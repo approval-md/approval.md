@@ -24,12 +24,14 @@
     "lint": "oxlint src tests"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
     "@types/node": "^26.1.2",
     "oxlint": "^1.77.0",
     "typescript": "^7.0.2"
   },
   "dependencies": {
     "ajv": "8.20.0",
-    "ajv-formats": "3.0.1"
+    "ajv-formats": "3.0.1",
+    "better-sqlite3": "13.0.2"
   }
 }
