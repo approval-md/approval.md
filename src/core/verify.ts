@@ -1,0 +1,376 @@
+/**
+ * Hash-chain verification for `.approval/log/events.jsonl` (SPEC.md §8:
+ * "`approval log verify` MUST detect any mutation or truncation").
+ *
+ * This module is the read side of the append-only log. It re-derives every
+ * record's digest from its canonical serialization and walks the `prev` chain
+ * and the `seq` succession end to end, reporting the *first* place the log
+ * stops being self-consistent.
+ *
+ * **Read-only, by definition.** Verification opens the log for reading and
+ * nothing else: it never truncates, never rewrites, never repairs, and never
+ * creates a lockfile. A torn tail is *reported*, never auto-truncated — a log
+ * that heals itself is a log that can be made to forget. Repair is a human
+ * decision, made explicitly: a later CLI task may offer it behind an explicit
+ * flag, but the core provides detection only.
+ *
+ * **What verification detects.** Any mutation of a record without a full
+ * recompute of every descendant; truncation of the tail (with an external
+ * anchor); deletion, insertion, reorder, or splice anywhere in the chain;
+ * `alg` tampering; a malformed or schema-invalid line; a duplicated or skipped
+ * `seq`; a non-genesis first record; and — given an anchor — a fully
+ * recomputed forged suffix.
+ *
+ * **The detection boundary — state it plainly.** A hash chain is
+ * tamper-*evident*, not tamper-*proof*. A forger who rewrites record N and then
+ * recomputes every descendant (new hash, fixed `prev`) produces a file that is
+ * internally self-consistent in every respect, and `verify(logPath)` on that
+ * file alone CANNOT distinguish it from an honest log. The same is true of
+ * dropping records off the tail: the surviving prefix is a valid chain. Closing
+ * that gap requires something the forger does not control:
+ *
+ * - an externally anchored head — pass {@link VerifyOptions.expectedHead} with
+ *   a `(seq, hash)` pair recorded elsewhere (a channel message, another host, a
+ *   human's notes); a mismatch is reported as `head-mismatch`;
+ * - a retained copy of the log held outside the writer's reach;
+ * - the optional per-event git commits of SPEC.md §8, where the daemon commits
+ *   each record under its own identity, giving signed, distributed evidence.
+ *
+ * Determinism: the result is a pure function of (log bytes, schema files,
+ * options). No clock, no network, no cross-call state.
+ */
+
+import { readFileSync } from "node:fs";
+
+import { ALG, computeRecordHash, type EventRecord } from "./log.js";
+import { validate, type ValidateOptions } from "./validate.js";
+
+/** A chain head: the last record's position and digest. */
+export interface LogHead {
+  seq: number;
+  hash: string;
+}
+
+/** Machine-readable reason a log failed verification. Closed set. */
+export type VerifyFailureReason =
+  | "malformed-line"
+  | "schema-invalid"
+  | "bad-alg"
+  | "hash-mismatch"
+  | "prev-mismatch"
+  | "seq-gap"
+  | "seq-duplicate"
+  | "not-genesis"
+  | "head-mismatch";
+
+/**
+ * Outcome of a verification run. A discriminated union on `status`:
+ *
+ * - `clean` — every complete line verified; `head` is `null` for an empty or
+ *   absent log.
+ * - `torn-tail` — the file's final line is torn (it is not newline-terminated,
+ *   i.e. a writer died mid-line) while every complete line before it verifies.
+ *   This is the crashed-write signature and is deliberately distinct from
+ *   corruption: it is an incomplete write, not evidence of tampering.
+ * - `corrupt` — everything else, reported at the first offending record.
+ */
+export type VerifyResult =
+  | { status: "clean"; records: number; head: LogHead | null }
+  | {
+      status: "torn-tail";
+      records: number;
+      intactThroughSeq: number;
+      message: string;
+    }
+  | {
+      status: "corrupt";
+      firstBadSeq: number | null;
+      reason: VerifyFailureReason;
+      message: string;
+    };
+
+/** Options accepted by {@link verify}. */
+export interface VerifyOptions extends ValidateOptions {
+  /**
+   * Externally anchored head. When supplied, a log that verifies internally is
+   * additionally required to end at exactly this `(seq, hash)`. This is the
+   * only defence against tail truncation and against a fully recomputed forged
+   * suffix; see the detection boundary in the module header.
+   */
+  expectedHead?: LogHead;
+}
+
+function corrupt(
+  reason: VerifyFailureReason,
+  firstBadSeq: number | null,
+  message: string,
+): VerifyResult {
+  return { status: "corrupt", firstBadSeq, reason, message };
+}
+
+/** `seq` as reported by a raw parsed line, or `null` when unusable. */
+function readSeq(record: Record<string, unknown>): number | null {
+  const seq = record["seq"];
+  return typeof seq === "number" && Number.isInteger(seq) && seq >= 1 ? seq : null;
+}
+
+interface Split {
+  /** Complete, newline-terminated lines, in file order. */
+  complete: string[];
+  /** The unterminated final segment, when the file does not end in a newline. */
+  torn: string | null;
+}
+
+/**
+ * Split the raw file into complete lines plus an optional torn tail.
+ *
+ * A torn tail is *only* an unterminated final segment. {@link appendEvent}
+ * writes `line + "\n"` in a single `write(2)` on an `O_APPEND` handle, so a
+ * crashed writer can leave a partial line but cannot leave a complete,
+ * newline-terminated line that is malformed. A malformed line that *is*
+ * newline-terminated is therefore corruption, not a torn write, and is reported
+ * as such wherever it appears — final line included.
+ */
+function splitLines(raw: string): Split {
+  const segments = raw.split("\n");
+  const last = segments[segments.length - 1] ?? "";
+  if (last.length === 0) {
+    segments.pop(); // the empty segment after the final newline
+    return { complete: segments, torn: null };
+  }
+  segments.pop();
+  return { complete: segments, torn: last };
+}
+
+/**
+ * Walk `lines` as a hash chain. Returns `null` when the whole prefix verifies,
+ * otherwise the first failure.
+ *
+ * Check order per record — earlier checks report the more specific reason:
+ *
+ * 1. the line parses as a JSON object (`malformed-line`);
+ * 2. `alg` is exactly `sha256/jcs` (`bad-alg`). Checked *before* the schema so
+ *    a missing or unrecognized scheme identifier — which SPEC.md §8 requires
+ *    verifiers to reject by name — reports `bad-alg` rather than generic
+ *    schema noise;
+ * 3. the record validates against the `event` schema (`schema-invalid`);
+ * 4. the recomputed digest equals `hash` (`hash-mismatch`);
+ * 5. `seq` is exactly the predecessor's `seq` + 1, and 1 for the first record
+ *    (`seq-duplicate` when it repeats the predecessor, else `seq-gap`);
+ * 6. `prev` is the predecessor's `hash`, and `null` for the first record
+ *    (`prev-mismatch`, or `not-genesis` for a first record with a non-null
+ *    `prev`).
+ *
+ * Fails closed throughout: anything that cannot be shown to be sound is a
+ * failure, never a pass.
+ */
+function walk(
+  lines: string[],
+  validateOptions: ValidateOptions,
+): { failure: VerifyResult | null; head: LogHead | null } {
+  let prevSeq = 0;
+  let prevHash: string | null = null;
+
+  for (const [index, line] of lines.entries()) {
+    const lineNumber = index + 1;
+
+    if (line.trim().length === 0) {
+      return {
+        failure: corrupt("malformed-line", null, `line ${lineNumber} is blank`),
+        head: null,
+      };
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      return {
+        failure: corrupt(
+          "malformed-line",
+          null,
+          `line ${lineNumber} is not valid JSON: ${detail}`,
+        ),
+        head: null,
+      };
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return {
+        failure: corrupt(
+          "malformed-line",
+          null,
+          `line ${lineNumber} is not a JSON object`,
+        ),
+        head: null,
+      };
+    }
+
+    const raw = parsed as Record<string, unknown>;
+    const seq = readSeq(raw);
+
+    if (raw["alg"] !== ALG) {
+      const found = raw["alg"] === undefined ? "missing" : JSON.stringify(raw["alg"]);
+      return {
+        failure: corrupt(
+          "bad-alg",
+          seq,
+          `line ${lineNumber}: hash-scheme identifier "alg" is ${found}, expected "${ALG}"`,
+        ),
+        head: null,
+      };
+    }
+
+    const validation = validate("event", raw, validateOptions);
+    if (!validation.ok) {
+      const detail = validation.errors
+        .map((error) => `${error.path === "" ? "/" : error.path} ${error.message}`)
+        .join("; ");
+      return {
+        failure: corrupt(
+          "schema-invalid",
+          seq,
+          `line ${lineNumber} does not validate against the event schema: ${detail}`,
+        ),
+        head: null,
+      };
+    }
+
+    // Schema-valid: the chain fields are now known to have their declared shapes.
+    const record = raw as unknown as EventRecord;
+
+    let recomputed: string;
+    try {
+      recomputed = computeRecordHash(record);
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      return {
+        failure: corrupt(
+          "hash-mismatch",
+          record.seq,
+          `record ${record.seq} could not be canonicalized for hashing: ${detail}`,
+        ),
+        head: null,
+      };
+    }
+    if (recomputed !== record.hash) {
+      return {
+        failure: corrupt(
+          "hash-mismatch",
+          record.seq,
+          `record ${record.seq} hash ${record.hash} does not match its contents (recomputed ${recomputed})`,
+        ),
+        head: null,
+      };
+    }
+
+    if (record.seq !== prevSeq + 1) {
+      const duplicate = prevSeq > 0 && record.seq === prevSeq;
+      return {
+        failure: corrupt(
+          duplicate ? "seq-duplicate" : "seq-gap",
+          record.seq,
+          duplicate
+            ? `line ${lineNumber} repeats seq ${record.seq}`
+            : `line ${lineNumber} has seq ${record.seq}, expected ${prevSeq + 1}`,
+        ),
+        head: null,
+      };
+    }
+
+    if (prevHash === null) {
+      if (record.prev !== null) {
+        return {
+          failure: corrupt(
+            "not-genesis",
+            record.seq,
+            `record ${record.seq} is the first record but its prev is ${JSON.stringify(record.prev)}, expected null`,
+          ),
+          head: null,
+        };
+      }
+    } else if (record.prev !== prevHash) {
+      return {
+        failure: corrupt(
+          "prev-mismatch",
+          record.seq,
+          `record ${record.seq} prev ${JSON.stringify(record.prev)} does not link to record ${prevSeq} hash ${prevHash}`,
+        ),
+        head: null,
+      };
+    }
+
+    prevSeq = record.seq;
+    prevHash = record.hash;
+  }
+
+  return {
+    failure: null,
+    head: prevHash === null ? null : { seq: prevSeq, hash: prevHash },
+  };
+}
+
+/**
+ * Verify the hash chain of the log at `logPath`.
+ *
+ * An absent file is an empty log, which is clean with zero records and a `null`
+ * head — an audit trail that has recorded nothing is not evidence of tampering.
+ *
+ * The file is opened for reading only; see the module header for the recovery
+ * stance and the detection boundary.
+ */
+export function verify(logPath: string, options: VerifyOptions = {}): VerifyResult {
+  const validateOptions: ValidateOptions =
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir };
+
+  let raw: string;
+  try {
+    raw = readFileSync(logPath, "utf8");
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code !== "ENOENT") {
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      return corrupt("malformed-line", null, `log ${logPath} could not be read: ${detail}`);
+    }
+    // An absent file is an empty log — but it still has to satisfy an anchor,
+    // so it falls through to the same walk rather than short-circuiting here.
+    raw = "";
+  }
+
+  const { complete, torn } = raw.length === 0 ? { complete: [], torn: null } : splitLines(raw);
+  const { failure, head } = walk(complete, validateOptions);
+
+  // A corrupt prefix outranks a torn tail: the tear is the least of the log's
+  // problems, and reporting it would understate the damage.
+  if (failure !== null) return failure;
+
+  if (torn !== null) {
+    return {
+      status: "torn-tail",
+      records: complete.length,
+      intactThroughSeq: head === null ? 0 : head.seq,
+      message: `log ${logPath} ends with an unterminated line of ${torn.length} byte(s); records 1..${
+        head === null ? 0 : head.seq
+      } verify clean. This is the signature of a crashed write. The log is NOT repaired here: truncating the torn line is a human decision.`,
+    };
+  }
+
+  const expected = options.expectedHead;
+  if (expected !== undefined) {
+    if (head === null) {
+      return corrupt(
+        "head-mismatch",
+        null,
+        `log ${logPath} is empty but the anchored head is seq ${expected.seq} ${expected.hash}: records have been removed`,
+      );
+    }
+    if (head.seq !== expected.seq || head.hash !== expected.hash) {
+      return corrupt(
+        "head-mismatch",
+        head.seq,
+        `log ${logPath} ends at seq ${head.seq} ${head.hash}, but the anchored head is seq ${expected.seq} ${expected.hash}: the log is internally consistent, so this is truncation or a fully recomputed forged suffix`,
+      );
+    }
+  }
+
+  return { status: "clean", records: complete.length, head };
+}
