@@ -1,0 +1,25 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual",
+    "channel": "telegram",
+    "approval_ttl": "30m",
+    "on_expiry": "reject"
+  },
+  "approvers": {
+    "carter": { "channels": ["telegram"] },
+    "ops-oncall": { "channels": ["telegram", "web", "cli"] }
+  },
+  "classes": {
+    "financial.spend": {
+      "autonomy": "manual",
+      "approvers": ["carter", "ops-oncall"],
+      "limits": {
+        "per_action_usd": 25,
+        "daily_usd": 100,
+        "daily_actions": 5
+      }
+    },
+    "communicate.email.draft": { "autonomy": "autonomous" }
+  }
+}

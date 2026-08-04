@@ -1,0 +1,8 @@
+{
+  "defaults": {
+    "autonomy": "manual",
+    "channel": "telegram",
+    "approval_ttl": "24h",
+    "on_expiry": "reject"
+  }
+}

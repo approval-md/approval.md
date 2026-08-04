@@ -1,0 +1,9 @@
+{
+  "version": "0.1",
+  "classes": {
+    "financial.spend": {
+      "autonomy": "manual",
+      "limits": { "per_action_usd": "25 USD" }
+    }
+  }
+}
