@@ -1,0 +1,15 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual",
+    "approval_ttl": "7d"
+  },
+  "classes": {
+    "*": { "autonomy": "manual" },
+    "read.*": { "autonomy": "autonomous" },
+    "calendar.*.own": { "autonomy": "supervised" },
+    "files.write.*": { "autonomy": "supervised" },
+    "*.delete": { "autonomy": "manual" },
+    "communicate.*.*": { "autonomy": "manual" }
+  }
+}

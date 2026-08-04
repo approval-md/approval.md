@@ -1,0 +1,19 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "supervised",
+    "channel": "web"
+  },
+  "budgets": {
+    "global": { "daily_usd": 100, "daily_actions": 200 },
+    "research": { "daily_usd": 12.5 },
+    "outbound": { "daily_actions": 20 }
+  },
+  "audit": {
+    "supervised_sample_rate": 0
+  },
+  "channels": {
+    "web": { "port": 4680 },
+    "matrix": { "homeserver_env": "APPROVAL_MATRIX_HS" }
+  }
+}

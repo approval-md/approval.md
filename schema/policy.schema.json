@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://approval.md/schema/policy.schema.json",
+  "title": "APPROVAL.md policy block",
+  "description": "SPEC.md §5: the parsed YAML of the single ```yaml approval-policy``` fenced block inside APPROVAL.md (or APPROVALS.md). Surrounding prose is ignored by the parser and never reaches this schema. SPEC.md §5.2 requires implementations to fail closed: a document rejected here means the runtime treats every class as `manual`, so this schema is deliberately closed (additionalProperties: false at every level) — an unrecognised key is a policy the author believed was in force and the runtime did not understand, which must be a hard error rather than a silent no-op.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "SPEC.md §5.1: policy format version, quoted in YAML so \"0.1\" stays a string rather than becoming the float 0.1. The only REQUIRED top-level key: a block with no version cannot be interpreted safely under any future format revision.",
+      "examples": ["0.1"]
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "SPEC.md §5.1/§5.2: fallbacks applied to any action whose class matches no rule in `classes`.",
+      "properties": {
+        "autonomy": {
+          "$ref": "#/$defs/autonomy",
+          "description": "SPEC.md §5.2: autonomy for actions matching no class rule. Fail-closed policies set this to `manual`."
+        },
+        "channel": {
+          "type": "string",
+          "minLength": 1,
+          "description": "SPEC.md §5.1: default channel name used to surface approval requests. Expected to name a key of `channels`; cross-key consistency is a runtime check (SPEC.md §10.3), not a schema constraint.",
+          "examples": ["telegram", "web", "cli"]
+        },
+        "approval_ttl": {
+          "$ref": "#/$defs/duration",
+          "description": "SPEC.md §5.1: how long a pending request stays actionable before it expires. Duration string, `<positive integer><unit>` with unit in ms|s|m|h|d|w (e.g. \"24h\"). Integer-only and single-unit by design: compound forms (\"1h30m\") and fractional values (\"1.5h\") are rejected so every implementation parses the same string to the same number of milliseconds.",
+          "examples": ["24h"]
+        },
+        "on_expiry": {
+          "type": "string",
+          "enum": ["reject"],
+          "description": "SPEC.md §5.1/§5.2: what happens when `approval_ttl` elapses with no human decision. SPEC.md §5.1 defines exactly one value, `reject`, and §5.2 mandates failing closed — so the enum is closed to `reject` rather than speculatively admitting a permissive value such as `grant`. Widening this enum is a spec amendment, and a policy that names an unknown expiry action fails validation (and therefore falls back to all-`manual`) instead of silently expiring into an unintended behaviour."
+        }
+      }
+    },
+    "approvers": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "SPEC.md §5.1: map of approver id -> approver record. Ids are referenced by the `approvers` list on class rules.",
+      "propertyNames": { "$ref": "#/$defs/identifier" },
+      "patternProperties": {
+        "^[a-z0-9][a-z0-9_-]*$": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["channels"],
+          "description": "SPEC.md §5.1: a human who may decide requests, and the channels they can be reached on.",
+          "properties": {
+            "channels": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "description": "SPEC.md §5.1/§10.3: channel names this approver can decide on, e.g. [telegram, cli]. At least one, since an approver reachable nowhere can never grant.",
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "classes": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "SPEC.md §5.1/§5.2 and §7: map of side-effect class pattern -> rule. Keys are dotted class patterns; `*` is a single-segment wildcard and a trailing `.*` matches any depth. Matching is most-specific-first and, at equal specificity, the strictest autonomy wins — both are runtime concerns; the schema only constrains key shape and rule shape.",
+      "propertyNames": { "$ref": "#/$defs/classPattern" },
+      "patternProperties": {
+        "^(?:[a-z0-9][a-z0-9_-]*|\\*)(?:\\.(?:[a-z0-9][a-z0-9_-]*|\\*))*$": {
+          "$ref": "#/$defs/classRule"
+        }
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "description": "SPEC.md §5.1/§5.2: named budget scopes. `global` is the scope every action is checked against; budgets are conjunctive (an action must pass its class limits AND the global budget) and consumption is computed from the log, never from a mutable counter. Additional named scopes are permitted and share the `global` shape.",
+      "additionalProperties": { "$ref": "#/$defs/budget" },
+      "properties": {
+        "global": {
+          "$ref": "#/$defs/budget",
+          "description": "SPEC.md §5.1: the repo-wide budget, e.g. { daily_usd: 100, daily_actions: 200 }."
+        }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "SPEC.md §5.2/§11: retrospective review settings for actions that executed without prior sign-off.",
+      "properties": {
+        "supervised_sample_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "SPEC.md §5.2: fraction of `supervised` actions escalated for after-the-fact human review, as a proportion in [0, 1] (0 = never sample, 1 = review everything). Sampling is deterministic and seeded from the event hash, so a given rate is reproducible and unguessable in advance by the agent."
+        }
+      }
+    },
+    "channels": {
+      "type": "object",
+      "description": "SPEC.md §5.1/§10.3: map of channel name -> channel configuration. Known channels are typed; unknown channel names are accepted as objects so a third-party transport plugin does not invalidate the whole policy (and, per §5.2, force everything to `manual`).",
+      "additionalProperties": { "type": "object" },
+      "properties": {
+        "telegram": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "SPEC.md §5.1/§11: Telegram channel. Credentials are named indirectly by environment variable — the policy file holds env var NAMES, never token values, because agents may read APPROVAL.md but must never reach channel credentials.",
+          "properties": {
+            "chat_id_env": {
+              "type": "string",
+              "minLength": 1,
+              "description": "SPEC.md §5.1: name of the environment variable holding the Telegram chat id.",
+              "examples": ["APPROVAL_TG_CHAT"]
+            },
+            "token_env": {
+              "type": "string",
+              "minLength": 1,
+              "description": "SPEC.md §5.1: name of the environment variable holding the Telegram bot token.",
+              "examples": ["APPROVAL_TG_TOKEN"]
+            }
+          }
+        },
+        "web": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "SPEC.md §5.1/§10.3: local web channel.",
+          "properties": {
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "SPEC.md §5.1: TCP port for the local approval UI. Valid port range only; 0 (ephemeral) is excluded because the policy must name a port a human can navigate to.",
+              "examples": [4680]
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "autonomy": {
+      "type": "string",
+      "enum": ["manual", "supervised", "autonomous"],
+      "description": "SPEC.md §5.2: autonomy level, strictest first — `manual` (human sign-off before execution) > `supervised` (executes immediately, sampled for review) > `autonomous` (executes freely). The enum is closed: an unrecognised level cannot be ordered against the others, so it must fail validation rather than be guessed at."
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*(?:ms|s|m|h|d|w)$",
+      "description": "SPEC.md §5.1: duration string `<positive integer><unit>`, unit in ms|s|m|h|d|w. Leading zeros, zero durations, negatives, fractions, whitespace and compound forms are all rejected so parsing is unambiguous across implementations."
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "description": "SPEC.md §5.1: lowercase identifier used for approver ids — starts alphanumeric, then alphanumerics, `_` or `-`. Case-insensitive collisions are excluded by construction."
+    },
+    "classPattern": {
+      "type": "string",
+      "pattern": "^(?:[a-z0-9][a-z0-9_-]*|\\*)(?:\\.(?:[a-z0-9][a-z0-9_-]*|\\*))*$",
+      "description": "SPEC.md §5.2 and §7: a side-effect class pattern — one or more dot-separated segments, each either a literal lowercase segment ([a-z0-9] then [a-z0-9_-]) or the wildcard `*`. Covers exact classes (`financial.spend`), trailing-depth wildcards (`read.*`), interior single-segment wildcards (`calendar.*.own`) and the bare `*`. Empty keys, empty segments (`read..write`), leading/trailing dots, uppercase and whitespace are rejected: an unmatchable key would be a rule the author believes is in force that can never fire."
+    },
+    "classRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["autonomy"],
+      "description": "SPEC.md §5.1: a class rule. The shorthand form is `{ autonomy }` alone; the full form adds `approvers` and `limits`. Both are this one shape — `autonomy` is always REQUIRED, since a rule without it cannot decide anything, and unknown keys are rejected so a typo'd constraint is never silently ignored.",
+      "properties": {
+        "autonomy": {
+          "$ref": "#/$defs/autonomy",
+          "description": "SPEC.md §5.2: autonomy for actions matching this class pattern."
+        },
+        "approvers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "SPEC.md §5.1: approver ids permitted to decide requests for this class. Ids are expected to be keys of the top-level `approvers` map; that cross-reference is a runtime check, not a schema constraint.",
+          "items": { "$ref": "#/$defs/identifier" }
+        },
+        "limits": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "SPEC.md §5.1/§5.2: per-class ceilings, e.g. { per_action_usd: 25, daily_usd: 100 }. Limit names are open-ended (the taxonomy in §7 grows), but every value MUST be a positive number: zero or negative would express 'no action may ever pass', which is spelled `autonomy: manual` instead, and a non-numeric limit cannot participate in budget arithmetic.",
+          "additionalProperties": { "$ref": "#/$defs/positiveNumber" },
+          "propertyNames": { "$ref": "#/$defs/identifier" }
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "SPEC.md §5.1/§5.2: a budget scope. Budgets are conjunctive with class limits and are computed from the append-only log.",
+      "properties": {
+        "daily_usd": {
+          "$ref": "#/$defs/positiveNumber",
+          "description": "SPEC.md §5.1: maximum spend in USD per rolling day for this scope."
+        },
+        "daily_actions": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "description": "SPEC.md §5.1: maximum number of side-effecting actions per rolling day for this scope. A count, hence an integer."
+        }
+      }
+    },
+    "positiveNumber": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "A strictly positive number. Zero and negatives are rejected: budget and limit arithmetic treats them as unreachable ceilings, which policy authors express with `autonomy: manual`."
+    }
+  }
+}

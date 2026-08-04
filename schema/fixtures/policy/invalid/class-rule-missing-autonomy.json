@@ -1,0 +1,9 @@
+{
+  "version": "0.1",
+  "classes": {
+    "financial.spend": {
+      "approvers": ["carter"],
+      "limits": { "daily_usd": 100 }
+    }
+  }
+}
