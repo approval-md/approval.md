@@ -223,12 +223,13 @@ Two invariants: an action's class MUST be declared before an execution token can
  "task":"task-042","action_key":"task-042:chaser:2026-08-04",
  "actor":"human:carter","channel":"telegram",
  "payload":{"note":"go, but cc me"},
- "prev":"b3c9…","hash":"a41f…"}
+ "alg":"sha256/jcs","prev":"b3c9…","hash":"a41f…"}
 ```
 
 - `hash` = SHA-256 over the canonical serialization of the record with `prev` included; `prev` = previous record's hash. `approval log verify` MUST detect any mutation or truncation. Optionally, the log directory is a git repo and the daemon commits per event with its own identity, giving signed, distributed tamper evidence for free (the [TaskChampion operation log](https://github.com/GothenburgBitFactory/taskchampion) and [Automerge](https://automerge.org) both converged on op-logs for related reasons; see also Ink & Switch's [local-first task framework](https://www.inkandswitch.com/patchwork/notebook/tasks-01/)).
 - **Event types (v0.1):** `task.registered`, `route.proposed`, `route.accepted`, `approval.requested`, `approval.granted`, `approval.rejected`, `approval.expired`, `approval.revoked`, `execution.started`, `execution.completed`, `execution.failed`, `budget.exceeded`, `policy.updated`, `envelope.drift`, `audit.sampled`, `audit.reviewed`.
 - Events MUST validate against the JSON Schemas in `schema/` before append. Validation at the write boundary is itself a control: an agent physically cannot request execution without declaring a class, key, and cost estimate.
+- Every record MUST carry an explicit hash-scheme identifier, `alg`. Version 0.1 defines exactly one value: `sha256/jcs`, meaning SHA-256 over the RFC 8785 (JCS) canonical serialization of the record with `prev` included. Verifiers MUST reject records whose `alg` is missing or unrecognized. Records with different `alg` values MAY coexist in one log, so a future scheme change is a migration, never a schism.
 
 ## 9. Projections
 

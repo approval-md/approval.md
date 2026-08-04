@@ -1,0 +1,14 @@
+{
+  "seq": 1,
+  "ts": "2026-08-04T09:00:00Z",
+  "event": "policy.updated",
+  "actor": "human:carter",
+  "channel": "cli",
+  "payload": {
+    "path": "APPROVAL.md",
+    "note": "initial policy"
+  },
+  "alg": "sha256/jcs",
+  "prev": null,
+  "hash": "b1cbb27b12bd811a9d197f5fb1c494c191040271901214286f0c10bc84820173"
+}

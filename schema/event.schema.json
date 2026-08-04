@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://approval.md/schema/event.schema.json",
+  "title": "Event log record",
+  "description": "One line of `.approval/log/events.jsonl` (SPEC.md §8). The log is append-only and is the truth; projections are caches. Every record MUST validate against this schema before append (SPEC.md §8: validation at the write boundary is itself a control). Structural shape only: hash-chain linkage, first-record semantics, and monotonic `seq` are verified by the chain verifier (M1), not expressible here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "seq",
+    "ts",
+    "event",
+    "actor",
+    "alg",
+    "hash",
+    "prev"
+  ],
+  "properties": {
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "SPEC.md §8: 1-based position of this record in the append-only log. Strict monotonic succession across records is enforced by the chain verifier (M1); this schema constrains a single record only."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "SPEC.md §8: RFC 3339 timestamp at which the event was appended (the example record uses `2026-08-04T09:14:02Z`)."
+    },
+    "event": {
+      "type": "string",
+      "enum": [
+        "task.registered",
+        "route.proposed",
+        "route.accepted",
+        "approval.requested",
+        "approval.granted",
+        "approval.rejected",
+        "approval.expired",
+        "approval.revoked",
+        "execution.started",
+        "execution.completed",
+        "execution.failed",
+        "budget.exceeded",
+        "policy.updated",
+        "envelope.drift",
+        "audit.sampled",
+        "audit.reviewed"
+      ],
+      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of sixteen event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated."
+    },
+    "actor": {
+      "type": "string",
+      "pattern": "^(human|agent|system):.+",
+      "description": "SPEC.md §8: who caused the event, as `<kind>:<id>` (the example record uses `human:carter`). Three kinds: `human:` for a person acting through a channel or the CLI, `agent:` for an agent-originated event, and `system:` for events the daemon originates with no external prompt (for example `approval.expired`, which fires on TTL lapse rather than on any actor's action). Approval decisions are restricted to `human:` — see the per-type rules below."
+    },
+    "alg": {
+      "const": "sha256/jcs",
+      "description": "SPEC.md §8 (hash-scheme amendment): explicit hash-scheme identifier. Version 0.1 defines exactly one value, `sha256/jcs` — SHA-256 over the RFC 8785 (JCS) canonical serialization of the record with `prev` included. Missing or unrecognized `alg` MUST be rejected; differing `alg` values MAY coexist in one log so a scheme change is a migration, never a schism."
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "SPEC.md §8: this record's hash under `alg` — SHA-256 over the record's JCS canonical serialization with `prev` included, lowercase hex. That the digest actually matches the record contents is checked by `approval log verify` (M1); this schema constrains only its form."
+    },
+    "prev": {
+      "description": "SPEC.md §8: the previous record's `hash`, chaining the log so that `approval log verify` detects any mutation or truncation. `null` is legal only for the first record in a log; a schema can express the type union but not the position, so first-record semantics are enforced by the chain verifier (M1).",
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "task": {
+      "type": "string",
+      "minLength": 1,
+      "description": "SPEC.md §8: the Backlog.md task id the event concerns (the example record uses `task-042`). Optional in the base shape and required per event type below."
+    },
+    "action_key": {
+      "type": "string",
+      "minLength": 1,
+      "description": "SPEC.md §8: the action's idempotency key (the example record uses `task-042:chaser:2026-08-04`), identifying the specific side effect being approved or executed. Optional in the base shape and required per event type below."
+    },
+    "channel": {
+      "type": "string",
+      "minLength": 1,
+      "description": "SPEC.md §8: the channel through which the event reached the runtime (the example record uses `telegram`). Optional: CLI- and daemon-originated events need not name one."
+    },
+    "payload": {
+      "type": "object",
+      "description": "SPEC.md §8: event-type-specific detail (the example record carries an approver's note). Shape is deliberately open at v0.1; per-type payload schemas are a later, separate task."
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "SPEC.md §8: approval lifecycle events name both the task and the specific action being decided.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "enum": [
+              "approval.requested",
+              "approval.granted",
+              "approval.rejected",
+              "approval.expired",
+              "approval.revoked"
+            ]
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "task",
+          "action_key"
+        ],
+        "properties": {
+          "task": {
+            "$ref": "#/properties/task"
+          },
+          "action_key": {
+            "$ref": "#/properties/action_key"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §10.1: granting and rejecting are human decisions made through the CLI or a channel. An agent- or system-originated grant would be the gate approving itself, so the actor MUST carry the `human:` prefix.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "enum": [
+              "approval.granted",
+              "approval.rejected"
+            ]
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^human:"
+          }
+        },
+        "required": [
+          "actor"
+        ]
+      }
+    },
+    {
+      "$comment": "SPEC.md §8: execution events report on one keyed action of one task.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "enum": [
+              "execution.started",
+              "execution.completed",
+              "execution.failed"
+            ]
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "task",
+          "action_key"
+        ],
+        "properties": {
+          "task": {
+            "$ref": "#/properties/task"
+          },
+          "action_key": {
+            "$ref": "#/properties/action_key"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §8: task-scoped events that precede or accompany a specific action key. Budget accounting is per task (SPEC.md §5), so `budget.exceeded` names the task but need not name an action.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "enum": [
+              "task.registered",
+              "route.proposed",
+              "route.accepted",
+              "envelope.drift",
+              "budget.exceeded"
+            ]
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "task"
+        ],
+        "properties": {
+          "task": {
+            "$ref": "#/properties/task"
+          }
+        }
+      }
+    }
+  ]
+}

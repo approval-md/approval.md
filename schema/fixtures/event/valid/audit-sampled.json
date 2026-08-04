@@ -1,0 +1,14 @@
+{
+  "seq": 15,
+  "ts": "2026-08-04T09:25:02Z",
+  "event": "audit.sampled",
+  "task": "task-049",
+  "action_key": "task-049:archive:2026-08-04",
+  "actor": "system:auditor",
+  "payload": {
+    "rate": 0.1
+  },
+  "alg": "sha256/jcs",
+  "prev": "07453feb30c2b0b1a2806398cdd17b38d98f9abf52b8a75ca42878c9101d8264",
+  "hash": "7f625051c176f2f260a1f7e25c9a933717ebb49917a8788ac25ae7a4614ebb30"
+}
