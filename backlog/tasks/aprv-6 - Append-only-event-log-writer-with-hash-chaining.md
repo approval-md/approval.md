@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-04 21:46'
-updated_date: '2026-08-04 23:27'
+updated_date: '2026-08-04 23:40'
 labels: []
 milestone: m-1
 dependencies:
@@ -32,6 +32,7 @@ The append path is the single write boundary for `.approval/log/events.jsonl` (S
 - [x] #7 Known-answer fixtures pin the wire format: committed fixture files map complete input records to their exact expected hash, and a test recomputes and asserts each — these fixtures are the permanent byte-for-byte commitment every future verifier must reproduce
 - [x] #8 Each appended record carries the explicit algorithm identifier defined by the APRV-5 event schema (e.g. `alg: "sha256/jcs"`), and the writer refuses to append a record whose identifier does not match the scheme it implements
 - [x] #9 SPEC.md amendments land in the same commit as the writer: (a) section 8 actor-prefix paragraph and (b) the section 10.1/6.3 manual-path clarification with the phrase auto-grant removed — both verbatim per the human-approved wording recorded in this task's comments
+- [x] #10 RFC 8785's official test material is incorporated verbatim into the suite and cited by source: the section 3.2.3 sorting example, Appendix A literals/examples, and the Appendix B number-serialization table entries representable in the suite
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -47,6 +48,8 @@ The append path is the single write boundary for `.approval/log/events.jsonl` (S
 Human approval recorded in advance (2026-08-05) for the two SPEC amendments in the task comment (actor prefixes; manual-path exclusivity of approval.* with auto-grant removed). Not silent spec edits.
 
 Implemented by Opus subagent; fable review made one override: two comments claimed the stored line "is the bytes that were digested" — corrected to state precisely that the stored line is JCS of the complete record (hash included) while the digest input is the same canonicalization minus the hash field. Design: src/core/jcs.ts is a hand-rolled RFC 8785 canonicalizer (zero new dependencies; sorting by UTF-16 code units via plain string <, numbers/strings delegated to JSON.stringify which implements the RFC-referenced ECMAScript algorithms; undefined/BigInt/NaN/Infinity/non-plain objects/cycles rejected with typed JcsError rather than silently coerced). src/core/log.ts: appendEvent stamps seq/prev/alg/hash (callers supply content + ts only; the writer never reads the clock for hash-relevant data), validates the complete record against the event schema before any byte is written, refuses corrupt tails (truncated/blank/unparseable last line), serializes the write under an advisory wx-lockfile with bounded retry and no stale-lock stealing, and writes one line per single O_APPEND syscall. Public API exposes no mutation/reorder/truncate operation (asserted by a test). Known-answer fixtures freeze 3 records (canonical string + digest each); the end-to-end test replays them through appendEvent and asserts identical bytes and hashes. SPEC amendments (actor prefixes; manual-path exclusivity, auto-grant removed) landed in this task per pre-approval; no M0 fixture or test presumed auto-granted approval events (verified before implementation). 140/140 tests, lint, typecheck green from wiped node_modules/dist.
+
+Addendum (human-requested before close): RFC 8785 official test material embedded verbatim in tests/rfc8785-vectors.test.ts, cited by source (rfc-editor.org/rfc/rfc8785, sections 3.2.2/3.2.3/3.2.4, Appendix B) — RFC text fetched from rfc-editor.org to guarantee verbatim data. 31 new tests: sorting example (order read off canonical text, not a reparsed object, since ECMAScript integer-key hoisting would corrupt the assertion), full example pinned to the RFC UTF-8 byte dump, all 24 Appendix B value rows reconstructed from IEEE 754 bit patterns, NaN/Infinity rows assert JcsError. Zero disagreement between the published vectors and the implementation; no source changes needed. Suite 171/171.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
@@ -61,5 +64,5 @@ Human-approved SPEC amendments (2026-08-05), to land in APRV-6's commit. Amendme
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Append-only log writer with RFC 8785 hash chaining: hand-rolled JCS canonicalizer pinned by test vectors, appendEvent with write-boundary schema validation, corrupt-tail refusal, lockfile-serialized appends, and known-answer fixtures freezing the wire format (final record hash 2f4cd2927b66ac9b5bdcb8186c05f521ace5a05ade16048117d1fbbd9d505d20). SPEC amendments (actor prefixes, auto-grant removal) in the same commit. Verified: 140/140 tests, lint, typecheck from clean install.
+Append-only log writer with RFC 8785 hash chaining: hand-rolled JCS canonicalizer pinned by the RFC's official vectors (sorting example, byte-level full example, all Appendix B rows — 171/171 tests) and known-answer fixtures freezing the wire format (final record hash 2f4cd2927b66ac9b5bdcb8186c05f521ace5a05ade16048117d1fbbd9d505d20). appendEvent validates at the write boundary, refuses corrupt tails, serializes appends via lockfile. SPEC amendments (actor prefixes, auto-grant removal) landed same-commit. Verified from clean install; lint and typecheck green.
 <!-- SECTION:FINAL_SUMMARY:END -->
