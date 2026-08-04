@@ -1,0 +1,8 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual",
+    "approval_ttl": "24h",
+    "on_expiry": "grant"
+  }
+}

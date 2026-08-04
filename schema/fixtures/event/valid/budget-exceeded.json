@@ -1,0 +1,21 @@
+{
+  "seq": 12,
+  "ts": "2026-08-04T09:22:02Z",
+  "event": "budget.exceeded",
+  "task": "task-047",
+  "actor": "system:budget",
+  "payload": {
+    "class": "financial.spend",
+    "limit": {
+      "currency": "USD",
+      "amount": 50
+    },
+    "requested": {
+      "currency": "USD",
+      "amount": 74.5
+    }
+  },
+  "alg": "sha256/jcs",
+  "prev": "0989dc2cde78680d3954bd4ed6d8e69e83adfcf3b779ae69c2e6fb07fc7a7bbf",
+  "hash": "8f880fd307a612563649414f299623dd4438352edd37860fdc0293d03018aab0"
+}

@@ -1,0 +1,47 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual",
+    "channel": "telegram",
+    "approval_ttl": "24h",
+    "on_expiry": "reject"
+  },
+  "approvers": {
+    "carter": {
+      "channels": ["telegram", "cli"]
+    }
+  },
+  "classes": {
+    "read.*": { "autonomy": "autonomous" },
+    "files.write.workspace": { "autonomy": "autonomous" },
+    "calendar.write.own": { "autonomy": "supervised" },
+    "communicate.email.draft": { "autonomy": "autonomous" },
+    "communicate.email.external": {
+      "autonomy": "manual",
+      "approvers": ["carter"]
+    },
+    "financial.spend": {
+      "autonomy": "manual",
+      "approvers": ["carter"],
+      "limits": { "per_action_usd": 25, "daily_usd": 100 }
+    },
+    "public.post": { "autonomy": "manual" },
+    "data.delete": { "autonomy": "manual" },
+    "account.auth": { "autonomy": "manual" }
+  },
+  "budgets": {
+    "global": { "daily_usd": 100, "daily_actions": 200 }
+  },
+  "audit": {
+    "supervised_sample_rate": 0.1
+  },
+  "channels": {
+    "telegram": {
+      "chat_id_env": "APPROVAL_TG_CHAT",
+      "token_env": "APPROVAL_TG_TOKEN"
+    },
+    "web": {
+      "port": 4680
+    }
+  }
+}

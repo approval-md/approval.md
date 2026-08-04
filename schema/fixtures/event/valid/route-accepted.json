@@ -1,0 +1,15 @@
+{
+  "seq": 3,
+  "ts": "2026-08-04T09:13:02Z",
+  "event": "route.accepted",
+  "task": "task-042",
+  "action_key": "task-042:chaser:2026-08-04",
+  "actor": "system:router",
+  "payload": {
+    "class": "comms.external",
+    "autonomy": "manual"
+  },
+  "alg": "sha256/jcs",
+  "prev": "4945705a2e1d9310eb24732f938fcbdf5d7d0cc1586ec45f4b2ac55f9a096f61",
+  "hash": "373aa302b5317fc7dc6c6f103bda2f49bb39013774910451339904bc48eab50f"
+}

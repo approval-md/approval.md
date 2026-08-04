@@ -1,0 +1,16 @@
+{
+  "seq": 14,
+  "ts": "2026-08-04T09:24:02Z",
+  "event": "envelope.drift",
+  "task": "task-048",
+  "action_key": "task-048:deploy:2026-08-04",
+  "actor": "system:daemon",
+  "payload": {
+    "field": "cost_estimate",
+    "declared": 10,
+    "observed": 42
+  },
+  "alg": "sha256/jcs",
+  "prev": "bdfaf8a8ca00429793e030281f0ed828e968befa664f1fa0f9351fbfd2489793",
+  "hash": "07453feb30c2b0b1a2806398cdd17b38d98f9abf52b8a75ca42878c9101d8264"
+}

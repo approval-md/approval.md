@@ -1,0 +1,15 @@
+{
+  "seq": 16,
+  "ts": "2026-08-04T09:26:02Z",
+  "event": "audit.reviewed",
+  "task": "task-049",
+  "action_key": "task-049:archive:2026-08-04",
+  "actor": "human:carter",
+  "channel": "cli",
+  "payload": {
+    "verdict": "ok"
+  },
+  "alg": "sha256/jcs",
+  "prev": "7f625051c176f2f260a1f7e25c9a933717ebb49917a8788ac25ae7a4614ebb30",
+  "hash": "6752e6617b2b810c1cc0cf09c51678c78891ff6fdfd8bb9399aecbdfca00dd5b"
+}

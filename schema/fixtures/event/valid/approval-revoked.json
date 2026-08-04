@@ -1,0 +1,15 @@
+{
+  "seq": 8,
+  "ts": "2026-08-04T09:18:02Z",
+  "event": "approval.revoked",
+  "task": "task-045",
+  "action_key": "task-045:post:2026-08-04",
+  "actor": "human:carter",
+  "channel": "cli",
+  "payload": {
+    "note": "revoking before execution"
+  },
+  "alg": "sha256/jcs",
+  "prev": "ad5cdc577c7a709ce5e8e0cf85d7a50aad1448ecf732ad77838d2e7300973ea6",
+  "hash": "d973375d6aeec5e6cd2de3a0f7dc8f5bc1d9be77225f9af0f851e7fc519a07c3"
+}
