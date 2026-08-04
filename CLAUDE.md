@@ -1,0 +1,135 @@
+# CLAUDE.md — approval.md
+
+Human approval for agent actions. Read `SPEC.md` in full before any work;
+it is the source of truth for design decisions. This file governs *how*
+agents work in this repo, not *what* to build.
+
+## Project context
+
+- approval.md is a file-based convention + reference runtime gating agent
+  actions with real-world side effects (send, spend, delete, post).
+- Mantra: **files are the interface, the log is the truth, the database
+  is a cache.** Any change violating this needs a SPEC.md amendment first.
+- Companion to Backlog.md, enforcement layer for AGENTS.md permissions
+  prose. We extend those conventions; we never fork or replace them.
+
+## Workflow — Backlog.md-driven
+
+All work flows through Backlog.md tasks in `backlog/`. No exceptions
+for "quick" changes; unlogged work is the failure mode this project exists
+to prevent.
+
+1. **Decompose before coding.** Milestones live in SPEC.md §14. Each task
+   gets: a description (why), acceptance criteria (verifiable increments,
+   checkbox list), and an implementation plan written *after* reading the
+   relevant code, *before* writing any.
+2. **One task = one context window = one reviewable unit.** If a task
+   won't fit, split it in Backlog.md first.
+3. **Implementation notes are mandatory** at task completion: what was
+   done, what was decided, and anything the diff alone wouldn't reveal.
+4. **Sequencing:** milestones land in order (M0→M8). Within a milestone,
+   prefer the task unblocking the most others.
+5. Definition of Done for every task: acceptance criteria checked, tests
+   pass (`npm test`), lint clean, SPEC.md updated if behavior diverged
+   from it (divergence requires calling it out to the human, never silent
+   spec edits).
+
+## Model tiers
+
+fable is the expensive orchestrator; spend it on judgment, never on bulk
+work. Always pass `model` explicitly when spawning agents (inheritance
+defaults to fable):
+
+- *Research* (prior-art checks, protocol/spec comparisons, dependency
+  evaluation): **opus/sonnet subagents — never fable**.
+- *Token-heavy coding* (feature builds from a settled spec task, schema
+  fixture generation, per-channel mirrors like telegram→web, mechanical
+  refactors, test suites against written acceptance criteria): **Opus 5
+  subagents** (`model: "opus"`), orchestrated by fable. Fable writes the
+  spec/task, reviews the diff, and keeps only small context-bound edits
+  inline.
+- *Verification* (running the test matrix, log-verify sweeps, CLI
+  output/schema conformance checks after a change): **sonnet 5 subagents**
+  handed an explicit pass/fail checklist. Fable steps in only for novel
+  diagnosis and design judgment — deciding what's wrong and speccing the
+  fix, not confirming the expected.
+- *Cheap classification*: `claude -p` haiku/sonnet subprocess.
+
+## Engineering invariants (from SPEC.md, enforced in review)
+
+- **Deterministic core.** Routing, policy matching, gating, budget math,
+  hash chaining: pure deterministic code with exhaustive tests. LLMs are
+  confined to language tasks and proposals; the runtime decides.
+- **Fail closed.** Unparseable policy → everything `manual`. Unknown
+  class → `defaults.autonomy`. Ambiguity resolves to the stricter path,
+  always.
+- **The log is append-only.** Nothing in this codebase may mutate or
+  reorder `events.jsonl`. Projections rebuild; they never write back.
+- **Validate at the write boundary.** Every event and envelope passes its
+  JSON Schema before append. Schema changes are their own tasks.
+- **Preserve unknown frontmatter** when rewriting any task file. Round-trip
+  fidelity with Backlog.md is a hard requirement (M6 has the tests).
+- Stack: TypeScript, Node ≥ 20, minimal dependencies (justify each new
+  one in the task's implementation notes). Single-package repo until a
+  second package is unavoidable; satellites go under `@approval-md/`.
+
+## Dogfooding — escalates at M2
+
+- From M2 (policy engine) onward: this repo carries its own `APPROVAL.md`,
+  and agents working here operate under it. Building the gate means
+  living behind it.
+- Agents MUST NOT edit `APPROVAL.md`, `.approval/`, or anything holding
+  credentials, in any milestone. Propose policy changes as Backlog.md
+  tasks for human sign-off.
+- From M4 (channels) onward: side-effecting repo actions route through
+  the built Telegram channel. Yes, really: releases of approval.md get
+  approved via approval.md.
+
+## Permissions
+
+### Allowed without prompting
+- Read files, list directories, search the repo
+- Edit source, tests, fixtures, and Backlog.md task files
+- Run tests, lint, typecheck, build; `node`/`tsx` scripts inside the repo
+- Local git: status, diff, add, commit on feature branches
+
+### Require approval first
+- `git push`, merges to `main`, tag creation
+- `npm publish`, `npm version`, any registry interaction
+- Adding or upgrading dependencies
+- Deleting files outside the current task's stated scope
+- Any network call beyond package installs (API calls, webhooks, sends)
+- Edits to `APPROVAL.md`, `.approval/`, `CLAUDE.md`, or CI/release config
+
+### Never
+- Touch credentials, tokens, or the vault
+- Rewrite git history on shared branches
+- Mutate `events.jsonl` or fabricate log entries — including in tests;
+  test logs are built through the real append path
+
+*(This section is intentionally AGENTS.md-convention format: it is the
+first fixture for `approval import agents-md` in M6.)*
+
+<!-- BACKLOG.MD GUIDELINES START -->
+<!-- backlog.md-instructions-version: 1.49.3 -->
+<CRITICAL_INSTRUCTION>
+
+## Backlog.md Workflow
+
+This project uses Backlog.md for task and project management.
+
+**For every user request in this project, run `backlog instructions overview` before answering or taking action.**
+
+Use the overview to decide whether to search, read, create, or update Backlog tasks.
+
+Before task lifecycle actions, read the matching detailed guide:
+- `backlog instructions task-creation` before creating or splitting tasks
+- `backlog instructions task-execution` before planning, changing status or assignee, adding a plan or implementation notes, or implementing task work
+- `backlog instructions task-finalization` before checking acceptance criteria, writing final summaries, or moving tasks to terminal statuses
+
+Use `backlog <command> --help` before running unfamiliar commands. Help shows options, fields, and examples.
+
+Do not edit Backlog task, draft, document, decision, or milestone markdown files directly. Use the `backlog` CLI so metadata, relationships, and history stay consistent.
+
+</CRITICAL_INSTRUCTION>
+<!-- BACKLOG.MD GUIDELINES END -->

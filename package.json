@@ -1,0 +1,10 @@
+{
+  "name": "approval-md",
+  "version": "0.0.1",
+  "description": "Human approval for agent actions. CLI runtime for the approval.md convention (pre-release).",
+  "bin": { "approval": "./cli.js" },
+  "files": ["cli.js", "SPEC.md", "README.md"],
+  "repository": "github:approval-md/approval.md",
+  "homepage": "https://approval.md",
+  "license": "MIT"
+}
