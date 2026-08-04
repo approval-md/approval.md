@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://approval.md/schema/sample-record.schema.json",
+  "title": "Sample record",
+  "description": "Exercise schema for the write-boundary validation harness. Not a runtime record type: it exists so the harness proves additionalProperties rejection and format enforcement end to end.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "ts"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque record identifier."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp."
+    },
+    "note": {
+      "type": "string",
+      "description": "Optional free-text note."
+    }
+  }
+}
