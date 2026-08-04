@@ -2,9 +2,30 @@
   "name": "approval-md",
   "version": "0.0.1",
   "description": "Human approval for agent actions. CLI runtime for the approval.md convention (pre-release).",
-  "bin": { "approval": "./cli.js" },
-  "files": ["cli.js", "SPEC.md", "README.md"],
+  "type": "module",
+  "bin": {
+    "approval": "./cli.js"
+  },
+  "files": [
+    "cli.js",
+    "SPEC.md",
+    "README.md"
+  ],
   "repository": "github:approval-md/approval.md",
   "homepage": "https://approval.md",
-  "license": "MIT"
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.json && node --test \"dist/tests/**/*.test.js\"",
+    "lint": "oxlint src tests"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "oxlint": "^1.77.0",
+    "typescript": "^7.0.2"
+  }
 }
