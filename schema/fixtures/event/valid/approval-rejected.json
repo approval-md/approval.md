@@ -1,0 +1,15 @@
+{
+  "seq": 6,
+  "ts": "2026-08-04T09:16:02Z",
+  "event": "approval.rejected",
+  "task": "task-043",
+  "action_key": "task-043:refund:2026-08-04",
+  "actor": "human:carter",
+  "channel": "telegram",
+  "payload": {
+    "note": "not this quarter"
+  },
+  "alg": "sha256/jcs",
+  "prev": "bcd21fd125d9c85cc4b4eb1ff519448989c72c0fd70305cbb06b821d04926686",
+  "hash": "1eca621f3726378633f2a9118b54924922854ebbe41d460e424bb564e7abbc6e"
+}

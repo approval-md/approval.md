@@ -1,0 +1,19 @@
+{
+  "seq": 4,
+  "ts": "2026-08-04T09:14:02Z",
+  "event": "approval.requested",
+  "task": "task-042",
+  "action_key": "task-042:chaser:2026-08-04",
+  "actor": "agent:chaser",
+  "channel": "telegram",
+  "payload": {
+    "ttl": "PT4H",
+    "cost_estimate": {
+      "currency": "USD",
+      "amount": 0
+    }
+  },
+  "alg": "sha256/jcs",
+  "prev": "373aa302b5317fc7dc6c6f103bda2f49bb39013774910451339904bc48eab50f",
+  "hash": "4341a44ad46ed5c25a601f296530e5cbab7d3bfb6a3119f77a83c327ab5b54d5"
+}

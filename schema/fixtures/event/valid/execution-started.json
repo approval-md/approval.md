@@ -1,0 +1,14 @@
+{
+  "seq": 9,
+  "ts": "2026-08-04T09:19:02Z",
+  "event": "execution.started",
+  "task": "task-042",
+  "action_key": "task-042:chaser:2026-08-04",
+  "actor": "agent:chaser",
+  "payload": {
+    "attempt": 1
+  },
+  "alg": "sha256/jcs",
+  "prev": "d973375d6aeec5e6cd2de3a0f7dc8f5bc1d9be77225f9af0f851e7fc519a07c3",
+  "hash": "707b79cfa14ec43224c8f71a4fee3ddbff52369f82525aab19bec18c369d5cad"
+}

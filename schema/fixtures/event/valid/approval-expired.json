@@ -1,0 +1,15 @@
+{
+  "seq": 7,
+  "ts": "2026-08-04T09:17:02Z",
+  "event": "approval.expired",
+  "task": "task-044",
+  "action_key": "task-044:nudge:2026-08-04",
+  "actor": "system:daemon",
+  "payload": {
+    "requested_at": "2026-08-04T05:10:00Z",
+    "ttl": "PT4H"
+  },
+  "alg": "sha256/jcs",
+  "prev": "1eca621f3726378633f2a9118b54924922854ebbe41d460e424bb564e7abbc6e",
+  "hash": "ad5cdc577c7a709ce5e8e0cf85d7a50aad1448ecf732ad77838d2e7300973ea6"
+}

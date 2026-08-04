@@ -1,0 +1,15 @@
+{
+  "seq": 11,
+  "ts": "2026-08-04T09:21:02Z",
+  "event": "execution.failed",
+  "task": "task-046",
+  "action_key": "task-046:sync:2026-08-04",
+  "actor": "agent:chaser",
+  "payload": {
+    "attempt": 2,
+    "error": "smtp: connection refused"
+  },
+  "alg": "sha256/jcs",
+  "prev": "1676b527a61665bf74287f00506bee5c1856453b413782f912ab927fb06f1836",
+  "hash": "0989dc2cde78680d3954bd4ed6d8e69e83adfcf3b779ae69c2e6fb07fc7a7bbf"
+}

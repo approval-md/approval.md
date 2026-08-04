@@ -1,0 +1,14 @@
+{
+  "seq": 5,
+  "ts": "2026-08-04T09:14:02Z",
+  "event": "approval.granted",
+  "task": "task-042",
+  "action_key": "task-042:chaser:2026-08-04",
+  "actor": "human:carter",
+  "channel": "telegram",
+  "payload": {
+    "note": "go, but cc me"
+  },
+  "alg": "sha256/jcs",
+  "prev": "b3c9197a2e2e644a440db3444ca5b5ebd30a35059eaa5e77bd3817d821df0e86"
+}
