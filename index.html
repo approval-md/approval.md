@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>approval.md — human approval for agent actions</title>
+<meta name="description" content="A file-based convention and runtime that gates AI agent actions with real-world side effects behind human sign-off. Your AGENTS.md says 'require approval first.' approval.md enforces it.">
+<style>
+  :root{
+    --paper:#F6F3EC; --ink:#17191D; --green:#17A15E; --mut:#8A857B;
+    --line:#E3DED2; --card:#FDFCF8;
+    --mono:"JetBrains Mono",ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--paper);color:var(--ink);font-family:var(--mono)}
+  body{font-size:16px;line-height:1.65}
+  a{color:var(--ink);text-underline-offset:3px}
+  a:hover{color:var(--green)}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 24px 96px}
+
+  /* wordmark */
+  .mark{display:flex;align-items:center;gap:0;font-weight:700;font-size:clamp(34px,7vw,56px);letter-spacing:.5px;user-select:none}
+  .mark svg{height:.86em;width:auto;display:block;margin:0 .03em}
+  .mark .md{color:var(--mut)}
+
+  .tag{margin:18px 0 0;font-size:clamp(17px,2.6vw,21px)}
+  .sub{margin:10px 0 0;color:var(--mut);max-width:56ch}
+
+  .install{margin:34px 0 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .install code{background:var(--ink);color:var(--paper);padding:12px 18px;border-radius:8px;font-size:15px}
+  .install .status{color:var(--mut);font-size:13px}
+
+  h2{margin:64px 0 12px;font-size:15px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut);font-weight:700}
+  p{margin:12px 0;max-width:62ch}
+  .rule{border:0;border-top:1px solid var(--line);margin:0}
+
+  /* the demo card */
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:22px 22px 18px;margin-top:18px;
+        box-shadow:0 1px 0 rgba(23,25,29,.04)}
+  .card .head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+  .card .evt{font-size:13px;color:var(--mut)}
+  .card .evt b{color:var(--ink)}
+  .card .task{margin:10px 0 2px;font-weight:700}
+  .fx{margin:8px 0 0;padding:0;list-style:none;font-size:14px}
+  .fx li{margin:4px 0;color:var(--mut)}
+  .fx .k{color:var(--ink)}
+  .fx .warn{color:#B4552D}
+  .actions{display:flex;gap:10px;margin-top:16px;align-items:center;flex-wrap:wrap}
+  button{font:inherit;font-weight:700;border-radius:8px;padding:10px 20px;cursor:pointer;border:1px solid var(--ink)}
+  .approve{background:var(--ink);color:var(--paper)}
+  .approve:hover{background:var(--green);border-color:var(--green)}
+  .reject{background:transparent;color:var(--ink)}
+  .reject:hover{color:#B4552D;border-color:#B4552D}
+
+  /* bracket-tick that draws on approve */
+  .box{display:inline-flex;vertical-align:-2px;margin-right:8px}
+  .box svg{height:18px;width:auto}
+  .tickpath{stroke-dasharray:340;stroke-dashoffset:340}
+  .approved .tickpath{transition:stroke-dashoffset .5s ease .05s;stroke-dashoffset:0}
+  @media (prefers-reduced-motion: reduce){ .approved .tickpath{transition:none;stroke-dashoffset:0} }
+
+  .log{margin-top:16px;background:var(--ink);color:#C9C5BA;border-radius:8px;padding:14px 16px;font-size:12.5px;
+       overflow-x:auto;white-space:pre;line-height:1.7}
+  .log .g{color:#5FD69A}
+  .log .dim{color:#7E7A70}
+
+  pre.snippet{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;
+       overflow-x:auto;font-size:13.5px;line-height:1.7;margin-top:14px}
+  .c{color:var(--mut)} .g{color:var(--green);font-weight:700}
+
+  .links{margin-top:14px;display:flex;gap:22px;flex-wrap:wrap;font-size:15px}
+  footer{margin-top:80px;color:var(--mut);font-size:13px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<main class="wrap">
+
+  <!-- wordmark: appr[✓]val.md -->
+  <h1 class="mark" aria-label="approval.md">appr<svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z" fill="#17191D"/><path d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z" fill="#17191D"/><path d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg>val<span class="md">.md</span></h1>
+
+  <p class="tag"><b>Human approval for agent actions.</b></p>
+  <p class="sub">Agents now send emails, spend money, book things, and delete data. There is no diff to revert. approval.md is a file-based convention and runtime that gates side-effecting agent actions behind your sign-off — from a policy file you write, to your phone.</p>
+
+  <div class="install">
+    <code>npm i -g approval-md</code>
+    <span class="status">pre-release · spec first, runtime landing milestone by milestone</span>
+  </div>
+
+  <h2>Try the loop</h2>
+  <p>This is the whole product in one card. An agent declared what it wants to do; the policy says <code>communicate.email.external</code> is yours to decide.</p>
+
+  <div class="card" id="card">
+    <div class="head">
+      <span class="evt"><b>approval.requested</b> · task-042 · agent:claude-admin</span>
+      <span class="evt">ttl 24h</span>
+    </div>
+    <p class="task"><span class="box"><svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z" fill="#17191D"/><path d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z" fill="#17191D"/><path class="tickpath" d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Send deposit chaser to agency@example.co.uk</p>
+    <ul class="fx">
+      <li><span class="k">class</span> communicate.email.external · <span class="warn">irreversible</span></li>
+      <li><span class="k">est. cost</span> $0.02 · <span class="k">idempotency</span> task-042:chaser</li>
+    </ul>
+    <div class="actions">
+      <button class="approve" id="ok">Approve</button>
+      <button class="reject" id="no">Reject</button>
+      <span class="evt" id="verdict"></span>
+    </div>
+    <div class="log" id="log"><span class="dim">$ approval log tail</span>
+{"seq":17,"event":"approval.requested","task":"task-042","actor":"agent:claude-admin"}</div>
+  </div>
+
+  <h2>How it works</h2>
+  <p>You write an <code>APPROVAL.md</code> — the enforced version of the permissions prose already living in AGENTS.md files everywhere. Agents declare side effects up front; deterministic policy decides what runs, what waits for you, and what gets sampled for review. Every decision lands in an append-only, hash-chained log.</p>
+
+<pre class="snippet"><span class="c"># APPROVAL.md</span>
+classes:
+  read.*:                     { autonomy: <span class="g">autonomous</span> }
+  calendar.write.own:         { autonomy: supervised }
+  communicate.email.external: { autonomy: <b>manual</b>, approvers: [you] }
+  financial.spend:            { autonomy: <b>manual</b>, limits: { per_action_usd: 25 } }
+  data.delete:                { autonomy: <b>manual</b> }</pre>
+
+  <p>Files are the interface, the log is the truth, the database is a cache. Tasks stay plain markdown — <a href="https://github.com/MrLesk/Backlog.md">Backlog.md</a>-compatible, one preserved frontmatter key. Approvals reach you wherever you are; Telegram is the reference channel.</p>
+
+  <h2>Read on</h2>
+  <div class="links">
+    <a href="https://github.com/approval-md/approval.md/blob/main/SPEC.md">The spec</a>
+    <a href="https://github.com/approval-md">GitHub</a>
+    <a href="https://www.npmjs.com/package/approval-md">npm</a>
+  </div>
+
+  <footer>
+    <span>MIT · built under its own policy</span>
+    <span>hello@approval.md</span>
+  </footer>
+</main>
+
+<script>
+(function(){
+  var card=document.getElementById('card'),log=document.getElementById('log'),
+      v=document.getElementById('verdict'),ok=document.getElementById('ok'),no=document.getElementById('no'),
+      done=false;
+  function line(html){ log.innerHTML+='\n'+html; }
+  function finish(){ done=true; ok.disabled=no.disabled=true; ok.style.opacity=no.style.opacity=.45;
+                     ok.style.cursor=no.style.cursor='default'; }
+  ok.addEventListener('click',function(){ if(done)return;
+    card.classList.add('approved');
+    v.textContent='approved · token minted';
+    line('{"seq":18,"event":"<span class="g">approval.granted</span>","task":"task-042","actor":"human:you"}');
+    line('{"seq":19,"event":"execution.completed","task":"task-042"} <span class="dim">// chain verifies</span>');
+    finish();
+  });
+  no.addEventListener('click',function(){ if(done)return;
+    v.textContent='rejected · nothing executed';
+    line('{"seq":18,"event":"approval.rejected","task":"task-042","actor":"human:you"}');
+    finish();
+  });
+})();
+</script>
+</body>
+</html>
