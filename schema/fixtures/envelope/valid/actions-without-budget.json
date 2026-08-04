@@ -1,0 +1,18 @@
+{
+  "origin": {
+    "app": "cartsos",
+    "created_by": "agent:claude-admin"
+  },
+  "route": {
+    "assignee": "agent:claude-admin",
+    "confidence": 0,
+    "rationale": "no prior on this counterparty; routing for human review"
+  },
+  "state": "rejected",
+  "actions": [
+    {
+      "class": "read",
+      "idempotency_key": "task-077:fetch:2026-08-04"
+    }
+  ]
+}

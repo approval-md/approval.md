@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://approval.md/schema/envelope.schema.json",
+  "title": "Task envelope",
+  "description": "SPEC.md §6: the value of the `approval:` frontmatter key on a Backlog.md-style task file. This schema governs that value only — sibling board keys (id, title, status) belong to Backlog.md and are out of scope. A task with no envelope is valid markdown; it simply cannot request side-effecting execution (§6).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["origin", "state"],
+  "properties": {
+    "origin": {
+      "type": "object",
+      "description": "SPEC.md §6.2: provenance of the task. MUST be present — an envelope with no traceable origin cannot be gated.",
+      "additionalProperties": false,
+      "required": ["app", "created_by"],
+      "properties": {
+        "app": {
+          "type": "string",
+          "minLength": 1,
+          "description": "SPEC.md §6.2 `origin.app` (MUST): source system that created this task (`cartsos`, `jobmaxxing`, `manual`, …)."
+        },
+        "created_by": {
+          "type": "string",
+          "pattern": "^(human|agent):.+",
+          "description": "SPEC.md §6.2 `origin.created_by` (MUST): `human:<id>` or `agent:<id>`. A bare identifier with no principal-kind prefix is rejected."
+        }
+      }
+    },
+    "route": {
+      "type": "object",
+      "description": "SPEC.md §6.2: routing of the task. Routing proposals from agents are events, never silent edits to this block.",
+      "additionalProperties": false,
+      "properties": {
+        "assignee": {
+          "type": "string",
+          "pattern": "^(human|agent:.+)$",
+          "description": "SPEC.md §6.2 `route.assignee` (SHOULD): the literal `human`, or `agent:<id>`. Note the asymmetry with `origin.created_by`: a human assignee is unqualified because the queue, not an id, is the destination."
+        },
+        "rationale": {
+          "type": "string",
+          "description": "SPEC.md §6.1: free-text justification for the routing decision, carried for audit and monitoring."
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "SPEC.md §6.2 `route.confidence` (MAY): 0.0–1.0 routing confidence, used as a monitoring signal (§11). Never a gate on its own."
+        }
+      }
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "proposed",
+        "awaiting",
+        "approved",
+        "executed",
+        "rejected",
+        "expired",
+        "revoked"
+      ],
+      "description": "SPEC.md §6.3: approval lifecycle state, distinct from the board `status`. A projection of the event log — the daemon writes it after the event is appended, never the reverse."
+    },
+    "actions": {
+      "type": "array",
+      "description": "SPEC.md §6.2 `actions[]`: declared side effects. MUST be present for execution; absent means the task cannot request an execution token (§7: a class MUST be declared before a token can be requested for it).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["class", "idempotency_key"],
+        "properties": {
+          "class": {
+            "type": "string",
+            "pattern": "^[a-z0-9_-]+(\\.[a-z0-9_-]+)*$",
+            "description": "SPEC.md §7: dotted, hierarchical side-effect class (`communicate.email.external`, `financial.spend`). Lowercase dot-separated segments of [a-z0-9_-]; top-level namespaces are reserved by the spec, sub-classes are extensible."
+          },
+          "summary": {
+            "type": "string",
+            "description": "SPEC.md §6.2: one-line human-readable description of the effect, rendered into the approval request and the queue (§9)."
+          },
+          "reversible": {
+            "type": "boolean",
+            "description": "SPEC.md §7: whether the effect can be undone. `false` actions MUST NOT be eligible for `autonomous` regardless of policy — the runtime enforces that floor."
+          },
+          "est_cost_usd": {
+            "type": "number",
+            "minimum": 0,
+            "description": "SPEC.md §6.2: estimated cost in USD, checked against task and policy budgets (conjunctively)."
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 1,
+            "description": "SPEC.md §6.2 (MUST per action): stable string; adapters MUST refuse to execute the same key twice."
+          }
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "description": "SPEC.md §6.2 `budget` (MAY): task-level caps, conjunctive with policy budgets — the stricter of the two binds.",
+      "additionalProperties": false,
+      "properties": {
+        "max_cost_usd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "SPEC.md §6.2: maximum total spend in USD across this task's actions."
+        },
+        "max_latency": {
+          "type": "string",
+          "pattern": "^[0-9]+(ms|s|m|h|d)$",
+          "description": "SPEC.md §6.1: duration string bounding how long the request may stay pending (`6h`, `30m`, `7d`). Integer magnitude plus one unit suffix."
+        }
+      }
+    }
+  }
+}
