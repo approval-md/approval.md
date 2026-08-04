@@ -196,6 +196,8 @@ proposed ──▶ awaiting ──▶ approved ──▶ executed
 
 `state` is a **projection** of log events; the file is updated by the daemon after the event is appended, never the reverse. A file edit that contradicts the log is itself logged (`envelope.drift`) and surfaced.
 
+`approval.*` events are exclusive to the manual path and always record a human decision. Actions whose class resolves to `supervised` or `autonomous` emit no `approval.requested` or `approval.granted`; their execution is recorded by `execution.*` events, and supervised actions are additionally eligible for `audit.sampled` and `audit.reviewed`.
+
 ## 7. Side-effect taxonomy (v0.1)
 
 Dotted, hierarchical, extensible. Top-level namespaces are reserved by this spec; implementations MAY add sub-classes freely and SHOULD upstream common ones.
@@ -230,6 +232,7 @@ Two invariants: an action's class MUST be declared before an execution token can
 - **Event types (v0.1):** `task.registered`, `route.proposed`, `route.accepted`, `approval.requested`, `approval.granted`, `approval.rejected`, `approval.expired`, `approval.revoked`, `execution.started`, `execution.completed`, `execution.failed`, `budget.exceeded`, `policy.updated`, `envelope.drift`, `audit.sampled`, `audit.reviewed`.
 - Events MUST validate against the JSON Schemas in `schema/` before append. Validation at the write boundary is itself a control: an agent physically cannot request execution without declaring a class, key, and cost estimate.
 - Every record MUST carry an explicit hash-scheme identifier, `alg`. Version 0.1 defines exactly one value: `sha256/jcs`, meaning SHA-256 over the RFC 8785 (JCS) canonical serialization of the record with `prev` included. Verifiers MUST reject records whose `alg` is missing or unrecognized. Records with different `alg` values MAY coexist in one log, so a future scheme change is a migration, never a schism.
+- Actor identifiers use exactly three prefixes: `human:` for decisions made by a person, `agent:` for actions proposed or performed by an agent, and `system:` for runtime-originated events such as `approval.expired`. Verifiers MUST reject unrecognized prefixes.
 
 ## 9. Projections
 
@@ -244,8 +247,9 @@ Two invariants: an action's class MUST be declared before an execution token can
 approval init                      # scaffold APPROVAL.md, .approval/, schemas
 approval instructions              # full agent-facing usage guide (also in --help)
 approval register  <task-file>     # validate envelope, append task.registered
-approval request   <task> [--action <key>]   # -> approval.requested (or auto-grant
-                                             #    per policy for supervised/autonomous)
+approval request   <task> [--action <key>]   # -> approval.requested (manual classes;
+                                             #    supervised/autonomous proceed directly
+                                             #    to execution)
 approval wait      <task> --timeout 6h       # block until decided; exit code = decision
 approval grant|reject|revoke <request-id> [--note …]   # human-only verbs
 approval token     <action-key>    # print single-use execution token if granted
