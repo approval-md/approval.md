@@ -45,6 +45,7 @@
  * clock — and one caller-supplied-timestamp seam is gone.
  */
 
+import { readFileSync } from "node:fs";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
@@ -107,6 +108,13 @@ function usageError(streams: Streams, json: boolean, message: string, helpText: 
   return EXIT_USAGE;
 }
 
+/** A filesystem fact, reported as one: exit 4, never a gate refusal code. */
+function ioError(streams: Streams, json: boolean, message: string): number {
+  if (json) streams.err(`${JSON.stringify({ error: { code: "io", message } })}\n`);
+  else streams.err(`approval: ${message}\n`);
+  return EXIT_IO;
+}
+
 /**
  * Map a core refusal onto the frozen exit table.
  *
@@ -118,6 +126,11 @@ function refusalExitCode(refusal: GateRefusal): number {
   switch (refusal.code) {
     case "log-unreadable":
     case "task-file-unreadable":
+    // The store could not be written: a filesystem fact, like the two above,
+    // and not a statement about what the gate decided. `payload-mismatch` is
+    // the opposite and stays at EXIT_INTEGRITY — the gate looked at the bytes
+    // and said no.
+    case "payload-store-failed":
       return EXIT_IO;
     case "log-torn-tail":
       return EXIT_TORN_TAIL;
@@ -285,10 +298,59 @@ function identityUsageError(
 // request
 // ---------------------------------------------------------------------------
 
+type PayloadFlag =
+  | { ok: true; value: unknown }
+  | { ok: false; code: number; message: string };
+
+/**
+ * `--payload <file>` or `--payload -` (stdin), as a JSON value.
+ *
+ * Two failures, two exit codes, on purpose: a file that cannot be read is an I/O
+ * fact (exit 4) and bytes that are not JSON are a usage error (exit 2). Neither
+ * is a gate refusal — the gate was never asked — and neither writes anything.
+ *
+ * The value is handed to `core/gate.ts` as a value, not as a path: the store is
+ * addressed by the RFC 8785 hash of the *material*, so a file's own formatting,
+ * key order and whitespace are irrelevant by construction.
+ */
+function readPayloadFlag(flag: string, cwd: string): PayloadFlag {
+  const source = flag === "-" ? 0 : absolute(flag, cwd);
+  const where = flag === "-" ? "stdin" : String(source);
+  let raw: string;
+  try {
+    raw = readFileSync(source, "utf8");
+  } catch (cause) {
+    return {
+      ok: false,
+      code: EXIT_IO,
+      message: `--payload ${where} could not be read: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    };
+  }
+  try {
+    return { ok: true, value: JSON.parse(raw) as unknown };
+  } catch (cause) {
+    return {
+      ok: false,
+      code: EXIT_USAGE,
+      message: `--payload ${where} is not valid JSON: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }; the payload store holds the exact material the binding names, so it must parse before it can be hashed`,
+    };
+  }
+}
+
 export function commandRequest(argv: string[], streams: Streams, cwd: string): number {
   const outcome = front(
     argv,
-    { ...COMMON_FLAGS, ...POLICY_FLAGS, "--as": "string", "--action": "string" },
+    {
+      ...COMMON_FLAGS,
+      ...POLICY_FLAGS,
+      "--as": "string",
+      "--action": "string",
+      "--payload": "string",
+    },
     REQUEST_HELP,
     streams,
     cwd,
@@ -311,6 +373,16 @@ export function commandRequest(argv: string[], streams: Streams, cwd: string): n
   const actor = resolvePrincipalActor(asFlag);
   if (actor === null) return identityUsageError(streams, json, asFlag, REQUEST_HELP);
 
+  // APRV-28: the bytes, read at the edge and handed to core as a value. Read
+  // before anything is appended so an unreadable file costs nothing.
+  const payloadFlag = stringFlag(flags, "--payload");
+  const material = payloadFlag === null ? null : readPayloadFlag(payloadFlag, cwd);
+  if (material !== null && !material.ok) {
+    return material.code === EXIT_IO
+      ? ioError(streams, json, material.message)
+      : usageError(streams, json, material.message, REQUEST_HELP);
+  }
+
   // The action's declaration comes from the log's task.registered record, never
   // from flags — see the module header.
   const read = readGateRecords(logPath);
@@ -332,6 +404,7 @@ export function commandRequest(argv: string[], streams: Streams, cwd: string): n
         ? {}
         : { reversible: declared.action.reversible }),
       ...(declared.action.summary === undefined ? {} : { summary: declared.action.summary }),
+      ...(material === null || !material.ok ? {} : { payload: { value: material.value } }),
     },
     actor,
     options,

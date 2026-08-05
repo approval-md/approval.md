@@ -32,8 +32,11 @@
  * ## Where the payload comes from
  *
  * v0.1's log records `payload_hash`, never the payload bytes, so the material to
- * render has to come from somewhere else: `--payload-dir`, one JSON file per
- * action key. `channels/tagging.ts` hashes whatever it is given and refuses
+ * render comes from the payload store beside the log — `.approval/payloads/`,
+ * written by `approval request --payload` (APRV-28) — which is why this verb
+ * needs no flag at all in the ordinary case. `--payload-dir` remains as an
+ * override for an operator whose bytes live elsewhere: one JSON file per action
+ * key, consulted first. `channels/tagging.ts` hashes whatever it is given and refuses
  * anything that does not match the recorded binding, so a wrong file is a
  * refusal and never a rendering. A manual request with no material is *skipped*
  * and reported — visibly, never silently, because a request missing from a queue

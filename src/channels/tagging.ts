@@ -29,8 +29,10 @@
  * v0.1's log records a `payload_hash`, never the payload bytes: the binding is
  * a commitment, and putting the bytes in an append-only log would make every
  * approved payload permanent and world-readable to anyone with the log. So the
- * material to render is supplied by the caller ({@link TagOptions.payload}) and
- * this module **verifies it against the recorded hash** before tagging it
+ * material to render comes from the payload store beside the log
+ * (`core/payload-store.ts`, APRV-28), or from a caller-supplied override
+ * ({@link TagOptions.payload}) where an operator holds the bytes somewhere else,
+ * and this module **verifies it against the recorded hash** before tagging it
  * `computed` — material that does not hash to the bound value is refused
  * `payload-mismatch` and never reaches a channel. That verification is what
  * makes `fullPayload` a computed field rather than one more agent claim, and it
@@ -51,6 +53,7 @@ import {
 } from "../core/budgets.js";
 import type { EventRecord } from "../core/log.js";
 import { payloadHash } from "../core/payload.js";
+import { loadPayload, payloadStoreDirFor } from "../core/payload-store.js";
 import { explain } from "../core/policy-explain.js";
 import {
   loadPolicy,
@@ -81,19 +84,38 @@ import {
  * Where the payload material for an action comes from.
  *
  * Returns `undefined` when the caller holds no material for that key — which
- * is a refusal for a manual request (§10.4) and merely a missing field
- * otherwise. Never throws: an adapter that cannot produce material says so by
- * returning `undefined`.
+ * falls back to the payload store, and then, if that holds nothing either, is a
+ * refusal for a manual request (§10.4) and merely a missing field otherwise.
+ * Never throws: an adapter that cannot produce material says so by returning
+ * `undefined`.
+ *
+ * The bound `payload_hash` is passed as a second argument for sources that are
+ * addressed by content rather than by key; sources that key on the action alone
+ * ignore it.
  */
-export type PayloadSource = (actionKey: string) => unknown;
+export type PayloadSource = (actionKey: string, payloadHash: string) => unknown;
 
 export interface TagOptions {
   /** Where `APPROVAL.md` lives. Same semantics as `core/gate.ts`'s option. */
   policy?: { dir?: string; file?: string };
   /** Schema directory, passed to the verified read and the policy load. */
   schemaDir?: string;
-  /** The payload bytes to render, checked against the recorded binding. */
+  /**
+   * The payload bytes to render, checked against the recorded binding.
+   *
+   * An **override**: when it is absent, or returns `undefined` for a key, the
+   * payload store beside the log answers instead (APRV-28). An operator with a
+   * `--payload-dir` therefore still wins for the keys it covers, and gets the
+   * store for the rest.
+   */
   payload?: PayloadSource;
+  /**
+   * Where the payload store lives. Defaults to `.approval/payloads/` beside the
+   * log, resolved by `core/payload-store.ts` from the log path the caller
+   * already passed. `null` disables the fallback entirely, which is what a
+   * caller that wants to prove the store is not answering asks for.
+   */
+  payloadStoreDir?: string | null;
   /**
    * Truncate the rendered payload text at this many characters. Unset means no
    * truncation. A truncated rendering is legal for a unit request and is what
@@ -278,9 +300,60 @@ function renderPayload(
   };
 }
 
+/**
+ * The material for one action: the caller's override, else the payload store.
+ *
+ * Three outcomes, and the middle one is the point of the whole store. `none`
+ * means nobody holds the bytes — the caller passed no source (or it returned
+ * nothing) and the store has no file — which is `payload-unavailable` for a
+ * manual request. `refusal` means the store *does* hold a file and it does not
+ * verify: a tampered `<hash>.json` is reported as `payload-mismatch` and its
+ * contents are never returned, let alone rendered. `material` is the ordinary
+ * case, and it is still hash-checked downstream by {@link renderPayload}, so the
+ * store is verified twice on the path to a human and trusted at neither step.
+ *
+ * A stored external reference is `none` with a reason: the pointer is reported
+ * in the refusal message, and no bytes are invented for it.
+ */
+function materialFor(
+  options: TagOptions,
+  actionKey: string,
+  boundHash: string,
+):
+  | { kind: "material"; value: unknown }
+  | { kind: "none"; reason: string | null }
+  | { kind: "refusal"; refusal: ChannelTagRefusal } {
+  const supplied = options.payload === undefined ? undefined : options.payload(actionKey, boundHash);
+  if (supplied !== undefined) return { kind: "material", value: supplied };
+
+  const storeDir = options.payloadStoreDir;
+  if (storeDir === undefined || storeDir === null) return { kind: "none", reason: null };
+
+  const loaded = loadPayload(storeDir, boundHash);
+  if (loaded.ok) return { kind: "material", value: loaded.value };
+  if (loaded.code === "hash-mismatch") {
+    return { kind: "refusal", refusal: refuse("payload-mismatch", loaded.message) };
+  }
+  return { kind: "none", reason: loaded.code === "absent" ? null : loaded.message };
+}
+
 // ---------------------------------------------------------------------------
 // buildChannelRequest
 // ---------------------------------------------------------------------------
+
+/**
+ * The options a build runs with: the caller's, plus the store convention.
+ *
+ * Resolved from the log path the caller already passes, so every surface —
+ * `approval render`, the CLI channel, web, Telegram — reads the same store
+ * without a flag, and a caller that wants no store at all says
+ * `payloadStoreDir: null` rather than being unable to say it.
+ */
+function withStore(options: TagOptions, logPath: string): TagOptions {
+  return options.payloadStoreDir === undefined
+    ? { ...options, payloadStoreDir: payloadStoreDirFor(logPath) }
+    : options;
+}
 
 /**
  * Build the render-ready request for one action key.
@@ -319,7 +392,14 @@ export function buildChannelRequest(
 
   const load = loadPolicy(loadOptionsOf(options));
   const derivation = requestState(read.records, actionKey, now, ttlOf(load));
-  return tagDerivation(read.records, read.head?.seq ?? 0, derivation, load, options, now);
+  return tagDerivation(
+    read.records,
+    read.head?.seq ?? 0,
+    derivation,
+    load,
+    withStore(options, logPath),
+    now,
+  );
 }
 
 /** The shared body of {@link buildChannelRequest} and {@link buildPendingQueue}. */
@@ -385,16 +465,19 @@ function tagDerivation(
 
   const attestation: AttestationStatus = checkAttestation(records, policyPathOf(options));
 
-  const material = options.payload === undefined ? undefined : options.payload(actionKey);
+  const material = materialFor(options, actionKey, boundHash);
+  if (material.kind === "refusal") return material.refusal;
   let rendering: PayloadRendering | null = null;
-  if (material !== undefined) {
-    const rendered = renderPayload(material, boundHash, options.maxPayloadChars);
+  if (material.kind === "material") {
+    const rendered = renderPayload(material.value, boundHash, options.maxPayloadChars);
     if (!rendered.ok) return rendered;
     rendering = rendered.rendering;
   } else if (explanation.outcome.autonomy === "manual") {
     return refuse(
       "payload-unavailable",
-      `no payload material was supplied for manual action ${actionKey}. SPEC.md §10.4 requires a channel to present the full payload or a faithful rendering of it before collecting a decision, so the request is refused here rather than delivered as a summary alone.`,
+      `no payload material is held for manual action ${actionKey}: the caller supplied none and the payload store has none${
+        material.reason === null ? "" : ` (${material.reason})`
+      }. SPEC.md §10.4 requires a channel to present the full payload or a faithful rendering of it before collecting a decision, so the request is refused here rather than delivered as a summary alone.`,
     );
   }
 
@@ -489,6 +572,7 @@ export function buildPendingQueue(
   const load = loadPolicy(loadOptionsOf(options));
   const ttlMs = ttlOf(load);
   const headSeq = read.head?.seq ?? 0;
+  const withStoreOptions = withStore(options, logPath);
 
   const keys: string[] = [];
   for (const record of read.records) {
@@ -503,7 +587,7 @@ export function buildPendingQueue(
   for (const key of keys) {
     const derivation = requestState(read.records, key, now, ttlMs);
     if (derivation.state !== "requested") continue;
-    const built = tagDerivation(read.records, headSeq, derivation, load, options, now);
+    const built = tagDerivation(read.records, headSeq, derivation, load, withStoreOptions, now);
     if (built.ok) requests.push(built.request);
     else skipped.push({ action_key: key, code: built.code, message: built.message });
   }

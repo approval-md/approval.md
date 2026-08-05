@@ -103,6 +103,9 @@ Defaults:
   log    .approval/log/events.jsonl   (relative to the working directory)
   index  .approval/index.sqlite
   queue  .approval/QUEUE.md
+  payloads .approval/payloads/<payload_hash>.json  (the bytes a request bound
+           to, written by request --payload; read by render and every channel,
+           and re-hashed on every read)
 
 ${EXIT_CODES}
 
@@ -627,11 +630,18 @@ export const REQUEST_HELP = `approval request — ask the gate to admit a declar
 
 Usage:
   approval request <task> --action <key> [--as human:<id>|agent:<id>]
-                   [--policy <path>] [--dir <path>] [--log <path>] [--json]
+                   [--payload <file>|-] [--policy <path>] [--dir <path>]
+                   [--log <path>] [--json]
 
 Flags:
   --action <key>   the action's idempotency_key, as registered (required)
   --as <id>        who is requesting; human:<id> or agent:<id>, else APPROVAL_HUMAN
+  --payload <file> the action's concrete payload, as JSON; - reads stdin. Its
+                   hash must equal the declared payload_hash (payload-mismatch
+                   otherwise) and it is filed in .approval/payloads/<hash>.json,
+                   which is where render and every channel read the bytes from.
+                   Supply it here once and no channel needs --payload-dir or
+                   --payloads at all.
   --policy <path>  policy file to apply (overrides discovery)
   --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
                    (default: the working directory)
@@ -648,9 +658,11 @@ the file; request against what was registered.
 
 Order of checks, each with its own refusal code: identity, then attestation
 (policy-not-attested), then class resolution through the real policy engine
-including SPEC §7's irreversibility floor, then — on the manual path only —
-request legality (duplicate-request, already-executed), then budgets, then the
-append of approval.requested.
+including SPEC §7's irreversibility floor, then — on the manual path only — the
+content binding (payload-hash-required, payload-mismatch), request legality
+(duplicate-request, already-executed), then budgets, then the payload store
+write (payload-store-failed), then the append of approval.requested. A refused
+request stores nothing.
 
 ${GATE_MANUAL_PATH}
 
@@ -1355,8 +1367,11 @@ Flags:
   --log <path>         log file to read, and to append decisions to
   --policy-dir <path>  directory to discover APPROVAL.md / APPROVALS.md in
   --policy <path>      policy file (wins over --policy-dir)
-  --payload-dir <path> directory of payload material, one JSON file per action
-                       key: "<key>.json" or its percent-encoded name. The bytes
+  --payload-dir <path> OPTIONAL OVERRIDE. Payload material for keys this
+                       operator holds outside the store: one JSON file per
+                       action key, "<key>.json" or its percent-encoded name.
+                       Unset, the bytes come from .approval/payloads/, where
+                       approval request --payload filed them. Either way they
                        are hashed and checked against the request's recorded
                        payload_hash; material that does not match is REFUSED,
                        never rendered.
@@ -1390,8 +1405,9 @@ agent's summary:
   { … }
   --- END FULL PAYLOAD ---
 
-The material comes from --payload-dir and is hash-checked against the recorded
-binding before it is shown, so what is inside the delimiters is what the
+The material comes from the payload store (.approval/payloads/, written by
+approval request --payload) or from --payload-dir, and is hash-checked against
+the recorded binding before it is shown, so what is inside the delimiters is what the
 execution token will spend. A manual request with no material is SKIPPED and
 reported on stderr — visibly, because a request missing from a queue is a
 request nobody will approve.
@@ -1441,11 +1457,13 @@ Flags:
   --log <path>         log file to read, and to append decisions to
   --policy <path>      policy file (wins over --dir)
   --dir <path>         directory to discover APPROVAL.md / APPROVALS.md in
-  --payload-dir <path> directory of payload material, one JSON file per action
-                       key: "<key>.json" or its percent-encoded name. The bytes
-                       are hashed and checked against the request's recorded
-                       payload_hash; material that does not match is REFUSED,
-                       never rendered
+  --payload-dir <path> OPTIONAL OVERRIDE. Payload material for keys this
+                       operator holds outside the store: one JSON file per
+                       action key, "<key>.json" or its percent-encoded name.
+                       Unset, the bytes come from .approval/payloads/. Either
+                       way they are hashed and checked against the request's
+                       recorded payload_hash; material that does not match is
+                       REFUSED, never rendered
   --as human:<id>      the person deciding; defaults to APPROVAL_HUMAN.
                        REQUIRED at startup — this page exists to record
                        decisions, so a server whose buttons could not record
@@ -1483,8 +1501,9 @@ they are agent-authored, and they are this page's entire injection surface.
 
 THE FULL PAYLOAD (SPEC.md §10.4). For a manual action the exact bytes are shown
 verbatim in a delimited <pre> block labelled with the bound sha256, never mixed
-with the agent's summary. Material comes from --payload-dir; a request whose
-material is missing is SKIPPED and reported on stderr.
+with the agent's summary. Material comes from the payload store, or from
+--payload-dir where it overrides; a request whose material nobody holds is
+SKIPPED and reported on stderr.
 
 BATCHING (SPEC.md §10.3, B7). Tick requests and use "Grant selected" /
 "Reject selected" for one gesture over the set. The log never batches: each
@@ -1614,12 +1633,14 @@ Flags:
                    tests, cron-style polling)
   --as human:<id>  the approver every decision is recorded against; defaults to
                    APPROVAL_HUMAN. REQUIRED — approvals are human-only
-  --payloads <f>   JSON file mapping action key -> that action's payload value.
-                   The log records only the payload HASH (SPEC.md §6.2), and
-                   §10.4 requires the full payload to be presented for a manual
-                   action, so the bytes are supplied here. They are re-hashed
-                   and checked against the recorded binding; material that does
-                   not match is refused, never rendered
+  --payloads <f>   OPTIONAL OVERRIDE. JSON file mapping action key -> that
+                   action's payload value. The log records only the payload HASH
+                   (SPEC.md §6.2) and §10.4 requires the full payload for a
+                   manual action, so the bytes come from .approval/payloads/ —
+                   filed by approval request --payload — unless this flag
+                   supplies them instead. Either way they are re-hashed and
+                   checked against the recorded binding; material that does not
+                   match is refused, never rendered
   --policy <path>  policy file to resolve autonomy, budgets and TTL against
   --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
   --log <path>     log file (read for the queue, appended to by decisions)

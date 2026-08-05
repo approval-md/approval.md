@@ -148,7 +148,15 @@ const TASK_FILE = [
 const demo = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-e2e-demo-")));
 const logPath = join(demo, ".approval", "log", "events.jsonl");
 const queuePath = join(demo, ".approval", "QUEUE.md");
-const payloadsPath = join(demo, "payloads.json");
+/**
+ * The bytes handed to `approval request --payload` (APRV-28). One file, read
+ * once at intake; from there the payload store beside the log is where every
+ * later surface finds the material, which is why no step below passes
+ * `--payload-dir` or `--payloads` to anything.
+ */
+const payloadPath = join(demo, "payload.json");
+/** Where the store files them: `.approval/payloads/<payload_hash>.json`. */
+const storedPayloadPath = join(demo, ".approval", "payloads", `${PAYLOAD_HASH}.json`);
 
 let mock: MockBotApi;
 
@@ -156,7 +164,7 @@ before(async () => {
   mkdirSync(demo, { recursive: true });
   writeFileSync(join(demo, "APPROVAL.md"), POLICY, "utf8");
   writeFileSync(join(demo, `${TASK}.md`), TASK_FILE, "utf8");
-  writeFileSync(payloadsPath, `${JSON.stringify({ [ACTION]: PAYLOAD }, null, 2)}\n`, "utf8");
+  writeFileSync(payloadPath, `${JSON.stringify(PAYLOAD, null, 2)}\n`, "utf8");
   mock = await startMockBotApi(BOT_TOKEN);
 });
 
@@ -268,6 +276,8 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
       TASK,
       "--action",
       ACTION,
+      "--payload",
+      "payload.json",
       "--as",
       AGENT,
       "--json",
@@ -297,6 +307,22 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
       reversible: false,
     });
     assert.equal(recordAt(3)["actor"], AGENT);
+
+    // APRV-28: the bytes are filed once, at intake, under the hash the log
+    // committed to — and the store is a sibling of the log directory, so no
+    // payload file can land where the chain is walked from.
+    assert.equal(existsSync(storedPayloadPath), true, "the request stored no payload");
+    assert.deepEqual(
+      JSON.parse(readFileSync(storedPayloadPath, "utf8")) as unknown,
+      PAYLOAD,
+      "the stored material is not the material that was supplied",
+    );
+    assert.equal(
+      createHash("sha256").update(readFileSync(storedPayloadPath, "utf8"), "utf8").digest("hex"),
+      PAYLOAD_HASH,
+      "the store file's own bytes do not hash to its name",
+    );
+    assert.equal(existsSync(join(demo, ".approval", "payloads", "events.jsonl")), false);
   });
 
   // -------------------------------------------------------------------------
@@ -315,18 +341,26 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
     assert.equal(render.code, 0, render.stderr);
     const rendered = json(render);
     assert.equal(rendered["out"], queuePath);
-    // `approval render` has no way to be handed payload material (it takes no
-    // --payloads), and `channels/tagging.ts` refuses to summarize a manual
-    // request without it (SPEC.md §10.4, enforced at construction). So the
-    // request is listed with its reason in the "could not summarize" section
-    // rather than silently dropped, and the pending section stays empty. That
-    // is the documented v0.1 gap, asserted here rather than papered over.
-    assert.equal(rendered["pending"], 0);
-    assert.equal(rendered["skipped"], 1);
+    // APRV-28 inverts the APRV-27 friction case. `approval render` still takes
+    // no payload flag and still needs none: the material was stored at intake,
+    // so the renderer summarizes the request like every other surface and
+    // QUEUE.md's pending count AGREES with the queue instead of silently
+    // disagreeing with it.
+    assert.equal(rendered["pending"], 1);
+    assert.equal(rendered["skipped"], 0, "nothing was left unsummarizable");
+    assert.equal(
+      rendered["pending"],
+      pending.length,
+      "QUEUE.md and `approval queue` disagree about how many requests are pending",
+    );
     const queueMd = readFileSync(queuePath, "utf8");
     assert.match(queueMd, new RegExp(ACTION, "u"), "QUEUE.md names the live request");
-    assert.match(queueMd, /payload-unavailable/u);
+    assert.match(queueMd, /1 request\(s\), oldest first/u);
+    assert.match(queueMd, /_None\._ Every live request above is rendered in full\./u);
+    // Holding the bytes is not the same as printing them: QUEUE.md is a summary
+    // surface that collects no decision, so it still carries only the binding.
     assert.equal(queueMd.includes(PAYLOAD.body), false, "QUEUE.md must not inline payload bytes");
+    assert.match(queueMd, new RegExp(PAYLOAD_HASH, "u"));
 
     // Pending is not unhealthy: a request awaiting a human is the system
     // working. `status` reports on attestation, the chain, and debris.
@@ -375,8 +409,10 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
         "--once",
         "--api-base",
         assertLocal(mock.url),
-        "--payloads",
-        payloadsPath,
+        // No --payloads: the listener reads the same store `approval request
+        // --payload` wrote at intake (APRV-28). The override flag still exists
+        // and is exercised in tests/channels-telegram.test.ts; the demo shows
+        // the path an operator actually walks, which no longer needs it.
         "--poll-timeout",
         "5",
       ],

@@ -26,12 +26,16 @@
  *    Telegram — see the module doc of `channels/telegram.ts` for why a chat
  *    transcript is not a credential store, and for the flag on that decision.
  *
- * ## Payload material — why `--payloads` exists
+ * ## Payload material — the store, and why `--payloads` still exists
  *
  * SPEC.md §6.2 records a `payload_hash` in the log and never the bytes, and
  * §10.4 requires a channel to present the full payload for a manual action. So
- * the bytes must come from somewhere the runtime can reach: `--payloads` names
- * a JSON file mapping action key to that action's payload value. The tagger
+ * the bytes must come from somewhere the runtime can reach. Since APRV-28 that
+ * somewhere is the payload store beside the log (`.approval/payloads/`, written
+ * by `approval request --payload`), and a listener ordinarily needs no payload
+ * flag at all. `--payloads` remains an override for bytes an operator holds
+ * elsewhere: a JSON file mapping action key to that action's payload value,
+ * consulted before the store. The tagger
  * (`channels/tagging.ts`) re-hashes whatever it is given and refuses anything
  * that does not match the recorded binding, so a wrong or stale file cannot put
  * different bytes in front of an approver than the token will execute — it
