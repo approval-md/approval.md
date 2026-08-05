@@ -24,6 +24,9 @@ Usage:
   approval log export [--log <path>] [--json]
   approval policy check|test <class> [--reversible true|false] [--policy <path>] [--dir <path>] [--json]
   approval policy attest [--policy <path>] [--dir <path>] [--as human:<id>] [--json]
+  approval policy amend  [--policy <path>] [--dir <path>] [--log <path>]
+                      [--as human:<id>] [--require-load] [--dry-run] [--commit]
+                      [--yes] [--json]
   approval register   <task-file> [--as <id>] [--log <path>] [--json]
   approval request    <task> --action <key> [--as <id>] [--json]
   approval grant|reject|revoke <action-key> [--note <text>] [--as human:<id>] [--json]
@@ -51,7 +54,9 @@ Usage:
 Commands:
   log       inspect the append-only event log (verify | tail | export)
   policy    explain what APPROVAL.md does with an action class (check | test),
-            or record a human's sign-off on the policy file (attest)
+            record a human's sign-off on the policy file (attest), or run the
+            whole amendment ceremony — semantic diff, load advisory,
+            attestation, and the two-file git commit — as one verb (amend)
   register  validate a task envelope and append task.registered
   request   ask the gate to admit a declared action (manual classes append
             approval.requested; supervised/autonomous append nothing and
@@ -268,14 +273,21 @@ Usage:
   approval policy check <class> [--reversible true|false] [--policy <path>] [--dir <path>] [--json]
   approval policy test  <class> [--reversible true|false] [--policy <path>] [--dir <path>] [--json]
   approval policy attest [--policy <path>] [--dir <path>] [--as human:<id>] [--json]
+  approval policy amend  [--policy <path>] [--dir <path>] [--log <path>]
+                         [--as human:<id>] [--require-load] [--dry-run]
+                         [--commit] [--yes] [--json]
 
 Subcommands:
   check   explain the autonomy resolution for <class>
   test    exact alias of check (SPEC.md §10.1 names both)
   attest  record a human's sign-off on the policy file's bytes (human-only;
           gate operations refuse while the live file is unattested or changed).
-          Run "approval policy attest --help" — it is the only policy verb that
-          writes to the log.
+          Run "approval policy attest --help" — it is one of the two policy
+          verbs that write to the log.
+  amend   the whole amendment ceremony in one verb: semantic diff of the edited
+          policy against the last-attested bytes, load advisory, attestation,
+          and the two-file git add/commit that lands the edit and its
+          attestation together. Run "approval policy amend --help".
 
 Nothing is executed, requested, or logged: this command reads APPROVAL.md and
 answers a hypothetical. Discovery is APPROVAL.md then APPROVALS.md in --dir
@@ -390,6 +402,126 @@ JSON shape (stdout, one object):
   refusal  {"ok":false,"error":{"code":"...","message":"..."}}  on stderr
   path is the file that was hashed; the logged payload carries its basename
   only, so an exported log leaks no home directory.
+${JSON_ERRORS}`;
+
+export const POLICY_AMEND_HELP = `approval policy amend — the whole amendment ceremony, in one verb
+
+Usage:
+  approval policy amend [--policy <path>] [--dir <path>] [--log <path>]
+                        [--as human:<id>] [--require-load] [--dry-run]
+                        [--commit] [--yes] [--json]
+
+Flags:
+  --policy <path>  policy file to amend (overrides discovery)
+  --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
+                   (default: the working directory)
+  --log <path>     log file to read and append to
+                   (default .approval/log/events.jsonl)
+  --as human:<id>  the human amending; overrides APPROVAL_HUMAN
+  --require-load   REFUSE to attest a policy that does not load (exit 1,
+                   nothing appended). Without it a load failure is a loud
+                   advisory and the attestation may still proceed.
+  --dry-run        print the whole report and write NOTHING — no attestation,
+                   no commit, no prompt
+  --commit         run the two-file git add/commit instead of printing it
+  --yes            skip the interactive confirmation
+  --json           machine-readable output
+  -h, --help       this text
+
+What it does, in this order:
+  1. resolves the live policy file and hashes its bytes;
+  2. compares that hash to the latest attestation. EQUAL means nothing to
+     amend, reported on stdout at EXIT 0 — a no-op ceremony is a success;
+  3. recovers the last-attested policy TEXT if it can (see BASELINE below) and
+     prints the SEMANTIC diff: class resolutions that changed, approvers added
+     or removed or re-channelled, defaults, and budget/class limits — all of it
+     computed by the real engine on both versions, never re-derived here;
+  4. runs the load advisory: "loads clean", or a loud notice naming the failure
+     code and stating that the policy will fail closed to all-manual;
+  5. asks for confirmation (skipped by --yes and --dry-run);
+  6. attests — one policy.updated event, identical in every respect to
+     "approval policy attest";
+  7. prints, or with --commit runs, "git add <policy> <log>" and
+     "git commit" whose message cites the attestation seq.
+
+BASELINE (a stated limitation, FLAGGED FOR HUMAN REVIEW): an attestation
+records only the SHA-256 of the policy bytes, so the attested TEXT is NOT
+recoverable from the log. When the policy lives in a git repository this verb
+recovers HEAD:<path> and uses it as the baseline ONLY IF that blob's hash equals
+the attested hash — proving the text being diffed is the text that was signed
+for. Otherwise it drops to HASH-ONLY MODE: it says so loudly, the semantic diff
+is unavailable, and only the load advisory and the attestation run. There is no
+--baseline flag, because a baseline supplied by hand is a baseline nobody can
+verify.
+
+Human-only, with "approval policy attest"'s identity rules exactly: --as, else
+APPROVAL_HUMAN, and an agent: or system: actor is refused before anything is
+read or written. Identity is CONFIG-DECLARED and nothing here authenticates it.
+
+CONFIRMATION: interactive y/N by default. With stdin not a terminal (or with
+--json) and no --yes, the command REFUSES at exit 2 rather than assuming an
+answer — pass --yes to confirm non-interactively, or --dry-run to see
+everything without writing. Answering anything but y/yes aborts and writes
+nothing.
+
+--commit carries EXACTLY two files: the policy and the log. It refuses outside a
+git repository, and refuses when the INDEX holds staged changes to anything
+else — a commit that swept in an unrelated staged edit would make "this commit
+is the amendment" false. Both refusals happen BEFORE the attestation, so a
+refused --commit never leaves an attested policy without its commit. Unstaged
+and untracked files elsewhere are not touched.
+
+${EXIT_CODES}
+  policy amend: 0 when the amendment was recorded, when it was a no-op, when
+  --dry-run reported, or when a human aborted at the prompt; 1 when
+  --require-load refused a policy that does not load (nothing appended) or the
+  log does not verify; 2 for usage — no human identity, an --as that is not
+  human:<id>, a missing confirmation it could not ask for, or --commit
+  preconditions; 3 for a torn tail; 4 for I/O.
+
+JSON shape (stdout, one object; keys ALWAYS present):
+  {"ok":true,"noop":false,"dryRun":false,"aborted":false,
+   "policy":"/abs/APPROVAL.md","liveSha256":"<64 hex>",
+   "attested":null|{"sha256":"<64 hex>","seq":2},
+   "baseline":{"mode":"git-head"|"unavailable","reason":null|"..."},
+   "diff":null|{"beforeFailure":null|{"code","message"},
+                "afterFailure":null|{"code","message"},
+                "structuralComparable":true,"probes":["..."],
+                "classes":[{"class":"...","before":{"autonomy","provenance",
+                  "pattern"},"after":{...}}],
+                "approvers":[{"approver":"...","change":"added"|"removed"|
+                  "channels-changed","beforeChannels":[...]|null,
+                  "afterChannels":[...]|null,"danglingRules":["..."]}],
+                "defaults":[{"field":"autonomy"|"channel"|"approval_ttl"|
+                  "on_expiry","before":null|"...","after":null|"..."}],
+                "budgets":[{"scope":"global"|"classes.<pattern>",
+                  "limit":"daily_usd","before":null|N,"after":null|N}],
+                "unchanged":false},
+   "load":null|{"ok":true|false,"code":null|"...","message":null|"..."},
+   "attestation":null|{"seq":3,"sha256":"<64 hex>"},
+   "git":null|{"repo":true,"commands":["git add ...","git commit -m ..."],
+               "committed":false,"output":null|"..."}}
+  diff is null in hash-only mode; attestation is null for a no-op, a dry run,
+  and an abort. In a dry run the commands carry the literal placeholder <seq>,
+  since the attestation that would supply the number has not happened.
+  refusal  {"ok":false,"error":{"code":"...","message":"..."}}  on stderr
+
+Refusal codes (error.code with --json; frozen public API):
+  usage                 no identity, a non-human --as, an unknown flag, or a
+                        confirmation that could not be asked for.
+  io                    the policy file or the log could not be read/written.
+  load-failed           --require-load and the policy does not load. NOTHING
+                        was appended.
+  commit-preconditions  --commit outside a git repository, or with staged
+                        changes beyond the policy and the log. Checked BEFORE
+                        the attestation; nothing was appended.
+  git-failed            the attestation WAS appended and git then failed; the
+                        message names the seq and the two commands to run.
+  append-failed         the attestation append itself failed.
+  log-unreadable / log-torn-tail / log-corrupt
+                        the log could not be read, ends in a torn line, or does
+                        not verify. Nothing is amended from a log that does not
+                        verify.
 ${JSON_ERRORS}`;
 
 /**
