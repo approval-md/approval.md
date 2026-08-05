@@ -1,0 +1,31 @@
+---
+id: APRV-16
+title: 'Gate core: request lifecycle, write-boundary transition enforcement'
+status: To Do
+assignee: []
+created_date: '2026-08-05 01:00'
+labels: []
+milestone: m-3
+dependencies:
+  - APRV-14
+  - APRV-15
+priority: high
+type: feature
+ordinal: 16000
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+The gate itself (SPEC sections 6.3, 10.1, amended 6.3 manual-path rule): derive each request's state purely from the log, and enforce legality at the write boundary — an illegal transition is refused before any byte lands (human-settled point 4, 2026-08-06). Covers intake (`approval register` validating the envelope and appending task.registered; `approval request` appending approval.requested for manual-resolving actions only — supervised/autonomous proceed toward execution with no approval events, per amended section 6.3) and decisions (grant/reject/revoke as human verbs, expire on TTL). TTL is judged from the request's own timestamp: a late grant is refused even if no approval.expired event has been observed yet; expiry events carry a system: actor. Intake and grant both refuse on attestation failure (APRV-15 codes) and budget failure (APRV-14 verdicts, budget.exceeded logged). Refusals are structured results with machine-readable reasons; every state transition appended is schema-valid and every test log is built through the real append path.
+<!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 Request state (proposed/awaiting/approved/executed/rejected/expired/revoked) is derived purely from the log by a projection function with tests for every reachable path
+- [ ] #2 Illegal transitions are refused before append, each with a distinct machine-readable reason: grant/reject after expiry (judged from the request's own ts + policy TTL, no approval.expired event required), grant on a rejected/revoked request, second decision on a decided request, execution events without a grant
+- [ ] #3 `approval request` appends approval.requested only for actions resolving to manual (via the real APRV-11 resolver incl. the irreversibility floor); supervised and autonomous actions emit no approval.* events, per amended section 6.3
+- [ ] #4 Expiry appends approval.expired with a system: actor and honors defaults.on_expiry; late decisions after TTL are refused with the expiry reason even when the expired event is not yet in the log
+- [ ] #5 Intake and grant refuse with the APRV-15 attestation codes when the policy is unattested or hash-mismatched, and with a budget refusal (appending budget.exceeded) when APRV-14 verdicts fail — both covered by tests
+- [ ] #6 CLI verbs register/request/grant/reject/revoke follow the frozen exit-code and --json conventions; grant/reject/revoke are documented as human-only
+<!-- AC:END -->
