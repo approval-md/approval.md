@@ -146,6 +146,26 @@ function splitLines(raw: string): Split {
 }
 
 /**
+ * Where a chain walk starts.
+ *
+ * The genesis start is `{ prevSeq: 0, prevHash: null, lineNumberBase: 0 }`, and
+ * a walk from there is the only thing {@link verify} ever does. A non-genesis
+ * start exists for one caller — the verified-read cache of `core/state.ts` — and
+ * is sound only when that caller has *proved* the prefix bytes are byte-identical
+ * to bytes this process already verified in full. See {@link VerifiedPrefix}.
+ */
+interface WalkStart {
+  /** `seq` of the last record before the walk (0 at genesis). */
+  prevSeq: number;
+  /** `hash` of the last record before the walk (`null` at genesis). */
+  prevHash: string | null;
+  /** Lines preceding the walk, so reported line numbers stay file-absolute. */
+  lineNumberBase: number;
+}
+
+const GENESIS_START: WalkStart = { prevSeq: 0, prevHash: null, lineNumberBase: 0 };
+
+/**
  * Walk `lines` as a hash chain. Returns `null` when the whole prefix verifies,
  * otherwise the first failure.
  *
@@ -170,13 +190,14 @@ function splitLines(raw: string): Split {
 function walk(
   lines: string[],
   validateOptions: ValidateOptions,
+  start: WalkStart,
 ): { failure: VerifyResult | null; head: LogHead | null; records: EventRecord[] } {
-  let prevSeq = 0;
-  let prevHash: string | null = null;
+  let prevSeq = start.prevSeq;
+  let prevHash: string | null = start.prevHash;
   const verified: EventRecord[] = [];
 
   for (const [index, line] of lines.entries()) {
-    const lineNumber = index + 1;
+    const lineNumber = start.lineNumberBase + index + 1;
 
     if (line.trim().length === 0) {
       return {
@@ -348,9 +369,6 @@ export interface VerifiedLog {
  * with a private walk that could disagree with it (APRV-20 finding S1).
  */
 export function verifyWithRecords(logPath: string, options: VerifyOptions = {}): VerifiedLog {
-  const validateOptions: ValidateOptions =
-    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir };
-
   let raw: string;
   try {
     raw = readFileSync(logPath, "utf8");
@@ -367,8 +385,71 @@ export function verifyWithRecords(logPath: string, options: VerifyOptions = {}):
     raw = "";
   }
 
-  const { complete, torn } = raw.length === 0 ? { complete: [], torn: null } : splitLines(raw);
-  const { failure, head, records } = walk(complete, validateOptions);
+  return verifyText(logPath, raw, options, null);
+}
+
+/**
+ * A prefix of a log that *this process* has already verified in full, together
+ * with the evidence needed to resume behind it.
+ *
+ * Handing one of these to {@link verifyText} skips re-verification of the prefix
+ * entirely, which is sound only under the caller's obligation stated on
+ * {@link records}: the bytes now on disk in `[0, byteLength)` must be proved
+ * byte-identical to the bytes that produced these records. `core/state.ts` is
+ * the only caller, and it discharges that obligation by re-hashing the prefix
+ * bytes on every use. Verification is a pure function of (bytes, schemas,
+ * options), so identical bytes re-verify identically by construction; nothing
+ * weaker (a matching size, a matching mtime, a matching head line) implies it.
+ */
+export interface VerifiedPrefix {
+  /** Byte length of the prefix. Always immediately after a newline. */
+  byteLength: number;
+  /** Number of complete lines in the prefix, for file-absolute line numbers. */
+  lines: number;
+  /** The prefix's chain head, which the resumed walk chains onto. */
+  head: LogHead;
+  /** The records the prefix verified to, in log order. */
+  records: readonly EventRecord[];
+}
+
+/**
+ * {@link verifyWithRecords} over text already in hand, optionally resuming
+ * behind a {@link VerifiedPrefix}.
+ *
+ * With `prefix === null`, `text` is the whole log and the walk starts at
+ * genesis: this is exactly what {@link verifyWithRecords} does, and the two
+ * share every check, message, and line number as a result. With a `prefix`,
+ * `text` is the *remainder* of the file (the bytes from `prefix.byteLength` on)
+ * and the walk chains onto `prefix.head` with line numbers offset by
+ * `prefix.lines`, so a resumed verdict is textually identical to the cold one.
+ *
+ * Exported for `core/state.ts`'s verified-read cache and for nothing else. Every
+ * schema check, hash recompute, `seq` succession check, and `prev` link check
+ * still runs on every record the walk covers; resuming changes only *which*
+ * records are covered, never how.
+ */
+export function verifyText(
+  logPath: string,
+  text: string,
+  options: VerifyOptions = {},
+  prefix: VerifiedPrefix | null = null,
+): VerifiedLog {
+  const validateOptions: ValidateOptions =
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir };
+
+  const start: WalkStart =
+    prefix === null
+      ? GENESIS_START
+      : { prevSeq: prefix.head.seq, prevHash: prefix.head.hash, lineNumberBase: prefix.lines };
+  const priorRecords = prefix === null ? [] : prefix.records;
+  const priorLines = prefix === null ? 0 : prefix.lines;
+
+  const { complete, torn } = text.length === 0 ? { complete: [], torn: null } : splitLines(text);
+  const walked = walk(complete, validateOptions, start);
+  const { failure, head } = walked;
+  const records =
+    priorRecords.length === 0 ? walked.records : [...priorRecords, ...walked.records];
+  const lineCount = priorLines + complete.length;
 
   // A corrupt prefix outranks a torn tail: the tear is the least of the log's
   // problems, and reporting it would understate the damage.
@@ -378,7 +459,7 @@ export function verifyWithRecords(logPath: string, options: VerifyOptions = {}):
     return {
       result: {
         status: "torn-tail",
-        records: complete.length,
+        records: lineCount,
         intactThroughSeq: head === null ? 0 : head.seq,
         message: `log ${logPath} ends with an unterminated line of ${torn.length} byte(s); records 1..${
           head === null ? 0 : head.seq
@@ -412,7 +493,7 @@ export function verifyWithRecords(logPath: string, options: VerifyOptions = {}):
     }
   }
 
-  return { result: { status: "clean", records: complete.length, head }, records };
+  return { result: { status: "clean", records: lineCount, head }, records };
 }
 
 /**
