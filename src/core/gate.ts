@@ -100,6 +100,7 @@ import {
   type EventInput,
   type EventRecord,
 } from "./log.js";
+import { isLoopEscalated } from "./loop.js";
 import {
   loadPolicy,
   POLICY_FILENAMES,
@@ -144,6 +145,12 @@ export const GATE_REFUSAL_CODES = [
   "already-executed",
   /** APRV-14 verdicts failed; a `budget.exceeded` event was appended. */
   "budget-exceeded",
+  /**
+   * Loop safety escalated the task to manual (SPEC.md §10.2, APRV-18): three
+   * consecutive `execution.failed` events. Only the non-manual paths are
+   * refused — see {@link request}.
+   */
+  "loop-escalated",
   /** No request to decide. */
   "not-requested",
   /** The request already has a terminal decision. */
@@ -848,6 +855,21 @@ export function request(
   );
 
   if (resolution.autonomy !== "manual") {
+    // SPEC.md §10.2 loop safety, the gate's half (APRV-18). Three consecutive
+    // execution.failed events for a task escalate it to manual "regardless of
+    // policy", so an escalated task may not be told to proceed unsupervised.
+    // The refusal is deliberately narrow: it fires only where the answer would
+    // otherwise have been `proceed: true`. A class that resolves manual anyway
+    // is unaffected, because escalation escalates TO manual — putting a human in
+    // the loop is the remedy, and refusing the manual request too would leave an
+    // escalated task with no way back. `core/execute.ts` enforces the matching
+    // half at start time, for an executor that never asks the gate first.
+    if (isLoopEscalated(read.records, input.task)) {
+      return refuse(
+        "loop-escalated",
+        `task ${input.task} has three consecutive execution.failed events and is escalated to manual (SPEC.md §10.2); its ${resolution.autonomy} action ${input.actionKey} may not proceed unsupervised. The task's manual actions are unaffected — escalation puts a human in the loop, it does not close the task — and the streak clears when an execution.completed for the task lands.`,
+      );
+    }
     // Amended SPEC.md §6.3: no approval.* event exists off the manual path.
     return { ok: true, autonomy: resolution.autonomy, proceed: true, resolution, record: null };
   }

@@ -30,6 +30,10 @@ Usage:
   approval expire     <action-key> [--json]
   approval token      <action-key> [--policy <path>] [--dir <path>] [--json]
   approval consume    <action-key> --token <t> [--as <id>] [--json]   (internal)
+  approval run        <action-key> [--token <t>] [--as <id>] [--json] -- <cmd…>
+  approval wait       <task> --timeout <duration> [--interval <d>] [--json]
+  approval queue      [--policy <path>] [--dir <path>] [--json]
+  approval status     [--policy <path>] [--dir <path>] [--json]
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
   approval --help
 
@@ -49,6 +53,17 @@ Commands:
             action (the RAW token is printed once, by grant, and stored nowhere)
   consume   spend a token and append execution.started (internal plumbing;
             "approval run" wraps it)
+  run       execute a command behind the gate: appends execution.started before
+            spawning it, execution.completed/failed with the child's exit code
+            after, and exits with that same code
+  wait      block until a task's requests are decided; the exit code IS the
+            decision (0 granted, 1 rejected/revoked, 3 expired, 6 timeout)
+  queue     the pending-decision INBOX: requests awaiting a human, inside their
+            TTL. Nothing else — exit 0 always when the log could be read
+  status    system HEALTH: attestation, dangling executions, budget headroom,
+            the latest chain verdict, loop escalations. Exit 1 when any of
+            those needs attention. queue is what a human must answer; status is
+            what an operator must fix, and neither carries the other's content
   reindex   rebuild the SQLite index projection from the log
 
 Defaults:
@@ -71,7 +86,11 @@ grant, reject and revoke are HUMAN-ONLY: the actor must match human:<id>, from
 
 A gate refusal — an illegal transition, an expired request, an unattested
 policy, a failed budget — exits 1, NOT 2. The command was well-formed; the
-answer is no. With --json, error.code names the refusal.`;
+answer is no. With --json, error.code names the refusal.
+
+Two codes are ADDITIONS to the table above, each emitted by exactly one verb:
+5 by "approval run" when no valid execution token was presented (nothing is
+appended), and 6 by "approval wait" on timeout. Nothing in 0–4 changed meaning.`;
 
 export const LOG_HELP = `approval log — read the append-only event log
 
@@ -386,6 +405,11 @@ const GATE_REFUSAL_CODES_HELP = `Refusal codes (error.code with --json; frozen p
   already-executed        the action key already has an execution.started.
   budget-exceeded         APRV-14 verdicts failed; a budget.exceeded event WAS
                           appended and error.verdicts lists the failures.
+  loop-escalated          SPEC.md §10.2: three consecutive execution.failed
+                          events escalated the task to manual, so its
+                          supervised/autonomous actions may not proceed
+                          unsupervised. Its MANUAL actions are unaffected; the
+                          streak clears on an execution.completed.
   not-requested           there is no request to decide or expire.
   already-decided         the request is already granted/rejected/revoked/expired.
   not-granted             revoke was attempted on a request that is not granted.
@@ -756,4 +780,266 @@ JSON shape (stdout, one object):
             "seq"?:N}}  on stderr
 
 ${TOKEN_REFUSAL_CODES_HELP}
+${JSON_ERRORS}`;
+
+// ---------------------------------------------------------------------------
+// The execution verbs (APRV-18): run, wait, status, queue
+// ---------------------------------------------------------------------------
+
+/**
+ * The exit table plus the two APRV-18 additions.
+ *
+ * Additions, not redefinitions: 0–4 keep their meanings everywhere, and 5 and 6
+ * are emitted by exactly one verb each. Both are printed in full wherever they
+ * can occur, because an agent that has to guess an exit code guesses wrong on
+ * the one invocation that mattered.
+ */
+const RUN_EXIT_CODES = `${EXIT_CODES}
+  5  NO VALID EXECUTION TOKEN — "approval run" only (APRV-18 addition to the
+     frozen table). The action's class resolves to manual and no usable token
+     was presented. NOTHING was appended. Distinct from 1 because the repair is
+     distinct: request the action, have a human grant it, and pass the token
+     that grant printed once.`;
+
+const WAIT_EXIT_CODES = `Exit codes (frozen public API) — for "approval wait" the code IS the decision
+(SPEC.md §10.1: "exit code = decision"):
+  0  success — every request of the task is granted (a task with no requests at
+     all is granted vacuously: there was nothing to wait for)
+  1  integrity failure (corrupt log) / here also: REJECTED or REVOKED — a human
+     said no. Precedence: a human's no outranks a lapse.
+  2  usage error
+  3  torn tail / here also: EXPIRED — the TTL lapsed before a decision landed
+  4  I/O error (unreadable/unwritable path; never reported as corruption)
+  6  TIMEOUT — "approval wait" only (APRV-18 addition to the frozen table). The
+     wait elapsed with request(s) still undecided. Nothing was appended, the
+     request(s) are still live, and waiting again is legitimate.
+  The overloading of 1 and 3 is deliberate: wait appends nothing and cannot fail
+  a chain verification of its own, and --json names the outcome exactly
+  (status: granted | rejected | expired | timeout) for callers that need more
+  than a number. FLAGGED FOR HUMAN REVIEW.`;
+
+export const RUN_HELP = `approval run — execute a command behind the gate
+
+Usage:
+  approval run <action-key> [--token <t>] [--as <id>] [--policy <path>]
+               [--dir <path>] [--log <path>] [--json] -- <cmd> [args…]
+
+Flags:
+  --token <t>      the raw token printed once by "approval grant". REQUIRED for
+                   any action whose class resolves to manual (including one
+                   forced there by SPEC §7's irreversibility floor).
+  --as <id>        the executing identity, human:<id> or agent:<id>; defaults to
+                   APPROVAL_HUMAN
+  --policy <path>  policy file to apply (overrides discovery)
+  --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
+  --log <path>     log file to read and append to
+  --json           machine-readable summary — ON STDERR, see below
+  -h, --help       this text
+
+Everything after the first "--" is the child's argv and is passed through
+untouched, flags included.
+
+What it does, in this order:
+  1. appends execution.started — BEFORE the child is spawned, never after;
+  2. spawns the command with inherited stdio (the child owns the terminal);
+  3. appends execution.completed (child exit 0) or execution.failed (anything
+     else), carrying payload.exit_code — the real number, unmapped;
+  4. exits with THE CHILD'S EXIT CODE. run is transparent: a wrapper that
+     swallowed the code would break every && and every CI step that wrapped it.
+
+A child killed by a signal is recorded and reported as 128 + signal number
+(SIGKILL 137, SIGTERM 143), the shell convention. A command that could not be
+spawned at all is recorded as exit_code 127.
+
+Authorization: manual actions spend a token (verified, single-use, bound to the
+action key). Supervised and autonomous actions have no grant and no token
+(amended SPEC.md §6.3) — for them run enforces, in order, attestation, SPEC.md
+§10.2 loop escalation, single-use idempotency, and BUDGETS, which are charged
+here because execution.started is their authorization record.
+
+A CRASH BETWEEN started AND ITS OUTCOME leaves a DANGLING EXECUTION: the log
+says truthfully that the action began and that nobody knows how it ended.
+"approval status" reports it distinctly; "approval queue" does not (it is not a
+pending decision). NOTHING REPAIRS IT AUTOMATICALLY — a second run for the same
+key refuses rather than reconciling, because reconciliation would mean GUESSING
+whether the side effect happened, and a guess in an append-only log is
+indistinguishable from a fact. Recovery is a human recording the outcome they
+actually observed, through core/execute.ts's finishExecution; no CLI verb ships
+for it yet (flagged for human review, see "approval status --help").
+
+${RUN_EXIT_CODES}
+
+JSON shape — ON STDERR, because stdout belongs to the child:
+  success  {"ok":true,"action_key":"...","task":"...","class":"...",
+            "autonomy":"manual","started_seq":5,"outcome":"execution.completed",
+            "outcome_seq":6,"exit_code":0}
+  refusal  {"ok":false,"error":{"code":"...","message":"...","detail"?:"...",
+            "verdicts"?:[...],"seq"?:N,"event_seq"?:N}}
+
+Refusal codes (error.code with --json; frozen public API):
+  token-required        the class resolves to manual and no token was given.
+                        Nothing was appended. EXIT 5.
+  action-not-registered no task.registered record declares this action key.
+  loop-escalated        SPEC.md §10.2: three consecutive execution.failed events
+                        for the task escalated it to manual; its supervised or
+                        autonomous actions may not start. Route it through a
+                        human grant instead.
+  policy-not-attested   policy unattested or its bytes changed (detail:
+                        not-attested | hash-mismatch | unreadable).
+  already-executed      an execution.started already exists for this key.
+  budget-exceeded       budgets refused the start; a budget.exceeded event WAS
+                        appended and error.verdicts lists the failures.
+  not-granted           manual action with a token but no grant behind it.
+  token-mismatch        the presented token is not the grant's preimage.
+  token-consumed        the token was already spent — including by a dangling
+                        execution, which run will NOT reconcile.
+  token-expired         the parent request's TTL lapsed.
+  token-revoked         a human withdrew the grant.
+  not-started           (finish path) no execution.started to close.
+  already-finished      (finish path) that execution already has an outcome.
+  log-unreadable        the log could not be read (exit 4).
+  log-torn-tail         the log's final line is unterminated (exit 3).
+  append-failed         the append itself failed; exit code follows the cause.
+${JSON_ERRORS}`;
+
+export const WAIT_HELP = `approval wait — block until a task's requests are decided
+
+Usage:
+  approval wait <task> --timeout <duration> [--interval <duration>]
+                [--policy <path>] [--dir <path>] [--log <path>] [--json]
+
+Flags:
+  --timeout <d>    how long to wait, in the SPEC.md §5.2 duration grammar
+                   (<positive integer><ms|s|m|h|d|w>), e.g. 6h. Required.
+  --interval <d>   poll interval (default 500ms). Tuning for tests and
+                   automation; the log is the only thing polled.
+  --policy <path>  policy file to read defaults.approval_ttl from
+  --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
+  --log <path>     log file to read (never written by this command)
+  --json           machine-readable output
+  -h, --help       this text
+
+Polls the log until every approval.requested of the task has a decision, or the
+timeout elapses. WRITES NOTHING — not even the approval.expired event it may
+derive: expiry is judged lazily from the request's own timestamp (a decision is
+refused past the TTL whether or not the event exists), and materialising it is
+"approval expire"'s job, not a reader's.
+
+Only the MANUAL path produces requests to wait for. A supervised or autonomous
+action emits no approval.requested at all (amended SPEC.md §6.3), so waiting on
+a task that has none returns immediately with exit 0 — there is no grant coming.
+
+${WAIT_EXIT_CODES}
+
+JSON shape (stdout, one object; timeout goes to stderr):
+  decided  {"ok":true,"task":"task-042","status":"granted"|"rejected"|"expired",
+            "actions":[{"action_key":"...","state":"granted","seq":4}]}
+  timeout  {"ok":false,"task":"task-042","status":"timeout",
+            "actions":[{"action_key":"...","state":"requested","seq":3}]}
+  state is the per-action derived state; status is the whole task's outcome,
+  with rejected/revoked outranking expired and expired outranking granted.
+${JSON_ERRORS}`;
+
+export const QUEUE_HELP = `approval queue — the pending-decision inbox
+
+Usage:
+  approval queue [--policy <path>] [--dir <path>] [--log <path>] [--json]
+
+Flags:
+  --policy <path>  policy file to read defaults.approval_ttl from
+  --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
+  --log <path>     log file to read (never written by this command)
+  --json           machine-readable output
+  -h, --help       this text
+
+Lists exactly the requests awaiting a human decision and inside their TTL:
+action key, task, class, declared cost, when it was requested, and how much of
+the TTL is left. Nothing else. THIS IS AN INBOX, NOT A DASHBOARD.
+
+What it deliberately does NOT show — all of it lives in "approval status":
+dangling executions, attestation state, budget headroom, chain verification,
+loop escalations. A decided, expired, revoked or executed action leaves the
+queue and does not come back; operational debris never enters it. An inbox that
+accumulates things nobody can act on is an inbox that stops being read, and this
+one is the whole mechanism by which a human's attention is spent.
+
+Writes nothing. EXIT 0 ALWAYS when the log could be read — an empty inbox is a
+healthy inbox, not an error. Only a filesystem fact (4) or a torn tail (3) can
+produce anything else.
+
+${EXIT_CODES}
+
+JSON shape (stdout, one object):
+  {"ok":true,"pending":[{"action_key":"task-042:chaser","task":"task-042",
+   "class":"communicate.email.external","est_cost_usd":0.02,
+   "requested_ts":"2026-08-06T10:00:00.000Z","seq":3,
+   "ttl_remaining_ms":3599000}]}
+  pending is [] for an empty inbox. ttl_remaining_ms is null when the policy
+  declares no defaults.approval_ttl (no TTL means no lapse).
+${JSON_ERRORS}`;
+
+export const STATUS_HELP = `approval status — system health, not the inbox
+
+Usage:
+  approval status [--policy <path>] [--dir <path>] [--log <path>] [--json]
+
+Flags:
+  --policy <path>  policy file whose bytes attestation is judged against
+  --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
+  --log <path>     log file to read (never written by this command)
+  --json           machine-readable output
+  -h, --help       this text
+
+Reports, in one object:
+  attestation      attested | hash-mismatch | not-attested | unreadable, with
+                   the seq of the governing policy.updated record.
+  verification     the latest chain verdict: clean | torn-tail | corrupt, and
+                   the record count (null when corrupt — a corrupt log's count
+                   is not a fact worth reporting).
+  dangling         executions that STARTED AND NEVER FINISHED, each with its
+                   action key, task, start timestamp and seq. This is the state
+                   a crash between execution.started and its outcome leaves.
+                   Nothing repairs it automatically; it clears only when a human
+                   records the real outcome through core/execute.ts's
+                   finishExecution. NO CLI VERB SHIPS FOR THAT YET — recording
+                   an outcome nobody observed is exactly the write this design
+                   refuses to make casual, so the verb's shape (who may call it,
+                   what it must assert) is FLAGGED FOR HUMAN REVIEW rather than
+                   guessed at here.
+  budgets          headroom per configured GLOBAL limit, from a ZERO-COST PROBE
+                   evaluated now: the numbers are what the evaluator would say
+                   about a hypothetical next action declaring $0. Consequently
+                   remaining for daily_actions already has that one action
+                   subtracted, because every authorization counts as one.
+                   Class limits are absent by design — they need a matched rule,
+                   and therefore a specific action, which status does not have.
+  loop_escalations tasks with three consecutive execution.failed events, forced
+                   to manual by SPEC.md §10.2 until an execution.completed lands.
+
+THIS IS NOT "approval queue". queue is the pending-decision inbox — what a human
+must answer. status is what an operator must fix. Neither shows the other's
+content, and a dangling execution is the clearest case: it appears here, never
+there, because nobody is being asked to decide it.
+
+Writes nothing.
+
+${EXIT_CODES}
+  status: 0 when everything is healthy — policy attested, chain clean, no
+  dangling execution, no loop escalation. 1 when ANY of those needs attention
+  (including a torn tail: status reports health, while "approval log verify"
+  remains the verb whose exit code distinguishes 3). 4 when the log path itself
+  could not be read.
+
+JSON shape (stdout, one object):
+  {"ok":true,"healthy":false,
+   "attestation":{"state":"attested","seq":1},
+   "verification":{"status":"clean","records":6},
+   "dangling":[{"action_key":"...","task":"...","ts":"...","seq":5}],
+   "budgets":[{"limit":"global.daily_usd","scope":"global",
+     "window":"rolling-24h","consumed":0.02,"requested":0,"remaining":9.98,
+     "pass":true}],
+   "loop_escalations":[{"task":"task-042","consecutive_failures":3,
+     "escalated":true}]}
+  ok is true whenever status ran; healthy is the verdict. attestation.seq is
+  null for not-attested and unreadable.
 ${JSON_ERRORS}`;
