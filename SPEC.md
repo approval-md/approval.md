@@ -185,6 +185,7 @@ deposit-protection scheme deadline.
 | `actions[]` | MUST for execution | Each declared action: `class`, `summary`, `reversible`, `est_cost_usd`, `idempotency_key`. |
 | `budget` | MAY | Task-level caps, conjunctive with policy budgets. |
 | `idempotency_key` | MUST per action | Stable string; adapters MUST refuse to execute the same key twice. |
+| `payload_hash` | MUST for `manual` actions, SHOULD otherwise | SHA-256 over the RFC 8785 canonical serialization of the action's concrete payload: for a message send, the full body and recipients; for `approval run`, the argv array and cwd; for a record write, the proposed record content. The payload itself is stored or referenced by the request so channels can display it; the hash is what approval binds to. |
 
 ### 6.3 Approval lifecycle
 
@@ -238,6 +239,8 @@ The irreversibility floor resolves to `manual`: an action declared `reversible: 
 - Every record MUST carry an explicit hash-scheme identifier, `alg`. Version 0.1 defines exactly one value: `sha256/jcs`, meaning SHA-256 over the RFC 8785 (JCS) canonical serialization of the record with `prev` included. Verifiers MUST reject records whose `alg` is missing or unrecognized. Records with different `alg` values MAY coexist in one log, so a future scheme change is a migration, never a schism.
 - Actor identifiers use exactly three prefixes: `human:` for decisions made by a person, `agent:` for actions proposed or performed by an agent, and `system:` for runtime-originated events such as `approval.expired`. Verifiers MUST reject unrecognized prefixes.
 
+Events written through the gate (`approval.*`, `execution.*`, `budget.*`, `audit.*`, `policy.updated`) have `ts` assigned by the runtime at the write boundary. Caller-supplied timestamps on these types MUST be refused. Because TTL judgment and budget windows read `ts`, a party subject to those controls must never author the clock they are judged by. Direct log writers outside the gate remain free to supply `ts` (per §8's writer rules); verification treats gate-type events with implausible skew relative to their neighbors as a reportable anomaly, never silently accepted.
+
 ## 9. Projections
 
 1. **The queue** (`.approval/QUEUE.md`): a rendered, read-only markdown view of pending requests (task, actions, declared effects, cost, TTL countdown) plus the sampled-audit backlog. Regenerated on every relevant event. This is the screenshot; it is never the truth.
@@ -278,6 +281,10 @@ Interface: `notify(request) -> delivery_id`, `poll()/webhook() -> decision`. Dec
 
 Adapters (e.g. `adapter-email`, `adapter-gcal`) hold the actual credentials in an encrypted vault and MUST require a valid, unexpired, single-use execution token bound to the action's `idempotency_key`. This is the hard boundary: an agent that bypasses the CLI still cannot send, spend, or delete, because the credentials only answer to tokens. (Same architectural intuition as mission-control's vault + "agents cannot modify security settings.")
 
+An execution token is bound to the request, its `idempotency_key`, AND its `payload_hash`. Adapters and `approval run` MUST recompute the hash of the payload they are about to execute and MUST refuse, with a distinct machine-readable reason (`payload-mismatch`), when it differs from the hash the grant recorded. A grant therefore approves specific bytes. Changing the payload after grant requires a new request.
+
+For `manual` actions, channels MUST present the full payload or a faithful rendering of it, clearly delineated from any agent-written summary, before collecting a decision.
+
 ### 10.5 MCP wrapper (optional)
 
 A thin MCP server exposing the same verbs as tools (`request_approval`, `wait_decision`, `get_queue`, …) for clients where MCP is more ergonomic than shelling out. It shares the CLI's code paths; the [MCP tasks extension](https://modelcontextprotocol.io) MAY be mapped onto `awaiting` when client support stabilizes, and A2A's `input-required` maps cleanly for agent-to-agent deployments.
@@ -294,7 +301,11 @@ approval.md operationalizes, at consumer scale, the structure of trusted monitor
 
 **Defended:** honest-mistake side effects, prompt-injected instructions that try to escalate side effects silently, retries double-executing (idempotency keys), quiet budget creep, after-the-fact disputes about who approved what, tampering with history.
 
-**Not defended, stated plainly:** an agent with direct credential access outside adapters; a compromised host; deceptive *content* inside an approved action (you approve "send email," the runtime does not verify the prose is honest, though channels SHOULD display full content for `manual` actions); collusion between agent and a careless approver; and this is engineering informed by control research, offering no guarantees against a schemer that control protocols proper are designed to stress-test. Keep `manual` floors on irreversible classes. Human identity in v0.1 is config-declared (an environment variable or flag); the trust boundary is the local machine, and anyone who can set that configuration and write to the log is inside it. Attestation therefore proves that *someone with local control* signed off, not *who* — cryptographic identity is future work, not a v0.1 claim.
+**Not defended, stated plainly:** an agent with direct credential access outside adapters; a compromised host; collusion between agent and a careless approver; and this is engineering informed by control research, offering no guarantees against a schemer that control protocols proper are designed to stress-test. Keep `manual` floors on irreversible classes. Human identity in v0.1 is config-declared (an environment variable or flag); the trust boundary is the local machine, and anyone who can set that configuration and write to the log is inside it. Attestation therefore proves that *someone with local control* signed off, not *who* — cryptographic identity is future work, not a v0.1 claim.
+
+Deceptive content inside an approved action is defended to this extent: the approver sees, and the token binds to, the exact payload bytes. What remains undefended is persuasion about whether those bytes should be approved, and any consequence the approver fails to model from bytes they did see.
+
+Fields authored by the party under oversight (`route.confidence`, summaries, cost estimates) MAY raise scrutiny, inform display, or feed retrospective analysis. They MUST NOT reduce sampling probability, downgrade a resolved autonomy level, or shortcut any refusal path. Scrutiny only ratchets upward on self-report.
 
 ## 12. Interoperability
 

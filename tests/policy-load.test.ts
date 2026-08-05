@@ -16,11 +16,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
+import { readTaskFile } from "../src/core/frontmatter.js";
 import {
   MAX_ALIAS_COUNT,
   POLICY_FILENAMES,
   loadPolicy,
   parseDuration,
+  parseHardenedYaml,
   type PolicyLoadResult,
 } from "../src/core/policy-load.js";
 import { DEFAULT_SCHEMA_DIR } from "../src/core/validate.js";
@@ -345,4 +347,82 @@ test("loading is deterministic: repeated loads of the same file are identical", 
   const first = loadPolicy({ dir: REPO_ROOT });
   const second = loadPolicy({ dir: REPO_ROOT });
   assert.deepEqual(first, second);
+});
+
+// ---------------------------------------------------------------------------
+// One hardened parser, two entry points (APRV-20 finding S5)
+// ---------------------------------------------------------------------------
+
+/**
+ * The hardening cases, each written twice: once as a policy block read through
+ * `loadPolicy`, once as task frontmatter read through `readTaskFile`.
+ *
+ * This is the honest proof that the two share one implementation. Before
+ * APRV-20 `core/frontmatter.ts` carried its own copy of the parser settings, and
+ * a fix to one was a fix to only one. Now both call `parseHardenedYaml`, and a
+ * regression in either direction fails a pair of assertions here.
+ */
+const HARDENING_CASES: Array<[name: string, yaml: string, expected: RegExp]> = [
+  [
+    "an alias bomb",
+    [
+      'id: task-042',
+      'a: &a ["lol", "lol", "lol", "lol", "lol", "lol", "lol", "lol", "lol"]',
+      "b: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a]",
+      "c: &c [*b, *b, *b, *b, *b, *b, *b, *b, *b]",
+      "d: &d [*c, *c, *c, *c, *c, *c, *c, *c, *c]",
+      "e: &e [*d, *d, *d, *d, *d, *d, *d, *d, *d]",
+      "f: [*e, *e, *e, *e, *e, *e, *e, *e, *e]",
+    ].join("\n"),
+    /alias/iu,
+  ],
+  ["an explicit tag", 'id: !!str "task-042"', /tag/u],
+  ["duplicate keys", "id: task-042\nid: task-043", /keys must be unique/iu],
+];
+
+for (const [name, yaml, expected] of HARDENING_CASES) {
+  test(`${name} fails closed through loadPolicy AND through readTaskFile`, () => {
+    const policyPath = join(scratch, `hardening-policy-${name.replace(/\s+/gu, "-")}.md`);
+    writeFileSync(policyPath, ["```yaml approval-policy", yaml, "```", ""].join("\n"), "utf8");
+    const policy = expectFail(loadPolicy({ file: policyPath }), "yaml-error");
+    assert.match(policy.message, expected);
+    assert.match(policy.message, /^policy YAML/u);
+
+    const taskPath = join(scratch, `hardening-task-${name.replace(/\s+/gu, "-")}.md`);
+    writeFileSync(taskPath, ["---", yaml, "---", "", "# Task", ""].join("\n"), "utf8");
+    const task = readTaskFile(taskPath);
+    assert.equal(task.ok, false, "the task file must fail closed too");
+    if (task.ok) throw new Error("unreachable");
+    assert.equal(task.code, "yaml-error");
+    assert.match(task.message, expected);
+    assert.match(task.message, /^frontmatter YAML/u);
+  });
+}
+
+test("parseHardenedYaml is the shared implementation both paths call", () => {
+  const ok = parseHardenedYaml("version: \"0.1\"", {
+    subject: "policy YAML",
+    tagContext: "a policy block",
+  });
+  assert.equal(ok.ok, true);
+  if (ok.ok) assert.deepEqual(ok.value, { version: "0.1" });
+
+  // YAML 1.2 core, so no 1.1-isms: `no` is the string, not `false`. The same
+  // guarantee now holds for a task envelope, because it is the same call.
+  const yaml11 = parseHardenedYaml("autonomy: no", {
+    subject: "policy YAML",
+    tagContext: "a policy block",
+  });
+  assert.equal(yaml11.ok, true);
+  if (yaml11.ok) assert.deepEqual(yaml11.value, { autonomy: "no" });
+
+  const tagged = parseHardenedYaml('version: !!str "0.1"', {
+    subject: "frontmatter YAML",
+    tagContext: "a task envelope",
+  });
+  assert.equal(tagged.ok, false);
+  if (!tagged.ok) {
+    assert.match(tagged.message, /^frontmatter YAML uses an explicit tag/u);
+    assert.match(tagged.message, /a task envelope/u);
+  }
 });

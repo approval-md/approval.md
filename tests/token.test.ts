@@ -22,15 +22,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { appendAttestation } from "../src/core/attest.js";
+import { appendAttestation, consumeToken, decide, register, request } from "./clock-adapters.js";
 import { evaluateBudgets } from "../src/core/budgets.js";
-import { decide, register, request, type GateOptions } from "../src/core/gate.js";
+import { type GateOptions } from "../src/core/gate.js";
 import { appendEvent, type EventRecord } from "../src/core/log.js";
 import {
-  consumeToken,
   digestsEqual,
   mintToken,
   TOKEN_BYTES,
+  TOKEN_HASH_FIELD,
   TOKEN_REFUSAL_CODES,
   TOKEN_VERIFY_REFUSAL_CODES,
   tokenHash,
@@ -143,6 +143,18 @@ function assertTokenAbsentFromLog(unit: Case, token: string): void {
   }
 }
 
+/**
+ * The content binding for an action key (amended SPEC.md §6.2, A1).
+ *
+ * Per-key rather than a shared constant, so the binding tests can prove that a
+ * token minted for one payload cannot spend another: two keys have two hashes.
+ * The value is `sha256(key)`, which is a legal 64-hex digest and nothing more —
+ * `tests/payload.test.ts` covers the real derivation.
+ */
+function bindingFor(key: string): string {
+  return createHash("sha256").update(`payload:${key}`, "utf8").digest("hex");
+}
+
 function envelopeFor(keys: string[]): unknown {
   return {
     origin: { app: "cartsos", created_by: "human:carter" },
@@ -153,6 +165,7 @@ function envelopeFor(keys: string[]): unknown {
       reversible: false,
       est_cost_usd: 0.02,
       idempotency_key: key,
+      payload_hash: bindingFor(key),
     })),
   };
 }
@@ -177,6 +190,7 @@ function requestAction(unit: Case, actionKey: string, ts: string = at(1)): void 
       est_cost_usd: 0.02,
       reversible: false,
       summary: "Send deposit chaser",
+      payload_hash: bindingFor(actionKey),
     },
     ts,
     "agent:claude",
@@ -243,11 +257,16 @@ test("the refusal unions are frozen and the verify codes are a prefix of them", 
     "token-consumed",
     "token-expired",
     "token-revoked",
+    // APRV-20 pass two, amendment A1: a grant approves specific bytes, so a
+    // spend that presents different ones (or none) is refused on its own code.
+    "payload-mismatch",
   ]);
   assert.deepEqual([...TOKEN_REFUSAL_CODES], [
     ...TOKEN_VERIFY_REFUSAL_CODES,
     "log-unreadable",
     "log-torn-tail",
+    // APRV-20 finding S1, shared verbatim with the gate and the executor.
+    "log-corrupt",
     "append-failed",
   ]);
 });
@@ -407,7 +426,10 @@ test("consumeToken appends execution.started with the exact contract payload", (
     token,
     at(3),
     "agent:claude",
-    { policyFile: unit.policyPath },
+    {
+      policyFile: unit.policyPath,
+      presentedPayloadHash: bindingFor("task-042:chaser"),
+    },
   );
   assert.equal(result.ok, true, result.ok ? "" : result.message);
   if (!result.ok) return;
@@ -420,6 +442,8 @@ test("consumeToken appends execution.started with the exact contract payload", (
     class: "communicate.email.external",
     est_cost_usd: 0.02,
     token_sha256: tokenHash(token),
+    // A1: the bytes that ran, recorded beside the token that authorized them.
+    payload_hash: bindingFor("task-042:chaser"),
   });
   assert.equal(result.grantSeq, 4);
 
@@ -432,7 +456,7 @@ test("death by execution: the second consume is refused FROM THE LOG, not from m
   const token = granted(unit);
   const options = { policyFile: unit.policyPath };
 
-  const first = consumeToken(unit.logPath, "task-042:chaser", token, at(3), "agent:claude", options);
+  const first = consumeToken(unit.logPath, "task-042:chaser", token, at(3), "agent:claude", { ...options, presentedPayloadHash: bindingFor("task-042:chaser") });
   assert.equal(first.ok, true);
 
   // Chain-native: a completely fresh verification, reading only the log's bytes,
@@ -442,7 +466,7 @@ test("death by execution: the second consume is refused FROM THE LOG, not from m
   assert.equal(fromLog.seq, 5);
 
   const second = asRefusal(
-    consumeToken(unit.logPath, "task-042:chaser", token, at(4), "agent:claude", options),
+    consumeToken(unit.logPath, "task-042:chaser", token, at(4), "agent:claude", { ...options, presentedPayloadHash: bindingFor("task-042:chaser") }),
   );
   assert.equal(second.code, "token-consumed");
   assert.equal(
@@ -451,6 +475,35 @@ test("death by execution: the second consume is refused FROM THE LOG, not from m
     "a second execution.started was appended",
   );
   assertClean(unit);
+});
+
+test("a token is not spendable from a log that does not verify (log-corrupt)", () => {
+  const unit = newCase();
+  const token = granted(unit);
+
+  // Forge the grant's recorded digest: valid JSON, valid against the schema,
+  // wrong hash. A reader that merely parsed the line would happily authorize an
+  // execution against a record nobody ever wrote.
+  const lines = readFileSync(unit.logPath, "utf8").split("\n");
+  const grantLine = lines.findIndex((line) => line.includes('"approval.granted"'));
+  assert.ok(grantLine >= 0, "expected an approval.granted line");
+  const forged = JSON.parse(lines[grantLine] as string) as Record<string, unknown>;
+  forged["payload"] = {
+    ...(forged["payload"] as Record<string, unknown>),
+    [TOKEN_HASH_FIELD]: createHash("sha256").update("forged", "utf8").digest("hex"),
+  };
+  lines[grantLine] = JSON.stringify(forged);
+  writeFileSync(unit.logPath, lines.join("\n"), "utf8");
+  const before = readFileSync(unit.logPath, "utf8");
+
+  const refusal = asRefusal(
+    consumeToken(unit.logPath, "task-042:chaser", token, at(3), "agent:claude", {
+      policyFile: unit.policyPath,      presentedPayloadHash: bindingFor("task-042:chaser"),
+    }),
+  );
+  assert.equal(refusal.code, "log-corrupt");
+  assert.match(refusal.message, /does not verify/);
+  assert.equal(readFileSync(unit.logPath, "utf8"), before, "nothing was appended");
 });
 
 test("an execution.started for the key spends it even if it named no token", () => {
@@ -495,7 +548,7 @@ test("death by revocation: a revoked grant's token is token-revoked", () => {
 
   const consumed = asRefusal(
     consumeToken(unit.logPath, "task-042:chaser", token, at(4), "agent:claude", {
-      policyFile: unit.policyPath,
+      policyFile: unit.policyPath,      presentedPayloadHash: bindingFor("task-042:chaser"),
     }),
   );
   assert.equal(consumed.code, "token-revoked");
@@ -526,7 +579,7 @@ test("death by the PARENT REQUEST's TTL: past requestTs + ttl the token is token
 
   const consumed = asRefusal(
     consumeToken(unit.logPath, "task-042:chaser", token, at(62), "agent:claude", {
-      policyFile: unit.policyPath,
+      policyFile: unit.policyPath,      presentedPayloadHash: bindingFor("task-042:chaser"),
     }),
   );
   assert.equal(consumed.code, "token-expired");
@@ -548,6 +601,7 @@ test("a policy with no approval_ttl gives a token no expiry at all", () => {
   assert.equal(verifyToken(records(unit), "task-042:chaser", token, later, null).ok, true);
   const result = consumeToken(unit.logPath, "task-042:chaser", token, later, "agent:claude", {
     policyFile: unit.policyPath,
+    presentedPayloadHash: bindingFor("task-042:chaser"),
   });
   assert.equal(result.ok, true, result.ok ? "" : result.message);
   assertTokenAbsentFromLog(unit, token);
@@ -574,7 +628,7 @@ test("the supervised/autonomous path is not this function's: no grant, no token"
   registerTask(unit);
   const refusal = asRefusal(
     consumeToken(unit.logPath, "task-042:chaser", mintToken(), at(2), "agent:claude", {
-      policyFile: unit.policyPath,
+      policyFile: unit.policyPath,      presentedPayloadHash: bindingFor("task-042:chaser"),
     }),
   );
   assert.equal(refusal.code, "not-granted");
@@ -589,7 +643,7 @@ test("a malformed actor is refused at the write boundary as append-failed", () =
   const token = granted(unit);
   const refusal = asRefusal(
     consumeToken(unit.logPath, "task-042:chaser", token, at(3), "root", {
-      policyFile: unit.policyPath,
+      policyFile: unit.policyPath,      presentedPayloadHash: bindingFor("task-042:chaser"),
     }),
   );
   assert.equal(refusal.code, "append-failed");
@@ -630,7 +684,7 @@ test("grant + consume charges the window ONCE (the double-count guard, end to en
     token,
     at(3),
     "agent:claude",
-    { policyFile: unit.policyPath },
+    { policyFile: unit.policyPath, presentedPayloadHash: bindingFor("task-042:chaser") },
   );
   assert.equal(consumed.ok, true, consumed.ok ? "" : consumed.message);
 
@@ -655,7 +709,7 @@ test("a full request → grant → consume flow leaves the chain clean and the t
     token,
     at(3),
     "agent:claude",
-    { policyFile: unit.policyPath },
+    { policyFile: unit.policyPath, presentedPayloadHash: bindingFor("task-042:chaser") },
   );
   assert.equal(consumed.ok, true);
   const completed = appendEvent(unit.logPath, {

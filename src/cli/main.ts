@@ -54,6 +54,7 @@ import {
   commandRequest,
 } from "./gate.js";
 import {
+  commandExecution,
   commandQueue,
   commandRun,
   commandStatus,
@@ -487,6 +488,11 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // people (the human who decides, the operator who repairs).
     case "run":
       return commandRun(rest, streams, cwd);
+    // The recovery verb (APRV-20 pass two). `execution resolve` is the only
+    // sanctioned way to close a dangling execution, and it is human-only,
+    // note-mandatory, and records no invented exit code.
+    case "execution":
+      return commandExecution(rest, streams, cwd);
     case "wait":
       return commandWait(rest, streams, cwd);
     case "queue":

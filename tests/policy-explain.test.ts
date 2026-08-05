@@ -1,11 +1,12 @@
 /**
  * Policy explanation tests (APRV-12).
  *
- * Two properties carry most of the weight here. First, the trace must agree
- * with the decision: `explain()` delegates to `resolve()`, so every candidate,
- * winner and floor claim is asserted against `resolve()`'s own output rather
- * than against a hand-written expectation that could drift from the matcher.
- * Second, `manualBecause` must distinguish the three ways an answer becomes
+ * Two properties carry most of the weight here. First, the trace is public API:
+ * `approval policy check --json` prints `candidates` verbatim, so the candidate
+ * lists are asserted as **literal frozen expectations** rather than against
+ * `resolve()`'s own output. Mirroring the matcher passed whenever explain and
+ * resolve drifted together, which is exactly the drift worth catching (APRV-20
+ * finding S3). Second, `manualBecause` must distinguish the three ways an answer becomes
  * `manual` — a rule said so, the §7 floor overrode a grant, or the policy never
  * loaded — because collapsing them hides a broken policy behind an answer that
  * looks deliberate.
@@ -23,7 +24,6 @@ import { after, test } from "node:test";
 
 import { explain, isActionClass } from "../src/core/policy-explain.js";
 import { loadPolicy, type PolicyLoadResult } from "../src/core/policy-load.js";
-import { resolve } from "../src/core/policy-match.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "approval-md-policy-explain-"));
 let counter = 0;
@@ -164,7 +164,11 @@ test("manualBecause is null when the outcome is not manual", () => {
 // Candidates mirror the matcher
 // ---------------------------------------------------------------------------
 
-test("candidates mirror resolve() in order, pattern and autonomy", () => {
+test("the candidate list is exactly this, for this policy", () => {
+  // APRV-20 finding S3: this used to assert `explain()` against `resolve()`,
+  // which passes whenever the two drift *together* — precisely the drift a
+  // frozen-shape test exists to catch. `candidates` is printed verbatim by
+  // `approval policy check --json`, so it is public API and is written down.
   const load = policyWith(
     [
       "  read.*: { autonomy: autonomous }",
@@ -172,29 +176,24 @@ test("candidates mirror resolve() in order, pattern and autonomy", () => {
       "  '*.web': { autonomy: manual }",
     ].join("\n"),
   );
-  const resolution = resolve(load, "read.web");
   const explanation = explain(load, "read.web");
 
-  assert.deepEqual(
-    explanation.candidates.map((candidate) => candidate.pattern),
-    resolution.candidates.map((candidate) => candidate.pattern),
-  );
-  assert.deepEqual(
-    explanation.candidates.map((candidate) => candidate.specificity),
-    resolution.candidates.map((candidate) => candidate.specificity),
-  );
-  assert.deepEqual(
-    explanation.candidates.map((candidate) => candidate.autonomy),
-    resolution.candidates.map((candidate) => candidate.rule.autonomy),
-  );
-  assert.deepEqual(explanation.matched, resolution.matched);
-  assert.equal(explanation.outcome.autonomy, resolution.autonomy);
-
-  const winners = explanation.candidates.filter((candidate) => candidate.winner);
-  assert.equal(winners.length, 1);
-  assert.equal(winners[0]?.pattern, resolution.matched?.pattern);
-  // read.web has two literals, so it wins outright — no tie to break.
-  assert.equal(winners[0]?.tieBreak, "specificity");
+  assert.deepEqual(explanation.candidates, [
+    {
+      pattern: "read.web",
+      specificity: [2, 0, 2],
+      autonomy: "supervised",
+      winner: true,
+      tieBreak: "specificity",
+    },
+    { pattern: "*.web", specificity: [1, 1, 2], autonomy: "manual", winner: false },
+    { pattern: "read.*", specificity: [1, 1, 2], autonomy: "autonomous", winner: false },
+  ]);
+  assert.deepEqual(explanation.matched, {
+    pattern: "read.web",
+    rule: { autonomy: "supervised" },
+  });
+  assert.equal(explanation.outcome.autonomy, "supervised");
 });
 
 test("an equal-specificity tie is annotated as strictest-autonomy", () => {
@@ -202,16 +201,24 @@ test("an equal-specificity tie is annotated as strictest-autonomy", () => {
     ["  read.*: { autonomy: autonomous }", "  '*.web': { autonomy: supervised }"].join("\n"),
   );
   const explanation = explain(load, "read.web");
-  const resolution = resolve(load, "read.web");
 
   assert.equal(explanation.outcome.autonomy, "supervised");
-  assert.equal(resolution.matched?.pattern, "*.web");
-  const winner = explanation.candidates.find((candidate) => candidate.winner);
-  assert.equal(winner?.pattern, "*.web");
-  assert.equal(winner?.tieBreak, "strictest-autonomy");
-  const loser = explanation.candidates.find((candidate) => !candidate.winner);
-  assert.equal(loser?.pattern, "read.*");
-  assert.equal(loser?.tieBreak, "tied-specificity");
+  assert.deepEqual(explanation.candidates, [
+    {
+      pattern: "*.web",
+      specificity: [1, 1, 2],
+      autonomy: "supervised",
+      winner: true,
+      tieBreak: "strictest-autonomy",
+    },
+    {
+      pattern: "read.*",
+      specificity: [1, 1, 2],
+      autonomy: "autonomous",
+      winner: false,
+      tieBreak: "tied-specificity",
+    },
+  ]);
   assert.ok(
     explanation.decisionPath.some((line) => line.includes("deny beats allow")),
     "the trace must explain the strictness tie-break",
@@ -224,13 +231,23 @@ test("a tie on specificity and strictness is annotated as lexicographic", () => 
   );
   const explanation = explain(load, "read.web");
 
-  const winner = explanation.candidates.find((candidate) => candidate.winner);
-  assert.equal(winner?.pattern, "*.web", "lexicographically smallest pattern wins");
-  assert.equal(winner?.tieBreak, "lexicographic");
-  assert.equal(
-    explanation.candidates.find((candidate) => !candidate.winner)?.tieBreak,
-    "tied-specificity",
-  );
+  assert.deepEqual(explanation.candidates, [
+    {
+      // Lexicographically smallest pattern wins the last tie.
+      pattern: "*.web",
+      specificity: [1, 1, 2],
+      autonomy: "supervised",
+      winner: true,
+      tieBreak: "lexicographic",
+    },
+    {
+      pattern: "read.*",
+      specificity: [1, 1, 2],
+      autonomy: "supervised",
+      winner: false,
+      tieBreak: "tied-specificity",
+    },
+  ]);
 });
 
 test("a candidate outside the head's tie group carries no tieBreak", () => {
@@ -239,9 +256,17 @@ test("a candidate outside the head's tie group carries no tieBreak", () => {
   );
   const explanation = explain(load, "read.web");
 
-  const outer = explanation.candidates.find((candidate) => candidate.pattern === "read.*");
-  assert.equal(outer?.winner, false);
-  assert.equal(outer?.tieBreak, undefined);
+  assert.deepEqual(explanation.candidates, [
+    {
+      pattern: "read.web",
+      specificity: [2, 0, 2],
+      autonomy: "supervised",
+      winner: true,
+      tieBreak: "specificity",
+    },
+    // No `tieBreak` key at all: this candidate never entered the tie group.
+    { pattern: "read.*", specificity: [1, 1, 2], autonomy: "autonomous", winner: false },
+  ]);
 });
 
 // ---------------------------------------------------------------------------

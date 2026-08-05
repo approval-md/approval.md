@@ -26,6 +26,7 @@ import { after, test } from "node:test";
 
 import {
   ALG,
+  APPEND_ERROR_CODES,
   GENESIS_PREV,
   appendEvent,
   computeRecordHash,
@@ -325,10 +326,125 @@ test("a held lock makes the next append time out cleanly, without corruption", (
   assert.equal(second.prev, first.hash);
 });
 
+// ---------------------------------------------------------------------------
+// compare-and-append (APRV-20 finding B1)
+// ---------------------------------------------------------------------------
+
+test("expectedHead matching the tail lets the append through", () => {
+  const logPath = freshLog();
+  const first = appendOrThrow(logPath, REGISTERED);
+
+  const result = appendEvent(logPath, REQUESTED, {
+    expectedHead: { seq: first.seq, hash: first.hash },
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.record.seq, 2);
+    assert.equal(result.record.prev, first.hash);
+  }
+});
+
+test("a moved head refuses head-moved and writes nothing", () => {
+  const logPath = freshLog();
+  const first = appendOrThrow(logPath, REGISTERED);
+  const stale = { seq: first.seq, hash: first.hash };
+
+  // Someone else appends between the caller's read and the caller's append.
+  appendOrThrow(logPath, REQUESTED);
+  const before = readFileSync(logPath);
+
+  const result = appendEvent(logPath, GRANTED, { expectedHead: stale });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.code, "head-moved");
+    assert.match(result.error.message, /head moved/);
+    assert.match(result.error.message, /Nothing was written/);
+  }
+  assert.deepEqual(readFileSync(logPath), before, "a refused append writes nothing");
+});
+
+test("a head-moved refusal does not consume a seq", () => {
+  const logPath = freshLog();
+  const first = appendOrThrow(logPath, REGISTERED);
+  const second = appendOrThrow(logPath, REQUESTED);
+
+  const refused = appendEvent(logPath, GRANTED, {
+    expectedHead: { seq: first.seq, hash: first.hash },
+  });
+  assert.equal(refused.ok, false);
+
+  const third = appendOrThrow(logPath, GRANTED);
+  assert.equal(third.seq, 3);
+  assert.equal(third.prev, second.hash);
+});
+
+test("expectedHead null asserts an empty log", () => {
+  const logPath = freshLog();
+
+  const genesis = appendEvent(logPath, REGISTERED, { expectedHead: null });
+  assert.equal(genesis.ok, true);
+  if (genesis.ok) assert.equal(genesis.record.seq, 1);
+
+  // The log is no longer empty, so the same precondition must now refuse.
+  const second = appendEvent(logPath, REQUESTED, { expectedHead: null });
+  assert.equal(second.ok, false);
+  if (!second.ok) {
+    assert.equal(second.error.code, "head-moved");
+    assert.match(second.error.message, /expected to be empty/);
+  }
+  assert.equal(readRecords(logPath).length, 1);
+});
+
+test("a same-seq, different-hash head is refused: the digest is compared too", () => {
+  const logPath = freshLog();
+  const first = appendOrThrow(logPath, REGISTERED);
+
+  const result = appendEvent(logPath, REQUESTED, {
+    expectedHead: { seq: first.seq, hash: "0".repeat(64) },
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.code, "head-moved");
+});
+
+test("omitting expectedHead keeps the unconditional append behaviour", () => {
+  const logPath = freshLog();
+  appendOrThrow(logPath, REGISTERED);
+  // No precondition: an append with no read-dependent decision behind it (the
+  // attestation path) is unaffected by whatever landed first.
+  appendOrThrow(logPath, REQUESTED);
+  assert.deepEqual(
+    readRecords(logPath).map((record) => record.seq),
+    [1, 2],
+  );
+});
+
+test("head-moved is pinned in the append-error union", () => {
+  assert.deepEqual([...APPEND_ERROR_CODES], [
+    "lock-timeout",
+    "corrupt-tail",
+    "validation",
+    "canonicalization",
+    "io",
+    // APRV-20 finding B1, human-approved 2026-08-07: an addition to the closed
+    // union, not a rename of anything in it.
+    "head-moved",
+  ]);
+});
+
 test("the module exposes no mutation, reorder, or truncate operation", async () => {
   const module = await import("../src/core/log.js");
   assert.deepEqual(
     Object.keys(module).sort(),
-    ["ALG", "GENESIS_PREV", "appendEvent", "computeRecordHash", "serializeRecord", "verifyRecordHash"],
+    [
+      // APRV-20 added the pinned append-error union. It is a constant, not an
+      // operation: nothing here mutates, reorders, or truncates.
+      "ALG",
+      "APPEND_ERROR_CODES",
+      "GENESIS_PREV",
+      "appendEvent",
+      "computeRecordHash",
+      "serializeRecord",
+      "verifyRecordHash",
+    ],
   );
 });

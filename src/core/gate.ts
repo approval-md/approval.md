@@ -27,9 +27,13 @@
  *    appends nothing. Its authorization is recorded by `execution.started`,
  *    which APRV-18 appends, and which is also where its budget is charged (see
  *    the consumption contract in `core/budgets.ts`).
- * 4. **Time is a parameter.** No function here reads the clock. TTL lapse,
- *    budget windows, and event timestamps all come from a `ts` argument, so a
- *    gate decision can be replayed from the log exactly as it was made.
+ * 4. **Time is assigned by the runtime, not by the caller** (amended SPEC.md
+ *    §8, A2). No public function here takes a `ts`. TTL lapse, budget windows,
+ *    and the timestamp stamped on every append all come from one read of
+ *    {@link GateOptions.clock} — the real clock unless a caller injects one —
+ *    made once per operation, so a gate decision is still replayable from its
+ *    inputs while the party being judged no longer authors the clock it is
+ *    judged by. Tests inject a fixed clock; production passes none.
  *
  * ## Lazy expiry — the named requirement
  *
@@ -67,13 +71,21 @@
  * action that declared no cost is recorded as `0` — an authorization with no
  * declared cost is still an authorization, and still counts as one action.
  *
- * ## What this module does NOT do
+ * ## Reads are verified, writes are compare-and-append (APRV-20)
  *
- * It does not verify the hash chain. `approval log verify` does that, and
- * `appendEvent` independently refuses to build on a torn tail. The gate reads
- * the log's complete lines and refuses only on a tail it cannot parse; it never
- * diagnoses corruption, because two modules with two opinions about what
- * "corrupt" means is worse than one.
+ * The gate no longer trusts the bytes it reads. {@link readGateRecords}
+ * delegates to `core/state.ts`, which runs the *same* chain verification
+ * `approval log verify` runs — one walk, one vocabulary — and refuses
+ * `log-corrupt` on anything that does not verify. The gate still does not
+ * *diagnose* corruption: it reports that the log is untrustworthy and points at
+ * `approval log verify` for the detail, because two modules with two opinions
+ * about what "corrupt" means is worse than one.
+ *
+ * Every append this module makes is authorized by something it read, so every
+ * append passes `expectedHead` — the `(seq, hash)` observed at that read. If any
+ * record landed in between, `appendEvent` refuses `head-moved` under its lock
+ * and nothing is written. The gate does **not** retry: re-deriving a decision
+ * against a log that changed is the caller's judgment call, not this module's.
  *
  * It does not define execution tokens — `core/token.ts` does. {@link decide}'s
  * grant path calls that module's `mintToken` at the seam APRV-17 documented,
@@ -82,7 +94,7 @@
  * is `core/token.ts`'s `consumeToken`.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -91,7 +103,8 @@ import {
   checkAttestation,
   type AttestationRefusalDetail,
 } from "./attest.js";
-import { evaluateBudgets, type BudgetScope, type BudgetVerdict } from "./budgets.js";
+import { evaluateBudgetsWithTask, type BudgetScope, type BudgetVerdict } from "./budgets.js";
+import { tick, type ClockOptions } from "./clock.js";
 import { readTaskFile } from "./frontmatter.js";
 import {
   appendEvent,
@@ -99,8 +112,10 @@ import {
   type AppendOptions,
   type EventInput,
   type EventRecord,
+  type LogHead,
 } from "./log.js";
 import { isLoopEscalated } from "./loop.js";
+import { isPayloadHash } from "./payload.js";
 import {
   loadPolicy,
   POLICY_FILENAMES,
@@ -109,8 +124,32 @@ import {
   type PolicyLoadResult,
 } from "./policy-load.js";
 import { resolve, type Resolution } from "./policy-match.js";
+import {
+  payloadOf,
+  readVerifiedRecords,
+  requestState,
+  type Decision,
+  type LogReadRefusal,
+  type RequestDerivation,
+  type RequestState,
+} from "./state.js";
 import { mintToken, tokenHash, TOKEN_HASH_FIELD } from "./token.js";
 import { validate, type ValidationError } from "./validate.js";
+
+/**
+ * The approval-state derivation moved to `core/state.ts` in APRV-20 (finding
+ * S4: `gate.ts` and `token.ts` imported each other). It is re-exported here, its
+ * documented home, so every existing importer — the CLI, the tests — is
+ * unaffected by the move.
+ */
+export {
+  requestState,
+  type Decision,
+  type DeclaredAction,
+  type ExecutionFacts,
+  type RequestDerivation,
+  type RequestState,
+} from "./state.js";
 
 /** Actor stamped on runtime-originated expiry events (SPEC.md §8 `system:`). */
 export const EXPIRY_ACTOR = "system:gate";
@@ -143,8 +182,34 @@ export const GATE_REFUSAL_CODES = [
   "duplicate-request",
   /** The action key already has an `execution.*` record (idempotency). */
   "already-executed",
-  /** APRV-14 verdicts failed; a `budget.exceeded` event was appended. */
+  /**
+   * APRV-14 verdicts failed; a `budget.exceeded` event was appended. Covers
+   * class limits, `policy.budgets`, and — since S2 — the registered envelope's
+   * own `budget.max_cost_usd`, which appears as a `task`-scoped verdict in
+   * `verdicts` and in the appended event's payload.
+   */
   "budget-exceeded",
+  /**
+   * The action resolves to `manual` and its registered declaration carries no
+   * `payload_hash` (amended SPEC.md §6.2: MUST for `manual` actions).
+   *
+   * Enforced here rather than in `envelope.schema.json` because the schema
+   * cannot know an action's resolved autonomy — that answer depends on the
+   * policy, the irreversibility floor, and the class, none of which the
+   * envelope alone determines. A manual action with nothing to bind to would
+   * give a human a decision about bytes nobody committed to, so intake refuses
+   * and nothing is appended.
+   */
+  "payload-hash-required",
+  /**
+   * A grant was attempted on a request whose payload carries no usable `class`.
+   *
+   * Its own code since APRV-20 pass two: the previous behavior substituted the
+   * empty string and granted anyway, which recorded an authorization that no
+   * class-scoped budget could ever charge and no policy rule could ever match.
+   * Fail closed and say which fact was missing.
+   */
+  "grant-classless-request",
   /**
    * Loop safety escalated the task to manual (SPEC.md §10.2, APRV-18): three
    * consecutive `execution.failed` events. Only the non-manual paths are
@@ -169,7 +234,18 @@ export const GATE_REFUSAL_CODES = [
   "log-unreadable",
   /** The log's final line is unterminated (a crashed write). */
   "log-torn-tail",
-  /** The append itself failed; `append` carries the underlying error. */
+  /**
+   * The chain does not verify (APRV-20 finding S1). Distinct from
+   * `log-unreadable`, which is a filesystem fact: this one says the log's own
+   * contents contradict each other, so nothing may be authorized from it.
+   */
+  "log-corrupt",
+  /**
+   * The append itself failed; `append` carries the underlying error. Its
+   * `code` is `head-moved` when the log grew between this module's read and its
+   * append: every check that authorized the write was made against an older log,
+   * so nothing was written and nothing is retried here.
+   */
   "append-failed",
 ] as const;
 
@@ -197,8 +273,16 @@ export interface GateRefusal {
   record?: EventRecord;
 }
 
-/** Options shared by every gate operation. */
-export interface GateOptions {
+/**
+ * Options shared by every gate operation.
+ *
+ * Note what is **not** here and no longer a parameter anywhere in this module:
+ * `ts`. Under amended SPEC.md §8 a gate-typed event's timestamp is assigned by
+ * the runtime at the write boundary, so it is read from {@link ClockOptions
+ * clock} (defaulting to the real clock) rather than accepted from the caller.
+ * The refusal the spec asks for is structural: there is no parameter to pass.
+ */
+export interface GateOptions extends ClockOptions {
   /** Schema directory, passed to both envelope validation and the append. */
   schemaDir?: string;
   /** Where to find `APPROVAL.md`. Same semantics as `loadPolicy`. */
@@ -208,236 +292,10 @@ export interface GateOptions {
 }
 
 // ---------------------------------------------------------------------------
-// State derivation
-// ---------------------------------------------------------------------------
-
-/**
- * One action's approval state, derived from the log.
- *
- * These are the gate's names for the approval lifecycle of SPEC.md §6.3. The
- * envelope's `state:` enum is the projection of the same thing over a whole
- * task (`proposed`/`awaiting`/`approved`/…); the mapping is one-to-one for the
- * action-scoped states and is applied by the projection layer, not here.
- */
-export type RequestState =
-  /** No `approval.requested` for this key. */
-  | "none"
-  /** Requested and undecided — the envelope's `awaiting`. */
-  | "requested"
-  /** A human granted it — the envelope's `approved`. */
-  | "granted"
-  | "rejected"
-  | "revoked"
-  /** TTL lapsed, by event or by arithmetic. */
-  | "expired";
-
-/** The three terminal decisions a human can record, plus runtime expiry. */
-export type Decision = "grant" | "reject" | "revoke";
-
-/** What the request declared, copied out of the `approval.requested` payload. */
-export interface DeclaredAction {
-  class: string | null;
-  est_cost_usd: number | null;
-  reversible: boolean | null;
-  summary: string | null;
-}
-
-/** Execution facts for the action key: the seq of each event, or `null`. */
-export interface ExecutionFacts {
-  started: number | null;
-  completed: number | null;
-  failed: number | null;
-}
-
-/** The full derivation, so a caller never re-walks the log to explain itself. */
-export interface RequestDerivation {
-  actionKey: string;
-  state: RequestState;
-  task: string | null;
-  requestSeq: number | null;
-  requestTs: string | null;
-  decision: "granted" | "rejected" | "revoked" | "expired" | null;
-  decisionSeq: number | null;
-  decisionTs: string | null;
-  /** An `approval.expired` record exists for the current request. */
-  expiredByEvent: boolean;
-  /** The TTL lapsed by arithmetic, with no `approval.expired` record. */
-  expiredLazily: boolean;
-  declared: DeclaredAction;
-  execution: ExecutionFacts;
-}
-
-function payloadOf(record: EventRecord): Record<string, unknown> {
-  const payload = record.payload;
-  return typeof payload === "object" && payload !== null ? payload : {};
-}
-
-function declaredFrom(record: EventRecord): DeclaredAction {
-  const payload = payloadOf(record);
-  const cls = payload["class"];
-  const cost = payload["est_cost_usd"];
-  const reversible = payload["reversible"];
-  const summary = payload["summary"];
-  return {
-    class: typeof cls === "string" ? cls : null,
-    est_cost_usd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
-    reversible: typeof reversible === "boolean" ? reversible : null,
-    summary: typeof summary === "string" ? summary : null,
-  };
-}
-
-/**
- * Derive `actionKey`'s approval state from `records`.
- *
- * Pure: no I/O, no clock. `ts` is the moment the question is being asked and is
- * **required** — lazy expiry is arithmetic on it, and a state function that read
- * the clock could not be replayed.
- *
- * Sequencing rules, all of them deliberate:
- *
- * - An `approval.requested` **resets** the derivation. A key that was rejected
- *   or expired may be requested again; the new request starts a fresh cycle and
- *   the old decision no longer governs. (An action that has *executed* is a
- *   different matter — {@link request} refuses that on idempotency grounds.)
- * - The **first** decision after a request wins. This module refuses to append a
- *   second one, so a log carrying two is a log written by something else; the
- *   fail-closed reading is that the earliest human decision stands rather than
- *   that a later append can overwrite it.
- * - Execution facts accumulate across the whole log for the key, independent of
- *   the request cycle: an action that has executed has executed, and no
- *   subsequent request un-executes it.
- * - Expiry: an `approval.expired` record sets `expiredByEvent`. With no such
- *   record, `ttlMs !== null` and `ts > requestTs + ttlMs` sets `expiredLazily`.
- *   Both yield `state: "expired"`. An unparseable `requestTs` or `ts` also
- *   yields `expired`: liveness that cannot be demonstrated is not assumed. (The
- *   event schema's `date-time` format makes that unreachable through the real
- *   append path; it is a backstop, not a live branch.)
- */
-export function requestState(
-  records: EventRecord[],
-  actionKey: string,
-  ts: string,
-  ttlMs: number | null,
-): RequestDerivation {
-  let task: string | null = null;
-  let requestSeq: number | null = null;
-  let requestTs: string | null = null;
-  let decision: RequestDerivation["decision"] = null;
-  let decisionSeq: number | null = null;
-  let decisionTs: string | null = null;
-  let expiredByEvent = false;
-  let declared: DeclaredAction = {
-    class: null,
-    est_cost_usd: null,
-    reversible: null,
-    summary: null,
-  };
-  const execution: ExecutionFacts = { started: null, completed: null, failed: null };
-
-  const settle = (
-    record: EventRecord,
-    value: NonNullable<RequestDerivation["decision"]>,
-  ): void => {
-    if (requestSeq === null) return;
-    // Revocation is the one decision that legitimately follows another: a
-    // human withdraws a grant they already made, so `approval.revoked`
-    // supersedes. Every other decision settles only an undecided request —
-    // this module refuses to append a second one, and a log carrying two was
-    // written by something else, where the fail-closed reading is that the
-    // earliest human answer stands rather than that a later append overwrites it.
-    if (decision !== null && value !== "revoked") return;
-    decision = value;
-    decisionSeq = record.seq;
-    decisionTs = record.ts;
-    if (value === "expired") expiredByEvent = true;
-  };
-
-  for (const record of records) {
-    if (record.action_key !== actionKey) continue;
-    switch (record.event) {
-      case "approval.requested":
-        task = record.task ?? task;
-        requestSeq = record.seq;
-        requestTs = record.ts;
-        decision = null;
-        decisionSeq = null;
-        decisionTs = null;
-        expiredByEvent = false;
-        declared = declaredFrom(record);
-        break;
-      case "approval.granted":
-        settle(record, "granted");
-        break;
-      case "approval.rejected":
-        settle(record, "rejected");
-        break;
-      case "approval.revoked":
-        settle(record, "revoked");
-        break;
-      case "approval.expired":
-        settle(record, "expired");
-        break;
-      case "execution.started":
-        execution.started = record.seq;
-        task = record.task ?? task;
-        break;
-      case "execution.completed":
-        execution.completed = record.seq;
-        break;
-      case "execution.failed":
-        execution.failed = record.seq;
-        break;
-      default:
-        break;
-    }
-  }
-
-  let state: RequestState;
-  let expiredLazily = false;
-  if (requestSeq === null) {
-    state = "none";
-  } else if (decision !== null) {
-    state = decision;
-  } else if (ttlMs === null) {
-    // No `defaults.approval_ttl` means the policy declares no lapse. A request
-    // stays live until a human decides it; inventing a default TTL here would
-    // silently reject approvals a policy author never asked to expire.
-    state = "requested";
-  } else {
-    const requestedAt = Date.parse(requestTs ?? "");
-    const now = Date.parse(ts);
-    if (Number.isNaN(requestedAt) || Number.isNaN(now)) {
-      state = "expired";
-      expiredLazily = true;
-    } else if (now > requestedAt + ttlMs) {
-      state = "expired";
-      expiredLazily = true;
-    } else {
-      state = "requested";
-    }
-  }
-
-  return {
-    actionKey,
-    state,
-    task,
-    requestSeq,
-    requestTs,
-    decision,
-    decisionSeq,
-    decisionTs,
-    expiredByEvent,
-    expiredLazily,
-    declared,
-    execution,
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Log reading
 // ---------------------------------------------------------------------------
 
-type ReadOutcome = { ok: true; records: EventRecord[] } | GateRefusal;
+type ReadOutcome = { ok: true; records: EventRecord[]; head: LogHead | null } | GateRefusal;
 
 function refuse(
   code: GateRefusalCode,
@@ -447,59 +305,31 @@ function refuse(
   return { ok: false, code, message, ...extra };
 }
 
-function errorMessage(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
+/** A read refusal is already one of this module's codes; widen it in place. */
+function fromReadRefusal(refusal: LogReadRefusal): GateRefusal {
+  return refuse(refusal.code, refusal.message);
 }
 
 /**
- * Read the log's complete records.
+ * Read the log's records, refusing unless the whole chain verifies.
  *
- * An absent log is an empty log (nothing has happened yet), exactly as
- * `appendEvent` and `approval log verify` treat it. An unterminated final line
- * is a torn tail and gets its own code, because the repair is a human decision
- * and never a gate's. A newline-terminated line that will not parse is reported
- * as unreadable rather than diagnosed: `approval log verify` owns the vocabulary
- * of corruption.
+ * Delegates to `core/state.ts`'s {@link readVerifiedRecords}: since APRV-20
+ * (finding S1) the gate does not merely parse the log, it verifies it. A
+ * corrupt log refuses `log-corrupt` and authorizes nothing; a torn tail refuses
+ * `log-torn-tail`, unchanged, because the repair is a human decision and never a
+ * gate's; an unopenable file refuses `log-unreadable`, an I/O fact rather than an
+ * accusation.
+ *
+ * The returned `head` is what every append site here passes as `expectedHead`,
+ * so a decision derived from these records cannot land on a log that moved
+ * underneath it.
  */
-export function readGateRecords(logPath: string): ReadOutcome {
-  let raw: string;
-  try {
-    raw = readFileSync(logPath, "utf8");
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, records: [] };
-    return refuse("log-unreadable", `log ${logPath} could not be read: ${errorMessage(cause)}`);
-  }
-
-  if (raw.length === 0) return { ok: true, records: [] };
-  if (!raw.endsWith("\n")) {
-    return refuse(
-      "log-torn-tail",
-      `log ${logPath} ends without a newline: the final record is truncated, the signature of a crashed write. Nothing is repaired here; run \`approval log verify\`.`,
-    );
-  }
-
-  const lines = raw.split("\n");
-  lines.pop();
-  const records: EventRecord[] = [];
-  for (const [index, line] of lines.entries()) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch (cause) {
-      return refuse(
-        "log-unreadable",
-        `log ${logPath} line ${index + 1} is not valid JSON (${errorMessage(cause)}); run \`approval log verify\``,
-      );
-    }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      return refuse(
-        "log-unreadable",
-        `log ${logPath} line ${index + 1} is not a JSON object; run \`approval log verify\``,
-      );
-    }
-    records.push(parsed as EventRecord);
-  }
-  return { ok: true, records };
+export function readGateRecords(logPath: string, schemaDir?: string): ReadOutcome {
+  const read = readVerifiedRecords(
+    logPath,
+    schemaDir === undefined ? {} : { schemaDir },
+  );
+  return read.ok ? read : fromReadRefusal(read);
 }
 
 // ---------------------------------------------------------------------------
@@ -562,12 +392,21 @@ function budgetScopeOf(load: PolicyLoadResult, resolution: Resolution): BudgetSc
   };
 }
 
+/**
+ * Append one event, with the compare-and-append precondition (APRV-20).
+ *
+ * `expectedHead` is the head observed at the read that authorized this write.
+ * Passing it is not optional at any site here: every gate append is authorized
+ * by something read from the log, and an append that skipped the precondition
+ * would be exactly the check-then-act race the option exists to close.
+ */
 function append(
   logPath: string,
   input: EventInput,
   options: GateOptions,
+  expectedHead: LogHead | null,
 ): { ok: true; record: EventRecord } | GateRefusal {
-  const result = appendEvent(logPath, input, appendOptionsOf(options));
+  const result = appendEvent(logPath, input, { ...appendOptionsOf(options), expectedHead });
   if (result.ok) return { ok: true, record: result.record };
   return refuse(
     "append-failed",
@@ -587,6 +426,14 @@ export interface RegisteredAction {
   summary?: string;
   reversible?: boolean;
   est_cost_usd?: number;
+  /**
+   * The content binding of amended SPEC.md §6.2. MUST be present for an action
+   * that resolves to `manual`; the enforcement point is {@link request}, not
+   * registration, because autonomy is not known until policy is consulted and
+   * refusing at registration would make an envelope unregisterable for a
+   * property of a policy file it never mentions.
+   */
+  payload_hash?: string;
 }
 
 /**
@@ -617,9 +464,26 @@ function actionsOf(envelope: unknown): RegisteredAction[] {
     if (typeof item["summary"] === "string") action.summary = item["summary"];
     if (typeof item["reversible"] === "boolean") action.reversible = item["reversible"];
     if (typeof item["est_cost_usd"] === "number") action.est_cost_usd = item["est_cost_usd"];
+    if (isPayloadHash(item["payload_hash"])) action.payload_hash = item["payload_hash"];
     actions.push(action);
   }
   return actions;
+}
+
+/**
+ * The envelope's own `budget` block (SPEC.md §6.2), as registered.
+ *
+ * Copied into the `task.registered` payload so the task cap is enforced from
+ * the log rather than from a file an agent can edit after the fact (S2; see
+ * `core/budgets.ts`'s `taskMaxCostUsd`). Only `max_cost_usd` is enforced at
+ * v0.1 — `max_latency` is recorded and does nothing yet — so the whole block is
+ * copied verbatim rather than a single field cherry-picked, and the enforcement
+ * that arrives later reads a log that already carries what it needs.
+ */
+function budgetOf(envelope: unknown): Record<string, unknown> | null {
+  const value = (envelope as { budget?: unknown }).budget;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
 }
 
 type Resolved = { ok: true; task: string; envelope: unknown } | GateRefusal;
@@ -672,11 +536,14 @@ function readTaskFileSource(path: string): Resolved {
  * `actor` is a `human:` or `agent:` identity; registration is an ordinary
  * proposal, not a privileged act, so an agent may perform it. `system:` is
  * refused: the runtime does not author tasks.
+ *
+ * The registration payload carries the envelope's `actions` and — since S2 —
+ * its `budget` block, so the task's own `max_cost_usd` cap is enforced from the
+ * log rather than from a task file that may be edited afterwards.
  */
 export function register(
   logPath: string,
   source: RegisterSource,
-  ts: string,
   actor: string,
   options: GateOptions = {},
 ): RegisterResult {
@@ -719,11 +586,15 @@ export function register(
   const actions = actionsOf(resolved.envelope);
   const payload: Record<string, unknown> = { actions };
   if (typeof envelope.state === "string") payload["state"] = envelope.state;
+  const budget = budgetOf(resolved.envelope);
+  if (budget !== null) payload["budget"] = budget;
 
   const appended = append(
     logPath,
-    { ts, event: "task.registered", actor, task: resolved.task, payload },
+    { ts: tick(options), event: "task.registered", actor, task: resolved.task, payload },
     options,
+    // The head read above, when the double-registration check was made.
+    read.head,
   );
   if (!appended.ok) return appended;
 
@@ -764,6 +635,7 @@ export function registeredAction(
     if (typeof item["summary"] === "string") action.summary = item["summary"];
     if (typeof item["reversible"] === "boolean") action.reversible = item["reversible"];
     if (typeof item["est_cost_usd"] === "number") action.est_cost_usd = item["est_cost_usd"];
+    if (isPayloadHash(item["payload_hash"])) action.payload_hash = item["payload_hash"];
     return { ok: true, action };
   }
   return refuse(
@@ -785,6 +657,42 @@ export interface RequestInput {
   est_cost_usd?: number;
   reversible?: boolean;
   summary?: string;
+  /**
+   * The content binding (amended SPEC.md §6.2). A fallback only: {@link request}
+   * prefers the value on the `task.registered` record, because the log is what
+   * the human's policy was attested against and a caller-supplied hash could
+   * name bytes the registration never declared.
+   */
+  payload_hash?: string;
+}
+
+/**
+ * The `payload_hash` the log says was declared for `(task, actionKey)`, or
+ * `null`.
+ *
+ * Deliberately narrower than {@link registeredAction}: this answers one
+ * question and refuses nothing, so {@link request} can distinguish "declared no
+ * hash" from "declared no action" and report each in its own words. The last
+ * registration wins, matching every other declaration read in this codebase.
+ */
+function declaredPayloadHash(
+  records: EventRecord[],
+  task: string,
+  actionKey: string,
+): string | null {
+  let found: string | null = null;
+  for (const record of records) {
+    if (record.event !== "task.registered" || record.task !== task) continue;
+    const declared = payloadOf(record)["actions"];
+    if (!Array.isArray(declared)) continue;
+    for (const entry of declared) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const item = entry as Record<string, unknown>;
+      if (item["idempotency_key"] !== actionKey) continue;
+      found = isPayloadHash(item["payload_hash"]) ? item["payload_hash"] : null;
+    }
+  }
+  return found;
 }
 
 export type RequestResult =
@@ -819,21 +727,28 @@ function costOf(value: number | undefined): number {
  *    event** (amended SPEC.md §6.3) and return `proceed: true`. Their budget is
  *    charged at `execution.started`, which APRV-18 appends — checking budgets
  *    here as well would charge them twice or, worse, pass here and fail there.
- * 5. **Request legality**, then **budgets**, then the append. Legality first
+ * 5. **Content binding** (amended SPEC.md §6.2, A1). A manual action whose
+ *    registered declaration carries no `payload_hash` is refused
+ *    `payload-hash-required` and nothing is appended. This is the first check
+ *    after the manual path is known, because a request with nothing to bind to
+ *    should never reach a human's queue at all.
+ * 6. **Request legality**, then **budgets**, then the append. Legality first
  *    because a duplicate request is a caller bug that no budget outcome should
  *    obscure, and because refusing it must leave the log untouched.
  *
- * The `approval.requested` payload carries `class` and `est_cost_usd`
- * unconditionally — the budgets contract requires them on the grant, and the
- * grant copies them from here.
+ * The `approval.requested` payload carries `class`, `est_cost_usd`, and (on the
+ * manual path, always) `payload_hash` — the budgets contract requires the first
+ * two on the grant and the token binding requires the third, and the grant
+ * copies all of them from here rather than re-deriving them from a file that
+ * may have changed.
  */
 export function request(
   logPath: string,
   input: RequestInput,
-  ts: string,
   actor: string,
   options: GateOptions = {},
 ): RequestResult {
+  const ts = tick(options);
   if (!PRINCIPAL_ACTOR.test(actor)) {
     return refuse(
       "actor-invalid",
@@ -874,6 +789,20 @@ export function request(
     return { ok: true, autonomy: resolution.autonomy, proceed: true, resolution, record: null };
   }
 
+  // Amended SPEC.md §6.2/§10 (A1): a manual grant binds to bytes. The log's
+  // declaration wins over anything the caller passed — `register` wrote it from
+  // the envelope, and a request that could name its own hash could approve one
+  // payload and execute another, which is the property this exists to remove.
+  const payloadHash =
+    declaredPayloadHash(read.records, input.task, input.actionKey) ??
+    (isPayloadHash(input.payload_hash) ? input.payload_hash : null);
+  if (payloadHash === null) {
+    return refuse(
+      "payload-hash-required",
+      `action ${input.actionKey} resolves to manual and its registered declaration carries no payload_hash. Amended SPEC.md §6.2 makes the hash MUST for manual actions: an approval binds to the exact bytes it approves, so a request with nothing to bind to would ask a human to authorize a payload that could still change afterwards. Declare payload_hash (SHA-256 over the RFC 8785 canonical serialization of the concrete payload) on the action and register the task again.`,
+    );
+  }
+
   const derivation = requestState(read.records, input.actionKey, ts, ttlOf(load));
   if (derivation.state === "requested") {
     return refuse(
@@ -890,11 +819,14 @@ export function request(
     );
   }
 
-  const budget = evaluateBudgets(
+  const budget = evaluateBudgetsWithTask(
     read.records,
     budgetScopeOf(load, resolution),
     { class: input.cls, est_cost_usd: costOf(input.est_cost_usd) },
     ts,
+    // S2: the registered envelope's own `budget.max_cost_usd`, conjunctive with
+    // policy budgets and enforced at all three of intake, grant, and start.
+    input.task,
   );
   if (!budget.pass) {
     const failed = budget.verdicts.filter((verdict) => !verdict.pass);
@@ -914,6 +846,7 @@ export function request(
         },
       },
       options,
+      read.head,
     );
     const message = `budget refused the request: ${failed
       .map((verdict) => `${verdict.limit} (${verdict.scope})`)
@@ -928,6 +861,7 @@ export function request(
   const payload: Record<string, unknown> = {
     class: input.cls,
     est_cost_usd: costOf(input.est_cost_usd),
+    payload_hash: payloadHash,
   };
   if (input.summary !== undefined) payload["summary"] = input.summary;
   if (input.reversible !== undefined) payload["reversible"] = input.reversible;
@@ -943,6 +877,9 @@ export function request(
       payload,
     },
     options,
+    // The head read at the top of `request`: the duplicate-request, execution
+    // and budget checks were all made against exactly that log.
+    read.head,
   );
   if (!appended.ok) return appended;
 
@@ -1010,19 +947,22 @@ const DECISION_STATE: Readonly<Record<Decision, RequestState>> = {
  * commitment is the moment the human commits.
  *
  * On `grant` a single-use execution token is minted (`core/token.ts`) and its
- * SHA-256 recorded in the payload as `token_sha256`. The raw token is returned
- * in `token` and is written nowhere: whoever calls this is the only party that
- * will ever hold it, and a lost token is unrecoverable by design — revoke and
- * request again.
+ * SHA-256 recorded in the payload as `token_sha256`, **alongside the request's
+ * `payload_hash`** (amended SPEC.md §10, A1). The token is therefore bound to
+ * three things — the request, its `idempotency_key`, and the bytes — and
+ * `core/token.ts` refuses `payload-mismatch` for anything else. The raw token
+ * is returned in `token` and is written nowhere: whoever calls this is the only
+ * party that will ever hold it, and a lost token is unrecoverable by design —
+ * revoke and request again.
  */
 export function decide(
   logPath: string,
   actionKey: string,
   decision: Decision,
   actor: string,
-  ts: string,
   options: DecideOptions = {},
 ): DecideResult {
+  const ts = tick(options);
   if (!HUMAN_ACTOR.test(actor)) {
     return refuse(
       "actor-not-human",
@@ -1055,7 +995,7 @@ export function decide(
     // module header for why the log must carry the state a reader can derive.
     let materialised: EventRecord | undefined;
     if (derivation.expiredLazily) {
-      const logged = appendExpiry(logPath, derivation, load, ts, options);
+      const logged = appendExpiry(logPath, derivation, load, ts, options, read.head);
       if (logged.ok) materialised = logged.record;
     }
     const message = derivation.expiredLazily
@@ -1104,10 +1044,26 @@ export function decide(
 
   const payload: Record<string, unknown> = {};
   if (decision === "grant") {
+    // A grant with no class is refused rather than recorded with an empty one.
+    // The empty-string substitution this replaces produced an authorization
+    // that no class rule could match and no class-scoped budget could charge —
+    // a hole shaped exactly like a permitted action. Reject and revoke are
+    // unaffected: withdrawing authority needs no class.
+    if (derivation.declared.class === null || derivation.declared.class.length === 0) {
+      return refuse(
+        "grant-classless-request",
+        `the approval.requested record for ${actionKey} at seq ${String(derivation.requestSeq)} carries no usable payload.class; a grant is scoped by class — policy matching, the irreversibility floor, and every class-scoped budget read it — so an authorization that names none cannot be recorded. Request the action again through \`approval request\`, which copies the class from the task.registered declaration.`,
+        { state: derivation.state },
+      );
+    }
     // The budgets contract: class and est_cost_usd on every approval.granted,
-    // copied from the request rather than re-derived from a file.
-    payload["class"] = derivation.declared.class ?? "";
+    // copied from the request rather than re-derived from a file. A1 adds the
+    // content binding on the same terms: copied, never recomputed.
+    payload["class"] = derivation.declared.class;
     payload["est_cost_usd"] = derivation.declared.est_cost_usd ?? 0;
+    if (derivation.declared.payload_hash !== null) {
+      payload["payload_hash"] = derivation.declared.payload_hash;
+    }
   }
   if (options.note !== undefined) payload["note"] = options.note;
 
@@ -1118,11 +1074,14 @@ export function decide(
       cls,
       derivation.declared.reversible === null ? {} : { reversible: derivation.declared.reversible },
     );
-    const budget = evaluateBudgets(
+    const budget = evaluateBudgetsWithTask(
       read.records,
       budgetScopeOf(load, resolution),
       { class: cls, est_cost_usd: derivation.declared.est_cost_usd ?? 0 },
       ts,
+      // S2: the envelope's own cap, re-checked at the moment of commitment for
+      // the same reason the policy budgets are — the queue may have moved.
+      derivation.task,
     );
     if (!budget.pass) {
       const failed = budget.verdicts.filter((verdict) => !verdict.pass);
@@ -1142,6 +1101,7 @@ export function decide(
           },
         },
         options,
+        read.head,
       );
       const message = `budget refused the grant: ${failed
         .map((verdict) => `${verdict.limit} (${verdict.scope})`)
@@ -1179,6 +1139,9 @@ export function decide(
       payload,
     },
     options,
+    // The head read at the top of `decide`: transition legality and the budget
+    // re-check were both judged against exactly that log.
+    read.head,
   );
   if (!appended.ok) return appended;
 
@@ -1204,6 +1167,7 @@ function appendExpiry(
   load: PolicyLoadResult,
   ts: string,
   options: GateOptions,
+  expectedHead: LogHead | null,
 ): { ok: true; record: EventRecord } | GateRefusal {
   const payload: Record<string, unknown> = {};
   if (derivation.requestTs !== null) payload["requested_ts"] = derivation.requestTs;
@@ -1226,6 +1190,7 @@ function appendExpiry(
       payload,
     },
     options,
+    expectedHead,
   );
 }
 
@@ -1250,9 +1215,9 @@ function appendExpiry(
 export function expire(
   logPath: string,
   actionKey: string,
-  ts: string,
   options: GateOptions = {},
 ): ExpireResult {
+  const ts = tick(options);
   const read = readGateRecords(logPath);
   if (!read.ok) return read;
 
@@ -1291,5 +1256,5 @@ export function expire(
     );
   }
 
-  return appendExpiry(logPath, derivation, load, ts, options);
+  return appendExpiry(logPath, derivation, load, ts, options, read.head);
 }

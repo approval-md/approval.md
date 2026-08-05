@@ -84,6 +84,16 @@ const POLICY_SHORT_TTL = POLICY.replace('approval_ttl: "1h"', 'approval_ttl: "1s
 /** One supervised action a day: the second start must be refused. */
 const POLICY_TIGHT = POLICY.replace("    daily_actions: 50", "    daily_actions: 1");
 
+/**
+ * The content binding every declared action carries (amended SPEC.md §6.2, A1).
+ *
+ * Manual actions MUST have one — intake refuses `payload-hash-required` without
+ * it — and the spend must present the same value, which these suites do with
+ * `--payload-hash`. One constant across the fixture keeps the CLI assertions
+ * about flags and exit codes rather than about hashing.
+ */
+const PAYLOAD_HASH = "3".repeat(64);
+
 const TASK_FILE = [
   "---",
   "id: task-042",
@@ -100,16 +110,19 @@ const TASK_FILE = [
   "      reversible: false",
   "      est_cost_usd: 0.02",
   '      idempotency_key: "task-042:chaser"',
+  `      payload_hash: "${PAYLOAD_HASH}"`,
   "    - class: files.write.local",
   '      summary: "Write the draft"',
   "      reversible: true",
   "      est_cost_usd: 0.01",
   '      idempotency_key: "task-042:draft"',
+  `      payload_hash: "${PAYLOAD_HASH}"`,
   "    - class: files.write.local",
   '      summary: "Write the second draft"',
   "      reversible: true",
   "      est_cost_usd: 0.01",
   '      idempotency_key: "task-042:draft2"',
+  `      payload_hash: "${PAYLOAD_HASH}"`,
   "---",
   "",
   "## Description",
@@ -214,7 +227,7 @@ test("run with the wrong token exits 1 (a refusal is not a missing token)", () =
     [
       "run",
       "task-042:chaser",
-      "--token",
+      "--payload-hash", PAYLOAD_HASH, "--token",
       "a".repeat(64),
       "--as",
       "agent:claude",
@@ -263,7 +276,7 @@ test("run appends execution.started BEFORE the child runs, then completed with e
     [
       "run",
       "task-042:chaser",
-      "--token",
+      "--payload-hash", PAYLOAD_HASH, "--token",
       token,
       "--as",
       "agent:claude",
@@ -310,6 +323,9 @@ test("run appends execution.started BEFORE the child runs, then completed with e
     outcome: "execution.completed",
     outcome_seq: 6,
     exit_code: 0,
+    // A1: the binding run presented when it spent the token. Here it is the
+    // --payload-hash override; the computed path has its own test below.
+    payload_hash: PAYLOAD_HASH,
   });
   assertClean(dir);
 });
@@ -318,7 +334,7 @@ test("a failing child is recorded as execution.failed and run exits with the chi
   const dir = ready();
   const token = grantChaser(dir);
   const run = runCli(
-    ["run", "task-042:chaser", "--token", token, "--as", "agent:claude", "--", ...exiting(42)],
+    ["run", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", token, "--as", "agent:claude", "--", ...exiting(42)],
     dir,
   );
   assert.equal(run.code, 42, run.stderr);
@@ -334,7 +350,7 @@ test("a child killed by a signal is recorded and reported as 128 + signal", () =
     [
       "run",
       "task-042:chaser",
-      "--token",
+      "--payload-hash", PAYLOAD_HASH, "--token",
       token,
       "--as",
       "agent:claude",
@@ -358,7 +374,7 @@ test("a command that cannot be spawned is recorded as exit_code 127", () => {
     [
       "run",
       "task-042:chaser",
-      "--token",
+      "--payload-hash", PAYLOAD_HASH, "--token",
       token,
       "--as",
       "agent:claude",
@@ -447,7 +463,7 @@ test("a crash between started and its outcome leaves a dangling execution nothin
     [
       "run",
       "task-042:chaser",
-      "--token",
+      "--payload-hash", PAYLOAD_HASH, "--token",
       token,
       "--as",
       "agent:claude",
@@ -482,7 +498,7 @@ test("a crash between started and its outcome leaves a dangling execution nothin
   // Nothing auto-repairs: a second run refuses, and the log is unchanged.
   const before = rawLog(dir);
   const again = runCli(
-    ["run", "task-042:chaser", "--token", token, "--as", "agent:claude", "--json", "--", ...exiting(0)],
+    ["run", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", token, "--as", "agent:claude", "--json", "--", ...exiting(0)],
     dir,
   );
   assert.equal(again.code, 1);

@@ -38,7 +38,8 @@
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
-import { readGateRecords } from "../core/gate.js";
+import { isPayloadHash } from "../core/payload.js";
+import { readVerifiedRecords } from "../core/state.js";
 import {
   consumeToken,
   tokenStatus,
@@ -198,11 +199,14 @@ export function commandToken(argv: string[], streams: Streams, cwd: string): num
   const key = actionKeyOf(positionals, streams, json, TOKEN_HELP);
   if (!key.ok) return key.code;
 
-  const read = readGateRecords(logPath);
+  const read = readVerifiedRecords(logPath);
   if (!read.ok) {
     return emitRefusal(streams, json, {
       ok: false,
-      code: read.code === "log-torn-tail" ? "log-torn-tail" : "log-unreadable",
+      // The read refusal's code is already one of this command's codes
+      // (`log-unreadable`, `log-torn-tail`, `log-corrupt`); it is surfaced
+      // unchanged so a corrupt log is reported as corruption, not as I/O.
+      code: read.code,
       message: read.message,
     });
   }
@@ -221,6 +225,7 @@ export function commandToken(argv: string[], streams: Streams, cwd: string): num
       grant_seq: status.grantSeq,
       class: status.class,
       est_cost_usd: status.est_cost_usd,
+      payload_hash: status.payloadHash,
       task: status.task,
     });
   } else {
@@ -241,7 +246,7 @@ export function commandToken(argv: string[], streams: Streams, cwd: string): num
 export function commandConsume(argv: string[], streams: Streams, cwd: string): number {
   const outcome = front(
     argv,
-    { ...COMMON_FLAGS, "--token": "string", "--as": "string" },
+    { ...COMMON_FLAGS, "--token": "string", "--as": "string", "--payload-hash": "string" },
     CONSUME_HELP,
     streams,
     cwd,
@@ -276,14 +281,20 @@ export function commandConsume(argv: string[], streams: Streams, cwd: string): n
     );
   }
 
-  const result = consumeToken(
-    logPath,
-    key.actionKey,
-    token,
-    now(),
-    actor,
-    tokenOptions(flags, cwd),
-  );
+  const payloadHash = stringFlag(flags, "--payload-hash");
+  if (payloadHash !== null && !isPayloadHash(payloadHash)) {
+    return usageError(
+      streams,
+      json,
+      `--payload-hash expects 64 lowercase hex characters (SHA-256 over the RFC 8785 canonical serialization of the payload), got ${JSON.stringify(payloadHash)}`,
+      CONSUME_HELP,
+    );
+  }
+
+  const result = consumeToken(logPath, key.actionKey, token, actor, {
+    ...tokenOptions(flags, cwd),
+    ...(payloadHash === null ? {} : { presentedPayloadHash: payloadHash }),
+  });
   if (!result.ok) return emitRefusal(streams, json, result);
 
   const payload = (result.record.payload ?? {}) as Record<string, unknown>;
@@ -297,6 +308,7 @@ export function commandConsume(argv: string[], streams: Streams, cwd: string): n
       grant_seq: result.grantSeq,
       class: payload["class"] ?? null,
       est_cost_usd: payload["est_cost_usd"] ?? null,
+      payload_hash: payload["payload_hash"] ?? null,
     });
   } else {
     streams.out(

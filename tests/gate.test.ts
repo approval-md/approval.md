@@ -18,15 +18,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { appendAttestation } from "../src/core/attest.js";
+import { appendAttestation, decide, expire, register, request } from "./clock-adapters.js";
 import {
-  decide,
-  expire,
   EXPIRY_ACTOR,
   GATE_REFUSAL_CODES,
-  register,
   registeredAction,
-  request,
   requestState,
   type GateOptions,
   type GateRefusal,
@@ -43,6 +39,16 @@ after(() => {
 });
 
 const T0 = "2026-08-05T10:00:00.000Z";
+
+/**
+ * A stand-in content binding (amended SPEC.md §6.2, A1).
+ *
+ * Every manual action needs one: intake refuses `payload-hash-required` without
+ * it, because a grant binds to bytes. The value here is an arbitrary 64-hex
+ * digest — these suites test the gate's handling of the binding, not the hash
+ * function, which `tests/payload.test.ts` covers.
+ */
+const PAYLOAD_HASH = "1".repeat(64);
 
 /** `minutes` after {@link T0}, as an RFC 3339 instant. */
 function at(minutes: number): string {
@@ -147,6 +153,7 @@ const ENVELOPE = {
       reversible: false,
       est_cost_usd: 0.02,
       idempotency_key: "task-042:chaser",
+      payload_hash: PAYLOAD_HASH,
     },
   ],
 };
@@ -166,6 +173,7 @@ function requestChaser(unit: Case, ts: string = at(1)): EventRecord {
     {
       task: "task-042",
       actionKey: "task-042:chaser",
+      payload_hash: PAYLOAD_HASH,
       cls: "communicate.email.external",
       est_cost_usd: 0.02,
       reversible: false,
@@ -341,6 +349,7 @@ test("register appends task.registered carrying the declared actions", () => {
         summary: "Send deposit chaser",
         reversible: false,
         est_cost_usd: 0.02,
+        payload_hash: PAYLOAD_HASH,
       },
     ],
     state: "proposed",
@@ -418,6 +427,7 @@ test("register reads the envelope from a task file's frontmatter", () => {
       "      reversible: false",
       "      est_cost_usd: 0.02",
       '      idempotency_key: "task-042:chaser"',
+      `      payload_hash: "${PAYLOAD_HASH}"`,
       "---",
       "",
       "## Description",
@@ -487,7 +497,7 @@ test("request refuses when the policy has never been attested", () => {
   const refusal = asRefusal(
     request(
       unit.logPath,
-      { task: "task-042", actionKey: "task-042:chaser", cls: "communicate.email.external" },
+      { task: "task-042", actionKey: "task-042:chaser", payload_hash: PAYLOAD_HASH, cls: "communicate.email.external" },
       at(1),
       "agent:claude",
       unit.options,
@@ -506,7 +516,7 @@ test("request refuses when the policy bytes changed since attestation", () => {
   const refusal = asRefusal(
     request(
       unit.logPath,
-      { task: "task-042", actionKey: "task-042:chaser", cls: "communicate.email.external" },
+      { task: "task-042", actionKey: "task-042:chaser", payload_hash: PAYLOAD_HASH, cls: "communicate.email.external" },
       at(1),
       "agent:claude",
       unit.options,
@@ -529,6 +539,7 @@ test("request on the manual path appends approval.requested with class and cost"
   assert.deepEqual(record.payload, {
     class: "communicate.email.external",
     est_cost_usd: 0.02,
+    payload_hash: PAYLOAD_HASH,
     summary: "Send deposit chaser",
     reversible: false,
   });
@@ -541,7 +552,7 @@ test("an undeclared cost is recorded as 0, per the budgets consumption contract"
   registerTask(unit);
   const result = request(
     unit.logPath,
-    { task: "task-042", actionKey: "task-042:chaser", cls: "communicate.email.external" },
+    { task: "task-042", actionKey: "task-042:chaser", payload_hash: PAYLOAD_HASH, cls: "communicate.email.external" },
     at(1),
     "agent:claude",
     unit.options,
@@ -589,7 +600,7 @@ test("the irreversibility floor pulls an autonomous class back onto the manual p
   registerTask(unit);
   const result = request(
     unit.logPath,
-    { task: "task-042", actionKey: "task-042:read", cls: "read.web", reversible: false },
+    { task: "task-042", actionKey: "task-042:read", payload_hash: PAYLOAD_HASH, cls: "read.web", reversible: false },
     at(1),
     "agent:claude",
     unit.options,
@@ -612,7 +623,7 @@ test("request refuses a duplicate live request, and an already-executed key", ()
   const duplicate = asRefusal(
     request(
       unit.logPath,
-      { task: "task-042", actionKey: "task-042:chaser", cls: "communicate.email.external" },
+      { task: "task-042", actionKey: "task-042:chaser", payload_hash: PAYLOAD_HASH, cls: "communicate.email.external" },
       at(2),
       "agent:claude",
       unit.options,
@@ -628,7 +639,7 @@ test("request refuses a duplicate live request, and an already-executed key", ()
   const executed = asRefusal(
     request(
       unit.logPath,
-      { task: "task-042", actionKey: "task-042:chaser", cls: "communicate.email.external" },
+      { task: "task-042", actionKey: "task-042:chaser", payload_hash: PAYLOAD_HASH, cls: "communicate.email.external" },
       at(5),
       "agent:claude",
       unit.options,
@@ -645,7 +656,7 @@ test("request refuses a non-principal actor", () => {
   const refusal = asRefusal(
     request(
       unit.logPath,
-      { task: "task-042", actionKey: "k", cls: "communicate.email.external" },
+      { task: "task-042", actionKey: "k", payload_hash: PAYLOAD_HASH, cls: "communicate.email.external" },
       at(1),
       "system:gate",
       unit.options,
@@ -665,6 +676,7 @@ test("a failed budget appends budget.exceeded with the verdicts, and refuses", (
       {
         task: "task-042",
         actionKey: "task-042:spend",
+        payload_hash: PAYLOAD_HASH,
         cls: "financial.spend",
         est_cost_usd: 5,
         reversible: false,
@@ -720,6 +732,9 @@ test("grant appends approval.granted carrying class and est_cost_usd (budgets co
   assert.deepEqual(result.record.payload, {
     class: "communicate.email.external",
     est_cost_usd: 0.02,
+    // A1: the grant copies the request's content binding, so the token is bound
+    // to the request, its key, AND the bytes.
+    payload_hash: PAYLOAD_HASH,
     note: "go, but cc me",
     token_sha256: tokenHash(result.token ?? ""),
   });
@@ -875,8 +890,8 @@ test("budgets are re-evaluated at grant time, appending budget.exceeded on failu
       origin: { app: "cartsos", created_by: "human:carter" },
       state: "proposed",
       actions: [
-        { class: "physical.order", idempotency_key: "task-100:a" },
-        { class: "physical.order", idempotency_key: "task-100:b" },
+        { class: "physical.order", idempotency_key: "task-100:a", payload_hash: PAYLOAD_HASH },
+        { class: "physical.order", idempotency_key: "task-100:b", payload_hash: PAYLOAD_HASH },
       ],
     },
   }, T0, "agent:claude");
@@ -884,7 +899,7 @@ test("budgets are re-evaluated at grant time, appending budget.exceeded on failu
   for (const key of ["task-100:a", "task-100:b"]) {
     const result = request(
       unit.logPath,
-      { task: "task-100", actionKey: key, cls: "physical.order", est_cost_usd: 0 },
+      { task: "task-100", actionKey: key, payload_hash: PAYLOAD_HASH, cls: "physical.order", est_cost_usd: 0 },
       at(1),
       "agent:claude",
       unit.options,
@@ -1020,7 +1035,7 @@ test("a torn tail is refused with its own code, and nothing is appended", () => 
   const refusal = asRefusal(
     request(
       unit.logPath,
-      { task: "task-042", actionKey: "task-042:chaser", cls: "communicate.email.external" },
+      { task: "task-042", actionKey: "task-042:chaser", payload_hash: PAYLOAD_HASH, cls: "communicate.email.external" },
       at(1),
       "agent:claude",
       unit.options,
@@ -1028,6 +1043,58 @@ test("a torn tail is refused with its own code, and nothing is appended", () => 
   );
   assert.equal(refusal.code, "log-torn-tail");
   assert.equal(readFileSync(unit.logPath, "utf8"), `${before}{"seq":3,"ts":"2026`);
+});
+
+test("a forged record is refused log-corrupt: the gate verifies what it reads", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  requestChaser(unit);
+
+  // The attacker rewrites a record's payload in place. The line is still valid
+  // JSON and still schema-valid — only its digest no longer matches, which is
+  // precisely what a JSON-parsing reader could not see and a verifying one can.
+  const lines = readFileSync(unit.logPath, "utf8").split("\n");
+  const forged = JSON.parse(lines[2] as string) as Record<string, unknown>;
+  forged["payload"] = { class: "communicate.email.external", est_cost_usd: 999 };
+  lines[2] = JSON.stringify(forged);
+  writeFileSync(unit.logPath, lines.join("\n"), "utf8");
+  const before = readFileSync(unit.logPath, "utf8");
+
+  const refusal = asRefusal(
+    decide(unit.logPath, "task-042:chaser", "grant", "human:carter", at(2), unit.options),
+  );
+  assert.equal(refusal.code, "log-corrupt");
+  assert.match(refusal.message, /does not verify/);
+  assert.match(refusal.message, /hash-mismatch/);
+  assert.equal(readFileSync(unit.logPath, "utf8"), before, "nothing was appended");
+});
+
+test("a decision appended between the gate's read and its write is refused head-moved", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  requestChaser(unit);
+
+  // Stand in for the interleaving: the gate's own append path is exercised
+  // directly with the head the gate would have read one record ago.
+  const all = records(unit);
+  const stale = all[all.length - 2] as EventRecord;
+  const result = appendEvent(
+    unit.logPath,
+    {
+      ts: at(2),
+      event: "approval.granted",
+      actor: "human:carter",
+      task: "task-042",
+      action_key: "task-042:chaser",
+      payload: { class: "communicate.email.external", est_cost_usd: 0.02 },
+    },
+    { expectedHead: { seq: stale.seq, hash: stale.hash } },
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.code, "head-moved");
+  assertClean(unit);
 });
 
 test("a full manual lifecycle leaves the chain clean and the states in order", () => {
@@ -1075,6 +1142,12 @@ test("the refusal-code union is frozen public API", () => {
     "duplicate-request",
     "already-executed",
     "budget-exceeded",
+    // APRV-20 pass two, amendment A1: a manual action must bind to bytes, and
+    // the schema cannot know autonomy, so intake enforces it. An addition.
+    "payload-hash-required",
+    // APRV-20 pass two: the grant path used to substitute an empty class and
+    // record the authorization anyway. Its own code now.
+    "grant-classless-request",
     // APRV-18 added this one: SPEC.md §10.2 loop safety, refused at intake for
     // the non-manual paths only. An addition to the union, not a rename.
     "loop-escalated",
@@ -1087,6 +1160,10 @@ test("the refusal-code union is frozen public API", () => {
     "actor-not-human",
     "log-unreadable",
     "log-torn-tail",
+    // APRV-20 finding S1: the gate verifies the chain before it derives anything
+    // from it, so "the log does not verify" needs a code of its own. An addition
+    // to the union, not a rename.
+    "log-corrupt",
     "append-failed",
   ]);
 });

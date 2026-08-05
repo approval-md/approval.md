@@ -84,6 +84,16 @@ const POLICY = [
 /** Same policy, but every request lapses the instant it is made. */
 const POLICY_INSTANT_TTL = POLICY.replace('approval_ttl: "1h"', 'approval_ttl: "1ms"');
 
+/**
+ * The content binding every declared action carries (amended SPEC.md §6.2, A1).
+ *
+ * Manual actions MUST have one — intake refuses `payload-hash-required` without
+ * it — and the spend must present the same value, which these suites do with
+ * `--payload-hash`. One constant across the fixture keeps the CLI assertions
+ * about flags and exit codes rather than about hashing.
+ */
+const PAYLOAD_HASH = "3".repeat(64);
+
 const TASK_FILE = [
   "---",
   "id: task-042",
@@ -104,16 +114,19 @@ const TASK_FILE = [
   "      reversible: false",
   "      est_cost_usd: 0.02",
   '      idempotency_key: "task-042:chaser"',
+  `      payload_hash: "${PAYLOAD_HASH}"`,
   "    - class: read.web",
   '      summary: "Read the scheme deadline page"',
   "      reversible: true",
   "      est_cost_usd: 0",
   '      idempotency_key: "task-042:read"',
+  `      payload_hash: "${PAYLOAD_HASH}"`,
   "    - class: financial.spend",
   '      summary: "Pay the filing fee"',
   "      reversible: false",
   "      est_cost_usd: 5",
   '      idempotency_key: "task-042:fee"',
+  `      payload_hash: "${PAYLOAD_HASH}"`,
   "---",
   "",
   "## Description",
@@ -287,6 +300,7 @@ test("request on the manual path appends approval.requested", () => {
   assert.deepEqual(requested["payload"], {
     class: "communicate.email.external",
     est_cost_usd: 0.02,
+    payload_hash: PAYLOAD_HASH,
     summary: "Send deposit chaser to agency@example.co.uk",
     reversible: false,
   });
@@ -435,6 +449,7 @@ test("grant --json emits the frozen shape and records the human decision", () =>
   assert.deepEqual(granted["payload"], {
     class: "communicate.email.external",
     est_cost_usd: 0.02,
+    payload_hash: PAYLOAD_HASH,
     note: "go, but cc me",
     token_sha256: createHash("sha256").update(token, "utf8").digest("hex"),
   });

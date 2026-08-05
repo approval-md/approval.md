@@ -31,8 +31,11 @@
  *    side effect of anything else. A second `approval run` for the same key does
  *    not "recover" the first; it refuses (`token-consumed` on the manual path,
  *    `already-executed` off it). Recovery is a human calling
- *    {@link finishExecution} with the outcome they actually observed — the same
- *    append path, the real exit code, no fabricated history. An automatic
+ *    {@link resolveExecution} with the outcome they actually observed and a
+ *    mandatory note saying how they know — the same append path, no fabricated
+ *    exit code, `attested_by_human: true` so no reader mistakes it for a
+ *    machine's report. ({@link finishExecution} is the mechanical sibling, used
+ *    by `approval run`, which watched the child exit.) An automatic
  *    reconciliation would have to *guess* whether the email went out, and a
  *    guess written into an append-only log is indistinguishable from a fact.
  * 5. **The budgets contract is honored at the documented charge point.**
@@ -54,26 +57,33 @@
  * have a human grant it, and run it with the token. `core/gate.ts` enforces the
  * matching half at intake so the redirection is visible one step earlier.
  *
- * Time is a parameter here as everywhere: nothing in this module reads the
- * clock, so an execution decision can be replayed exactly as it was made.
+ * ## Time (amended SPEC.md §8, A2)
+ *
+ * `execution.*` events are gate-typed, so their timestamps are assigned by the
+ * runtime at the write boundary: no public function here takes a `ts`, each
+ * reads {@link ExecuteOptions.clock} once, and the party whose budget window
+ * and TTL are being judged does not author the clock. Replay is preserved by
+ * injection — a test hands in a fixed clock, production hands in nothing.
  */
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { attestationRefusal, checkAttestation, type AttestationRefusalDetail } from "./attest.js";
-import { evaluateBudgets, type BudgetVerdict } from "./budgets.js";
-import { readGateRecords, type GateRefusal } from "./gate.js";
+import { evaluateBudgetsWithTask, type BudgetVerdict } from "./budgets.js";
+import { tick, type ClockOptions } from "./clock.js";
 import {
   appendEvent,
   type AppendError,
   type AppendOptions,
   type EventInput,
   type EventRecord,
+  type LogHead,
 } from "./log.js";
 import { isLoopEscalated } from "./loop.js";
 import { loadPolicy, POLICY_FILENAMES, type Autonomy, type LoadPolicyOptions } from "./policy-load.js";
 import { resolve } from "./policy-match.js";
+import { readVerifiedRecords, type LogReadRefusal } from "./state.js";
 import { consumeToken, type TokenRefusal } from "./token.js";
 
 export {
@@ -121,11 +131,30 @@ export const EXECUTE_REFUSAL_CODES = [
   "token-expired",
   /** A human withdrew the grant. */
   "token-revoked",
+  /**
+   * The payload presented does not hash to the bytes the grant approved
+   * (amended SPEC.md §10, A1). Nothing was appended and the token is still live.
+   */
+  "payload-mismatch",
+  /**
+   * `resolveExecution` was called without the mandatory human observation, or
+   * by an actor that is not a `human:`. Recorded here rather than reusing
+   * `not-started` because the log is unchanged for a different reason: the
+   * caller, not the state.
+   */
+  "actor-not-human",
   /** The log could not be read, or holds a line that is not a record. */
   "log-unreadable",
   /** The log's final line is unterminated (a crashed write). */
   "log-torn-tail",
-  /** The append itself failed; `append` carries the underlying error. */
+  /** The chain does not verify; nothing may execute on an untrustworthy log. */
+  "log-corrupt",
+  /**
+   * The append itself failed; `append` carries the underlying error. Its `code`
+   * is `head-moved` when a record landed between this module's read and its
+   * append, so the idempotency and budget checks that authorized the write were
+   * made against an older log. Nothing was written and nothing is retried here.
+   */
   "append-failed",
 ] as const;
 
@@ -148,14 +177,27 @@ export interface ExecuteRefusal {
   append?: AppendError;
 }
 
-/** Options shared by the execution verbs. */
-export interface ExecuteOptions {
+/**
+ * Options shared by the execution verbs.
+ *
+ * No `ts`: `execution.*` events are gate-typed, so amended SPEC.md §8 (A2)
+ * assigns their timestamps at the write boundary from {@link ClockOptions}.
+ */
+export interface ExecuteOptions extends ClockOptions {
   /**
    * The raw single-use token printed by `approval grant`. REQUIRED for an
    * action whose class resolves to `manual`; meaningless off that path, where no
    * token was ever minted.
    */
   token?: string;
+  /**
+   * The hash of the payload about to be executed (amended SPEC.md §10, A1),
+   * forwarded to `core/token.ts` on the manual path. `approval run` computes it
+   * with `runPayloadHash(argv, cwd)`; an adapter with a different payload
+   * computes its own. REQUIRED whenever the grant bound to bytes, which under
+   * A1 is every manual grant.
+   */
+  presentedPayloadHash?: string;
   /** Where to find `APPROVAL.md`. Same semantics as `loadPolicy`. */
   policy?: { dir?: string; file?: string };
   /** Schema directory, passed to the append's write-boundary validation. */
@@ -172,12 +214,9 @@ function refuse(
   return { ok: false, code, message, ...extra };
 }
 
-/** Narrow a gate read refusal onto this module's codes, unchanged. */
-function fromGateRefusal(refusal: GateRefusal): ExecuteRefusal {
-  return refuse(
-    refusal.code === "log-torn-tail" ? "log-torn-tail" : "log-unreadable",
-    refusal.message,
-  );
+/** Narrow a verified-read refusal onto this module's codes, unchanged. */
+function fromReadRefusal(refusal: LogReadRefusal): ExecuteRefusal {
+  return refuse(refusal.code, refusal.message);
 }
 
 /**
@@ -231,12 +270,20 @@ function appendOptionsOf(options: ExecuteOptions): AppendOptions {
   return append;
 }
 
+/**
+ * Append one event under the compare-and-append precondition (APRV-20).
+ *
+ * `expectedHead` is the head observed at the read that authorized this write:
+ * the already-executed check, the loop-safety check, and the budget evaluation
+ * were all made against a log ending exactly there.
+ */
 function append(
   logPath: string,
   input: EventInput,
   options: ExecuteOptions,
+  expectedHead: LogHead | null,
 ): { ok: true; record: EventRecord } | ExecuteRefusal {
-  const result = appendEvent(logPath, input, appendOptionsOf(options));
+  const result = appendEvent(logPath, input, { ...appendOptionsOf(options), expectedHead });
   if (result.ok) return { ok: true, record: result.record };
   return refuse(
     "append-failed",
@@ -357,11 +404,14 @@ export function startExecution(
   logPath: string,
   actionKey: string,
   options: ExecuteOptions,
-  ts: string,
   actor: string,
 ): StartResult {
-  const read = readGateRecords(logPath);
-  if (!read.ok) return fromGateRefusal(read);
+  const ts = tick(options);
+  const read = readVerifiedRecords(
+    logPath,
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+  );
+  if (!read.ok) return fromReadRefusal(read);
   const records = read.records;
 
   const declared = findDeclaration(records, actionKey);
@@ -387,13 +437,20 @@ export function startExecution(
         `action ${actionKey} resolves to manual (${resolution.provenance}${resolution.floorApplied ? ", irreversibility floor" : ""}) and cannot execute without the single-use token minted at grant. Request the action, have a human grant it, and pass the token that grant printed.`,
       );
     }
-    const consumed = consumeToken(logPath, actionKey, token, ts, actor, {
+    const consumed = consumeToken(logPath, actionKey, token, actor, {
       ...(options.policy?.file === undefined ? {} : { policyFile: options.policy.file }),
       ...(options.policy?.file === undefined
         ? { policyDir: options.policy?.dir ?? process.cwd() }
         : {}),
       ...(options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir }),
       ...(options.append === undefined ? {} : { append: options.append }),
+      ...(options.presentedPayloadHash === undefined
+        ? {}
+        : { presentedPayloadHash: options.presentedPayloadHash }),
+      // One moment for the whole operation: the timestamp already read above is
+      // the one the spend records, so `startExecution` and the `execution.started`
+      // it produces cannot disagree about when this happened.
+      clock: () => ts,
     });
     if (!consumed.ok) return fromTokenRefusal(consumed);
     const payload = payloadOf(consumed.record);
@@ -432,7 +489,7 @@ export function startExecution(
     );
   }
 
-  const budget = evaluateBudgets(
+  const budget = evaluateBudgetsWithTask(
     records,
     {
       classLimits: resolution.limits,
@@ -441,6 +498,10 @@ export function startExecution(
     },
     { class: declared.class, est_cost_usd: declared.est_cost_usd },
     ts,
+    // S2: the registered envelope's own `budget.max_cost_usd`. This is the
+    // supervised/autonomous charge point, so it is where the task cap binds for
+    // actions that never pass through a grant.
+    declared.task,
   );
   if (!budget.pass) {
     const failed = budget.verdicts.filter((entry) => !entry.pass);
@@ -460,6 +521,7 @@ export function startExecution(
         },
       },
       options,
+      read.head,
     );
     const message = `budget refused the execution: ${failed
       .map((entry) => `${entry.limit} (${entry.scope})`)
@@ -486,6 +548,7 @@ export function startExecution(
       payload: { class: declared.class, est_cost_usd: declared.est_cost_usd },
     },
     options,
+    read.head,
   );
   if (!appended.ok) return appended;
 
@@ -531,12 +594,51 @@ export function finishExecution(
   logPath: string,
   actionKey: string,
   exitCode: number,
-  ts: string,
   actor: string,
   options: ExecuteOptions = {},
 ): FinishResult {
-  const read = readGateRecords(logPath);
-  if (!read.ok) return fromGateRefusal(read);
+  const open = openExecution(logPath, actionKey, options);
+  if (!open.ok) return open;
+
+  const event = exitCode === 0 ? "execution.completed" : "execution.failed";
+  const appended = append(
+    logPath,
+    {
+      ts: tick(options),
+      event,
+      actor,
+      task: open.task,
+      action_key: actionKey,
+      payload: { exit_code: exitCode },
+    },
+    options,
+    // The head read above, when the not-started / already-finished checks ran.
+    open.head,
+  );
+  if (!appended.ok) return appended;
+
+  return { ok: true, record: appended.record, event, exitCode, task: open.task };
+}
+
+/**
+ * The one dangling execution for `actionKey`, or a refusal explaining why there
+ * is none to close.
+ *
+ * Shared by {@link finishExecution} and {@link resolveExecution} so the two
+ * verbs cannot drift about what "still open" means. Returns the head observed
+ * at the read, which the caller passes as `expectedHead`: the not-started and
+ * already-finished checks were made against a log ending exactly there.
+ */
+function openExecution(
+  logPath: string,
+  actionKey: string,
+  options: ExecuteOptions,
+): { ok: true; task: string; startedSeq: number; head: LogHead | null } | ExecuteRefusal {
+  const read = readVerifiedRecords(
+    logPath,
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+  );
+  if (!read.ok) return fromReadRefusal(read);
 
   let started: EventRecord | null = null;
   let finished: EventRecord | null = null;
@@ -577,15 +679,98 @@ export function finishExecution(
     );
   }
 
-  const event = exitCode === 0 ? "execution.completed" : "execution.failed";
+  return { ok: true, task, startedSeq: started.seq, head: read.head };
+}
+
+// ---------------------------------------------------------------------------
+// resolve — the human recovery verb
+// ---------------------------------------------------------------------------
+
+/** What a human observed about a dangling execution. */
+export type ResolveOutcome = "completed" | "failed";
+
+export type ResolveResult =
+  | {
+      ok: true;
+      record: EventRecord;
+      event: "execution.completed" | "execution.failed";
+      outcome: ResolveOutcome;
+      task: string;
+    }
+  | ExecuteRefusal;
+
+/** Actors permitted to resolve. A fact nobody observed is not an observation. */
+const HUMAN_ACTOR = /^human:.+/u;
+
+/**
+ * Close a dangling execution with what a human actually observed.
+ *
+ * {@link finishExecution} is the mechanical path: `approval run` knows the
+ * child's exit code because it waited for it. This is the path for the case
+ * that code cannot cover — the runtime died between `execution.started` and its
+ * outcome, so the log honestly says "this began and we do not know how it
+ * ended", and only a person who went and looked can say more.
+ *
+ * Four properties, all deliberate:
+ *
+ * 1. **The note is mandatory and non-empty.** The whole value of this event is
+ *    the observation behind it; an unexplained human-attested outcome is
+ *    indistinguishable from a guess, and a guess written into an append-only
+ *    log is indistinguishable from a fact. The CLI refuses an empty note as a
+ *    usage error before reaching here, and this refuses it again.
+ * 2. **Human-only.** An agent closing its own dangling execution is the agent
+ *    reporting on itself, which is the one thing the log exists not to accept.
+ * 3. **`exit_code: null`.** Not `0`, not `127`: nobody ran anything and there
+ *    is no code to report. A fabricated exit code would read exactly like an
+ *    observed one, and `payload.attested_by_human: true` marks the difference
+ *    for every reader and every projection.
+ * 4. **No attestation requirement.** Resolve records a fact a human observed;
+ *    it exercises no policy authority — it authorizes nothing, spends no
+ *    budget, mints no token — so it does not require an attested policy. A
+ *    dangling execution left unclosable because a policy file was edited would
+ *    be a repair blocked by an unrelated fact.
+ */
+export function resolveExecution(
+  logPath: string,
+  actionKey: string,
+  outcome: ResolveOutcome,
+  note: string,
+  actor: string,
+  options: ExecuteOptions = {},
+): ResolveResult {
+  if (!HUMAN_ACTOR.test(actor)) {
+    return refuse(
+      "actor-not-human",
+      `resolve is human-only: it records what a person observed about an execution nobody watched finish, and an agent-attested outcome would be the executing party reporting on itself. The actor must match human:<id>, got ${JSON.stringify(actor)}.`,
+    );
+  }
+  if (note.trim().length === 0) {
+    return refuse(
+      "actor-not-human",
+      `resolve requires a non-empty --note: the event's value is the observation behind it, and an unexplained human-attested outcome cannot be told apart from a guess`,
+    );
+  }
+
+  const open = openExecution(logPath, actionKey, options);
+  if (!open.ok) return open;
+
+  const event = outcome === "completed" ? "execution.completed" : "execution.failed";
   const appended = append(
     logPath,
-    { ts, event, actor, task, action_key: actionKey, payload: { exit_code: exitCode } },
+    {
+      ts: tick(options),
+      event,
+      actor,
+      task: open.task,
+      action_key: actionKey,
+      payload: { note, attested_by_human: true, exit_code: null },
+    },
     options,
+    open.head,
   );
   if (!appended.ok) return appended;
 
-  return { ok: true, record: appended.record, event, exitCode, task };
+  return { ok: true, record: appended.record, event, outcome, task: open.task };
 }
 
 // ---------------------------------------------------------------------------

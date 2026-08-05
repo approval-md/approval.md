@@ -12,24 +12,30 @@
  */
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { appendAttestation } from "../src/core/attest.js";
+
 import {
   danglingExecutions,
   EXECUTE_REFUSAL_CODES,
-  finishExecution,
   findDeclaration,
   loopEscalation,
   LOOP_ESCALATION_THRESHOLD,
-  startExecution,
   type ExecuteOptions,
   type ExecuteRefusal,
 } from "../src/core/execute.js";
-import { decide, register, request } from "../src/core/gate.js";
+import {
+  appendAttestation,
+  decide,
+  finishExecution,
+  register,
+  request,
+  startExecution,
+} from "./clock-adapters.js";
 import type { EventRecord } from "../src/core/log.js";
 import { isLoopEscalated } from "../src/core/loop.js";
 import { verify } from "../src/core/verify.js";
@@ -127,6 +133,18 @@ function asRefusal(value: { ok: boolean }): ExecuteRefusal {
   return value as ExecuteRefusal;
 }
 
+/**
+ * The content binding of amended SPEC.md §6.2 (A1), one per action key.
+ *
+ * Only the manual action strictly needs it — intake refuses
+ * `payload-hash-required` without one — but every declaration carries it here,
+ * because SHOULD-otherwise is the spec's answer for the rest and a fixture that
+ * models only the mandatory case would not exercise the SHOULD path at all.
+ */
+function bindingFor(key: string): string {
+  return createHash("sha256").update(`payload:${key}`, "utf8").digest("hex");
+}
+
 const ENVELOPE = {
   origin: { app: "cartsos", created_by: "human:carter" },
   state: "proposed",
@@ -137,6 +155,7 @@ const ENVELOPE = {
       reversible: false,
       est_cost_usd: 0.02,
       idempotency_key: "task-042:chaser",
+      payload_hash: bindingFor("task-042:chaser"),
     },
     {
       class: "files.write.local",
@@ -144,6 +163,7 @@ const ENVELOPE = {
       reversible: true,
       est_cost_usd: 0.01,
       idempotency_key: "task-042:draft",
+      payload_hash: bindingFor("task-042:draft"),
     },
     {
       class: "files.write.local",
@@ -151,6 +171,7 @@ const ENVELOPE = {
       reversible: true,
       est_cost_usd: 0.01,
       idempotency_key: "task-042:draft2",
+      payload_hash: bindingFor("task-042:draft2"),
     },
     {
       class: "files.write.local",
@@ -158,6 +179,7 @@ const ENVELOPE = {
       reversible: true,
       est_cost_usd: 0.01,
       idempotency_key: "task-042:draft3",
+      payload_hash: bindingFor("task-042:draft3"),
     },
     {
       class: "files.write.local",
@@ -165,6 +187,7 @@ const ENVELOPE = {
       reversible: true,
       est_cost_usd: 0.01,
       idempotency_key: "task-042:draft4",
+      payload_hash: bindingFor("task-042:draft4"),
     },
   ],
 };
@@ -194,6 +217,7 @@ function grantChaser(unit: Case, ts: string = at(1)): string {
       est_cost_usd: 0.02,
       reversible: false,
       summary: "Send deposit chaser",
+      payload_hash: bindingFor("task-042:chaser"),
     },
     ts,
     "agent:claude",
@@ -228,8 +252,15 @@ test("the execution refusal-code union is frozen public API", () => {
     "token-consumed",
     "token-expired",
     "token-revoked",
+    // APRV-20 pass two, amendment A1: the payload presented is not the payload
+    // approved. Nothing appended, token still live.
+    "payload-mismatch",
+    // APRV-20 pass two: `resolveExecution` is human-only and note-mandatory.
+    "actor-not-human",
     "log-unreadable",
     "log-torn-tail",
+    // APRV-20 finding S1, shared verbatim with the gate and the token module.
+    "log-corrupt",
     "append-failed",
   ]);
 });
@@ -259,7 +290,7 @@ test("a manual action with its token appends execution.started and spends the to
   const started = startExecution(
     unit.logPath,
     "task-042:chaser",
-    { ...unit.options, token },
+    { ...unit.options, token, presentedPayloadHash: bindingFor("task-042:chaser") },
     at(2),
     "agent:claude",
   );
@@ -278,7 +309,7 @@ test("a manual action with its token appends execution.started and spends the to
     startExecution(
       unit.logPath,
       "task-042:chaser",
-      { ...unit.options, token },
+      { ...unit.options, token, presentedPayloadHash: bindingFor("task-042:chaser") },
       at(3),
       "agent:claude",
     ),
@@ -382,6 +413,23 @@ test("a second start for the same non-manual key refuses already-executed", () =
   );
   assert.equal(refusal.code, "already-executed");
   assertClean(unit);
+});
+
+test("a spliced-out record refuses log-corrupt: nothing executes on an unverifiable log", () => {
+  const unit = ready();
+  // Delete a record from the middle. Every surviving line is valid JSON and
+  // schema-valid; only the chain says a record is missing — the deletion this
+  // whole design exists to make visible.
+  const lines = readFileSync(unit.logPath, "utf8").split("\n").filter((line) => line.length > 0);
+  writeFileSync(unit.logPath, `${lines.slice(1).join("\n")}\n`, "utf8");
+  const before = readFileSync(unit.logPath, "utf8");
+
+  const refusal = asRefusal(
+    startExecution(unit.logPath, "task-042:draft", unit.options, at(2), "agent:claude"),
+  );
+  assert.equal(refusal.code, "log-corrupt");
+  assert.match(refusal.message, /does not verify/);
+  assert.equal(readFileSync(unit.logPath, "utf8"), before, "nothing was appended");
 });
 
 // ===========================================================================
@@ -562,7 +610,13 @@ test("an escalated task refuses a supervised start, and the gate refuses the req
 
   const gated = request(
     unit.logPath,
-    { task: "task-042", actionKey: "task-042:draft4", cls: "files.write.local", reversible: true },
+    {
+      task: "task-042",
+      actionKey: "task-042:draft4",
+      cls: "files.write.local",
+      reversible: true,
+      payload_hash: bindingFor("task-042:draft4"),
+    },
     at(8),
     "agent:claude",
     { policy: { file: unit.policyPath } },
@@ -576,7 +630,7 @@ test("an escalated task refuses a supervised start, and the gate refuses the req
   const started = startExecution(
     unit.logPath,
     "task-042:chaser",
-    { ...unit.options, token },
+    { ...unit.options, token, presentedPayloadHash: bindingFor("task-042:chaser") },
     at(10),
     "agent:claude",
   );

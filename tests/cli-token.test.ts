@@ -79,6 +79,16 @@ const POLICY = [
 /** Short enough to lapse inside a test, long enough to grant first. */
 const POLICY_SHORT_TTL = POLICY.replace('approval_ttl: "1h"', 'approval_ttl: "1s"');
 
+/**
+ * The content binding every declared action carries (amended SPEC.md §6.2, A1).
+ *
+ * Manual actions MUST have one — intake refuses `payload-hash-required` without
+ * it — and the spend must present the same value, which these suites do with
+ * `--payload-hash`. One constant across the fixture keeps the CLI assertions
+ * about flags and exit codes rather than about hashing.
+ */
+const PAYLOAD_HASH = "3".repeat(64);
+
 const TASK_FILE = [
   "---",
   "id: task-042",
@@ -95,11 +105,13 @@ const TASK_FILE = [
   "      reversible: false",
   "      est_cost_usd: 0.02",
   '      idempotency_key: "task-042:chaser"',
+  `      payload_hash: "${PAYLOAD_HASH}"`,
   "    - class: communicate.email.external",
   '      summary: "Send the follow-up"',
   "      reversible: false",
   "      est_cost_usd: 0.02",
   '      idempotency_key: "task-042:followup"',
+  `      payload_hash: "${PAYLOAD_HASH}"`,
   "---",
   "",
   "## Description",
@@ -198,6 +210,7 @@ test("grant prints the raw token on stdout, warns it is shown once, and logs onl
   assert.deepEqual(granted["payload"], {
     class: "communicate.email.external",
     est_cost_usd: 0.02,
+    payload_hash: PAYLOAD_HASH,
     token_sha256: sha256(token),
   });
   assertTokenAbsentFromLog(dir, token);
@@ -246,6 +259,7 @@ test("token --json emits the frozen live shape and writes nothing", () => {
     grant_seq: 4,
     class: "communicate.email.external",
     est_cost_usd: 0.02,
+    payload_hash: PAYLOAD_HASH,
     task: "task-042",
   });
   assert.equal(rawLog(dir), before, "approval token wrote to the log");
@@ -287,7 +301,7 @@ test("token reports the three deaths: consumed, revoked, expired", () => {
   const executedToken = grantToken(executed);
   assert.equal(
     runCli(
-      ["consume", "task-042:chaser", "--token", executedToken, "--as", "agent:claude"],
+      ["consume", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", executedToken, "--as", "agent:claude"],
       executed,
     ).code,
     0,
@@ -320,7 +334,7 @@ test("token reports the three deaths: consumed, revoked, expired", () => {
   assert.equal(expired.code, 1);
   assert.equal(jsonErr(expired)["code"], "token-expired");
   const spend = runCli(
-    ["consume", "task-042:chaser", "--token", expiringToken, "--as", "agent:claude", "--json"],
+    ["consume", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", expiringToken, "--as", "agent:claude", "--json"],
     expiring,
   );
   assert.equal(spend.code, 1);
@@ -338,7 +352,7 @@ test("consume --json emits the frozen shape and appends exactly one execution.st
   const token = grantToken(dir);
 
   const run = runCli(
-    ["consume", "task-042:chaser", "--token", token, "--as", "agent:claude", "--json"],
+    ["consume", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", token, "--as", "agent:claude", "--json"],
     dir,
   );
   assert.equal(run.code, 0, run.stderr);
@@ -351,6 +365,7 @@ test("consume --json emits the frozen shape and appends exactly one execution.st
     grant_seq: 4,
     class: "communicate.email.external",
     est_cost_usd: 0.02,
+    payload_hash: PAYLOAD_HASH,
   });
 
   assert.deepEqual(events(dir), [
@@ -365,6 +380,7 @@ test("consume --json emits the frozen shape and appends exactly one execution.st
     class: "communicate.email.external",
     est_cost_usd: 0.02,
     token_sha256: sha256(token),
+    payload_hash: PAYLOAD_HASH,
   });
   assertTokenAbsentFromLog(dir, token);
   assertClean(dir);
@@ -373,7 +389,7 @@ test("consume --json emits the frozen shape and appends exactly one execution.st
 test("the second consume is refused token-consumed and appends nothing", () => {
   const dir = readyForDecision();
   const token = grantToken(dir);
-  const spec = ["consume", "task-042:chaser", "--token", token, "--as", "agent:claude", "--json"];
+  const spec = ["consume", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", token, "--as", "agent:claude", "--json"];
 
   assert.equal(runCli(spec, dir).code, 0);
   const second = runCli(spec, dir);
@@ -391,7 +407,7 @@ test("a wrong token is token-mismatch, and the real token still works afterwards
   const wrong = "0".repeat(64);
 
   const bad = runCli(
-    ["consume", "task-042:chaser", "--token", wrong, "--as", "agent:claude", "--json"],
+    ["consume", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", wrong, "--as", "agent:claude", "--json"],
     dir,
   );
   assert.equal(bad.code, 1);
@@ -399,7 +415,7 @@ test("a wrong token is token-mismatch, and the real token still works afterwards
   assert.deepEqual(events(dir).filter((event) => event.startsWith("execution.")), []);
 
   const good = runCli(
-    ["consume", "task-042:chaser", "--token", token, "--as", "agent:claude", "--json"],
+    ["consume", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", token, "--as", "agent:claude", "--json"],
     dir,
   );
   assert.equal(good.code, 0, good.stderr);
@@ -417,7 +433,7 @@ test("a token is bound to its action key: presenting it for another action refus
   const followupToken = grantToken(dir, "task-042:followup");
 
   const crossed = runCli(
-    ["consume", "task-042:followup", "--token", chaserToken, "--as", "agent:claude", "--json"],
+    ["consume", "task-042:followup", "--payload-hash", PAYLOAD_HASH, "--token", chaserToken, "--as", "agent:claude", "--json"],
     dir,
   );
   assert.equal(crossed.code, 1);
@@ -425,7 +441,7 @@ test("a token is bound to its action key: presenting it for another action refus
 
   assert.equal(
     runCli(
-      ["consume", "task-042:followup", "--token", followupToken, "--as", "agent:claude"],
+      ["consume", "task-042:followup", "--payload-hash", PAYLOAD_HASH, "--token", followupToken, "--as", "agent:claude"],
       dir,
     ).code,
     0,
@@ -441,7 +457,7 @@ test("consume refuses a revoked grant with token-revoked and appends nothing", (
   assert.equal(runCli(["revoke", "task-042:chaser", "--as", "human:carter"], dir).code, 0);
 
   const run = runCli(
-    ["consume", "task-042:chaser", "--token", token, "--as", "agent:claude", "--json"],
+    ["consume", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", token, "--as", "agent:claude", "--json"],
     dir,
   );
   assert.equal(run.code, 1);
@@ -463,9 +479,9 @@ test("usage failures are exit 2 and write nothing", () => {
     ["token"],
     ["token", "a", "b"],
     ["token", "task-042:chaser", "--bogus"],
-    ["consume", "--token", token],
+    ["consume", "--payload-hash", PAYLOAD_HASH, "--token", token],
     ["consume", "task-042:chaser"],
-    ["consume", "task-042:chaser", "--token", token, "--as", "system:gate"],
+    ["consume", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", token, "--as", "system:gate"],
   ];
   for (const args of cases) {
     const run = runCli([...args, "--json"], dir);
@@ -475,7 +491,7 @@ test("usage failures are exit 2 and write nothing", () => {
   }
 
   // Identity comes from APPROVAL_HUMAN when --as is absent.
-  const missing = runCli(["consume", "task-042:chaser", "--token", token, "--json"], dir);
+  const missing = runCli(["consume", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", token, "--json"], dir);
   assert.equal(missing.code, 2);
   assert.match(String(jsonErr(missing)["message"]), /APPROVAL_HUMAN/u);
 
@@ -485,7 +501,7 @@ test("usage failures are exit 2 and write nothing", () => {
 test("APPROVAL_HUMAN supplies consume's identity when --as is absent", () => {
   const dir = readyForDecision();
   const token = grantToken(dir);
-  const run = runCli(["consume", "task-042:chaser", "--token", token], dir, {
+  const run = runCli(["consume", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", token], dir, {
     APPROVAL_HUMAN: "human:carter",
   });
   assert.equal(run.code, 0, run.stderr);
