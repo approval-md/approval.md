@@ -75,8 +75,11 @@
  * diagnoses corruption, because two modules with two opinions about what
  * "corrupt" means is worse than one.
  *
- * It does not mint execution tokens. {@link decide} returns the appended
- * `approval.granted` record, which is the seam APRV-17 mints against.
+ * It does not define execution tokens — `core/token.ts` does. {@link decide}'s
+ * grant path calls that module's `mintToken` at the seam APRV-17 documented,
+ * records only the digest in the `approval.granted` payload, and returns the raw
+ * token to its caller. It still appends no `execution.*` event: spending a token
+ * is `core/token.ts`'s `consumeToken`.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -105,6 +108,7 @@ import {
   type PolicyLoadResult,
 } from "./policy-load.js";
 import { resolve, type Resolution } from "./policy-match.js";
+import { mintToken, tokenHash, TOKEN_HASH_FIELD } from "./token.js";
 import { validate, type ValidationError } from "./validate.js";
 
 /** Actor stamped on runtime-originated expiry events (SPEC.md §8 `system:`). */
@@ -939,7 +943,18 @@ export interface DecideOptions extends GateOptions {
 }
 
 export type DecideResult =
-  | { ok: true; decision: Decision; state: RequestState; record: EventRecord }
+  | {
+      ok: true;
+      decision: Decision;
+      state: RequestState;
+      record: EventRecord;
+      /**
+       * The raw single-use execution token, on `grant` only (APRV-17). Returned
+       * here and nowhere else: the log carries only its SHA-256, so this value
+       * is unrecoverable once the caller drops it.
+       */
+      token?: string;
+    }
   | GateRefusal;
 
 const DECISION_EVENT: Readonly<Record<Decision, "approval.granted" | "approval.rejected" | "approval.revoked">> = {
@@ -972,9 +987,11 @@ const DECISION_STATE: Readonly<Record<Decision, RequestState>> = {
  * while other actions consumed the window, and the moment that matters for a
  * commitment is the moment the human commits.
  *
- * Returns the appended record: APRV-17 mints a single-use execution token
- * against the `approval.granted` record this returns, which is why the record —
- * not just a boolean — is the success value.
+ * On `grant` a single-use execution token is minted (`core/token.ts`) and its
+ * SHA-256 recorded in the payload as `token_sha256`. The raw token is returned
+ * in `token` and is written nowhere: whoever calls this is the only party that
+ * will ever hold it, and a lost token is unrecoverable by design — revoke and
+ * request again.
  */
 export function decide(
   logPath: string,
@@ -1120,6 +1137,15 @@ export function decide(
     }
   }
 
+  // APRV-17, the token seam. Minted here — after every check has passed and
+  // immediately before the append — so a refused grant mints nothing. Only the
+  // digest enters the payload; the raw token is returned to this caller alone.
+  let token: string | undefined;
+  if (decision === "grant") {
+    token = mintToken();
+    payload[TOKEN_HASH_FIELD] = tokenHash(token);
+  }
+
   const appended = append(
     logPath,
     {
@@ -1139,6 +1165,7 @@ export function decide(
     decision,
     state: DECISION_STATE[decision],
     record: appended.record,
+    ...(token === undefined ? {} : { token }),
   };
 }
 

@@ -28,6 +28,8 @@ Usage:
   approval request    <task> --action <key> [--as <id>] [--json]
   approval grant|reject|revoke <action-key> [--note <text>] [--as human:<id>] [--json]
   approval expire     <action-key> [--json]
+  approval token      <action-key> [--policy <path>] [--dir <path>] [--json]
+  approval consume    <action-key> --token <t> [--as <id>] [--json]   (internal)
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
   approval --help
 
@@ -43,6 +45,10 @@ Commands:
   reject    record a human refusal           (HUMAN-ONLY)
   revoke    withdraw an unexecuted approval  (HUMAN-ONLY)
   expire    lapse a request whose TTL passed (system verb, actor system:gate)
+  token     report whether a live single-use execution token exists for an
+            action (the RAW token is printed once, by grant, and stored nowhere)
+  consume   spend a token and append execution.started (internal plumbing;
+            "approval run" wraps it)
   reindex   rebuild the SQLite index projection from the log
 
 Defaults:
@@ -534,11 +540,22 @@ ${attestation}
 ${budgets}
 
 Appends exactly one ${event} on success.
-
+${
+  verb === "grant"
+    ? `
+TOKENS: a grant MINTS the single-use execution token for the action and PRINTS
+IT ONCE — on stdout as "token: <64 hex>", or as the "token" key with --json. The
+log records only its SHA-256 (payload token_sha256), so this print is the only
+time the raw value exists outside the caller's memory and NOTHING can recover
+it: not "approval token", not the log, not the index. Capture it, or revoke and
+request again. Spend it with "approval run" (or the internal "approval consume").
+`
+    : ""
+}
 ${GATE_EXIT_CODES}
 
 JSON shape (stdout, one object):
-  success  {"ok":true,"decision":"${verb}","state":"${verb === "grant" ? "granted" : verb === "reject" ? "rejected" : "revoked"}","action_key":"...","seq":5}
+  success  {"ok":true,"decision":"${verb}","state":"${verb === "grant" ? "granted" : verb === "reject" ? "rejected" : "revoked"}","action_key":"...","seq":5${verb === "grant" ? `,\n            "token":"<64 hex>"}   (shown once; never recoverable)` : "}"}
   refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"...",
             "verdicts"?:[...],"detail"?:"...","seq"?:N}}  on stderr
 
@@ -618,4 +635,125 @@ JSON shape (stdout, one object):
   refusal  {"ok":false,"error":{"code":"not-clean"|"torn-tail"|"io",
             "message":"..."}}
   head is null for an empty log; truncated is true only for a forced torn tail.
+${JSON_ERRORS}`;
+
+/**
+ * The token refusal codes, shared by `approval token` and `approval consume`.
+ * Frozen public API in the same sense the gate's codes are: an agent branches on
+ * `error.code` to decide whether to fix itself, stop retrying, or ask a human.
+ */
+const TOKEN_REFUSAL_CODES_HELP = `Refusal codes (error.code with --json; frozen public API):
+  not-granted      no grant governs this action key — never requested, still
+                   awaiting a decision, or rejected. Ask a human, do not retry.
+  token-mismatch   a grant exists but the presented token is not its preimage
+                   (or the grant predates tokens and carries no hash).
+  token-consumed   already spent: an execution.started for this action key is in
+                   the log. A token is single-use; retrying cannot help.
+  token-expired    the PARENT REQUEST's TTL lapsed. There is no separate token
+                   TTL — re-request the action.
+  token-revoked    a human withdrew the grant (approval.revoked).
+  log-unreadable   the log could not be read (exit 4).
+  log-torn-tail    the log's final line is unterminated (exit 3).
+  append-failed    the append itself failed; exit code follows the cause.`;
+
+/**
+ * The one design point everybody gets wrong on first reading, so it is printed
+ * in both token-facing help texts.
+ */
+const TOKEN_SHOWN_ONCE = `THE RAW TOKEN IS SHOWN ONCE, BY "approval grant", AND IS RECOVERABLE FROM
+NOTHING. The log records only its SHA-256 (approval.granted payload
+token_sha256), which is the entire point: an exported, copied, audited log grants
+its reader no power to execute. If the token is lost, revoke the grant and
+request the action again.`;
+
+export const TOKEN_HELP = `approval token — report the execution-token status of an action
+
+Usage:
+  approval token <action-key> [--policy <path>] [--dir <path>] [--log <path>]
+                 [--json]
+
+Flags:
+  --policy <path>  policy file to read defaults.approval_ttl from
+  --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
+  --log <path>     log file to read (never written by this command)
+  --json           machine-readable output
+  -h, --help       this text
+
+${TOKEN_SHOWN_ONCE}
+
+So this command does NOT print the token — it cannot, and no future version can
+without storing the secret the design exists to avoid storing. It reports
+whether a live, unspent token EXISTS for the action key, and prints its digest
+so an operator can match it against the log. SPEC.md §10.1 lists "approval token
+<action-key>  # print single-use execution token if granted"; the honest reading
+under the settled hash-only design is that the token is printed BY grant and
+that this verb reports status. (Flagged for human review.)
+
+Exit 0 means: granted, unrevoked, unexpired, unconsumed — the token minted at
+that grant is still spendable by whoever holds it. Every other answer is a
+refusal at exit 1, naming which of the three deaths applied: execution
+(token-consumed), revocation (token-revoked), or the parent request's TTL
+(token-expired).
+
+Writes nothing. Reads the log and the policy only.
+
+${GATE_EXIT_CODES}
+
+JSON shape (stdout, one object):
+  live     {"ok":true,"action_key":"...","state":"granted","live":true,
+            "token_sha256":"<64 hex>","grant_seq":4,"class":"...",
+            "est_cost_usd":0.02,"task":"task-042"}
+  refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"...",
+            "seq"?:N}}  on stderr
+
+${TOKEN_REFUSAL_CODES_HELP}
+${JSON_ERRORS}`;
+
+export const CONSUME_HELP = `approval consume — spend an execution token (INTERNAL PLUMBING)
+
+Usage:
+  approval consume <action-key> --token <t> [--as <id>] [--policy <path>]
+                   [--dir <path>] [--log <path>] [--json]
+
+Flags:
+  --token <t>      the raw token printed by "approval grant" (required)
+  --as <id>        the executing identity, human:<id> or agent:<id>;
+                   defaults to APPROVAL_HUMAN
+  --policy <path>  policy file to read defaults.approval_ttl from
+  --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
+  --log <path>     log file to read and append to
+  --json           machine-readable output
+  -h, --help       this text
+
+INTERNAL. This is the plumbing verb "approval run" (APRV-18) wraps; it exists in
+the CLI so the token boundary is testable and so an adapter integration can be
+driven by hand. Prefer "approval run -- <cmd…>", which mints, spends, executes
+and records completion as one auditable unit.
+
+Verifies the token and, only if it is live, appends ONE execution.started
+carrying {"class","est_cost_usd","token_sha256"} — class and est_cost_usd copied
+from the grant, per the consumption contract in core/budgets.ts. This is the
+ONLY sanctioned appender of execution.started on the manual path: a manual
+action's start event cannot exist without a verified token behind it.
+
+Supervised and autonomous actions have no grant and therefore no token (amended
+SPEC.md §6.3); this verb correctly refuses them with not-granted. Their
+execution.started belongs to "approval run".
+
+Budgets are NOT charged twice: the evaluator counts an execution.started only
+when the window holds no approval.granted with the same action key, so a manual
+action costs its window exactly one charge — the grant.
+
+${TOKEN_SHOWN_ONCE}
+
+${GATE_EXIT_CODES}
+
+JSON shape (stdout, one object):
+  success  {"ok":true,"action_key":"...","event":"execution.started","seq":5,
+            "token_sha256":"<64 hex>","grant_seq":4,"class":"...",
+            "est_cost_usd":0.02}
+  refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"...",
+            "seq"?:N}}  on stderr
+
+${TOKEN_REFUSAL_CODES_HELP}
 ${JSON_ERRORS}`;
