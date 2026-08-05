@@ -15,7 +15,7 @@ defaults:
 
 approvers:
   carter:
-    channels: [cli]
+    channels: [telegram]
 
 classes:
   read.*:                    { autonomy: autonomous }
