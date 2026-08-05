@@ -43,6 +43,8 @@ Usage:
                       [--policy <path>] [--dir <path>] [--log <path>] [--json]
   approval channel telegram listen|health [--once] [--as human:<id>] [--json]
   approval status     [--policy <path>] [--dir <path>] [--json]
+  approval doctor     [--log <path>] [--policy <path>] [--dir <path>]
+                      [--api-base <url>] [--json]
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
   approval render     [--log <path>] [--out <path>] [--policy <path>]
                       [--dir <path>] [--json]
@@ -81,6 +83,11 @@ Commands:
             the latest chain verdict, loop escalations. Exit 1 when any of
             those needs attention. queue is what a human must answer; status is
             what an operator must fix, and neither carries the other's content
+  doctor    is this ENVIRONMENT sane? build freshness, declared identity, policy
+            attestation, chain health, the Telegram token, the web port — each
+            with a concrete repair. status asks whether the SYSTEM needs
+            attention; doctor asks whether the machine you are typing on can run
+            the system at all. Appends nothing, sends nothing, repairs nothing
   channel   put pending requests in front of a human over the channel contract.
             "channel cli" renders the queue with [computed]/[claimed] markers and
             the full payload in delimiters, and with a terminal collects
@@ -1111,6 +1118,94 @@ JSON shape (stdout, one object):
      "escalated":true}]}
   ok is true whenever status ran; healthy is the verdict. attestation.seq is
   null for not-attested and unreadable.
+${JSON_ERRORS}`;
+
+export const DOCTOR_HELP = `approval doctor — environment sanity in one verb
+
+Usage:
+  approval doctor [--log <path>] [--policy <path>] [--dir <path>]
+                  [--api-base <url>] [--json]
+
+Flags:
+  --log <path>       log file to verify (never written by this command)
+  --policy <path>    policy file whose bytes attestation is judged against
+  --dir <path>       directory to discover APPROVAL.md / APPROVALS.md in
+  --api-base <url>   Bot API base for the Telegram probe
+                     (default https://api.telegram.org)
+  --root <path>      TEST-ONLY: point the build-freshness check at another tree.
+                     It moves no other check. Real invocations never pass it —
+                     freshness is judged against the installation this binary
+                     was loaded from, not against the working directory
+  --json             machine-readable output
+  -h, --help         this text
+
+Six checks, in the order in which their failures cascade:
+
+  build-freshness  dist/src/cli/main.js — the exact file the bin loader runs —
+                   is present and NOT OLDER than the newest file under src/ or
+                   tsconfig.json. Two shapes have their own message because
+                   both were lost time in a real ceremony: a STALE BUILD, where
+                   verbs that exist in the source are simply absent from the
+                   binary; and an UNBUILT CHECKOUT, where cli.js exists with no
+                   dist/ behind it and the checkout only looks installed. A
+                   published install carries no src/, so freshness is
+                   unanswerable there and the check SKIPS rather than passing.
+  identity         APPROVAL_HUMAN names a human:<id>. Environment only, no --as:
+                   this reports what the NEXT command will find.
+  attestation      the live policy bytes match the latest policy.updated in the
+                   log. Anything else — never attested, edited since, unreadable
+                   — makes every gated operation refuse, and that refusal reads
+                   like "the policy says no" when it means "the policy is
+                   unverified".
+  log              the hash chain verifies. A torn tail and a corrupt log are
+                   both failures here; neither is repaired, and doctor never
+                   truncates a torn line.
+  telegram         getMe against --api-base, when APPROVAL_TG_TOKEN and
+                   APPROVAL_TG_CHAT are both set; otherwise SKIP, because a
+                   runtime driven by "channel cli" is healthy without Telegram.
+                   getMe AND NOTHING ELSE: never sendMessage, which would buzz a
+                   human's phone for a diagnostic, and never getUpdates, whose
+                   offset a running listener owns — a decision tap consumed here
+                   would never reach the listener waiting for it. The token
+                   value never appears in the output. ("channel telegram health"
+                   remains the offline answer: it reports configuration and
+                   makes no network call at all.)
+  web-port         channels.web.port (default 4680) can be bound on 127.0.0.1.
+                   A port already HELD is a PASS with a note — the likeliest
+                   holder is this runtime's own "approval channel web", and a
+                   doctor that cried broken at a working channel would train
+                   people to ignore it. Only a bind error meaning the config
+                   itself is wrong (EACCES on a privileged port) fails.
+
+APPENDS NOTHING. Not an event, not a marker. An operator reaching for a
+diagnostic while the log is in a state they do not understand must not have that
+state changed by looking at it. Nothing here writes, sends, or repairs; every
+failure carries a fix the human runs themselves.
+
+THIS IS NOT "approval status". status reports the health of the SYSTEM recorded
+in the log — attestation, dangling executions, budgets, escalations. doctor
+reports whether this MACHINE can run the system: the right build, a declared
+identity, a reachable channel. A stale binary is invisible to status and is
+exactly what doctor exists to name.
+
+${EXIT_CODES}
+  doctor: 0 when every check passed or skipped, 1 when ANY failed. 4 only when
+  doctor itself could not look — the installation root would not stat for a
+  reason other than "not there". An unreadable log or policy is NOT that: those
+  are environment facts, which is what this command reports, so they are check
+  failures at 1.
+
+JSON shape (stdout, one object):
+  {"ok":false,"checks":[
+    {"check":"build-freshness","status":"pass","detail":"..."},
+    {"check":"identity","status":"fail","detail":"...","fix":"..."},
+    {"check":"attestation","status":"pass","detail":"..."},
+    {"check":"log","status":"pass","detail":"..."},
+    {"check":"telegram","status":"skip","detail":"..."},
+    {"check":"web-port","status":"pass","detail":"..."}]}
+  status is "pass" | "fail" | "skip". fix is present only when there is
+  something to do. ok is true when no check failed — a skip does not make it
+  false. The six checks always appear, in this order.
 ${JSON_ERRORS}`;
 
 export const EXECUTION_HELP = `approval execution — recovery verbs for executions the runtime could not close
