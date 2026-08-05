@@ -15,7 +15,7 @@
  *
  * Neither failure was a bug in the runtime. Both were facts about the
  * environment that nothing was in a position to state out loud. `doctor` is
- * that statement: six checks, in the order in which their failures cascade,
+ * that statement: seven checks, in the order in which their failures cascade,
  * each with a concrete repair.
  *
  * ## What it will not do
@@ -45,7 +45,7 @@
  */
 
 import { createServer } from "node:net";
-import { readdirSync, statSync } from "node:fs";
+import { closeSync, openSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve as resolvePathSegments } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -57,6 +57,7 @@ import {
 } from "../channels/telegram.js";
 import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
 import type { EventRecord } from "../core/log.js";
+import { payloadStoreDirFor } from "../core/payload-store.js";
 import { POLICY_FILENAMES, loadPolicy } from "../core/policy-load.js";
 import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
@@ -533,6 +534,99 @@ async function checkWebPort(port: number): Promise<DoctorCheck> {
 }
 
 // ---------------------------------------------------------------------------
+// 7. payload store
+// ---------------------------------------------------------------------------
+
+/** The sentence every verdict of this check carries. */
+const PAYLOAD_STORE_WARNING =
+  "the store holds the bytes approvals bind to, keyed by their hash, and it is the one cache that CANNOT be rebuilt from the log: the log records the binding, never the material, so payloads deleted from here are gone and their manual requests render payload-unavailable";
+
+/**
+ * Can the payload store be written?
+ *
+ * A store that does not exist yet is a `pass`: the directory is created by the
+ * first request that carries `--payload`, and a repo that has not made one is
+ * not broken. What is worth failing on is an existing directory this process
+ * cannot write, because the failure surfaces at exactly the wrong moment: a
+ * request already accepted by the gate refuses `payload-store-failed` mid
+ * ceremony, and the operator reads it as the runtime refusing rather than as a
+ * permission bit.
+ *
+ * The probe is a real create-and-remove in the store directory, not a `statSync`
+ * mode test: mode bits do not answer the question on a read-only mount, under an
+ * ACL, or in a container whose uid mapping differs from the one that made the
+ * directory. Nothing is left behind, and no payload file is read, written or
+ * verified here.
+ */
+function checkPayloadStore(logPath: string): DoctorCheck {
+  const storeDir = payloadStoreDirFor(logPath);
+
+  let stats;
+  try {
+    stats = statSync(storeDir);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+      return {
+        check: "payload-store",
+        status: "pass",
+        detail: `${storeDir} is not created until the first request --payload; ${PAYLOAD_STORE_WARNING}`,
+      };
+    }
+    return {
+      check: "payload-store",
+      status: "fail",
+      detail: `${storeDir} could not be stat'd: ${detailOf(cause)}; ${PAYLOAD_STORE_WARNING}`,
+      fix: `make ${storeDir} readable and writable by the user running approval`,
+    };
+  }
+
+  if (!stats.isDirectory()) {
+    return {
+      check: "payload-store",
+      status: "fail",
+      detail: `${storeDir} exists and is not a directory, so no payload can be stored beside the log; ${PAYLOAD_STORE_WARNING}`,
+      fix: `move whatever occupies ${storeDir} aside, then re-run the request`,
+    };
+  }
+
+  const probe = join(storeDir, `.doctor-write-probe-${String(process.pid)}`);
+  try {
+    const handle = openSync(probe, "wx");
+    closeSync(handle);
+  } catch (cause) {
+    return {
+      check: "payload-store",
+      status: "fail",
+      detail: `${storeDir} exists but is not writable (${detailOf(cause)}): a request carrying --payload will refuse payload-store-failed; ${PAYLOAD_STORE_WARNING}`,
+      fix: `make ${storeDir} writable by the user running approval (e.g. \`chmod u+w ${storeDir}\`), and check its ownership`,
+    };
+  } finally {
+    try {
+      unlinkSync(probe);
+    } catch {
+      // The probe may never have been created; nothing to clean up.
+    }
+  }
+
+  let files = 0;
+  try {
+    for (const entry of readdirSync(storeDir, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith(".json") && !entry.name.startsWith(".")) {
+        files += 1;
+      }
+    }
+  } catch {
+    files = 0;
+  }
+
+  return {
+    check: "payload-store",
+    status: "pass",
+    detail: `${storeDir} is writable and holds ${files} payload file(s); ${PAYLOAD_STORE_WARNING}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
@@ -619,6 +713,7 @@ export function commandDoctor(
       checkLog(logPath, verified.result),
       await checkTelegram(apiBase),
       await checkWebPort(port ?? WEB_DEFAULT_PORT),
+      checkPayloadStore(logPath),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

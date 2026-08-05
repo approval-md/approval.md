@@ -88,6 +88,19 @@ const POLICY_NO_BUDGETS = POLICY.split("budgets:")[0] as string;
  */
 const PAYLOAD_HASH = "3".repeat(64);
 
+/**
+ * The unrebuildable warning `status` carries in `payload_store.note`, pinned
+ * verbatim (APRV-35).
+ *
+ * Duplicated from `src/cli/execute.ts` on purpose: the point of the key is the
+ * sentence, and a test that matched it loosely would let the one warning about
+ * the one cache a rebuild cannot recreate be softened without anybody noticing.
+ */
+const PAYLOAD_STORE_NOTE =
+  "the payload store holds the bytes approvals bind to, keyed by their hash; " +
+  "it is the one cache that cannot be rebuilt from the log, and losing it leaves " +
+  "manual requests rendering as payload-unavailable rather than showing bytes no hash bound";
+
 const TASK_FILE = [
   "---",
   "id: task-042",
@@ -255,6 +268,11 @@ test("status --json on a healthy repo emits the frozen shape and exits 0", () =>
       },
     ],
     loop_escalations: [],
+    // Additive (APRV-35). This fixture binds hashes but never supplies bytes,
+    // so nothing was ever stored and the directory does not exist, which is
+    // the normal state of a repo that has made no request carrying --payload,
+    // and does not move `healthy` or the exit code above.
+    payload_store: { present: false, files: 0, note: PAYLOAD_STORE_NOTE },
   });
   assert.equal(rawLog(dir), rawLog(dir), "status must not write");
   assertClean(dir);
@@ -294,6 +312,79 @@ test("status text mode names health, attestation, verification, dangling and bud
   assert.match(run.stdout, /dangling executions: none/u);
   assert.match(run.stdout, /budget global\.daily_usd/u);
   assert.match(run.stdout, /loop escalations: none/u);
+  assert.match(run.stdout, /payload store: not created yet; /u);
+});
+
+// ---------------------------------------------------------------------------
+// The payload store (APRV-35)
+// ---------------------------------------------------------------------------
+
+test("status counts the payload store once a real request has stored bytes", () => {
+  const dir = caseDir();
+  const payload = '{"to":"landlord@example.com","body":"Chasing the deposit."}\n';
+  writeFileSync(join(dir, "payload.json"), payload, "utf8");
+
+  // The declared binding is whatever `approval payload hash` says about these
+  // exact bytes, so the request below is the real accepted path rather than a
+  // directory assembled by hand.
+  const hashRun = runCli(["payload", "hash", "payload.json"], dir);
+  assert.equal(hashRun.code, 0, hashRun.stderr);
+  const hash = hashRun.stdout.trim();
+  writeFileSync(join(dir, "task-042.md"), TASK_FILE.split(PAYLOAD_HASH).join(hash), "utf8");
+
+  assert.equal(runCli(["policy", "attest", "--as", "human:carter"], dir).code, 0);
+  assert.equal(runCli(["register", "task-042.md", "--as", "agent:claude"], dir).code, 0);
+  const requested = runCli(
+    [
+      "request",
+      "task-042",
+      "--action",
+      "task-042:chaser",
+      "--as",
+      "agent:claude",
+      "--payload",
+      "payload.json",
+    ],
+    dir,
+  );
+  assert.equal(requested.code, 0, requested.stderr);
+
+  const { code, body } = statusJson(dir);
+  assert.equal(code, 0);
+  assert.deepEqual(body["payload_store"], {
+    present: true,
+    files: 1,
+    note: PAYLOAD_STORE_NOTE,
+  });
+  assert.equal(body["healthy"], true, "the store is informational, not a health input");
+
+  const text = runCli(["status"], dir);
+  assert.equal(text.code, 0, text.stderr);
+  assert.match(text.stdout, /payload store: 1 file\(s\); /u);
+  assertClean(dir);
+});
+
+test("a lost payload store is reported without changing health or the exit code", () => {
+  const dir = ready();
+  requestChaser(dir);
+  grant(dir, "task-042:chaser");
+
+  // Deleting the store cannot be undone by any rebuild, which is exactly what
+  // the note says; what it must NOT do is turn a healthy repo unhealthy.
+  rmSync(join(dir, ".approval", "payloads"), { recursive: true, force: true });
+
+  const { code, body } = statusJson(dir);
+  assert.equal(code, 0);
+  assert.equal(body["healthy"], true);
+  assert.deepEqual(body["payload_store"], {
+    present: false,
+    files: 0,
+    note: PAYLOAD_STORE_NOTE,
+  });
+  assert.match(
+    String((body["payload_store"] as Record<string, unknown>)["note"]),
+    /cannot be rebuilt from the log/u,
+  );
 });
 
 // ===========================================================================

@@ -40,6 +40,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { readdirSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
@@ -56,6 +57,7 @@ import {
   type ResolveOutcome,
 } from "../core/execute.js";
 import { isPayloadHash, runPayloadHash } from "../core/payload.js";
+import { payloadStoreDirFor } from "../core/payload-store.js";
 import { readVerifiedRecords, requestState } from "../core/state.js";
 import type { EventRecord } from "../core/log.js";
 import { loadPolicy, parseDuration, POLICY_FILENAMES } from "../core/policy-load.js";
@@ -665,6 +667,49 @@ function budgetHeadroom(
   ).verdicts;
 }
 
+/**
+ * The one warning `status` exists to keep in front of an operator: the payload
+ * store is the only thing under `.approval/` that a rebuild cannot recreate.
+ *
+ * QUEUE.md regenerates and `index.sqlite` reindexes, both from the log. The
+ * store does not: the log records the *hash* a request bound to, never the
+ * bytes, so bytes deleted from `.approval/payloads/` are gone. What survives is
+ * the binding, which is why the loss is visible rather than silent: every
+ * manual request whose material went with it renders `payload-unavailable`
+ * (`channels/tagging.ts`) instead of showing an approver something no hash ever
+ * bound.
+ */
+const PAYLOAD_STORE_NOTE =
+  "the payload store holds the bytes approvals bind to, keyed by their hash; " +
+  "it is the one cache that cannot be rebuilt from the log, and losing it leaves " +
+  "manual requests rendering as payload-unavailable rather than showing bytes no hash bound";
+
+/** How many payloads are stored, and whether the store exists at all. */
+function payloadStoreSummary(logPath: string): {
+  present: boolean;
+  files: number;
+  note: string;
+} {
+  let files = 0;
+  let present = true;
+  try {
+    for (const entry of readdirSync(payloadStoreDirFor(logPath), { withFileTypes: true })) {
+      // `<hash>.json` and nothing else. Temp files from an interrupted atomic
+      // write start with a dot and are not payloads anybody can read.
+      if (entry.isFile() && entry.name.endsWith(".json") && !entry.name.startsWith(".")) {
+        files += 1;
+      }
+    }
+  } catch {
+    // Unreadable and absent are reported the same way on purpose: `status` is
+    // not the environment diagnostic. `approval doctor` distinguishes them, and
+    // an unwritable store is a failure there.
+    present = false;
+    files = 0;
+  }
+  return { present, files, note: PAYLOAD_STORE_NOTE };
+}
+
 export function commandStatus(argv: string[], streams: Streams, cwd: string): number {
   const outcome = front(argv, { ...COMMON_FLAGS, ...POLICY_FLAGS }, STATUS_HELP, streams, cwd);
   if (outcome.kind === "handled") return outcome.code;
@@ -705,6 +750,10 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       escalated: true,
     }));
   const budgets = budgetHeadroom(records, flags, cwd, now());
+  // Informational: the store's state never moves `healthy` or the exit code.
+  // A repo that has never made a `--payload` request has no store, and an
+  // operator is being told what it is, not that anything is wrong.
+  const payloadStore = payloadStoreSummary(logPath);
 
   const verificationSummary = {
     status: verification.status,
@@ -732,6 +781,7 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       dangling,
       budgets,
       loop_escalations: escalations,
+      payload_store: payloadStore,
     });
   } else {
     streams.out(`health: ${healthy ? "ok" : "attention"}\n`);
@@ -762,6 +812,11 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
         );
       }
     }
+    streams.out(
+      `payload store: ${
+        payloadStore.present ? `${payloadStore.files} file(s)` : "not created yet"
+      }; ${PAYLOAD_STORE_NOTE}\n`,
+    );
     if (escalations.length === 0) streams.out("loop escalations: none\n");
     else {
       for (const entry of escalations) {

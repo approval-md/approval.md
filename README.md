@@ -100,8 +100,9 @@ Then confirm the world is sane before you trust anything it tells you:
 approval doctor
 ```
 
-`doctor` runs six checks in the order their failures cascade: build freshness,
-identity, attestation, log chain, Telegram reachability, and the web port. It
+`doctor` runs seven checks in the order their failures cascade: build freshness,
+identity, attestation, log chain, Telegram reachability, the web port, and the
+payload store. It
 appends nothing, sends no message, and repairs nothing. Each failure comes with a
 concrete fix string you run yourself. It exists because a real ceremony lost time
 twice to a stale `dist/` and an unbuilt checkout, neither of which was a runtime
@@ -186,6 +187,27 @@ Bytes that do not hash to the declared binding are refused `payload-mismatch`,
 and nothing is stored or appended. Class, cost, and reversibility come from the
 registered envelope rather than from flags, so an agent cannot rename its own
 class between registering and asking.
+
+### The payload store
+
+Accepted payloads land in `.approval/payloads/`, one file per binding, named by
+its own hash. Treat that directory as data, not as scratch space. `QUEUE.md`
+regenerates and `index.sqlite` reindexes, both from the log; the payload store is
+the one cache a rebuild cannot recreate, because the log records the hash a
+request bound to and never the material itself. Delete the store and those bytes
+are gone. The binding survives, which is what makes the loss visible rather than
+silent: every affected manual request renders `payload-unavailable` instead of
+showing an approver bytes no hash ever bound. `approval status` reports the store
+in every run and `approval doctor` fails when it exists and cannot be written.
+
+Some material is deliberately kept out of it. `--payload-dir` (CLI and web
+channels) and `--payloads` (Telegram) let an operator serve payload bytes from
+somewhere they chose: a vault, an encrypted volume, any location where the rule
+is that these bytes never rest beside the log. The tagger re-hashes whatever
+those flags supply and compares it against the recorded binding, so the
+authoritative answer stays the log's either way and an override cannot put
+different bytes in front of an approver. Retiring the flags now that the store
+exists is deferred to M6, pending exactly this use case.
 
 Now start the listener and pick up your phone:
 

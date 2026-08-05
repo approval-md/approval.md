@@ -250,6 +250,8 @@ Events written through the gate (`approval.*`, `execution.*`, `budget.*`, `audit
 1. **The queue** (`.approval/QUEUE.md`): a rendered, read-only markdown view of pending requests (task, actions, declared effects, cost, TTL countdown) plus the sampled-audit backlog. Regenerated on every relevant event. This is the screenshot; it is never the truth.
 2. **The index** (`.approval/index.sqlite`): rebuilt from the log (`approval reindex`), used for queries like "pending manual approvals touching `financial.*`, oldest first." Any SQLite client, including DuckDB, can read it; deleting it loses nothing.
 
+`.approval/payloads/` sits beside these as a content-addressed material store: the bytes approvals bind to, keyed by their hash. It is not a projection, and unlike them it cannot be rebuilt from the log.
+
 Every displayed field is one of two kinds and MUST be visibly distinguished: **computed** (derived by the runtime from the log, policy, or payload bytes: class resolution, budget state, attestation status, payload hash, chain position) and **claimed** (authored by the requesting agent: summaries, estimates, rationale, confidence). Rendering claimed fields with the visual authority of computed fields misrepresents the verification boundary to the approver and is a conformance failure for a channel.
 
 ## 10. Runtime
