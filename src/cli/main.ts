@@ -62,6 +62,7 @@ import {
 } from "./execute.js";
 import { commandChannel } from "./channel.js";
 import { commandPolicy } from "./policy.js";
+import { commandRender } from "./render.js";
 import { commandConsume, commandToken } from "./token.js";
 import {
   DEFAULT_INDEX_PATH,
@@ -509,6 +510,10 @@ export function main(argv: string[], options: MainOptions = {}): number {
       return commandStatus(rest, streams, cwd);
     case "reindex":
       return commandReindex(rest, streams, cwd);
+    // The projection verb (APRV-24). `render` writes .approval/QUEUE.md and
+    // nothing else; the projection itself is `channels/render-queue.ts`.
+    case "render":
+      return commandRender(rest, streams, cwd);
     default:
       return usageError(
         streams,
