@@ -1,9 +1,11 @@
 ---
 id: APRV-24
 title: 'QUEUE.md renderer: pure read-only projection'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@fable'
 created_date: '2026-08-05 10:50'
+updated_date: '2026-08-05 11:15'
 labels: []
 milestone: m-5
 dependencies:
