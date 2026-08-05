@@ -62,6 +62,7 @@ import {
 } from "./execute.js";
 import { commandChannel } from "./channel.js";
 import { commandDoctor } from "./doctor.js";
+import { commandPayload } from "./payload.js";
 import { commandPolicy } from "./policy.js";
 import { commandRender } from "./render.js";
 import { commandConsume, commandToken } from "./token.js";
@@ -549,6 +550,12 @@ export function main(argv: string[], options: MainOptions = {}): number {
       );
       return EXIT_OK;
     }
+    // The binding verb (APRV-29). `payload hash` prints the payload_hash of a
+    // JSON document through the same core function the gate uses, so nobody has
+    // to import an internal module (or reinvent JCS) to fill in a declaration.
+    // It reads no log and writes nothing.
+    case "payload":
+      return commandPayload(rest, streams, cwd);
     case "reindex":
       return commandReindex(rest, streams, cwd);
     // The projection verb (APRV-24). `render` writes .approval/QUEUE.md and

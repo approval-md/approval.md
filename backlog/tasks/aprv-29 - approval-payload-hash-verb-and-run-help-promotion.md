@@ -1,9 +1,11 @@
 ---
 id: APRV-29
 title: approval payload hash verb and run --help promotion
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@fable'
 created_date: '2026-08-05 12:19'
+updated_date: '2026-08-05 13:03'
 labels: []
 milestone: m-6
 dependencies: []
@@ -20,7 +22,19 @@ Follow-ups 2 and 4 from the M4 demo (human-approved 2026-08-09). Computing a pay
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 approval payload hash <file> and approval payload hash - (stdin) print the payload hash used by the binding path, byte-identical to what request/grant record; --json frozen; non-JSON input refused with a clear message
-- [ ] #2 run --help documents --payload-hash as the normal path for adapter-shaped payloads, with the argv+cwd default explained; the examples walkthrough replaces its node -e step with the new verb
-- [ ] #3 Exit codes per the frozen table; subprocess tests pin verb output against a grant recorded through the real gate
+- [x] #1 approval payload hash <file> and approval payload hash - (stdin) print the payload hash used by the binding path, byte-identical to what request/grant record; --json frozen; non-JSON input refused with a clear message
+- [x] #2 run --help documents --payload-hash as the normal path for adapter-shaped payloads, with the argv+cwd default explained; the examples walkthrough replaces its node -e step with the new verb
+- [x] #3 Exit codes per the frozen table; subprocess tests pin verb output against a grant recorded through the real gate
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented by Opus subagent; fable review found nothing to override. The verb hashes the canonical VALUE (non-JSON bytes have no defined hash — stated in the refusal); the load-bearing test proves byte-identity against a real grant recorded through the gate, and pins the examples doc's expected hash value so the walkthrough transcript is regression-tested. RUN_HELP promotion landed with the settled framing: argv+cwd default is right whenever the command IS the action; content-bound actions MUST pass --payload-hash, obtained from the verb or recorded at request time. examples node -e internal-module step replaced. Verified on merged tree: 894/894, lint, typecheck.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+approval payload hash <file|->: the binding hash as a first-class verb, proven byte-identical to gate-recorded hashes; run --help promotes --payload-hash to documented common case; examples walkthrough de-internalized. 10 tests. Verified: 894/894, lint, typecheck.
+<!-- SECTION:FINAL_SUMMARY:END -->
