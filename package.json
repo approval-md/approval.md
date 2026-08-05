@@ -20,7 +20,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
-    "test": "tsc -p tsconfig.json && node --test \"dist/tests/**/*.test.js\"",
+    "test": "tsc -p tsconfig.json && node scripts/run-tests.mjs",
     "lint": "oxlint src tests",
     "check:tier": "node scripts/classify-tier.mjs",
     "check:changed": "node scripts/classify-tier.mjs --working-tree --run"
