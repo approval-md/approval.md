@@ -1,5 +1,7 @@
 # approval.md
 
+[![ci](https://github.com/approval-md/approval.md/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/approval-md/approval.md/actions/workflows/ci.yml)
+
 **Human approval for agent actions.**
 
 Your AGENTS.md says "require approval first". approval.md enforces it, and

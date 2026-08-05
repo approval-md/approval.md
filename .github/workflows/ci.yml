@@ -1,0 +1,123 @@
+# CI — the gate, outside any agent's hands (APRV-37).
+#
+# The tier a change rides is computed here, by scripts/classify-tier.mjs, from
+# the paths git reports. No input from the author of the change — commit
+# message, label, task file, or agent claim — can select it. The two rules that
+# make that true are in the classify job below:
+#
+#   1. a push to main is `full` unconditionally, without consulting anything;
+#   2. every other event asks the classifier, which fails closed to `full`.
+#
+# The workflow references no secrets and needs none: it checks out public code,
+# installs pinned dependencies, and runs the test matrix. Nothing here can send,
+# spend, publish, or deploy, so there is nothing for a malicious pull request to
+# steal by getting a workflow run.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    name: classify tier
+    runs-on: ubuntu-latest
+    outputs:
+      tier: ${{ steps.tier.outputs.tier }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: tier
+        name: compute tier from changed paths
+        # Context values are passed as environment variables rather than
+        # interpolated into the script text: a branch name is attacker-shaped
+        # input, and it must not be able to become shell syntax.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          # Rule 1: push to main is always the full tier.
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF" = "refs/heads/main" ]; then
+            echo "push to main: tier=full, unconditionally"
+            echo "tier=full" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="origin/$BASE_REF"
+          else
+            base="origin/main"
+          fi
+          tier="$(node scripts/classify-tier.mjs --base "$base")"
+          case "$tier" in
+            light|full) ;;
+            *) tier=full ;;   # unrecognised output fails closed
+          esac
+          echo "base=$base tier=$tier"
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
+      - name: explain the verdict
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF" = "refs/heads/main" ]; then
+            echo '{"tier":"full","reason":"push-to-main"}'
+            exit 0
+          fi
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="origin/$BASE_REF"
+          else
+            base="origin/main"
+          fi
+          node scripts/classify-tier.mjs --base "$base" --json
+
+  doc-guard:
+    name: docs guard (light tier)
+    needs: classify
+    if: needs.classify.outputs.tier == 'light'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node --test dist/tests/docs-guard.test.js
+
+  full:
+    name: full gate (node ${{ matrix.node-version }})
+    needs: classify
+    if: needs.classify.outputs.tier == 'full'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: npm run lint
+      - run: npm run typecheck
