@@ -1,0 +1,22 @@
+{
+  "origin": {
+    "app": "backlog-md",
+    "created_by": "agent:claude-admin"
+  },
+  "route": {
+    "assignee": "agent:claude-admin",
+    "confidence": 0.61,
+    "rationale": "stage transition proposed after acceptance criteria checked"
+  },
+  "state": "awaiting",
+  "actions": [
+    {
+      "class": "record.write.stage",
+      "summary": "Move task-042 from In Progress to Done",
+      "reversible": true,
+      "est_cost_usd": 0,
+      "idempotency_key": "task-042:stage:done:2026-08-05",
+      "payload_hash": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"
+    }
+  ]
+}

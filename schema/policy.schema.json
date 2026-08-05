@@ -94,7 +94,7 @@
           "type": "number",
           "minimum": 0,
           "maximum": 1,
-          "description": "SPEC.md §5.2: fraction of `supervised` actions escalated for after-the-fact human review, as a proportion in [0, 1] (0 = never sample, 1 = review everything). Sampling is deterministic and seeded from the event hash, so a given rate is reproducible and unguessable in advance by the agent."
+          "description": "SPEC.md §5.2: fraction of `supervised` actions escalated for after-the-fact human review, as a proportion in [0, 1] (0 = never sample, 1 = review everything). Sample selection is reproducible by the operator and unpredictable to agents: HMAC-SHA-256 over the event hash using an operator-held secret (amended SPEC.md §5.2; enforcement lands with the M5 daemon)."
         }
       }
     },
@@ -180,9 +180,19 @@
         "limits": {
           "type": "object",
           "minProperties": 1,
-          "description": "SPEC.md §5.1/§5.2: per-class ceilings, e.g. { per_action_usd: 25, daily_usd: 100 }. Limit names are open-ended (the taxonomy in §7 grows), but every value MUST be a positive number: zero or negative would express 'no action may ever pass', which is spelled `autonomy: manual` instead, and a non-numeric limit cannot participate in budget arithmetic.",
+          "description": "SPEC.md §5.1/§5.2: per-class ceilings, e.g. { per_action_usd: 25, daily_usd: 100 }. Limit names are open-ended (the taxonomy in §7 grows), but every value MUST be a positive number: zero or negative would express 'no action may ever pass', which is spelled `autonomy: manual` instead, and a non-numeric limit cannot participate in budget arithmetic. Two request-volume names are documented explicitly (SPEC.md §5.2) and are counts, hence integers: `max_pending` and `requests_per_hour`.",
           "additionalProperties": { "$ref": "#/$defs/positiveNumber" },
-          "propertyNames": { "$ref": "#/$defs/identifier" }
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "properties": {
+            "max_pending": {
+              "$ref": "#/$defs/positiveInteger",
+              "description": "SPEC.md §5.2: maximum simultaneously pending requests for this class; further requests are refused at intake with reason `queue-full`. A count, hence an integer. Policy vocabulary in v0.1: enforcement lands with M4/M5, so a policy may declare it before any runtime reads it."
+            },
+            "requests_per_hour": {
+              "$ref": "#/$defs/positiveInteger",
+              "description": "SPEC.md §5.2: rolling-window ceiling on request creation, evaluated per origin; excess is refused with reason `rate-limited` and logged. A count, hence an integer. The per-origin windowing (and enforcement generally) lands with M4/M5; v0.1 only accepts the vocabulary."
+            }
+          }
         }
       }
     },
@@ -200,8 +210,17 @@
           "type": "integer",
           "exclusiveMinimum": 0,
           "description": "SPEC.md §5.1: maximum number of side-effecting actions per rolling day for this scope. A count, hence an integer."
+        },
+        "max_pending": {
+          "$ref": "#/$defs/positiveInteger",
+          "description": "SPEC.md §5.2: maximum simultaneously pending requests across this scope (the global counterpart of `limits.max_pending`); further requests are refused at intake with reason `queue-full`. A count, hence an integer. Policy vocabulary in v0.1: enforcement lands with M4/M5."
         }
       }
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "description": "A strictly positive whole number, used for counts (pending requests, requests per hour). Zero and negatives are rejected for the same reason as `positiveNumber`: an unreachable ceiling is spelled `autonomy: manual`, not `0`."
     },
     "positiveNumber": {
       "type": "number",

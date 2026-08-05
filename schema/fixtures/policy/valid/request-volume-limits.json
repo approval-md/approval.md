@@ -1,0 +1,26 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual",
+    "channel": "telegram",
+    "approval_ttl": "24h",
+    "on_expiry": "reject"
+  },
+  "approvers": {
+    "carter": { "channels": ["telegram", "cli"] }
+  },
+  "classes": {
+    "communicate.email.external": {
+      "autonomy": "manual",
+      "approvers": ["carter"],
+      "limits": { "max_pending": 5, "requests_per_hour": 20 }
+    },
+    "record.write.stage": {
+      "autonomy": "supervised",
+      "limits": { "max_pending": 50 }
+    }
+  },
+  "budgets": {
+    "global": { "daily_actions": 200, "max_pending": 25 }
+  }
+}
