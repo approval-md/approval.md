@@ -37,6 +37,8 @@ Usage:
                       --note "<text>" [--as human:<id>] [--json]
   approval wait       <task> --timeout <duration> [--interval <d>] [--json]
   approval queue      [--policy <path>] [--dir <path>] [--json]
+  approval channel cli [--policy-dir <path>] [--payload-dir <path>]
+                      [--as human:<id>] [--interactive] [--json]
   approval status     [--policy <path>] [--dir <path>] [--json]
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
   approval --help
@@ -74,6 +76,10 @@ Commands:
             the latest chain verdict, loop escalations. Exit 1 when any of
             those needs attention. queue is what a human must answer; status is
             what an operator must fix, and neither carries the other's content
+  channel   put pending requests in front of a human over the channel contract.
+            "channel cli" renders the queue with [computed]/[claimed] markers and
+            the full payload in delimiters, and with a terminal collects
+            decisions through the same human-only gate as grant/reject
   reindex   rebuild the SQLite index projection from the log
 
 Defaults:
@@ -1163,4 +1169,108 @@ JSON shape (stdout, one object):
             "attested_by_human":true,"actor":"human:carter"}
   refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
            on stderr
+${JSON_ERRORS}`;
+
+export const CHANNEL_HELP = `approval channel — put a pending request in front of a human
+
+Usage:
+  approval channel cli [--log <path>] [--policy-dir <path>] [--policy <path>]
+                       [--payload-dir <path>] [--as human:<id>] [--interactive]
+                       [--json]
+
+Subcommands:
+  cli   render the pending queue in this terminal and, when it IS a terminal,
+        collect decisions with a prompt
+
+A channel is TRANSPORT. It renders what the runtime derived and reports the
+gesture a human made; it decides nothing, holds no state, writes no log line and
+never sees an execution token. Every decision collected here is recorded by the
+same human-only gate "approval grant" and "approval reject" call, with every
+rule — TTL, budgets, attestation, idempotency — applied unchanged.
+
+${EXIT_CODES}`;
+
+export const CHANNEL_CLI_HELP = `approval channel cli — the zero-config channel
+
+Usage:
+  approval channel cli [--log <path>] [--policy-dir <path>] [--policy <path>]
+                       [--payload-dir <path>] [--as human:<id>] [--interactive]
+                       [--json]
+
+Flags:
+  --log <path>         log file to read, and to append decisions to
+  --policy-dir <path>  directory to discover APPROVAL.md / APPROVALS.md in
+  --policy <path>      policy file (wins over --policy-dir)
+  --payload-dir <path> directory of payload material, one JSON file per action
+                       key: "<key>.json" or its percent-encoded name. The bytes
+                       are hashed and checked against the request's recorded
+                       payload_hash; material that does not match is REFUSED,
+                       never rendered.
+  --as human:<id>      the person deciding; defaults to APPROVAL_HUMAN. Required
+                       only when a decision could be recorded.
+  --interactive        prompt even though stdin is not a terminal (scripted
+                       input, wrappers, tests)
+  --json               machine-readable output; never interactive
+  -h, --help           this text
+
+THE RENDERING CONVENTION (SPEC.md §9). Every displayed field carries a marker in
+the first column, and the marker is the whole point:
+
+  [computed] class            communicate.email.external      (log)
+  [claimed]  summary          chase invoice 41                (agent:drafter)
+
+  [computed]  the RUNTIME derived it — from the verified log, the attested
+              policy, the budget evaluator, the payload bytes, or arithmetic on
+              the display instant. The parenthetical names which derivation.
+  [claimed]   the PARTY UNDER OVERSIGHT wrote it. The parenthetical names the
+              author. Claimed fields are indented under their own heading. A
+              claim may raise your scrutiny; it is never evidence, and rendering
+              one with the visual authority of a computed field is a conformance
+              failure for a channel, not a styling preference.
+
+THE FULL PAYLOAD (SPEC.md §10.4). For a manual action the exact bytes the
+approval binds to are printed verbatim inside delimiters, never mixed with the
+agent's summary:
+
+  --- BEGIN FULL PAYLOAD (bound sha256 <64hex>) ---
+  { … }
+  --- END FULL PAYLOAD ---
+
+The material comes from --payload-dir and is hash-checked against the recorded
+binding before it is shown, so what is inside the delimiters is what the
+execution token will spend. A manual request with no material is SKIPPED and
+reported on stderr — visibly, because a request missing from a queue is a
+request nobody will approve.
+
+INTERACTIVE ONLY WITH A TERMINAL. With a TTY on stdin (or --interactive) each
+pending request is rendered and answered: g) grant, r) reject, s) skip. A reject
+DEMANDS a note and re-asks until it gets one; a grant's note is optional. A
+grant prints its single-use execution token ONCE — the log stores only its
+SHA-256 and nothing can recover it.
+
+WITHOUT a TTY, and always with --json, the queue is printed and the command
+EXITS 0 WITHOUT READING STDIN. It cannot hang a pipeline, and it records
+nothing.
+
+IDENTITY IS DECLARED, NOT PROVED. --as, else APPROVAL_HUMAN. The trust boundary
+is the local machine: a decision recorded here proves that someone with local
+control answered, not who. Missing or non-human identity on the deciding path is
+a usage error (2), refused before anything is rendered.
+
+${EXIT_CODES}
+  1 is also a gate refusal surfaced from a decision (already-decided, expired,
+  budget-exceeded, policy-not-attested, …). The command was well-formed; the
+  runtime's answer was no. An empty queue is 0.
+
+JSON shape (stdout, one object):
+  {"ok":true,"channel":"cli","interactive":false,
+   "pending":[{"action_key":{"kind":"computed","value":"task-042:chaser",
+     "source":"log"},
+     "summary":{"kind":"claimed","value":"chase invoice 41",
+       "author":"agent:drafter"}, …}],
+   "skipped":[{"action_key":"...","code":"payload-unavailable",
+     "message":"..."}]}
+  pending holds the TAGGED requests verbatim: every field keeps its
+  kind/value/source|author markers, so a machine reader sees the same
+  computed/claimed split a human does. pending is [] for an empty queue.
 ${JSON_ERRORS}`;

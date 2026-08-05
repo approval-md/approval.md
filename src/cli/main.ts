@@ -60,6 +60,7 @@ import {
   commandStatus,
   commandWait,
 } from "./execute.js";
+import { commandChannel } from "./channel.js";
 import { commandPolicy } from "./policy.js";
 import { commandConsume, commandToken } from "./token.js";
 import {
@@ -497,6 +498,13 @@ export function main(argv: string[], options: MainOptions = {}): number {
       return commandWait(rest, streams, cwd);
     case "queue":
       return commandQueue(rest, streams, cwd);
+    // The channel verbs (APRV-23). `channel cli` renders the pending queue over
+    // the plugin contract and, with a terminal, collects decisions — through
+    // `recordChannelDecision`, which is the same human-only gate `grant` and
+    // `reject` call. Its interactive path is asynchronous and assigns its own
+    // exit code to `process.exitCode`; see `channel.ts`'s header.
+    case "channel":
+      return commandChannel(rest, streams, cwd);
     case "status":
       return commandStatus(rest, streams, cwd);
     case "reindex":
