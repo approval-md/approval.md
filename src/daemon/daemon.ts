@@ -82,6 +82,7 @@ import {
   type ReadRecordsResult,
 } from "../core/state.js";
 import { validate } from "../core/validate.js";
+import type { GitEvidenceRecorder } from "./git-evidence.js";
 import {
   driftAlreadyLogged,
   lapsedRequests,
@@ -222,6 +223,13 @@ export interface DaemonOptions {
   once: boolean;
   /** The write-boundary clock, injected by tests (amended SPEC.md §8). */
   clock?: Clock;
+  /**
+   * SPEC.md §8's optional git hardening (APRV-42), off unless the operator asked
+   * for it. When present, it is handed the verified head at the end of each
+   * tick; it decides everything else, reports through its own sink, and cannot
+   * change any verdict this loop reaches. See `daemon/git-evidence.ts`.
+   */
+  gitEvidence?: GitEvidenceRecorder;
   sink: DaemonSink;
 }
 
@@ -446,6 +454,7 @@ export class Daemon {
       const escalated = this.surfaceEscalations(closing.records);
 
       this.render();
+      this.options.gitEvidence?.commit(closing.head);
 
       this.emit({
         event: "tick",
