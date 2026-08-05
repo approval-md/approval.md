@@ -1,9 +1,11 @@
 ---
 id: APRV-25
 title: 'Web queue channel: localhost-only approval page'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@fable'
 created_date: '2026-08-05 10:51'
+updated_date: '2026-08-05 11:45'
 labels: []
 milestone: m-5
 dependencies:
