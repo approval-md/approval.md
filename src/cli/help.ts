@@ -39,6 +39,8 @@ Usage:
   approval queue      [--policy <path>] [--dir <path>] [--json]
   approval status     [--policy <path>] [--dir <path>] [--json]
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
+  approval render     [--log <path>] [--out <path>] [--policy <path>]
+                      [--dir <path>] [--json]
   approval --help
 
 Commands:
@@ -75,10 +77,15 @@ Commands:
             those needs attention. queue is what a human must answer; status is
             what an operator must fix, and neither carries the other's content
   reindex   rebuild the SQLite index projection from the log
+  render    regenerate .approval/QUEUE.md, the READ-ONLY markdown queue
+            projection (SPEC.md §9.1): pending requests and the sampled-audit
+            backlog, computed and claimed fields visibly distinguished. The
+            screenshot, never the truth — editing it authorizes nothing
 
 Defaults:
   log    .approval/log/events.jsonl   (relative to the working directory)
   index  .approval/index.sqlite
+  queue  .approval/QUEUE.md
 
 ${EXIT_CODES}
 
@@ -1163,4 +1170,50 @@ JSON shape (stdout, one object):
             "attested_by_human":true,"actor":"human:carter"}
   refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
            on stderr
+${JSON_ERRORS}`;
+
+export const RENDER_HELP = `approval render — regenerate .approval/QUEUE.md from the log
+
+Usage:
+  approval render [--log <path>] [--out <path>] [--policy <path>] [--dir <path>]
+                  [--json]
+
+Flags:
+  --log <path>     log file to read (NEVER written by this command)
+  --out <path>     queue file to write (default .approval/QUEUE.md)
+  --policy <path>  policy file to resolve autonomy, budgets and the TTL from
+  --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
+  --json           machine-readable output
+  -h, --help       this text
+
+Writes the queue projection of SPEC.md §9.1: a rendered, READ-ONLY markdown view
+of the requests awaiting a human decision plus the sampled-audit backlog,
+regenerated WHOLE on every run. "This is the screenshot; it is never the truth."
+The file opens with a header saying so; editing it authorizes nothing and is
+overwritten by the next render.
+
+Every displayed field is visibly COMPUTED (derived by the runtime from the
+verified log, the attested policy, or the payload binding — each line names the
+derivation) or CLAIMED (authored by the requesting agent — a separate block that
+names the author), per SPEC.md §9. Full payloads are deliberately NOT inlined:
+the queue collects no decision, so it carries the content binding only and the
+decision channels present the bytes, as SPEC.md §10.4 requires.
+
+Deterministic: the evaluation instant is read once, here, and handed to the pure
+renderer, so the same log rendered at the same instant produces the same bytes.
+TTL countdowns are the only thing that moves between renders of an unchanged log.
+
+Writes exactly one file, atomically (temp + rename), and only that file. A log
+that does not verify refuses (exit 1) and writes nothing.
+
+${EXIT_CODES}
+
+JSON shape (stdout, one object):
+  {"ok":true,"out":"/abs/.approval/QUEUE.md","bytes":2481,
+   "head":{"seq":7,"hash":"<64hex>"},"pending":2,"skipped":0,
+   "audit_backlog":0,"now":"2026-08-06T10:00:00.000Z"}
+  head is null for an empty log. skipped counts live requests the renderer could
+  not summarize (they are listed in the file with their reason, never dropped).
+  refusal  {"ok":false,"error":{"code":"log-corrupt|log-torn-tail|
+            log-unreadable|write-failed","message":"..."}} on stderr
 ${JSON_ERRORS}`;
