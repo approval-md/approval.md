@@ -158,6 +158,17 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
       return;
     }
 
+    // The identity read `approval doctor` uses (APRV-31). Added to the mock
+    // rather than to any production file: nothing in the channel calls it, and
+    // doctor's probe must be exercised against loopback like everything else.
+    if (method === "getMe") {
+      send(response, {
+        ok: true,
+        result: { id: 424_242, is_bot: true, username: "approval_md_test_bot" },
+      });
+      return;
+    }
+
     if (method === "sendMessage") {
       messageId += 1;
       send(response, {
