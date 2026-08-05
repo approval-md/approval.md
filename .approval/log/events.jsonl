@@ -1,0 +1,1 @@
+{"actor":"human:carter","alg":"sha256/jcs","event":"policy.updated","hash":"efa29b0ead02f57481ee78fb391137f81e41d28e01555d7947e8f9b228ab6f11","payload":{"policy_path":"APPROVAL.md","sha256":"c218ecd012fd721432ebe8aa023d74a7a23e821bd180e13e9bddeded2070cf9d"},"prev":null,"seq":1,"ts":"2026-08-05T02:31:04.035Z"}
