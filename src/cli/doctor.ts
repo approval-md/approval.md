@@ -59,7 +59,8 @@ import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/at
 import type { EventRecord } from "../core/log.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
 import { payloadStoreCensus } from "../daemon/prune.js";
-import { POLICY_FILENAMES, loadPolicy } from "../core/policy-load.js";
+import { POLICY_FILENAMES, loadPolicy, type PolicyLoadResult } from "../core/policy-load.js";
+import { resolveSampler } from "../core/sampler.js";
 import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { policyWebPort } from "./channel-web.js";
@@ -639,6 +640,54 @@ function checkPayloadStore(logPath: string, records: EventRecord[]): DoctorCheck
 }
 
 // ---------------------------------------------------------------------------
+// 8. audit sampling
+// ---------------------------------------------------------------------------
+
+/**
+ * Surface the sampler's state, because sampling fails open by design.
+ *
+ * SPEC.md §5.2: an unconfigured sampler is disabled with a machine-readable
+ * reason rather than escalating everything (the only remaining seed would be
+ * agent-authored event content, which §5.2 forbids). The human ruling that
+ * accepted the fail-open pairs it with this check: doctor states the disabled
+ * state and its reason prominently, so unconfigured-in-production cannot
+ * persist unnoticed.
+ *
+ * Verdict mapping: a sampler the operator plainly chose not to have (no rate,
+ * or rate 0) is `skip`, stated in full. A sampler that is half-configured or
+ * unreadable (rate set but the secret unnamed or unset, an invalid rate, an
+ * unloadable policy) is `fail` with a fix: someone intended sampling and is not
+ * getting it.
+ */
+function checkSampling(load: PolicyLoadResult): DoctorCheck {
+  const sampler = resolveSampler(load);
+  if (sampler.enabled) {
+    return {
+      check: "audit-sampling",
+      status: "pass",
+      detail: `enabled at rate ${String(sampler.rate)}; secret read from $${sampler.secretEnv} (the value itself is never printed and never logged)`,
+    };
+  }
+  const deliberate = sampler.reason === "rate-absent" || sampler.reason === "rate-zero";
+  if (deliberate) {
+    return {
+      check: "audit-sampling",
+      status: "skip",
+      detail: `disabled (${sampler.reason}): ${sampler.message}`,
+    };
+  }
+  return {
+    check: "audit-sampling",
+    status: "fail",
+    detail: `disabled (${sampler.reason}): ${sampler.message}`,
+    fix:
+      sampler.reason === "secret-unset" && sampler.secretEnv !== null
+        ? `export ${sampler.secretEnv} with the operator-held sampling secret in the environment that runs the daemon`
+        : "set audit.supervised_sample_rate and audit.sampling_secret_env in the policy, re-attest, and export the named variable where the daemon runs",
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
@@ -711,9 +760,8 @@ export function commandDoctor(
   // told two different things about one file.
   const verified = verifyWithRecords(logPath);
 
-  const port = policyWebPort(
-    loadPolicy(policyFlag === null ? { dir } : { file: policyPath }),
-  );
+  const policyLoad = loadPolicy(policyFlag === null ? { dir } : { file: policyPath });
+  const port = policyWebPort(policyLoad);
 
   const apiBase = stringFlag(parsed.flags, "--api-base") ?? TELEGRAM_DEFAULT_API_BASE;
 
@@ -726,6 +774,7 @@ export function commandDoctor(
       await checkTelegram(apiBase),
       await checkWebPort(port ?? WEB_DEFAULT_PORT),
       checkPayloadStore(logPath, verified.records),
+      checkSampling(policyLoad),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

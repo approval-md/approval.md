@@ -316,11 +316,15 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       "telegram",
       "web-port",
       "payload-store",
+      "audit-sampling",
     ],
   );
   assert.deepEqual(
     parsed.checks.map((entry) => entry.status),
-    ["pass", "pass", "pass", "pass", "pass", "pass", "pass"],
+    // audit-sampling skips: the healthy fixture never configured a rate, and a
+    // sampler the operator plainly chose not to have is a stated skip, not a
+    // failure (APRV-49 rider to the APRV-40 fail-open sign-off).
+    ["pass", "pass", "pass", "pass", "pass", "pass", "pass", "skip"],
   );
   for (const entry of parsed.checks) {
     assert.equal(entry.fix, undefined, `a passing check carried a fix: ${entry.check}`);
@@ -355,7 +359,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
 
   assert.equal(run.code, 1, run.stderr);
   const lines = run.stdout.trimEnd().split("\n");
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 7);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 8);
   assert.ok(lines.some((line) => line.startsWith("✗ identity:")));
   assert.ok(lines.some((line) => line.startsWith("– telegram:")));
   // The fix belongs to the failing check and is indented under it.
@@ -752,7 +756,7 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  assert.equal(parsed.checks.length, 7);
+  assert.equal(parsed.checks.length, 8);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);
@@ -863,4 +867,64 @@ test("doctor: --log, --policy and --dir point the checks at other trees", async 
     GREEN_ENV,
   );
   assert.equal(checkNamed(explicit, "attestation").status, "pass");
+});
+
+// ---------------------------------------------------------------------------
+// audit-sampling (APRV-49 rider to the APRV-40 fail-open sign-off)
+// ---------------------------------------------------------------------------
+
+/** A policy home whose audit block is exactly `audit` — attested for realism. */
+async function homeWithAudit(port: number, audit: string[]): Promise<string> {
+  counter += 1;
+  const dir = join(scratch, `audit-home-${counter}`);
+  mkdirSync(join(dir, ".approval", "log"), { recursive: true });
+  const policy = policyWith(port).replace(
+    "channels:",
+    [...audit, "channels:"].join("\n"),
+  );
+  writeFileSync(join(dir, "APPROVAL.md"), policy);
+  const attested = await runCli(["policy", "attest"], dir, { APPROVAL_HUMAN: "human:carter" });
+  assert.equal(attested.code, 0, attested.stderr);
+  return dir;
+}
+
+test("doctor: a fully configured sampler passes and never prints the secret", async () => {
+  const { port } = healthy();
+  const home = await homeWithAudit(port, [
+    "audit:",
+    "  supervised_sample_rate: 0.25",
+    "  sampling_secret_env: APPROVAL_TEST_DOCTOR_SECRET",
+  ]);
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, {
+    ...GREEN_ENV,
+    APPROVAL_TEST_DOCTOR_SECRET: "doctor-secret-value",
+  });
+  const check = checkNamed(run, "audit-sampling");
+  assert.equal(check.status, "pass");
+  assert.match(check.detail, /rate 0\.25/u);
+  assert.match(check.detail, /\$APPROVAL_TEST_DOCTOR_SECRET/u);
+  assert.ok(!run.stdout.includes("doctor-secret-value") && !run.stderr.includes("doctor-secret-value"));
+});
+
+test("doctor: a half-configured sampler fails with the export fix", async () => {
+  const { port } = healthy();
+  const home = await homeWithAudit(port, [
+    "audit:",
+    "  supervised_sample_rate: 0.25",
+    "  sampling_secret_env: APPROVAL_TEST_DOCTOR_SECRET",
+  ]);
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "audit-sampling");
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /secret-unset/u);
+  assert.match(check.fix ?? "", /export APPROVAL_TEST_DOCTOR_SECRET/u);
+});
+
+test("doctor: a sampler nobody configured is a stated skip, not a failure", async () => {
+  const { home } = healthy();
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "audit-sampling");
+  assert.equal(check.status, "skip");
+  assert.match(check.detail, /rate-absent/u);
+  assert.equal(check.fix, undefined);
 });
