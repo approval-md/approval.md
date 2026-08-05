@@ -33,6 +33,11 @@ to prevent.
    pass (`npm test`), lint clean, SPEC.md updated if behavior diverged
    from it (divergence requires calling it out to the human, never silent
    spec edits).
+6. **Pull before starting any session.** GitHub writes to main from the web
+   side (CNAME, UI edits, merged PRs), and the human commits by hand (policy,
+   genesis events, this file). A worktree branched from a stale main invites
+   exactly the non-fast-forward rejections and log divergence the rules above
+   exist to prevent.
 
 ## Model tiers
 
@@ -72,6 +77,22 @@ defaults to fable):
 - Stack: TypeScript, Node ≥ 20, minimal dependencies (justify each new
   one in the task's implementation notes). Single-package repo until a
   second package is unavoidable; satellites go under `@approval-md/`.
+- **Global invariants are implicit acceptance criteria.** SPEC §11's "Global
+  invariants" subsection binds every task without being restated: enforcement
+  paths read only verified records; gate-typed events never accept caller
+  timestamps; raw secrets never appear in the log; self-reported fields never
+  reduce scrutiny; every check-then-append passes through compare-and-append;
+  refusals are machine-readable and distinct. A diff that weakens any of these
+  fails review regardless of the task's stated criteria, and a task that
+  *touches* one must say so in its implementation notes. When a new
+  cross-cutting safety property is born, it is added to §11 and to this list —
+  properties stated only inside one task's criteria do not exist anywhere else.
+
+## Prose style in SPEC.md and docs
+
+Limit em dashes; prefer commas, parentheses, colons, or separate sentences. Avoid
+"not X but Y" constructions; state the point affirmatively. Existing prose is
+grandfathered — apply this to new and rewritten text only.
 
 ## Dogfooding — escalates at M2
 
@@ -84,6 +105,14 @@ defaults to fable):
 - From M4 (channels) onward: side-effecting repo actions route through
   the built Telegram channel. Yes, really: releases of approval.md get
   approved via approval.md.
+- **The committed log has one writer.** `.approval/log/events.jsonl` on main is
+  the project's live log. Gate operations (attest, request, grant, run, resolve)
+  execute only in the primary checkout against main — never in agent worktrees,
+  and log-touching commits never ride feature branches. Hash chains do not
+  survive git merges: two branches appending independently produce a corrupt
+  chain by construction, and no merge strategy repairs semantics. If a gate
+  operation is needed mid-task, stop and escalate. (The M5 daemon becomes the
+  sole writer; until then this rule is the daemon.)
 
 ## Permissions
 
