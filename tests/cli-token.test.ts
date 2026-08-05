@@ -77,7 +77,7 @@ const POLICY = [
 ].join("\n");
 
 /** Short enough to lapse inside a test, long enough to grant first. */
-const POLICY_SHORT_TTL = POLICY.replace('approval_ttl: "1h"', 'approval_ttl: "1s"');
+const POLICY_SHORT_TTL = POLICY.replace('approval_ttl: "1h"', 'approval_ttl: "10s"');
 
 /**
  * The content binding every declared action carries (amended SPEC.md §6.2, A1).
@@ -324,13 +324,22 @@ test("token reports the three deaths: consumed, revoked, expired", () => {
   assert.equal(jsonErr(revoked)["state"], "revoked");
   assertClean(revokedDir);
 
-  // The parent request's TTL, with no separate token TTL: a 1s policy TTL, a
-  // grant inside it, and a check after it.
+  // The parent request's TTL, with no separate token TTL: a 10s policy TTL, a
+  // grant inside it, and expiry observed by polling. The TTL is generous and
+  // the wait is a poll rather than a fixed sleep because this test runs under
+  // whatever load the rest of the suite generates: a tight TTL makes the
+  // grant itself miss the window on a busy machine (observed at 15.9s total
+  // under three parallel builds). Liveness-inside-the-TTL is pinned by the
+  // core token tests with injected clocks; wall-clock liveness is not
+  // re-asserted here.
   const expiring = readyForDecision(POLICY_SHORT_TTL);
   const expiringToken = grantToken(expiring);
-  assert.equal(runCli(["token", "task-042:chaser", "--json"], expiring).code, 0);
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_200);
-  const expired = runCli(["token", "task-042:chaser", "--json"], expiring);
+  const deadline = Date.now() + 30_000;
+  let expired = runCli(["token", "task-042:chaser", "--json"], expiring);
+  while (expired.code === 0 && Date.now() < deadline) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+    expired = runCli(["token", "task-042:chaser", "--json"], expiring);
+  }
   assert.equal(expired.code, 1);
   assert.equal(jsonErr(expired)["code"], "token-expired");
   const spend = runCli(
