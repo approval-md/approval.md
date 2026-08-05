@@ -23,12 +23,14 @@ Usage:
   approval log tail   [--log <path>] [-n <count>] [--json]
   approval log export [--log <path>] [--json]
   approval policy check|test <class> [--reversible true|false] [--policy <path>] [--dir <path>] [--json]
+  approval policy attest [--policy <path>] [--dir <path>] [--as human:<id>] [--json]
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
   approval --help
 
 Commands:
   log       inspect the append-only event log (verify | tail | export)
-  policy    explain what APPROVAL.md does with an action class (check | test)
+  policy    explain what APPROVAL.md does with an action class (check | test),
+            or record a human's sign-off on the policy file (attest)
   reindex   rebuild the SQLite index projection from the log
 
 Defaults:
@@ -42,8 +44,8 @@ JSON object per invocation. Run "approval <command> --help" for that command's
 exact shape.
 ${JSON_ERRORS}
 
-The log is append-only. No command here writes to it, and a torn tail is
-reported, never repaired.`;
+The log is append-only. Only "policy attest" writes to it — one appended event,
+by a human — and a torn tail is reported, never repaired.`;
 
 export const LOG_HELP = `approval log — read the append-only event log
 
@@ -191,10 +193,15 @@ export const POLICY_HELP = `approval policy — explain what policy does with an
 Usage:
   approval policy check <class> [--reversible true|false] [--policy <path>] [--dir <path>] [--json]
   approval policy test  <class> [--reversible true|false] [--policy <path>] [--dir <path>] [--json]
+  approval policy attest [--policy <path>] [--dir <path>] [--as human:<id>] [--json]
 
 Subcommands:
   check   explain the autonomy resolution for <class>
   test    exact alias of check (SPEC.md §10.1 names both)
+  attest  record a human's sign-off on the policy file's bytes (human-only;
+          gate operations refuse while the live file is unattested or changed).
+          Run "approval policy attest --help" — it is the only policy verb that
+          writes to the log.
 
 Nothing is executed, requested, or logged: this command reads APPROVAL.md and
 answers a hypothetical. Discovery is APPROVAL.md then APPROVALS.md in --dir
@@ -261,6 +268,55 @@ either applies. stderr stays empty on a successful answer.`;
 
 export const POLICY_CHECK_HELP = policyVerbHelp("check", "test");
 export const POLICY_TEST_HELP = policyVerbHelp("test", "check");
+
+export const POLICY_ATTEST_HELP = `approval policy attest — record a human's sign-off on the policy file
+
+Usage:
+  approval policy attest [--policy <path>] [--dir <path>] [--as human:<id>]
+                         [--log <path>] [--json]
+
+Flags:
+  --policy <path>  policy file to attest (overrides discovery)
+  --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
+                   (default: the working directory)
+  --as human:<id>  the human attesting; overrides APPROVAL_HUMAN
+  --log <path>     log file to append to (default .approval/log/events.jsonl)
+  --json           machine-readable output
+  -h, --help       this text
+
+Appends one policy.updated event carrying the SHA-256 of the policy file's exact
+bytes:  payload {"policy_path":"APPROVAL.md","sha256":"<64 hex>"}. Gate
+operations refuse whenever the live file's hash differs from the latest
+attestation or no attestation exists, with the distinct machine-readable reason
+"policy-not-attested". An edited policy is inoperative until a human re-attests
+it.
+
+Human-only. The actor must match human:<id>; an agent: or system: actor is
+refused before anything is read or written. Identity is CONFIG-DECLARED — it
+comes from --as or the APPROVAL_HUMAN environment variable, and nothing here
+authenticates it. The trust boundary is the local machine: anyone who can set
+that variable and write to the log is inside it. An attestation therefore proves
+that someone with local control signed off, not who — cryptographic identity is
+future work, not a v0.1 claim.
+
+Bytes, not parse: the file is hashed as it sits on disk and does NOT have to be
+loadable. Attesting a schema-invalid policy is allowed and records exactly what
+it says — a human saw these bytes. It does not make a broken policy work; a
+policy that fails to load is still manual-everything (see policy check).
+
+${EXIT_CODES}
+  policy attest: 0 when the attestation was appended; 2 for usage — no
+  resolvable human identity, an --as that is not human:<id>, or an unknown flag;
+  3 when the log's final line is torn (a crashed write, never repaired here);
+  4 for I/O — the policy file is absent or unreadable, or the log cannot be
+  written.
+
+JSON shape (stdout, one object):
+  success  {"ok":true,"seq":7,"sha256":"<64 hex>","path":"/abs/APPROVAL.md"}
+  refusal  {"ok":false,"error":{"code":"...","message":"..."}}  on stderr
+  path is the file that was hashed; the logged payload carries its basename
+  only, so an exported log leaks no home directory.
+${JSON_ERRORS}`;
 
 export const REINDEX_HELP = `approval reindex — rebuild the SQLite index from the log
 
