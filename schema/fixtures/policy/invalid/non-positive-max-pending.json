@@ -1,0 +1,9 @@
+{
+  "version": "0.1",
+  "classes": {
+    "communicate.email.external": {
+      "autonomy": "manual",
+      "limits": { "max_pending": 0 }
+    }
+  }
+}

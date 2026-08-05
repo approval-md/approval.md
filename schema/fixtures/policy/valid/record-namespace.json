@@ -1,0 +1,13 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual",
+    "channel": "cli"
+  },
+  "classes": {
+    "record.write.stage": { "autonomy": "supervised" },
+    "record.categorize": { "autonomy": "manual" },
+    "record.archive": { "autonomy": "supervised" },
+    "record.*": { "autonomy": "manual" }
+  }
+}

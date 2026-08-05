@@ -126,7 +126,8 @@ channels:
 - **Specificity.** Pattern specificity is compared as follows: (1) more literal (non-wildcard) segments is more specific; (2) ties broken by fewer wildcard segments; (3) remaining ties by greater total segment count; a trailing `.*` counts as a single wildcard segment and contributes no literal segments. Patterns still tied are equally specific and the strictest-autonomy rule applies.
 - **Deny beats allow.** If multiple rules match at equal specificity, the strictest autonomy wins (`manual` > `supervised` > `autonomous`).
 - **Budgets are conjunctive.** An action must pass its class limits AND global budgets. Budget consumption is computed from the log, never from a mutable counter. Budget windows are rolling: a `daily` limit is evaluated over the 24 hours preceding the evaluation moment, computed solely from the event log; evaluation is deterministic given the log and the evaluation timestamp. Budgets meter authorization, not completion; an authorized action consumes budget whether or not it ultimately executes.
-- **`supervised_sample_rate`** implements auditing under a budget: supervised actions execute immediately, and a deterministic pseudo-random sample (seeded from the event hash, so it is reproducible and unguessable in advance by the agent) is queued for after-the-fact human review. See §11 for why.
+- **`supervised_sample_rate`** implements auditing under a budget: supervised actions execute immediately, and a deterministic pseudo-random sample is queued for after-the-fact human review. Sample selection MUST be reproducible by the operator and unpredictable to agents. Implementations derive the selection value as HMAC-SHA-256 over the event hash using an operator-held secret stored outside the repository and outside any agent-readable path. Seeding from event content alone is forbidden: the authoring agent controls that content and could search it until its action falls outside the sample. See §11 for why. (Enforcement lands with the M5 daemon.)
+- **Request-volume limits.** `limits.max_pending` (per class or global): maximum simultaneously pending requests; further requests are refused at intake with reason `queue-full`. `limits.requests_per_hour` (per origin): rolling-window ceiling on request creation; excess is refused with reason `rate-limited` and logged. Defaults are generous; the purpose is a tripwire against queue-flooding and approver fatigue, which attack the human's attention rather than the action budget. Refused requests consume no budget and no attention beyond the log line. (Policy vocabulary in v0.1; enforcement lands with M4/M5.)
 - **Agents MUST NOT be able to modify `APPROVAL.md`, the log, or channel credentials.** The reference runtime refuses to mint tokens if the policy file's mtime/hash changed without a signed `policy.updated` event from a human session. Attestation makes this mechanical: a human runs `approval policy attest`, which appends a `policy.updated` event carrying the SHA-256 of the policy file's bytes. Gate operations — request intake, grant recording, token minting — MUST refuse, with a distinct machine-readable reason, whenever the live file's hash differs from the latest attestation or no attestation exists. An edited policy is inoperative until a human re-attests it.
 - **Durations.** Every duration-valued field (`approval_ttl`, budget windows, `max_latency`) is a string matching `<positive integer><unit>` with unit one of `ms`, `s`, `m`, `h`, `d`, `w` (weeks = 7 days). Single unit only: compound (`1h30m`), fractional (`1.5h`), zero, and leading-zero forms are invalid. An invalid duration anywhere in the policy is a schema violation and the policy fails closed.
 
@@ -183,7 +184,7 @@ deposit-protection scheme deadline.
 | `route.confidence` | MAY | 0.0–1.0; used as a monitoring signal (§11). |
 | `state` | MUST | Approval lifecycle state (§6.3), distinct from board `status`. |
 | `actions[]` | MUST for execution | Each declared action: `class`, `summary`, `reversible`, `est_cost_usd`, `idempotency_key`. |
-| `budget` | MAY | Task-level caps, conjunctive with policy budgets. |
+| `budget` | MAY | Task-level caps, conjunctive with policy budgets. `max_latency` is declared in the envelope and recorded at registration; its enforcement (bounding time-to-decision and time-to-execution) lands with the daemon (M5) and is not yet a runtime obligation. |
 | `idempotency_key` | MUST per action | Stable string; adapters MUST refuse to execute the same key twice. |
 | `payload_hash` | MUST for `manual` actions, SHOULD otherwise | SHA-256 over the RFC 8785 canonical serialization of the action's concrete payload: for a message send, the full body and recipients; for `approval run`, the argv array and cwd; for a record write, the proposed record content. The payload itself is stored or referenced by the request so channels can display it; the hash is what approval binds to. |
 
@@ -216,10 +217,13 @@ Dotted, hierarchical, extensible. Top-level namespaces are reserved by this spec
 | `data.delete` | destructive deletes outside workspace | manual, always |
 | `account.*` | `.auth`, `.create`, `.credential` | manual, always |
 | `physical.*` | orders, bookings with cancellation cost | manual |
+| `record.*` | `.write.stage`, `.categorize`, `.create`, `.archive` | supervised or manual, per ownership preference |
 
 Two invariants: an action's class MUST be declared before an execution token can be requested for it, and `reversible: false` actions MUST NOT be eligible for `autonomous` regardless of policy (the runtime enforces this floor).
 
 The irreversibility floor resolves to `manual`: an action declared `reversible: false` MUST NOT execute under `autonomous` or `supervised` regardless of policy. Retrospective audit cannot undo an irreversible action, so execute-then-sample is not meaningful oversight for one. Implementations MUST apply the floor after class resolution and record in the decision trace when the floor, rather than the matched rule, determined the outcome.
+
+For `record.*` classes, grant means adoption: the action proposes a write to a system of record (a task stage, a note category, a pipeline state), and approval commits it. The "adapter" is whatever write path owns the record; it MUST hold proposed writes in a staged state invisible to, or visibly provisional in, the record proper until granted. `record.*` actions are typically reversible; policies gate them for cognitive ownership rather than consequence, and both rationales are first-class (see §11).
 
 ## 8. The event log
 
@@ -246,6 +250,8 @@ Events written through the gate (`approval.*`, `execution.*`, `budget.*`, `audit
 1. **The queue** (`.approval/QUEUE.md`): a rendered, read-only markdown view of pending requests (task, actions, declared effects, cost, TTL countdown) plus the sampled-audit backlog. Regenerated on every relevant event. This is the screenshot; it is never the truth.
 2. **The index** (`.approval/index.sqlite`): rebuilt from the log (`approval reindex`), used for queries like "pending manual approvals touching `financial.*`, oldest first." Any SQLite client, including DuckDB, can read it; deleting it loses nothing.
 
+Every displayed field is one of two kinds and MUST be visibly distinguished: **computed** (derived by the runtime from the log, policy, or payload bytes: class resolution, budget state, attestation status, payload hash, chain position) and **claimed** (authored by the requesting agent: summaries, estimates, rationale, confidence). Rendering claimed fields with the visual authority of computed fields misrepresents the verification boundary to the approver and is a conformance failure for a channel.
+
 ## 10. Runtime
 
 ### 10.1 CLI (primary interface, for humans and agents)
@@ -259,7 +265,8 @@ approval request   <task> [--action <key>]   # -> approval.requested (manual cla
                                              #    to execution)
 approval wait      <task> --timeout 6h       # block until decided; exit code = decision
 approval grant|reject|revoke <request-id> [--note …]   # human-only verbs
-approval token     <action-key>    # print single-use execution token if granted
+approval token     <action-key>    # report execution-token status (the token itself
+                                   #   is printed once, by `grant`; only its hash is logged)
 approval run -- <cmd…>             # gate arbitrary commands: mints token, runs, logs
 approval queue [--json]            # pending requests
 approval log verify | tail | export
@@ -276,6 +283,10 @@ Machine-readable output: every command supports `--json`; schemas for inputs and
 ### 10.3 Channels
 
 Interface: `notify(request) -> delivery_id`, `poll()/webhook() -> decision`. Decisions become log events; channels hold no state. v0.1 ships **cli** (zero-config prompt), **web** (local queue page with grant/reject), and **telegram** (reference push channel: message with declared effects + inline Approve/Reject buttons; callback verified against approver identity). Channel breadth is explicitly out of scope; HumanLayer exists for Slack/email/SMS enterprises.
+
+Every displayed field is one of two kinds and MUST be visibly distinguished: **computed** (derived by the runtime from the log, policy, or payload bytes: class resolution, budget state, attestation status, payload hash, chain position) and **claimed** (authored by the requesting agent: summaries, estimates, rationale, confidence). Rendering claimed fields with the visual authority of computed fields misrepresents the verification boundary to the approver and is a conformance failure for a channel.
+
+Channels MAY present multiple pending requests as a batch and collect one human gesture over the set, and SHOULD for high-volume `record.*` classes. The log never batches: each granted or rejected request receives its own `approval.granted` or `approval.rejected` event carrying the batch's channel delivery id in its payload, so audit granularity survives ergonomic grouping. A batch MUST NOT mix `manual` classes with differing payload-display requirements in a way that hides any full payload behind the fold of another.
 
 ### 10.4 Adapters and hard enforcement
 
@@ -307,6 +318,23 @@ Deceptive content inside an approved action is defended to this extent: the appr
 
 Fields authored by the party under oversight (`route.confidence`, summaries, cost estimates) MAY raise scrutiny, inform display, or feed retrospective analysis. They MUST NOT reduce sampling probability, downgrade a resolved autonomy level, or shortcut any refusal path. Scrutiny only ratchets upward on self-report.
 
+Disclosure duty binds the informed party. An agent that knows information material to an approval decision and omits it from the request has violated policy even where the action itself was permitted. Materiality is judged as a reasonable approver would judge it. Undeclared side effects are the mechanical case, caught at the adapter boundary; undisclosed context is the same violation in a form only audit can catch, which is one of the things audit is for.
+
+This system makes actions, policies, and decisions common knowledge: a shared record both parties can read and neither can silently rewrite. It makes neither party's mind legible to the other. Agent reasoning is unverifiable from outputs; human intent exceeds any policy file. approval.md shrinks the information asymmetry where artifacts can carry it and claims nothing about interiority on either side.
+
+The gate protects two things: the world from your agents' actions, and your mind from your agents' writes. A system of record is an extended mind; writes to it are cheap to make and expensive to un-believe once relied upon. Policies that set reversible `record.*` classes to `manual` are exercising reversibility-preservation over epistemic state, and the irreversibility floor (§7) remains a minimum, never a statement that manual is reserved for the irreversible.
+
+### 11.1 Global invariants
+
+The following hold across every surface of the runtime. They are implicit acceptance criteria for every future task: a change that violates one is a defect regardless of what its own task asked for, and each is pinned by the test file cited.
+
+1. **Enforcement paths read only verified records.** Gate decisions are computed from log state that has passed chain verification, never from unverified or partially read input (`tests/state.test.ts`).
+2. **Gate-typed events never accept caller timestamps.** `ts` on gate-typed events is assigned by the runtime at the write boundary; a caller-supplied value is refused (`tests/clock.test.ts`).
+3. **Raw secrets never appear in the log; only their hashes do.** Execution tokens and binding material are logged as hashes, and a raw-token scan over written logs finds nothing (`tests/token.test.ts`, `tests/binding.test.ts`).
+4. **Self-reported fields never reduce scrutiny.** Values authored by the party under oversight may raise scrutiny and never lower it (`tests/ratchet.test.ts`).
+5. **Every check-then-append passes through compare-and-append.** No path reads a decision-relevant log state and appends on it without the atomic head check that makes the pair safe under concurrency (`tests/concurrency.test.ts`, `tests/log.test.ts`).
+6. **Refusals are machine-readable and distinct, and every code union is pinned by a test.** Each refusal path returns its own stable code, and the unions are frozen public API (`tests/gate.test.ts`, `tests/token.test.ts`, `tests/execute.test.ts`, `tests/log.test.ts`).
+
 ## 12. Interoperability
 
 - **Backlog.md:** native. Tasks live in `backlog/`, the envelope is one preserved frontmatter key, board `status` and approval `state` are independent. approval.md ships no board; use Backlog.md's.
@@ -317,6 +345,8 @@ Fields authored by the party under oversight (`route.confidence`, summaries, cos
 ## 13. Non-goals
 
 No new task file format. No kanban UI. No agent framework or orchestration platform. No hosted service (local-first; a sync story can come later). No channel breadth beyond the three shipped. No claim of scheming-robustness (§11).
+
+Post-v1 (non-normative): `review: adversarial` as a per-class flag. Before a flagged `manual` request reaches the approver, an independent agent instance with the raw payload and no stake in the outcome writes a dissent: worst plausible reading, omissions, questions a suspicious reviewer would ask. The approver adjudicates between framings instead of consuming one. Untrusted monitoring, spent where human attention is scarcest.
 
 ## 14. Repository layout and roadmap
 
