@@ -50,6 +50,33 @@ export const EXIT_TORN_TAIL = 3;
  */
 export const EXIT_IO = 4;
 
+/**
+ * No valid execution token — **`approval run` only** (APRV-18, human-settled
+ * 2026-08-06: "refuses without a valid token at a distinct exit code").
+ *
+ * An addition to the table above, not a redefinition of anything in it: every
+ * command that existed before APRV-18 still uses 0–4 and none of them can emit
+ * 5. It is distinct from {@link EXIT_INTEGRITY} because the repair is distinct.
+ * A generic gate refusal means "ask a human what to do"; a 5 means "you are
+ * holding no key to this door" — request the action, get it granted, and pass
+ * the token that grant printed. An agent that could not tell those apart would
+ * escalate when it should retry with a token, or retry forever when it should
+ * escalate.
+ */
+export const EXIT_NO_TOKEN = 5;
+
+/**
+ * Timeout — **`approval wait` only** (APRV-18). The wait elapsed with the
+ * task's requests still undecided. Nothing was appended and nothing is implied
+ * about the request: it is still live, and waiting again is legitimate.
+ *
+ * Distinct from every decision code, because "no answer yet" is not an answer.
+ * `wait` is the one verb whose exit code encodes a *decision* rather than a
+ * runtime outcome (SPEC.md §10.1: "exit code = decision"), so its mapping is
+ * documented in full in its own `--help`.
+ */
+export const EXIT_TIMEOUT = 6;
+
 /** The frozen table, for help text and for tests that pin it. */
 export const EXIT_CODE_TABLE: ReadonlyArray<readonly [number, string]> = [
   [EXIT_OK, "success"],
@@ -57,4 +84,6 @@ export const EXIT_CODE_TABLE: ReadonlyArray<readonly [number, string]> = [
   [EXIT_USAGE, "usage error"],
   [EXIT_TORN_TAIL, "torn tail"],
   [EXIT_IO, "I/O error"],
+  [EXIT_NO_TOKEN, "no valid execution token (approval run only)"],
+  [EXIT_TIMEOUT, "timeout (approval wait only)"],
 ];

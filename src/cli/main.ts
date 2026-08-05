@@ -53,6 +53,12 @@ import {
   commandRegister,
   commandRequest,
 } from "./gate.js";
+import {
+  commandQueue,
+  commandRun,
+  commandStatus,
+  commandWait,
+} from "./execute.js";
 import { commandPolicy } from "./policy.js";
 import { commandConsume, commandToken } from "./token.js";
 import {
@@ -474,6 +480,19 @@ export function main(argv: string[], options: MainOptions = {}): number {
       return commandToken(rest, streams, cwd);
     case "consume":
       return commandConsume(rest, streams, cwd);
+    // The execution verbs (APRV-18). `run` is the only command that spawns
+    // anything and the only one that can exit 5; `wait` the only one that can
+    // exit 6. `queue` is the pending-decision inbox and `status` is system
+    // health — deliberately two verbs, because they answer to two different
+    // people (the human who decides, the operator who repairs).
+    case "run":
+      return commandRun(rest, streams, cwd);
+    case "wait":
+      return commandWait(rest, streams, cwd);
+    case "queue":
+      return commandQueue(rest, streams, cwd);
+    case "status":
+      return commandStatus(rest, streams, cwd);
     case "reindex":
       return commandReindex(rest, streams, cwd);
     default:

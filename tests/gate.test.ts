@@ -1075,6 +1075,9 @@ test("the refusal-code union is frozen public API", () => {
     "duplicate-request",
     "already-executed",
     "budget-exceeded",
+    // APRV-18 added this one: SPEC.md §10.2 loop safety, refused at intake for
+    // the non-manual paths only. An addition to the union, not a rename.
+    "loop-escalated",
     "not-requested",
     "already-decided",
     "not-granted",
