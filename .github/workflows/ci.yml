@@ -121,3 +121,40 @@ jobs:
       - run: npm test
       - run: npm run lint
       - run: npm run typecheck
+
+  ci:
+    # The one required check. `classify` alone passes regardless of tier
+    # outcome, so branch protection requiring it would protect nothing; this
+    # job succeeds only when the tier that was chosen actually ran and
+    # succeeded. Skipped-when-required is a failure here, not a pass.
+    name: ci
+    needs: [classify, doc-guard, full]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate tier outcomes
+        env:
+          TIER: ${{ needs.classify.outputs.tier }}
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          DOC_RESULT: ${{ needs['doc-guard'].result }}
+          FULL_RESULT: ${{ needs.full.result }}
+        run: |
+          set -euo pipefail
+          echo "classify=$CLASSIFY_RESULT tier=$TIER doc-guard=$DOC_RESULT full=$FULL_RESULT"
+          if [ "$CLASSIFY_RESULT" != "success" ]; then
+            echo "classify did not succeed; nothing downstream is trustworthy"
+            exit 1
+          fi
+          case "$TIER" in
+            light)
+              [ "$DOC_RESULT" = "success" ] || { echo "light tier required doc-guard to succeed, got $DOC_RESULT"; exit 1; }
+              ;;
+            full)
+              [ "$FULL_RESULT" = "success" ] || { echo "full tier required the full gate to succeed, got $FULL_RESULT"; exit 1; }
+              ;;
+            *)
+              echo "unrecognized tier '$TIER'"
+              exit 1
+              ;;
+          esac
+          echo "the active tier succeeded"
