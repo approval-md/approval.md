@@ -61,6 +61,7 @@ import {
   commandWait,
 } from "./execute.js";
 import { commandChannel } from "./channel.js";
+import { commandDoctor } from "./doctor.js";
 import { commandPolicy } from "./policy.js";
 import { commandRender } from "./render.js";
 import { commandConsume, commandToken } from "./token.js";
@@ -501,6 +502,26 @@ export function main(argv: string[], options: MainOptions = {}): number {
       return commandQueue(rest, streams, cwd);
     case "status":
       return commandStatus(rest, streams, cwd);
+    // The diagnostic verb (APRV-31). `doctor` answers for the MACHINE what
+    // `status` answers for the system, and it is asynchronous for the same
+    // reason `channel` is: two of its checks touch the network stack (a Bot API
+    // `getMe`, a loopback bind probe). It writes nothing anywhere.
+    case "doctor": {
+      const outcome = commandDoctor(rest, streams, cwd);
+      if (typeof outcome === "number") return outcome;
+      void outcome.then(
+        (code) => {
+          process.exitCode = code;
+        },
+        (cause: unknown) => {
+          streams.err(
+            `approval: doctor failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+          );
+          process.exitCode = EXIT_IO;
+        },
+      );
+      return EXIT_OK;
+    }
     // The channel verbs (APRV-23 cli, APRV-26 telegram). `channel cli` renders
     // the pending queue over the plugin contract and, with a terminal, collects
     // decisions through `recordChannelDecision` — the same human-only gate
