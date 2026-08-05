@@ -296,3 +296,62 @@ test("the ci aggregator requires the active tier to have succeeded (APRV-44)", (
   assert.equal(env["DOC_RESULT"], "${{ needs['doc-guard'].result }}");
   assert.equal(env["FULL_RESULT"], "${{ needs.full.result }}");
 });
+
+// --------------------------------------------------------------------------
+// The dependency floor
+// --------------------------------------------------------------------------
+//
+// The Node matrix guard above keeps 20 in CI; this one keeps 20 possible. The
+// first real CI run (APRV-48) failed because better-sqlite3 had been bumped to
+// a major whose engines declare `>=22`: npm does not enforce `engines` at
+// install time, so the violation surfaced as a native crash on the Node 20 job
+// rather than as an install error. Every production dependency that declares a
+// Node range must therefore admit the floor, checked here from the installed
+// bytes. Range shapes this parser does not recognise fail the test rather than
+// pass it: an unreadable claim about the floor is not evidence the floor holds.
+
+test("every production dependency's engines.node admits the Node floor", () => {
+  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+    engines: { node: string };
+    dependencies: Record<string, string>;
+  };
+  const floorMatch = /^>=(\d+)$/.exec(pkg.engines.node);
+  assert.ok(floorMatch !== undefined && floorMatch !== null, "engines.node must be a plain >=N floor");
+  const floor = Number(floorMatch[1]);
+
+  /**
+   * Does `range` admit major version `major`? Understands the two shapes our
+   * dependencies actually use (`>= N[.x[.y]]` and `N.x || M.x || ...`);
+   * anything else returns null and fails the assertion below, deliberately.
+   */
+  const admits = (range: string, major: number): boolean | null => {
+    const trimmed = range.trim();
+    const gte = /^>=\s*(\d+)(?:\.[\dx]+)*$/.exec(trimmed);
+    if (gte !== null) return major >= Number(gte[1]);
+    const alternatives = trimmed.split("||").map((part) => part.trim());
+    if (alternatives.every((part) => /^\d+\.x$/.test(part))) {
+      return alternatives.some((part) => Number(part.split(".")[0]) === major);
+    }
+    return null;
+  };
+
+  for (const name of Object.keys(pkg.dependencies)) {
+    const depPkg = JSON.parse(
+      readFileSync(join(REPO_ROOT, "node_modules", name, "package.json"), "utf8"),
+    ) as { engines?: { node?: string } };
+    const range = depPkg.engines?.node;
+    if (range === undefined) continue; // no claim made; nothing to check
+    const verdict = admits(range, floor);
+    assert.ok(
+      verdict !== null,
+      `${name} declares engines.node ${JSON.stringify(range)}, a shape this guard cannot read; ` +
+        "extend the parser or judge the floor by hand — an unread claim is not a pass",
+    );
+    assert.ok(
+      verdict,
+      `${name} declares engines.node ${JSON.stringify(range)}, which excludes Node ${floor}; ` +
+        "the repository floor is >=" + String(floor) + " (package.json engines, CLAUDE.md) — " +
+        "pin a version that supports it or raise the floor deliberately, never incidentally",
+    );
+  }
+});

@@ -309,11 +309,14 @@ the trunk. Review applies identically to both tiers. And anything ambiguous,
 including an empty path set, an unreadable git state, or a path shape the
 classifier does not recognise, resolves to full.
 
-CI earned its first catch on its second run: the test invocation leaned on
-`node --test` expanding its own glob (Node 21 and later), and the Node 20
-matrix job, the one executor not shaped by our own environments, falsified the
-portability claim. Discovery is now an explicit file list
-(`scripts/run-tests.mjs`), which also refuses to call an empty suite green.
+CI earned its first catch on its second run: the Node 20 matrix job, the one
+executor not shaped by our own environments, falsified two portability claims
+at once. The test invocation leaned on `node --test` expanding its own glob
+(Node 21 and later), and behind that mask the pinned better-sqlite3 major had
+dropped Node 20 entirely. Discovery is now an explicit file list
+(`scripts/run-tests.mjs`) that refuses to call an empty suite green, the pin
+is back on a major that supports the floor, and a guard test now checks every
+production dependency's `engines.node` against it.
 
 ## Exit codes
 
