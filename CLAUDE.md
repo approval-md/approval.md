@@ -105,14 +105,21 @@ grandfathered — apply this to new and rewritten text only.
 - From M4 (channels) onward: side-effecting repo actions route through
   the built Telegram channel. Yes, really: releases of approval.md get
   approved via approval.md.
-- **The committed log has one writer.** `.approval/log/events.jsonl` on main is
-  the project's live log. Gate operations (attest, request, grant, run, resolve)
-  execute only in the primary checkout against main — never in agent worktrees,
-  and log-touching commits never ride feature branches. Hash chains do not
-  survive git merges: two branches appending independently produce a corrupt
-  chain by construction, and no merge strategy repairs semantics. If a gate
-  operation is needed mid-task, stop and escalate. (The M5 daemon becomes the
-  sole writer; until then this rule is the daemon.)
+- **The committed log has one writer: the daemon.** `.approval/log/events.jsonl`
+  on main is the project's live log, and `approval daemon run` in the primary
+  checkout is its sole writer while it runs (the M5 daemon this rule was
+  waiting for; CLI verbs still serialize through the append lockfile when it
+  is not running). Sessions no longer stop and escalate for manual-class repo
+  actions (deps.add, network.call, release.publish, and kin): they carry an
+  approval envelope on the task file, then run `approval register`,
+  `approval request`, and `approval wait` against the PRIMARY checkout's log
+  and policy, and proceed only on a granted exit, executing through
+  `approval run` with the granted token. The decision arrives via the
+  Telegram channel; docs/dogfood-cutover.md is the runbook. Unchanged and
+  still binding: gate operations never run in agent worktrees, log-touching
+  commits never ride feature branches, and hash chains do not survive git
+  merges. A session that cannot reach the gate (daemon down, channel dark,
+  wait timed out) is back under the old rule: stop and escalate.
 
 ## Permissions
 
