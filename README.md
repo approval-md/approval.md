@@ -282,6 +282,31 @@ Treat that check as a speed bump and not as a control. If a future version grows
 anything resembling a session, or widens the bind address, this stance needs a
 real anti-CSRF token and a human revisiting it.
 
+## Running the checks
+
+```
+npm run check:changed        # classify the working tree, then run that tier
+npm run check:tier -- <path> # classify the given paths and print light or full
+```
+
+Checks come in two tiers. The **light** tier runs only the documentation guard
+(`tests/docs-guard.test.ts`), and a change qualifies for it only when every
+changed path is `README.md`, `docs/**/*.md`, or `examples/**/*.md`. The **full**
+tier is the standing gate, `npm test && npm run lint && npm run typecheck`, and
+a denylist forces it regardless of file extension: `APPROVAL.md`, `CLAUDE.md`,
+`.claude/**`, `SPEC.md`, `schema/**`, `**/fixtures/**`, `backlog/**`,
+`scripts/**`, `.github/**`, the packaging files, and `cli.js`. Backlog task
+files are on that list because their acceptance criteria are instructions to
+future agents: markdown by extension, behavior by effect.
+
+Four rules hold this together. Classification is computed from the changed
+paths by `scripts/classify-tier.mjs`, never asserted by the author of the
+change, human or agent. Every merge to `main` runs the full suite
+unconditionally, so the light tier is a fast local signal and not a way into
+the trunk. Review applies identically to both tiers. And anything ambiguous,
+including an empty path set, an unreadable git state, or a path shape the
+classifier does not recognise, resolves to full.
+
 ## Exit codes
 
 An agent branches on the exit code before it ever reads stdout, so these numbers

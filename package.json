@@ -21,7 +21,9 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "tsc -p tsconfig.json && node --test \"dist/tests/**/*.test.js\"",
-    "lint": "oxlint src tests"
+    "lint": "oxlint src tests",
+    "check:tier": "node scripts/classify-tier.mjs",
+    "check:changed": "node scripts/classify-tier.mjs --working-tree --run"
   },
   "devDependencies": {
     "@types/better-sqlite3": "9.6.0",
