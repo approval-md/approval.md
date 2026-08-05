@@ -117,7 +117,9 @@ exactly that YAML.
 
 An approval binds to specific bytes (SPEC.md section 6.2). The action's payload
 lives in a file, and its `payload_hash` is SHA-256 over the RFC 8785 canonical
-serialization of that value.
+serialization of that value. `approval payload hash` computes it with the same
+function the runtime uses, so the value below is exactly what the request and its
+grant will record.
 
 ```sh
 cat > payload.json <<'EOF'
@@ -128,11 +130,7 @@ cat > payload.json <<'EOF'
 }
 EOF
 
-HASH=$(node -e '
-import("'"$APPROVAL_MD"'/dist/src/core/payload.js").then(({ payloadHash }) => {
-  console.log(payloadHash(JSON.parse(require("fs").readFileSync("payload.json", "utf8"))));
-});
-')
+HASH=$(approval payload hash payload.json)
 echo "$HASH"
 ```
 

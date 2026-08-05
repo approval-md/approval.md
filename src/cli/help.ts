@@ -48,6 +48,7 @@ Usage:
   approval status     [--policy <path>] [--dir <path>] [--json]
   approval doctor     [--log <path>] [--policy <path>] [--dir <path>]
                       [--api-base <url>] [--json]
+  approval payload hash <file|-> [--json]
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
   approval render     [--log <path>] [--out <path>] [--policy <path>]
                       [--dir <path>] [--json]
@@ -100,6 +101,10 @@ Commands:
             "channel telegram listen" delivers the queue to a Telegram chat and
             long-polls for Approve/Reject taps; config is environment-only
             (APPROVAL_TG_TOKEN, APPROVAL_TG_CHAT)
+  payload   "payload hash" prints the payload_hash of a JSON document (SHA-256
+            over its RFC 8785 canonical serialization), the value a declaration
+            carries and a grant binds to. Most flows never need it: "request
+            --payload" hashes, verifies and stores the bytes in one step
   reindex   rebuild the SQLite index projection from the log
   render    regenerate .approval/QUEUE.md, the READ-ONLY markdown queue
             projection (SPEC.md §9.1): pending requests and the sampled-audit
@@ -1028,13 +1033,16 @@ Flags:
                    any action whose class resolves to manual (including one
                    forced there by SPEC §7's irreversibility floor).
   --payload-hash <64hex>
-                   override the computed content binding. NORMALLY UNNECESSARY:
-                   amended SPEC.md §6.2 defines run's payload as "the argv array
-                   and cwd", and run hashes exactly that itself — an executor
+                   the content binding, when the approved payload is CONTENT
+                   rather than the command. By default run hashes what amended
+                   SPEC.md §6.2 defines as its payload, "the argv array and cwd",
+                   which is right whenever the command IS the action: an executor
                    that had to be TOLD what it was running could be told wrong.
-                   The override exists for adapters whose real payload is
-                   something else (a message body and its recipients, a proposed
-                   record) and which wrap run rather than calling core.
+                   Any action whose grant bound to content instead (an email
+                   body, a record write, a message and its recipients) MUST pass
+                   this flag with that content's hash, or the spend is refused
+                   payload-mismatch. Get it from "approval payload hash <file>",
+                   or keep the value recorded at request time.
   --as <id>        the executing identity, human:<id> or agent:<id>; defaults to
                    APPROVAL_HUMAN
   --policy <path>  policy file to apply (overrides discovery)
@@ -1627,6 +1635,68 @@ JSON shape (stdout, one object per line):
   {"event":"stopped","notified":3,"views":7,"decisions":2,"refused":1}
   The token NEVER appears in this stream: --json output is the thing most
   likely to be piped into a file or a log aggregator.`;
+
+export const PAYLOAD_HELP = `approval payload — work with the bytes an approval binds to
+
+Usage:
+  approval payload hash <file|-> [--json]
+
+Commands:
+  hash      print the payload_hash of a JSON document: SHA-256 over its RFC 8785
+            canonical serialization (SPEC.md §6.2)
+
+${EXIT_CODES}
+${JSON_ERRORS}`;
+
+export const PAYLOAD_HASH_HELP = `approval payload hash — the content binding for a payload
+
+Usage:
+  approval payload hash <file|-> [--json]
+
+Reads one JSON document from <file>, or from stdin when the argument is "-",
+and prints its payload_hash: SHA-256 (lowercase hex) over the RFC 8785 (JCS)
+canonical serialization of the parsed VALUE. Canonicalization first is what makes
+the hash reproducible across implementations that agree about the payload but not
+about key order, whitespace or number formatting.
+
+Flags:
+  --json           machine-readable output
+  -h, --help       this text
+
+This is the same function the runtime uses, so the printed hash is byte-identical
+to the one a request and its grant record.
+
+Where the hash goes:
+  payload_hash     in a task file's action declaration, and on the
+                   approval.requested / approval.granted events in the log
+  approval request --payload <file>|-
+                   supplies the concrete bytes; the runtime hashes them, refuses
+                   payload-mismatch if they are not what was declared, and files
+                   them in .approval/payloads/<hash>.json for render and every
+                   channel to display
+  approval run --payload-hash <64hex>
+                   presents the binding when spending a token, for an action
+                   whose payload is content rather than the command itself
+
+MOST FLOWS NEVER NEED THIS VERB: "approval request --payload" both stores and
+verifies the bytes, so the hash is computed where the payload already is. Reach
+for "payload hash" when writing the declared payload_hash into a task file in the
+first place, or when an adapter must present a binding for material this runtime
+does not hold.
+
+Bytes that do not parse as JSON are a usage error (exit 2), not a hash: the
+binding is defined over the canonical VALUE, so non-JSON input has no defined
+payload_hash and printing one would invent a binding no other implementation
+could reproduce. Empty input is exit 2 for the same reason. A file that exists
+but cannot be read is exit 4.
+
+Reads no log, writes no file, appends nothing.
+
+${EXIT_CODES}
+
+JSON shape (stdout, one object):
+  {"ok":true,"hash":"<64hex>"}
+${JSON_ERRORS}`;
 
 export const RENDER_HELP = `approval render — regenerate .approval/QUEUE.md from the log
 
