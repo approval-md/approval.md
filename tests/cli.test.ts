@@ -36,7 +36,59 @@ import { after, test } from "node:test";
 
 import { appendEvent, type EventInput } from "../src/core/log.js";
 import { indexHead } from "../src/core/reindex.js";
-import { verify } from "../src/core/verify.js";
+
+// ---------------------------------------------------------------------------
+// Frozen wire commitments (APRV-20 finding S3)
+// ---------------------------------------------------------------------------
+
+/**
+ * These are **frozen wire commitments**: the literal bytes the CLI is contracted
+ * to emit for the fixture logs built by {@link buildLog}.
+ *
+ * They used to be derived by calling core's `verify()` inside the test and
+ * asserting the CLI matched it — which passes even when both sides drift
+ * together, and which is the one thing a public-API test must not do. The digests
+ * are deterministic (fixed timestamps, fixed payloads, JCS canonicalization,
+ * SHA-256), so they are captured once and written down. If a hash below changes,
+ * something changed the serialization or the hashing of an event, and every
+ * consumer of an existing log is affected: that is a spec change, and this test
+ * is where it must be argued rather than absorbed.
+ */
+const HEAD_AFTER_2 = {
+  seq: 2,
+  hash: "d42d8abe3ae3b0f057013636740b6bd5e45d622951597e0dc457fa4fff440b28",
+} as const;
+
+const HEAD_AFTER_3 = {
+  seq: 3,
+  hash: "73c5bc2652202931fa33560a2f7749fcd5aafd804899f815110125333f21c67d",
+} as const;
+
+/** The digest each tampered record recomputes to, per {@link tamperedCopy}. */
+const RECOMPUTED_AFTER_TAMPER: Readonly<Record<number, string>> = {
+  1: "8ac220475752eaee092b51d31bec8997b7db66b73e90d93b7912b403e798be57",
+  2: "a3a6cd58f770f06676235941415d0c02b7fc1f53a586c3e4408597b7e275d22b",
+  3: "31c7c05c0c9ee34271f234b3a4444b237e213feda0aae11d3c1ec7fcc8477ef6",
+};
+
+/** The stored hash of each record of a 3-record fixture log. */
+const STORED_HASH: Readonly<Record<number, string>> = {
+  1: "92a924934af7976a77c37a4bf3726c00e6a9d9220d7ac6ad45de3b9c142dd5ba",
+  2: HEAD_AFTER_2.hash,
+  3: HEAD_AFTER_3.hash,
+};
+
+/** The exact `corrupt` message for a tampered record — frozen, not derived. */
+function hashMismatchMessage(seq: number): string {
+  return `record ${seq} hash ${STORED_HASH[seq] as string} does not match its contents (recomputed ${
+    RECOMPUTED_AFTER_TAMPER[seq] as string
+  })`;
+}
+
+/** The exact `torn-tail` message for {@link tornCopy} of a 3-record log. */
+function tornTailMessage(path: string): string {
+  return `log ${path} ends with an unterminated line of 32 byte(s); records 1..3 verify clean. This is the signature of a crashed write. The log is NOT repaired here: truncating the torn line is a human decision.`;
+}
 
 /** dist/tests/cli.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -143,30 +195,25 @@ const RUNNING_AS_ROOT = typeof process.getuid === "function" && process.getuid()
 
 test("log verify: clean log exits 0 with the exact JSON shape", () => {
   const dir = caseDir();
-  const logPath = buildLog(dir, 3);
-  const expected = verify(logPath);
-  assert.equal(expected.status, "clean");
+  buildLog(dir, 3);
 
   const run = runCli(["log", "verify", "--json"], dir);
   assert.equal(run.code, 0);
   assert.deepEqual(json(run), {
     status: "clean",
     records: 3,
-    head: expected.status === "clean" ? expected.head : null,
+    head: { seq: 3, hash: HEAD_AFTER_3.hash },
   });
   assert.equal(run.stderr, "");
 });
 
 test("log verify: human output prints status and head", () => {
   const dir = caseDir();
-  const logPath = buildLog(dir, 2);
-  const head = verify(logPath);
-  assert.equal(head.status, "clean");
-  const hash = head.status === "clean" && head.head !== null ? head.head.hash : "";
+  buildLog(dir, 2);
 
   const run = runCli(["log", "verify"], dir);
   assert.equal(run.code, 0);
-  assert.equal(run.stdout, `clean: 2 record(s), head seq 2 ${hash}\n`);
+  assert.equal(run.stdout, `clean: 2 record(s), head seq 2 ${HEAD_AFTER_2.hash}\n`);
 });
 
 test("log verify: absent log is a clean empty log, exit 0", () => {
@@ -180,8 +227,6 @@ test("log verify: corrupt log exits 1 with the exact JSON shape", () => {
   const dir = caseDir();
   const logPath = buildLog(dir, 3);
   const tampered = tamperedCopy(logPath, 2);
-  const expected = verify(tampered);
-  assert.equal(expected.status, "corrupt");
 
   const run = runCli(["log", "verify", "--log", tampered, "--json"], dir);
   assert.equal(run.code, 1);
@@ -189,9 +234,9 @@ test("log verify: corrupt log exits 1 with the exact JSON shape", () => {
     status: "corrupt",
     records: null,
     head: null,
-    firstBadSeq: expected.status === "corrupt" ? expected.firstBadSeq : null,
-    reason: expected.status === "corrupt" ? expected.reason : null,
-    message: expected.status === "corrupt" ? expected.message : null,
+    firstBadSeq: 2,
+    reason: "hash-mismatch",
+    message: hashMismatchMessage(2),
   });
 });
 
@@ -203,15 +248,16 @@ test("log verify: corrupt log reports reason and first bad seq on stderr", () =>
   const run = runCli(["log", "verify", "--log", tampered], dir);
   assert.equal(run.code, 1);
   assert.equal(run.stdout, "");
-  assert.match(run.stderr, /corrupt: hash-mismatch at seq 2/);
+  assert.equal(
+    run.stderr,
+    `approval: corrupt: hash-mismatch at seq 2\napproval: ${hashMismatchMessage(2)}\n`,
+  );
 });
 
 test("log verify: torn tail exits 3 with the exact JSON shape", () => {
   const dir = caseDir();
   const logPath = buildLog(dir, 3);
   const torn = tornCopy(logPath);
-  const expected = verify(torn);
-  assert.equal(expected.status, "torn-tail");
 
   const run = runCli(["log", "verify", "--log", torn, "--json"], dir);
   assert.equal(run.code, 3);
@@ -220,7 +266,7 @@ test("log verify: torn tail exits 3 with the exact JSON shape", () => {
     records: 3,
     head: null,
     intactThroughSeq: 3,
-    message: expected.status === "torn-tail" ? expected.message : null,
+    message: tornTailMessage(torn),
   });
 });
 
@@ -454,23 +500,21 @@ test("log export: unreadable log exits 4 without saying corrupt", { skip: RUNNIN
 
 test("reindex: builds the index and reports records and head", () => {
   const dir = caseDir();
-  const logPath = buildLog(dir, 3);
-  const head = verify(logPath);
-  assert.equal(head.status, "clean");
+  buildLog(dir, 3);
 
   const run = runCli(["reindex", "--json"], dir);
   assert.equal(run.code, 0);
   assert.deepEqual(json(run), {
     ok: true,
     records: 3,
-    head: head.status === "clean" ? head.head : null,
+    head: { seq: 3, hash: HEAD_AFTER_3.hash },
     truncated: false,
   });
 
   const indexPath = join(dir, ".approval", "index.sqlite");
   assert.equal(existsSync(indexPath), true);
   assert.deepEqual(indexHead(indexPath), {
-    head: head.status === "clean" ? head.head : null,
+    head: { seq: 3, hash: HEAD_AFTER_3.hash },
     truncated: false,
   });
 });

@@ -276,11 +276,38 @@ function scanPolicyFences(markdown: string): FenceScan {
   return { blocks, unterminated: inFence && openIsPolicy };
 }
 
+/** How a hardened parse should name itself in its failure messages. */
+export interface HardenedYamlLabels {
+  /** Subject of the message, e.g. `"policy YAML"` or `"frontmatter YAML"`. */
+  subject: string;
+  /** Where a tag was found, e.g. `"a policy block"` / `"a task envelope"`. */
+  tagContext: string;
+}
+
+/** Outcome of {@link parseHardenedYaml}: a value, or one fail-closed message. */
+export type HardenedYamlResult =
+  | { ok: true; value: unknown }
+  | { ok: false; message: string };
+
 /**
- * Parse policy YAML under the hardened settings described in the module
- * header. Returns the plain JS value, or a fail-closed `yaml-error`.
+ * Parse YAML under the hardened settings described in the module header:
+ * YAML 1.2 core schema, warnings fatal, duplicate keys fatal, explicitly tagged
+ * nodes rejected, alias expansion bounded by {@link MAX_ALIAS_COUNT}.
+ *
+ * **This is the one implementation.** `core/frontmatter.ts` parses the *other*
+ * half of the same permission surface — the task envelope declares the class,
+ * cost, and reversibility that policy is matched against — and used to carry a
+ * replica of these settings. APRV-20 (finding S5) deleted the replica: a task
+ * envelope and a policy block are now hardened by the same code, so the two
+ * cannot drift apart, and a hardening fix lands in both at once.
+ *
+ * Never throws; every failure is a message. Pure function of the source text.
  */
-function parsePolicyYaml(source: string): PolicyLoadResult | { value: unknown } {
+export function parseHardenedYaml(
+  source: string,
+  labels: HardenedYamlLabels,
+): HardenedYamlResult {
+  const { subject, tagContext } = labels;
   let document;
   try {
     document = parseDocument(source, {
@@ -289,28 +316,28 @@ function parsePolicyYaml(source: string): PolicyLoadResult | { value: unknown } 
       prettyErrors: false,
     });
   } catch (cause) {
-    return failure("yaml-error", `policy YAML could not be parsed: ${errorMessage(cause)}`);
+    return { ok: false, message: `${subject} could not be parsed: ${errorMessage(cause)}` };
   }
 
   if (document.errors.length > 0) {
-    return failure(
-      "yaml-error",
-      `policy YAML could not be parsed: ${document.errors
+    return {
+      ok: false,
+      message: `${subject} could not be parsed: ${document.errors
         .map((error) => error.message)
         .join("; ")}`,
-    );
+    };
   }
   if (document.warnings.length > 0) {
-    return failure(
-      "yaml-error",
-      `policy YAML parsed with warnings, which fail closed: ${document.warnings
+    return {
+      ok: false,
+      message: `${subject} parsed with warnings, which fail closed: ${document.warnings
         .map((warning) => warning.message)
         .join("; ")}`,
-    );
+    };
   }
 
-  // Reject explicitly tagged nodes outright: a policy value must only ever be
-  // a plain string, number, boolean, null, map, or sequence.
+  // Reject explicitly tagged nodes outright: a value must only ever be a plain
+  // string, number, boolean, null, map, or sequence.
   let taggedTag: string | null = null;
   visit(document, (_key, node) => {
     if (taggedTag === null && isNode(node) && typeof node.tag === "string") {
@@ -319,10 +346,10 @@ function parsePolicyYaml(source: string): PolicyLoadResult | { value: unknown } 
     return undefined;
   });
   if (taggedTag !== null) {
-    return failure(
-      "yaml-error",
-      `policy YAML uses an explicit tag (${String(taggedTag)}); tags are not accepted in a policy block`,
-    );
+    return {
+      ok: false,
+      message: `${subject} uses an explicit tag (${String(taggedTag)}); tags are not accepted in ${tagContext}`,
+    };
   }
 
   let value: unknown;
@@ -331,13 +358,19 @@ function parsePolicyYaml(source: string): PolicyLoadResult | { value: unknown } 
     // (`maxAliasCount` is a ToJSOptions field): exceeding it throws.
     value = document.toJS({ maxAliasCount: MAX_ALIAS_COUNT });
   } catch (cause) {
-    return failure(
-      "yaml-error",
-      `policy YAML could not be materialised: ${errorMessage(cause)}`,
-    );
+    return { ok: false, message: `${subject} could not be materialised: ${errorMessage(cause)}` };
   }
 
-  return { value };
+  return { ok: true, value };
+}
+
+/** {@link parseHardenedYaml} with this module's labels and error code. */
+function parsePolicyYaml(source: string): PolicyLoadResult | { value: unknown } {
+  const parsed = parseHardenedYaml(source, {
+    subject: "policy YAML",
+    tagContext: "a policy block",
+  });
+  return parsed.ok ? { value: parsed.value } : failure("yaml-error", parsed.message);
 }
 
 function resolveFile(options: LoadPolicyOptions): PolicyLoadResult | { path: string; text: string } {

@@ -53,7 +53,7 @@ import {
   type ExecuteOptions,
   type ExecuteRefusal,
 } from "../core/execute.js";
-import { readGateRecords, requestState } from "../core/gate.js";
+import { readVerifiedRecords, requestState } from "../core/state.js";
 import type { EventRecord } from "../core/log.js";
 import { loadPolicy, parseDuration, POLICY_FILENAMES } from "../core/policy-load.js";
 import { verify } from "../core/verify.js";
@@ -434,7 +434,7 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
   const deadline = Date.now() + timeoutMs;
 
   for (;;) {
-    const read = readGateRecords(logPath);
+    const read = readVerifiedRecords(logPath);
     if (!read.ok) {
       return emitRefusal(streams, json, {
         ok: false,
@@ -554,11 +554,14 @@ export function commandQueue(argv: string[], streams: Streams, cwd: string): num
   const check = preflightLog(logPath);
   if (!check.ok) return ioError(streams, json, check.message);
 
-  const read = readGateRecords(logPath);
+  const read = readVerifiedRecords(logPath);
   if (!read.ok) {
     return emitRefusal(streams, json, {
       ok: false,
-      code: read.code === "log-torn-tail" ? "log-torn-tail" : "log-unreadable",
+      // The read refusal's code is already one of this command's codes
+      // (`log-unreadable`, `log-torn-tail`, `log-corrupt`); it is surfaced
+      // unchanged so a corrupt log is reported as corruption, not as I/O.
+      code: read.code,
       message: read.message,
     });
   }
@@ -640,11 +643,15 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
   if (!check.ok) return ioError(streams, json, check.message);
 
   const verification = verify(logPath);
-  const read = readGateRecords(logPath);
+  const read = readVerifiedRecords(logPath);
   // A log that cannot be read at all is an I/O fact, not a health report.
   if (!read.ok && read.code === "log-unreadable") {
     return ioError(streams, json, read.message);
   }
+  // A torn or corrupt log still produces a health report — that *is* the report,
+  // and `verification` below names the damage. Projections over an unverifiable
+  // log are simply empty: `status` describes the log, it never authorizes
+  // anything from one.
   const records = read.ok ? read.records : [];
 
   const attestation = checkAttestation(records, policyPathFor(flags, cwd));

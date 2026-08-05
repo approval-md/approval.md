@@ -11,6 +11,16 @@
  * 1. **Exclusive access.** A dependency-free advisory lockfile (`<log>.lock`,
  *    created `wx`) serializes the read-tail → compute → write sequence, so two
  *    concurrent appenders cannot both read seq N and both write seq N+1.
+ * 1b. **Compare-and-append (APRV-20 finding B1).** The lock serializes *writes*,
+ *    but every caller that checks the log before appending — "no live request
+ *    exists", "this token is unspent", "the budget has room" — made that check
+ *    outside the lock, against a log that could have moved on before its own
+ *    append took the lock. {@link AppendOptions.expectedHead} closes that
+ *    window: the caller states the `(seq, hash)` it read, this module compares
+ *    it against the actual tail **under the lock**, and refuses `head-moved`
+ *    when they differ. Nothing is written. The refusal is deliberately *not*
+ *    retried here: only the caller knows whether re-deriving its decision
+ *    against the newer log is safe, so the core reports and stops.
  * 2. **Refuse to build on a corrupt tail.** If the file's last line is
  *    truncated (no terminating newline) or unparseable, the append is
  *    rejected. Chaining onto a half-written record would bake the corruption
@@ -100,13 +110,35 @@ export interface EventRecord extends EventInput {
 /** The hash input: a record with every field except `hash`. */
 export type UnhashedRecord = Omit<EventRecord, "hash">;
 
-/** Why an append was refused. Every failure is one of these, never a throw. */
-export type AppendErrorCode =
-  | "lock-timeout"
-  | "corrupt-tail"
-  | "validation"
-  | "canonicalization"
-  | "io";
+/**
+ * Why an append was refused. Every failure is one of these, never a throw.
+ *
+ * Frozen public API in the same sense the gate's refusal codes are: callers
+ * branch on these strings, so adding one is a spec change and renaming one is a
+ * breaking change. `head-moved` is the APRV-20 addition (finding B1), sanctioned
+ * by the human decision of 2026-08-07.
+ */
+export const APPEND_ERROR_CODES = [
+  /** The lockfile was held by another writer for longer than the timeout. */
+  "lock-timeout",
+  /** The file's last line is truncated or unparseable; nothing may chain onto it. */
+  "corrupt-tail",
+  /** The complete record failed the `event` schema at the write boundary. */
+  "validation",
+  /** The record could not be canonicalized (RFC 8785). */
+  "canonicalization",
+  /** The log could not be created, opened, or written. */
+  "io",
+  /**
+   * The caller supplied {@link AppendOptions.expectedHead} and the log's actual
+   * tail, read under the lock, is a different `(seq, hash)`. Someone appended
+   * between the caller's read and this append, so every read-dependent check the
+   * caller made is stale. Nothing was written.
+   */
+  "head-moved",
+] as const;
+
+export type AppendErrorCode = (typeof APPEND_ERROR_CODES)[number];
 
 export interface AppendError {
   code: AppendErrorCode;
@@ -119,12 +151,39 @@ export type AppendResult =
   | { ok: true; record: EventRecord; line: string }
   | { ok: false; error: AppendError };
 
+/**
+ * A chain head: the last record's position and digest.
+ *
+ * Defined here rather than in `core/verify.ts` because the writer needs it for
+ * {@link AppendOptions.expectedHead} and the writer cannot import the verifier
+ * (the verifier imports the writer). `core/verify.ts` re-exports this exact
+ * type, so there is one definition and one meaning.
+ */
+export interface LogHead {
+  seq: number;
+  hash: string;
+}
+
 /** Options for {@link appendEvent}. */
 export interface AppendOptions extends ValidateOptions {
   /** Milliseconds to keep retrying the lockfile before giving up. */
   lockTimeoutMs?: number;
   /** Milliseconds between lock acquisition attempts. */
   lockRetryMs?: number;
+  /**
+   * Compare-and-append precondition (guarantee 1b in the module header).
+   *
+   * - a `LogHead` — the append proceeds only if the log's tail is exactly that
+   *   `(seq, hash)`;
+   * - `null` — the append proceeds only if the log is empty or absent;
+   * - absent/`undefined` — no precondition, the pre-APRV-20 behavior.
+   *
+   * Evaluated **under the lock**, after the tail is read and before anything is
+   * computed or written. A mismatch is `head-moved` and writes nothing. Callers
+   * that made a decision from the log MUST pass the head they read; callers with
+   * no read-dependent decision (an unconditional append) legitimately omit it.
+   */
+  expectedHead?: LogHead | null;
 }
 
 const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
@@ -334,6 +393,35 @@ function readTail(logPath: string): TailOutcome {
 }
 
 /**
+ * Evaluate the compare-and-append precondition against the tail read under the
+ * lock. Returns the refusal, or `null` when the append may proceed.
+ *
+ * `tail.hash === null` (with `seq` 0) is the empty log, which is exactly what
+ * `expectedHead: null` asserts. Anything else is a head that moved: the message
+ * names both heads because the operator's next question is always "moved to
+ * what?".
+ */
+function headPrecondition(
+  logPath: string,
+  expected: LogHead | null,
+  tail: TailState,
+): AppendError | null {
+  const actual = tail.hash === null ? "empty" : `seq ${tail.seq} ${tail.hash}`;
+  if (expected === null) {
+    if (tail.hash === null) return null;
+    return {
+      code: "head-moved",
+      message: `log ${logPath} was expected to be empty but its head is ${actual}; a record was appended between the caller's read and this append, so the checks that authorized it are stale. Nothing was written.`,
+    };
+  }
+  if (tail.seq === expected.seq && tail.hash === expected.hash) return null;
+  return {
+    code: "head-moved",
+    message: `log ${logPath} head moved: expected seq ${expected.seq} ${expected.hash}, found ${actual}. A record was appended between the caller's read and this append, so the checks that authorized it are stale. Nothing was written; re-reading and re-deciding is the caller's choice, never this module's.`,
+  };
+}
+
+/**
  * Build a complete record from caller content plus chain state. Property
  * insertion order is irrelevant to the digest (JCS sorts keys) but is kept
  * readable here for anyone eyeballing the code.
@@ -362,6 +450,10 @@ function buildRecord(input: EventInput, seq: number, prev: string | null): Event
  *
  * Returns a structured result rather than throwing: an append that cannot be
  * made safely leaves the file byte-identical and says why.
+ *
+ * Pass {@link AppendOptions.expectedHead} whenever the append is authorized by
+ * something read from the log: the head is compared under the lock and a moved
+ * head refuses `head-moved` without writing.
  */
 export function appendEvent(
   logPath: string,
@@ -383,6 +475,14 @@ export function appendEvent(
   try {
     const tail = readTail(logPath);
     if (!tail.ok) return { ok: false, error: tail.error };
+
+    // Compare-and-append: the precondition is evaluated here, inside the lock,
+    // against the tail that was just read. Outside the lock it would be exactly
+    // the race it exists to close.
+    if (options.expectedHead !== undefined) {
+      const moved = headPrecondition(logPath, options.expectedHead, tail.tail);
+      if (moved !== null) return { ok: false, error: moved };
+    }
 
     let record: EventRecord;
     let line: string;

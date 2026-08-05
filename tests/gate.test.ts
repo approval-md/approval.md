@@ -1030,6 +1030,58 @@ test("a torn tail is refused with its own code, and nothing is appended", () => 
   assert.equal(readFileSync(unit.logPath, "utf8"), `${before}{"seq":3,"ts":"2026`);
 });
 
+test("a forged record is refused log-corrupt: the gate verifies what it reads", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  requestChaser(unit);
+
+  // The attacker rewrites a record's payload in place. The line is still valid
+  // JSON and still schema-valid — only its digest no longer matches, which is
+  // precisely what a JSON-parsing reader could not see and a verifying one can.
+  const lines = readFileSync(unit.logPath, "utf8").split("\n");
+  const forged = JSON.parse(lines[2] as string) as Record<string, unknown>;
+  forged["payload"] = { class: "communicate.email.external", est_cost_usd: 999 };
+  lines[2] = JSON.stringify(forged);
+  writeFileSync(unit.logPath, lines.join("\n"), "utf8");
+  const before = readFileSync(unit.logPath, "utf8");
+
+  const refusal = asRefusal(
+    decide(unit.logPath, "task-042:chaser", "grant", "human:carter", at(2), unit.options),
+  );
+  assert.equal(refusal.code, "log-corrupt");
+  assert.match(refusal.message, /does not verify/);
+  assert.match(refusal.message, /hash-mismatch/);
+  assert.equal(readFileSync(unit.logPath, "utf8"), before, "nothing was appended");
+});
+
+test("a decision appended between the gate's read and its write is refused head-moved", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  requestChaser(unit);
+
+  // Stand in for the interleaving: the gate's own append path is exercised
+  // directly with the head the gate would have read one record ago.
+  const all = records(unit);
+  const stale = all[all.length - 2] as EventRecord;
+  const result = appendEvent(
+    unit.logPath,
+    {
+      ts: at(2),
+      event: "approval.granted",
+      actor: "human:carter",
+      task: "task-042",
+      action_key: "task-042:chaser",
+      payload: { class: "communicate.email.external", est_cost_usd: 0.02 },
+    },
+    { expectedHead: { seq: stale.seq, hash: stale.hash } },
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.code, "head-moved");
+  assertClean(unit);
+});
+
 test("a full manual lifecycle leaves the chain clean and the states in order", () => {
   const unit = newCase();
   attest(unit);
@@ -1087,6 +1139,10 @@ test("the refusal-code union is frozen public API", () => {
     "actor-not-human",
     "log-unreadable",
     "log-torn-tail",
+    // APRV-20 finding S1: the gate verifies the chain before it derives anything
+    // from it, so "the log does not verify" needs a code of its own. An addition
+    // to the union, not a rename.
+    "log-corrupt",
     "append-failed",
   ]);
 });

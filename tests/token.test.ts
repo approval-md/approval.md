@@ -31,6 +31,7 @@ import {
   digestsEqual,
   mintToken,
   TOKEN_BYTES,
+  TOKEN_HASH_FIELD,
   TOKEN_REFUSAL_CODES,
   TOKEN_VERIFY_REFUSAL_CODES,
   tokenHash,
@@ -248,6 +249,8 @@ test("the refusal unions are frozen and the verify codes are a prefix of them", 
     ...TOKEN_VERIFY_REFUSAL_CODES,
     "log-unreadable",
     "log-torn-tail",
+    // APRV-20 finding S1, shared verbatim with the gate and the executor.
+    "log-corrupt",
     "append-failed",
   ]);
 });
@@ -451,6 +454,35 @@ test("death by execution: the second consume is refused FROM THE LOG, not from m
     "a second execution.started was appended",
   );
   assertClean(unit);
+});
+
+test("a token is not spendable from a log that does not verify (log-corrupt)", () => {
+  const unit = newCase();
+  const token = granted(unit);
+
+  // Forge the grant's recorded digest: valid JSON, valid against the schema,
+  // wrong hash. A reader that merely parsed the line would happily authorize an
+  // execution against a record nobody ever wrote.
+  const lines = readFileSync(unit.logPath, "utf8").split("\n");
+  const grantLine = lines.findIndex((line) => line.includes('"approval.granted"'));
+  assert.ok(grantLine >= 0, "expected an approval.granted line");
+  const forged = JSON.parse(lines[grantLine] as string) as Record<string, unknown>;
+  forged["payload"] = {
+    ...(forged["payload"] as Record<string, unknown>),
+    [TOKEN_HASH_FIELD]: createHash("sha256").update("forged", "utf8").digest("hex"),
+  };
+  lines[grantLine] = JSON.stringify(forged);
+  writeFileSync(unit.logPath, lines.join("\n"), "utf8");
+  const before = readFileSync(unit.logPath, "utf8");
+
+  const refusal = asRefusal(
+    consumeToken(unit.logPath, "task-042:chaser", token, at(3), "agent:claude", {
+      policyFile: unit.policyPath,
+    }),
+  );
+  assert.equal(refusal.code, "log-corrupt");
+  assert.match(refusal.message, /does not verify/);
+  assert.equal(readFileSync(unit.logPath, "utf8"), before, "nothing was appended");
 });
 
 test("an execution.started for the key spends it even if it named no token", () => {

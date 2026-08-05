@@ -420,7 +420,12 @@ const GATE_REFUSAL_CODES_HELP = `Refusal codes (error.code with --json; frozen p
   actor-not-human         a human-only verb was attempted by another actor.
   log-unreadable          the log could not be read (exit 4).
   log-torn-tail           the log's final line is unterminated (exit 3).
-  append-failed           the append itself failed; exit code follows the cause.`;
+  log-corrupt             the hash chain does not verify; nothing is authorized
+                          from an unverifiable log (exit 1). Run
+                          \`approval log verify\` for the detail.
+  append-failed           the append itself failed; exit code follows the cause.
+                          \`head-moved\` means the log grew between this command's
+                          read and its write, so nothing was written.`;
 
 export const REGISTER_HELP = `approval register — validate a task envelope and record it
 
@@ -678,7 +683,11 @@ const TOKEN_REFUSAL_CODES_HELP = `Refusal codes (error.code with --json; frozen 
   token-revoked    a human withdrew the grant (approval.revoked).
   log-unreadable   the log could not be read (exit 4).
   log-torn-tail    the log's final line is unterminated (exit 3).
-  append-failed    the append itself failed; exit code follows the cause.`;
+  log-corrupt      the hash chain does not verify; no token is spendable from an
+                   unverifiable log (exit 1). Run \`approval log verify\`.
+  append-failed    the append itself failed; exit code follows the cause.
+                   \`head-moved\` means another writer got there first — with one
+                   token that is a refused double-spend, and nothing was written.`;
 
 /**
  * The one design point everybody gets wrong on first reading, so it is printed
@@ -899,7 +908,11 @@ Refusal codes (error.code with --json; frozen public API):
   already-finished      (finish path) that execution already has an outcome.
   log-unreadable        the log could not be read (exit 4).
   log-torn-tail         the log's final line is unterminated (exit 3).
+  log-corrupt           the hash chain does not verify; nothing executes from an
+                        unverifiable log (exit 1). Run \`approval log verify\`.
   append-failed         the append itself failed; exit code follows the cause.
+                        \`head-moved\` means the log grew between the checks and
+                        the write; nothing was written and nothing is retried.
 ${JSON_ERRORS}`;
 
 export const WAIT_HELP = `approval wait — block until a task's requests are decided

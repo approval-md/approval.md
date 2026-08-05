@@ -79,18 +79,18 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 import {
-  readGateRecords,
-  requestState,
-  type GateRefusal,
-  type RequestState,
-} from "./gate.js";
-import {
   appendEvent,
   type AppendError,
   type AppendOptions,
   type EventRecord,
 } from "./log.js";
 import { loadPolicy, type LoadPolicyOptions } from "./policy-load.js";
+import {
+  readVerifiedRecords,
+  requestState,
+  type LogReadRefusal,
+  type RequestState,
+} from "./state.js";
 
 /** Token entropy. 32 bytes = 256 bits, rendered as 64 lowercase hex chars. */
 export const TOKEN_BYTES = 32;
@@ -175,7 +175,13 @@ export const TOKEN_REFUSAL_CODES = [
   "log-unreadable",
   /** The log's final line is unterminated (a crashed write). */
   "log-torn-tail",
-  /** The append itself failed; `append` carries the underlying error. */
+  /** The chain does not verify; nothing may be spent from an untrustworthy log. */
+  "log-corrupt",
+  /**
+   * The append itself failed; `append` carries the underlying error. Its `code`
+   * is `head-moved` when a record landed between this module's read and its
+   * append — the double-spend case, refused under `appendEvent`'s lock.
+   */
   "append-failed",
 ] as const;
 
@@ -202,11 +208,15 @@ function refuse(
   return { ok: false, code, message, ...extra };
 }
 
-/** Narrow the gate's read refusals onto this module's codes, unchanged. */
-function fromGateRefusal(refusal: GateRefusal): TokenRefusal {
-  const code: TokenRefusalCode =
-    refusal.code === "log-torn-tail" ? "log-torn-tail" : "log-unreadable";
-  return refuse(code, refusal.message);
+/**
+ * Narrow a verified-read refusal onto this module's codes, unchanged.
+ *
+ * The three names are shared verbatim with `core/state.ts` (and with the gate
+ * and the executor) so the CLI maps all of them onto the frozen exit table with
+ * one function.
+ */
+function fromReadRefusal(refusal: LogReadRefusal): TokenRefusal {
+  return refuse(refusal.code, refusal.message);
 }
 
 // ---------------------------------------------------------------------------
@@ -450,13 +460,15 @@ export function tokenTtlMs(options: TokenOptions): number | null {
  * is what makes the second consumption attempt refusable from the log alone.
  * `class` and `est_cost_usd` are copied from the grant, never re-derived.
  *
- * Verification and append are not atomic against a concurrent writer of *other*
- * event types, but the double-spend that matters is closed by `appendEvent`'s
- * lockfile plus this re-read: two concurrent consumers serialize on the lock,
- * and the loser's own verification — performed before its append — has already
- * observed the winner's `execution.started` only if it read after the winner
- * wrote. To make that ordering unconditional the verification here reads the log
- * itself rather than accepting records from the caller.
+ * Verification and append are made atomic by compare-and-append (APRV-20 finding
+ * B1): this function reads the log itself — never records handed in by a caller —
+ * and passes the head it read as `appendEvent`'s `expectedHead`. Two genuinely
+ * concurrent consumers of one token therefore cannot both start. Whichever takes
+ * the lockfile first appends `execution.started`; the loser finds the head moved
+ * under the lock and is refused `append-failed`/`head-moved` with nothing
+ * written. The loser is **not** retried here: re-reading would report
+ * `token-consumed`, but deciding to look again is the caller's call, and a core
+ * that silently retried would hide a double-spend attempt behind a tidy error.
  *
  * `actor` is not pre-validated: the event schema is the authority on actor
  * shape, and a malformed one is refused at the write boundary as
@@ -471,8 +483,11 @@ export function consumeToken(
   actor: string,
   options: TokenOptions = {},
 ): ConsumeResult {
-  const read = readGateRecords(logPath);
-  if (!read.ok) return fromGateRefusal(read);
+  const read = readVerifiedRecords(
+    logPath,
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+  );
+  if (!read.ok) return fromReadRefusal(read);
 
   const verified = verifyToken(
     read.records,
@@ -511,6 +526,11 @@ export function consumeToken(
     {
       ...options.append,
       ...(options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir }),
+      // Compare-and-append (APRV-20 finding B1): the verification above was made
+      // against the log ending at this head. If anything landed since — another
+      // consumer spending the same token, most of all — the append is refused
+      // `head-moved` under the lock and this token is not spent twice.
+      expectedHead: read.head,
     },
   );
   if (!appended.ok) {

@@ -125,6 +125,18 @@ export function policyFileHash(path: string): string {
  * `ts` is supplied by the caller. Like `appendEvent`, this function never reads
  * the clock: a hash-relevant field sourced from ambient state would make the
  * log irreproducible.
+ *
+ * ## Why this append carries no `expectedHead` (APRV-20 finding B1)
+ *
+ * Every *other* append site in the codebase reads the log, decides something
+ * from what it read, and must therefore prove the log has not moved before it
+ * writes. This one does not read the log at all. Its only precondition is the
+ * actor check and the policy file's bytes — neither of which the log can
+ * invalidate — so there is no check-then-act window to close. A concurrent
+ * appender simply means this attestation lands after that record, which is
+ * correct: attestation is an unconditional assertion about a file's bytes at a
+ * moment, and the *latest* attestation is the one `checkAttestation` honors.
+ * Passing a precondition here would only manufacture spurious failures.
  */
 export function appendAttestation(
   logPath: string,

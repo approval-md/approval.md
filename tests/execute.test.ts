@@ -230,6 +230,8 @@ test("the execution refusal-code union is frozen public API", () => {
     "token-revoked",
     "log-unreadable",
     "log-torn-tail",
+    // APRV-20 finding S1, shared verbatim with the gate and the token module.
+    "log-corrupt",
     "append-failed",
   ]);
 });
@@ -382,6 +384,23 @@ test("a second start for the same non-manual key refuses already-executed", () =
   );
   assert.equal(refusal.code, "already-executed");
   assertClean(unit);
+});
+
+test("a spliced-out record refuses log-corrupt: nothing executes on an unverifiable log", () => {
+  const unit = ready();
+  // Delete a record from the middle. Every surviving line is valid JSON and
+  // schema-valid; only the chain says a record is missing — the deletion this
+  // whole design exists to make visible.
+  const lines = readFileSync(unit.logPath, "utf8").split("\n").filter((line) => line.length > 0);
+  writeFileSync(unit.logPath, `${lines.slice(1).join("\n")}\n`, "utf8");
+  const before = readFileSync(unit.logPath, "utf8");
+
+  const refusal = asRefusal(
+    startExecution(unit.logPath, "task-042:draft", unit.options, at(2), "agent:claude"),
+  );
+  assert.equal(refusal.code, "log-corrupt");
+  assert.match(refusal.message, /does not verify/);
+  assert.equal(readFileSync(unit.logPath, "utf8"), before, "nothing was appended");
 });
 
 // ===========================================================================

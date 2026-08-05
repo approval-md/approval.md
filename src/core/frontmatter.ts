@@ -18,7 +18,7 @@
  * request side-effecting execution"), so that is a distinct, non-alarming code
  * rather than a parse error.
  *
- * ## YAML stance — the same hardening as the policy loader
+ * ## YAML stance — literally the same hardening as the policy loader
  *
  * `core/policy-load.ts` documents at length why a permission document must be
  * parsed under YAML 1.2 core with tags rejected, warnings fatal, duplicate keys
@@ -26,12 +26,11 @@
  * same permission surface — it declares the class, cost, and reversibility that
  * policy is matched against — so it is parsed under exactly the same settings.
  *
- * That module's `parsePolicyYaml` is private, so the settings are **replicated**
- * here rather than imported. The one shared constant that is exported,
- * {@link MAX_ALIAS_COUNT}, is imported rather than re-typed, so the two bounds
- * cannot drift. If `policy-load.ts` ever exports its parse helper, this function
- * should become a call to it; the replication is deliberate and small, and it is
- * flagged here so it cannot rot unnoticed.
+ * Those settings used to be **replicated** here. APRV-20 (finding S5) removed
+ * the replica: `policy-load.ts` now exports {@link parseHardenedYaml} and this
+ * module calls it. There is one hardened parser in the codebase, and a task file
+ * and a policy block are hardened by the same lines of code — no `parseDocument`
+ * call survives in this file, so the two can no longer drift.
  *
  * Determinism: a pure function of the input text. No clock, no network, no
  * caching. Never throws — every failure is a structured result.
@@ -39,9 +38,7 @@
 
 import { readFileSync } from "node:fs";
 
-import { isNode, parseDocument, visit } from "yaml";
-
-import { MAX_ALIAS_COUNT } from "./policy-load.js";
+import { parseHardenedYaml } from "./policy-load.js";
 
 /** The line that opens and closes a frontmatter block. */
 export const FRONTMATTER_DELIMITER = "---";
@@ -103,55 +100,12 @@ export function parseFrontmatter(text: string): FrontmatterResult {
   const source = lines.slice(1, close).join("\n");
   const body = lines.slice(close + 1).join("\n");
 
-  let document;
-  try {
-    document = parseDocument(source, {
-      schema: "core",
-      logLevel: "silent",
-      prettyErrors: false,
-    });
-  } catch (cause) {
-    return failure("yaml-error", `frontmatter YAML could not be parsed: ${errorMessage(cause)}`);
-  }
-
-  if (document.errors.length > 0) {
-    return failure(
-      "yaml-error",
-      `frontmatter YAML could not be parsed: ${document.errors.map((error) => error.message).join("; ")}`,
-    );
-  }
-  if (document.warnings.length > 0) {
-    return failure(
-      "yaml-error",
-      `frontmatter YAML parsed with warnings, which fail closed: ${document.warnings
-        .map((warning) => warning.message)
-        .join("; ")}`,
-    );
-  }
-
-  let taggedTag: string | null = null;
-  visit(document, (_key, node) => {
-    if (taggedTag === null && isNode(node) && typeof node.tag === "string") {
-      taggedTag = node.tag;
-    }
-    return undefined;
+  const parsed = parseHardenedYaml(source, {
+    subject: "frontmatter YAML",
+    tagContext: "a task envelope",
   });
-  if (taggedTag !== null) {
-    return failure(
-      "yaml-error",
-      `frontmatter YAML uses an explicit tag (${String(taggedTag)}); tags are not accepted in a task envelope`,
-    );
-  }
-
-  let value: unknown;
-  try {
-    value = document.toJS({ maxAliasCount: MAX_ALIAS_COUNT });
-  } catch (cause) {
-    return failure(
-      "yaml-error",
-      `frontmatter YAML could not be materialised: ${errorMessage(cause)}`,
-    );
-  }
+  if (!parsed.ok) return failure("yaml-error", parsed.message);
+  const value = parsed.value;
 
   if (value === null || value === undefined) {
     // An empty frontmatter block is a mapping with no keys, not an error.

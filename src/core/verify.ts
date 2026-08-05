@@ -42,14 +42,17 @@
 
 import { readFileSync } from "node:fs";
 
-import { ALG, computeRecordHash, type EventRecord } from "./log.js";
+import { ALG, computeRecordHash, type EventRecord, type LogHead } from "./log.js";
 import { validate, type ValidateOptions } from "./validate.js";
 
-/** A chain head: the last record's position and digest. */
-export interface LogHead {
-  seq: number;
-  hash: string;
-}
+/**
+ * A chain head: the last record's position and digest.
+ *
+ * Defined in `core/log.ts` (the writer needs it for its compare-and-append
+ * precondition and cannot import this module) and re-exported here, where
+ * readers expect to find it. One definition, one meaning.
+ */
+export type { LogHead };
 
 /** Machine-readable reason a log failed verification. Closed set. */
 export type VerifyFailureReason =
@@ -167,9 +170,10 @@ function splitLines(raw: string): Split {
 function walk(
   lines: string[],
   validateOptions: ValidateOptions,
-): { failure: VerifyResult | null; head: LogHead | null } {
+): { failure: VerifyResult | null; head: LogHead | null; records: EventRecord[] } {
   let prevSeq = 0;
   let prevHash: string | null = null;
+  const verified: EventRecord[] = [];
 
   for (const [index, line] of lines.entries()) {
     const lineNumber = index + 1;
@@ -178,6 +182,7 @@ function walk(
       return {
         failure: corrupt("malformed-line", null, `line ${lineNumber} is blank`),
         head: null,
+        records: verified,
       };
     }
 
@@ -193,6 +198,7 @@ function walk(
           `line ${lineNumber} is not valid JSON: ${detail}`,
         ),
         head: null,
+        records: verified,
       };
     }
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
@@ -203,6 +209,7 @@ function walk(
           `line ${lineNumber} is not a JSON object`,
         ),
         head: null,
+        records: verified,
       };
     }
 
@@ -218,6 +225,7 @@ function walk(
           `line ${lineNumber}: hash-scheme identifier "alg" is ${found}, expected "${ALG}"`,
         ),
         head: null,
+        records: verified,
       };
     }
 
@@ -233,6 +241,7 @@ function walk(
           `line ${lineNumber} does not validate against the event schema: ${detail}`,
         ),
         head: null,
+        records: verified,
       };
     }
 
@@ -251,6 +260,7 @@ function walk(
           `record ${record.seq} could not be canonicalized for hashing: ${detail}`,
         ),
         head: null,
+        records: verified,
       };
     }
     if (recomputed !== record.hash) {
@@ -261,6 +271,7 @@ function walk(
           `record ${record.seq} hash ${record.hash} does not match its contents (recomputed ${recomputed})`,
         ),
         head: null,
+        records: verified,
       };
     }
 
@@ -275,6 +286,7 @@ function walk(
             : `line ${lineNumber} has seq ${record.seq}, expected ${prevSeq + 1}`,
         ),
         head: null,
+        records: verified,
       };
     }
 
@@ -287,6 +299,7 @@ function walk(
             `record ${record.seq} is the first record but its prev is ${JSON.stringify(record.prev)}, expected null`,
           ),
           head: null,
+          records: verified,
         };
       }
     } else if (record.prev !== prevHash) {
@@ -297,29 +310,44 @@ function walk(
           `record ${record.seq} prev ${JSON.stringify(record.prev)} does not link to record ${prevSeq} hash ${prevHash}`,
         ),
         head: null,
+        records: verified,
       };
     }
 
     prevSeq = record.seq;
     prevHash = record.hash;
+    verified.push(record);
   }
 
   return {
     failure: null,
     head: prevHash === null ? null : { seq: prevSeq, hash: prevHash },
+    records: verified,
   };
 }
 
 /**
- * Verify the hash chain of the log at `logPath`.
+ * A verification run plus the records it verified.
  *
- * An absent file is an empty log, which is clean with zero records and a `null`
- * head — an audit trail that has recorded nothing is not evidence of tampering.
- *
- * The file is opened for reading only; see the module header for the recovery
- * stance and the detection boundary.
+ * `records` holds every record the walk accepted, in log order: the whole log
+ * when `result.status` is `clean`, the intact prefix when it is `torn-tail`, and
+ * the prefix before the first failure when it is `corrupt` (where it carries no
+ * authority and callers must ignore it).
  */
-export function verify(logPath: string, options: VerifyOptions = {}): VerifyResult {
+export interface VerifiedLog {
+  result: VerifyResult;
+  records: EventRecord[];
+}
+
+/**
+ * {@link verify}, returning the verified records alongside the verdict.
+ *
+ * This exists so that a reader which needs *both* — the gate, the token module,
+ * the executor, via `core/state.ts` — can have one walk produce both, rather
+ * than verifying with this module and then parsing the same bytes a second time
+ * with a private walk that could disagree with it (APRV-20 finding S1).
+ */
+export function verifyWithRecords(logPath: string, options: VerifyOptions = {}): VerifiedLog {
   const validateOptions: ValidateOptions =
     options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir };
 
@@ -329,7 +357,10 @@ export function verify(logPath: string, options: VerifyOptions = {}): VerifyResu
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code !== "ENOENT") {
       const detail = cause instanceof Error ? cause.message : String(cause);
-      return corrupt("malformed-line", null, `log ${logPath} could not be read: ${detail}`);
+      return {
+        result: corrupt("malformed-line", null, `log ${logPath} could not be read: ${detail}`),
+        records: [],
+      };
     }
     // An absent file is an empty log — but it still has to satisfy an anchor,
     // so it falls through to the same walk rather than short-circuiting here.
@@ -337,40 +368,63 @@ export function verify(logPath: string, options: VerifyOptions = {}): VerifyResu
   }
 
   const { complete, torn } = raw.length === 0 ? { complete: [], torn: null } : splitLines(raw);
-  const { failure, head } = walk(complete, validateOptions);
+  const { failure, head, records } = walk(complete, validateOptions);
 
   // A corrupt prefix outranks a torn tail: the tear is the least of the log's
   // problems, and reporting it would understate the damage.
-  if (failure !== null) return failure;
+  if (failure !== null) return { result: failure, records };
 
   if (torn !== null) {
     return {
-      status: "torn-tail",
-      records: complete.length,
-      intactThroughSeq: head === null ? 0 : head.seq,
-      message: `log ${logPath} ends with an unterminated line of ${torn.length} byte(s); records 1..${
-        head === null ? 0 : head.seq
-      } verify clean. This is the signature of a crashed write. The log is NOT repaired here: truncating the torn line is a human decision.`,
+      result: {
+        status: "torn-tail",
+        records: complete.length,
+        intactThroughSeq: head === null ? 0 : head.seq,
+        message: `log ${logPath} ends with an unterminated line of ${torn.length} byte(s); records 1..${
+          head === null ? 0 : head.seq
+        } verify clean. This is the signature of a crashed write. The log is NOT repaired here: truncating the torn line is a human decision.`,
+      },
+      records,
     };
   }
 
   const expected = options.expectedHead;
   if (expected !== undefined) {
     if (head === null) {
-      return corrupt(
-        "head-mismatch",
-        null,
-        `log ${logPath} is empty but the anchored head is seq ${expected.seq} ${expected.hash}: records have been removed`,
-      );
+      return {
+        result: corrupt(
+          "head-mismatch",
+          null,
+          `log ${logPath} is empty but the anchored head is seq ${expected.seq} ${expected.hash}: records have been removed`,
+        ),
+        records,
+      };
     }
     if (head.seq !== expected.seq || head.hash !== expected.hash) {
-      return corrupt(
-        "head-mismatch",
-        head.seq,
-        `log ${logPath} ends at seq ${head.seq} ${head.hash}, but the anchored head is seq ${expected.seq} ${expected.hash}: the log is internally consistent, so this is truncation or a fully recomputed forged suffix`,
-      );
+      return {
+        result: corrupt(
+          "head-mismatch",
+          head.seq,
+          `log ${logPath} ends at seq ${head.seq} ${head.hash}, but the anchored head is seq ${expected.seq} ${expected.hash}: the log is internally consistent, so this is truncation or a fully recomputed forged suffix`,
+        ),
+        records,
+      };
     }
   }
 
-  return { status: "clean", records: complete.length, head };
+  return { result: { status: "clean", records: complete.length, head }, records };
+}
+
+/**
+ * Verify the hash chain of the log at `logPath`.
+ *
+ * An absent file is an empty log, which is clean with zero records and a `null`
+ * head — an audit trail that has recorded nothing is not evidence of tampering.
+ *
+ * The file is opened for reading only; see the module header for the recovery
+ * stance and the detection boundary. This is {@link verifyWithRecords} with the
+ * records dropped — one walk, one implementation.
+ */
+export function verify(logPath: string, options: VerifyOptions = {}): VerifyResult {
+  return verifyWithRecords(logPath, options).result;
 }

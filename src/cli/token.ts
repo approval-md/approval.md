@@ -38,7 +38,7 @@
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
-import { readGateRecords } from "../core/gate.js";
+import { readVerifiedRecords } from "../core/state.js";
 import {
   consumeToken,
   tokenStatus,
@@ -198,11 +198,14 @@ export function commandToken(argv: string[], streams: Streams, cwd: string): num
   const key = actionKeyOf(positionals, streams, json, TOKEN_HELP);
   if (!key.ok) return key.code;
 
-  const read = readGateRecords(logPath);
+  const read = readVerifiedRecords(logPath);
   if (!read.ok) {
     return emitRefusal(streams, json, {
       ok: false,
-      code: read.code === "log-torn-tail" ? "log-torn-tail" : "log-unreadable",
+      // The read refusal's code is already one of this command's codes
+      // (`log-unreadable`, `log-torn-tail`, `log-corrupt`); it is surfaced
+      // unchanged so a corrupt log is reported as corruption, not as I/O.
+      code: read.code,
       message: read.message,
     });
   }

@@ -63,17 +63,18 @@ import { join } from "node:path";
 
 import { attestationRefusal, checkAttestation, type AttestationRefusalDetail } from "./attest.js";
 import { evaluateBudgets, type BudgetVerdict } from "./budgets.js";
-import { readGateRecords, type GateRefusal } from "./gate.js";
 import {
   appendEvent,
   type AppendError,
   type AppendOptions,
   type EventInput,
   type EventRecord,
+  type LogHead,
 } from "./log.js";
 import { isLoopEscalated } from "./loop.js";
 import { loadPolicy, POLICY_FILENAMES, type Autonomy, type LoadPolicyOptions } from "./policy-load.js";
 import { resolve } from "./policy-match.js";
+import { readVerifiedRecords, type LogReadRefusal } from "./state.js";
 import { consumeToken, type TokenRefusal } from "./token.js";
 
 export {
@@ -125,7 +126,14 @@ export const EXECUTE_REFUSAL_CODES = [
   "log-unreadable",
   /** The log's final line is unterminated (a crashed write). */
   "log-torn-tail",
-  /** The append itself failed; `append` carries the underlying error. */
+  /** The chain does not verify; nothing may execute on an untrustworthy log. */
+  "log-corrupt",
+  /**
+   * The append itself failed; `append` carries the underlying error. Its `code`
+   * is `head-moved` when a record landed between this module's read and its
+   * append, so the idempotency and budget checks that authorized the write were
+   * made against an older log. Nothing was written and nothing is retried here.
+   */
   "append-failed",
 ] as const;
 
@@ -172,12 +180,9 @@ function refuse(
   return { ok: false, code, message, ...extra };
 }
 
-/** Narrow a gate read refusal onto this module's codes, unchanged. */
-function fromGateRefusal(refusal: GateRefusal): ExecuteRefusal {
-  return refuse(
-    refusal.code === "log-torn-tail" ? "log-torn-tail" : "log-unreadable",
-    refusal.message,
-  );
+/** Narrow a verified-read refusal onto this module's codes, unchanged. */
+function fromReadRefusal(refusal: LogReadRefusal): ExecuteRefusal {
+  return refuse(refusal.code, refusal.message);
 }
 
 /**
@@ -231,12 +236,20 @@ function appendOptionsOf(options: ExecuteOptions): AppendOptions {
   return append;
 }
 
+/**
+ * Append one event under the compare-and-append precondition (APRV-20).
+ *
+ * `expectedHead` is the head observed at the read that authorized this write:
+ * the already-executed check, the loop-safety check, and the budget evaluation
+ * were all made against a log ending exactly there.
+ */
 function append(
   logPath: string,
   input: EventInput,
   options: ExecuteOptions,
+  expectedHead: LogHead | null,
 ): { ok: true; record: EventRecord } | ExecuteRefusal {
-  const result = appendEvent(logPath, input, appendOptionsOf(options));
+  const result = appendEvent(logPath, input, { ...appendOptionsOf(options), expectedHead });
   if (result.ok) return { ok: true, record: result.record };
   return refuse(
     "append-failed",
@@ -360,8 +373,11 @@ export function startExecution(
   ts: string,
   actor: string,
 ): StartResult {
-  const read = readGateRecords(logPath);
-  if (!read.ok) return fromGateRefusal(read);
+  const read = readVerifiedRecords(
+    logPath,
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+  );
+  if (!read.ok) return fromReadRefusal(read);
   const records = read.records;
 
   const declared = findDeclaration(records, actionKey);
@@ -460,6 +476,7 @@ export function startExecution(
         },
       },
       options,
+      read.head,
     );
     const message = `budget refused the execution: ${failed
       .map((entry) => `${entry.limit} (${entry.scope})`)
@@ -486,6 +503,7 @@ export function startExecution(
       payload: { class: declared.class, est_cost_usd: declared.est_cost_usd },
     },
     options,
+    read.head,
   );
   if (!appended.ok) return appended;
 
@@ -535,8 +553,11 @@ export function finishExecution(
   actor: string,
   options: ExecuteOptions = {},
 ): FinishResult {
-  const read = readGateRecords(logPath);
-  if (!read.ok) return fromGateRefusal(read);
+  const read = readVerifiedRecords(
+    logPath,
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+  );
+  if (!read.ok) return fromReadRefusal(read);
 
   let started: EventRecord | null = null;
   let finished: EventRecord | null = null;
@@ -582,6 +603,8 @@ export function finishExecution(
     logPath,
     { ts, event, actor, task, action_key: actionKey, payload: { exit_code: exitCode } },
     options,
+    // The head read above, when the not-started / already-finished checks ran.
+    read.head,
   );
   if (!appended.ok) return appended;
 
