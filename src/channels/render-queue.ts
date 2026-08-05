@@ -58,14 +58,15 @@
  * carries the **binding** (`payload_hash`) and points at the channels for the
  * bytes, and the rendered header says exactly that to the human reading it.
  *
- * The consequence is stated plainly rather than hidden: because
- * `channels/tagging.ts` refuses to build a `manual` request with no payload
- * material (§10.4, enforced at construction), a caller that holds no material
- * gets those keys in {@link QueueRender.skipped} and they are rendered in their
- * own section — listed, with the reason, never silently dropped. A payload store
- * (SPEC.md §7's "the payload itself is stored or referenced by the request so
- * channels can display it") is what closes that gap, and it does not exist in
- * v0.1.
+ * Which is a different statement from "the renderer cannot see the payload".
+ * Since APRV-28 it can: `channels/tagging.ts` reads the payload store beside the
+ * log (SPEC.md §6.2's "the payload itself is stored or referenced by the request
+ * so channels can display it"), so a request whose bytes were supplied at intake
+ * is *summarizable* here and appears in the pending section — which is why this
+ * file's pending count now agrees with the queue every channel shows, where
+ * before it silently disagreed. The bytes still do not appear in this file.
+ * Requests whose material nobody holds remain in {@link QueueRender.skipped},
+ * rendered in their own section with the reason, never silently dropped.
  */
 
 import { closeSync, mkdirSync, openSync, renameSync, unlinkSync, writeSync } from "node:fs";

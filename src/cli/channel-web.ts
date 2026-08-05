@@ -147,6 +147,10 @@ export function resolveWebPort(portFlag: string | null, fromPolicy: number | nul
  * `approval channel cli` uses, deliberately, so an operator's payload directory
  * works with either channel.
  *
+ * An override since APRV-28: with no flag the bytes come from the payload store
+ * beside the log, so the ordinary path needs no directory at all. This answers
+ * first for the keys it covers, and the store answers for the rest.
+ *
  * The tagger re-hashes whatever this returns and refuses anything that does not
  * match the recorded binding, so a wrong file produces a visible skip rather
  * than a rendering of bytes the token would refuse to execute.

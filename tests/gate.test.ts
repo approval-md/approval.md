@@ -1145,6 +1145,13 @@ test("the refusal-code union is frozen public API", () => {
     // APRV-20 pass two, amendment A1: a manual action must bind to bytes, and
     // the schema cannot know autonomy, so intake enforces it. An addition.
     "payload-hash-required",
+    // APRV-28, the payload store: two additions on the intake path, both about
+    // material the caller supplied. `payload-mismatch` is the same word
+    // `core/token.ts` uses at spend time, for the same reason — the bytes are
+    // not the bytes the action declared — and `payload-store-failed` is the
+    // filesystem's half, which fails closed rather than requesting anyway.
+    "payload-mismatch",
+    "payload-store-failed",
     // APRV-20 pass two: the grant path used to substitute an empty class and
     // record the authorization anyway. Its own code now.
     "grant-classless-request",

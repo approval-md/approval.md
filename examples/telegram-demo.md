@@ -120,20 +120,17 @@ lives in a file, and its `payload_hash` is SHA-256 over the RFC 8785 canonical
 serialization of that value.
 
 ```sh
-cat > payloads.json <<'EOF'
+cat > payload.json <<'EOF'
 {
-  "task-demo:chaser": {
-    "to": ["agency@example.co.uk"],
-    "subject": "Deposit refund chaser <second> & final",
-    "body": "Following up on the deposit refund, now 21 days past the scheme deadline."
-  }
+  "to": ["agency@example.co.uk"],
+  "subject": "Deposit refund chaser <second> & final",
+  "body": "Following up on the deposit refund, now 21 days past the scheme deadline."
 }
 EOF
 
 HASH=$(node -e '
 import("'"$APPROVAL_MD"'/dist/src/core/payload.js").then(({ payloadHash }) => {
-  const table = JSON.parse(require("fs").readFileSync("payloads.json", "utf8"));
-  console.log(payloadHash(table["task-demo:chaser"]));
+  console.log(payloadHash(JSON.parse(require("fs").readFileSync("payload.json", "utf8"))));
 });
 ')
 echo "$HASH"
@@ -189,7 +186,8 @@ again.
 
 ```sh
 approval register task-demo.md --as agent:drafter
-approval request task-demo --action task-demo:chaser --as agent:drafter
+approval request task-demo --action task-demo:chaser --payload payload.json \
+  --as agent:drafter
 ```
 
 ```
@@ -199,6 +197,13 @@ requested task-demo task-demo:chaser at seq 3 (manual)
 
 The class, cost, reversibility and binding come from the registered envelope, not
 from flags. An agent cannot rename its own class between registering and asking.
+
+`--payload` supplies the concrete bytes. They must hash to the `payload_hash` the
+envelope declared — anything else is refused `payload-mismatch` and nothing is
+stored or appended — and they are filed at
+`.approval/payloads/<payload_hash>.json`. That store is where `approval render`
+and every channel read the payload from, which is why no later step below passes
+a payload flag to anything.
 
 ### Step 6: look at the queue
 
@@ -210,7 +215,7 @@ approval status
 
 ```
 task-demo:chaser  task-demo  communicate.email.external  $0.02  2026-08-05T12:07:51.447Z  3600s left
-wrote /tmp/approval-demo/.approval/QUEUE.md: 2891 byte(s), head seq 3 c0ec5027..., 0 pending, 1 not summarized, 0 awaiting audit review
+wrote /tmp/approval-demo/.approval/QUEUE.md: 3204 byte(s), head seq 3 c0ec5027..., 1 pending, 0 not summarized, 0 awaiting audit review
 health: ok
 attestation: attested (seq 1)
 verification: clean (3 record(s))
@@ -219,12 +224,13 @@ budgets: none configured
 loop escalations: none
 ```
 
-Note `0 pending, 1 not summarized`. `approval render` takes no `--payloads` flag,
-and a `manual` request cannot be summarized without its payload material (SPEC.md
-section 10.4), so QUEUE.md lists the request in its "could not summarize" section
-with the reason `payload-unavailable`. The decision surfaces are the channels,
-which do present the bytes. QUEUE.md never inlines payloads by design: it is
-regenerated on every event and read by anyone with the working directory.
+Note `1 pending, 0 not summarized`, agreeing with `approval queue`. `approval
+render` still takes no payload flag and needs none: the material went into the
+payload store at request time, so the renderer can summarize the request like
+every other surface. It still does not print the bytes. QUEUE.md carries the
+binding only, by design: it is regenerated on every event and read by anyone with
+the working directory, and it collects no decision. The decision surfaces are the
+channels, which do present the payload (SPEC.md section 10.4).
 
 ### Step 7: try to run it before it is approved
 
@@ -244,7 +250,7 @@ whole point stated as a refusal.
 ### Step 8: start the listener
 
 ```sh
-approval channel telegram listen --payloads payloads.json
+approval channel telegram listen
 ```
 
 ```
@@ -368,8 +374,8 @@ BotFather (`/revoke`) or delete the bot (`/deletebot`).
 | `telegram is not configured` at exit 2 | `APPROVAL_TG_TOKEN` or `APPROVAL_TG_CHAT` is unset or empty. The message names which. |
 | `no human identity` at exit 2 | `APPROVAL_HUMAN` is unset and no `--as human:<id>` was given. The listener refuses to record decisions against nobody. |
 | The listener starts but no message arrives | The chat id is wrong, or you have not messaged the bot yet. A bot cannot open a conversation. |
-| `telegram cannot deliver ... (payload-unavailable)` | `--payloads` is missing, or its table has no entry for the action key. |
-| `telegram cannot deliver ... (payload-mismatch)` | The payload file no longer hashes to the recorded binding. Regenerate `HASH`, or fix the payload back. |
+| `telegram cannot deliver ... (payload-unavailable)` | Nothing is stored at `.approval/payloads/<hash>.json` — the request was made without `--payload` — and no `--payloads` override was given. |
+| `telegram cannot deliver ... (payload-mismatch)` | The stored (or overriding) payload no longer hashes to the recorded binding. A store file is refused rather than rendered when its contents stop matching its name. |
 | Tapping Approve answers "only accepts decisions from its configured approval chat" | The tap came from a chat other than `APPROVAL_TG_CHAT`. Nothing was logged, and the request is still live. |
 | `policy-not-attested` / `hash-mismatch` at exit 1 | `APPROVAL.md` changed since it was attested. Run `approval policy attest` again. |
 | `payload-mismatch` from `approval run` | The `--payload-hash` presented is not the one the grant approved. A grant approves specific bytes. |
