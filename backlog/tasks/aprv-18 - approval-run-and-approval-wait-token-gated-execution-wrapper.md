@@ -4,6 +4,7 @@ title: 'approval run and approval wait: token-gated execution wrapper'
 status: To Do
 assignee: []
 created_date: '2026-08-05 01:00'
+updated_date: '2026-08-05 01:05'
 labels: []
 milestone: m-3
 dependencies:
@@ -26,4 +27,6 @@ The gate's execution surface (SPEC section 10.1, human-settled point 5, 2026-08-
 - [ ] #3 `approval wait <task> --timeout <duration>` blocks until decided or timeout; exit code encodes granted/rejected/expired/timeout distinctly, documented and pinned by tests
 - [ ] #4 Three consecutive execution.failed events for one task yield an escalate-to-manual projection consumed by the gate for subsequent requests, covered by tests
 - [ ] #5 All new CLI surface follows the frozen exit-code and --json conventions with --help documenting shapes and codes
+- [ ] #6 New verb `approval status`, distinct from queue: reports attestation state, dangling executions, budget headroom per limit, latest verification summary, and loop-escalation flags; --json shape and exit codes frozen by subprocess tests per the APRV-9 conventions
+- [ ] #7 `approval queue` remains solely the pending-decision inbox and gains no status content
 <!-- AC:END -->
