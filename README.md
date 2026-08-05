@@ -140,10 +140,14 @@ preconditions first so a refusal never leaves a half-finished amendment behind.
 ### Why this verb exists: seq 2
 
 Read this repository's own log. At **seq 2** a policy amendment was attested at
-11:56. It was **superseded** eleven minutes later, at seq 3 at 12:03, because the
+11:56:07. It was **superseded** seven minutes later, at seq 3 at 12:03:35, because the
 edit broke a pinned assertion and nobody found out until the repository's own
 test suite ran against it. The operator attested bytes whose consequences had
 never been shown to them.
+
+This account originally said eleven minutes. The log says seven, and the log
+won: the figure was corrected against the chain after being misremembered,
+which is the whole thesis of keeping one.
 
 That is the failure the load advisory is for. Had `amend` existed that morning,
 the load failure would have been on screen while the human was deciding, and

@@ -4,8 +4,9 @@
  *
  * ## The two incidents this verb exists to prevent
  *
- * **seq 2 of this repository's own log — the eleven-minute amendment.** A
- * policy edit was attested and superseded eleven minutes later, because the
+ * **seq 2 of this repository's own log — the seven-minute amendment.** A
+ * policy edit was attested and superseded seven minutes later (seq 2 at
+ * 11:56:07Z, seq 3 at 12:03:35Z), because the
  * edit broke a pinned dogfood assertion and nobody found out until the test
  * suite ran. The operator attested bytes whose *consequences* had never been
  * shown to them. `amend` shows the semantic diff and the load advisory BEFORE
