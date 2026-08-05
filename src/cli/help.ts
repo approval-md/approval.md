@@ -1243,6 +1243,19 @@ Reports, in one object:
                    and therefore a specific action, which status does not have.
   loop_escalations tasks with three consecutive execution.failed events, forced
                    to manual by SPEC.md §10.2 until an execution.completed lands.
+  payload_store    whether .approval/payloads/ exists and how many payload files
+                   it holds, with the warning it exists to keep in front of an
+                   operator: the store holds the bytes approvals bind to, and it
+                   is THE ONE CACHE THAT CANNOT BE REBUILT FROM THE LOG. QUEUE.md
+                   regenerates and index.sqlite reindexes; the store does not,
+                   because the log records the hash a request bound to and never
+                   the material. Deleting it loses those bytes for good, and the
+                   surviving binding makes the loss visible: every manual request
+                   whose material went with it renders payload-unavailable.
+                   INFORMATIONAL: it moves neither the health verdict nor the
+                   exit code. An empty store is the normal state of a repo that
+                   has never made a request carrying --payload. ("approval
+                   doctor" is where an UNWRITABLE store is a failure.)
 
 THIS IS NOT "approval queue". queue is the pending-decision inbox — what a human
 must answer. status is what an operator must fix. Neither shows the other's
@@ -1267,9 +1280,12 @@ JSON shape (stdout, one object):
      "window":"rolling-24h","consumed":0.02,"requested":0,"remaining":9.98,
      "pass":true}],
    "loop_escalations":[{"task":"task-042","consecutive_failures":3,
-     "escalated":true}]}
+     "escalated":true}],
+   "payload_store":{"present":true,"files":2,"note":"..."}}
   ok is true whenever status ran; healthy is the verdict. attestation.seq is
-  null for not-attested and unreadable.
+  null for not-attested and unreadable. payload_store is informational: it never
+  moves healthy or the exit code, and note carries the unrebuildable warning
+  verbatim.
 ${JSON_ERRORS}`;
 
 export const DOCTOR_HELP = `approval doctor — environment sanity in one verb
@@ -1291,7 +1307,7 @@ Flags:
   --json             machine-readable output
   -h, --help         this text
 
-Six checks, in the order in which their failures cascade:
+Seven checks, in the order in which their failures cascade:
 
   build-freshness  dist/src/cli/main.js — the exact file the bin loader runs —
                    is present and NOT OLDER than the newest file under src/ or
@@ -1328,6 +1344,17 @@ Six checks, in the order in which their failures cascade:
                    doctor that cried broken at a working channel would train
                    people to ignore it. Only a bind error meaning the config
                    itself is wrong (EACCES on a privileged port) fails.
+  payload-store    .approval/payloads/ can be written. The store holds the bytes
+                   approvals bind to, keyed by their hash, and it is THE ONE
+                   CACHE THAT CANNOT BE REBUILT FROM THE LOG: the log records
+                   the binding, never the material, so a deleted payload is gone
+                   and its manual request renders payload-unavailable. A store
+                   that does not exist yet PASSES (it is created by the first
+                   request carrying --payload); an existing directory this
+                   process cannot write FAILS, because a request already
+                   accepted by the gate would refuse payload-store-failed mid
+                   ceremony. The probe creates and removes one empty file and
+                   reads no payload.
 
 APPENDS NOTHING. Not an event, not a marker. An operator reaching for a
 diagnostic while the log is in a state they do not understand must not have that
@@ -1354,10 +1381,11 @@ JSON shape (stdout, one object):
     {"check":"attestation","status":"pass","detail":"..."},
     {"check":"log","status":"pass","detail":"..."},
     {"check":"telegram","status":"skip","detail":"..."},
-    {"check":"web-port","status":"pass","detail":"..."}]}
+    {"check":"web-port","status":"pass","detail":"..."},
+    {"check":"payload-store","status":"pass","detail":"..."}]}
   status is "pass" | "fail" | "skip". fix is present only when there is
   something to do. ok is true when no check failed — a skip does not make it
-  false. The six checks always appear, in this order.
+  false. The seven checks always appear, in this order.
 ${JSON_ERRORS}`;
 
 export const EXECUTION_HELP = `approval execution — recovery verbs for executions the runtime could not close

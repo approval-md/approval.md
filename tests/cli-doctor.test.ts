@@ -26,9 +26,11 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   appendFileSync,
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   utimesSync,
@@ -306,11 +308,19 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
   assert.equal(parsed.ok, true);
   assert.deepEqual(
     parsed.checks.map((entry) => entry.check),
-    ["build-freshness", "identity", "attestation", "log", "telegram", "web-port"],
+    [
+      "build-freshness",
+      "identity",
+      "attestation",
+      "log",
+      "telegram",
+      "web-port",
+      "payload-store",
+    ],
   );
   assert.deepEqual(
     parsed.checks.map((entry) => entry.status),
-    ["pass", "pass", "pass", "pass", "pass", "pass"],
+    ["pass", "pass", "pass", "pass", "pass", "pass", "pass"],
   );
   for (const entry of parsed.checks) {
     assert.equal(entry.fix, undefined, `a passing check carried a fix: ${entry.check}`);
@@ -320,6 +330,13 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
   assert.match(checkNamed(run, "attestation").detail, /attested at seq 1/u);
   assert.match(checkNamed(run, "telegram").detail, /@approval_md_test_bot/u);
   assert.match(checkNamed(run, "web-port").detail, new RegExp(`127\\.0\\.0\\.1:${port} is free`, "u"));
+  // The healthy fixture has never made a request carrying --payload, so the
+  // store does not exist yet: a pass with the reason, plus the warning every
+  // verdict of this check carries.
+  const store = checkNamed(run, "payload-store");
+  assert.match(store.detail, /not created until the first request --payload/u);
+  assert.match(store.detail, /CANNOT be rebuilt from the log/u);
+  assert.match(store.detail, /payload-unavailable/u);
 
   // The log was not touched, and the token never appeared in the output.
   assert.deepEqual(readFileSync(logPathOf(home)), before);
@@ -338,7 +355,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
 
   assert.equal(run.code, 1, run.stderr);
   const lines = run.stdout.trimEnd().split("\n");
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 6);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 7);
   assert.ok(lines.some((line) => line.startsWith("✗ identity:")));
   assert.ok(lines.some((line) => line.startsWith("– telegram:")));
   // The fix belongs to the failing check and is indented under it.
@@ -665,6 +682,65 @@ test("doctor: a nonsense policy port falls back to the default rather than crash
 });
 
 // ---------------------------------------------------------------------------
+// payload-store (APRV-35)
+// ---------------------------------------------------------------------------
+
+test("doctor: a writable payload store passes and counts what it holds", async () => {
+  const port = await freePort();
+  const home = await makeHome({ port });
+  const storeDir = join(home, ".approval", "payloads");
+  mkdirSync(storeDir, { recursive: true });
+  writeFileSync(join(storeDir, `${"a".repeat(64)}.json`), '{"body":"x"}');
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  const check = checkNamed(run, "payload-store");
+  assert.equal(check.status, "pass");
+  assert.equal(check.fix, undefined);
+  assert.match(check.detail, /is writable and holds 1 payload file\(s\)/u);
+  assert.match(check.detail, /CANNOT be rebuilt from the log/u);
+
+  // The probe leaves nothing behind: the store still holds exactly the one file.
+  assert.deepEqual(readdirSync(storeDir), [`${"a".repeat(64)}.json`]);
+});
+
+test("doctor: an existing payload store that cannot be written fails with a fix", async (t) => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    // Root ignores the mode bits, so the probe would succeed and the case would
+    // assert nothing. Skipped rather than faked.
+    t.skip("running as root: an unwritable directory cannot be simulated with mode bits");
+    return;
+  }
+
+  const port = await freePort();
+  const home = await makeHome({ port });
+  const storeDir = join(home, ".approval", "payloads");
+  mkdirSync(storeDir, { recursive: true });
+  const before = readFileSync(logPathOf(home));
+  chmodSync(storeDir, 0o555);
+
+  try {
+    const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+    assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+    const parsed = parseDoctor(run);
+    assert.equal(parsed.ok, false);
+    const check = checkNamed(run, "payload-store");
+    assert.equal(check.status, "fail");
+    assert.match(check.detail, /exists but is not writable/u);
+    assert.match(check.detail, /payload-store-failed/u);
+    assert.match(check.detail, /CANNOT be rebuilt from the log/u);
+    assert.ok(check.fix !== undefined && check.fix.includes(storeDir));
+
+    // A failing check is still a report: doctor repaired nothing and wrote
+    // nothing, including to the log.
+    assert.deepEqual(readFileSync(logPathOf(home)), before);
+    assert.deepEqual(readdirSync(storeDir), []);
+  } finally {
+    chmodSync(storeDir, 0o755);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Shape and hygiene
 // ---------------------------------------------------------------------------
 
@@ -676,7 +752,7 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  assert.equal(parsed.checks.length, 6);
+  assert.equal(parsed.checks.length, 7);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);
