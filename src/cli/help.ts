@@ -1279,7 +1279,7 @@ JSON shape (stdout, one object):
      "message":"..."}]}
   pending holds the TAGGED requests verbatim: every field keeps its
   kind/value/source|author markers, so a machine reader sees the same
-  computed/claimed split a human does. pending is [] for an empty queue.
+  computed/claimed split a human does. pending is [] for an empty queue.`;
 
 export const RENDER_HELP = `approval render — regenerate .approval/QUEUE.md from the log
 
