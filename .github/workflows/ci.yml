@@ -15,8 +15,22 @@
 
 name: ci
 
+# Trigger split (human refinement, 2026-08-05): push covers main only, and
+# pull_request owns PR branches. Before the restriction, a branch with an open
+# PR ran the full gate twice per Node version on every push (push event plus
+# pull_request event on the same commits). A branch with no PR gets no CI,
+# which is fine: nothing merges without a PR, and the PR is where the gate is
+# required.
+#
+# Classification input, stated so nobody re-litigates it from symptoms: the
+# classifier diffs `base...HEAD` (three-dot, merge-base semantics), so a PR
+# that pulls main in via "Update branch" is still classified from its own
+# changes only. When a record-only PR runs the full gate, that is the
+# `backlog/**` denylist working as designed (task files are instruction-
+# bearing), never merge-commit pollution.
 on:
   push:
+    branches: [main]
   pull_request:
 
 concurrency:
