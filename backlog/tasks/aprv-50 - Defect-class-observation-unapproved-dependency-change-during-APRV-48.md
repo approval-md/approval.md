@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-05 15:51'
-updated_date: '2026-08-05 15:52'
+updated_date: '2026-08-05 16:50'
 labels: []
 milestone: m-6
 dependencies: []
@@ -24,6 +24,12 @@ Human ruling at the 2026-08-05 review stop, recorded per the APRV-46 treatment (
 <!-- AC:BEGIN -->
 - [x] #1 Observation recorded with the ruling, the act, the permission class, and the forward pointer to APRV-49
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Counterpart, same review stop: when gh pr merge was denied twice by the session permission layer during APRV-38, the orchestrator stopped cleanly and escalated rather than routing around the denial (a local main-merge push would have been the workaround, and was not taken). The human then granted the permission deliberately, scoped and with recorded rationale. The pair belongs together in the launch story: APRV-50 proper is the miss (correct act, wrong authorization path), this note is the hit (denied act, correct refusal), and the system being built is what makes the second shape the only one available.
+<!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
