@@ -61,6 +61,7 @@ import {
   commandWait,
 } from "./execute.js";
 import { commandChannel } from "./channel.js";
+import { commandDaemon } from "./daemon.js";
 import { commandDoctor } from "./doctor.js";
 import { commandPayload } from "./payload.js";
 import { commandPolicy } from "./policy.js";
@@ -544,6 +545,27 @@ export function main(argv: string[], options: MainOptions = {}): number {
         (cause: unknown) => {
           streams.err(
             `approval: channel listener failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+          );
+          process.exitCode = EXIT_IO;
+        },
+      );
+      return EXIT_OK;
+    }
+    // The daemon verb (APRV-39). `daemon run` is the second LONG-LIVED command
+    // in this CLI and is handled exactly like `channel`: it returns a promise,
+    // and its eventual code reaches the process through `process.exitCode`. It
+    // is the only command that both watches and appends, and the only one whose
+    // ordinary ending is a signal (which is exit 0, not a failure).
+    case "daemon": {
+      const outcome = commandDaemon(rest, streams, cwd);
+      if (typeof outcome === "number") return outcome;
+      void outcome.then(
+        (code) => {
+          process.exitCode = code;
+        },
+        (cause: unknown) => {
+          streams.err(
+            `approval: daemon failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
           );
           process.exitCode = EXIT_IO;
         },
