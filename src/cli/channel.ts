@@ -73,6 +73,7 @@ import { CHANNEL_CLI_HELP, CHANNEL_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
 import { commandTelegram } from "./channel-telegram.js";
+import { commandWeb } from "./channel-web.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--log": "string",
@@ -360,7 +361,7 @@ async function interactiveLoop(
   return refused ? EXIT_INTEGRITY : EXIT_OK;
 }
 
-/** `approval channel <subcommand>` — one subcommand at v0.1: `cli`. */
+/** `approval channel <subcommand>` — `cli`, `web` (APRV-25), `telegram`. */
 export function commandChannel(argv: string[], streams: Streams, cwd: string): number | Promise<number> {
   const sub = argv[0];
   const rest = argv.slice(1);
@@ -374,6 +375,8 @@ export function commandChannel(argv: string[], streams: Streams, cwd: string): n
     return EXIT_OK;
   }
   if (sub === "cli") return commandChannelCli(rest, streams, cwd);
+  // APRV-25: the local queue page. Long-lived, like `telegram listen`.
+  if (sub === "web") return commandWeb(rest, streams, cwd);
   if (sub === "telegram") return commandTelegram(rest, streams, cwd);
   return usageError(
     streams,

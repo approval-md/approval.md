@@ -39,6 +39,8 @@ Usage:
   approval queue      [--policy <path>] [--dir <path>] [--json]
   approval channel cli [--policy-dir <path>] [--payload-dir <path>]
                       [--as human:<id>] [--interactive] [--json]
+  approval channel web [--port <n>] [--payload-dir <path>] [--as human:<id>]
+                      [--policy <path>] [--dir <path>] [--log <path>] [--json]
   approval channel telegram listen|health [--once] [--as human:<id>] [--json]
   approval status     [--policy <path>] [--dir <path>] [--json]
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
@@ -1188,11 +1190,16 @@ Usage:
   approval channel cli [--log <path>] [--policy-dir <path>] [--policy <path>]
                        [--payload-dir <path>] [--as human:<id>] [--interactive]
                        [--json]
+  approval channel web [--port <n>] [--payload-dir <path>] [--as human:<id>]
+                       [--policy <path>] [--dir <path>] [--log <path>] [--json]
   approval channel telegram listen|health [--once] [--as human:<id>] [--json]
 
 Subcommands:
   cli        render the pending queue in this terminal and, when it IS a
              terminal, collect decisions with a prompt
+  web        serve the pending queue as a page on 127.0.0.1 ONLY, with
+             Grant/Reject forms and a batch gesture; see
+             "approval channel web --help"
   telegram   deliver the queue to a Telegram chat (sendMessage + inline
              keyboard) and long-poll for Approve/Reject taps; see
              "approval channel telegram --help"
@@ -1288,6 +1295,92 @@ JSON shape (stdout, one object):
   pending holds the TAGGED requests verbatim: every field keeps its
   kind/value/source|author markers, so a machine reader sees the same
   computed/claimed split a human does. pending is [] for an empty queue.`;
+
+export const WEB_HELP = `approval channel web — the local queue page (127.0.0.1 ONLY)
+
+Usage:
+  approval channel web [--port <n>] [--log <path>] [--policy <path>]
+                       [--dir <path>] [--payload-dir <path>] [--as human:<id>]
+                       [--json]
+
+Flags:
+  --port <n>           port to bind. Precedence: --port > channels.web.port in
+                       the policy > 4680. There is deliberately NO --host
+  --log <path>         log file to read, and to append decisions to
+  --policy <path>      policy file (wins over --dir)
+  --dir <path>         directory to discover APPROVAL.md / APPROVALS.md in
+  --payload-dir <path> directory of payload material, one JSON file per action
+                       key: "<key>.json" or its percent-encoded name. The bytes
+                       are hashed and checked against the request's recorded
+                       payload_hash; material that does not match is REFUSED,
+                       never rendered
+  --as human:<id>      the person deciding; defaults to APPROVAL_HUMAN.
+                       REQUIRED at startup — this page exists to record
+                       decisions, so a server whose buttons could not record
+                       one is refused before the socket is bound (exit 2)
+  --json               print the listening/stopped lines as JSON objects
+  -h, --help           this text
+
+The command runs until interrupted (ctrl-c / SIGTERM). It is a PULL channel:
+nothing is delivered anywhere, and the page is the notification surface. Open
+it when you want to decide.
+
+BINDS 127.0.0.1 AND NOTHING ELSE. The loopback host is hard-coded, and there is
+no flag, option or environment variable that widens it. That is not an
+oversight: this server has NO AUTHENTICATION, so the loopback interface IS the
+access control. A --host 0.0.0.0 would turn "anyone with local access can
+approve" into "anyone on this network can approve", from a flag that reads like
+a convenience.
+
+NO AUTH IN v0.1 — THE TRUST BOUNDARY (SPEC.md §11). This page authenticates
+nobody. Every decision is recorded against the actor from --as / APPROVAL_HUMAN,
+so what it proves is "someone with access to this machine answered", never "that
+specific person answered". The same caveat is printed in a banner ON the page,
+because the page is where the human is looking. CSRF: there is no token in v0.1
+— there is no session to protect, and anything that can open a socket to the
+port can POST directly. A best-effort same-origin check refuses clearly
+cross-origin POSTs (403); it is a speed bump, not a control, and is flagged for
+review in the source.
+
+THE RENDERING CONVENTION (SPEC.md §9). Every field is marked [computed] (the
+runtime derived it; the parenthetical names the derivation) or [claimed] (the
+party under oversight wrote it; the parenthetical names the author). Claimed
+fields sit in their own outlined section under a heading naming their author.
+Every value — claimed fields and payload bytes especially — is HTML-escaped:
+they are agent-authored, and they are this page's entire injection surface.
+
+THE FULL PAYLOAD (SPEC.md §10.4). For a manual action the exact bytes are shown
+verbatim in a delimited <pre> block labelled with the bound sha256, never mixed
+with the agent's summary. Material comes from --payload-dir; a request whose
+material is missing is SKIPPED and reported on stderr.
+
+BATCHING (SPEC.md §10.3, B7). Tick requests and use "Grant selected" /
+"Reject selected" for one gesture over the set. The log never batches: each
+member gets its own approval.granted / approval.rejected carrying the batch's
+delivery id. A selection that would hide one member's full payload behind
+another is refused (batch-forbidden-mix) with nothing recorded. A reject needs
+a note, batch or not, and the requirement is enforced on the server (422).
+
+NO JAVASCRIPT REQUIRED. Every flow is a plain form post; the only script on the
+page is a "select all" convenience.
+
+THE EXECUTION TOKEN IS SHOWN ON THE PAGE, ONCE. A grant mints a single-use
+token, and the response page displays it in a copy-me block. It is never
+written to the log (which holds only its SHA-256), never put in a URL, and
+never shown again — reload and it is gone. This differs from the Telegram
+channel, which refuses to put a token in a chat: that transcript lives on
+someone else's servers, this page is served over loopback to the person
+deciding, right now, and is persisted nowhere.
+
+${EXIT_CODES}
+${JSON_ERRORS}
+
+JSON shape (stdout, one object per line):
+  {"event":"listening","channel":"web","url":"http://127.0.0.1:4680/",
+   "host":"127.0.0.1","port":4680,"actor":"human:carter"}
+  {"event":"stopped","notified":3,"views":7,"decisions":2,"refused":1}
+  The token NEVER appears in this stream: --json output is the thing most
+  likely to be piped into a file or a log aggregator.`;
 
 export const RENDER_HELP = `approval render — regenerate .approval/QUEUE.md from the log
 
