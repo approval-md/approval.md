@@ -113,10 +113,25 @@ export interface Policy {
     approval_ttl?: string;
     on_expiry?: "reject";
   };
+  /**
+   * Amended SPEC.md §5.2 (APRV-38): duration after which a payload whose action
+   * reached a terminal state MAY be pruned from `.approval/payloads/`. Absent
+   * means retain indefinitely. Read by the M5 daemon; nothing else prunes.
+   */
+  payload_retention?: string;
   approvers?: Record<string, { channels: string[] }>;
   classes?: Record<string, PolicyClassRule>;
   budgets?: Record<string, { daily_usd?: number; daily_actions?: number }>;
-  audit?: { supervised_sample_rate?: number };
+  audit?: {
+    supervised_sample_rate?: number;
+    /**
+     * Amended SPEC.md §5.2 (APRV-38): NAME of the environment variable holding
+     * the operator's HMAC sampling secret. The name is what a policy carries;
+     * the secret lives outside the repository and outside any agent-readable
+     * path, because an agent that can read it can predict the sample.
+     */
+    sampling_secret_env?: string;
+  };
   channels?: Record<string, Record<string, unknown>>;
 }
 

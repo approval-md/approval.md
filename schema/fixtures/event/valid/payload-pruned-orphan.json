@@ -1,0 +1,13 @@
+{
+  "seq": 22,
+  "ts": "2026-09-11T03:00:05Z",
+  "event": "payload.pruned",
+  "actor": "system:daemon",
+  "payload": {
+    "payload_hash": "6413e70c6131a9bac579589d6b54c51aaeae7197a8168120f11196b207439a6b",
+    "reason": "orphaned"
+  },
+  "alg": "sha256/jcs",
+  "prev": "7f09d44fa736a1cff155595e65d934ddb40400917d0f62f035e193b258d8790e",
+  "hash": "b751a8c3136adf85eeef2721735f6f65012eda8532c705e132ef0522c8311f1f"
+}

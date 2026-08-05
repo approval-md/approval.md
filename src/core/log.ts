@@ -67,7 +67,13 @@ export const ALG = "sha256/jcs";
  */
 export const GENESIS_PREV = null;
 
-/** The closed set of event types (SPEC.md §8, mirrored by the schema enum). */
+/**
+ * The closed set of event types (SPEC.md §8, mirrored by the schema enum).
+ *
+ * `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of
+ * sixteen: the daemon appends one per payload file it removes under
+ * `payload_retention`, so a log states what its payload store no longer holds.
+ */
 export type EventType =
   | "task.registered"
   | "route.proposed"
@@ -84,7 +90,8 @@ export type EventType =
   | "policy.updated"
   | "envelope.drift"
   | "audit.sampled"
-  | "audit.reviewed";
+  | "audit.reviewed"
+  | "payload.pruned";
 
 /** Caller-supplied content of an event. Chain fields are not accepted. */
 export interface EventInput {

@@ -1,0 +1,19 @@
+{
+  "seq": 9,
+  "ts": "2026-08-04T09:31:00Z",
+  "event": "approval.granted",
+  "task": "task-049",
+  "action_key": "task-049:stage-3:2026-08-04",
+  "actor": "human:carter",
+  "channel": "telegram",
+  "payload": {
+    "class": "record.write.stage",
+    "est_cost_usd": 0,
+    "payload_hash": "bb9c3b1eaaf988bf0b95107c99c4ae23405576fcfff2fce1fb1e5c4cc1e4a3ca",
+    "batch_delivery_id": "tg-batch-7",
+    "note": "all four look right"
+  },
+  "alg": "sha256/jcs",
+  "prev": "b751a8c3136adf85eeef2721735f6f65012eda8532c705e132ef0522c8311f1f",
+  "hash": "8ae4823e490219f719383730bac75a35543ad790475300fb1a0113a2e2d1d834"
+}

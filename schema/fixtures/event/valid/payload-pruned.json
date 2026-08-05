@@ -1,0 +1,17 @@
+{
+  "seq": 21,
+  "ts": "2026-09-11T03:00:04Z",
+  "event": "payload.pruned",
+  "task": "task-042",
+  "action_key": "task-042:chaser:2026-08-04",
+  "actor": "system:daemon",
+  "payload": {
+    "payload_hash": "8ae4823e490219f719383730bac75a35543ad790475300fb1a0113a2e2d1d834",
+    "reason": "payload_retention",
+    "retention": "30d",
+    "terminal_state": "executed"
+  },
+  "alg": "sha256/jcs",
+  "prev": "92f55b985ad964c052e5e7b500f56ede98efa49473bb32bca236896317fa5da7",
+  "hash": "7f09d44fa736a1cff155595e65d934ddb40400917d0f62f035e193b258d8790e"
+}
