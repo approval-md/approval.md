@@ -123,6 +123,7 @@ channels:
 ### 5.2 Policy semantics
 
 - **Matching.** Classes match most-specific-first; `*` is a single-segment wildcard, a trailing `.*` matches any depth. An action whose class matches no rule takes `defaults.autonomy`. Implementations MUST fail closed: unparseable policy means everything is `manual`.
+- **Specificity.** Pattern specificity is compared as follows: (1) more literal (non-wildcard) segments is more specific; (2) ties broken by fewer wildcard segments; (3) remaining ties by greater total segment count; a trailing `.*` counts as a single wildcard segment and contributes no literal segments. Patterns still tied are equally specific and the strictest-autonomy rule applies.
 - **Deny beats allow.** If multiple rules match at equal specificity, the strictest autonomy wins (`manual` > `supervised` > `autonomous`).
 - **Budgets are conjunctive.** An action must pass its class limits AND global budgets. Budget consumption is computed from the log, never from a mutable counter.
 - **`supervised_sample_rate`** implements auditing under a budget: supervised actions execute immediately, and a deterministic pseudo-random sample (seeded from the event hash, so it is reproducible and unguessable in advance by the agent) is queued for after-the-fact human review. See §11 for why.
@@ -216,6 +217,8 @@ Dotted, hierarchical, extensible. Top-level namespaces are reserved by this spec
 | `physical.*` | orders, bookings with cancellation cost | manual |
 
 Two invariants: an action's class MUST be declared before an execution token can be requested for it, and `reversible: false` actions MUST NOT be eligible for `autonomous` regardless of policy (the runtime enforces this floor).
+
+The irreversibility floor resolves to `manual`: an action declared `reversible: false` MUST NOT execute under `autonomous` or `supervised` regardless of policy. Retrospective audit cannot undo an irreversible action, so execute-then-sample is not meaningful oversight for one. Implementations MUST apply the floor after class resolution and record in the decision trace when the floor, rather than the matched rule, determined the outcome.
 
 ## 8. The event log
 
