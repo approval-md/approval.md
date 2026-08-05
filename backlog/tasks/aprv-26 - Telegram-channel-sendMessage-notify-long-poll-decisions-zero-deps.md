@@ -1,10 +1,11 @@
 ---
 id: APRV-26
 title: 'Telegram channel: sendMessage notify, long-poll decisions, zero deps'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@fable'
 created_date: '2026-08-05 10:51'
-updated_date: '2026-08-05 11:00'
+updated_date: '2026-08-05 11:15'
 labels: []
 milestone: m-5
 dependencies:
