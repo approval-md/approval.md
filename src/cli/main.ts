@@ -1,6 +1,8 @@
 /**
- * `approval` CLI entry point — the log-facing commands of SPEC.md §10.1:
- * `approval log verify | tail | export` and `approval reindex`.
+ * `approval` CLI entry point — the commands of SPEC.md §10.1: the log-facing
+ * `approval log verify | tail | export` and `approval reindex`, the policy
+ * verbs, and the gate verbs `register`, `request`, `grant`, `reject`, `revoke`,
+ * and `expire`.
  *
  * **The CLI holds no logic.** Chain verification lives in `core/verify.ts`, the
  * projection in `core/reindex.ts`, and appends in `core/log.ts`. Everything
@@ -19,6 +21,10 @@
  * the word "corrupt". Absent files are exempt: an empty log is clean.
  *
  * Nothing in this file writes to the log, and no command repairs a torn tail.
+ * The gate verbs do append — through `core/gate.ts`, which appends through
+ * `core/log.ts` — and their exit-code mapping lives in `gate.ts` beside them: a
+ * gate refusal is {@link EXIT_INTEGRITY}, because the command was well-formed
+ * and the runtime's answer was no.
  */
 
 import { pathToFileURL } from "node:url";
@@ -41,6 +47,12 @@ import {
   TAIL_HELP,
   VERIFY_HELP,
 } from "./help.js";
+import {
+  commandDecide,
+  commandExpire,
+  commandRegister,
+  commandRequest,
+} from "./gate.js";
 import { commandPolicy } from "./policy.js";
 import {
   DEFAULT_INDEX_PATH,
@@ -440,6 +452,20 @@ export function main(argv: string[], options: MainOptions = {}): number {
       return commandLog(rest, streams, cwd);
     case "policy":
       return commandPolicy(rest, streams, cwd);
+    // The gate verbs (APRV-16). grant/reject/revoke are human-only and expire
+    // is the system verb; the enforcement lives in core, not in this dispatch.
+    case "register":
+      return commandRegister(rest, streams, cwd);
+    case "request":
+      return commandRequest(rest, streams, cwd);
+    case "grant":
+      return commandDecide("grant", rest, streams, cwd);
+    case "reject":
+      return commandDecide("reject", rest, streams, cwd);
+    case "revoke":
+      return commandDecide("revoke", rest, streams, cwd);
+    case "expire":
+      return commandExpire(rest, streams, cwd);
     case "reindex":
       return commandReindex(rest, streams, cwd);
     default:

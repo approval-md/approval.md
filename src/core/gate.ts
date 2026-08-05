@@ -1,0 +1,1246 @@
+/**
+ * The gate: request lifecycle and write-boundary transition enforcement
+ * (SPEC.md §6.3, §7, §10.1).
+ *
+ * This is the module that decides whether a side effect may be authorized, and
+ * it is the only module that appends approval lifecycle events. Everything it
+ * knows it derives from the append-only log; everything it decides it decides
+ * before a byte is written.
+ *
+ * ## Four rules this module exists to enforce
+ *
+ * 1. **State is derived, never stored.** {@link requestState} rebuilds one
+ *    action's approval state from the log alone. There is no status field, no
+ *    cache, no in-memory session. The envelope's `state:` key is a projection
+ *    written by the daemon *after* the event lands (SPEC.md §6.3), never a
+ *    source this module reads.
+ * 2. **Illegal transitions are refused before append.** A second grant, a grant
+ *    on a rejected request, a revoke of an executed action, a decision after the
+ *    TTL — each is refused with its own machine-readable code and **nothing is
+ *    appended**. The one deliberate exception is a failed budget check, which
+ *    appends `budget.exceeded` *and then* refuses: a budget refusal is a fact
+ *    about the world that an operator must be able to see afterwards, and a
+ *    refusal nobody can audit is how quiet budget creep starts.
+ * 3. **No approval events off the manual path** (amended SPEC.md §6.3). An
+ *    action whose class resolves to `supervised` or `autonomous` produces *no*
+ *    `approval.*` record at all — {@link request} returns `proceed: true` and
+ *    appends nothing. Its authorization is recorded by `execution.started`,
+ *    which APRV-18 appends, and which is also where its budget is charged (see
+ *    the consumption contract in `core/budgets.ts`).
+ * 4. **Time is a parameter.** No function here reads the clock. TTL lapse,
+ *    budget windows, and event timestamps all come from a `ts` argument, so a
+ *    gate decision can be replayed from the log exactly as it was made.
+ *
+ * ## Lazy expiry — the named requirement
+ *
+ * A request expires when `ts > requestTs + defaults.approval_ttl`, **whether or
+ * not** an `approval.expired` event exists. Nothing may depend on a daemon
+ * having run: if the expiry sweep is asleep, a late grant must still be refused.
+ * {@link requestState} therefore computes expiry two ways — from the event, and
+ * lazily from the arithmetic — and treats them as equivalent.
+ *
+ * When {@link decide} refuses a decision because the TTL has lapsed and no
+ * `approval.expired` event exists yet, it **first appends that event** (actor
+ * {@link EXPIRY_ACTOR}) and then refuses. The alternative — refuse silently and
+ * leave the log claiming the request is still live — was rejected: the log is
+ * the truth, and a state every reader can derive but no reader can see recorded
+ * makes the log disagree with itself. The append is the same one
+ * {@link expire} would have made, so a later sweep is a no-op rather than a
+ * duplicate.
+ *
+ * ## `defaults.on_expiry`
+ *
+ * SPEC.md §5 defines exactly one value, `reject`. An expired request is
+ * terminal here under either setting: no grant, no reject, no revoke ever
+ * follows it. `on_expiry` is recorded in the `approval.expired` payload so the
+ * projection layer (M5) can render the envelope's `state:` as `rejected` rather
+ * than `expired` when the policy asks for it. Re-requesting the same action key
+ * after expiry is a *new* request and is allowed — the key has not executed, and
+ * refusing forever would make a lapsed TTL more punishing than a human's "no".
+ *
+ * ## The budgets contract (`core/budgets.ts`)
+ *
+ * That module obligates this one: every `approval.granted` this module appends
+ * carries `payload.est_cost_usd` (number, USD) and `payload.class` (the dotted
+ * class). `approval.requested` carries them too, so the grant can copy them from
+ * the request rather than re-derive them from a file that may have changed. An
+ * action that declared no cost is recorded as `0` — an authorization with no
+ * declared cost is still an authorization, and still counts as one action.
+ *
+ * ## What this module does NOT do
+ *
+ * It does not verify the hash chain. `approval log verify` does that, and
+ * `appendEvent` independently refuses to build on a torn tail. The gate reads
+ * the log's complete lines and refuses only on a tail it cannot parse; it never
+ * diagnoses corruption, because two modules with two opinions about what
+ * "corrupt" means is worse than one.
+ *
+ * It does not mint execution tokens. {@link decide} returns the appended
+ * `approval.granted` record, which is the seam APRV-17 mints against.
+ */
+
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import {
+  ATTESTATION_REFUSAL,
+  attestationRefusal,
+  checkAttestation,
+  type AttestationRefusalDetail,
+} from "./attest.js";
+import { evaluateBudgets, type BudgetScope, type BudgetVerdict } from "./budgets.js";
+import { readTaskFile } from "./frontmatter.js";
+import {
+  appendEvent,
+  type AppendError,
+  type AppendOptions,
+  type EventInput,
+  type EventRecord,
+} from "./log.js";
+import {
+  loadPolicy,
+  POLICY_FILENAMES,
+  type Autonomy,
+  type LoadPolicyOptions,
+  type PolicyLoadResult,
+} from "./policy-load.js";
+import { resolve, type Resolution } from "./policy-match.js";
+import { validate, type ValidationError } from "./validate.js";
+
+/** Actor stamped on runtime-originated expiry events (SPEC.md §8 `system:`). */
+export const EXPIRY_ACTOR = "system:gate";
+
+/** Actors permitted to request or register: a person or an agent, never the runtime. */
+const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
+
+/** Actors permitted to decide. Human-only, in code (SPEC.md §10.1). */
+const HUMAN_ACTOR = /^human:.+/u;
+
+/**
+ * The closed set of gate refusal codes. Agents branch on these, so the union is
+ * frozen public API in the same sense the exit codes are: adding a code is a
+ * spec change, redefining one is a breaking change.
+ */
+export const GATE_REFUSAL_CODES = [
+  /** Policy is unattested or its bytes changed (`core/attest.ts`). */
+  "policy-not-attested",
+  /** The envelope failed `envelope.schema.json`, or the task file has none. */
+  "envelope-invalid",
+  /** The task file could not be read. */
+  "task-file-unreadable",
+  /** This task id already has a `task.registered` record. */
+  "task-already-registered",
+  /** No `task.registered` record for this task id. */
+  "not-registered",
+  /** The task is registered but declares no action with this key (SPEC.md §7). */
+  "action-not-registered",
+  /** A live `approval.requested` for this action key already exists. */
+  "duplicate-request",
+  /** The action key already has an `execution.*` record (idempotency). */
+  "already-executed",
+  /** APRV-14 verdicts failed; a `budget.exceeded` event was appended. */
+  "budget-exceeded",
+  /** No request to decide. */
+  "not-requested",
+  /** The request already has a terminal decision. */
+  "already-decided",
+  /** Revoke was attempted on a request that is not granted. */
+  "not-granted",
+  /** The TTL lapsed — judged from the request's own ts, event or no event. */
+  "expired",
+  /** `expire` was called on a request whose TTL has not lapsed. */
+  "not-expired",
+  /** The actor is not a well-formed `human:`/`agent:` identity. */
+  "actor-invalid",
+  /** A human-only verb was attempted by a non-human actor. */
+  "actor-not-human",
+  /** The log could not be read, or holds a line that is not a record. */
+  "log-unreadable",
+  /** The log's final line is unterminated (a crashed write). */
+  "log-torn-tail",
+  /** The append itself failed; `append` carries the underlying error. */
+  "append-failed",
+] as const;
+
+export type GateRefusalCode = (typeof GATE_REFUSAL_CODES)[number];
+
+/** Every gate failure is one of these. Nothing here throws. */
+export interface GateRefusal {
+  ok: false;
+  code: GateRefusalCode;
+  message: string;
+  /** Attestation discriminator, when `code` is `policy-not-attested`. */
+  detail?: AttestationRefusalDetail;
+  /** The derived state at refusal time, for transition refusals. */
+  state?: RequestState;
+  /** The failing verdicts, when `code` is `budget-exceeded`. */
+  verdicts?: BudgetVerdict[];
+  /** Schema errors, when `code` is `envelope-invalid`. */
+  errors?: ValidationError[];
+  /** The underlying append error, when `code` is `append-failed`. */
+  append?: AppendError;
+  /**
+   * An event appended *alongside* the refusal: the `budget.exceeded` record, or
+   * the lazily-materialised `approval.expired` record. Never an authorization.
+   */
+  record?: EventRecord;
+}
+
+/** Options shared by every gate operation. */
+export interface GateOptions {
+  /** Schema directory, passed to both envelope validation and the append. */
+  schemaDir?: string;
+  /** Where to find `APPROVAL.md`. Same semantics as `loadPolicy`. */
+  policy?: { dir?: string; file?: string };
+  /** Lock tuning for the append path. */
+  append?: AppendOptions;
+}
+
+// ---------------------------------------------------------------------------
+// State derivation
+// ---------------------------------------------------------------------------
+
+/**
+ * One action's approval state, derived from the log.
+ *
+ * These are the gate's names for the approval lifecycle of SPEC.md §6.3. The
+ * envelope's `state:` enum is the projection of the same thing over a whole
+ * task (`proposed`/`awaiting`/`approved`/…); the mapping is one-to-one for the
+ * action-scoped states and is applied by the projection layer, not here.
+ */
+export type RequestState =
+  /** No `approval.requested` for this key. */
+  | "none"
+  /** Requested and undecided — the envelope's `awaiting`. */
+  | "requested"
+  /** A human granted it — the envelope's `approved`. */
+  | "granted"
+  | "rejected"
+  | "revoked"
+  /** TTL lapsed, by event or by arithmetic. */
+  | "expired";
+
+/** The three terminal decisions a human can record, plus runtime expiry. */
+export type Decision = "grant" | "reject" | "revoke";
+
+/** What the request declared, copied out of the `approval.requested` payload. */
+export interface DeclaredAction {
+  class: string | null;
+  est_cost_usd: number | null;
+  reversible: boolean | null;
+  summary: string | null;
+}
+
+/** Execution facts for the action key: the seq of each event, or `null`. */
+export interface ExecutionFacts {
+  started: number | null;
+  completed: number | null;
+  failed: number | null;
+}
+
+/** The full derivation, so a caller never re-walks the log to explain itself. */
+export interface RequestDerivation {
+  actionKey: string;
+  state: RequestState;
+  task: string | null;
+  requestSeq: number | null;
+  requestTs: string | null;
+  decision: "granted" | "rejected" | "revoked" | "expired" | null;
+  decisionSeq: number | null;
+  decisionTs: string | null;
+  /** An `approval.expired` record exists for the current request. */
+  expiredByEvent: boolean;
+  /** The TTL lapsed by arithmetic, with no `approval.expired` record. */
+  expiredLazily: boolean;
+  declared: DeclaredAction;
+  execution: ExecutionFacts;
+}
+
+function payloadOf(record: EventRecord): Record<string, unknown> {
+  const payload = record.payload;
+  return typeof payload === "object" && payload !== null ? payload : {};
+}
+
+function declaredFrom(record: EventRecord): DeclaredAction {
+  const payload = payloadOf(record);
+  const cls = payload["class"];
+  const cost = payload["est_cost_usd"];
+  const reversible = payload["reversible"];
+  const summary = payload["summary"];
+  return {
+    class: typeof cls === "string" ? cls : null,
+    est_cost_usd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
+    reversible: typeof reversible === "boolean" ? reversible : null,
+    summary: typeof summary === "string" ? summary : null,
+  };
+}
+
+/**
+ * Derive `actionKey`'s approval state from `records`.
+ *
+ * Pure: no I/O, no clock. `ts` is the moment the question is being asked and is
+ * **required** — lazy expiry is arithmetic on it, and a state function that read
+ * the clock could not be replayed.
+ *
+ * Sequencing rules, all of them deliberate:
+ *
+ * - An `approval.requested` **resets** the derivation. A key that was rejected
+ *   or expired may be requested again; the new request starts a fresh cycle and
+ *   the old decision no longer governs. (An action that has *executed* is a
+ *   different matter — {@link request} refuses that on idempotency grounds.)
+ * - The **first** decision after a request wins. This module refuses to append a
+ *   second one, so a log carrying two is a log written by something else; the
+ *   fail-closed reading is that the earliest human decision stands rather than
+ *   that a later append can overwrite it.
+ * - Execution facts accumulate across the whole log for the key, independent of
+ *   the request cycle: an action that has executed has executed, and no
+ *   subsequent request un-executes it.
+ * - Expiry: an `approval.expired` record sets `expiredByEvent`. With no such
+ *   record, `ttlMs !== null` and `ts > requestTs + ttlMs` sets `expiredLazily`.
+ *   Both yield `state: "expired"`. An unparseable `requestTs` or `ts` also
+ *   yields `expired`: liveness that cannot be demonstrated is not assumed. (The
+ *   event schema's `date-time` format makes that unreachable through the real
+ *   append path; it is a backstop, not a live branch.)
+ */
+export function requestState(
+  records: EventRecord[],
+  actionKey: string,
+  ts: string,
+  ttlMs: number | null,
+): RequestDerivation {
+  let task: string | null = null;
+  let requestSeq: number | null = null;
+  let requestTs: string | null = null;
+  let decision: RequestDerivation["decision"] = null;
+  let decisionSeq: number | null = null;
+  let decisionTs: string | null = null;
+  let expiredByEvent = false;
+  let declared: DeclaredAction = {
+    class: null,
+    est_cost_usd: null,
+    reversible: null,
+    summary: null,
+  };
+  const execution: ExecutionFacts = { started: null, completed: null, failed: null };
+
+  const settle = (
+    record: EventRecord,
+    value: NonNullable<RequestDerivation["decision"]>,
+  ): void => {
+    if (requestSeq === null) return;
+    // Revocation is the one decision that legitimately follows another: a
+    // human withdraws a grant they already made, so `approval.revoked`
+    // supersedes. Every other decision settles only an undecided request —
+    // this module refuses to append a second one, and a log carrying two was
+    // written by something else, where the fail-closed reading is that the
+    // earliest human answer stands rather than that a later append overwrites it.
+    if (decision !== null && value !== "revoked") return;
+    decision = value;
+    decisionSeq = record.seq;
+    decisionTs = record.ts;
+    if (value === "expired") expiredByEvent = true;
+  };
+
+  for (const record of records) {
+    if (record.action_key !== actionKey) continue;
+    switch (record.event) {
+      case "approval.requested":
+        task = record.task ?? task;
+        requestSeq = record.seq;
+        requestTs = record.ts;
+        decision = null;
+        decisionSeq = null;
+        decisionTs = null;
+        expiredByEvent = false;
+        declared = declaredFrom(record);
+        break;
+      case "approval.granted":
+        settle(record, "granted");
+        break;
+      case "approval.rejected":
+        settle(record, "rejected");
+        break;
+      case "approval.revoked":
+        settle(record, "revoked");
+        break;
+      case "approval.expired":
+        settle(record, "expired");
+        break;
+      case "execution.started":
+        execution.started = record.seq;
+        task = record.task ?? task;
+        break;
+      case "execution.completed":
+        execution.completed = record.seq;
+        break;
+      case "execution.failed":
+        execution.failed = record.seq;
+        break;
+      default:
+        break;
+    }
+  }
+
+  let state: RequestState;
+  let expiredLazily = false;
+  if (requestSeq === null) {
+    state = "none";
+  } else if (decision !== null) {
+    state = decision;
+  } else if (ttlMs === null) {
+    // No `defaults.approval_ttl` means the policy declares no lapse. A request
+    // stays live until a human decides it; inventing a default TTL here would
+    // silently reject approvals a policy author never asked to expire.
+    state = "requested";
+  } else {
+    const requestedAt = Date.parse(requestTs ?? "");
+    const now = Date.parse(ts);
+    if (Number.isNaN(requestedAt) || Number.isNaN(now)) {
+      state = "expired";
+      expiredLazily = true;
+    } else if (now > requestedAt + ttlMs) {
+      state = "expired";
+      expiredLazily = true;
+    } else {
+      state = "requested";
+    }
+  }
+
+  return {
+    actionKey,
+    state,
+    task,
+    requestSeq,
+    requestTs,
+    decision,
+    decisionSeq,
+    decisionTs,
+    expiredByEvent,
+    expiredLazily,
+    declared,
+    execution,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Log reading
+// ---------------------------------------------------------------------------
+
+type ReadOutcome = { ok: true; records: EventRecord[] } | GateRefusal;
+
+function refuse(
+  code: GateRefusalCode,
+  message: string,
+  extra: Omit<GateRefusal, "ok" | "code" | "message"> = {},
+): GateRefusal {
+  return { ok: false, code, message, ...extra };
+}
+
+function errorMessage(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
+/**
+ * Read the log's complete records.
+ *
+ * An absent log is an empty log (nothing has happened yet), exactly as
+ * `appendEvent` and `approval log verify` treat it. An unterminated final line
+ * is a torn tail and gets its own code, because the repair is a human decision
+ * and never a gate's. A newline-terminated line that will not parse is reported
+ * as unreadable rather than diagnosed: `approval log verify` owns the vocabulary
+ * of corruption.
+ */
+export function readGateRecords(logPath: string): ReadOutcome {
+  let raw: string;
+  try {
+    raw = readFileSync(logPath, "utf8");
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, records: [] };
+    return refuse("log-unreadable", `log ${logPath} could not be read: ${errorMessage(cause)}`);
+  }
+
+  if (raw.length === 0) return { ok: true, records: [] };
+  if (!raw.endsWith("\n")) {
+    return refuse(
+      "log-torn-tail",
+      `log ${logPath} ends without a newline: the final record is truncated, the signature of a crashed write. Nothing is repaired here; run \`approval log verify\`.`,
+    );
+  }
+
+  const lines = raw.split("\n");
+  lines.pop();
+  const records: EventRecord[] = [];
+  for (const [index, line] of lines.entries()) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch (cause) {
+      return refuse(
+        "log-unreadable",
+        `log ${logPath} line ${index + 1} is not valid JSON (${errorMessage(cause)}); run \`approval log verify\``,
+      );
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return refuse(
+        "log-unreadable",
+        `log ${logPath} line ${index + 1} is not a JSON object; run \`approval log verify\``,
+      );
+    }
+    records.push(parsed as EventRecord);
+  }
+  return { ok: true, records };
+}
+
+// ---------------------------------------------------------------------------
+// Policy plumbing
+// ---------------------------------------------------------------------------
+
+/**
+ * The policy file the gate will hash for attestation.
+ *
+ * `file` wins; otherwise discovery walks `POLICY_FILENAMES` in `dir` exactly as
+ * `loadPolicy` does, so the attested file and the enforced file are the same
+ * file. When neither exists the first candidate is returned anyway, so
+ * `checkAttestation` reports `unreadable` and the gate refuses — a missing
+ * policy is never a pass.
+ */
+function policyPathOf(options: GateOptions): string {
+  const policy = options.policy ?? {};
+  if (policy.file !== undefined) return policy.file;
+  const dir = policy.dir ?? process.cwd();
+  for (const filename of POLICY_FILENAMES) {
+    const candidate = join(dir, filename);
+    if (existsSync(candidate)) return candidate;
+  }
+  return join(dir, POLICY_FILENAMES[0] ?? "APPROVAL.md");
+}
+
+function loadOptionsOf(options: GateOptions): LoadPolicyOptions {
+  const policy = options.policy ?? {};
+  const load: LoadPolicyOptions = {};
+  if (policy.file !== undefined) load.file = policy.file;
+  else load.dir = policy.dir ?? process.cwd();
+  if (options.schemaDir !== undefined) load.schemaDir = options.schemaDir;
+  return load;
+}
+
+function appendOptionsOf(options: GateOptions): AppendOptions {
+  const append: AppendOptions = { ...options.append };
+  if (options.schemaDir !== undefined) append.schemaDir = options.schemaDir;
+  return append;
+}
+
+/** Refuse unless the live policy bytes match the latest attestation. */
+function requireAttestation(records: EventRecord[], options: GateOptions): GateRefusal | null {
+  const status = checkAttestation(records, policyPathOf(options));
+  const refusal = attestationRefusal(status);
+  if (refusal === null) return null;
+  return refuse(ATTESTATION_REFUSAL, refusal.message, { detail: refusal.detail });
+}
+
+/** The TTL in force, or `null` when the policy declares (or can declare) none. */
+function ttlOf(load: PolicyLoadResult): number | null {
+  return load.ok ? load.durations.approvalTtlMs : null;
+}
+
+function budgetScopeOf(load: PolicyLoadResult, resolution: Resolution): BudgetScope {
+  return {
+    classLimits: resolution.limits,
+    classPattern: resolution.matched === null ? null : resolution.matched.pattern,
+    globalBudgets: load.ok ? load.policy.budgets ?? null : null,
+  };
+}
+
+function append(
+  logPath: string,
+  input: EventInput,
+  options: GateOptions,
+): { ok: true; record: EventRecord } | GateRefusal {
+  const result = appendEvent(logPath, input, appendOptionsOf(options));
+  if (result.ok) return { ok: true, record: result.record };
+  return refuse(
+    "append-failed",
+    `${input.event} could not be appended: ${result.error.message}`,
+    { append: result.error },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// register
+// ---------------------------------------------------------------------------
+
+/** One declared action of an envelope (SPEC.md §6.2 `actions[]`). */
+export interface RegisteredAction {
+  class: string;
+  idempotency_key: string;
+  summary?: string;
+  reversible?: boolean;
+  est_cost_usd?: number;
+}
+
+/**
+ * What to register: a task file to read, or an already-in-hand envelope.
+ *
+ * The task **id** is not part of the envelope — `envelope.schema.json` governs
+ * the value of the `approval:` key only, and `id:` is a sibling board key owned
+ * by Backlog.md (SPEC.md §6). So the file form reads it from the frontmatter's
+ * `id`, and the in-memory form takes it explicitly.
+ */
+export type RegisterSource = { file: string } | { task: string; envelope: unknown };
+
+export type RegisterResult =
+  | { ok: true; record: EventRecord; task: string; actions: RegisteredAction[] }
+  | GateRefusal;
+
+function actionsOf(envelope: unknown): RegisteredAction[] {
+  const value = (envelope as { actions?: unknown }).actions;
+  if (!Array.isArray(value)) return [];
+  const actions: RegisteredAction[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const item = entry as Record<string, unknown>;
+    const cls = item["class"];
+    const key = item["idempotency_key"];
+    if (typeof cls !== "string" || typeof key !== "string") continue;
+    const action: RegisteredAction = { class: cls, idempotency_key: key };
+    if (typeof item["summary"] === "string") action.summary = item["summary"];
+    if (typeof item["reversible"] === "boolean") action.reversible = item["reversible"];
+    if (typeof item["est_cost_usd"] === "number") action.est_cost_usd = item["est_cost_usd"];
+    actions.push(action);
+  }
+  return actions;
+}
+
+type Resolved = { ok: true; task: string; envelope: unknown } | GateRefusal;
+
+function resolveSource(source: RegisterSource): Resolved {
+  if (!("file" in source)) {
+    if (typeof source.task !== "string" || source.task.length === 0) {
+      return refuse("envelope-invalid", "register requires a non-empty task id");
+    }
+    return { ok: true, task: source.task, envelope: source.envelope };
+  }
+  return readTaskFileSource(source.file);
+}
+
+function readTaskFileSource(path: string): Resolved {
+  const read = readTaskFile(path);
+  if (!read.ok) {
+    if (read.code === "io") return refuse("task-file-unreadable", read.message);
+    return refuse("envelope-invalid", `${path}: ${read.message}`);
+  }
+  const id = read.data["id"];
+  if (typeof id !== "string" || id.length === 0) {
+    return refuse(
+      "envelope-invalid",
+      `${path}: frontmatter has no usable \`id\`; the task id is a Backlog.md board key and the gate needs it to key the registration`,
+    );
+  }
+  const envelope = read.data["approval"];
+  if (envelope === undefined) {
+    return refuse(
+      "envelope-invalid",
+      `${path}: frontmatter has no \`approval:\` key. SPEC.md §6 tolerates a task with no envelope — it simply cannot request side-effecting execution — so there is nothing to register.`,
+    );
+  }
+  return { ok: true, task: id, envelope };
+}
+
+/**
+ * Validate an envelope and append `task.registered`.
+ *
+ * Fail closed: the envelope is validated against `envelope.schema.json` **before
+ * anything is read from it and before any byte is written**. A schema-invalid
+ * envelope leaves the log untouched.
+ *
+ * Double registration is refused. Re-registering a task id would give the same
+ * id two different declared action sets in one log, and every later lookup
+ * ("what class is this key?") would have to pick one — silently. Envelope
+ * *changes* are `envelope.drift` (SPEC.md §6.3, M5), not a second registration.
+ *
+ * `actor` is a `human:` or `agent:` identity; registration is an ordinary
+ * proposal, not a privileged act, so an agent may perform it. `system:` is
+ * refused: the runtime does not author tasks.
+ */
+export function register(
+  logPath: string,
+  source: RegisterSource,
+  ts: string,
+  actor: string,
+  options: GateOptions = {},
+): RegisterResult {
+  if (!PRINCIPAL_ACTOR.test(actor)) {
+    return refuse(
+      "actor-invalid",
+      `register requires a human: or agent: actor, got ${JSON.stringify(actor)}`,
+    );
+  }
+
+  const resolved = resolveSource(source);
+  if (!resolved.ok) return resolved;
+
+  const validation = validate(
+    "envelope",
+    resolved.envelope,
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+  );
+  if (!validation.ok) {
+    return refuse(
+      "envelope-invalid",
+      `the envelope failed schema validation; nothing was appended`,
+      { errors: validation.errors },
+    );
+  }
+
+  const read = readGateRecords(logPath);
+  if (!read.ok) return read;
+
+  for (const record of read.records) {
+    if (record.event === "task.registered" && record.task === resolved.task) {
+      return refuse(
+        "task-already-registered",
+        `task ${resolved.task} was already registered at seq ${record.seq}; an envelope change is envelope.drift, not a second registration`,
+      );
+    }
+  }
+
+  const envelope = resolved.envelope as { state?: unknown };
+  const actions = actionsOf(resolved.envelope);
+  const payload: Record<string, unknown> = { actions };
+  if (typeof envelope.state === "string") payload["state"] = envelope.state;
+
+  const appended = append(
+    logPath,
+    { ts, event: "task.registered", actor, task: resolved.task, payload },
+    options,
+  );
+  if (!appended.ok) return appended;
+
+  return { ok: true, record: appended.record, task: resolved.task, actions };
+}
+
+/**
+ * The declared action for `(task, actionKey)`, as registered in the log.
+ *
+ * SPEC.md §7: "an action's class MUST be declared before an execution token can
+ * be requested for it". The declaration lives in `task.registered`, so the log —
+ * not the file, which may have been edited since — is what the gate reads back.
+ */
+export function registeredAction(
+  records: EventRecord[],
+  task: string,
+  actionKey: string,
+): { ok: true; action: RegisteredAction } | GateRefusal {
+  let registration: EventRecord | null = null;
+  for (const record of records) {
+    if (record.event === "task.registered" && record.task === task) registration = record;
+  }
+  if (registration === null) {
+    return refuse(
+      "not-registered",
+      `task ${task} has no task.registered record; run \`approval register <task-file>\` first`,
+    );
+  }
+  const declared = payloadOf(registration)["actions"];
+  const actions = Array.isArray(declared) ? declared : [];
+  for (const entry of actions) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const item = entry as Record<string, unknown>;
+    if (item["idempotency_key"] !== actionKey) continue;
+    const cls = item["class"];
+    if (typeof cls !== "string") break;
+    const action: RegisteredAction = { class: cls, idempotency_key: actionKey };
+    if (typeof item["summary"] === "string") action.summary = item["summary"];
+    if (typeof item["reversible"] === "boolean") action.reversible = item["reversible"];
+    if (typeof item["est_cost_usd"] === "number") action.est_cost_usd = item["est_cost_usd"];
+    return { ok: true, action };
+  }
+  return refuse(
+    "action-not-registered",
+    `task ${task} declares no action with idempotency_key ${JSON.stringify(actionKey)}; SPEC.md §7 requires a class to be declared before it can be requested`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// request
+// ---------------------------------------------------------------------------
+
+/** The action being submitted to the gate. */
+export interface RequestInput {
+  task: string;
+  actionKey: string;
+  /** The dotted side-effect class (SPEC.md §7). */
+  cls: string;
+  est_cost_usd?: number;
+  reversible?: boolean;
+  summary?: string;
+}
+
+export type RequestResult =
+  | {
+      ok: true;
+      autonomy: Autonomy;
+      /** True when execution may start now: the supervised/autonomous path. */
+      proceed: boolean;
+      resolution: Resolution;
+      /** The `approval.requested` record, or `null` off the manual path. */
+      record: EventRecord | null;
+    }
+  | GateRefusal;
+
+/** `est_cost_usd` as the budgets contract wants it recorded: always a number. */
+function costOf(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/**
+ * Gate intake.
+ *
+ * Check order, and why it is this order:
+ *
+ * 1. **Actor.** A malformed identity is a bad call, not a policy question.
+ * 2. **Attestation.** An unverified policy cannot answer anything, so it is
+ *    checked before the policy is consulted rather than after.
+ * 3. **Policy resolution** (`loadPolicy` + `resolve`, including the §7
+ *    irreversibility floor). A failed load resolves everything to `manual` —
+ *    that is `policy-match.ts`'s contract, and this module does not soften it.
+ * 4. **Off the manual path, stop.** `supervised`/`autonomous` append **no
+ *    event** (amended SPEC.md §6.3) and return `proceed: true`. Their budget is
+ *    charged at `execution.started`, which APRV-18 appends — checking budgets
+ *    here as well would charge them twice or, worse, pass here and fail there.
+ * 5. **Request legality**, then **budgets**, then the append. Legality first
+ *    because a duplicate request is a caller bug that no budget outcome should
+ *    obscure, and because refusing it must leave the log untouched.
+ *
+ * The `approval.requested` payload carries `class` and `est_cost_usd`
+ * unconditionally — the budgets contract requires them on the grant, and the
+ * grant copies them from here.
+ */
+export function request(
+  logPath: string,
+  input: RequestInput,
+  ts: string,
+  actor: string,
+  options: GateOptions = {},
+): RequestResult {
+  if (!PRINCIPAL_ACTOR.test(actor)) {
+    return refuse(
+      "actor-invalid",
+      `request requires a human: or agent: actor, got ${JSON.stringify(actor)}`,
+    );
+  }
+
+  const read = readGateRecords(logPath);
+  if (!read.ok) return read;
+
+  const attested = requireAttestation(read.records, options);
+  if (attested !== null) return attested;
+
+  const load = loadPolicy(loadOptionsOf(options));
+  const resolution = resolve(
+    load,
+    input.cls,
+    input.reversible === undefined ? {} : { reversible: input.reversible },
+  );
+
+  if (resolution.autonomy !== "manual") {
+    // Amended SPEC.md §6.3: no approval.* event exists off the manual path.
+    return { ok: true, autonomy: resolution.autonomy, proceed: true, resolution, record: null };
+  }
+
+  const derivation = requestState(read.records, input.actionKey, ts, ttlOf(load));
+  if (derivation.state === "requested") {
+    return refuse(
+      "duplicate-request",
+      `action ${input.actionKey} already has a live request at seq ${String(derivation.requestSeq)} awaiting a decision`,
+      { state: derivation.state },
+    );
+  }
+  if (derivation.execution.started !== null) {
+    return refuse(
+      "already-executed",
+      `action ${input.actionKey} already executed (execution.started at seq ${String(derivation.execution.started)}); an idempotency key is single-use`,
+      { state: derivation.state },
+    );
+  }
+
+  const budget = evaluateBudgets(
+    read.records,
+    budgetScopeOf(load, resolution),
+    { class: input.cls, est_cost_usd: costOf(input.est_cost_usd) },
+    ts,
+  );
+  if (!budget.pass) {
+    const failed = budget.verdicts.filter((verdict) => !verdict.pass);
+    const logged = append(
+      logPath,
+      {
+        ts,
+        event: "budget.exceeded",
+        actor,
+        task: input.task,
+        action_key: input.actionKey,
+        payload: {
+          class: input.cls,
+          est_cost_usd: costOf(input.est_cost_usd),
+          stage: "request",
+          verdicts: budget.verdicts,
+        },
+      },
+      options,
+    );
+    const message = `budget refused the request: ${failed
+      .map((verdict) => `${verdict.limit} (${verdict.scope})`)
+      .join(", ")}`;
+    return logged.ok
+      ? refuse("budget-exceeded", message, { verdicts: failed, record: logged.record })
+      : refuse("budget-exceeded", `${message}; the budget.exceeded event could not be appended: ${logged.message}`, {
+          verdicts: failed,
+        });
+  }
+
+  const payload: Record<string, unknown> = {
+    class: input.cls,
+    est_cost_usd: costOf(input.est_cost_usd),
+  };
+  if (input.summary !== undefined) payload["summary"] = input.summary;
+  if (input.reversible !== undefined) payload["reversible"] = input.reversible;
+
+  const appended = append(
+    logPath,
+    {
+      ts,
+      event: "approval.requested",
+      actor,
+      task: input.task,
+      action_key: input.actionKey,
+      payload,
+    },
+    options,
+  );
+  if (!appended.ok) return appended;
+
+  return {
+    ok: true,
+    autonomy: "manual",
+    proceed: false,
+    resolution,
+    record: appended.record,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// decide
+// ---------------------------------------------------------------------------
+
+export interface DecideOptions extends GateOptions {
+  /** Free-text note recorded in the event payload (SPEC.md §8's example). */
+  note?: string;
+}
+
+export type DecideResult =
+  | { ok: true; decision: Decision; state: RequestState; record: EventRecord }
+  | GateRefusal;
+
+const DECISION_EVENT: Readonly<Record<Decision, "approval.granted" | "approval.rejected" | "approval.revoked">> = {
+  grant: "approval.granted",
+  reject: "approval.rejected",
+  revoke: "approval.revoked",
+};
+
+const DECISION_STATE: Readonly<Record<Decision, RequestState>> = {
+  grant: "granted",
+  reject: "rejected",
+  revoke: "revoked",
+};
+
+/**
+ * Record a human decision on a request.
+ *
+ * **Human-only**, enforced here in code and again by the event schema for
+ * grant/reject. `revoke` is human-only too: withdrawing an authorization is a
+ * decision about an authorization, and an agent that could revoke could also
+ * churn the queue.
+ *
+ * Attestation is required **for `grant` only**. Grant is the authorizing
+ * decision, so an unverified policy must not be able to produce one. Reject and
+ * revoke *withdraw* authority, and refusing them on an unattested policy would
+ * leave a live grant standing because a file changed — the strict direction and
+ * the safe direction point the same way, and it is not "refuse everything".
+ *
+ * Budgets are re-evaluated at grant time. A request may have sat in the queue
+ * while other actions consumed the window, and the moment that matters for a
+ * commitment is the moment the human commits.
+ *
+ * Returns the appended record: APRV-17 mints a single-use execution token
+ * against the `approval.granted` record this returns, which is why the record —
+ * not just a boolean — is the success value.
+ */
+export function decide(
+  logPath: string,
+  actionKey: string,
+  decision: Decision,
+  actor: string,
+  ts: string,
+  options: DecideOptions = {},
+): DecideResult {
+  if (!HUMAN_ACTOR.test(actor)) {
+    return refuse(
+      "actor-not-human",
+      `${decision} is a human-only verb; the actor must match human:<id>, got ${JSON.stringify(actor)}`,
+    );
+  }
+
+  const read = readGateRecords(logPath);
+  if (!read.ok) return read;
+
+  if (decision === "grant") {
+    const attested = requireAttestation(read.records, options);
+    if (attested !== null) return attested;
+  }
+
+  const load = loadPolicy(loadOptionsOf(options));
+  const ttlMs = ttlOf(load);
+  const derivation = requestState(read.records, actionKey, ts, ttlMs);
+
+  if (derivation.state === "none") {
+    return refuse(
+      "not-requested",
+      `action ${actionKey} has no approval.requested record to decide`,
+      { state: derivation.state },
+    );
+  }
+
+  if (derivation.state === "expired") {
+    // Lazy expiry: materialise the event we just derived, then refuse. See the
+    // module header for why the log must carry the state a reader can derive.
+    let materialised: EventRecord | undefined;
+    if (derivation.expiredLazily) {
+      const logged = appendExpiry(logPath, derivation, load, ts, options);
+      if (logged.ok) materialised = logged.record;
+    }
+    const message = derivation.expiredLazily
+      ? `action ${actionKey} expired: the request at ${String(derivation.requestTs)} lapsed its ${String(ttlMs)}ms TTL before ${ts}. The lapse is judged from the request's own timestamp, so a decision is refused whether or not an approval.expired event had been observed.`
+      : `action ${actionKey} expired at ${String(derivation.decisionTs)} (approval.expired, seq ${String(derivation.decisionSeq)}); an expired request is terminal`;
+    return refuse(
+      "expired",
+      message,
+      materialised === undefined
+        ? { state: derivation.state }
+        : { state: derivation.state, record: materialised },
+    );
+  }
+
+  if (derivation.state === "rejected" || derivation.state === "revoked") {
+    return refuse(
+      "already-decided",
+      `action ${actionKey} was already ${derivation.state} at seq ${String(derivation.decisionSeq)}; a decided request is terminal`,
+      { state: derivation.state },
+    );
+  }
+
+  if (derivation.state === "granted") {
+    if (decision !== "revoke") {
+      return refuse(
+        "already-decided",
+        `action ${actionKey} was already granted at seq ${String(derivation.decisionSeq)}; a second decision would rewrite a human's answer`,
+        { state: derivation.state },
+      );
+    }
+    if (derivation.execution.started !== null) {
+      return refuse(
+        "already-executed",
+        `action ${actionKey} already executed (execution.started at seq ${String(derivation.execution.started)}); revocation is only meaningful before execution`,
+        { state: derivation.state },
+      );
+    }
+  } else if (decision === "revoke") {
+    // state === "requested"
+    return refuse(
+      "not-granted",
+      `action ${actionKey} is awaiting a decision, not granted; reject it rather than revoking it`,
+      { state: derivation.state },
+    );
+  }
+
+  const payload: Record<string, unknown> = {};
+  if (decision === "grant") {
+    // The budgets contract: class and est_cost_usd on every approval.granted,
+    // copied from the request rather than re-derived from a file.
+    payload["class"] = derivation.declared.class ?? "";
+    payload["est_cost_usd"] = derivation.declared.est_cost_usd ?? 0;
+  }
+  if (options.note !== undefined) payload["note"] = options.note;
+
+  if (decision === "grant") {
+    const cls = derivation.declared.class ?? "";
+    const resolution = resolve(
+      load,
+      cls,
+      derivation.declared.reversible === null ? {} : { reversible: derivation.declared.reversible },
+    );
+    const budget = evaluateBudgets(
+      read.records,
+      budgetScopeOf(load, resolution),
+      { class: cls, est_cost_usd: derivation.declared.est_cost_usd ?? 0 },
+      ts,
+    );
+    if (!budget.pass) {
+      const failed = budget.verdicts.filter((verdict) => !verdict.pass);
+      const logged = append(
+        logPath,
+        {
+          ts,
+          event: "budget.exceeded",
+          actor,
+          ...(derivation.task === null ? {} : { task: derivation.task }),
+          action_key: actionKey,
+          payload: {
+            class: cls,
+            est_cost_usd: derivation.declared.est_cost_usd ?? 0,
+            stage: "grant",
+            verdicts: budget.verdicts,
+          },
+        },
+        options,
+      );
+      const message = `budget refused the grant: ${failed
+        .map((verdict) => `${verdict.limit} (${verdict.scope})`)
+        .join(", ")}`;
+      return logged.ok
+        ? refuse("budget-exceeded", message, {
+            verdicts: failed,
+            record: logged.record,
+            state: derivation.state,
+          })
+        : refuse("budget-exceeded", `${message}; the budget.exceeded event could not be appended: ${logged.message}`, {
+            verdicts: failed,
+            state: derivation.state,
+          });
+    }
+  }
+
+  const appended = append(
+    logPath,
+    {
+      ts,
+      event: DECISION_EVENT[decision],
+      actor,
+      ...(derivation.task === null ? {} : { task: derivation.task }),
+      action_key: actionKey,
+      payload,
+    },
+    options,
+  );
+  if (!appended.ok) return appended;
+
+  return {
+    ok: true,
+    decision,
+    state: DECISION_STATE[decision],
+    record: appended.record,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// expire
+// ---------------------------------------------------------------------------
+
+export type ExpireResult = { ok: true; record: EventRecord } | GateRefusal;
+
+/** The shared append used by both `expire` and `decide`'s lazy materialisation. */
+function appendExpiry(
+  logPath: string,
+  derivation: RequestDerivation,
+  load: PolicyLoadResult,
+  ts: string,
+  options: GateOptions,
+): { ok: true; record: EventRecord } | GateRefusal {
+  const payload: Record<string, unknown> = {};
+  if (derivation.requestTs !== null) payload["requested_ts"] = derivation.requestTs;
+  const ttlMs = ttlOf(load);
+  if (ttlMs !== null) payload["ttl_ms"] = ttlMs;
+  const onExpiry = load.ok ? load.policy.defaults?.on_expiry : undefined;
+  if (onExpiry !== undefined) payload["on_expiry"] = onExpiry;
+  if (derivation.declared.class !== null) payload["class"] = derivation.declared.class;
+
+  return append(
+    logPath,
+    {
+      ts,
+      event: "approval.expired",
+      // SPEC.md §8: `system:` is for runtime-originated events, and expiry is
+      // the example the spec itself gives. No human acted; the clock did.
+      actor: EXPIRY_ACTOR,
+      ...(derivation.task === null ? {} : { task: derivation.task }),
+      action_key: derivation.actionKey,
+      payload,
+    },
+    options,
+  );
+}
+
+/**
+ * Append `approval.expired` for a live request whose TTL has lapsed.
+ *
+ * The system verb: no human decides an expiry, so the actor is
+ * {@link EXPIRY_ACTOR} and there is no identity to resolve. Used by the daemon's
+ * sweep (M5) and by tests; `decide` performs the same append itself when it
+ * discovers a lapse first.
+ *
+ * Refuses when the request is not live (`not-requested`, `already-decided`) or
+ * when the TTL has not lapsed (`not-expired`, which also covers a policy that
+ * declares no `defaults.approval_ttl` — no TTL means no lapse, and expiring a
+ * request the policy never bounded would be the runtime inventing a deadline).
+ *
+ * `defaults.on_expiry` is recorded in the payload. Its only v0.1 value,
+ * `reject`, does not change the mechanics here — an expired request is terminal
+ * either way — it tells the projection layer to render the envelope's `state:`
+ * as `rejected`.
+ */
+export function expire(
+  logPath: string,
+  actionKey: string,
+  ts: string,
+  options: GateOptions = {},
+): ExpireResult {
+  const read = readGateRecords(logPath);
+  if (!read.ok) return read;
+
+  const load = loadPolicy(loadOptionsOf(options));
+  const ttlMs = ttlOf(load);
+  const derivation = requestState(read.records, actionKey, ts, ttlMs);
+
+  if (derivation.state === "none") {
+    return refuse(
+      "not-requested",
+      `action ${actionKey} has no approval.requested record to expire`,
+      { state: derivation.state },
+    );
+  }
+  if (derivation.expiredByEvent) {
+    return refuse(
+      "already-decided",
+      `action ${actionKey} already has an approval.expired record at seq ${String(derivation.decisionSeq)}`,
+      { state: derivation.state },
+    );
+  }
+  if (derivation.state !== "expired") {
+    if (derivation.state !== "requested") {
+      return refuse(
+        "already-decided",
+        `action ${actionKey} was already ${derivation.state} at seq ${String(derivation.decisionSeq)}; only a live request can expire`,
+        { state: derivation.state },
+      );
+    }
+    return refuse(
+      "not-expired",
+      ttlMs === null
+        ? `action ${actionKey} cannot expire: the policy declares no defaults.approval_ttl, so the request is not bounded by a TTL`
+        : `action ${actionKey} has not expired: the request at ${String(derivation.requestTs)} has not lapsed its ${String(ttlMs)}ms TTL as of ${ts}`,
+      { state: derivation.state },
+    );
+  }
+
+  return appendExpiry(logPath, derivation, load, ts, options);
+}
