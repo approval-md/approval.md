@@ -43,9 +43,10 @@
         "policy.updated",
         "envelope.drift",
         "audit.sampled",
-        "audit.reviewed"
+        "audit.reviewed",
+        "payload.pruned"
       ],
-      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of sixteen event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated."
+      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of seventeen event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen: a reader of a v0.1 log may encounter it, and a verifier written against the draft enum must be updated to accept it."
     },
     "actor": {
       "type": "string",
@@ -187,6 +188,79 @@
           },
           "action_key": {
             "$ref": "#/properties/action_key"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §10.3 (amended, APRV-38): a decision collected as part of a batch gesture carries the batch's channel delivery id as a first-class payload field. Optional — a unit decision has no batch — and constrained only when present, so the field can never arrive as an empty string or a number that audit would have to guess at.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "enum": [
+              "approval.granted",
+              "approval.rejected"
+            ]
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "batch_delivery_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "SPEC.md §10.3: the channel delivery id of the batch this decision answered. The log never batches — each member gets its own event — so this field is what ties the separate events back to the one human gesture. Earlier v0.1 builds encoded the same id in the first line of `note` (`batch_delivery_id=<id>`); readers accept both encodings through v0.1 and prefer this one.",
+                "examples": ["tg-batch-7"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §8/§9 (amended, APRV-38): `payload.pruned` records that the daemon removed a payload file from `.approval/payloads/` under `payload_retention`. Two constraints, both about who and what: the actor is `system:` because pruning is a retention rule executing on a schedule rather than anyone's decision (a `human:` or `agent:` pruner would be a party under oversight deleting the evidence its approval bound to), and the payload names the removed bytes by their SHA-256, which is the store's own key and the same value a grant binds to. The log therefore states exactly what the store no longer holds.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "payload.pruned"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^system:"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "payload_hash"
+            ],
+            "properties": {
+              "payload_hash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "description": "SPEC.md §6.2/§9: SHA-256 (lowercase hex) of the pruned payload's bytes — the content address `.approval/payloads/` filed them under, and the value the action's grant bound to."
+              }
+            }
           }
         }
       }

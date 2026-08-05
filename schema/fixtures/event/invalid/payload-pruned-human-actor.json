@@ -1,0 +1,14 @@
+{
+  "seq": 21,
+  "ts": "2026-09-11T03:00:04Z",
+  "event": "payload.pruned",
+  "task": "task-042",
+  "action_key": "task-042:chaser:2026-08-04",
+  "actor": "human:carter",
+  "payload": {
+    "payload_hash": "8ae4823e490219f719383730bac75a35543ad790475300fb1a0113a2e2d1d834"
+  },
+  "alg": "sha256/jcs",
+  "prev": "92f55b985ad964c052e5e7b500f56ede98efa49473bb32bca236896317fa5da7",
+  "hash": "e68eb434e9c342315dd6beeb0b4af73839eefa6a8f181565a4eb28804ce0b67f"
+}

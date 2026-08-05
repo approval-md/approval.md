@@ -23,9 +23,11 @@ import { after, test } from "node:test";
 import {
   assembleBatch,
   batchDeliveryIdOf,
+  batchNote,
   recordBatchDecisions,
 } from "../src/channels/batch.js";
 import {
+  BATCH_DELIVERY_ID_FIELD,
   CHANNEL_REQUEST_REFUSAL_CODES,
   COMPUTED_SOURCES,
   claimed,
@@ -632,6 +634,116 @@ test("a batch member that refuses does not stop the rest", () => {
   const records = recordsOf(world.unit.logPath);
   assert.equal(records.length, before + 1, "exactly the member that could be recorded was");
   assert.equal(batchDeliveryIdOf(records[records.length - 1] as never), "mock-batch-2");
+  assertClean(world.unit);
+});
+
+// ---------------------------------------------------------------------------
+// The batch delivery id: first-class field, and the v0.1 dual-read window
+// (amended SPEC.md §10.3, APRV-38)
+// ---------------------------------------------------------------------------
+
+/** The payload of `record`, as a plain bag. */
+function payloadOf(record: { payload?: Record<string, unknown> }): Record<string, unknown> {
+  return record.payload ?? {};
+}
+
+test("a batch decision records batch_delivery_id as a payload field, and leaves the note to the human", () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+
+  const result = recordBatchDecisions(
+    world.unit.logPath,
+    [{ action_key: key, decision: "grant", deliveryId: "d", note: "fine by me" }],
+    "mock-batch-3",
+    { actor: HUMAN, channel: "mock" },
+    { ...world.unit.options, clock: fixedClock(NOW) },
+  );
+  assert.equal(result.ok, true, JSON.stringify(result.results));
+
+  const records = recordsOf(world.unit.logPath);
+  const record = records[records.length - 1] as NonNullable<(typeof records)[number]>;
+  const payload = payloadOf(record);
+  assert.equal(payload[BATCH_DELIVERY_ID_FIELD], "mock-batch-3");
+  assert.equal(
+    payload["note"],
+    "fine by me",
+    "the human's note carries the human's words and nothing else now that the id has its own field",
+  );
+  assert.equal(batchDeliveryIdOf(record), "mock-batch-3");
+  assertClean(world.unit);
+});
+
+test("batchDeliveryIdOf still resolves the pre-APRV-38 note encoding", () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+
+  // Written through the real gate: the legacy encoding was only ever a note,
+  // so reproducing it needs no fabricated log line, just the note a v0.1 build
+  // would have passed.
+  const decided = decide(
+    world.unit.logPath,
+    key,
+    "grant",
+    HUMAN,
+    NOW,
+    { ...world.unit.options, note: batchNote("legacy-batch-9", "go ahead") },
+  );
+  assert.equal(decided.ok, true, JSON.stringify(decided));
+
+  const records = recordsOf(world.unit.logPath);
+  const record = records[records.length - 1] as NonNullable<(typeof records)[number]>;
+  assert.equal(
+    BATCH_DELIVERY_ID_FIELD in payloadOf(record),
+    false,
+    "the legacy shape carries no first-class field; that is what makes the fallback load-bearing",
+  );
+  assert.equal(batchDeliveryIdOf(record), "legacy-batch-9");
+  assertClean(world.unit);
+});
+
+test("the first-class field wins over a note that disagrees with it", () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+
+  const result = recordChannelDecision(
+    world.unit.logPath,
+    {
+      action_key: key,
+      decision: "grant",
+      deliveryId: "d",
+      batchDeliveryId: "field-batch",
+      // A human whose note happens to begin with the legacy prefix, or a
+      // relayed note from an older channel build. The field is the record the
+      // runtime wrote; the note is text that arrived with the gesture.
+      note: batchNote("note-batch", "go"),
+    },
+    { actor: HUMAN, channel: "mock" },
+    { ...world.unit.options, clock: fixedClock(NOW) },
+  );
+  assert.equal(result.outcome.ok, true, JSON.stringify(result.outcome));
+
+  const records = recordsOf(world.unit.logPath);
+  const record = records[records.length - 1] as NonNullable<(typeof records)[number]>;
+  assert.equal(batchDeliveryIdOf(record), "field-batch");
+  assertClean(world.unit);
+});
+
+test("a unit decision records no batch delivery id at all", () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+
+  const result = recordChannelDecision(
+    world.unit.logPath,
+    { action_key: key, decision: "reject", deliveryId: "mock-1", note: "no" },
+    { actor: HUMAN, channel: "mock" },
+    { ...world.unit.options, clock: fixedClock(NOW) },
+  );
+  assert.equal(result.outcome.ok, true, JSON.stringify(result.outcome));
+
+  const records = recordsOf(world.unit.logPath);
+  const record = records[records.length - 1] as NonNullable<(typeof records)[number]>;
+  assert.equal(BATCH_DELIVERY_ID_FIELD in payloadOf(record), false);
+  assert.equal(batchDeliveryIdOf(record), null);
   assertClean(world.unit);
 });
 

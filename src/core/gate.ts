@@ -991,6 +991,23 @@ export function request(
 export interface DecideOptions extends GateOptions {
   /** Free-text note recorded in the event payload (SPEC.md §8's example). */
   note?: string;
+  /**
+   * The channel delivery id of the batch this decision answered (amended
+   * SPEC.md §10.3, APRV-38), recorded as `payload.batch_delivery_id` on
+   * `approval.granted` / `approval.rejected`.
+   *
+   * The log never batches: one gesture over five requests is five events, and
+   * this is the only thing tying them back together for audit. It is recorded
+   * on grant and reject alone, the two decisions a channel can collect;
+   * `revoke` is a considered act performed against the log through the CLI and
+   * never arrives as part of a batch gesture, so a value supplied with it is
+   * ignored rather than written.
+   *
+   * Empty strings are ignored for the same reason the schema requires
+   * `minLength: 1`: a batch id that identifies no batch is worse than none,
+   * since audit would read it as a grouping that never existed.
+   */
+  batchDeliveryId?: string;
 }
 
 export type DecideResult =
@@ -1158,6 +1175,13 @@ export function decide(
     }
   }
   if (options.note !== undefined) payload["note"] = options.note;
+  if (
+    decision !== "revoke" &&
+    options.batchDeliveryId !== undefined &&
+    options.batchDeliveryId.length > 0
+  ) {
+    payload["batch_delivery_id"] = options.batchDeliveryId;
+  }
 
   if (decision === "grant") {
     const cls = derivation.declared.class ?? "";

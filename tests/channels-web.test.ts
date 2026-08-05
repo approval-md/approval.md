@@ -23,6 +23,8 @@ import { readFileSync } from "node:fs";
 import { after, test } from "node:test";
 
 import {
+  BATCH_DELIVERY_ID_FIELD,
+  batchDeliveryIdOf,
   recordChannelDecision,
   type ChannelDecision,
   type ChannelRequest,
@@ -542,10 +544,18 @@ test("a batch gesture records one event per member, each carrying the batch deli
   const ids = new Set<string>();
   for (const record of appended) {
     assert.equal(record.event, "approval.granted");
-    const note = (record.payload as { note?: string }).note ?? "";
-    const id = note.split("\n", 1)[0] ?? "";
-    assert.match(id, /^batch_delivery_id=web-batch-\d+$/u);
-    ids.add(id);
+    // First-class payload field since APRV-38 (amended SPEC.md §10.3). The id
+    // no longer rides in `note`, so the note stays the human's own text.
+    const id = (record.payload as Record<string, unknown>)[BATCH_DELIVERY_ID_FIELD];
+    assert.equal(typeof id, "string");
+    assert.match(id as string, /^web-batch-\d+$/u);
+    assert.equal(batchDeliveryIdOf(record), id);
+    assert.equal(
+      (record.payload as { note?: string }).note,
+      undefined,
+      "a batch grant with no human note must record no note",
+    );
+    ids.add(id as string);
   }
   assert.equal(ids.size, 1, "the members carry different batch delivery ids");
   assertClean(world.unit);

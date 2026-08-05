@@ -59,6 +59,7 @@ import {
 } from "./contract.js";
 
 export {
+  BATCH_DELIVERY_ID_FIELD,
   BATCH_DELIVERY_NOTE_PREFIX,
   batchDeliveryIdOf,
   batchNote,
@@ -138,7 +139,8 @@ export interface BatchDecisionsResult {
  * **Unit decisions mean unit outcomes.** The log never batches (SPEC.md §10.3),
  * so this is a loop over `decide()` and not a transaction: each member is
  * checked and appended on its own, each carries the batch delivery id in its
- * payload, and a member that refuses does **not** stop the rest. That is
+ * payload as the first-class `batch_delivery_id` field (amended SPEC.md §10.3,
+ * APRV-38), and a member that refuses does **not** stop the rest. That is
  * deliberate and it is the only coherent semantics available — an "all or
  * nothing" batch would have to un-append events the log forbids un-appending,
  * and abandoning the remaining members because the third one expired would

@@ -40,6 +40,11 @@
         }
       }
     },
+    "payload_retention": {
+      "$ref": "#/$defs/duration",
+      "description": "SPEC.md §5.2 (amended, APRV-38): how long payload bytes are kept in `.approval/payloads/` after the action they bind to reaches a terminal state (`executed`, `rejected`, `expired`, `revoked`). A payload older than this duration in a terminal state MAY be pruned; a payload whose action is still live is never prunable at any age, because the bytes are what a pending or granted approval binds to. Orphaned payloads (bytes with no recorded binding) are prunable regardless of this key. Omitting the key means retain indefinitely: the payload store holds the material evidence of what was approved, so forgetting it is an explicit operator choice rather than a default. Pruning is performed by the daemon and by nothing else, and each removal is recorded as a `payload.pruned` event. Policy vocabulary in v0.1: enforcement lands with the M5 daemon (APRV-41), so a policy may declare it before any runtime reads it.",
+      "examples": ["30d", "12w"]
+    },
     "approvers": {
       "type": "object",
       "additionalProperties": false,
@@ -95,6 +100,12 @@
           "minimum": 0,
           "maximum": 1,
           "description": "SPEC.md §5.2: fraction of `supervised` actions escalated for after-the-fact human review, as a proportion in [0, 1] (0 = never sample, 1 = review everything). Sample selection is reproducible by the operator and unpredictable to agents: HMAC-SHA-256 over the event hash using an operator-held secret (amended SPEC.md §5.2; enforcement lands with the M5 daemon)."
+        },
+        "sampling_secret_env": {
+          "type": "string",
+          "minLength": 1,
+          "description": "SPEC.md §5.2/§11 (amended, APRV-38): name of the environment variable holding the operator's HMAC sampling secret. Named indirectly for the same reason channel credentials are (`chat_id_env`, `token_env`): agents may read APPROVAL.md, and a secret they can read is a sample they can predict and then steer their actions out of. The secret itself lives outside the repository and outside any agent-readable path; this policy carries the variable name only. Policy vocabulary in v0.1: the sampler that reads it lands with the M5 daemon.",
+          "examples": ["APPROVAL_SAMPLING_SECRET"]
         }
       }
     },
