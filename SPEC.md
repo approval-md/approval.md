@@ -127,6 +127,7 @@ channels:
 - **Budgets are conjunctive.** An action must pass its class limits AND global budgets. Budget consumption is computed from the log, never from a mutable counter.
 - **`supervised_sample_rate`** implements auditing under a budget: supervised actions execute immediately, and a deterministic pseudo-random sample (seeded from the event hash, so it is reproducible and unguessable in advance by the agent) is queued for after-the-fact human review. See §11 for why.
 - **Agents MUST NOT be able to modify `APPROVAL.md`, the log, or channel credentials.** The reference runtime refuses to mint tokens if the policy file's mtime/hash changed without a signed `policy.updated` event from a human session.
+- **Durations.** Every duration-valued field (`approval_ttl`, budget windows, `max_latency`) is a string matching `<positive integer><unit>` with unit one of `ms`, `s`, `m`, `h`, `d`, `w` (weeks = 7 days). Single unit only: compound (`1h30m`), fractional (`1.5h`), zero, and leading-zero forms are invalid. An invalid duration anywhere in the policy is a schema violation and the policy fails closed.
 
 ## 6. The task envelope
 

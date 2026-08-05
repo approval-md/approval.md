@@ -4,6 +4,7 @@ title: 'Policy explain: core trace + approval policy check|test CLI'
 status: To Do
 assignee: []
 created_date: '2026-08-05 00:23'
+updated_date: '2026-08-05 00:30'
 labels: []
 milestone: m-2
 dependencies:
@@ -26,4 +27,5 @@ SPEC.md section 10.1 ships `approval policy check|test <class>`: explain what po
 - [ ] #3 With a missing or unparseable policy the CLI still answers (manual, fail-closed) and the output carries explicit provenance of the load failure, distinct from a successful parse — covered by tests
 - [ ] #4 Exit codes follow the APRV-9 frozen table; any addition is documented in --help and pinned by tests
 - [ ] #5 Human-readable output shows the decision path clearly enough that a policy author can see why a class resolves as it does
+- [ ] #6 The trace distinguishes three manual provenances as separate machine-readable values: manual-because-matched-rule, manual-because-irreversibility-floor, and manual-because-load-failure (human-mandated; binds the section 7 floor amendment's trace requirement)
 <!-- AC:END -->
