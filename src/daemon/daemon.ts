@@ -82,6 +82,7 @@ import {
   type ReadRecordsResult,
 } from "../core/state.js";
 import { validate } from "../core/validate.js";
+import { sweepAuditSampling } from "./audit.js";
 import type { GitEvidenceRecorder } from "./git-evidence.js";
 import { prunePayloads } from "./prune.js";
 import {
@@ -454,6 +455,20 @@ export class Daemon {
 
       const expired = this.sweepTtl();
       if (expired.stop !== null) return expired.stop;
+
+      // Audit sampling (APRV-40, SPEC.md §5.2/§10.2). Placed before the closing
+      // read and the render so a sample appended here is counted by this tick's
+      // head and shows up in this tick's `audit_backlog`. It decides nothing:
+      // `daemon/audit.ts` re-derives eligibility from the verified log and every
+      // append is a compare-and-append.
+      sweepAuditSampling({
+        logPath: this.options.logPath,
+        policy: this.options.policy,
+        cwd: this.options.cwd,
+        ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
+        ...(this.options.clock === undefined ? {} : { clock: this.options.clock }),
+        warn: (message) => this.warn("append-refused", message),
+      });
 
       // Payload retention (APRV-41), after the TTL sweep so a request expired on
       // this tick is judged against the record the sweep just wrote. The pruner

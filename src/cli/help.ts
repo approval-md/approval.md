@@ -38,6 +38,8 @@ Usage:
                       [--as <id>] [--json] -- <cmd…>
   approval execution resolve <action-key> --outcome completed|failed
                       --note "<text>" [--as human:<id>] [--json]
+  approval audit list|review [<seq|action-key>] [--note "<text>"]
+                      [--as human:<id>] [--all] [--json]
   approval wait       <task> --timeout <duration> [--interval <d>] [--json]
   approval queue      [--policy <path>] [--dir <path>] [--json]
   approval channel cli [--policy-dir <path>] [--payload-dir <path>]
@@ -112,6 +114,11 @@ Commands:
             over its RFC 8785 canonical serialization), the value a declaration
             carries and a grant binds to. Most flows never need it: "request
             --payload" hashes, verifies and stores the bytes in one step
+  audit     "audit list" is the open sampled-audit backlog and "audit review" is
+            the HUMAN-ONLY verb that closes one item of it. Sampling itself has
+            no verb: the daemon selects supervised actions with an operator-held
+            secret, because a caller who could sample could also decline to
+            sample itself
   reindex   rebuild the SQLite index projection from the log
   render    regenerate .approval/QUEUE.md, the READ-ONLY markdown queue
             projection (SPEC.md §9.1): pending requests and the sampled-audit
@@ -201,10 +208,22 @@ JSON shape (stdout, one object):
   head is null for an empty log. reason is one of malformed-line,
   schema-invalid, bad-alg, hash-mismatch, prev-mismatch, seq-gap,
   seq-duplicate, not-genesis, head-mismatch.
+
+  "anomalies" is ADDITIVE and appears ONLY when there is something to report:
+  [{"kind":"gate-ts-regression","seq":9,"ts":"...","event":"execution.started",
+    "previousSeq":8,"previousTs":"...","skewMs":45000,"message":"..."}]
 ${JSON_ERRORS}
 
-Human output: the status and head on stdout; reason, first bad seq, and the
-full message on stderr.`;
+ANOMALIES DO NOT CHANGE THE VERDICT. SPEC.md §8 stamps the timestamps of
+gate-typed events (approval.*, execution.*, budget.*, audit.*, policy.updated)
+at the write boundary, so a backwards step of more than 2s between two of them
+means either a clock that stepped backwards or a timestamp that was authored
+rather than stamped. A CLEAN LOG WITH ANOMALIES IS CLEAN and still exits 0.
+Chain integrity is a proof; skew is a judgment. Folding the judgment into the
+proof would turn this verb into a check people learn to pass a flag to silence.
+
+Human output: the status and head on stdout; reason, first bad seq, anomalies,
+and the full message on stderr.`;
 
 export const TAIL_HELP = `approval log tail — print the last records of the log
 
@@ -1263,6 +1282,12 @@ Reports, in one object:
                    exit code. An empty store is the normal state of a repo that
                    has never made a request carrying --payload. ("approval
                    doctor" is where an UNWRITABLE store is a failure.)
+  anomalies        ADDITIVE and present only when non-empty: gate-typed events
+                   whose ts steps backwards by more than 2s relative to the
+                   previous gate-typed event (SPEC.md §8). INFORMATIONAL — it
+                   moves neither the health verdict nor the exit code, because
+                   "approval log verify" already declined to refuse on it and
+                   status does not get to overrule that.
 
 THIS IS NOT "approval queue". queue is the pending-decision inbox — what a human
 must answer. status is what an operator must fix. Neither shows the other's
@@ -1393,6 +1418,125 @@ JSON shape (stdout, one object):
   status is "pass" | "fail" | "skip". fix is present only when there is
   something to do. ok is true when no check failed — a skip does not make it
   false. The seven checks always appear, in this order.
+${JSON_ERRORS}`;
+
+export const AUDIT_HELP = `approval audit — the retrospective review of sampled supervised actions
+
+Usage:
+  approval audit list   [--all] [--log <path>] [--json]
+  approval audit review <seq|action-key> [--note "<text>"] [--as human:<id>]
+                        [--log <path>] [--json]
+
+Subcommands:
+  list      the open sampled-audit backlog: audit.sampled with no audit.reviewed
+  review    record that a HUMAN looked at one sampled action
+
+SUPERVISED actions execute immediately and are audited AFTERWARDS. The daemon
+samples a fraction of them (audit.supervised_sample_rate) into a backlog a
+person works through; SPEC.md §12 calls the human's attention the audit budget,
+and this is where it is spent retrospectively rather than before the fact.
+
+THERE IS NO "approval audit sample". Selection is the runtime's, derived as
+HMAC-SHA-256 over the event hash with an operator-held secret named by
+audit.sampling_secret_env and kept outside this repository. A verb that let a
+caller sample — or decline to sample — an action of its choosing would hand the
+party under oversight the control that exists to oversee it. Seeding from event
+content alone is forbidden by SPEC.md §5.2 for the same reason: the agent
+authoring the event controls that content and could search it until its action
+falls outside the sample.
+
+If no secret is configured, SAMPLING IS OFF and this backlog stays empty.
+"approval audit list" reports that beside the backlog, because an empty backlog
+means one thing when sampling is running and quite another when it is not.
+Sampling is retrospective, so an unconfigured sampler costs review coverage and
+authorizes nothing: nothing is gated on it and no budget is spent by it.
+
+${EXIT_CODES}`;
+
+export const AUDIT_LIST_HELP = `approval audit list — the open sampled-audit backlog
+
+Usage:
+  approval audit list [--all] [--policy <path>] [--dir <path>] [--log <path>]
+                      [--json]
+
+Flags:
+  --all           include samples that have already been reviewed
+  --policy <path> policy file, for reporting whether sampling is on
+  --dir <path>    directory to discover the policy in (default: cwd)
+  --log <path>    log file to read
+  --json          machine-readable output
+  -h, --help      this text
+
+Reads a VERIFIED log and writes nothing. The same set .approval/QUEUE.md renders
+and the same set the daemon counts as audit_backlog, from the same projection,
+so the file, the daemon and this verb cannot disagree.
+
+A review closes a sample only when it comes AFTER it in the chain and names the
+same action. An earlier audit.reviewed is a review of an EARLIER sample, and
+treating it as covering this one would silently empty the backlog — which is
+exactly the failure a sampled-audit backlog exists to prevent.
+
+${EXIT_CODES}
+
+JSON shape (stdout, one object):
+  {"ok":true,
+   "sampling":{"enabled":false,"rate":0.1,"secret_env":"APPROVAL_SAMPLE_SECRET",
+               "reason":"secret-unset"},
+   "open":2,
+   "samples":[{"seq":9,"ts":"...","action_key":"...","task":"...",
+               "subject_seq":7,"reviewed_seq":null}]}
+
+sampling.reason is null when sampling is running, and otherwise one of
+policy-unreadable, rate-absent, rate-zero, rate-invalid, secret-env-unnamed,
+secret-unset. The SECRET ITSELF is never printed, never logged, and never
+returned by any code path — sampling.secret_env is the variable's NAME, which
+the policy file already carries in the open.
+${JSON_ERRORS}`;
+
+export const AUDIT_REVIEW_HELP = `approval audit review — record that a human reviewed a sample
+
+Usage:
+  approval audit review <seq|action-key> [--note "<text>"] [--as human:<id>]
+                        [--log <path>] [--json]
+
+Arguments:
+  <seq|action-key> a bare integer is the SEQ OF THE audit.sampled RECORD; any
+                   other value is an action key with exactly one open sample.
+                   An action key with several open samples refuses
+                   ambiguous-subject: a review that could mean either would
+                   close the wrong item.
+
+Flags:
+  --note <text> what you concluded. OPTIONAL — unlike "execution resolve", this
+                event records only that a person looked, and the runtime is not
+                relying on the note for a fact it does not otherwise have.
+  --as human:<id>  the reviewer; defaults to APPROVAL_HUMAN. HUMAN-ONLY: a
+                runtime that could mark its own samples reviewed would be a
+                supervision backlog that empties itself.
+  --log <path>  log file to read and append to
+  --json        machine-readable output
+  -h, --help    this text
+
+What it appends: audit.reviewed, naming the sample's action key and task, with
+payload {"subject_seq":<seq of the audit.sampled>,"reviewed":true,"note"?:"..."}
+
+NO ATTESTATION IS REQUIRED, for the reason "execution resolve" states: review
+records an observation, exercises no policy authority, authorizes nothing, and
+spends no budget. A review blocked because a policy file was edited afterwards
+would be a supervision backlog held open by an unrelated fact.
+
+Refuses (exit 1): not-sampled when nothing matches, already-reviewed when the
+sample is closed, ambiguous-subject when an action key names several open
+samples, actor-not-human when the actor is not human:<id>. All leave the log
+untouched.
+
+${EXIT_CODES}
+
+JSON shape (stdout, one object):
+  success  {"ok":true,"seq":11,"sample_seq":9,"action_key":"...","task":"...",
+            "actor":"human:carter"}
+  refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
+           on stderr
 ${JSON_ERRORS}`;
 
 export const EXECUTION_HELP = `approval execution — recovery verbs for executions the runtime could not close

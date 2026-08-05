@@ -36,8 +36,19 @@
  * - the optional per-event git commits of SPEC.md §8, where the daemon commits
  *   each record under its own identity, giving signed, distributed evidence.
  *
+ * **Anomalies, which are reported and never enforced (APRV-40).** SPEC.md §8
+ * requires that "verification treats gate-type events with implausible skew
+ * relative to their neighbors as a reportable anomaly, never silently accepted".
+ * Every non-corrupt result therefore carries {@link VerifyResult.anomalies}, a
+ * list that says nothing about integrity: a clean log with anomalies is clean,
+ * exits 0, and authorizes exactly what it authorized before. The separation is
+ * the point. Chain integrity is a proof, skew is a judgment, and folding a
+ * judgment into a proof would turn `log verify` into a check people learn to
+ * pass a flag to silence. See {@link chainAnomalies}.
+ *
  * Determinism: the result is a pure function of (log bytes, schema files,
- * options). No clock, no network, no cross-call state.
+ * options). No clock, no network, no cross-call state — the anomaly pass reads
+ * the records' own timestamps and never the current time.
  */
 
 import { readFileSync } from "node:fs";
@@ -53,6 +64,143 @@ import { validate, type ValidateOptions } from "./validate.js";
  * readers expect to find it. One definition, one meaning.
  */
 export type { LogHead };
+
+// ---------------------------------------------------------------------------
+// Anomalies (SPEC.md §8, timestamp rules) — reportable, never a verdict
+// ---------------------------------------------------------------------------
+
+/**
+ * SPEC.md §8: "Events written through the gate (`approval.*`, `execution.*`,
+ * `budget.*`, `audit.*`, `policy.updated`) have `ts` assigned by the runtime at
+ * the write boundary."
+ *
+ * These are the types whose timestamps the runtime authored, so these are the
+ * only types whose timestamps the runtime may be held to. Every other type is
+ * writable directly by callers who legitimately supply their own `ts` (an
+ * importer replaying a historical log is the obvious case), so comparing them
+ * would manufacture anomalies out of correct behavior.
+ */
+function isGateTyped(event: string): boolean {
+  return (
+    event.startsWith("approval.") ||
+    event.startsWith("execution.") ||
+    event.startsWith("budget.") ||
+    event.startsWith("audit.") ||
+    event === "policy.updated"
+  );
+}
+
+/**
+ * The skew allowance, in milliseconds, before a backwards step between two
+ * gate-typed records is reported.
+ *
+ * ### Why 2 seconds, and why any number at all
+ *
+ * Gate-typed timestamps are stamped by `core/clock.ts` at the write boundary. In
+ * one process they come from one `Date.now()` and never go backwards. Across
+ * processes and hosts — the daemon on one machine, a CLI verb on another, both
+ * appending to a shared log — they come from separate wall clocks, and two
+ * healthy NTP-disciplined clocks routinely disagree by tens of milliseconds and
+ * occasionally by a few hundred during a step correction. A tolerance of zero
+ * would therefore report ordinary distributed operation as an anomaly, which is
+ * the fastest way to make an anomaly channel ignored.
+ *
+ * 2000 ms is chosen as roughly an order of magnitude above the disagreement a
+ * synchronized fleet actually exhibits, and two to three orders of magnitude
+ * below the skew that a *useful* lie requires. The thing this check exists to
+ * catch is a timestamp placed to change a judgment: a `ts` inside a lapsed TTL
+ * (minutes to hours), or one moved outside a rolling budget window (hours). No
+ * attack is bought by 1.9 seconds, and no healthy fleet needs 2.1.
+ *
+ * HUMAN REVIEW: this constant is a drafted default, not a spec-derived one.
+ * SPEC.md §8 requires "implausible skew" to be reported and deliberately does
+ * not fix the number. An operator running a single host could tighten it to
+ * 250 ms; one running across a WAN with poor time discipline might want 5 s.
+ * Making it configurable is a policy-vocabulary change and therefore its own
+ * task; it is a constant here so that today it has exactly one value and every
+ * reader can see it.
+ */
+export const GATE_TS_SKEW_TOLERANCE_MS = 2_000;
+
+/**
+ * Machine-readable anomaly kinds. Closed union, additive-only, each pinned by a
+ * test — the same contract every other frozen union in this codebase carries.
+ */
+export const CHAIN_ANOMALY_KINDS = [
+  /**
+   * A gate-typed record's `ts` is earlier than the previous gate-typed record's
+   * `ts` by more than {@link GATE_TS_SKEW_TOLERANCE_MS}.
+   *
+   * One kind covers both directions SPEC.md §8 describes. "Earlier than its
+   * predecessor" and "later than its successor" are the same disagreement seen
+   * from the two ends of one adjacent pair, and reporting it twice would double
+   * every entry without adding a fact.
+   */
+  "gate-ts-regression",
+] as const;
+
+export type ChainAnomalyKind = (typeof CHAIN_ANOMALY_KINDS)[number];
+
+/** One reportable oddity in a log that verifies. Never a verdict. */
+export interface ChainAnomaly {
+  kind: ChainAnomalyKind;
+  /** The record the anomaly is reported against. */
+  seq: number;
+  ts: string;
+  event: string;
+  /** The gate-typed record it was compared with. */
+  previousSeq: number;
+  previousTs: string;
+  /** How far back the step is, in milliseconds. Always positive. */
+  skewMs: number;
+  message: string;
+}
+
+/**
+ * Timestamp anomalies among the gate-typed records of a verified chain.
+ *
+ * Pure: a function of the records alone, with no clock and no I/O. Comparison is
+ * between each gate-typed record and the previous **gate-typed** record, not the
+ * previous record of any kind, for the reason {@link isGateTyped} states.
+ *
+ * This changes no verdict. A log full of anomalies is still `clean` if its chain
+ * verifies, still exits 0, and still authorizes exactly what it authorized
+ * before. Skew is evidence for a human to weigh, and a verifier that refused on
+ * it would be refusing on a heuristic — which is how a tamper-evidence tool
+ * starts being run with a flag that turns it off.
+ */
+export function chainAnomalies(records: readonly EventRecord[]): ChainAnomaly[] {
+  const anomalies: ChainAnomaly[] = [];
+  let previous: { seq: number; ts: string; millis: number } | null = null;
+
+  for (const record of records) {
+    if (!isGateTyped(record.event)) continue;
+    const millis = Date.parse(record.ts);
+    if (Number.isNaN(millis)) continue; // the schema's date-time format precedes this
+
+    if (previous !== null) {
+      const skewMs = previous.millis - millis;
+      if (skewMs > GATE_TS_SKEW_TOLERANCE_MS) {
+        anomalies.push({
+          kind: "gate-ts-regression",
+          seq: record.seq,
+          ts: record.ts,
+          event: record.event,
+          previousSeq: previous.seq,
+          previousTs: previous.ts,
+          skewMs,
+          message: `record ${record.seq} (${record.event}) is timestamped ${record.ts}, ${String(
+            skewMs,
+          )}ms BEFORE the previous gate-typed record ${previous.seq} at ${previous.ts}. Gate-typed timestamps are stamped by the runtime at the write boundary (SPEC.md §8), so a backwards step larger than ${String(
+            GATE_TS_SKEW_TOLERANCE_MS,
+          )}ms means either a clock that stepped backwards or a timestamp that was authored rather than stamped. The chain still verifies and nothing is refused: this is reported for a human to weigh, because TTL judgment and budget windows read ts.`,
+        });
+      }
+    }
+    previous = { seq: record.seq, ts: record.ts, millis };
+  }
+  return anomalies;
+}
 
 /** Machine-readable reason a log failed verification. Closed set. */
 export type VerifyFailureReason =
@@ -78,18 +226,20 @@ export type VerifyFailureReason =
  * - `corrupt` — everything else, reported at the first offending record.
  */
 export type VerifyResult =
-  | { status: "clean"; records: number; head: LogHead | null }
+  | { status: "clean"; records: number; head: LogHead | null; anomalies: ChainAnomaly[] }
   | {
       status: "torn-tail";
       records: number;
       intactThroughSeq: number;
       message: string;
+      anomalies: ChainAnomaly[];
     }
   | {
       status: "corrupt";
       firstBadSeq: number | null;
       reason: VerifyFailureReason;
       message: string;
+      anomalies: ChainAnomaly[];
     };
 
 /** Options accepted by {@link verify}. */
@@ -108,7 +258,11 @@ function corrupt(
   firstBadSeq: number | null,
   message: string,
 ): VerifyResult {
-  return { status: "corrupt", firstBadSeq, reason, message };
+  // A chain that does not verify gets no anomaly report. Anomalies are a
+  // secondary reading of records the walk vouched for, and reading timestamps
+  // off a log whose integrity is in question would dress up untrusted bytes as
+  // findings. The corruption is the finding.
+  return { status: "corrupt", firstBadSeq, reason, message, anomalies: [] };
 }
 
 /** `seq` as reported by a raw parsed line, or `null` when unusable. */
@@ -455,10 +609,16 @@ export function verifyText(
   // problems, and reporting it would understate the damage.
   if (failure !== null) return { result: failure, records };
 
+  // Computed once over the records the walk vouched for, and attached to every
+  // non-corrupt verdict. Additive: it changes no status, no exit code, and no
+  // authorization. Clean with anomalies is clean.
+  const anomalies = chainAnomalies(records);
+
   if (torn !== null) {
     return {
       result: {
         status: "torn-tail",
+        anomalies,
         records: lineCount,
         intactThroughSeq: head === null ? 0 : head.seq,
         message: `log ${logPath} ends with an unterminated line of ${torn.length} byte(s); records 1..${
@@ -493,7 +653,7 @@ export function verifyText(
     }
   }
 
-  return { result: { status: "clean", records: lineCount, head }, records };
+  return { result: { status: "clean", records: lineCount, head, anomalies }, records };
 }
 
 /**
