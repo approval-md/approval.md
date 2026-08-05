@@ -45,6 +45,8 @@ Usage:
   approval channel web [--port <n>] [--payload-dir <path>] [--as human:<id>]
                       [--policy <path>] [--dir <path>] [--log <path>] [--json]
   approval channel telegram listen|health [--once] [--as human:<id>] [--json]
+  approval daemon run [--tasks <dir>] [--out <path>] [--interval <duration>]
+                      [--debounce <duration>] [--once] [--json]
   approval status     [--policy <path>] [--dir <path>] [--json]
   approval doctor     [--log <path>] [--policy <path>] [--dir <path>]
                       [--api-base <url>] [--json]
@@ -101,6 +103,11 @@ Commands:
             "channel telegram listen" delivers the queue to a Telegram chat and
             long-polls for Approve/Reject taps; config is environment-only
             (APPROVAL_TG_TOKEN, APPROVAL_TG_CHAT)
+  daemon    "daemon run" is the watch loop of SPEC.md §10.2, in the FOREGROUND:
+            it records envelope.drift when a task file's state: contradicts the
+            log, appends approval.expired for lapsed requests, regenerates
+            QUEUE.md, and surfaces loop escalations. It rewrites no task file and
+            holds no lock; backgrounding is the operator's business in v0.1
   payload   "payload hash" prints the payload_hash of a JSON document (SHA-256
             over its RFC 8785 canonical serialization), the value a declaration
             carries and a grant binds to. Most flows never need it: "request
@@ -1929,4 +1936,114 @@ ${EXIT_CODES}
 JSON shape (stdout, one object):
   {"ok":true,"channel":"telegram","token_env":"APPROVAL_TG_TOKEN",
    "token_set":true,"chat_env":"APPROVAL_TG_CHAT","chat_id":"12345"}
+${JSON_ERRORS}`;
+
+// ---------------------------------------------------------------------------
+// The daemon (APRV-39)
+// ---------------------------------------------------------------------------
+
+export const DAEMON_HELP = `approval daemon — the watch loop of SPEC.md §10.2
+
+Usage:
+  approval daemon run [--log <path>] [--tasks <dir>] [--out <path>]
+                      [--policy <path>] [--dir <path>] [--interval <duration>]
+                      [--debounce <duration>] [--once] [--json]
+
+Subcommands:
+  run   watch the task folder and the log; record envelope drift, expire lapsed
+        requests, regenerate QUEUE.md, and surface loop escalations
+
+${EXIT_CODES}
+${JSON_ERRORS}`;
+
+export const DAEMON_RUN_HELP = `approval daemon run — watch, expire, re-render (FOREGROUND)
+
+Usage:
+  approval daemon run [--log <path>] [--tasks <dir>] [--out <path>]
+                      [--policy <path>] [--dir <path>] [--interval <duration>]
+                      [--debounce <duration>] [--once] [--json]
+
+Flags:
+  --log <path>        log file to read and append to (.approval/log/events.jsonl)
+  --tasks <dir>       task folder to watch (default backlog/tasks). Named
+                      explicitly and missing is an error; absent by default is a
+                      warning and the daemon runs log-only
+  --out <path>        queue file to regenerate (default .approval/QUEUE.md)
+  --policy <path>     policy file to read the TTL and autonomy from
+  --dir <path>        directory to discover APPROVAL.md / APPROVALS.md in
+  --interval <d>      how often to tick with no watcher event (default 30s)
+  --debounce <d>      how long a burst of file events settles first (default 250ms)
+  --once              run exactly ONE tick and exit; the cron-shaped invocation
+  --json              machine-readable output, one JSON object per line
+  -h, --help          this text
+
+RUNS IN THE FOREGROUND and stops on SIGINT/SIGTERM. It does not fork, write a
+pidfile, or manage its own lifecycle: in v0.1 backgrounding is the operator's
+business, and systemd, launchd, tmux and & all do it better than a bespoke
+daemonizer would. A clean stop exits 0 — a signal is how this verb is meant to
+end — and leaves no lockfile and no half-written queue.
+
+Each tick, in order:
+
+  ENVELOPE DRIFT (§6.3) — every task file is read and its approval: envelope
+    validated. When the file's state: contradicts the state the log implies, an
+    envelope.drift event is appended (actor system:daemon) naming both. The FILE
+    IS NEVER REWRITTEN: the log is the truth, and repairing a human's edit would
+    resolve a disagreement this verb only records. Identical drift is recorded
+    once — the same claim against the same log is not appended again until the
+    file or the log changes.
+  TTL SWEEP — every live request whose TTL lapsed gets an approval.expired
+    (actor system:gate, through the same "approval expire" the CLI calls). The
+    gate ALREADY refuses a late grant whether or not this event exists; the sweep
+    makes the lapse visible rather than changing any verdict. Idempotent with
+    lazy expiry, with itself, and across restarts, because the candidate list is
+    re-derived from the verified log every sweep and nothing is remembered.
+  LOOP ESCALATION (§10.2) — tasks with three consecutive execution.failed are
+    reported when they escalate and when they clear. The gate and the executor
+    enforce it; this only surfaces it, and "approval status" reports the same set.
+  QUEUE (§9.1) — .approval/QUEUE.md is regenerated through the same renderer
+    "approval render" uses, written temp-then-renamed so a reader never sees a
+    partial file.
+
+WATCHING IS A LATENCY OPTIMIZATION, NEVER A CORRECTNESS DEPENDENCY. fs.watch is
+bursty and platform-dependent, so every tick re-scans the folder and re-derives
+everything from the verified log, and the periodic tick runs whether or not any
+watcher ever fired. A daemon whose watchers failed to attach is slower, not
+wrong; it says so in its first line.
+
+SINGLE WRITER, IN INTENT ONLY. While it runs the daemon is meant to be the only
+writer, but the CLI verbs stay appendable: core's advisory lockfile serializes
+the writes, and every append here carries the head it decided against, so a
+concurrent CLI append refuses the daemon's write rather than corrupting it. The
+daemon tolerates that by RE-READING — the next tick re-derives the whole question
+from the log as it now is. It holds no lock of its own.
+
+A log that does not verify STOPS the daemon rather than degrading it: nothing may
+be appended onto a chain that does not verify, and a projection of one would be a
+screenshot of something nobody should read.
+
+${EXIT_CODES}
+  A clean stop is 0. 4 when the log cannot be read, 3 when its tail is torn, 1
+  when the chain does not verify.
+
+JSON shape (stdout, ONE OBJECT PER LINE):
+  {"event":"started","log":".approval/log/events.jsonl","tasks":"backlog/tasks",
+   "queue":".approval/QUEUE.md","interval_ms":30000,"debounce_ms":250,
+   "watching":true}
+  {"event":"drift","task":"task-042","file":"backlog/tasks/task-042.md",
+   "declared_state":"approved","derived_state":"awaiting","seq":9}
+  {"event":"expired","action_key":"task-042:chaser","task":"task-042","seq":10}
+  {"event":"rendered","path":".approval/QUEUE.md","bytes":2481,"pending":1,
+   "skipped":0,"audit_backlog":0}
+  {"event":"escalated","task":"task-042","consecutive_failures":3}
+  {"event":"escalation_cleared","task":"task-042"}
+  {"event":"tick","n":1,"head":10,"drift":1,"expired":1,"escalated":0}
+  {"event":"stopped","reason":"SIGINT","ticks":3,"drift":1,"expired":1,
+   "renders":3}
+  warnings go to STDERR as {"event":"warning","code":"...","message":"..."},
+  with code one of task-unreadable, frontmatter-invalid, envelope-invalid,
+  task-id-missing, tasks-dir-unreadable, append-refused, expire-refused,
+  render-failed, watch-unavailable. A warning never stops the loop.
+  "rendered" is emitted when the queue's summary CHANGES; the file itself is
+  rewritten every tick, because TTL countdowns move even when the log does not.
 ${JSON_ERRORS}`;

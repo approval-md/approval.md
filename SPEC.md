@@ -276,6 +276,7 @@ approval queue [--json]            # pending requests
 approval log verify | tail | export
 approval policy check|test <class> # explain what policy does with a class
 approval reindex | render
+approval daemon run                # the §10.2 watch loop, in the foreground
 ```
 
 Machine-readable output: every command supports `--json`; schemas for inputs and outputs are printed by `approval instructions --schemas`.
@@ -283,6 +284,8 @@ Machine-readable output: every command supports `--json`; schemas for inputs and
 ### 10.2 Daemon
 
 `approvald` watches the backlog folder and the log: validates new/changed envelopes, applies policy, dispatches channel notifications, expires TTLs, samples supervised actions for audit, re-renders projections, and (optionally) polls upstream sources. Loop safety: three consecutive `execution.failed` events for one task escalate to `manual` regardless of policy.
+
+The reference runtime ships the daemon as a CLI verb, `approval daemon run`, running in the foreground and stopping cleanly on SIGINT or SIGTERM; process supervision is the operator's business at v0.1. Each pass validates the task files' envelopes, appends `envelope.drift` (a `system:` actor) where a file's `state:` contradicts the state the log implies, appends `approval.expired` for live requests whose TTL lapsed, regenerates the queue projection whole, and surfaces escalated tasks. The sweep changes no verdict: TTL is judged at decision time whether or not an expiry event exists, so the sweep exists to make a lapse visible in the log and in every projection built from it. It MUST be idempotent with that lazy judgment and with itself, which implementations get by re-deriving the candidate list from the verified log each pass rather than remembering what they expired. The daemon writes no task file; a file that contradicts the log is recorded, never corrected. File watching is a latency optimization: a pass re-derives everything from the verified log and re-scans the folder, so an implementation whose watchers fail to attach is slower and never wrong.
 
 ### 10.3 Channels
 
