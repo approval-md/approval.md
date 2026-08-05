@@ -40,7 +40,14 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 
-import { appendEvent, type AppendOptions, type AppendResult, type EventRecord } from "./log.js";
+import { tick, type ClockOptions } from "./clock.js";
+import {
+  APPEND_ERROR_CODES,
+  appendEvent,
+  type AppendOptions,
+  type EventRecord,
+} from "./log.js";
+import type { ValidationError } from "./validate.js";
 
 /**
  * Actors permitted to attest. Deliberately narrower than the event schema's
@@ -73,6 +80,48 @@ export interface AttestationRefusal {
   message: string;
 }
 
+/**
+ * Why an attestation append failed: every reason `appendEvent` can give, plus
+ * the one rule this module enforces on its own.
+ *
+ * ### Why `actor-not-human` lives here and not in `core/log.ts`
+ *
+ * Until APRV-20 pass two the non-human-actor refusal reused `validation`, which
+ * conflated two different facts: "the record failed `event.schema.json` at the
+ * write boundary" and "the caller is not allowed to perform this verb". A
+ * caller branching on `validation` could not tell a malformed event from a
+ * forbidden one, and the two call for opposite responses (fix the record;
+ * fetch a human).
+ *
+ * The fix does **not** add the code to `APPEND_ERROR_CODES`. That union is the
+ * log writer's vocabulary — the ways a byte can fail to reach the file — and
+ * "only humans may attest" is a fact about attestation, not about writing.
+ * Widening the writer's union to carry a caller's policy rule would oblige every
+ * future append site to consider a code that can only ever come from this one,
+ * and would make `core/log.ts` the place people look for permission rules.
+ * Instead this module widens the union *for itself*: `AppendResult` remains
+ * assignable to {@link AttestationAppendResult}, so nothing downstream is
+ * forced to change, and the CLI adds one case.
+ */
+export const ATTEST_ERROR_CODES = [...APPEND_ERROR_CODES, "actor-not-human"] as const;
+
+export type AttestErrorCode = (typeof ATTEST_ERROR_CODES)[number];
+
+export interface AttestError {
+  code: AttestErrorCode;
+  message: string;
+  /** Schema errors, present when `code` is "validation". */
+  errors?: ValidationError[];
+}
+
+/** {@link appendAttestation}'s result: `AppendResult` widened by one code. */
+export type AttestationAppendResult =
+  | { ok: true; record: EventRecord; line: string }
+  | { ok: false; error: AttestError };
+
+/** Options for {@link appendAttestation}: the append's, plus the clock. */
+export interface AttestOptions extends AppendOptions, ClockOptions {}
+
 /** The result of comparing the live policy file against the log. */
 export type AttestationStatus =
   | { status: "attested"; seq: number; sha256: string }
@@ -104,10 +153,11 @@ export function policyFileHash(path: string): string {
  * Append a `policy.updated` attestation for `policyPath` to `logPath`.
  *
  * `actor` MUST match `^human:.+`. An `agent:` or `system:` actor is refused
- * before anything is read or written — the refusal is a structured
- * `AppendResult`, never a throw, consistent with the rest of the write path.
- * The refusal uses the `validation` code because that is what it is: the actor
- * failed the rule this verb enforces, and no byte reached the log.
+ * before anything is read or written — the refusal is a structured result,
+ * never a throw, consistent with the rest of the write path. Its code is
+ * `actor-not-human`, this module's own (see {@link ATTEST_ERROR_CODES}): the
+ * actor failed the rule *this verb* enforces, which is a different fact from a
+ * record failing the event schema, and the two used to share `validation`.
  *
  * The event is deliberately minimal:
  *
@@ -122,9 +172,12 @@ export function policyFileHash(path: string): string {
  * a reader can use. `sha256` is the file's byte digest — the field
  * {@link checkAttestation} compares against.
  *
- * `ts` is supplied by the caller. Like `appendEvent`, this function never reads
- * the clock: a hash-relevant field sourced from ambient state would make the
- * log irreproducible.
+ * `ts` is **not** a parameter. `policy.updated` is one of the gate-typed events
+ * of amended SPEC.md §8 (A2), so its timestamp is assigned by the runtime at the
+ * write boundary — read once from {@link AttestOptions.clock}, which defaults to
+ * the real clock and which tests inject. Attestation is the verb that decides
+ * which policy bytes are operative from a moment onward; a caller that could
+ * choose that moment could backdate the answer.
  *
  * ## Why this append carries no `expectedHead` (APRV-20 finding B1)
  *
@@ -142,14 +195,13 @@ export function appendAttestation(
   logPath: string,
   policyPath: string,
   actor: string,
-  ts: string,
-  options: AppendOptions = {},
-): AppendResult {
+  options: AttestOptions = {},
+): AttestationAppendResult {
   if (!HUMAN_ACTOR.test(actor)) {
     return {
       ok: false,
       error: {
-        code: "validation",
+        code: "actor-not-human",
         message: `attestation requires a human actor matching ^human:.+, got ${JSON.stringify(actor)}; attestation is the one verb an agent must not perform, and the log was left unchanged`,
       },
     };
@@ -171,7 +223,7 @@ export function appendAttestation(
   return appendEvent(
     logPath,
     {
-      ts,
+      ts: tick(options),
       event: "policy.updated",
       actor,
       payload: { policy_path: basename(policyPath), sha256 },

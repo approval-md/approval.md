@@ -48,8 +48,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
-import { appendAttestation } from "../src/core/attest.js";
-import { decide, register, request } from "../src/core/gate.js";
+import { decide, register, request, appendAttestation } from "./clock-adapters.js";
 import type { EventRecord } from "../src/core/log.js";
 import { verify } from "../src/core/verify.js";
 
@@ -65,6 +64,9 @@ after(() => {
 
 const T0 = "2026-08-05T10:00:00.000Z";
 const ACTION_KEY = "task-042:chaser";
+
+/** The content binding both racers present (amended SPEC.md §6.2, §10, A1). */
+const PAYLOAD_HASH = "2".repeat(64);
 
 function at(minutes: number): string {
   return new Date(Date.parse(T0) + minutes * 60_000).toISOString();
@@ -95,7 +97,8 @@ const CHILD_SOURCE = `
 import { existsSync, writeFileSync } from "node:fs";
 import { consumeToken } from ${JSON.stringify(TOKEN_MODULE)};
 
-const [logPath, actionKey, token, ts, actor, policyFile, ready, go] = process.argv.slice(2);
+const [logPath, actionKey, token, ts, actor, policyFile, payloadHash, ready, go] =
+  process.argv.slice(2);
 
 function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -104,7 +107,14 @@ function sleep(ms) {
 writeFileSync(ready, "ready", "utf8");
 while (!existsSync(go)) sleep(2);
 
-const result = consumeToken(logPath, actionKey, token, ts, actor, { policyFile });
+// A2: no ts parameter — the runtime stamps gate events. The race needs a fixed
+// instant, so it is injected as a clock, which is the sanctioned path.
+// A1: the payload binding is presented, exactly as \`approval run\` presents it.
+const result = consumeToken(logPath, actionKey, token, actor, {
+  policyFile,
+  presentedPayloadHash: payloadHash,
+  clock: () => ts,
+});
 process.stdout.write(JSON.stringify(result));
 `;
 
@@ -147,6 +157,7 @@ function grantedCase(): RaceCase {
             reversible: false,
             est_cost_usd: 0.02,
             idempotency_key: ACTION_KEY,
+            payload_hash: PAYLOAD_HASH,
           },
         ],
       },
@@ -164,6 +175,7 @@ function grantedCase(): RaceCase {
       cls: "communicate.email.external",
       est_cost_usd: 0.02,
       reversible: false,
+      payload_hash: PAYLOAD_HASH,
     },
     at(1),
     "agent:claude",
@@ -235,6 +247,7 @@ test("two concurrent processes race one token: exactly one execution.started", a
       at(3),
       "agent:claude",
       unit.policyPath,
+      PAYLOAD_HASH,
       readyA,
       go,
     ]);
@@ -245,6 +258,7 @@ test("two concurrent processes race one token: exactly one execution.started", a
       at(3),
       "agent:mallory",
       unit.policyPath,
+      PAYLOAD_HASH,
       readyB,
       go,
     ]);

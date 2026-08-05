@@ -38,6 +38,7 @@
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
+import { isPayloadHash } from "../core/payload.js";
 import { readVerifiedRecords } from "../core/state.js";
 import {
   consumeToken,
@@ -224,6 +225,7 @@ export function commandToken(argv: string[], streams: Streams, cwd: string): num
       grant_seq: status.grantSeq,
       class: status.class,
       est_cost_usd: status.est_cost_usd,
+      payload_hash: status.payloadHash,
       task: status.task,
     });
   } else {
@@ -244,7 +246,7 @@ export function commandToken(argv: string[], streams: Streams, cwd: string): num
 export function commandConsume(argv: string[], streams: Streams, cwd: string): number {
   const outcome = front(
     argv,
-    { ...COMMON_FLAGS, "--token": "string", "--as": "string" },
+    { ...COMMON_FLAGS, "--token": "string", "--as": "string", "--payload-hash": "string" },
     CONSUME_HELP,
     streams,
     cwd,
@@ -279,14 +281,20 @@ export function commandConsume(argv: string[], streams: Streams, cwd: string): n
     );
   }
 
-  const result = consumeToken(
-    logPath,
-    key.actionKey,
-    token,
-    now(),
-    actor,
-    tokenOptions(flags, cwd),
-  );
+  const payloadHash = stringFlag(flags, "--payload-hash");
+  if (payloadHash !== null && !isPayloadHash(payloadHash)) {
+    return usageError(
+      streams,
+      json,
+      `--payload-hash expects 64 lowercase hex characters (SHA-256 over the RFC 8785 canonical serialization of the payload), got ${JSON.stringify(payloadHash)}`,
+      CONSUME_HELP,
+    );
+  }
+
+  const result = consumeToken(logPath, key.actionKey, token, actor, {
+    ...tokenOptions(flags, cwd),
+    ...(payloadHash === null ? {} : { presentedPayloadHash: payloadHash }),
+  });
   if (!result.ok) return emitRefusal(streams, json, result);
 
   const payload = (result.record.payload ?? {}) as Record<string, unknown>;
@@ -300,6 +308,7 @@ export function commandConsume(argv: string[], streams: Streams, cwd: string): n
       grant_seq: result.grantSeq,
       class: payload["class"] ?? null,
       est_cost_usd: payload["est_cost_usd"] ?? null,
+      payload_hash: payload["payload_hash"] ?? null,
     });
   } else {
     streams.out(

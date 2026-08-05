@@ -90,6 +90,11 @@
             "type": "string",
             "minLength": 1,
             "description": "SPEC.md §6.2 (MUST per action): stable string; adapters MUST refuse to execute the same key twice."
+          },
+          "payload_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "SPEC.md §6.2 (amended: MUST for `manual` actions, SHOULD otherwise): SHA-256 over the RFC 8785 canonical serialization of the action's concrete payload — for a message send, the full body and recipients; for `approval run`, the argv array and cwd; for a record write, the proposed record content. The payload itself is stored or referenced by the request so channels can display it; the hash is what approval binds to (§10). Optional here because this schema cannot know an action's resolved autonomy — the MUST for `manual` is enforced at request time by the gate, which refuses `payload-hash-required`."
           }
         }
       }

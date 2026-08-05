@@ -78,6 +78,16 @@ const POLICY = [
 /** No budgets block at all: status must report an empty budget list, not fail. */
 const POLICY_NO_BUDGETS = POLICY.split("budgets:")[0] as string;
 
+/**
+ * The content binding every declared action carries (amended SPEC.md §6.2, A1).
+ *
+ * Manual actions MUST have one — intake refuses `payload-hash-required` without
+ * it — and the spend must present the same value, which these suites do with
+ * `--payload-hash`. One constant across the fixture keeps the CLI assertions
+ * about flags and exit codes rather than about hashing.
+ */
+const PAYLOAD_HASH = "3".repeat(64);
+
 const TASK_FILE = [
   "---",
   "id: task-042",
@@ -94,26 +104,31 @@ const TASK_FILE = [
   "      reversible: false",
   "      est_cost_usd: 0.02",
   '      idempotency_key: "task-042:chaser"',
+  `      payload_hash: "${PAYLOAD_HASH}"`,
   "    - class: communicate.email.external",
   '      summary: "Send the follow-up"',
   "      reversible: false",
   "      est_cost_usd: 0.02",
   '      idempotency_key: "task-042:followup"',
+  `      payload_hash: "${PAYLOAD_HASH}"`,
   "    - class: files.write.local",
   '      summary: "Write the draft"',
   "      reversible: true",
   "      est_cost_usd: 0.01",
   '      idempotency_key: "task-042:draft"',
+  `      payload_hash: "${PAYLOAD_HASH}"`,
   "    - class: files.write.local",
   '      summary: "Write the second draft"',
   "      reversible: true",
   "      est_cost_usd: 0.01",
   '      idempotency_key: "task-042:draft2"',
+  `      payload_hash: "${PAYLOAD_HASH}"`,
   "    - class: files.write.local",
   '      summary: "Write the third draft"',
   "      reversible: true",
   "      est_cost_usd: 0.01",
   '      idempotency_key: "task-042:draft3"',
+  `      payload_hash: "${PAYLOAD_HASH}"`,
   "---",
   "",
   "## Description",
@@ -293,7 +308,7 @@ test("a dangling execution appears in status, never in queue, and nothing repair
   // `approval consume` starts the execution and, by design, never finishes it —
   // the same state a crash between started and its outcome leaves behind.
   assert.equal(
-    runCli(["consume", "task-042:chaser", "--token", token, "--as", "agent:claude"], dir).code,
+    runCli(["consume", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", token, "--as", "agent:claude"], dir).code,
     0,
   );
 
@@ -344,7 +359,7 @@ test("three consecutive failures raise a loop escalation in status; a completion
     [
       "run",
       "task-042:chaser",
-      "--token",
+      "--payload-hash", PAYLOAD_HASH, "--token",
       token,
       "--as",
       "agent:claude",

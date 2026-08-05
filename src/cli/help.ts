@@ -29,8 +29,12 @@ Usage:
   approval grant|reject|revoke <action-key> [--note <text>] [--as human:<id>] [--json]
   approval expire     <action-key> [--json]
   approval token      <action-key> [--policy <path>] [--dir <path>] [--json]
-  approval consume    <action-key> --token <t> [--as <id>] [--json]   (internal)
-  approval run        <action-key> [--token <t>] [--as <id>] [--json] -- <cmd…>
+  approval consume    <action-key> --token <t> [--payload-hash <64hex>]
+                      [--as <id>] [--json]                            (internal)
+  approval run        <action-key> [--token <t>] [--payload-hash <64hex>]
+                      [--as <id>] [--json] -- <cmd…>
+  approval execution resolve <action-key> --outcome completed|failed
+                      --note "<text>" [--as human:<id>] [--json]
   approval wait       <task> --timeout <duration> [--interval <d>] [--json]
   approval queue      [--policy <path>] [--dir <path>] [--json]
   approval status     [--policy <path>] [--dir <path>] [--json]
@@ -56,6 +60,12 @@ Commands:
   run       execute a command behind the gate: appends execution.started before
             spawning it, execution.completed/failed with the child's exit code
             after, and exits with that same code
+  execution recovery verbs for executions the runtime could not close itself.
+            "execution resolve" records the outcome a HUMAN OBSERVED for a
+            dangling execution: mandatory --note, human-only, exit_code null,
+            attested_by_human true. No attestation is required — resolve records
+            a fact a human observed; it exercises no policy authority, so it
+            does not require an attested policy
   wait      block until a task's requests are decided; the exit code IS the
             decision (0 granted, 1 rejected/revoked, 3 expired, 6 timeout)
   queue     the pending-decision INBOX: requests awaiting a human, inside their
@@ -745,11 +755,20 @@ ${JSON_ERRORS}`;
 export const CONSUME_HELP = `approval consume — spend an execution token (INTERNAL PLUMBING)
 
 Usage:
-  approval consume <action-key> --token <t> [--as <id>] [--policy <path>]
-                   [--dir <path>] [--log <path>] [--json]
+  approval consume <action-key> --token <t> [--payload-hash <64hex>]
+                   [--as <id>] [--policy <path>] [--dir <path>] [--log <path>]
+                   [--json]
 
 Flags:
   --token <t>      the raw token printed by "approval grant" (required)
+  --payload-hash <64hex>
+                   SHA-256 over the RFC 8785 canonical serialization of the
+                   payload about to be executed. REQUIRED whenever the grant
+                   bound to bytes, which under amended SPEC.md §6.2 is every
+                   manual grant this runtime mints. A different hash — or none —
+                   is refused payload-mismatch, nothing is appended, and the
+                   token stays live: a grant approves specific bytes, and
+                   changing the payload after grant requires a new request.
   --as <id>        the executing identity, human:<id> or agent:<id>;
                    defaults to APPROVAL_HUMAN
   --policy <path>  policy file to read defaults.approval_ttl from
@@ -830,13 +849,22 @@ const WAIT_EXIT_CODES = `Exit codes (frozen public API) — for "approval wait" 
 export const RUN_HELP = `approval run — execute a command behind the gate
 
 Usage:
-  approval run <action-key> [--token <t>] [--as <id>] [--policy <path>]
-               [--dir <path>] [--log <path>] [--json] -- <cmd> [args…]
+  approval run <action-key> [--token <t>] [--payload-hash <64hex>] [--as <id>]
+               [--policy <path>] [--dir <path>] [--log <path>] [--json]
+               -- <cmd> [args…]
 
 Flags:
   --token <t>      the raw token printed once by "approval grant". REQUIRED for
                    any action whose class resolves to manual (including one
                    forced there by SPEC §7's irreversibility floor).
+  --payload-hash <64hex>
+                   override the computed content binding. NORMALLY UNNECESSARY:
+                   amended SPEC.md §6.2 defines run's payload as "the argv array
+                   and cwd", and run hashes exactly that itself — an executor
+                   that had to be TOLD what it was running could be told wrong.
+                   The override exists for adapters whose real payload is
+                   something else (a message body and its recipients, a proposed
+                   record) and which wrap run rather than calling core.
   --as <id>        the executing identity, human:<id> or agent:<id>; defaults to
                    APPROVAL_HUMAN
   --policy <path>  policy file to apply (overrides discovery)
@@ -873,8 +901,18 @@ pending decision). NOTHING REPAIRS IT AUTOMATICALLY — a second run for the sam
 key refuses rather than reconciling, because reconciliation would mean GUESSING
 whether the side effect happened, and a guess in an append-only log is
 indistinguishable from a fact. Recovery is a human recording the outcome they
-actually observed, through core/execute.ts's finishExecution; no CLI verb ships
-for it yet (flagged for human review, see "approval status --help").
+actually observed:
+
+  approval execution resolve <action-key> --outcome completed|failed \
+                             --note "<what you saw>" [--as human:<id>]
+
+which appends execution.completed or execution.failed with exit_code null and
+attested_by_human true, so no reader mistakes an observation for a measurement.
+
+CONTENT BINDING (amended SPEC.md §6.2, §10): run computes the hash of the argv
+and cwd it is about to spawn and presents it when spending the token. If the
+grant bound to different bytes the spend is refused payload-mismatch, nothing is
+appended, and the token stays live. A grant approves specific bytes.
 
 ${RUN_EXIT_CODES}
 
@@ -1013,12 +1051,11 @@ Reports, in one object:
                    action key, task, start timestamp and seq. This is the state
                    a crash between execution.started and its outcome leaves.
                    Nothing repairs it automatically; it clears only when a human
-                   records the real outcome through core/execute.ts's
-                   finishExecution. NO CLI VERB SHIPS FOR THAT YET — recording
-                   an outcome nobody observed is exactly the write this design
-                   refuses to make casual, so the verb's shape (who may call it,
-                   what it must assert) is FLAGGED FOR HUMAN REVIEW rather than
-                   guessed at here.
+                   records the real outcome with "approval execution resolve",
+                   which demands a mandatory note, a human actor, and records
+                   exit_code null rather than inventing one. Recording an
+                   outcome nobody observed is exactly the write this design
+                   refuses to make casual.
   budgets          headroom per configured GLOBAL limit, from a ZERO-COST PROBE
                    evaluated now: the numbers are what the evaluator would say
                    about a hypothetical next action declaring $0. Consequently
@@ -1055,4 +1092,75 @@ JSON shape (stdout, one object):
      "escalated":true}]}
   ok is true whenever status ran; healthy is the verdict. attestation.seq is
   null for not-attested and unreadable.
+${JSON_ERRORS}`;
+
+export const EXECUTION_HELP = `approval execution — recovery verbs for executions the runtime could not close
+
+Usage:
+  approval execution resolve <action-key> --outcome completed|failed
+                            --note "<text>" [--as human:<id>] [--log <path>]
+                            [--json]
+
+Subcommands:
+  resolve   record the outcome a HUMAN OBSERVED for a dangling execution
+
+A DANGLING EXECUTION is what a crash between execution.started and its outcome
+leaves behind: the log says truthfully that the action began and that nobody
+knows how it ended. "approval status" reports it; "approval queue" does not,
+because nobody is being asked to decide anything. Nothing in this codebase
+closes one automatically — an automatic reconciliation would have to GUESS
+whether the email went out, and a guess written into an append-only log is
+indistinguishable from a fact.
+
+${EXIT_CODES}`;
+
+export const RESOLVE_HELP = `approval execution resolve — record what a human observed
+
+Usage:
+  approval execution resolve <action-key> --outcome completed|failed
+                            --note "<text>" [--as human:<id>] [--log <path>]
+                            [--json]
+
+Flags:
+  --outcome <o>    completed or failed. REQUIRED, and nothing is inferred: the
+                   runtime does not know how the execution ended, which is the
+                   whole reason this verb exists.
+  --note <text>    what you observed and how you know. MANDATORY and non-empty.
+                   The event's entire value is the observation behind it; an
+                   unexplained human-attested outcome cannot be told apart from
+                   a guess.
+  --as human:<id>  the person recording the observation; defaults to
+                   APPROVAL_HUMAN. HUMAN-ONLY — an agent closing its own
+                   dangling execution is the executing party reporting on
+                   itself, which is the one thing the log exists not to accept.
+  --log <path>     log file to read and append to
+  --json           machine-readable output
+  -h, --help       this text
+
+What it appends: execution.completed or execution.failed, with payload
+  {"note":"<text>","attested_by_human":true,"exit_code":null}
+
+exit_code is NULL, not 0 and not 127. Nobody ran anything and there is no code
+to report; a fabricated exit code would read exactly like an observed one.
+attested_by_human marks the difference for every reader and every projection.
+
+NO ATTESTATION IS REQUIRED. resolve records a fact a human observed; it
+exercises no policy authority, so it does not require an attested policy. It
+authorizes nothing, spends no budget, mints no token, and consumes nothing —
+the commitment was charged at authorization time, long before the crash. A
+dangling execution left unclosable because a policy file was edited afterwards
+would be a repair blocked by an unrelated fact.
+
+Refuses (exit 1) when there is nothing to close: not-started when the key has
+no execution.started, already-finished when that execution already has an
+outcome. Both leave the log untouched.
+
+${EXIT_CODES}
+
+JSON shape (stdout, one object):
+  success  {"ok":true,"action_key":"...","task":"...",
+            "event":"execution.completed","outcome":"completed","seq":7,
+            "attested_by_human":true,"actor":"human:carter"}
+  refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
+           on stderr
 ${JSON_ERRORS}`;

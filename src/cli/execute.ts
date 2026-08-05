@@ -49,10 +49,13 @@ import {
   danglingExecutions,
   finishExecution,
   loopEscalation,
+  resolveExecution,
   startExecution,
   type ExecuteOptions,
   type ExecuteRefusal,
+  type ResolveOutcome,
 } from "../core/execute.js";
+import { isPayloadHash, runPayloadHash } from "../core/payload.js";
 import { readVerifiedRecords, requestState } from "../core/state.js";
 import type { EventRecord } from "../core/log.js";
 import { loadPolicy, parseDuration, POLICY_FILENAMES } from "../core/policy-load.js";
@@ -67,7 +70,14 @@ import {
   EXIT_TORN_TAIL,
   EXIT_USAGE,
 } from "./exit-codes.js";
-import { QUEUE_HELP, RUN_HELP, STATUS_HELP, WAIT_HELP } from "./help.js";
+import {
+  EXECUTION_HELP,
+  QUEUE_HELP,
+  RESOLVE_HELP,
+  RUN_HELP,
+  STATUS_HELP,
+  WAIT_HELP,
+} from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
 
@@ -259,7 +269,13 @@ export function commandRun(argv: string[], streams: Streams, cwd: string): numbe
 
   const outcome = front(
     ours,
-    { ...COMMON_FLAGS, ...POLICY_FLAGS, "--token": "string", "--as": "string" },
+    {
+      ...COMMON_FLAGS,
+      ...POLICY_FLAGS,
+      "--token": "string",
+      "--as": "string",
+      "--payload-hash": "string",
+    },
     RUN_HELP,
     streams,
     cwd,
@@ -309,14 +325,33 @@ export function commandRun(argv: string[], streams: Streams, cwd: string): numbe
     );
   }
 
+  // Content binding (amended SPEC.md §6.2, §10). §6.2 defines `approval run`'s
+  // payload as "the argv array and cwd", so run computes the hash itself from
+  // the command it is about to spawn — an executor that had to be *told* what
+  // it was running could be told wrong. `--payload-hash` overrides it for
+  // adapters whose real payload is something else (a message body, a proposed
+  // record) and who wrap `run` rather than calling core.
+  const hashFlag = stringFlag(flags, "--payload-hash");
+  if (hashFlag !== null && !isPayloadHash(hashFlag)) {
+    return usageError(
+      streams,
+      json,
+      `--payload-hash expects 64 lowercase hex characters (SHA-256 over the RFC 8785 canonical serialization of the payload), got ${JSON.stringify(hashFlag)}`,
+      RUN_HELP,
+    );
+  }
+  const payloadHash = hashFlag ?? runPayloadHash(childArgv, cwd);
+
   // execution.started is appended HERE, before the child exists. A crash from
   // this line until the finish below leaves a dangling execution, which
   // `approval status` reports and nothing repairs on its own.
   const started = startExecution(
     logPath,
     actionKey,
-    executeOptions(flags, cwd, stringFlag(flags, "--token")),
-    now(),
+    {
+      ...executeOptions(flags, cwd, stringFlag(flags, "--token")),
+      presentedPayloadHash: payloadHash,
+    },
     actor,
   );
   if (!started.ok) return emitRefusal(streams, json, started);
@@ -332,7 +367,7 @@ export function commandRun(argv: string[], streams: Streams, cwd: string): numbe
     );
   }
 
-  const finished = finishExecution(logPath, actionKey, exitCode, now(), actor);
+  const finished = finishExecution(logPath, actionKey, exitCode, actor);
   if (!finished.ok) {
     const code = emitRefusal(streams, json, finished);
     // The child's code is the more important fact when the child itself failed;
@@ -353,6 +388,7 @@ export function commandRun(argv: string[], streams: Streams, cwd: string): numbe
         outcome: finished.event,
         outcome_seq: finished.record.seq,
         exit_code: exitCode,
+        payload_hash: payloadHash,
       })}\n`,
     );
   }
@@ -737,4 +773,140 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
   }
 
   return healthy ? EXIT_OK : EXIT_INTEGRITY;
+}
+
+// ===========================================================================
+// approval execution resolve
+// ===========================================================================
+
+/**
+ * `approval execution resolve <action-key> --outcome completed|failed --note …`
+ *
+ * The human recovery verb for a dangling execution: the runtime died between
+ * `execution.started` and its outcome, `approval status` has been reporting the
+ * gap ever since, and a person went and looked. This records what they saw.
+ *
+ * Three rules, enforced here as usage errors before core is called at all, so
+ * the log is untouched by a malformed invocation:
+ *
+ * - `--outcome` is `completed` or `failed`. Nothing is inferred.
+ * - `--note` is MANDATORY and non-empty. The event's whole value is the
+ *   observation behind it.
+ * - The actor must be a human (`--as human:<id>` or `APPROVAL_HUMAN`). An agent
+ *   closing its own dangling execution is the executing party reporting on
+ *   itself.
+ *
+ * No attestation is required, and the help text says why: resolve records a
+ * fact a human observed; it exercises no policy authority, so it does not
+ * require an attested policy.
+ */
+export function commandResolve(argv: string[], streams: Streams, cwd: string): number {
+  const outcomeFront = front(
+    argv,
+    { ...COMMON_FLAGS, "--outcome": "string", "--note": "string", "--as": "string" },
+    RESOLVE_HELP,
+    streams,
+    cwd,
+  );
+  if (outcomeFront.kind === "handled") return outcomeFront.code;
+  const { flags, positionals, json, logPath } = outcomeFront;
+
+  const actionKey = positionals[0];
+  if (actionKey === undefined) {
+    return usageError(streams, json, "missing <action-key> argument", RESOLVE_HELP);
+  }
+  const extra = positionals[1];
+  if (extra !== undefined) {
+    return usageError(streams, json, `unexpected argument ${JSON.stringify(extra)}`, RESOLVE_HELP);
+  }
+
+  const outcomeFlag = stringFlag(flags, "--outcome");
+  if (outcomeFlag === null) {
+    return usageError(streams, json, "missing --outcome completed|failed", RESOLVE_HELP);
+  }
+  if (outcomeFlag !== "completed" && outcomeFlag !== "failed") {
+    return usageError(
+      streams,
+      json,
+      `--outcome expects completed or failed, got ${JSON.stringify(outcomeFlag)}; nothing is inferred from a dangling execution`,
+      RESOLVE_HELP,
+    );
+  }
+  const outcome: ResolveOutcome = outcomeFlag;
+
+  const note = stringFlag(flags, "--note");
+  if (note === null || note.trim().length === 0) {
+    return usageError(
+      streams,
+      json,
+      note === null
+        ? "missing --note \"<what you observed>\": resolve records a human observation, and an unexplained attested outcome cannot be told apart from a guess"
+        : "--note must not be empty: resolve records a human observation, and an unexplained attested outcome cannot be told apart from a guess",
+      RESOLVE_HELP,
+    );
+  }
+
+  const asFlag = stringFlag(flags, "--as");
+  const actor = resolveHumanActor(asFlag === null ? {} : { actor: asFlag });
+  if (actor === null) {
+    if (asFlag !== null) {
+      return usageError(
+        streams,
+        json,
+        `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; resolve records what a person observed and an agent: or system: actor cannot perform it`,
+        RESOLVE_HELP,
+      );
+    }
+    return usageError(
+      streams,
+      json,
+      `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>`,
+      RESOLVE_HELP,
+    );
+  }
+
+  const result = resolveExecution(logPath, actionKey, outcome, note, actor, {
+    policy: policyLocation(flags, cwd),
+  });
+  if (!result.ok) return emitRefusal(streams, json, result);
+
+  if (json) {
+    emitJson(streams, {
+      ok: true,
+      action_key: actionKey,
+      task: result.task,
+      event: result.event,
+      outcome: result.outcome,
+      seq: result.record.seq,
+      attested_by_human: true,
+      actor,
+    });
+  } else {
+    streams.out(
+      `resolved ${actionKey} as ${result.outcome} at seq ${result.record.seq} by ${actor} (human-attested, no exit code)\n`,
+    );
+  }
+  return EXIT_OK;
+}
+
+/** `approval execution <subcommand>` — one subcommand at v0.1: `resolve`. */
+export function commandExecution(argv: string[], streams: Streams, cwd: string): number {
+  const sub = argv[0];
+  const rest = argv.slice(1);
+  const json = argv.includes("--json");
+
+  if (sub === undefined) {
+    return usageError(streams, json, "missing subcommand for `approval execution`", EXECUTION_HELP);
+  }
+  if (sub === "--help" || sub === "-h" || sub === "help") {
+    streams.out(`${EXECUTION_HELP}\n`);
+    return EXIT_OK;
+  }
+  if (sub === "resolve") return commandResolve(rest, streams, cwd);
+  return usageError(
+    streams,
+    json,
+    `unknown subcommand ${JSON.stringify(sub)} for \`approval execution\``,
+    EXECUTION_HELP,
+  );
 }

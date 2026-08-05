@@ -112,11 +112,21 @@ export interface BudgetAction {
   est_cost_usd?: number;
 }
 
-/** Which window a limit is measured over. */
-export type BudgetWindow = "per-action" | "rolling-24h";
+/**
+ * Which window a limit is measured over.
+ *
+ * `task-total` is the envelope cap of SPEC.md §6.2 (`budget.max_cost_usd`): not
+ * a window at all but the whole life of one task, which is what "maximum total
+ * spend across this task's actions" means.
+ */
+export type BudgetWindow = "per-action" | "rolling-24h" | "task-total";
 
-/** Whether a limit came from the matched class rule or from `budgets`. */
-export type BudgetVerdictScope = "class" | "global";
+/**
+ * Where a limit came from: the matched class rule, `policy.budgets`, or the
+ * task's own registered envelope (SPEC.md §6.2 `budget`). All three are
+ * conjunctive with each other — "the stricter of the two binds".
+ */
+export type BudgetVerdictScope = "class" | "global" | "task";
 
 /**
  * One limit's outcome.
@@ -149,6 +159,9 @@ export interface BudgetVerdicts {
 const PER_ACTION_USD = "per_action_usd";
 const DAILY_USD = "daily_usd";
 const DAILY_ACTIONS = "daily_actions";
+
+/** The verdict label for the envelope's own cap (SPEC.md §6.2 `budget`). */
+export const TASK_MAX_COST_USD = "budget.max_cost_usd";
 
 /**
  * Round monetary arithmetic to 1e-6 USD.
@@ -417,5 +430,105 @@ export function evaluateBudgets(
     }
   }
 
+  return { pass: verdicts.every((entry) => entry.pass), verdicts };
+}
+
+// ---------------------------------------------------------------------------
+// The envelope's own cap (SPEC.md §6.2 `budget.max_cost_usd`) — S2
+// ---------------------------------------------------------------------------
+
+/**
+ * The registered envelope's `budget.max_cost_usd` for `task`, or `null`.
+ *
+ * Read from the **log**, not from the task file: the file may have been edited
+ * since registration, and an agent that could raise its own cap by editing
+ * frontmatter after the fact would be authoring the ceiling it is judged by.
+ * `register` copies the envelope's `budget` block into the `task.registered`
+ * payload for exactly this read. The last registration wins, matching
+ * `findDeclaration` in `core/execute.ts`.
+ *
+ * A cap that is not a finite non-negative number is `null` — absent rather than
+ * zero. The schema already refuses those shapes at the write boundary, and
+ * inventing a $0 ceiling for a malformed one would refuse every action of the
+ * task with a message about money nobody wrote down.
+ */
+export function taskMaxCostUsd(records: EventRecord[], task: string): number | null {
+  let found: number | null = null;
+  for (const record of records) {
+    if (record.event !== "task.registered" || record.task !== task) continue;
+    const budget = payloadOf(record)["budget"];
+    if (typeof budget !== "object" || budget === null) continue;
+    const cap = (budget as Record<string, unknown>)["max_cost_usd"];
+    if (typeof cap === "number" && Number.isFinite(cap) && cap >= 0) found = cap;
+  }
+  return found;
+}
+
+/**
+ * Evaluate the task's own cap: does admitting `action` keep the SUM of this
+ * task's authorized `est_cost_usd` at or under `maxCostUsd`?
+ *
+ * Commitment-based and consumption-identical to {@link evaluateBudgets}: the
+ * same two event types authorize (`approval.granted`, and `execution.started`
+ * only where no grant carries the same `action_key`), so a manual action that is
+ * granted and then started is charged once. The only differences are scope —
+ * events of *this task* — and window: there is none. A task cap is a lifetime
+ * total, so an envelope that says `max_cost_usd: 0.5` cannot be spent twice by
+ * waiting a day.
+ *
+ * `evaluationTs` is accepted for symmetry with the windowed evaluator and to
+ * keep every budget call site shaped alike; it selects no window here and the
+ * verdict does not depend on it.
+ */
+export function evaluateTaskBudget(
+  records: EventRecord[],
+  task: string,
+  maxCostUsd: number,
+  action: BudgetAction,
+  _evaluationTs: string,
+): BudgetVerdict {
+  const consumed = tally(
+    authorizations(records.filter((record) => record.task === task)),
+  ).usd;
+  return verdict(
+    TASK_MAX_COST_USD,
+    "task",
+    "task-total",
+    consumed,
+    requestedCost(action),
+    maxCostUsd,
+  );
+}
+
+/**
+ * Every applicable budget, conjunctively: class limits, global budgets, and the
+ * task envelope's own cap.
+ *
+ * This is the function the three enforcement points call (`gate.request`,
+ * `gate.decide`'s grant path, `execute.startExecution`), so the envelope cap is
+ * checked at intake, at grant, and at execution start — the same three moments
+ * policy budgets are checked, because a cap enforced at only one of them is a
+ * cap a caller can route around by choosing a different door.
+ *
+ * Verdict order is class limits, then global budgets, then the task cap: the
+ * existing byte-stable order with one deterministic addition at the end.
+ * `task` may be `null` for a call site that has no task in hand, in which case
+ * the cap simply does not apply.
+ */
+export function evaluateBudgetsWithTask(
+  records: EventRecord[],
+  scope: BudgetScope,
+  action: BudgetAction,
+  evaluationTs: string,
+  task: string | null,
+): BudgetVerdicts {
+  const base = evaluateBudgets(records, scope, action, evaluationTs);
+  if (task === null) return base;
+  const cap = taskMaxCostUsd(records, task);
+  if (cap === null) return base;
+  const verdicts = [
+    ...base.verdicts,
+    evaluateTaskBudget(records, task, cap, action, evaluationTs),
+  ];
   return { pass: verdicts.every((entry) => entry.pass), verdicts };
 }

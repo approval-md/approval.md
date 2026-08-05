@@ -1,0 +1,14 @@
+{
+  "origin": {
+    "app": "cartsos",
+    "created_by": "agent:claude"
+  },
+  "state": "awaiting",
+  "actions": [
+    {
+      "class": "communicate.email.external",
+      "idempotency_key": "task-042:chaser:2026-08-04",
+      "payload_hash": "9F86D081884C7D659A2FEAA0C55AD015"
+    }
+  ]
+}

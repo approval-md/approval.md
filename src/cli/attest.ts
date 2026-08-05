@@ -172,9 +172,9 @@ export function commandPolicyAttest(argv: string[], streams: Streams, cwd: strin
 
   const logPath = resolvePath(stringFlag(parsed.flags, "--log"), DEFAULT_LOG_PATH, cwd);
 
-  // The clock is read here, at the edge, and handed to core — `core/log.ts`
-  // never reads it itself, so a log stays reproducible from its inputs.
-  const result = appendAttestation(logPath, policy.path, actor, new Date().toISOString());
+  // No timestamp is passed: `policy.updated` is gate-typed, so amended SPEC.md
+  // §8 (A2) has core stamp it at the write boundary from its own clock.
+  const result = appendAttestation(logPath, policy.path, actor);
 
   if (result.ok) {
     const sha256 = (result.record.payload as Record<string, unknown>)["sha256"] as string;
@@ -196,9 +196,14 @@ export function commandPolicyAttest(argv: string[], streams: Streams, cwd: strin
     streams.err(`approval: ${result.error.message}\n`);
   }
   switch (result.error.code) {
+    case "actor-not-human":
+      // The actor rule, re-refused by core with its own code since APRV-20 pass
+      // two. Reachable only if this layer's check and core's ever disagree; it
+      // is a bad invocation either way, so exit 2.
+      return EXIT_USAGE;
     case "validation":
-      // The actor rule, re-refused by core. Reachable only if the two checks
-      // ever disagree; it is a bad invocation either way.
+      // The record itself failed `event.schema.json` at the write boundary — a
+      // different fact from the actor rule, and no longer spelled the same way.
       return EXIT_USAGE;
     case "corrupt-tail":
       // A torn tail has its own code in the frozen table, and calling it I/O

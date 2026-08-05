@@ -27,9 +27,13 @@
  *    appends nothing. Its authorization is recorded by `execution.started`,
  *    which APRV-18 appends, and which is also where its budget is charged (see
  *    the consumption contract in `core/budgets.ts`).
- * 4. **Time is a parameter.** No function here reads the clock. TTL lapse,
- *    budget windows, and event timestamps all come from a `ts` argument, so a
- *    gate decision can be replayed from the log exactly as it was made.
+ * 4. **Time is assigned by the runtime, not by the caller** (amended SPEC.md
+ *    §8, A2). No public function here takes a `ts`. TTL lapse, budget windows,
+ *    and the timestamp stamped on every append all come from one read of
+ *    {@link GateOptions.clock} — the real clock unless a caller injects one —
+ *    made once per operation, so a gate decision is still replayable from its
+ *    inputs while the party being judged no longer authors the clock it is
+ *    judged by. Tests inject a fixed clock; production passes none.
  *
  * ## Lazy expiry — the named requirement
  *
@@ -99,7 +103,8 @@ import {
   checkAttestation,
   type AttestationRefusalDetail,
 } from "./attest.js";
-import { evaluateBudgets, type BudgetScope, type BudgetVerdict } from "./budgets.js";
+import { evaluateBudgetsWithTask, type BudgetScope, type BudgetVerdict } from "./budgets.js";
+import { tick, type ClockOptions } from "./clock.js";
 import { readTaskFile } from "./frontmatter.js";
 import {
   appendEvent,
@@ -110,6 +115,7 @@ import {
   type LogHead,
 } from "./log.js";
 import { isLoopEscalated } from "./loop.js";
+import { isPayloadHash } from "./payload.js";
 import {
   loadPolicy,
   POLICY_FILENAMES,
@@ -176,8 +182,34 @@ export const GATE_REFUSAL_CODES = [
   "duplicate-request",
   /** The action key already has an `execution.*` record (idempotency). */
   "already-executed",
-  /** APRV-14 verdicts failed; a `budget.exceeded` event was appended. */
+  /**
+   * APRV-14 verdicts failed; a `budget.exceeded` event was appended. Covers
+   * class limits, `policy.budgets`, and — since S2 — the registered envelope's
+   * own `budget.max_cost_usd`, which appears as a `task`-scoped verdict in
+   * `verdicts` and in the appended event's payload.
+   */
   "budget-exceeded",
+  /**
+   * The action resolves to `manual` and its registered declaration carries no
+   * `payload_hash` (amended SPEC.md §6.2: MUST for `manual` actions).
+   *
+   * Enforced here rather than in `envelope.schema.json` because the schema
+   * cannot know an action's resolved autonomy — that answer depends on the
+   * policy, the irreversibility floor, and the class, none of which the
+   * envelope alone determines. A manual action with nothing to bind to would
+   * give a human a decision about bytes nobody committed to, so intake refuses
+   * and nothing is appended.
+   */
+  "payload-hash-required",
+  /**
+   * A grant was attempted on a request whose payload carries no usable `class`.
+   *
+   * Its own code since APRV-20 pass two: the previous behavior substituted the
+   * empty string and granted anyway, which recorded an authorization that no
+   * class-scoped budget could ever charge and no policy rule could ever match.
+   * Fail closed and say which fact was missing.
+   */
+  "grant-classless-request",
   /**
    * Loop safety escalated the task to manual (SPEC.md §10.2, APRV-18): three
    * consecutive `execution.failed` events. Only the non-manual paths are
@@ -241,8 +273,16 @@ export interface GateRefusal {
   record?: EventRecord;
 }
 
-/** Options shared by every gate operation. */
-export interface GateOptions {
+/**
+ * Options shared by every gate operation.
+ *
+ * Note what is **not** here and no longer a parameter anywhere in this module:
+ * `ts`. Under amended SPEC.md §8 a gate-typed event's timestamp is assigned by
+ * the runtime at the write boundary, so it is read from {@link ClockOptions
+ * clock} (defaulting to the real clock) rather than accepted from the caller.
+ * The refusal the spec asks for is structural: there is no parameter to pass.
+ */
+export interface GateOptions extends ClockOptions {
   /** Schema directory, passed to both envelope validation and the append. */
   schemaDir?: string;
   /** Where to find `APPROVAL.md`. Same semantics as `loadPolicy`. */
@@ -386,6 +426,14 @@ export interface RegisteredAction {
   summary?: string;
   reversible?: boolean;
   est_cost_usd?: number;
+  /**
+   * The content binding of amended SPEC.md §6.2. MUST be present for an action
+   * that resolves to `manual`; the enforcement point is {@link request}, not
+   * registration, because autonomy is not known until policy is consulted and
+   * refusing at registration would make an envelope unregisterable for a
+   * property of a policy file it never mentions.
+   */
+  payload_hash?: string;
 }
 
 /**
@@ -416,9 +464,26 @@ function actionsOf(envelope: unknown): RegisteredAction[] {
     if (typeof item["summary"] === "string") action.summary = item["summary"];
     if (typeof item["reversible"] === "boolean") action.reversible = item["reversible"];
     if (typeof item["est_cost_usd"] === "number") action.est_cost_usd = item["est_cost_usd"];
+    if (isPayloadHash(item["payload_hash"])) action.payload_hash = item["payload_hash"];
     actions.push(action);
   }
   return actions;
+}
+
+/**
+ * The envelope's own `budget` block (SPEC.md §6.2), as registered.
+ *
+ * Copied into the `task.registered` payload so the task cap is enforced from
+ * the log rather than from a file an agent can edit after the fact (S2; see
+ * `core/budgets.ts`'s `taskMaxCostUsd`). Only `max_cost_usd` is enforced at
+ * v0.1 — `max_latency` is recorded and does nothing yet — so the whole block is
+ * copied verbatim rather than a single field cherry-picked, and the enforcement
+ * that arrives later reads a log that already carries what it needs.
+ */
+function budgetOf(envelope: unknown): Record<string, unknown> | null {
+  const value = (envelope as { budget?: unknown }).budget;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
 }
 
 type Resolved = { ok: true; task: string; envelope: unknown } | GateRefusal;
@@ -471,11 +536,14 @@ function readTaskFileSource(path: string): Resolved {
  * `actor` is a `human:` or `agent:` identity; registration is an ordinary
  * proposal, not a privileged act, so an agent may perform it. `system:` is
  * refused: the runtime does not author tasks.
+ *
+ * The registration payload carries the envelope's `actions` and — since S2 —
+ * its `budget` block, so the task's own `max_cost_usd` cap is enforced from the
+ * log rather than from a task file that may be edited afterwards.
  */
 export function register(
   logPath: string,
   source: RegisterSource,
-  ts: string,
   actor: string,
   options: GateOptions = {},
 ): RegisterResult {
@@ -518,10 +586,12 @@ export function register(
   const actions = actionsOf(resolved.envelope);
   const payload: Record<string, unknown> = { actions };
   if (typeof envelope.state === "string") payload["state"] = envelope.state;
+  const budget = budgetOf(resolved.envelope);
+  if (budget !== null) payload["budget"] = budget;
 
   const appended = append(
     logPath,
-    { ts, event: "task.registered", actor, task: resolved.task, payload },
+    { ts: tick(options), event: "task.registered", actor, task: resolved.task, payload },
     options,
     // The head read above, when the double-registration check was made.
     read.head,
@@ -565,6 +635,7 @@ export function registeredAction(
     if (typeof item["summary"] === "string") action.summary = item["summary"];
     if (typeof item["reversible"] === "boolean") action.reversible = item["reversible"];
     if (typeof item["est_cost_usd"] === "number") action.est_cost_usd = item["est_cost_usd"];
+    if (isPayloadHash(item["payload_hash"])) action.payload_hash = item["payload_hash"];
     return { ok: true, action };
   }
   return refuse(
@@ -586,6 +657,42 @@ export interface RequestInput {
   est_cost_usd?: number;
   reversible?: boolean;
   summary?: string;
+  /**
+   * The content binding (amended SPEC.md §6.2). A fallback only: {@link request}
+   * prefers the value on the `task.registered` record, because the log is what
+   * the human's policy was attested against and a caller-supplied hash could
+   * name bytes the registration never declared.
+   */
+  payload_hash?: string;
+}
+
+/**
+ * The `payload_hash` the log says was declared for `(task, actionKey)`, or
+ * `null`.
+ *
+ * Deliberately narrower than {@link registeredAction}: this answers one
+ * question and refuses nothing, so {@link request} can distinguish "declared no
+ * hash" from "declared no action" and report each in its own words. The last
+ * registration wins, matching every other declaration read in this codebase.
+ */
+function declaredPayloadHash(
+  records: EventRecord[],
+  task: string,
+  actionKey: string,
+): string | null {
+  let found: string | null = null;
+  for (const record of records) {
+    if (record.event !== "task.registered" || record.task !== task) continue;
+    const declared = payloadOf(record)["actions"];
+    if (!Array.isArray(declared)) continue;
+    for (const entry of declared) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const item = entry as Record<string, unknown>;
+      if (item["idempotency_key"] !== actionKey) continue;
+      found = isPayloadHash(item["payload_hash"]) ? item["payload_hash"] : null;
+    }
+  }
+  return found;
 }
 
 export type RequestResult =
@@ -620,21 +727,28 @@ function costOf(value: number | undefined): number {
  *    event** (amended SPEC.md §6.3) and return `proceed: true`. Their budget is
  *    charged at `execution.started`, which APRV-18 appends — checking budgets
  *    here as well would charge them twice or, worse, pass here and fail there.
- * 5. **Request legality**, then **budgets**, then the append. Legality first
+ * 5. **Content binding** (amended SPEC.md §6.2, A1). A manual action whose
+ *    registered declaration carries no `payload_hash` is refused
+ *    `payload-hash-required` and nothing is appended. This is the first check
+ *    after the manual path is known, because a request with nothing to bind to
+ *    should never reach a human's queue at all.
+ * 6. **Request legality**, then **budgets**, then the append. Legality first
  *    because a duplicate request is a caller bug that no budget outcome should
  *    obscure, and because refusing it must leave the log untouched.
  *
- * The `approval.requested` payload carries `class` and `est_cost_usd`
- * unconditionally — the budgets contract requires them on the grant, and the
- * grant copies them from here.
+ * The `approval.requested` payload carries `class`, `est_cost_usd`, and (on the
+ * manual path, always) `payload_hash` — the budgets contract requires the first
+ * two on the grant and the token binding requires the third, and the grant
+ * copies all of them from here rather than re-deriving them from a file that
+ * may have changed.
  */
 export function request(
   logPath: string,
   input: RequestInput,
-  ts: string,
   actor: string,
   options: GateOptions = {},
 ): RequestResult {
+  const ts = tick(options);
   if (!PRINCIPAL_ACTOR.test(actor)) {
     return refuse(
       "actor-invalid",
@@ -675,6 +789,20 @@ export function request(
     return { ok: true, autonomy: resolution.autonomy, proceed: true, resolution, record: null };
   }
 
+  // Amended SPEC.md §6.2/§10 (A1): a manual grant binds to bytes. The log's
+  // declaration wins over anything the caller passed — `register` wrote it from
+  // the envelope, and a request that could name its own hash could approve one
+  // payload and execute another, which is the property this exists to remove.
+  const payloadHash =
+    declaredPayloadHash(read.records, input.task, input.actionKey) ??
+    (isPayloadHash(input.payload_hash) ? input.payload_hash : null);
+  if (payloadHash === null) {
+    return refuse(
+      "payload-hash-required",
+      `action ${input.actionKey} resolves to manual and its registered declaration carries no payload_hash. Amended SPEC.md §6.2 makes the hash MUST for manual actions: an approval binds to the exact bytes it approves, so a request with nothing to bind to would ask a human to authorize a payload that could still change afterwards. Declare payload_hash (SHA-256 over the RFC 8785 canonical serialization of the concrete payload) on the action and register the task again.`,
+    );
+  }
+
   const derivation = requestState(read.records, input.actionKey, ts, ttlOf(load));
   if (derivation.state === "requested") {
     return refuse(
@@ -691,11 +819,14 @@ export function request(
     );
   }
 
-  const budget = evaluateBudgets(
+  const budget = evaluateBudgetsWithTask(
     read.records,
     budgetScopeOf(load, resolution),
     { class: input.cls, est_cost_usd: costOf(input.est_cost_usd) },
     ts,
+    // S2: the registered envelope's own `budget.max_cost_usd`, conjunctive with
+    // policy budgets and enforced at all three of intake, grant, and start.
+    input.task,
   );
   if (!budget.pass) {
     const failed = budget.verdicts.filter((verdict) => !verdict.pass);
@@ -730,6 +861,7 @@ export function request(
   const payload: Record<string, unknown> = {
     class: input.cls,
     est_cost_usd: costOf(input.est_cost_usd),
+    payload_hash: payloadHash,
   };
   if (input.summary !== undefined) payload["summary"] = input.summary;
   if (input.reversible !== undefined) payload["reversible"] = input.reversible;
@@ -815,19 +947,22 @@ const DECISION_STATE: Readonly<Record<Decision, RequestState>> = {
  * commitment is the moment the human commits.
  *
  * On `grant` a single-use execution token is minted (`core/token.ts`) and its
- * SHA-256 recorded in the payload as `token_sha256`. The raw token is returned
- * in `token` and is written nowhere: whoever calls this is the only party that
- * will ever hold it, and a lost token is unrecoverable by design — revoke and
- * request again.
+ * SHA-256 recorded in the payload as `token_sha256`, **alongside the request's
+ * `payload_hash`** (amended SPEC.md §10, A1). The token is therefore bound to
+ * three things — the request, its `idempotency_key`, and the bytes — and
+ * `core/token.ts` refuses `payload-mismatch` for anything else. The raw token
+ * is returned in `token` and is written nowhere: whoever calls this is the only
+ * party that will ever hold it, and a lost token is unrecoverable by design —
+ * revoke and request again.
  */
 export function decide(
   logPath: string,
   actionKey: string,
   decision: Decision,
   actor: string,
-  ts: string,
   options: DecideOptions = {},
 ): DecideResult {
+  const ts = tick(options);
   if (!HUMAN_ACTOR.test(actor)) {
     return refuse(
       "actor-not-human",
@@ -909,10 +1044,26 @@ export function decide(
 
   const payload: Record<string, unknown> = {};
   if (decision === "grant") {
+    // A grant with no class is refused rather than recorded with an empty one.
+    // The empty-string substitution this replaces produced an authorization
+    // that no class rule could match and no class-scoped budget could charge —
+    // a hole shaped exactly like a permitted action. Reject and revoke are
+    // unaffected: withdrawing authority needs no class.
+    if (derivation.declared.class === null || derivation.declared.class.length === 0) {
+      return refuse(
+        "grant-classless-request",
+        `the approval.requested record for ${actionKey} at seq ${String(derivation.requestSeq)} carries no usable payload.class; a grant is scoped by class — policy matching, the irreversibility floor, and every class-scoped budget read it — so an authorization that names none cannot be recorded. Request the action again through \`approval request\`, which copies the class from the task.registered declaration.`,
+        { state: derivation.state },
+      );
+    }
     // The budgets contract: class and est_cost_usd on every approval.granted,
-    // copied from the request rather than re-derived from a file.
-    payload["class"] = derivation.declared.class ?? "";
+    // copied from the request rather than re-derived from a file. A1 adds the
+    // content binding on the same terms: copied, never recomputed.
+    payload["class"] = derivation.declared.class;
     payload["est_cost_usd"] = derivation.declared.est_cost_usd ?? 0;
+    if (derivation.declared.payload_hash !== null) {
+      payload["payload_hash"] = derivation.declared.payload_hash;
+    }
   }
   if (options.note !== undefined) payload["note"] = options.note;
 
@@ -923,11 +1074,14 @@ export function decide(
       cls,
       derivation.declared.reversible === null ? {} : { reversible: derivation.declared.reversible },
     );
-    const budget = evaluateBudgets(
+    const budget = evaluateBudgetsWithTask(
       read.records,
       budgetScopeOf(load, resolution),
       { class: cls, est_cost_usd: derivation.declared.est_cost_usd ?? 0 },
       ts,
+      // S2: the envelope's own cap, re-checked at the moment of commitment for
+      // the same reason the policy budgets are — the queue may have moved.
+      derivation.task,
     );
     if (!budget.pass) {
       const failed = budget.verdicts.filter((verdict) => !verdict.pass);
@@ -1061,9 +1215,9 @@ function appendExpiry(
 export function expire(
   logPath: string,
   actionKey: string,
-  ts: string,
   options: GateOptions = {},
 ): ExpireResult {
+  const ts = tick(options);
   const read = readGateRecords(logPath);
   if (!read.ok) return read;
 

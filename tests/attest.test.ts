@@ -22,13 +22,13 @@ import { after, test } from "node:test";
 import {
   ATTESTATION_REFUSAL,
   HUMAN_ACTOR_ENV,
-  appendAttestation,
   attestationRefusal,
   checkAttestation,
   policyFileHash,
   resolveHumanActor,
 } from "../src/core/attest.js";
 import { appendEvent, type EventRecord } from "../src/core/log.js";
+import { appendAttestation } from "./clock-adapters.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "approval-md-attest-"));
 const restoreOnExit: string[] = [];
@@ -243,7 +243,10 @@ test("an agent actor is refused and nothing is written", () => {
   const result = appendAttestation(logPath, policyPath, "agent:planner", TS);
 
   assert.equal(result.ok, false);
-  assert.equal(result.ok === false && result.error.code, "validation");
+  // APRV-20 pass two: its own code, not `validation`. "You are not allowed to
+  // perform this verb" and "your record failed the event schema" are different
+  // facts calling for different responses, and they used to share a name.
+  assert.equal(result.ok === false && result.error.code, "actor-not-human");
   assert.match(result.ok === false ? result.error.message : "", /requires a human actor/);
   assert.deepEqual(readRecords(logPath), []);
 });
@@ -252,6 +255,7 @@ test("a system actor is refused too", () => {
   const { policyPath, logPath } = freshCase();
   const result = appendAttestation(logPath, policyPath, "system:daemon", TS);
   assert.equal(result.ok, false);
+  assert.equal(result.ok === false && result.error.code, "actor-not-human");
   assert.deepEqual(readRecords(logPath), []);
 });
 

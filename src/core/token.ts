@@ -16,11 +16,16 @@
  *    Double-spend detection is chain-native: it survives a process restart, a
  *    different machine, and a lost in-memory cache, because the evidence is the
  *    log itself.
- * 3. **Bound to the request and its `idempotency_key`.** A token is looked up by
- *    `action_key` — the envelope's `idempotency_key` — and is compared against
- *    the hash on *that* action's grant. A token minted for action A therefore
- *    cannot be presented for action B: B's grant carries a different hash (or no
- *    grant at all), and the comparison fails.
+ * 3. **Bound to the request, its `idempotency_key`, and its `payload_hash`**
+ *    (amended SPEC.md §10, A1). A token is looked up by `action_key` — the
+ *    envelope's `idempotency_key` — and is compared against the hash on *that*
+ *    action's grant. A token minted for action A therefore cannot be presented
+ *    for action B: B's grant carries a different hash (or no grant at all), and
+ *    the comparison fails. The third binding is to the bytes: a consumer states
+ *    the hash of the payload it is about to execute, and anything but the hash
+ *    the grant recorded is refused `payload-mismatch`. A grant approves specific
+ *    bytes; changing them after grant requires a new request. A grant that
+ *    recorded *no* bytes is refused too — see {@link consumeToken}.
  * 4. **Hash-only in the log.** `approval.granted` carries
  *    `payload.token_sha256`; the raw token is returned to the caller of `decide`
  *    and to nothing else. Possession is proven by presenting a preimage. An
@@ -72,18 +77,27 @@
  * Copying rather than re-deriving keeps the two records agreeing about what was
  * authorized even if the task file changed in between.
  *
- * Time is a parameter here as everywhere: nothing in this module reads the
- * clock.
+ * ## Time
+ *
+ * {@link tokenStatus} and {@link verifyToken} are pure and take `now` as a
+ * parameter: they answer a question and write nothing, so a caller asking "was
+ * this token live at time T?" is asking something legitimate. {@link
+ * consumeToken} *writes*, and `execution.started` is a gate-typed event, so
+ * amended SPEC.md §8 (A2) gives its timestamp to the runtime: no `ts`
+ * parameter, one read of {@link TokenOptions.clock} at the top, and a spender
+ * that cannot choose the moment its own TTL is judged at.
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
+import { tick, type ClockOptions } from "./clock.js";
 import {
   appendEvent,
   type AppendError,
   type AppendOptions,
   type EventRecord,
 } from "./log.js";
+import { isPayloadHash } from "./payload.js";
 import { loadPolicy, type LoadPolicyOptions } from "./policy-load.js";
 import {
   readVerifiedRecords,
@@ -97,6 +111,9 @@ export const TOKEN_BYTES = 32;
 
 /** The payload key carrying the token's digest, on both grant and start. */
 export const TOKEN_HASH_FIELD = "token_sha256";
+
+/** The payload key carrying the content binding (amended SPEC.md §6.2, §10). */
+export const PAYLOAD_HASH_FIELD = "payload_hash";
 
 /**
  * Mint a token: 32 cryptographically random bytes as lowercase hex.
@@ -160,6 +177,18 @@ export const TOKEN_VERIFY_REFUSAL_CODES = [
   "token-expired",
   /** A human withdrew the grant (`approval.revoked`). */
   "token-revoked",
+  /**
+   * The bytes do not match (amended SPEC.md §10, A1). The grant recorded a
+   * `payload_hash` and the consumer presented a different one — or none at all,
+   * which is the same fact stated by omission: an executor that cannot say what
+   * it is about to run has not shown that it is running what was approved.
+   *
+   * Distinct from `token-mismatch` on purpose. That one says "you are not the
+   * party who was approved"; this one says "you are, but that is not what was
+   * approved", and the repair is different: request the new payload rather than
+   * hunt for a lost token.
+   */
+  "payload-mismatch",
 ] as const;
 
 export type TokenVerifyRefusalCode = (typeof TOKEN_VERIFY_REFUSAL_CODES)[number];
@@ -236,6 +265,18 @@ export interface TokenStatus {
   /** Copied from the grant payload, per the budgets consumption contract. */
   class: string;
   est_cost_usd: number;
+  /**
+   * The bytes this grant approved (amended SPEC.md §10), or `null` for a grant
+   * that recorded none. Unreachable through the gate for a manual action —
+   * `request` refuses `payload-hash-required` — so `null` here means a log
+   * written by something other than this runtime, or one predating A1.
+   *
+   * `null` does not mean "unbound and therefore free": {@link consumeToken}
+   * refuses such a grant `payload-mismatch` and it can never be spent. This
+   * field is `string | null` so a *reader* (`approval token`, a channel) can
+   * report the fact; it is never a permission.
+   */
+  payloadHash: string | null;
   /** The `approval.requested` timestamp the TTL is measured from. */
   requestTs: string | null;
 }
@@ -360,6 +401,7 @@ export function tokenStatus(
   const payload = payloadOf(grant);
   const cls = payload["class"];
   const cost = payload["est_cost_usd"];
+  const bytes = payload[PAYLOAD_HASH_FIELD];
   return {
     ok: true,
     actionKey,
@@ -368,6 +410,7 @@ export function tokenStatus(
     tokenSha256: recorded,
     class: typeof cls === "string" ? cls : derivation.declared.class ?? "",
     est_cost_usd: typeof cost === "number" && Number.isFinite(cost) ? cost : 0,
+    payloadHash: isPayloadHash(bytes) ? bytes : derivation.declared.payload_hash,
     requestTs: derivation.requestTs,
   };
 }
@@ -414,8 +457,15 @@ export function verifyToken(
 // consume
 // ---------------------------------------------------------------------------
 
-/** Where to find the policy whose `approval_ttl` bounds the token. */
-export interface TokenOptions {
+/**
+ * Where to find the policy whose `approval_ttl` bounds the token — plus the two
+ * things a spend now carries that a status read does not.
+ *
+ * `ts` is not among them, and no longer a parameter of {@link consumeToken}:
+ * `execution.started` is a gate-typed event, so amended SPEC.md §8 gives its
+ * timestamp to the runtime at the write boundary ({@link ClockOptions}).
+ */
+export interface TokenOptions extends ClockOptions {
   /** Schema directory, passed to the append's write-boundary validation. */
   schemaDir?: string;
   /** Directory to discover `APPROVAL.md` in. Ignored when `policyFile` is set. */
@@ -424,6 +474,23 @@ export interface TokenOptions {
   policyFile?: string;
   /** Lock tuning for the append path. */
   append?: AppendOptions;
+  /**
+   * The hash of the payload the caller is **about to execute** (amended
+   * SPEC.md §10, A1).
+   *
+   * "Adapters and `approval run` MUST recompute the hash of the payload they
+   * are about to execute and MUST refuse, with a distinct machine-readable
+   * reason (`payload-mismatch`), when it differs from the hash the grant
+   * recorded." That is this field: it is not read from the log, because a value
+   * read from the log would prove nothing — the point is that the executor
+   * states, independently, what it holds, and the runtime compares.
+   *
+   * REQUIRED for every spend. Under A1 every manual grant this runtime mints
+   * records a `payload_hash`, and a grant that somehow records none is refused
+   * outright rather than treated as unbound — so there is no case in which
+   * omitting this field succeeds. Omitting it is a mismatch.
+   */
+  presentedPayloadHash?: string;
 }
 
 export type ConsumeResult =
@@ -455,10 +522,13 @@ export function tokenTtlMs(options: TokenOptions): number | null {
  * have no grant and therefore no token; their start event is APRV-18's `approval
  * run` wrapper's job, and calling this for them correctly refuses `not-granted`.
  *
- * The payload is exactly `{class, est_cost_usd, token_sha256}`: the first two
- * because `core/budgets.ts` meters authorization from them, the third because it
- * is what makes the second consumption attempt refusable from the log alone.
- * `class` and `est_cost_usd` are copied from the grant, never re-derived.
+ * The payload is exactly `{class, est_cost_usd, token_sha256, payload_hash}`:
+ * the first two because `core/budgets.ts` meters authorization from them, the
+ * third because it is what makes the second consumption attempt refusable from
+ * the log alone, and the fourth because an auditor should be able to see from
+ * the log that what ran is what was approved. All four are copied from the
+ * grant, never re-derived. `payload_hash` is unconditional because a grant
+ * carrying none is refused (see below) rather than spent.
  *
  * Verification and append are made atomic by compare-and-append (APRV-20 finding
  * B1): this function reads the log itself — never records handed in by a caller —
@@ -479,10 +549,10 @@ export function consumeToken(
   logPath: string,
   actionKey: string,
   presentedToken: string,
-  ts: string,
   actor: string,
   options: TokenOptions = {},
 ): ConsumeResult {
+  const ts = tick(options);
   const read = readVerifiedRecords(
     logPath,
     options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
@@ -497,6 +567,38 @@ export function consumeToken(
     tokenTtlMs(options),
   );
   if (!verified.ok) return verified;
+
+  // Content binding (amended SPEC.md §10, A1). A grant approves specific bytes,
+  // so the executor must say which bytes it holds and they must be the ones the
+  // human saw. Checked before the append and after token verification: a
+  // mismatch spends nothing, appends nothing, and leaves the token live — the
+  // repair is to request the new payload, not to hunt for the token.
+  //
+  // A grant that recorded NO binding is refused outright, not waved through.
+  // The current gate cannot produce one — `request` refuses
+  // `payload-hash-required` for every manual action — so such a record reached
+  // the log some other way: a hand-built line, or a log predating A1. Accepting
+  // it would make content binding bypassable by log construction, which is the
+  // one attack the binding exists to stop. Ambiguity resolves to the stricter
+  // path: the grant is permanently unspendable, and that is correct for an
+  // authorization this runtime could not have issued.
+  const presented = options.presentedPayloadHash;
+  if (verified.payloadHash === null) {
+    return refuse(
+      "payload-mismatch",
+      `the approval.granted record for ${actionKey} at seq ${verified.grantSeq} carries no payload_hash: it predates content binding, or was written by something other than this gate. Amended SPEC.md §6.2 makes the hash MUST for manual actions and §10 binds the token to it, so there is nothing here for an execution to be checked against and nothing that can be shown to be the approved bytes. This grant cannot be spent — revoke it and request the action again, which will bind to the payload.`,
+      { state: "granted", seq: verified.grantSeq },
+    );
+  }
+  if (!isPayloadHash(presented) || !digestsEqual(presented, verified.payloadHash)) {
+    return refuse(
+      "payload-mismatch",
+      presented === undefined
+        ? `the grant for ${actionKey} at seq ${verified.grantSeq} binds to payload_hash ${verified.payloadHash} and this consumer presented none. Amended SPEC.md §10: an executor MUST recompute the hash of the payload it is about to execute; a spend that cannot state its bytes cannot be shown to be executing the approved ones.`
+        : `the payload presented for ${actionKey} is not the one approved: the grant at seq ${verified.grantSeq} binds to ${verified.payloadHash}, this consumer presented ${JSON.stringify(presented)}. A grant approves specific bytes; changing the payload after grant requires a new request. Nothing was appended and the token is still live.`,
+      { state: "granted", seq: verified.grantSeq },
+    );
+  }
 
   if (verified.task === null) {
     // `execution.started` requires `task` (event.schema.json). A granted action
@@ -521,6 +623,11 @@ export function consumeToken(
         class: verified.class,
         est_cost_usd: verified.est_cost_usd,
         [TOKEN_HASH_FIELD]: verified.tokenSha256,
+        // A1: the bytes that actually ran, recorded beside the token that
+        // authorized them, so an auditor reading the log alone can see that the
+        // execution and the approval named the same payload. Unconditional: a
+        // grant with no binding was refused above and never reaches this line.
+        [PAYLOAD_HASH_FIELD]: verified.payloadHash,
       },
     },
     {

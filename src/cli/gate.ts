@@ -37,6 +37,12 @@
  * human:<id>` or `APPROVAL_HUMAN`, refused at exit 2 when absent or when it
  * names an agent. `expire` takes no identity at all: it is the system verb, and
  * `core/gate.ts` stamps `system:gate`.
+ *
+ * **This layer no longer reads the clock.** It used to pass `new Date()` into
+ * every gate call; under amended SPEC.md §8 (A2) a gate-typed event's `ts` is
+ * assigned inside core at the write boundary, and there is no parameter here to
+ * pass one through. Nothing about determinism is lost — core reads an injected
+ * clock — and one caller-supplied-timestamp seam is gone.
  */
 
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
@@ -161,11 +167,6 @@ function gateOptions(
   return { policy: { dir: dirFlag === null ? cwd : absolute(dirFlag, cwd) } };
 }
 
-/** The clock is read here, at the edge, and handed to core. */
-function now(): string {
-  return new Date().toISOString();
-}
-
 interface Front {
   flags: Record<string, string | boolean>;
   positionals: string[];
@@ -240,7 +241,7 @@ export function commandRegister(argv: string[], streams: Streams, cwd: string): 
   const actor = resolvePrincipalActor(asFlag);
   if (actor === null) return identityUsageError(streams, json, asFlag, REGISTER_HELP);
 
-  const result = register(logPath, { file: absolute(file, cwd) }, now(), actor);
+  const result = register(logPath, { file: absolute(file, cwd) }, actor);
   if (!result.ok) return emitRefusal(streams, json, result);
 
   if (json) {
@@ -332,7 +333,6 @@ export function commandRequest(argv: string[], streams: Streams, cwd: string): n
         : { reversible: declared.action.reversible }),
       ...(declared.action.summary === undefined ? {} : { summary: declared.action.summary }),
     },
-    now(),
     actor,
     options,
   );
@@ -415,7 +415,7 @@ export function commandDecide(
   }
 
   const note = stringFlag(flags, "--note");
-  const result = decide(logPath, actionKey, decision, actor, now(), {
+  const result = decide(logPath, actionKey, decision, actor, {
     ...gateOptions(flags, cwd),
     ...(note === null ? {} : { note }),
   });
@@ -469,7 +469,7 @@ export function commandExpire(argv: string[], streams: Streams, cwd: string): nu
     return usageError(streams, json, `unexpected argument ${JSON.stringify(extra)}`, EXPIRE_HELP);
   }
 
-  const result = expire(logPath, actionKey, now(), gateOptions(flags, cwd));
+  const result = expire(logPath, actionKey, gateOptions(flags, cwd));
   if (!result.ok) return emitRefusal(streams, json, result);
 
   if (json) {

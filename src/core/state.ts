@@ -40,6 +40,7 @@
 import { closeSync, openSync } from "node:fs";
 
 import type { EventRecord, LogHead } from "./log.js";
+import { isPayloadHash } from "./payload.js";
 import { verifyWithRecords, type VerifyOptions } from "./verify.js";
 
 // ---------------------------------------------------------------------------
@@ -180,12 +181,38 @@ export type RequestState =
 /** The three terminal decisions a human can record, plus runtime expiry. */
 export type Decision = "grant" | "reject" | "revoke";
 
-/** What the request declared, copied out of the `approval.requested` payload. */
+/**
+ * What the request declared, copied out of the `approval.requested` payload.
+ *
+ * ## The scrutiny ratchet (amended SPEC.md §11), stated where it binds
+ *
+ * `summary` and `est_cost_usd` are **claimed** fields: the party under
+ * oversight authored them. So is `route.confidence`, which this derivation
+ * deliberately does not carry at all — nothing in the resolution, sampling, or
+ * refusal paths reads it, and `tests/ratchet.test.ts` scans the source to keep
+ * it that way. Claimed fields MAY raise scrutiny, inform display, or feed
+ * retrospective analysis; they MUST NOT reduce sampling probability, downgrade
+ * a resolved autonomy level, or shortcut any refusal path. `est_cost_usd: 0`
+ * therefore still consumes one action of every action-count budget, and a
+ * confident summary buys nothing. Scrutiny only ratchets upward on self-report.
+ *
+ * `class` and `payload_hash` sit on the other side of that line: `class` is
+ * matched against policy the human attested, and `payload_hash` is *checked*
+ * against the bytes an executor presents (`core/payload.ts`), so a false one
+ * refuses rather than relaxes.
+ */
 export interface DeclaredAction {
   class: string | null;
   est_cost_usd: number | null;
   reversible: boolean | null;
   summary: string | null;
+  /**
+   * The content binding of amended SPEC.md §6.2, copied from the registered
+   * declaration onto `approval.requested` so the grant can copy it in turn.
+   * `null` for a request that declared none — which the gate admits only off
+   * the manual path.
+   */
+  payload_hash: string | null;
 }
 
 /** Execution facts for the action key: the seq of each event, or `null`. */
@@ -225,11 +252,13 @@ function declaredFrom(record: EventRecord): DeclaredAction {
   const cost = payload["est_cost_usd"];
   const reversible = payload["reversible"];
   const summary = payload["summary"];
+  const hash = payload["payload_hash"];
   return {
     class: typeof cls === "string" ? cls : null,
     est_cost_usd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
     reversible: typeof reversible === "boolean" ? reversible : null,
     summary: typeof summary === "string" ? summary : null,
+    payload_hash: isPayloadHash(hash) ? hash : null,
   };
 }
 
@@ -279,6 +308,7 @@ export function requestState(
     est_cost_usd: null,
     reversible: null,
     summary: null,
+    payload_hash: null,
   };
   const execution: ExecutionFacts = { started: null, completed: null, failed: null };
 
