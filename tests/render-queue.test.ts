@@ -488,8 +488,14 @@ test("the audit backlog renders an honest empty state", () => {
   assert.ok(markdown.includes("## Sampled-audit backlog"));
   assert.match(markdown, /_Empty\._ No `audit\.sampled` event/u);
   // The empty state says why it is empty rather than implying reviews happened.
-  assert.match(markdown, /nothing has been sampled yet/u);
-  assert.match(markdown, /M5/u);
+  // Before APRV-40 it said "the sampler is not implemented"; the sampler exists
+  // now, so the honest statement is that an empty backlog is AMBIGUOUS — either
+  // nothing was sampled or everything sampled was reviewed — and it names the
+  // verb that resolves the ambiguity. What must never appear is a bare "empty"
+  // that a reader takes for "all reviewed".
+  assert.match(markdown, /nothing was sampled/u);
+  assert.match(markdown, /this file cannot tell you which/u);
+  assert.match(markdown, /approval audit list/u);
 });
 
 test("a sampled action with no later review is listed; a reviewed one is not", () => {

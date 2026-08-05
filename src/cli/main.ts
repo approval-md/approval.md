@@ -30,7 +30,7 @@
 import { pathToFileURL } from "node:url";
 
 import { reindex } from "../core/reindex.js";
-import { verify } from "../core/verify.js";
+import { verify, type ChainAnomaly } from "../core/verify.js";
 import { boolFlag, countFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
   EXIT_INTEGRITY,
@@ -60,6 +60,7 @@ import {
   commandStatus,
   commandWait,
 } from "./execute.js";
+import { commandAudit } from "./audit.js";
 import { commandChannel } from "./channel.js";
 import { commandDaemon } from "./daemon.js";
 import { commandDoctor } from "./doctor.js";
@@ -183,6 +184,39 @@ function prelude(
   return { kind: "run", flags: parsed.flags, logPath, json };
 }
 
+/**
+ * The `anomalies` field, present only when there is something to report.
+ *
+ * ADDITIVE, in the strict sense the frozen `--json` shapes require: a consumer
+ * written against the pre-APRV-40 shape sees byte-identical output for every log
+ * that has no anomaly, and the key appears only when the runtime has something
+ * new to say. Omitting the empty case is deliberate rather than lazy — an
+ * always-present empty array would change the shape of every existing clean
+ * result, and those shapes are what agents parse.
+ */
+function anomalyField(anomalies: ChainAnomaly[]): Record<string, unknown> {
+  return anomalies.length === 0 ? {} : { anomalies };
+}
+
+/**
+ * Print anomalies to stderr, one line each.
+ *
+ * stderr rather than stdout, and after the verdict rather than instead of it:
+ * the verdict is the answer to the question asked (does this chain verify?), and
+ * an anomaly is a note in the margin. The exit code does not move. A clean log
+ * with anomalies exits 0, because the chain verifies and skew is a judgment for
+ * a human, not a proof the runtime is entitled to enforce.
+ */
+function reportAnomalies(streams: Streams, anomalies: ChainAnomaly[]): void {
+  if (anomalies.length === 0) return;
+  streams.err(
+    `approval: ${anomalies.length} timestamp anomaly(ies) — the chain verifies and NOTHING is refused; these are reported for a human to weigh (SPEC.md §8)\n`,
+  );
+  for (const anomaly of anomalies) {
+    streams.err(`approval: ${anomaly.kind}: ${anomaly.message}\n`);
+  }
+}
+
 function commandVerify(argv: string[], streams: Streams, cwd: string): number {
   const front = prelude(
     argv,
@@ -200,11 +234,18 @@ function commandVerify(argv: string[], streams: Streams, cwd: string): number {
   const result = verify(logPath);
 
   if (result.status === "clean") {
-    if (json) emitJson(streams, { status: result.status, records: result.records, head: result.head });
-    else {
+    if (json) {
+      emitJson(streams, {
+        status: result.status,
+        records: result.records,
+        head: result.head,
+        ...anomalyField(result.anomalies),
+      });
+    } else {
       const head =
         result.head === null ? "head none" : `head seq ${result.head.seq} ${result.head.hash}`;
       streams.out(`clean: ${result.records} record(s), ${head}\n`);
+      reportAnomalies(streams, result.anomalies);
     }
     return EXIT_OK;
   }
@@ -217,8 +258,10 @@ function commandVerify(argv: string[], streams: Streams, cwd: string): number {
         head: null,
         intactThroughSeq: result.intactThroughSeq,
         message: result.message,
+        ...anomalyField(result.anomalies),
       });
     } else {
+      reportAnomalies(streams, result.anomalies);
       streams.out(
         `torn-tail: ${result.records} record(s), intact through seq ${result.intactThroughSeq}\n`,
       );
@@ -498,6 +541,12 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // note-mandatory, and records no invented exit code.
     case "execution":
       return commandExecution(rest, streams, cwd);
+    // The audit verbs (APRV-40). `audit list` reads the sampled-audit backlog
+    // and `audit review` closes one item of it, human-only. There is no
+    // `audit sample`: selection is the runtime's, made by the daemon from an
+    // operator-held secret, and a caller who could sample could decline to.
+    case "audit":
+      return commandAudit(rest, streams, cwd);
     case "wait":
       return commandWait(rest, streams, cwd);
     case "queue":

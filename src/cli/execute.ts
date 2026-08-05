@@ -760,6 +760,24 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
     records: verification.status === "corrupt" ? null : verification.records,
   };
 
+  // APRV-40. Timestamp anomalies (SPEC.md §8) are informational and deliberately
+  // outside `healthy`: they are a judgment, not an integrity verdict. `verify`
+  // already declined to refuse on them, and `status` does not get to overrule it
+  // by flipping a health bit an operator reads as "something is broken". The
+  // field is present only when there is something to report, so every existing
+  // `--json` consumer sees a byte-identical object on a log with no anomaly.
+  //
+  // The sampler's own state is NOT reported here: `status --json` is a frozen
+  // shape, and the configuration fact belongs to `approval audit list`, which
+  // reports it beside the backlog it explains.
+  const anomalies = verification.anomalies.map((anomaly) => ({
+    kind: anomaly.kind,
+    seq: anomaly.seq,
+    previous_seq: anomaly.previousSeq,
+    skew_ms: anomaly.skewMs,
+    message: anomaly.message,
+  }));
+
   const healthy =
     attestation.status === "attested" &&
     verification.status === "clean" &&
@@ -782,6 +800,7 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       budgets,
       loop_escalations: escalations,
       payload_store: payloadStore,
+      ...(anomalies.length === 0 ? {} : { anomalies }),
     });
   } else {
     streams.out(`health: ${healthy ? "ok" : "attention"}\n`);
@@ -797,6 +816,17 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
         verificationSummary.records === null ? "" : ` (${verificationSummary.records} record(s))`
       }\n`,
     );
+    if (anomalies.length === 0) streams.out("timestamp anomalies: none\n");
+    else {
+      streams.out(
+        `timestamp anomalies: ${anomalies.length} (reported, NOT refused — the chain verifies and health is unaffected)\n`,
+      );
+      for (const anomaly of anomalies) {
+        streams.out(
+          `  ${anomaly.kind}\tseq ${anomaly.seq}\t${anomaly.skew_ms}ms before seq ${anomaly.previous_seq}\n`,
+        );
+      }
+    }
     if (dangling.length === 0) streams.out("dangling executions: none\n");
     else {
       streams.out(`dangling executions: ${dangling.length}\n`);

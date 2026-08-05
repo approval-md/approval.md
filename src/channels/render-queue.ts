@@ -350,9 +350,11 @@ interface AuditItem {
  * silently empty the backlog, which is exactly the failure a sampled-audit
  * backlog exists to prevent.
  *
- * M5's sampler does not exist yet, so on today's logs this is empty — and the
- * empty state is rendered as an honest statement of that, never as "all
- * reviewed".
+ * The sampler that fills this section is `core/audit.ts`, driven by the daemon
+ * (APRV-40). It runs only when the operator's HMAC secret is configured, so an
+ * empty backlog is genuinely ambiguous — everything reviewed, or nothing
+ * sampled — and the empty state is rendered as an honest statement of that
+ * ambiguity, never as "all reviewed". `approval audit list` resolves it.
  */
 function auditBacklog(records: EventRecord[]): AuditItem[] {
   const subjectOf = (record: EventRecord): { key: string | null; task: string | null } => {
@@ -537,7 +539,7 @@ function renderAudit(backlog: AuditItem[]): string[] {
   const lines = ["## Sampled-audit backlog", ""];
   if (backlog.length === 0) {
     lines.push(
-      "_Empty._ No `audit.sampled` event in this log is waiting for an `audit.reviewed`. Note what this does and does not say: the sampler that writes `audit.sampled` (SPEC.md §12, milestone M5) is not implemented in this version, so an empty backlog here usually means **nothing has been sampled yet**, not that everything sampled has been reviewed.",
+      "_Empty._ No `audit.sampled` event in this log is waiting for an `audit.reviewed`. Note what this does and does not say. The daemon samples supervised executions (SPEC.md §5.2) only when the operator's HMAC secret is configured, so an empty backlog means either **everything sampled has been reviewed** or **nothing was sampled**, and this file cannot tell you which. Run `approval audit list` for the answer: it reports whether sampling is running, and why not when it is not.",
     );
     lines.push("");
     return lines;
