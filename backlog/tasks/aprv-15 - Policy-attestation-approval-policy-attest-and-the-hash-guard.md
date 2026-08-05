@@ -1,9 +1,11 @@
 ---
 id: APRV-15
 title: 'Policy attestation: approval policy attest and the hash guard'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@fable'
 created_date: '2026-08-05 01:00'
+updated_date: '2026-08-05 01:05'
 labels: []
 milestone: m-3
 dependencies: []
@@ -26,3 +28,13 @@ Formalizes SPEC section 5.2's mtime/hash guard, per the human-settled design (20
 - [ ] #4 SPEC section 5.2 defines attestation and SPEC section 11 states the config-declared-identity / local-machine trust boundary plainly — both in the implementing commit, drafted wording flagged for human review
 - [ ] #5 Determinism and read-only: attestation checking never writes; only the attest verb appends, through the real append path
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. src/core/attest.ts: policyFileHash (SHA-256 of exact bytes), checkAttestation(records, policyPath) -> attested | not-attested | hash-mismatch (+ attested hash, event seq); refusal code exported for APRV-16.
+2. CLI: approval policy attest [--policy <path>] [--json] appending policy.updated {payload: {sha256}} with human actor from config — actor identity source designed here (config-declared, local trust boundary), documented plainly.
+3. SPEC 5.2 attestation definition + section 11 trust-boundary statement, drafted wording flagged for human review, same commit.
+4. Tests: never-attested, attest-then-edit (mismatch), re-attest heals, check is read-only, attest via real append path.
+5. Opus subagent (isolated worktree, parallel with APRV-14); fable reviews, merges, gates, finalizes.
+<!-- SECTION:PLAN:END -->
