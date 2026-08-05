@@ -39,6 +39,7 @@ Usage:
   approval queue      [--policy <path>] [--dir <path>] [--json]
   approval channel cli [--policy-dir <path>] [--payload-dir <path>]
                       [--as human:<id>] [--interactive] [--json]
+  approval channel telegram listen|health [--once] [--as human:<id>] [--json]
   approval status     [--policy <path>] [--dir <path>] [--json]
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
   approval render     [--log <path>] [--out <path>] [--policy <path>]
@@ -81,7 +82,10 @@ Commands:
   channel   put pending requests in front of a human over the channel contract.
             "channel cli" renders the queue with [computed]/[claimed] markers and
             the full payload in delimiters, and with a terminal collects
-            decisions through the same human-only gate as grant/reject
+            decisions through the same human-only gate as grant/reject.
+            "channel telegram listen" delivers the queue to a Telegram chat and
+            long-polls for Approve/Reject taps; config is environment-only
+            (APPROVAL_TG_TOKEN, APPROVAL_TG_CHAT)
   reindex   rebuild the SQLite index projection from the log
   render    regenerate .approval/QUEUE.md, the READ-ONLY markdown queue
             projection (SPEC.md §9.1): pending requests and the sampled-audit
@@ -1184,10 +1188,14 @@ Usage:
   approval channel cli [--log <path>] [--policy-dir <path>] [--policy <path>]
                        [--payload-dir <path>] [--as human:<id>] [--interactive]
                        [--json]
+  approval channel telegram listen|health [--once] [--as human:<id>] [--json]
 
 Subcommands:
-  cli   render the pending queue in this terminal and, when it IS a terminal,
-        collect decisions with a prompt
+  cli        render the pending queue in this terminal and, when it IS a
+             terminal, collect decisions with a prompt
+  telegram   deliver the queue to a Telegram chat (sendMessage + inline
+             keyboard) and long-poll for Approve/Reject taps; see
+             "approval channel telegram --help"
 
 A channel is TRANSPORT. It renders what the runtime derived and reports the
 gesture a human made; it decides nothing, holds no state, writes no log line and
@@ -1325,4 +1333,161 @@ JSON shape (stdout, one object):
   not summarize (they are listed in the file with their reason, never dropped).
   refusal  {"ok":false,"error":{"code":"log-corrupt|log-torn-tail|
             log-unreadable|write-failed","message":"..."}} on stderr
+${JSON_ERRORS}`;
+
+// ---------------------------------------------------------------------------
+// Channels (APRV-26)
+// ---------------------------------------------------------------------------
+
+/**
+ * The §11 caveat, verbatim in every channel help text.
+ *
+ * An operator wiring a bot to their approval log must be able to see the size
+ * of the claim they are making before they wire it, without reading the source
+ * or the spec.
+ */
+const CONFIG_DECLARED_IDENTITY = `Identity is CONFIG-DECLARED (SPEC.md §11). This channel does not authenticate
+the person who taps a button: it checks that the callback came from the
+configured chat, and records the decision against the human actor this process
+was started with (--as / APPROVAL_HUMAN). The guarantee is "someone with access
+to that chat, on a runtime configured by someone with local control, approved"
+— NOT "that specific person approved". Anyone in the chat can approve as the
+configured actor, so the chat's membership is part of your trust boundary. Use
+a private chat with the bot. Cryptographic identity is future work.`;
+
+
+
+export const TELEGRAM_HELP = `approval channel telegram — the Telegram push channel
+
+Usage:
+  approval channel telegram listen [--once] [--as human:<id>] [--payloads <f>]
+                                   [--policy <path>] [--dir <path>]
+                                   [--log <path>] [--api-base <url>]
+                                   [--poll-timeout <seconds>] [--json]
+  approval channel telegram health [--json]
+
+Configuration is ENVIRONMENT-ONLY (SPEC.md §5.1): APPROVAL_TG_TOKEN holds the
+bot token and APPROVAL_TG_CHAT the approver chat id. APPROVAL.md carries only
+those variable NAMES — never a token, never a secret. There is no flag that
+would put a bot token into a shell history or a process listing.
+
+${CONFIG_DECLARED_IDENTITY}
+
+${EXIT_CODES}
+${JSON_ERRORS}`;
+
+export const TELEGRAM_LISTEN_HELP = `approval channel telegram listen — deliver the queue, collect decisions
+
+Usage:
+  approval channel telegram listen [--once] [--as human:<id>] [--payloads <f>]
+                                   [--policy <path>] [--dir <path>]
+                                   [--log <path>] [--api-base <url>]
+                                   [--poll-timeout <seconds>] [--json]
+
+Flags:
+  --once           process exactly one getUpdates batch, then exit (scripts,
+                   tests, cron-style polling)
+  --as human:<id>  the approver every decision is recorded against; defaults to
+                   APPROVAL_HUMAN. REQUIRED — approvals are human-only
+  --payloads <f>   JSON file mapping action key -> that action's payload value.
+                   The log records only the payload HASH (SPEC.md §6.2), and
+                   §10.4 requires the full payload to be presented for a manual
+                   action, so the bytes are supplied here. They are re-hashed
+                   and checked against the recorded binding; material that does
+                   not match is refused, never rendered
+  --policy <path>  policy file to resolve autonomy, budgets and TTL against
+  --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
+  --log <path>     log file (read for the queue, appended to by decisions)
+  --api-base <url> Bot API base (default https://api.telegram.org). For tests
+                   against a local mock server
+  --poll-timeout   getUpdates long-poll timeout in seconds (default 25)
+  --json           machine-readable output: ONE JSON OBJECT PER LINE, not one
+                   per invocation — a listener is a stream, not a query
+  -h, --help       this text
+
+On start it sends every pending manual request to the configured chat: the
+computed fields (class, resolved autonomy, budgets, attestation, payload hash,
+chain position, TTL) under one heading, the agent's CLAIMED fields (summary,
+cost estimate, rationale) under another that says they are not verified, and
+the full payload verbatim in its own block (SPEC.md §9, §10.4). Each message
+carries an inline Approve/Reject keyboard.
+
+Then it long-polls getUpdates. A callback FROM THE CONFIGURED CHAT is recorded
+through the same human-only gate the CLI verbs use — TTL, budgets, attestation,
+idempotency and compare-and-append all still apply. A callback from ANY OTHER
+chat is ignored: counted as an anomaly, answered with a refusal, never turned
+into a decision and NEVER written to the log. A second tap on an
+already-decided request is refused already-decided by the gate: no second event
+is appended and the toast says so.
+
+Delivery bookkeeping is IN MEMORY ONLY (channels hold no state, §10.3). A
+restarted listener re-sends everything still pending and the buttons on its
+older messages stop resolving. Duplicated messages are the acceptable failure
+mode; an approval that depended on a channel's memory would not be.
+
+THE EXECUTION TOKEN IS PRINTED ON THIS TERMINAL'S STDOUT AND IS NEVER SENT TO
+TELEGRAM. A chat transcript is stored on someone else's servers, backed up to
+phones, and readable by anyone later added to the chat — it is not a credential
+store. So the person who taps Approve on their phone does not receive the
+token; the operator running this listener does.
+
+REJECT COLLECTS NO REASON. An inline keyboard has no text input, so a rejection
+is recorded with the note "rejected via telegram (callback <id>)". Use
+"approval reject --note" when the reason matters. (A ForceReply flow is a
+follow-up, flagged rather than silently dropped.)
+
+BATCHING IS DEFERRED. §10.3 permits one gesture over a set; Telegram binds one
+keyboard to one message, and a batch carrying every member's full payload would
+exceed the 4096-character limit long before the keyboard helped. notify() still
+accepts a batch and sends one message per member sharing one batch delivery id,
+so every event carries it — the semantics are there, the one-tap ergonomics are
+not.
+
+Runs until interrupted (SIGINT/SIGTERM stop it cleanly) or, with --once, for a
+single update batch. The loop SURVIVES THE NETWORK: a timeout, a dropped
+socket, a 5xx or a non-JSON response is counted, complained about on stderr and
+retried with a doubling backoff. It never stops listening quietly.
+
+${CONFIG_DECLARED_IDENTITY}
+
+${EXIT_CODES}
+
+JSON shape (stdout, ONE OBJECT PER LINE):
+  {"event":"notified","action_key":"task-042:chaser","delivery_id":"41"}
+  {"event":"decision","action_key":"task-042:chaser","decision":"grant",
+   "ok":true,"seq":7,"state":"granted","token_issued":true}
+  {"event":"decision","action_key":"...","decision":"grant","ok":false,
+   "code":"already-decided","token_issued":false}
+  {"event":"stopped","notified":1,"updates":1,"decisions":1,"pollErrors":0,
+   "anomalies":{"foreign-chat":0,"malformed-callback":0,"unknown-callback":0,
+   "key-mismatch":0}}
+  The raw execution token is NEVER in the JSON stream — that stream is the one
+  most likely to be piped into a file. It is printed as plain text on stdout.
+${JSON_ERRORS}`;
+
+export const TELEGRAM_HEALTH_HELP = `approval channel telegram health — is this runtime configured for Telegram?
+
+Usage:
+  approval channel telegram health [--json]
+
+Flags:
+  --json     machine-readable output
+  -h, --help this text
+
+Reports whether APPROVAL_TG_TOKEN and APPROVAL_TG_CHAT are set. Exit 0 when
+both are, 1 when either is missing. The token's VALUE never appears in the
+output — only whether it is present.
+
+MAKES NO NETWORK CALL. A health check that contacted the Bot API would announce
+the bot from any shell and would fail for reasons (a captive portal, a rate
+limit) that say nothing about whether the configuration is right. The live
+counters — deliveries, decisions, ignored callbacks, recovered poll errors —
+belong to a RUNNING listener: they are on its stderr as they happen, in its
+--json "stopped" line, and programmatically on TelegramChannel.health()/stats().
+
+${EXIT_CODES}
+
+JSON shape (stdout, one object):
+  {"ok":true,"channel":"telegram","token_env":"APPROVAL_TG_TOKEN",
+   "token_set":true,"chat_env":"APPROVAL_TG_CHAT","chat_id":"12345"}
 ${JSON_ERRORS}`;

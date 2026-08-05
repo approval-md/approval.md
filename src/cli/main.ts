@@ -499,15 +499,35 @@ export function main(argv: string[], options: MainOptions = {}): number {
       return commandWait(rest, streams, cwd);
     case "queue":
       return commandQueue(rest, streams, cwd);
-    // The channel verbs (APRV-23). `channel cli` renders the pending queue over
-    // the plugin contract and, with a terminal, collects decisions — through
-    // `recordChannelDecision`, which is the same human-only gate `grant` and
-    // `reject` call. Its interactive path is asynchronous and assigns its own
-    // exit code to `process.exitCode`; see `channel.ts`'s header.
-    case "channel":
-      return commandChannel(rest, streams, cwd);
     case "status":
       return commandStatus(rest, streams, cwd);
+    // The channel verbs (APRV-23 cli, APRV-26 telegram). `channel cli` renders
+    // the pending queue over the plugin contract and, with a terminal, collects
+    // decisions through `recordChannelDecision` — the same human-only gate
+    // `grant` and `reject` call. `channel telegram listen` is the only
+    // LONG-LIVED command in this CLI: it delivers the pending queue and then
+    // long-polls until it is interrupted. Every other command answers and
+    // exits, so `main` stays synchronous and this one case unwraps a promise —
+    // reporting its eventual code through `process.exitCode`, which is what
+    // the direct-execution path at the bottom of this file uses anyway.
+    // Callers that need the code (tests, embedders) call `commandChannel` and
+    // await it directly.
+    case "channel": {
+      const outcome = commandChannel(rest, streams, cwd);
+      if (typeof outcome === "number") return outcome;
+      void outcome.then(
+        (code) => {
+          process.exitCode = code;
+        },
+        (cause: unknown) => {
+          streams.err(
+            `approval: channel listener failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+          );
+          process.exitCode = EXIT_IO;
+        },
+      );
+      return EXIT_OK;
+    }
     case "reindex":
       return commandReindex(rest, streams, cwd);
     // The projection verb (APRV-24). `render` writes .approval/QUEUE.md and
