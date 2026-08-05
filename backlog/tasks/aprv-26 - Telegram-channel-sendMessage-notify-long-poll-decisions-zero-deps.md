@@ -4,6 +4,7 @@ title: 'Telegram channel: sendMessage notify, long-poll decisions, zero deps'
 status: To Do
 assignee: []
 created_date: '2026-08-05 10:51'
+updated_date: '2026-08-05 11:00'
 labels: []
 milestone: m-5
 dependencies:
@@ -27,4 +28,5 @@ The reference push channel (SPEC 10.3): message with declared effects plus inlin
 - [ ] #4 The APRV-22 conformance suite passes against the telegram channel unmodified; all tests run against a local mock Bot API server, never the real network
 - [ ] #5 The section 11 config-declared-identity caveat is stated in the channel docs and help; if B7 batching is deferred, the deferral is flagged in the implementation notes with the ergonomic reason, never silently dropped
 - [ ] #6 On green tests on main, the human is flagged to perform the APPROVAL.md channel edit and re-attestation (seq 2); the task is not complete until that flag is raised
+- [ ] #7 The mock Bot API exercises failure modes: getUpdates timeout and network error (listener survives and resumes polling), a callback from an unconfigured chat id (ignored and counted/noted, never a decision event), and a duplicate callback for an already-decided request (refused idempotently via the existing gate codes, no second event appended)
 <!-- AC:END -->

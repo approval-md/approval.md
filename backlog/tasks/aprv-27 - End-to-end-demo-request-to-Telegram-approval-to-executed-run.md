@@ -4,6 +4,7 @@ title: 'End-to-end demo: request to Telegram approval to executed run'
 status: To Do
 assignee: []
 created_date: '2026-08-05 10:51'
+updated_date: '2026-08-05 11:00'
 labels: []
 milestone: m-5
 dependencies:
@@ -26,4 +27,5 @@ The m-4 exit criterion (human-settled 2026-08-08): something end-to-end must clo
 - [ ] #2 The demo asserts the negative space too: before approval, run refuses at exit 5; after consumption, a second run refuses; the raw token never appears in any log byte
 - [ ] #3 A documented manual script for the real-Telegram walkthrough exists under examples/ with setup (env vars, bot creation) and expected output at each step
 - [ ] #4 QUEUE.md and approval status reflect the demo state correctly at the intermediate hops (queue shows the pending request; status healthy at completion)
+- [ ] #5 The scripted test's final step runs full chain verification on the demo log and asserts clean, so the demo's closing claim is the chain's own
 <!-- AC:END -->
