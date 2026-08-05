@@ -2068,7 +2068,12 @@ JSON shape (stdout, ONE OBJECT PER LINE):
   warnings go to STDERR as {"event":"warning","code":"...","message":"..."},
   with code one of task-unreadable, frontmatter-invalid, envelope-invalid,
   task-id-missing, tasks-dir-unreadable, append-refused, expire-refused,
-  render-failed, watch-unavailable. A warning never stops the loop.
+  render-failed, watch-unavailable, prune-refused. A warning never stops the
+  loop.
+  payload retention (APRV-41): with payload_retention set in policy, each tick
+  appends payload.pruned and THEN removes the payload file for every payload
+  whose action has been terminal longer than the duration, and for orphaned
+  store files. With the key absent nothing is ever pruned.
   "rendered" is emitted when the queue's summary CHANGES; the file itself is
   rewritten every tick, because TTL countdowns move even when the log does not.
   With --git-evidence, one further line per committing tick:
