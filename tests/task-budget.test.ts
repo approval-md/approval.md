@@ -96,7 +96,7 @@ const SUPERVISED: Action = {
 
 function envelope(cap: number | null): unknown {
   return {
-    origin: { app: "cartsos", created_by: "human:carter" },
+    origin: { app: "example-capture", created_by: "human:carter" },
     state: "proposed",
     actions: [MANUAL_A, MANUAL_B, SUPERVISED].map((action) => ({
       class: action.cls,

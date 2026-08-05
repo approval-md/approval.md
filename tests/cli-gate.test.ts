@@ -102,7 +102,7 @@ const TASK_FILE = [
   "labels: []",
   "approval:",
   "  origin:",
-  "    app: cartsos",
+  "    app: example-capture",
   '    created_by: "human:carter"',
   "  route:",
   '    assignee: "agent:claude-admin"',

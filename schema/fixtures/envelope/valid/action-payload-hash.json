@@ -1,6 +1,6 @@
 {
   "origin": {
-    "app": "cartsos",
+    "app": "example-capture",
     "created_by": "agent:claude"
   },
   "state": "awaiting",

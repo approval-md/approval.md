@@ -85,7 +85,7 @@ function taskFile(binding: string): string {
     "title: Chase deposit",
     "approval:",
     "  origin:",
-    "    app: cartsos",
+    "    app: example-capture",
     '    created_by: "human:carter"',
     "  state: proposed",
     "  actions:",

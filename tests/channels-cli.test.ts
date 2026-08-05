@@ -419,7 +419,7 @@ function repo(options: { withRequest?: boolean } = {}): Repo {
       "title: Chase deposit",
       "approval:",
       "  origin:",
-      "    app: cartsos",
+      "    app: example-capture",
       '    created_by: "human:carter"',
       "  state: proposed",
       "  actions:",

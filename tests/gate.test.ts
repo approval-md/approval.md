@@ -144,7 +144,7 @@ function assertClean(unit: Case): void {
 }
 
 const ENVELOPE = {
-  origin: { app: "cartsos", created_by: "human:carter" },
+  origin: { app: "example-capture", created_by: "human:carter" },
   state: "proposed",
   actions: [
     {
@@ -361,7 +361,7 @@ test("register fails closed on an invalid envelope: nothing is appended", () => 
   const unit = newCase();
   const result = register(
     unit.logPath,
-    { task: "task-042", envelope: { origin: { app: "cartsos" }, state: "proposed" } },
+    { task: "task-042", envelope: { origin: { app: "example-capture" }, state: "proposed" } },
     T0,
     "agent:claude",
   );
@@ -418,7 +418,7 @@ test("register reads the envelope from a task file's frontmatter", () => {
       "custom_board_key: kept",
       "approval:",
       "  origin:",
-      "    app: cartsos",
+      "    app: example-capture",
       '    created_by: "human:carter"',
       "  state: proposed",
       "  actions:",
@@ -887,7 +887,7 @@ test("budgets are re-evaluated at grant time, appending budget.exceeded on failu
   register(unit.logPath, {
     task: "task-100",
     envelope: {
-      origin: { app: "cartsos", created_by: "human:carter" },
+      origin: { app: "example-capture", created_by: "human:carter" },
       state: "proposed",
       actions: [
         { class: "physical.order", idempotency_key: "task-100:a", payload_hash: PAYLOAD_HASH },
