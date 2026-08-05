@@ -348,6 +348,8 @@ No new task file format. No kanban UI. No agent framework or orchestration platf
 
 Post-v1 (non-normative): `review: adversarial` as a per-class flag. Before a flagged `manual` request reaches the approver, an independent agent instance with the raw payload and no stake in the outcome writes a dissent: worst plausible reading, omissions, questions a suspicious reviewer would ask. The approver adjudicates between framings instead of consuming one. Untrusted monitoring, spent where human attention is scarcest.
 
+Post-v1 (non-normative): a Rust fast-path implementation of the hot loop (policy resolution, chain-tail verification, gate verdict) as the engine for per-tool-call hook adapters, where Node startup latency is unacceptable. Conformance is defined by the fixture suite; the crates.io name `approval-md` is reserved for it. The TypeScript runtime remains the reference implementation for the full surface.
+
 ## 14. Repository layout and roadmap
 
 ```
