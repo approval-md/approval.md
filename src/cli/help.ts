@@ -22,11 +22,13 @@ Usage:
   approval log verify [--log <path>] [--json]
   approval log tail   [--log <path>] [-n <count>] [--json]
   approval log export [--log <path>] [--json]
+  approval policy check|test <class> [--reversible true|false] [--policy <path>] [--dir <path>] [--json]
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
   approval --help
 
 Commands:
   log       inspect the append-only event log (verify | tail | export)
+  policy    explain what APPROVAL.md does with an action class (check | test)
   reindex   rebuild the SQLite index projection from the log
 
 Defaults:
@@ -152,6 +154,113 @@ JSON shape (stdout, one object):
   {"records":[<every event object, oldest first>]}
   {"records":[...],"warning":"..."}   on a torn tail
 ${JSON_ERRORS}`;
+
+/**
+ * The policy command's exit-code stance, printed in all three policy help
+ * texts. It is the one place where "answer" and "error" come apart, so it is
+ * stated at length rather than assumed: `policy check` answers the question
+ * "what would policy do with this class", and a policy too broken to load has
+ * a perfectly good answer — manual, everything, always.
+ */
+const POLICY_EXIT_CODES = `${EXIT_CODES}
+  policy check|test uses only 0, 2 and 4:
+    0  the question was answered — INCLUDING the fail-closed answer. A missing,
+       unparseable or schema-invalid policy is not an error here: a broken
+       policy IS a manual-everything policy, and "manual, because the policy
+       failed to load: <code>" is the answer, delivered on stdout with exit 0.
+       Branch on manualBecause / provenance, not on the exit code, to tell a
+       deliberate manual from a broken one.
+    2  usage — missing <class>, unknown flag, or a class that is not a valid
+       action class (lowercase dotted segments; wildcards are patterns, not
+       actions, and are rejected).
+    4  I/O — a policy path that exists but cannot be read (a permission bit).
+       Never used for a parse or schema failure; those are the answer above.
+  1 and 3 are never returned by this command.`;
+
+const POLICY_MANUAL_BECAUSE = `manualBecause — why a manual answer is manual (null when it is not manual):
+  "matched-rule"           a classes rule, or defaults.autonomy, says manual.
+                           The policy was read and understood, and it says ask.
+  "irreversibility-floor"  policy granted autonomous/supervised and SPEC §7's
+                           floor overrode it because --reversible false was
+                           given. overridden records what policy actually said.
+  "load-failure"           the policy could not be loaded at all, so every
+                           class is manual. loadFailure carries code + message.`;
+
+export const POLICY_HELP = `approval policy — explain what policy does with an action class
+
+Usage:
+  approval policy check <class> [--reversible true|false] [--policy <path>] [--dir <path>] [--json]
+  approval policy test  <class> [--reversible true|false] [--policy <path>] [--dir <path>] [--json]
+
+Subcommands:
+  check   explain the autonomy resolution for <class>
+  test    exact alias of check (SPEC.md §10.1 names both)
+
+Nothing is executed, requested, or logged: this command reads APPROVAL.md and
+answers a hypothetical. Discovery is APPROVAL.md then APPROVALS.md in --dir
+(default: the working directory); --policy names a file directly and wins.
+
+${POLICY_EXIT_CODES}
+
+${POLICY_MANUAL_BECAUSE}
+
+Run "approval policy check --help" for the flags and the full --json shape.`;
+
+function policyVerbHelp(verb: "check" | "test", alias: "check" | "test"): string {
+  return `approval policy ${verb} — explain what policy does with an action class
+
+Usage:
+  approval policy ${verb} <class> [--reversible true|false] [--policy <path>] [--dir <path>] [--json]
+
+Flags:
+  --reversible <true|false>
+                   whether the action can be undone. Omit it and the question is
+                   left open (reversible: null): policy answers on its own terms.
+                   --reversible false engages SPEC §7's irreversibility floor,
+                   which floors autonomous and supervised to manual. It takes an
+                   explicit value because "unstated", "reversible" and
+                   "irreversible" are three different questions.
+  --policy <path>  policy file to read (overrides discovery)
+  --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
+                   (default: the working directory)
+  --json           machine-readable output
+  -h, --help       this text
+
+\`policy ${verb}\` is an exact alias of \`policy ${alias}\`; both are named in
+SPEC.md §10.1 and they are the same command. <class> is a concrete action class
+(lowercase dotted segments, e.g. read.web, vcs.push.main) — not a pattern: \`*\`
+is something a policy key may contain, never something an agent can do.
+
+${POLICY_EXIT_CODES}
+
+${POLICY_MANUAL_BECAUSE}
+
+JSON shape (stdout, one object):
+  {"class":"vcs.push.main","reversible":null,
+   "outcome":{"autonomy":"supervised","approvers":null,"limits":null},
+   "provenance":"rule"|"default"|"fail-closed"|"floor",
+   "manualBecause":null|"matched-rule"|"irreversibility-floor"|"load-failure",
+   "loadFailure":null|{"code":"file-missing"|"no-block"|"multiple-blocks"|
+                       "yaml-error"|"schema-invalid","message":"..."},
+   "matched":null|{"pattern":"vcs.push.main","rule":{"autonomy":"supervised"}},
+   "overridden":null|{"pattern":"read.web"|null,"autonomy":"autonomous"},
+   "candidates":[{"pattern":"read.*","specificity":[1,1,2],
+                  "autonomy":"autonomous","winner":true,
+                  "tieBreak":"specificity"|"strictest-autonomy"|
+                             "lexicographic"|"tied-specificity"}],
+   "decisionPath":["...","..."]}
+  specificity is [literalSegments, wildcardSegments, totalSegments] (SPEC §5.2).
+  overridden.pattern is null when the floor overrode defaults.autonomy rather
+  than a rule.
+${JSON_ERRORS}
+
+Human output: the decisionPath lines, then a final line "-> <autonomy>" carrying
+"(fail-closed: <code>)" or "(floor applied over <pattern>: <autonomy>)" when
+either applies. stderr stays empty on a successful answer.`;
+}
+
+export const POLICY_CHECK_HELP = policyVerbHelp("check", "test");
+export const POLICY_TEST_HELP = policyVerbHelp("test", "check");
 
 export const REINDEX_HELP = `approval reindex — rebuild the SQLite index from the log
 

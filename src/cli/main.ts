@@ -41,6 +41,7 @@ import {
   TAIL_HELP,
   VERIFY_HELP,
 } from "./help.js";
+import { commandPolicy } from "./policy.js";
 import {
   DEFAULT_INDEX_PATH,
   DEFAULT_LOG_PATH,
@@ -437,6 +438,8 @@ export function main(argv: string[], options: MainOptions = {}): number {
   switch (command) {
     case "log":
       return commandLog(rest, streams, cwd);
+    case "policy":
+      return commandPolicy(rest, streams, cwd);
     case "reindex":
       return commandReindex(rest, streams, cwd);
     default:
