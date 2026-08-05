@@ -32,6 +32,7 @@ import { isAbsolute, join, resolve as resolvePathSegments } from "node:path";
 import { explain, isActionClass, type Explanation } from "../core/policy-explain.js";
 import { loadPolicy, POLICY_FILENAMES, type LoadPolicyOptions } from "../core/policy-load.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
+import { commandPolicyAttest } from "./attest.js";
 import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { POLICY_CHECK_HELP, POLICY_HELP, POLICY_TEST_HELP } from "./help.js";
 import type { Streams } from "./main.js";
@@ -216,6 +217,10 @@ export function commandPolicy(argv: string[], streams: Streams, cwd: string): nu
       return runVerb(rest, streams, cwd, POLICY_CHECK_HELP);
     case "test":
       return runVerb(rest, streams, cwd, POLICY_TEST_HELP);
+    // The one policy verb that writes: it lives in `attest.ts` because nothing
+    // it does — hashing, identity, appending — belongs to the explain path.
+    case "attest":
+      return commandPolicyAttest(rest, streams, cwd);
     default:
       return usageError(
         streams,
