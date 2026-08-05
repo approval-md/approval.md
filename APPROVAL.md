@@ -9,13 +9,13 @@ version: "0.1"
 
 defaults:
   autonomy: manual
-  channel: cli            # becomes telegram at M4
+  channel: telegram        # cli remains a fallback per approvers
   approval_ttl: 24h
   on_expiry: reject
 
 approvers:
   carter:
-    channels: [telegram]
+    channels: [telegram, cli]
 
 classes:
   read.*:                    { autonomy: autonomous }
