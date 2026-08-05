@@ -3,9 +3,13 @@
  *
  * `tests/fixtures.test.ts` already proves every fixture under
  * `schema/fixtures/event/` passes or fails as filed. This suite asserts the
- * rules that fixtures can only sample: that all sixteen v0.1 event types
+ * rules that fixtures can only sample: that all seventeen v0.1 event types
  * (SPEC.md §8) are accepted, that each type's required fields are actually
  * required, and that the hash-scheme identifier `alg` fails closed.
+ *
+ * Seventeen, not sixteen: `payload.pruned` (APRV-38) is the first addition
+ * after the draft set, and the last two tests here pin the two things that make
+ * it safe to write — a `system:` actor and a payload naming the pruned bytes.
  */
 
 import assert from "node:assert/strict";
@@ -34,6 +38,7 @@ const EVENT_TYPES = [
   "envelope.drift",
   "audit.sampled",
   "audit.reviewed",
+  "payload.pruned",
 ] as const;
 
 /** Fields each event type requires beyond the base record shape. */
@@ -54,6 +59,10 @@ const EXTRA_REQUIRED: Record<string, readonly string[]> = {
   "envelope.drift": ["task"],
   "audit.sampled": [],
   "audit.reviewed": [],
+  // Not `task`/`action_key`: an orphaned payload (bytes with no recorded
+  // binding) is prunable and has no task or action to name. `payload` is the
+  // required one, because the event's whole content is which bytes went.
+  "payload.pruned": ["payload"],
 };
 
 function fixture(event: string): Record<string, unknown> {
@@ -146,6 +155,64 @@ test("alg fails closed when missing or unrecognized (SPEC.md §8)", () => {
       false,
       `unrecognized alg "${alg}" was accepted`,
     );
+  }
+});
+
+test("payload.pruned is system-authored and names the pruned bytes (SPEC.md §5.2)", () => {
+  const record = fixture("payload.pruned");
+  assert.equal(validate("event", record).ok, true);
+
+  // Pruning is a retention rule executing on a schedule. A human or agent
+  // pruner would be a party under oversight deleting the evidence its own
+  // approval bound to, so the actor prefix is the control.
+  for (const actor of ["human:carter", "agent:chaser"]) {
+    assert.equal(
+      validate("event", { ...record, actor }).ok,
+      false,
+      `payload.pruned accepted actor "${actor}"`,
+    );
+  }
+
+  // The payload must name the removed bytes by their content address, and by
+  // one that is a SHA-256: a truncated or upper-case digest names no file.
+  for (const payload of [
+    {},
+    { reason: "payload_retention" },
+    { payload_hash: "8ae4823e" },
+    { payload_hash: "8AE4823E490219F719383730BAC75A35543AD790475300FB1A0113A2E2D1D834" },
+  ]) {
+    assert.equal(
+      validate("event", { ...record, payload }).ok,
+      false,
+      `payload.pruned accepted payload ${JSON.stringify(payload)}`,
+    );
+  }
+});
+
+test("batch_delivery_id is a first-class decision payload field (SPEC.md §10.3)", () => {
+  for (const event of ["approval.granted", "approval.rejected"]) {
+    const record = fixture(event);
+    const payload = (record["payload"] ?? {}) as Record<string, unknown>;
+    assert.equal(
+      validate("event", {
+        ...record,
+        payload: { ...payload, batch_delivery_id: "tg-batch-7" },
+      }).ok,
+      true,
+      `${event} rejected a batch delivery id`,
+    );
+    // A batch id that identifies no batch would read to audit as a grouping
+    // that never happened, so the shape is constrained where it is accepted.
+    for (const value of ["", 7, null]) {
+      assert.equal(
+        validate("event", {
+          ...record,
+          payload: { ...payload, batch_delivery_id: value },
+        }).ok,
+        false,
+        `${event} accepted batch_delivery_id ${JSON.stringify(value)}`,
+      );
+    }
   }
 });
 

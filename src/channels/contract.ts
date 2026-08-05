@@ -310,32 +310,64 @@ export interface ChannelBatch {
 export type DeliveryId = string;
 
 /**
- * The `note` prefix carrying a batch delivery id into the event payload.
+ * The event payload field carrying a batch's channel delivery id (SPEC.md
+ * §10.3: each event carries "the batch's channel delivery id in its payload").
  *
- * ## Flagged for human review
+ * First-class since APRV-38: `decide()` takes `batchDeliveryId` and writes this
+ * field on `approval.granted` / `approval.rejected`, and the event schema
+ * constrains it. What it replaced is described at
+ * {@link BATCH_DELIVERY_NOTE_PREFIX}.
+ */
+export const BATCH_DELIVERY_ID_FIELD = "batch_delivery_id";
+
+/**
+ * The legacy `note` prefix that carried a batch delivery id before APRV-38.
  *
- * SPEC.md §10.3 says each event carries "the batch's channel delivery id in its
- * payload". `core/gate.ts`'s `decide()` writes exactly one caller-controlled
- * payload field, `note`, and this task may not change the gate or the event
- * schema. So the id is carried *inside* `note`, as a machine-readable first
- * line: `batch_delivery_id=<id>`, optionally followed by a newline and the
- * human's own note. {@link batchDeliveryIdOf} parses it back, so audit
- * granularity survives, but a first-class `batch_delivery_id` payload field —
- * with a gate parameter and a schema entry — is the right end state and is a
- * follow-up task, not something to smuggle in here.
+ * ## The dual-read window (amended SPEC.md §10.3)
+ *
+ * APRV-22 had no gate parameter and no schema entry to work with, so the id
+ * rode inside the one caller-controlled payload field there was: `note`, whose
+ * first line read `batch_delivery_id=<id>`, optionally followed by a newline
+ * and the human's own words. Logs written by those builds exist and are
+ * append-only, so the encoding cannot be migrated away: it can only stop being
+ * written. That is exactly what happens now. {@link recordChannelDecision}
+ * writes the first-class field and leaves `note` to the human, while
+ * {@link batchDeliveryIdOf} reads both and prefers the field. Readers MUST
+ * accept both encodings for the life of v0.1.
+ *
+ * {@link batchNote} is retained so a caller with a v0.1-era log to reproduce
+ * can still produce the old shape. Nothing in this repository calls it on the
+ * write path.
  */
 export const BATCH_DELIVERY_NOTE_PREFIX = "batch_delivery_id=";
 
-/** Encode `batchDeliveryId` (and an optional human note) into a `note` string. */
+/**
+ * Encode `batchDeliveryId` (and an optional human note) into a `note` string.
+ *
+ * The pre-APRV-38 encoding, kept for round-trip fidelity with logs that carry
+ * it. New decisions use the first-class payload field instead.
+ */
 export function batchNote(batchDeliveryId: DeliveryId, note?: string): string {
   const head = `${BATCH_DELIVERY_NOTE_PREFIX}${batchDeliveryId}`;
   return note === undefined ? head : `${head}\n${note}`;
 }
 
-/** The batch delivery id recorded on `record`, or `null` for a unit decision. */
+/**
+ * The batch delivery id recorded on `record`, or `null` for a unit decision.
+ *
+ * Reads both encodings (see {@link BATCH_DELIVERY_NOTE_PREFIX}), preferring the
+ * first-class `batch_delivery_id` field. The fallback is what keeps audit
+ * granularity intact across a log that spans the change: a batch grant written
+ * last month and one written today resolve to the same id here.
+ */
 export function batchDeliveryIdOf(record: EventRecord): DeliveryId | null {
   const payload = record.payload;
-  const note = typeof payload === "object" && payload !== null ? payload["note"] : undefined;
+  if (typeof payload !== "object" || payload === null) return null;
+
+  const field = payload[BATCH_DELIVERY_ID_FIELD];
+  if (typeof field === "string" && field.length > 0) return field;
+
+  const note = payload["note"];
   if (typeof note !== "string") return null;
   const first = note.split("\n", 1)[0] ?? "";
   if (!first.startsWith(BATCH_DELIVERY_NOTE_PREFIX)) return null;
@@ -505,9 +537,11 @@ export interface ChannelDecisionResult {
  * - `expired`, `budget-exceeded`, `policy-not-attested`, `append-failed`
  *   (`head-moved`) — unchanged, all of them.
  *
- * `batchDeliveryId`, when present, is encoded into the note; see
- * {@link BATCH_DELIVERY_NOTE_PREFIX} for the interim encoding and why it is
- * flagged.
+ * `batchDeliveryId`, when present, is passed to the gate as such and lands in
+ * the event payload as `batch_delivery_id` (amended SPEC.md §10.3). The human's
+ * `note` is left carrying the human's words alone. See
+ * {@link BATCH_DELIVERY_NOTE_PREFIX} for the encoding this replaced and for the
+ * dual-read window readers stay inside for the life of v0.1.
  */
 export function recordChannelDecision(
   logPath: string,
@@ -515,17 +549,18 @@ export function recordChannelDecision(
   actorOptions: ChannelActorOptions,
   gateOptions: DecideOptions = {},
 ): ChannelDecisionResult {
-  const note =
-    decision.batchDeliveryId === undefined
-      ? decision.note
-      : batchNote(decision.batchDeliveryId, decision.note);
+  const options: DecideOptions = { ...gateOptions };
+  if (decision.note !== undefined) options.note = decision.note;
+  if (decision.batchDeliveryId !== undefined) {
+    options.batchDeliveryId = decision.batchDeliveryId;
+  }
 
   const result = decide(
     logPath,
     decision.action_key,
     decision.decision,
     actorOptions.actor,
-    note === undefined ? gateOptions : { ...gateOptions, note },
+    options,
   );
 
   if (!result.ok) return { outcome: result };

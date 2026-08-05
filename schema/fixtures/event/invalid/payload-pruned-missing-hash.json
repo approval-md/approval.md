@@ -1,0 +1,14 @@
+{
+  "seq": 21,
+  "ts": "2026-09-11T03:00:04Z",
+  "event": "payload.pruned",
+  "task": "task-042",
+  "action_key": "task-042:chaser:2026-08-04",
+  "actor": "system:daemon",
+  "payload": {
+    "reason": "payload_retention"
+  },
+  "alg": "sha256/jcs",
+  "prev": "92f55b985ad964c052e5e7b500f56ede98efa49473bb32bca236896317fa5da7",
+  "hash": "f17284d9e8652a2f2f92cb8187c91e565c24822125c2184be5daeedd4fbf714c"
+}
