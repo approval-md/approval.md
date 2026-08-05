@@ -4,6 +4,7 @@ title: 'HMAC sampling, audit lifecycle, and the skew anomaly check'
 status: To Do
 assignee: []
 created_date: '2026-08-05 14:18'
+updated_date: '2026-08-05 14:27'
 labels: []
 milestone: m-7
 dependencies:
@@ -27,3 +28,9 @@ Amended SPEC section 5.2 (B1): sample selection reproducible by the operator and
 - [ ] #3 verify() gains a non-fatal anomalies list flagging gate-typed events whose ts is implausibly skewed vs neighbors (threshold documented, drafted for review); clean logs with anomalies remain clean; log verify and status surface them
 - [ ] #4 The secret never appears in the log, any output, or any fixture; tests use a test-scoped env var
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Rider (human, at decomposition review): the skew threshold drafted-for-review at task time is approved as the approach.
+<!-- SECTION:NOTES:END -->

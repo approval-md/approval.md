@@ -272,3 +272,27 @@ test("a change to the CI workflow is classified full by the tier classifier", ()
     "the workflow is now forced to the full tier by something other than the `.github/**` denylist entry",
   );
 });
+
+test("the ci aggregator requires the active tier to have succeeded (APRV-44)", () => {
+  const doc = workflow();
+  const jobs = doc["jobs"] as Record<string, Record<string, unknown>>;
+  const ci = jobs["ci"];
+  assert.ok(ci !== undefined, "an aggregator job named ci must exist for branch protection");
+  assert.deepEqual(ci["needs"], ["classify", "doc-guard", "full"]);
+  assert.equal(ci["if"], "always()", "the aggregator must run even when tier jobs are skipped");
+  const steps = ci["steps"] as Array<Record<string, unknown>>;
+  const script = String((steps[steps.length - 1] as Record<string, unknown>)["run"]);
+  for (const needle of [
+    'if [ "$CLASSIFY_RESULT" != "success" ]',
+    'light)',
+    'full)',
+    '[ "$DOC_RESULT" = "success" ]',
+    '[ "$FULL_RESULT" = "success" ]',
+    "unrecognized tier",
+  ]) {
+    assert.ok(script.includes(needle), `aggregator script must contain ${JSON.stringify(needle)}`);
+  }
+  const env = (steps[steps.length - 1] as Record<string, unknown>)["env"] as Record<string, string>;
+  assert.equal(env["DOC_RESULT"], "${{ needs['doc-guard'].result }}");
+  assert.equal(env["FULL_RESULT"], "${{ needs.full.result }}");
+});
