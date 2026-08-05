@@ -1,9 +1,11 @@
 ---
 id: APRV-28
 title: 'Payload store: one source of bytes for gate, render, and channels'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@fable'
 created_date: '2026-08-05 12:19'
+updated_date: '2026-08-05 12:19'
 labels: []
 milestone: m-6
 dependencies: []

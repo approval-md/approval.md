@@ -1,9 +1,11 @@
 ---
 id: APRV-31
 title: 'approval doctor: environment sanity in one verb'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@fable'
 created_date: '2026-08-05 12:19'
+updated_date: '2026-08-05 12:19'
 labels: []
 milestone: m-6
 dependencies: []
