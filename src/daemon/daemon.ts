@@ -83,6 +83,8 @@ import {
 } from "../core/state.js";
 import { validate } from "../core/validate.js";
 import { sweepAuditSampling } from "./audit.js";
+import type { GitEvidenceRecorder } from "./git-evidence.js";
+import { prunePayloads } from "./prune.js";
 import {
   driftAlreadyLogged,
   lapsedRequests,
@@ -189,6 +191,11 @@ export const DAEMON_WARNING_CODES = [
   "render-failed",
   /** A watcher could not attach; the periodic tick covers the folder anyway. */
   "watch-unavailable",
+  /**
+   * A payload-retention prune did not complete (APRV-41). The store keeps the
+   * file, and the next tick re-derives; nothing is ever deleted unlogged.
+   */
+  "prune-refused",
 ] as const;
 
 export type DaemonWarningCode = (typeof DAEMON_WARNING_CODES)[number];
@@ -223,6 +230,13 @@ export interface DaemonOptions {
   once: boolean;
   /** The write-boundary clock, injected by tests (amended SPEC.md §8). */
   clock?: Clock;
+  /**
+   * SPEC.md §8's optional git hardening (APRV-42), off unless the operator asked
+   * for it. When present, it is handed the verified head at the end of each
+   * tick; it decides everything else, reports through its own sink, and cannot
+   * change any verdict this loop reaches. See `daemon/git-evidence.ts`.
+   */
+  gitEvidence?: GitEvidenceRecorder;
   sink: DaemonSink;
 }
 
@@ -456,11 +470,18 @@ export class Daemon {
         warn: (message) => this.warn("append-refused", message),
       });
 
+      // Payload retention (APRV-41), after the TTL sweep so a request expired on
+      // this tick is judged against the record the sweep just wrote. The pruner
+      // owns the rule, the append and the unlink; the daemon owns only the
+      // scheduling, which is the one thing `daemon/prune.ts` deliberately lacks.
+      this.prune();
+
       const closing = this.read();
       if (!closing.ok) return this.fatal(closing);
       const escalated = this.surfaceEscalations(closing.records);
 
       this.render();
+      this.options.gitEvidence?.commit(closing.head);
 
       this.emit({
         event: "tick",
@@ -728,6 +749,36 @@ export class Daemon {
     }
 
     return { appended, stop: null };
+  }
+
+  // -------------------------------------------------------------------------
+  // Payload retention (amended SPEC.md §5.2, APRV-41)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Hand one pass to `daemon/prune.ts` and surface whatever it could not do.
+   *
+   * The daemon adds nothing to the rule: with `payload_retention` absent the
+   * pass is a no-op, and with it present the pruner appends `payload.pruned`
+   * before every unlink and re-derives the whole question from the verified log.
+   * Warnings never stop the loop — a store that could not be pruned is a store
+   * holding more evidence than the policy asked it to, which is the safe side.
+   */
+  private prune(): void {
+    const options: Parameters<typeof prunePayloads>[0] = {
+      logPath: this.options.logPath,
+      // The same resolution `ttlMs` uses: an unset directory means the daemon's
+      // own working directory, never the process's.
+      policy:
+        this.options.policy.file !== undefined
+          ? { file: this.options.policy.file }
+          : { dir: this.options.policy.dir ?? this.options.cwd },
+    };
+    if (this.options.schemaDir !== undefined) options.schemaDir = this.options.schemaDir;
+    if (this.options.clock !== undefined) options.clock = this.options.clock;
+    for (const warning of prunePayloads(options).warnings) {
+      this.warn("prune-refused", `${warning.code}: ${warning.message}`);
+    }
   }
 
   // -------------------------------------------------------------------------

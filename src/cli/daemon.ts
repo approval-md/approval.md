@@ -40,6 +40,7 @@ import {
   type DaemonOptions,
   type DaemonOutcome,
 } from "../daemon/daemon.js";
+import { enableGitEvidence, type GitEvidenceEvent } from "../daemon/git-evidence.js";
 import { parseDuration } from "../core/policy-load.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
@@ -63,6 +64,7 @@ const RUN_FLAGS: Record<string, FlagKind> = {
   "--interval": "string",
   "--debounce": "string",
   "--once": "boolean",
+  "--git-evidence": "boolean",
   "--json": "boolean",
   "--help": "boolean",
   "-h": "boolean",
@@ -171,6 +173,28 @@ function describe(event: DaemonEvent): { text: string; stderr: boolean } {
   }
 }
 
+/**
+ * One git-evidence line as a human sentence (APRV-42).
+ *
+ * Its own function rather than a branch of {@link describe}, because the
+ * hardening layer has its own frozen event shape and `daemon/daemon.ts`'s union
+ * is untouched by the opt-in. Failures go to stderr with everything else that
+ * complains.
+ */
+function describeGitEvidence(event: GitEvidenceEvent): { text: string; stderr: boolean } {
+  if (event.event === "git_evidence_failed") {
+    return { text: `approval: git-evidence: ${event.message}`, stderr: true };
+  }
+  const covered =
+    event.records === null
+      ? "the log as it stands"
+      : `${String(event.records)} record(s) since the previous commit`;
+  return {
+    text: `git evidence: commit ${event.commit} witnesses seq ${String(event.seq)} (${covered})`,
+    stderr: false,
+  };
+}
+
 /** The outcome → frozen exit code mapping, drawn where every other verb draws it. */
 function exitFor(outcome: DaemonOutcome): number {
   switch (outcome.kind) {
@@ -273,6 +297,41 @@ export function commandDaemonRun(
       },
     },
   };
+
+  // SPEC.md §8's optional git hardening (APRV-42). Opt-in, checked here and
+  // never later: an operator who asked for a second evidence layer and silently
+  // did not get one is worse off than one who was refused at startup, so every
+  // precondition is judged before the first tick and a failure ends the verb.
+  if (boolFlag(flags, "--git-evidence")) {
+    const enabled = enableGitEvidence(logPath, (event) => {
+      if (json) {
+        const line = `${JSON.stringify(event)}\n`;
+        if (event.event === "git_evidence_failed") streams.err(line);
+        else streams.out(line);
+        return;
+      }
+      const rendered = describeGitEvidence(event);
+      if (rendered.stderr) streams.err(`${rendered.text}\n`);
+      else streams.out(`${rendered.text}\n`);
+    });
+    if (!enabled.ok) {
+      if (json) {
+        streams.err(
+          `${JSON.stringify({ error: { code: enabled.code, message: enabled.message } })}\n`,
+        );
+      } else {
+        streams.err(`approval: ${enabled.message}\n`);
+      }
+      // A missing binary or a missing directory is the environment failing to
+      // match the request (I/O); a repository in the wrong shape is the request
+      // failing to match a valid deployment (usage). The repair differs, and so
+      // does the code an operator's supervisor branches on.
+      return enabled.code === "git-unavailable" || enabled.code === "log-dir-missing"
+        ? EXIT_IO
+        : EXIT_USAGE;
+    }
+    options.gitEvidence = enabled.recorder;
+  }
 
   const daemon = new Daemon(options);
   const stop = (signal: NodeJS.Signals): void => daemon.stop(signal);

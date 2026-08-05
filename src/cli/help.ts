@@ -2118,6 +2118,10 @@ Flags:
   --interval <d>      how often to tick with no watcher event (default 30s)
   --debounce <d>      how long a burst of file events settles first (default 250ms)
   --once              run exactly ONE tick and exit; the cron-shaped invocation
+  --git-evidence      OPT-IN second evidence layer: commit the log and its
+                      payload store to the log home's OWN git repository after
+                      every tick that moved the head (SPEC.md §8). Off by
+                      default. Requires a standalone log deployment
   --json              machine-readable output, one JSON object per line
   -h, --help          this text
 
@@ -2166,6 +2170,27 @@ A log that does not verify STOPS the daemon rather than degrading it: nothing ma
 be appended onto a chain that does not verify, and a projection of one would be a
 screenshot of something nobody should read.
 
+GIT EVIDENCE (--git-evidence, OFF BY DEFAULT). SPEC.md §8's optional hardening: a
+second, independent record of the same bytes, one an operator can clone and diff
+from somewhere the tamperer does not control. When enabled the daemon commits the
+log file and the payload store to the log home's own repository after each tick
+that moved the head, with a message naming the head's seq and hash, authored as
+itself ("approvald <version>", fixed noreply address, never your git identity and
+never written to your git config). It NEVER pushes, fetches, or names a branch,
+and a git failure is a warning, not a stop.
+
+  THE LOG HOME MUST BE ITS OWN REPOSITORY ROOT, and must not sit inside any outer
+  working tree. Enabling in a nested layout — a project repository that also
+  tracks .approval/, which is how this project dogfoods itself — is REFUSED, with
+  the code log-dir-nested. A hash chain does not survive a merge (two branches
+  appending independently produce a corrupt chain by construction), and an outer
+  repository's rebases, amends and force-pushes rewrite the bytes the evidence is
+  made of. The nested layout stays fully valid WITHOUT the flag; the two patterns
+  do not mix. See docs/git-evidence.md.
+
+  Refusals at startup: git-unavailable and log-dir-missing exit 4;
+  log-dir-not-repo and log-dir-nested exit 2. Nothing is appended either way.
+
 ${EXIT_CODES}
   A clean stop is 0. 4 when the log cannot be read, 3 when its tail is torn, 1
   when the chain does not verify.
@@ -2187,7 +2212,17 @@ JSON shape (stdout, ONE OBJECT PER LINE):
   warnings go to STDERR as {"event":"warning","code":"...","message":"..."},
   with code one of task-unreadable, frontmatter-invalid, envelope-invalid,
   task-id-missing, tasks-dir-unreadable, append-refused, expire-refused,
-  render-failed, watch-unavailable. A warning never stops the loop.
+  render-failed, watch-unavailable, prune-refused. A warning never stops the
+  loop.
+  payload retention (APRV-41): with payload_retention set in policy, each tick
+  appends payload.pruned and THEN removes the payload file for every payload
+  whose action has been terminal longer than the duration, and for orphaned
+  store files. With the key absent nothing is ever pruned.
   "rendered" is emitted when the queue's summary CHANGES; the file itself is
   rewritten every tick, because TTL countdowns move even when the log does not.
+  With --git-evidence, one further line per committing tick:
+  {"event":"git_evidence","commit":"a1b2c3d","seq":10,
+   "hash":"<sha256 of the head record>","records":2}
+  and, on a git failure, {"event":"git_evidence_failed","step":"commit",
+  "message":"..."} on STDERR. Neither ever stops the loop.
 ${JSON_ERRORS}`;

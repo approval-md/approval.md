@@ -57,6 +57,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   unlinkSync,
   writeSync,
@@ -207,6 +208,84 @@ export function storeReference(
     };
   }
   return { ok: true, hash, path };
+}
+
+// ---------------------------------------------------------------------------
+// Enumeration and removal
+// ---------------------------------------------------------------------------
+
+/**
+ * Every payload hash the store currently holds, sorted.
+ *
+ * Only `<hash>.json` names whose stem is a well-formed `payload_hash` are
+ * reported. A directory, a dotfile (the temp name an interrupted
+ * {@link writeAtomic} leaves behind), and anything else a human dropped in the
+ * directory are not payloads the store addresses, so no caller — the daemon's
+ * pruner least of all — is ever handed one as if it were.
+ *
+ * An unreadable or absent directory yields the empty list rather than throwing:
+ * a store that cannot be listed holds nothing this process can act on, which is
+ * the fail-closed reading for every caller here (reporting counts, deciding what
+ * to prune).
+ */
+export function listStoredPayloadHashes(storeDir: string): string[] {
+  let entries;
+  try {
+    entries = readdirSync(storeDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const hashes: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.name.startsWith(".") || !entry.name.endsWith(".json")) continue;
+    const stem = entry.name.slice(0, -".json".length);
+    if (isPayloadHash(stem)) hashes.push(stem);
+  }
+  return hashes.sort();
+}
+
+/** Why a removal did not happen. `absent` is a success for every caller here. */
+export type RemovePayloadResult =
+  | { ok: true; path: string; existed: boolean }
+  | { ok: false; code: "unlink-failed"; message: string; path: string };
+
+/**
+ * Delete the bytes stored under `hash`.
+ *
+ * **Daemon-only.** SPEC.md §5.2: "Pruning is performed by the daemon and by
+ * nothing else." Nothing in the CLI calls this, and the retention rule that
+ * decides *which* hash reaches it lives in `daemon/prune.ts`, which appends the
+ * `payload.pruned` event before the file goes. This function is the unlink and
+ * nothing more: it judges no retention, reads no policy, and touches no log.
+ *
+ * A file that is already gone reports `existed: false` and `ok`. The caller's
+ * intent is that the bytes not be there, and a removal that raced another
+ * removal (or completed a crash-interrupted one) achieved exactly that.
+ */
+export function removeStoredPayload(storeDir: string, hash: string): RemovePayloadResult {
+  const path = payloadPath(storeDir, hash);
+  if (!isPayloadHash(hash)) {
+    return {
+      ok: false,
+      code: "unlink-failed",
+      message: `${JSON.stringify(hash)} is not a payload hash; the store is addressed by hash and nothing else, so nothing was removed`,
+      path,
+    };
+  }
+  try {
+    unlinkSync(path);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+      return { ok: true, path, existed: false };
+    }
+    return {
+      ok: false,
+      code: "unlink-failed",
+      message: `payload ${path} could not be removed: ${detail(cause)}`,
+      path,
+    };
+  }
+  return { ok: true, path, existed: true };
 }
 
 // ---------------------------------------------------------------------------
