@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-05 13:48'
-updated_date: '2026-08-05 14:10'
+updated_date: '2026-08-05 15:32'
 labels: []
 milestone: m-6
 dependencies: []
@@ -17,7 +17,7 @@ ordinal: 36000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Human workflow tuning (2026-08-10), hard constraints verbatim in ACs. Motivated by the APRV-33 turn: a docs-only change ran the full 900-test suite. A tier classifier computes light vs full deterministically from changed paths; agents never assert their own tier; merges to main always run full; ambiguity resolves full.
+Human workflow tuning (2026-08-05), hard constraints verbatim in ACs. Motivated by the APRV-33 turn: a docs-only change ran the full 900-test suite. A tier classifier computes light vs full deterministically from changed paths; agents never assert their own tier; merges to main always run full; ambiguity resolves full.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -27,13 +27,15 @@ Human workflow tuning (2026-08-10), hard constraints verbatim in ACs. Motivated 
 - [x] #3 A test asserts the classifier cannot classify changes to its own code or config as light
 - [x] #4 Light tier runs the doc-guard subset (reintroduction guard, exit-code deepEqual, README/example grep-guards); full tier is the whole suite; ambiguous or unclassifiable paths resolve full
 - [x] #5 Documented in CLAUDE-adjacent tooling docs that every merge to main runs the full suite unconditionally and review applies identically to both tiers
-- [x] #6 Denylist amended per the 2026-08-10 addendum: backlog/ forces the full tier — task files are markdown but instruction-bearing (acceptance criteria are commands to future worker agents), so an edit to a pending task's criteria is a change to future agent behavior; the self-exemption test covers this path
+- [x] #6 Denylist amended per the 2026-08-05 addendum: backlog/ forces the full tier — task files are markdown but instruction-bearing (acceptance criteria are commands to future worker agents), so an edit to a pending task's criteria is a change to future agent behavior; the self-exemption test covers this path
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented by Opus subagent; fable review found nothing to override. The denylist lives as a frozen inline const in the classifier itself (config is the code, so the self-protection constraint covers both with one mechanism); verdicts carry a named reason (empty-path-set, git-state-unreadable, denylisted-path, path-outside-light-allowlist) with unparseable paths kept in the set as full-forcing rather than dropped; the backlog/ addendum entry has dedicated cases asserting forcedBy names backlog/**. Light tier still compiles (the guard imports frozen TS tables); the saving is the ~930 other tests, stated in script and README. Every-merge-runs-full and identical-review are documented in the README section. Verified: 939/939, lint, typecheck.
+
+Date corrected in place per the 2026-08-05 human ruling (log-is-authoritative, applied to all APRV-46 findings): prose previously claimed 2026-08-10; this task's own created_date (2026-08-05) is the cited source. The wrong date was orchestrator confabulation, part of the systematic drift reported in APRV-46.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

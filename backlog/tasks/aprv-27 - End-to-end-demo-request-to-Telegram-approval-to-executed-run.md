@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-05 10:51'
-updated_date: '2026-08-05 12:12'
+updated_date: '2026-08-05 15:32'
 labels: []
 milestone: m-5
 dependencies:
@@ -19,7 +19,7 @@ ordinal: 27000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The m-4 exit criterion (human-settled 2026-08-08): something end-to-end must close the milestone. A scripted demo test walks the full path — register, request (manual class), Telegram notify, approve via callback, token minted at grant, approval run executes the command — asserted against the log at every hop, running against the local mock Bot API. Alongside it, a documented manual script (docs or examples/ per SPEC section 14) walks the same path against real Telegram for a human to run once, since the mock cannot prove the real network. The demo is the SPEC abstract made executable: agent drafts, phone approves, log verifies.
+The m-4 exit criterion (human-settled 2026-08-05): something end-to-end must close the milestone. A scripted demo test walks the full path — register, request (manual class), Telegram notify, approve via callback, token minted at grant, approval run executes the command — asserted against the log at every hop, running against the local mock Bot API. Alongside it, a documented manual script (docs or examples/ per SPEC section 14) walks the same path against real Telegram for a human to run once, since the mock cannot prove the real network. The demo is the SPEC abstract made executable: agent drafts, phone approves, log verifies.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -35,6 +35,8 @@ The m-4 exit criterion (human-settled 2026-08-08): something end-to-end must clo
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented by Opus subagent; fable review found nothing to override. Eight ordered hops driven entirely through the CLI as subprocesses; core imported only for the fixture payload hash. Both negative-space requirements covered (exit 5 before approval with byte-identical log; token replay refused with no second started event); token and bot-token scans cover log bytes, mock request bodies, and stderr; final statement of the file is log verify --json asserting clean per the human rider. examples/telegram-demo.md carries the real-Telegram walkthrough with verbatim captured transcripts and the section 11 caveat, no em dashes. CLI friction reported for follow-up triage (not fixed, per scope): (1) approval render has no --payloads bridge so live manual requests land in could-not-summarize and QUEUE.md pending reads 0 while queue reads 1 — the missing payload store made concrete; (2) grant-via-telegram records no note while reject does, asymmetry undocumented outside channel source; (3) no approval payload hash verb — the manual script resorts to a node -e one-liner against an internal module; (4) --payload-hash is load-bearing for adapter-shaped payloads but run --help presents it as exotic; (5) examples transcripts are a second unexecuted source of truth — cheap guard test proposed. Verified from wiped node_modules/dist: 809/809, lint, typecheck.
+
+Date corrected in place per the 2026-08-05 human ruling (log-is-authoritative, applied to all APRV-46 findings): prose previously claimed 2026-08-08; this task's own created_date (2026-08-05) is the cited source. The wrong date was orchestrator confabulation, part of the systematic drift reported in APRV-46.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

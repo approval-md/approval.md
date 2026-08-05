@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-05 01:00'
-updated_date: '2026-08-05 02:11'
+updated_date: '2026-08-05 15:31'
 labels: []
 milestone: m-3
 dependencies:
@@ -18,7 +18,7 @@ ordinal: 18000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The gate's execution surface (SPEC section 10.1, human-settled point 5, 2026-08-06). `approval run -- <cmd...>` refuses without a valid token at a distinct exit code; on success it appends execution.started BEFORE spawning the child and execution.completed/execution.failed carrying the child's exit code after. A crash between started and completed leaves a dangling execution: the queue/status surface and verification tooling must report that state distinctly, and recovery is human-invoked, never automatic — no auto-reconciliation on the next run. `approval wait <task> --timeout` blocks until a request is decided, exit code encoding the decision (SPEC 10.1). Three consecutive execution.failed events for one task escalate to manual regardless of policy (SPEC 10.2 loop safety) — the projection for that lives here so the daemon (M5) can reuse it.
+The gate's execution surface (SPEC section 10.1, human-settled point 5, 2026-08-05). `approval run -- <cmd...>` refuses without a valid token at a distinct exit code; on success it appends execution.started BEFORE spawning the child and execution.completed/execution.failed carrying the child's exit code after. A crash between started and completed leaves a dangling execution: the queue/status surface and verification tooling must report that state distinctly, and recovery is human-invoked, never automatic — no auto-reconciliation on the next run. `approval wait <task> --timeout` blocks until a request is decided, exit code encoding the decision (SPEC 10.1). Three consecutive execution.failed events for one task escalate to manual regardless of policy (SPEC 10.2 loop safety) — the projection for that lives here so the daemon (M5) can reuse it.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -36,6 +36,8 @@ The gate's execution surface (SPEC section 10.1, human-settled point 5, 2026-08-
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented by Opus subagent; fable review found nothing to override. Exit-code additions 5 (run: no valid execution token — distinct because the repair is distinct) and 6 (wait: timeout) added in the declared single home src/cli/exit-codes.ts, 0-4 untouched, each new code emitted by exactly one verb; wait overloads 1/3 as exit-code-equals-decision per SPEC 10.1, flagged in help for review. loop-escalated added to the gate refusal union at the documented seam — escalation forces the manual path and never blocks it (refusing manual too would leave no way back). Accepted decisions: budget headroom via zero-cost probe (class limits omitted — they need a matched rule status does not have); manual-path start does not re-check attestation (grant+mint were the guarded operations per the settled design; the token proves an attested grant); signal deaths recorded 128+signum, unspawnable 127; a refused finish after a successful child exits with the refusal code (failure to record success must not read as success); run --json summary goes to stderr since stdout belongs to the inherited-stdio child (the one documented departure from one-object-on-stdout). Deliberately unbuilt and flagged for human decision: no CLI verb closes a dangling execution — finishExecution is the core-level human recovery, but making that write casual would undercut the log; the verb shape awaits human sign-off. Real-crash test: child SIGKILLs its run parent; status reports dangling, queue does not, second run refuses token-consumed, nothing auto-repairs. Verified from wiped node_modules/dist: 629/629, lint, typecheck.
+
+Date corrected in place per the 2026-08-05 human ruling (log-is-authoritative, applied to all APRV-46 findings): prose previously claimed 2026-08-06; this task's own created_date (2026-08-05) is the cited source. The wrong date was orchestrator confabulation, part of the systematic drift reported in APRV-46.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

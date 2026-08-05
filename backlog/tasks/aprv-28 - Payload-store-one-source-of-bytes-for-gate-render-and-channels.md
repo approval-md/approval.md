@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-05 12:19'
-updated_date: '2026-08-05 12:54'
+updated_date: '2026-08-05 15:32'
 labels: []
 milestone: m-6
 dependencies: []
@@ -17,7 +17,7 @@ ordinal: 28000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Follow-up 1 from the M4 demo (human-approved 2026-08-09). v0.1 logs only payload_hash, so every surface needs the bytes handed to it separately: channels take --payloads/--payload-dir, render has no bridge at all, and QUEUE.md's pending count reads 0 while queue reads 1 for material-less manual requests. This task gives requests a persisted payload (or reference) at request time under .approval/payloads/ keyed by hash, so render and channels share one source; the payload-unavailable listing becomes the exception path it was meant to be (material genuinely lost), and the two counts agree. The store is content-addressed (file named by the payload_hash it must hash to), verified on read, and never trusted over the recorded binding.
+Follow-up 1 from the M4 demo (human-approved 2026-08-05). v0.1 logs only payload_hash, so every surface needs the bytes handed to it separately: channels take --payloads/--payload-dir, render has no bridge at all, and QUEUE.md's pending count reads 0 while queue reads 1 for material-less manual requests. This task gives requests a persisted payload (or reference) at request time under .approval/payloads/ keyed by hash, so render and channels share one source; the payload-unavailable listing becomes the exception path it was meant to be (material genuinely lost), and the two counts agree. The store is content-addressed (file named by the payload_hash it must hash to), verified on read, and never trusted over the recorded binding.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -33,6 +33,8 @@ Follow-up 1 from the M4 demo (human-approved 2026-08-09). v0.1 logs only payload
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented by Opus subagent in isolated worktree; fable review found nothing to override. Store: .approval-sibling payloads/ dir (never inside the chain-walked directory), files hold RFC 8785 canonical bytes so sha256(bytes)==filename, every read re-hashes and withholds on mismatch; references are minimal {"$ref"} never resolved. Ordering accepted as argued: declared-hash comparison early (pure, before duplicate/budget), write after every check immediately before append — refused requests store nothing; a head-moved orphan is harmless content-addressed residue, whereas the reverse ordering would record a manual request whose bytes no channel can display. Two sanctioned GATE_REFUSAL_CODES additions: payload-mismatch (exit 1), payload-store-failed (exit 4, fails closed). SPEC unchanged: section 6.2 already says stored-or-referenced; the only arguable addition (naming payloads/ in section 9 layout) deliberately left for human judgment. Demo simplified: request --payload carries the whole chain, count-agreement asserted, override flags still covered in channel tests. Three tail findings for the m-4.1 report: the store is the one UNREBUILDABLE cache (loss is not derivable from the log; operator warning proposed for status or docs before M5); retention is unbounded incl. terminal-state and orphan files (a SPEC decision, deliberately not invented here); --payload-dir/--payloads are now redundant surface (deprecate at M6 or document the vault-backed use case). Global invariants: touches none; store writes never touch the log (byte-checked). Verified on merged tree: 859/859, lint, typecheck.
+
+Date corrected in place per the 2026-08-05 human ruling (log-is-authoritative, applied to all APRV-46 findings): prose previously claimed 2026-08-09; this task's own created_date (2026-08-05) is the cited source. The wrong date was orchestrator confabulation, part of the systematic drift reported in APRV-46.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-05 01:00'
-updated_date: '2026-08-05 01:14'
+updated_date: '2026-08-05 15:31'
 labels: []
 milestone: m-3
 dependencies: []
@@ -17,7 +17,7 @@ ordinal: 15000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Formalizes SPEC section 5.2's mtime/hash guard, per the human-settled design (2026-08-06): a new human-only verb `approval policy attest` appends a policy.updated event carrying the live policy file's SHA-256. Every gate operation — request intake, grant recording, token minting — MUST refuse with a distinct machine-readable reason when the live file's hash differs from the latest attestation, or when no attestation exists. This is what makes "agents cannot modify APPROVAL.md" mechanical: an edited policy is simply inoperative until a human re-attests. Two SPEC edits land same-commit: section 5.2 gains the attestation definition, and section 11 states plainly that human identity is config-declared and the trust boundary is the local machine (no pretense of stronger identity). Amendment wording is drafted in this task and flagged for human review, per the duration-grammar precedent — the design is pre-approved, the prose is not yet.
+Formalizes SPEC section 5.2's mtime/hash guard, per the human-settled design (2026-08-05): a new human-only verb `approval policy attest` appends a policy.updated event carrying the live policy file's SHA-256. Every gate operation — request intake, grant recording, token minting — MUST refuse with a distinct machine-readable reason when the live file's hash differs from the latest attestation, or when no attestation exists. This is what makes "agents cannot modify APPROVAL.md" mechanical: an edited policy is simply inoperative until a human re-attests. Two SPEC edits land same-commit: section 5.2 gains the attestation definition, and section 11 states plainly that human identity is config-declared and the trust boundary is the local machine (no pretense of stronger identity). Amendment wording is drafted in this task and flagged for human review, per the duration-grammar precedent — the design is pre-approved, the prose is not yet.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -43,6 +43,8 @@ Formalizes SPEC section 5.2's mtime/hash guard, per the human-settled design (20
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented by Opus subagent in isolated worktree; fable review found nothing to override. Both drafted SPEC paragraphs (section 5.2 attestation mechanics; section 11 config-declared identity / local-machine trust boundary, "someone with local control, not who") landed same-commit — wording awaits human review at the M3 report. Accepted decisions (all documented): actor refusal reuses AppendErrorCode "validation" since log.ts is a closed union this task may not edit (dedicated code flagged as possible follow-up); corrupt-tail on attest maps to exit 3 not 4 (3 is the frozen torn-tail meaning; calling it io would misdescribe a crashed write); payload.policy_path is the basename so exported logs never bake in a home directory; checkAttestation compares bytes only, deliberately not filtering by filename, so APPROVALS/APPROVAL drift surfaces as mismatch; unreadable outranks not-attested; a non-human --as never falls back to env; discovery stops on an unreadable candidate rather than silently attesting the fallback file; clock read only at the CLI edge. Smoke: attest of the real APPROVAL.md produced sha256 c218ecd0...70cf9d, byte-identical to the dogfood suite pin. Verified on merged tree: 477/477, lint, typecheck green.
+
+Date corrected in place per the 2026-08-05 human ruling (log-is-authoritative, applied to all APRV-46 findings): prose previously claimed 2026-08-06; this task's own created_date (2026-08-05) is the cited source. The wrong date was orchestrator confabulation, part of the systematic drift reported in APRV-46.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

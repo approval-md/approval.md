@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-05 13:37'
-updated_date: '2026-08-05 13:38'
+updated_date: '2026-08-05 15:32'
 labels: []
 milestone: m-6
 dependencies: []
@@ -17,13 +17,19 @@ ordinal: 33000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Human-dictated roadmap addition (2026-08-09), post-v1, non-normative: a Rust fast-path implementation of the hot loop (policy resolution, chain-tail verification, gate verdict) as the engine for per-tool-call hook adapters, where Node startup latency is unacceptable; conformance defined by the fixture suite; the crates.io name approval-md reserved for it; the TypeScript runtime remains the reference implementation for the full surface. Landed in section 13 alongside the existing Post-v1 non-normative note, wording near-verbatim from the dictation, style rule observed.
+Human-dictated roadmap addition (2026-08-05), post-v1, non-normative: a Rust fast-path implementation of the hot loop (policy resolution, chain-tail verification, gate verdict) as the engine for per-tool-call hook adapters, where Node startup latency is unacceptable; conformance defined by the fixture suite; the crates.io name approval-md reserved for it; the TypeScript runtime remains the reference implementation for the full surface. Landed in section 13 alongside the existing Post-v1 non-normative note, wording near-verbatim from the dictation, style rule observed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 The Rust fast-path paragraph lands in SPEC section 13 as a Post-v1 non-normative note, matching the dictated content
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Date corrected in place per the 2026-08-05 human ruling (log-is-authoritative, applied to all APRV-46 findings): prose previously claimed 2026-08-09; this task's own created_date (2026-08-05) is the cited source. The wrong date was orchestrator confabulation, part of the systematic drift reported in APRV-46.
+<!-- SECTION:NOTES:END -->
 
 ## Final Summary
 

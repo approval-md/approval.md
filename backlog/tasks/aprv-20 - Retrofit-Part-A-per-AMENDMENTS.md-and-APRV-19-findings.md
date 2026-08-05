@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-05 02:21'
-updated_date: '2026-08-05 03:49'
+updated_date: '2026-08-05 15:32'
 labels: []
 milestone: m-3.1
 dependencies:
@@ -18,7 +18,7 @@ ordinal: 20000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Code retrofit per the human's AMENDMENTS.md Part A (NOTE: AMENDMENTS.md is not yet present in the repo as of task creation, 2026-08-07 — this task is additionally blocked on that file landing on main; the human's message also references the dangling-execution recovery verb "as specced" therein). Scope adjusted by APRV-19's blocker/should-fix findings. Includes: the approval execution resolve verb (the human-specced recovery verb for dangling executions), the dedicated refusal code for grant-on-classless-request, and the dedicated append-error code for attestation's actor refusal. Spec amendments accompany their implementing code same-commit per the standing rule.
+Code retrofit per the human's AMENDMENTS.md Part A (NOTE: AMENDMENTS.md is not yet present in the repo as of task creation, 2026-08-05 — this task is additionally blocked on that file landing on main; the human's message also references the dangling-execution recovery verb "as specced" therein). Scope adjusted by APRV-19's blocker/should-fix findings. Includes: the approval execution resolve verb (the human-specced recovery verb for dangling executions), the dedicated refusal code for grant-on-classless-request, and the dedicated append-error code for attestation's actor refusal. Spec amendments accompany their implementing code same-commit per the standing rule.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -52,6 +52,8 @@ Code retrofit per the human's AMENDMENTS.md Part A (NOTE: AMENDMENTS.md is not y
 
 <!-- SECTION:NOTES:BEGIN -->
 Two-pass Opus build, fable review between. PASS 1 (seams): B1 compare-and-append (expectedHead under the lock, head-moved code, adopted at every check-then-append site; attest documented as exempt — no read-dependent check; TRUE concurrency test with two child processes barriered on the parent-held lock, 3 rounds, exactly one execution.started ever lands); S1 verified reads via state.ts readVerifiedRecords (log-corrupt code; v0.1 linear-cost note in header); S3 literal frozen fixtures (cli.test no longer imports verify; explain candidates are literal arrays); S4 cycle dissolved (token no longer imports gate — source-scan test); S5 one hardened parse (parseHardenedYaml; frontmatter replica deleted; alias-bomb proven through both paths). PASS 2 (semantics): A1 payload_hash (schema + fixtures; payload-hash-required at manual intake; grant records the hash; consume/start require presentedPayloadHash; approval run auto-computes runPayloadHash(argv,cwd) with --payload-hash override; SPEC 6.2/10.4/11 verbatim incl. not-defended splice); A2 runtime clocks (ts dropped from all gate-typed writer signatures; injected clock option; appendEvent keeps ts per the section 8 carve-out; arity-pinned tests); A3 ratchet (source-scan + behavioral guards: confidence 0.01 vs 0.99 identical outcomes; zero-cost still charges daily_actions); S2 evaluateBudgetsWithTask at intake/grant/start (task-scope verdict appended last, order stable); resolve verb (mandatory non-empty note, human actor, attested_by_human:true, exit_code null, no attestation — help explains it records facts and exercises no policy authority); dedicated codes grant-classless-request (gate) and actor-not-human (new ATTEST_ERROR_CODES extending APPEND_ERROR_CODES rather than widening the writer union — rationale documented). A1 REWORK-VS-EXTEND (human-required report): four frozen shapes reworked — approval.requested, approval.granted, execution.started payloads gained payload_hash, and consume/start now demand the binding (previously any valid token spent); plus attest actor code validation->actor-not-human and grant no longer substitutes class:"". FABLE OVERRIDE (stricter-path invariant): flipped the agent's judgment call — a grant recorded without payload_hash refuses consumption (payload-mismatch, "predates content binding", remedy revoke+re-request) instead of accepting; new test proves a valid token cannot spend a binding-less grant. Verify-side skew check deliberately not implemented (M5, spec text only). max_latency untouched (APRV-21 note); register now copies the envelope budget block into task.registered for M4/M5. Verified from wiped node_modules/dist: 703/703, lint, typecheck.
+
+Date corrected in place per the 2026-08-05 human ruling (log-is-authoritative, applied to all APRV-46 findings): prose previously claimed 2026-08-07; this task's own created_date (2026-08-05) is the cited source. The wrong date was orchestrator confabulation, part of the systematic drift reported in APRV-46.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

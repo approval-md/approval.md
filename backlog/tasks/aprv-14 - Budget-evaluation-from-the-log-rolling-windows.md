@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-05 00:59'
-updated_date: '2026-08-05 01:12'
+updated_date: '2026-08-05 15:31'
 labels: []
 milestone: m-3
 dependencies: []
@@ -17,7 +17,7 @@ ordinal: 14000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-SPEC.md section 5.2: budgets are conjunctive (class limits AND global budgets) and consumption is computed from the log, never from a mutable counter. The human has pre-approved (2026-08-06) the rolling-window amendment recorded verbatim in this task's comments: daily limits are evaluated over the 24 hours preceding the evaluation moment, deterministically, from the log alone — rolling rather than calendar-day so a burst straddling midnight cannot reset its own tripwire. This task builds the pure evaluator the gate (APRV-16) calls before admitting any action: given (log path or parsed records, policy limits, action est_cost_usd, evaluation timestamp) return per-limit pass/fail with machine-readable detail. Deterministic core: the evaluation timestamp is a parameter, never read from the clock inside the evaluator. The section 5.2 amendment lands in the same commit as the evaluator.
+SPEC.md section 5.2: budgets are conjunctive (class limits AND global budgets) and consumption is computed from the log, never from a mutable counter. The human has pre-approved (2026-08-05) the rolling-window amendment recorded verbatim in this task's comments: daily limits are evaluated over the 24 hours preceding the evaluation moment, deterministically, from the log alone — rolling rather than calendar-day so a burst straddling midnight cannot reset its own tripwire. This task builds the pure evaluator the gate (APRV-16) calls before admitting any action: given (log path or parsed records, policy limits, action est_cost_usd, evaluation timestamp) return per-limit pass/fail with machine-readable detail. Deterministic core: the evaluation timestamp is a parameter, never read from the clock inside the evaluator. The section 5.2 amendment lands in the same commit as the evaluator.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -47,6 +47,8 @@ SPEC.md section 5.2: budgets are conjunctive (class limits AND global budgets) a
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented by Opus subagent in isolated worktree; fable review found nothing to override. Both amendment sentences landed verbatim in the section 5.2 budgets bullet, same commit. The consumption contract for APRV-16 is documented prominently in the module header: only approval.granted and execution.started consume; the gate MUST record payload.est_cost_usd and payload.class on both; started counts only when the window holds no grant with the same action_key; rejected/expired/revoked/completed/failed never consume. Accepted design decisions: half-open window (evaluationTs-24h, evaluationTs] so windows tile; class-limit consumption scoped by the matched RULE PATTERN via the real matcher (a financial.* daily_usd is one shared bucket, not per-class buckets that silently multiply the ceiling); all named budget scopes evaluated, not just global; fail-closed set incl. unknown limit names, non-finite ceilings, unparseable evaluationTs, class daily limits with no pattern, and events with unparseable ts kept IN the window (cannot be proven outside); 1e-6 USD rounding applied identically to comparison and reported figures; deterministic verdict ordering. Named test present: 5 grants zero completions — 5th passes remaining 0, 6th fails consumed 5. Verified on merged tree: 440/440, lint, typecheck green.
+
+Date corrected in place per the 2026-08-05 human ruling (log-is-authoritative, applied to all APRV-46 findings): prose previously claimed 2026-08-06; this task's own created_date (2026-08-05) is the cited source. The wrong date was orchestrator confabulation, part of the systematic drift reported in APRV-46.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
@@ -54,12 +56,12 @@ Implemented by Opus subagent in isolated worktree; fable review found nothing to
 <!-- COMMENTS:BEGIN -->
 created: 2026-08-05 01:00
 ---
-Human pre-approved SPEC section 5.2 amendment (2026-08-06), verbatim: "Budget windows are rolling: a `daily` limit is evaluated over the 24 hours preceding the evaluation moment, computed solely from the event log; evaluation is deterministic given the log and the evaluation timestamp."
+Human pre-approved SPEC section 5.2 amendment (2026-08-05), verbatim: "Budget windows are rolling: a `daily` limit is evaluated over the 24 hours preceding the evaluation moment, computed solely from the event log; evaluation is deterministic given the log and the evaluation timestamp."
 ---
 
 created: 2026-08-05 01:05
 ---
-Human-settled (2026-08-06): consumption is commitment-based. Second SPEC section 5.2 amendment sentence, verbatim: "Budgets meter authorization, not completion; an authorized action consumes budget whether or not it ultimately executes." Lands in the same commit as the rolling-window sentence and the evaluator.
+Human-settled (2026-08-05): consumption is commitment-based. Second SPEC section 5.2 amendment sentence, verbatim: "Budgets meter authorization, not completion; an authorized action consumes budget whether or not it ultimately executes." Lands in the same commit as the rolling-window sentence and the evaluator.
 ---
 <!-- COMMENTS:END -->
 

@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-05 12:19'
-updated_date: '2026-08-05 12:56'
+updated_date: '2026-08-05 15:32'
 labels: []
 milestone: m-6
 dependencies: []
@@ -17,7 +17,7 @@ ordinal: 31000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Follow-up 4-adjacent (human-approved 2026-08-09), motivated by the stale-checkout and placeholder-binary detours in the amendment ceremony: the operator ran against an outdated build and an unbuilt bin before finding the real one. approval doctor checks, in one pass, each failure paired with a suggested fix: build freshness (dist mtime/content vs git HEAD state, and cli.js loader vs dist presence), identity resolution (APPROVAL_HUMAN/--as), attestation status vs the live policy hash, log verification summary, and channel reachability probes — Telegram send-capability via getMe (never sending a decision or message), web port availability. Read-only except the probes' outbound calls; appends nothing.
+Follow-up 4-adjacent (human-approved 2026-08-05), motivated by the stale-checkout and placeholder-binary detours in the amendment ceremony: the operator ran against an outdated build and an unbuilt bin before finding the real one. approval doctor checks, in one pass, each failure paired with a suggested fix: build freshness (dist mtime/content vs git HEAD state, and cli.js loader vs dist presence), identity resolution (APPROVAL_HUMAN/--as), attestation status vs the live policy hash, log verification summary, and channel reachability probes — Telegram send-capability via getMe (never sending a decision or message), web port availability. Read-only except the probes' outbound calls; appends nothing.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -32,6 +32,8 @@ Follow-up 4-adjacent (human-approved 2026-08-09), motivated by the stale-checkou
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented by Opus subagent in isolated worktree; fable review found nothing to override. Check semantics accepted: build-freshness markers the exact file cli.js loads vs max mtime of src/ + tsconfig.json, with three distinct shapes (stale build / unbuilt checkout / no bin loader) because their repairs differ, and published installs skip rather than silently pass; the freshness root derives from the module URL not cwd (the question is whether the running code is stale); --root is test-only and documented as such in --help (an undocumented flag in a diagnostic verb is what this project exists not to do); exit 4 reserved for doctor's own inability to look — an unreadable log or policy is an environment fact and a check failure at exit 1; one verifyWithRecords walk feeds both attestation and log checks so two walks cannot disagree; getMe-only Telegram probe with token redaction and BotFather fix on unauthorized; a held web port passes with a note (likeliest holder is our own channel). Testing findings recorded: the suite spawns the CLI asynchronously because spawnSync would block the event loop hosting the mock Bot API; runCli refuses a configured Telegram env without --api-base so no test can drift onto the real network; EACCES not simulated (needs a privileged port, non-portable) — documented at the test rather than left a coin-flip; the doctor suite was optimized from 18s to 6s to stop pushing the (since-deflaked) TTL test over its limit. Healthy run against the live repo shows attestation seq 3 sha 8ac906a4... and the log at head seq 3. Verified on merged tree: 884/884, lint, typecheck.
+
+Date corrected in place per the 2026-08-05 human ruling (log-is-authoritative, applied to all APRV-46 findings): prose previously claimed 2026-08-09; this task's own created_date (2026-08-05) is the cited source. The wrong date was orchestrator confabulation, part of the systematic drift reported in APRV-46.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

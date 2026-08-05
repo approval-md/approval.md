@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-05 12:19'
-updated_date: '2026-08-05 12:40'
+updated_date: '2026-08-05 15:32'
 labels: []
 milestone: m-6
 dependencies: []
@@ -17,7 +17,7 @@ ordinal: 30000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Follow-up 3 (human-approved 2026-08-09), motivated by two live incidents in the committed log and history: seq 2, an eleven-minute amendment superseded after the dogfood pin correctly failed it, and the unsigned interregnum between commit f829e6c and its attestation, during which the edited policy was inoperative. One verb owns the ceremony: approval policy amend shows a semantic diff of the edited policy against the currently attested bytes (class resolutions that changed, approvers' channel reachability), runs load validation with advisory output (the seq 2 failure would have surfaced before attestation), supports --require-load to refuse attesting a policy that fails load, then attests, and prints or (--commit) runs the two-file git add/commit so the policy edit and its attestation land together. Absorbs and supersedes the earlier advisory-output follow-up. Human-only, same identity rules as attest.
+Follow-up 3 (human-approved 2026-08-05), motivated by two live incidents in the committed log and history: seq 2, an eleven-minute amendment superseded after the dogfood pin correctly failed it, and the unsigned interregnum between commit f829e6c and its attestation, during which the edited policy was inoperative. One verb owns the ceremony: approval policy amend shows a semantic diff of the edited policy against the currently attested bytes (class resolutions that changed, approvers' channel reachability), runs load validation with advisory output (the seq 2 failure would have surfaced before attestation), supports --require-load to refuse attesting a policy that fails load, then attests, and prints or (--commit) runs the two-file git add/commit so the policy edit and its attestation land together. Absorbs and supersedes the earlier advisory-output follow-up. Human-only, same identity rules as attest.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -32,6 +32,8 @@ Follow-up 3 (human-approved 2026-08-09), motivated by two live incidents in the 
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented by Opus subagent in isolated worktree; fable review found nothing to override. Flagged design accepted, for the human's eyes in the m-4.1 report: the diff baseline is git HEAD's blob used ONLY when its SHA-256 equals the attested hash (proving the diffed text is the signed-for text); everything else drops to hash-only mode with a loud notice, and there is deliberately no --baseline flag since an operator-supplied baseline is unverifiable. Diff probes = union of both versions' class keys + the ten section 7 namespaces via the real resolve(); approver reachability includes danglingRules (patterns naming a no-longer-defined approver — the only reachability hole a loadable policy can have, since the schema forbids empty channel lists); fail-closed sides render as everything-manual with structural sections marked incomparable rather than fake-empty. Both motivating incidents (seq 2; the f829e6c unsigned interregnum) cited in the module doc; the seq-2-shaped test proves the advisory surfaces a load failure before attestation and --require-load refuses with a byte-identical log. --commit preconditions checked before attestation; the commit carries exactly the two files with the seq in its message. Noted for watchlist, untouched by this task: the cli-token 1s-TTL timing test failed once under load in a baseline run (passes consistently since). Verified on merged tree: 839/839, lint, typecheck.
+
+Date corrected in place per the 2026-08-05 human ruling (log-is-authoritative, applied to all APRV-46 findings): prose previously claimed 2026-08-09; this task's own created_date (2026-08-05) is the cited source. The wrong date was orchestrator confabulation, part of the systematic drift reported in APRV-46.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
