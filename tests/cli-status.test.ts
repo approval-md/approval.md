@@ -272,7 +272,7 @@ test("status --json on a healthy repo emits the frozen shape and exits 0", () =>
     // so nothing was ever stored and the directory does not exist, which is
     // the normal state of a repo that has made no request carrying --payload,
     // and does not move `healthy` or the exit code above.
-    payload_store: { present: false, files: 0, note: PAYLOAD_STORE_NOTE },
+    payload_store: { present: false, files: 0, pruned: 0, orphans: 0, note: PAYLOAD_STORE_NOTE },
   });
   assert.equal(rawLog(dir), rawLog(dir), "status must not write");
   assertClean(dir);
@@ -312,7 +312,7 @@ test("status text mode names health, attestation, verification, dangling and bud
   assert.match(run.stdout, /dangling executions: none/u);
   assert.match(run.stdout, /budget global\.daily_usd/u);
   assert.match(run.stdout, /loop escalations: none/u);
-  assert.match(run.stdout, /payload store: not created yet; /u);
+  assert.match(run.stdout, /payload store: not created yet, 0 pruned by the log, 0 unbound; /u);
 });
 
 // ---------------------------------------------------------------------------
@@ -354,13 +354,17 @@ test("status counts the payload store once a real request has stored bytes", () 
   assert.deepEqual(body["payload_store"], {
     present: true,
     files: 1,
+    // APRV-41: what the log says about the store, beside what the store holds.
+    // Nothing has been pruned here, and the one file is bound by the request.
+    pruned: 0,
+    orphans: 0,
     note: PAYLOAD_STORE_NOTE,
   });
   assert.equal(body["healthy"], true, "the store is informational, not a health input");
 
   const text = runCli(["status"], dir);
   assert.equal(text.code, 0, text.stderr);
-  assert.match(text.stdout, /payload store: 1 file\(s\); /u);
+  assert.match(text.stdout, /payload store: 1 file\(s\), 0 pruned by the log, 0 unbound; /u);
   assertClean(dir);
 });
 
@@ -379,6 +383,8 @@ test("a lost payload store is reported without changing health or the exit code"
   assert.deepEqual(body["payload_store"], {
     present: false,
     files: 0,
+    pruned: 0,
+    orphans: 0,
     note: PAYLOAD_STORE_NOTE,
   });
   assert.match(

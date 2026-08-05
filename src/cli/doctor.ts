@@ -58,6 +58,7 @@ import {
 import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
 import type { EventRecord } from "../core/log.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
+import { payloadStoreCensus } from "../daemon/prune.js";
 import { POLICY_FILENAMES, loadPolicy } from "../core/policy-load.js";
 import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
@@ -558,7 +559,7 @@ const PAYLOAD_STORE_WARNING =
  * directory. Nothing is left behind, and no payload file is read, written or
  * verified here.
  */
-function checkPayloadStore(logPath: string): DoctorCheck {
+function checkPayloadStore(logPath: string, records: EventRecord[]): DoctorCheck {
   const storeDir = payloadStoreDirFor(logPath);
 
   let stats;
@@ -619,10 +620,21 @@ function checkPayloadStore(logPath: string): DoctorCheck {
     files = 0;
   }
 
+  // What the log says about the store, beside what the store holds (APRV-41).
+  // `pruned` is retention doing its job and leaving the evidence of the deletion
+  // behind; `orphans` are files no record binds; `awaiting removal` are files the
+  // log already says are gone, which the next daemon tick unlinks without
+  // appending a second event.
+  const census = payloadStoreCensus(records, storeDir);
+  const residue =
+    census.awaitingRemoval === 0
+      ? ""
+      : `, ${census.awaitingRemoval} already recorded as pruned and awaiting removal by the daemon`;
+
   return {
     check: "payload-store",
     status: "pass",
-    detail: `${storeDir} is writable and holds ${files} payload file(s); ${PAYLOAD_STORE_WARNING}`,
+    detail: `${storeDir} is writable and holds ${files} payload file(s), ${census.pruned} pruned by the log, ${census.orphans} bound to no record${residue}; ${PAYLOAD_STORE_WARNING}`,
   };
 }
 
@@ -713,7 +725,7 @@ export function commandDoctor(
       checkLog(logPath, verified.result),
       await checkTelegram(apiBase),
       await checkWebPort(port ?? WEB_DEFAULT_PORT),
-      checkPayloadStore(logPath),
+      checkPayloadStore(logPath, verified.records),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

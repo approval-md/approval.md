@@ -58,6 +58,7 @@ import {
 } from "../core/execute.js";
 import { isPayloadHash, runPayloadHash } from "../core/payload.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
+import { payloadStoreCensus } from "../daemon/prune.js";
 import { readVerifiedRecords, requestState } from "../core/state.js";
 import type { EventRecord } from "../core/log.js";
 import { loadPolicy, parseDuration, POLICY_FILENAMES } from "../core/policy-load.js";
@@ -684,10 +685,25 @@ const PAYLOAD_STORE_NOTE =
   "it is the one cache that cannot be rebuilt from the log, and losing it leaves " +
   "manual requests rendering as payload-unavailable rather than showing bytes no hash bound";
 
-/** How many payloads are stored, and whether the store exists at all. */
-function payloadStoreSummary(logPath: string): {
+/**
+ * How many payloads are stored, whether the store exists, and what the log says
+ * about the ones that are gone (APRV-41).
+ *
+ * `pruned` counts distinct hashes named by a `payload.pruned` event: retention
+ * removes bytes and leaves that record behind on purpose, so a reader can tell
+ * "this store never held it" from "this store held it and the daemon let it go".
+ * `orphans` counts files no record binds — head-moved residue, which the daemon
+ * removes once `payload_retention` is set and which nothing removes while it is
+ * absent. Both are facts, never health inputs.
+ */
+function payloadStoreSummary(
+  logPath: string,
+  records: EventRecord[],
+): {
   present: boolean;
   files: number;
+  pruned: number;
+  orphans: number;
   note: string;
 } {
   let files = 0;
@@ -707,7 +723,14 @@ function payloadStoreSummary(logPath: string): {
     present = false;
     files = 0;
   }
-  return { present, files, note: PAYLOAD_STORE_NOTE };
+  const census = payloadStoreCensus(records, payloadStoreDirFor(logPath));
+  return {
+    present,
+    files,
+    pruned: census.pruned,
+    orphans: census.orphans,
+    note: PAYLOAD_STORE_NOTE,
+  };
 }
 
 export function commandStatus(argv: string[], streams: Streams, cwd: string): number {
@@ -753,7 +776,7 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
   // Informational: the store's state never moves `healthy` or the exit code.
   // A repo that has never made a `--payload` request has no store, and an
   // operator is being told what it is, not that anything is wrong.
-  const payloadStore = payloadStoreSummary(logPath);
+  const payloadStore = payloadStoreSummary(logPath, records);
 
   const verificationSummary = {
     status: verification.status,
@@ -815,7 +838,7 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
     streams.out(
       `payload store: ${
         payloadStore.present ? `${payloadStore.files} file(s)` : "not created yet"
-      }; ${PAYLOAD_STORE_NOTE}\n`,
+      }, ${payloadStore.pruned} pruned by the log, ${payloadStore.orphans} unbound; ${PAYLOAD_STORE_NOTE}\n`,
     );
     if (escalations.length === 0) streams.out("loop escalations: none\n");
     else {
