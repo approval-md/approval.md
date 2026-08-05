@@ -16,6 +16,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -412,22 +413,30 @@ test("grant --json emits the frozen shape and records the human decision", () =>
   );
 
   assert.equal(run.code, 0, run.stderr);
-  assert.deepEqual(JSON.parse(run.stdout), {
+  // APRV-17: the frozen shape gains "token" on grant — the single-use execution
+  // token, printed here once and stored nowhere.
+  const parsed = JSON.parse(run.stdout) as Record<string, unknown>;
+  const token = String(parsed["token"]);
+  assert.match(token, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(parsed, {
     ok: true,
     decision: "grant",
     state: "granted",
     action_key: "task-042:chaser",
     seq: 4,
+    token,
   });
 
   const granted = logRecords(dir)[3] as Record<string, unknown>;
   assert.equal(granted["event"], "approval.granted");
   assert.equal(granted["actor"], "human:carter");
-  // The budgets contract: class and est_cost_usd on every approval.granted.
+  // The budgets contract: class and est_cost_usd on every approval.granted,
+  // plus the token's digest — the raw token never reaches the log.
   assert.deepEqual(granted["payload"], {
     class: "communicate.email.external",
     est_cost_usd: 0.02,
     note: "go, but cc me",
+    token_sha256: createHash("sha256").update(token, "utf8").digest("hex"),
   });
   assertClean(dir);
 });

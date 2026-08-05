@@ -54,6 +54,7 @@ import {
   commandRequest,
 } from "./gate.js";
 import { commandPolicy } from "./policy.js";
+import { commandConsume, commandToken } from "./token.js";
 import {
   DEFAULT_INDEX_PATH,
   DEFAULT_LOG_PATH,
@@ -466,6 +467,13 @@ export function main(argv: string[], options: MainOptions = {}): number {
       return commandDecide("revoke", rest, streams, cwd);
     case "expire":
       return commandExpire(rest, streams, cwd);
+    // The token verbs (APRV-17). `token` reports status and writes nothing;
+    // `consume` is internal plumbing for APRV-18's `approval run` and is the
+    // only sanctioned appender of execution.started on the manual path.
+    case "token":
+      return commandToken(rest, streams, cwd);
+    case "consume":
+      return commandConsume(rest, streams, cwd);
     case "reindex":
       return commandReindex(rest, streams, cwd);
     default:

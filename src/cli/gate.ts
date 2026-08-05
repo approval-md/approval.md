@@ -421,6 +421,9 @@ export function commandDecide(
   });
   if (!result.ok) return emitRefusal(streams, json, result);
 
+  // APRV-17: a grant mints the single-use token and this is the ONLY place it is
+  // ever printed. The log holds sha256(token) alone, so once this output is gone
+  // the value is unrecoverable — hence the warning beside it.
   if (json) {
     emitJson(streams, {
       ok: true,
@@ -428,9 +431,16 @@ export function commandDecide(
       state: result.state,
       action_key: actionKey,
       seq: result.record.seq,
+      ...(result.token === undefined ? {} : { token: result.token }),
     });
   } else {
     streams.out(`${result.state} ${actionKey} at seq ${result.record.seq} by ${actor}\n`);
+    if (result.token !== undefined) {
+      streams.out(
+        `token: ${result.token}\n` +
+          `(single-use execution token, shown ONCE: the log records only its SHA-256 and nothing can recover it. Spend it with \`approval run\`; if lost, revoke and request again.)\n`,
+      );
+    }
   }
   return EXIT_OK;
 }

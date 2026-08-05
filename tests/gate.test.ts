@@ -32,6 +32,7 @@ import {
   type GateRefusal,
 } from "../src/core/gate.js";
 import { appendEvent, type EventRecord } from "../src/core/log.js";
+import { tokenHash } from "../src/core/token.js";
 import { verify } from "../src/core/verify.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "approval-md-gate-"));
@@ -714,11 +715,13 @@ test("grant appends approval.granted carrying class and est_cost_usd (budgets co
   assert.equal(result.record.event, "approval.granted");
   assert.equal(result.record.actor, "human:carter");
   assert.equal(result.record.task, "task-042");
-  // Exact payload: the budgets evaluator meters authorization from these fields.
+  // Exact payload: the budgets evaluator meters authorization from these fields,
+  // and APRV-17 adds the minted token's digest — never the token itself.
   assert.deepEqual(result.record.payload, {
     class: "communicate.email.external",
     est_cost_usd: 0.02,
     note: "go, but cc me",
+    token_sha256: tokenHash(result.token ?? ""),
   });
   assertClean(unit);
 });
