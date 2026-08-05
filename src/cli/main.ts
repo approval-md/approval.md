@@ -60,6 +60,7 @@ import {
   commandStatus,
   commandWait,
 } from "./execute.js";
+import { commandChannel } from "./channel.js";
 import { commandPolicy } from "./policy.js";
 import { commandConsume, commandToken } from "./token.js";
 import {
@@ -499,6 +500,30 @@ export function main(argv: string[], options: MainOptions = {}): number {
       return commandQueue(rest, streams, cwd);
     case "status":
       return commandStatus(rest, streams, cwd);
+    // The channel verbs (APRV-26). `channel telegram listen` is the only
+    // LONG-LIVED command in this CLI: it delivers the pending queue and then
+    // long-polls until it is interrupted. Every other command answers and
+    // exits, so `main` stays synchronous and this one case unwraps a promise —
+    // reporting its eventual code through `process.exitCode`, which is what
+    // the direct-execution path at the bottom of this file uses anyway.
+    // Callers that need the code (tests, embedders) call `commandChannel` and
+    // await it directly.
+    case "channel": {
+      const outcome = commandChannel(rest, streams, cwd);
+      if (typeof outcome === "number") return outcome;
+      void outcome.then(
+        (code) => {
+          process.exitCode = code;
+        },
+        (cause: unknown) => {
+          streams.err(
+            `approval: channel listener failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+          );
+          process.exitCode = EXIT_IO;
+        },
+      );
+      return EXIT_OK;
+    }
     case "reindex":
       return commandReindex(rest, streams, cwd);
     default:
