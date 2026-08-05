@@ -115,7 +115,8 @@ import {
   type LogHead,
 } from "./log.js";
 import { isLoopEscalated } from "./loop.js";
-import { isPayloadHash } from "./payload.js";
+import { isPayloadHash, payloadHash as hashOfPayload } from "./payload.js";
+import { payloadStoreDirFor, storePayload } from "./payload-store.js";
 import {
   loadPolicy,
   POLICY_FILENAMES,
@@ -201,6 +202,25 @@ export const GATE_REFUSAL_CODES = [
    * and nothing is appended.
    */
   "payload-hash-required",
+  /**
+   * Payload material was supplied at intake and does not hash to the
+   * `payload_hash` the registration declared (APRV-28).
+   *
+   * The same code, and the same reason, as `core/token.ts`'s refusal at spend
+   * time: a grant approves specific bytes, so material that hashes to something
+   * else is not the payload this request is about. Refused before anything is
+   * stored and before anything is appended.
+   */
+  "payload-mismatch",
+  /**
+   * The declared payload material could not be stored (APRV-28): it cannot be
+   * canonicalized, or the store directory could not be written.
+   *
+   * Fails closed rather than requesting anyway. A manual request whose bytes no
+   * channel can display is a request no human can answer — SPEC.md §10.4 —
+   * so intake refuses and the log is left untouched.
+   */
+  "payload-store-failed",
   /**
    * A grant was attempted on a request whose payload carries no usable `class`.
    *
@@ -289,6 +309,11 @@ export interface GateOptions extends ClockOptions {
   policy?: { dir?: string; file?: string };
   /** Lock tuning for the append path. */
   append?: AppendOptions;
+  /**
+   * Where payload material is stored (APRV-28). Defaults to the convention
+   * `core/payload-store.ts` defines: `.approval/payloads/`, beside the log.
+   */
+  payloadStoreDir?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -664,6 +689,20 @@ export interface RequestInput {
    * name bytes the registration never declared.
    */
   payload_hash?: string;
+  /**
+   * The concrete payload material, to be filed in the payload store (APRV-28).
+   *
+   * Wrapped in an object so that "supplied, and the material happens to be
+   * `undefined`" is distinguishable from "not supplied at all" — the first is a
+   * payload that cannot be bound to and is refused, the second is the ordinary
+   * case of a caller that stored the bytes some other way (or holds none).
+   *
+   * Its hash MUST equal the declared `payload_hash`; a difference refuses
+   * `payload-mismatch` and stores nothing. Material supplied for an action that
+   * resolves to `supervised` or `autonomous` is ignored: that path records no
+   * request, so there is no binding a stored payload could belong to.
+   */
+  payload?: { value: unknown };
 }
 
 /**
@@ -732,6 +771,12 @@ function costOf(value: number | undefined): number {
  *    `payload-hash-required` and nothing is appended. This is the first check
  *    after the manual path is known, because a request with nothing to bind to
  *    should never reach a human's queue at all.
+ * 5b. **Payload material**, when the caller supplied any (APRV-28). Its hash is
+ *    checked against the declaration here — before legality, before budgets,
+ *    before any file — and the bytes are written to the payload store in the
+ *    step immediately before the append, so a refused request stores nothing.
+ *    See the two comments in the body for the ordering and the one orphan it
+ *    permits.
  * 6. **Request legality**, then **budgets**, then the append. Legality first
  *    because a duplicate request is a caller bug that no budget outcome should
  *    obscure, and because refusing it must leave the log untouched.
@@ -803,6 +848,30 @@ export function request(
     );
   }
 
+  // APRV-28, phase one of two: the material is *checked* here, cheaply and
+  // purely, and written later. Checking early means a request whose bytes do
+  // not match its declaration is refused before a duplicate-request or budget
+  // outcome can obscure why, and before any file exists.
+  if (input.payload !== undefined) {
+    let materialHash: string;
+    try {
+      materialHash = hashOfPayload(input.payload.value);
+    } catch (cause) {
+      return refuse(
+        "payload-store-failed",
+        `the payload material for ${input.actionKey} could not be canonicalized: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }. A payload that cannot be serialized cannot be bound to, so nothing was stored and nothing was appended.`,
+      );
+    }
+    if (materialHash !== payloadHash) {
+      return refuse(
+        "payload-mismatch",
+        `the payload material supplied for ${input.actionKey} hashes to ${materialHash} but the action declares ${payloadHash} (amended SPEC.md §6.2/§10). A grant approves specific bytes, so material that hashes to something else is not this request's payload: nothing was stored and nothing was appended.`,
+      );
+    }
+  }
+
   const derivation = requestState(read.records, input.actionKey, ts, ttlOf(load));
   if (derivation.state === "requested") {
     return refuse(
@@ -856,6 +925,29 @@ export function request(
       : refuse("budget-exceeded", `${message}; the budget.exceeded event could not be appended: ${logged.message}`, {
           verdicts: failed,
         });
+  }
+
+  // APRV-28, phase two: the write, after every check has passed and immediately
+  // before the append. A refused request therefore stores nothing. The one
+  // residue this ordering permits is an orphan: if the append then fails
+  // `head-moved`, a `<hash>.json` file remains for a request that was never
+  // recorded. That is accepted deliberately — the file is content-addressed, so
+  // it is either exactly the bytes some later request will bind to or bytes
+  // nothing will ever ask for, and in neither case can it authorize, alter or
+  // be mistaken for anything. The reverse ordering (append, then store) trades
+  // this harmless file for a recorded manual request whose bytes no channel can
+  // display, which is a request no human can answer.
+  if (input.payload !== undefined) {
+    const stored = storePayload(
+      options.payloadStoreDir ?? payloadStoreDirFor(logPath),
+      input.payload.value,
+    );
+    if (!stored.ok) {
+      return refuse(
+        "payload-store-failed",
+        `${stored.message} Nothing was appended: a manual request whose payload no channel can display is a request no human can answer (SPEC.md §10.4).`,
+      );
+    }
   }
 
   const payload: Record<string, unknown> = {
