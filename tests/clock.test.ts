@@ -52,7 +52,7 @@ const BOUND = "c".repeat(64);
 const KEY = "task-042:chaser";
 
 const ENVELOPE = {
-  origin: { app: "cartsos", created_by: "human:carter" },
+  origin: { app: "example-capture", created_by: "human:carter" },
   state: "proposed",
   actions: [
     {

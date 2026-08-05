@@ -148,7 +148,7 @@ function grantedCase(): RaceCase {
     {
       task: "task-042",
       envelope: {
-        origin: { app: "cartsos", created_by: "human:carter" },
+        origin: { app: "example-capture", created_by: "human:carter" },
         state: "proposed",
         actions: [
           {

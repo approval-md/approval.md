@@ -16,7 +16,7 @@
         "app": {
           "type": "string",
           "minLength": 1,
-          "description": "SPEC.md §6.2 `origin.app` (MUST): source system that created this task (`cartsos`, `jobmaxxing`, `manual`, …)."
+          "description": "SPEC.md §6.2 `origin.app` (MUST): source system that created this task (`example-capture`, `manual`, …)."
         },
         "created_by": {
           "type": "string",

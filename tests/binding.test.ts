@@ -62,7 +62,7 @@ const SUPERVISED_KEY = "task-042:draft";
 /** An envelope whose manual action may or may not declare a binding. */
 function envelope(bind: boolean): unknown {
   return {
-    origin: { app: "cartsos", created_by: "human:carter" },
+    origin: { app: "example-capture", created_by: "human:carter" },
     state: "proposed",
     actions: [
       {

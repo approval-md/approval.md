@@ -146,7 +146,7 @@ title: Chase deposit refund from letting agency
 status: In Progress            # owned by Backlog.md / your board
 approval:
   origin:
-    app: cartsos               # provenance: which system created this
+    app: example-capture       # provenance: which system created this
     created_by: "human:carter" # or "agent:<id>"
   route:
     assignee: "agent:claude-admin"
@@ -178,7 +178,7 @@ deposit-protection scheme deadline.
 
 | Field | Req | Meaning |
 |---|---|---|
-| `origin.app` | MUST | Source system (`cartsos`, `jobmaxxing`, `manual`, …). |
+| `origin.app` | MUST | Source system (`example-capture`, `manual`, …). |
 | `origin.created_by` | MUST | `human:<id>` or `agent:<id>`. |
 | `route.assignee` | SHOULD | `human` or `agent:<id>`. Routing proposals from agents are events, never silent edits. |
 | `route.confidence` | MAY | 0.0–1.0; used as a monitoring signal (§11). |
@@ -339,7 +339,7 @@ The following hold across every surface of the runtime. They are implicit accept
 
 - **Backlog.md:** native. Tasks live in `backlog/`, the envelope is one preserved frontmatter key, board `status` and approval `state` are independent. approval.md ships no board; use Backlog.md's.
 - **AGENTS.md import:** `approval import agents-md` parses "require approval first / allowed without prompting" permissions sections into draft policy classes for human confirmation, turning existing prose conventions into enforced policy.
-- **Inbound adapters (post-v1):** CartsOS/Telegram capture, arbitrary apps via `approval register --json`.
+- **Inbound adapters (post-v1):** e.g. a Telegram capture bot, arbitrary apps via `approval register --json`.
 - **Outbound sinks (post-v1):** approved+scheduled tasks mirrored to TickTick / Google Tasks / Google Calendar as views, never sources of truth. Mapping via [RFC 8984 jsCalendar Task](https://www.rfc-editor.org/rfc/rfc8984) with the envelope as a vendor extension, `X-APPROVAL-*` in [VTODO](https://www.rfc-editor.org/rfc/rfc5545).
 
 ## 13. Non-goals
@@ -371,7 +371,7 @@ Milestones sized for agent-driven development (each = one reviewable task):
 - **M5** Daemon: watch, TTL, sampling, loop-escalation.
 - **M6** Backlog.md round-trip + AGENTS.md import.
 - **M7** First adapter (email) + vault; end-to-end demo: agent drafts chaser → Telegram ping → approve from phone → sent → log verifies.
-- **M8** MCP wrapper. Post-v1: TickTick/GCal sinks, CartsOS inbound.
+- **M8** MCP wrapper. Post-v1: TickTick/GCal sinks, inbound capture adapters.
 
 ## 15. References
 

@@ -101,7 +101,7 @@ const TASK_FILE = [
   "status: In Progress",
   "approval:",
   "  origin:",
-  "    app: cartsos",
+  "    app: example-capture",
   '    created_by: "human:carter"',
   "  state: proposed",
   "  actions:",

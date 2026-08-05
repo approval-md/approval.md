@@ -117,7 +117,7 @@ const BOUND = "d".repeat(64);
 /** An envelope whose CLAIMED fields are dialed all the way up or all the way down. */
 function envelope(confidence: number, summary: string, cost: number): unknown {
   return {
-    origin: { app: "cartsos", created_by: "agent:claude" },
+    origin: { app: "example-capture", created_by: "agent:claude" },
     route: { assignee: "agent:claude", confidence, rationale: summary },
     state: "proposed",
     actions: [

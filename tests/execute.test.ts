@@ -146,7 +146,7 @@ function bindingFor(key: string): string {
 }
 
 const ENVELOPE = {
-  origin: { app: "cartsos", created_by: "human:carter" },
+  origin: { app: "example-capture", created_by: "human:carter" },
   state: "proposed",
   actions: [
     {

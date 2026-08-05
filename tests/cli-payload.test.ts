@@ -92,7 +92,7 @@ function taskFile(payloadHash: string): string {
     "status: In Progress",
     "approval:",
     "  origin:",
-    "    app: cartsos",
+    "    app: example-capture",
     '    created_by: "human:carter"',
     "  state: proposed",
     "  actions:",
