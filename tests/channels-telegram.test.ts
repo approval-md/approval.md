@@ -46,6 +46,12 @@ import {
   TELEGRAM_MAX_CALLBACK_BYTES,
   type TelegramConfig,
 } from "../src/channels/telegram.js";
+import {
+  dispatchPending,
+  newDispatchState,
+  type ListenSetup,
+} from "../src/cli/channel-telegram.js";
+import type { Streams } from "../src/cli/main.js";
 import { appendAttestation } from "../src/core/attest.js";
 import { register as registerCore, request as requestCore } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
@@ -798,4 +804,279 @@ test("--once: pending request → message → callback → grant → token on st
   assert.equal(granted.actor, HUMAN);
   assert.equal(granted.action_key, key);
   assertClean(world.unit);
+});
+
+// ---------------------------------------------------------------------------
+// Dispatch: requests that arrive while the listener is already running
+// (APRV-55)
+// ---------------------------------------------------------------------------
+
+/**
+ * The M5 proof only ever exercised the startup send: the request existed before
+ * the listener did. These cases exercise the other order, which is the ordinary
+ * one in a running system — a session appends `approval.requested` at 14:00 and
+ * the listener has been up since breakfast.
+ *
+ * They drive `dispatchPending` directly, one call per cycle, with an explicit
+ * `now` rather than a clock read: that is the unit the listener calls before
+ * every `getUpdates`, and calling it in a loop here is the same code path with
+ * the same state. Nothing is hand-written into a log; every request is appended
+ * through the real gate and every decision through `recordChannelDecision`.
+ */
+
+/** A staged world: `count` actions registered, none requested yet. */
+function staged(count: number): Live {
+  fixtureCounter += 1;
+  const prefix = `staged${fixtureCounter}`;
+  const unit = newScenario(scratch.root, POLICY);
+  attest(unit, T0);
+
+  const payloads = new Map<string, unknown>();
+  const keys: string[] = [];
+  const actions = [];
+  for (let index = 0; index < count; index += 1) {
+    const key = actionKeyFor(prefix, index);
+    const payload = payloadFor(index);
+    keys.push(key);
+    payloads.set(key, payload);
+    actions.push({
+      class: "communicate.email.external",
+      idempotency_key: key,
+      summary: `chase invoice ${41 + index}`,
+      reversible: false,
+      est_cost_usd: 0.02,
+      payload_hash: payloadHash(payload),
+    });
+  }
+
+  const registered = register(
+    unit.logPath,
+    {
+      task: TASK,
+      envelope: { origin: { app: "manual", created_by: ACTOR }, state: "awaiting", actions },
+    },
+    T0,
+    ACTOR,
+    unit.options,
+  );
+  assert.equal(registered.ok, true, `registration failed: ${JSON.stringify(registered)}`);
+
+  return {
+    unit,
+    keys,
+    payloads,
+    tagOptions: { policy: { file: unit.policyPath }, payload: (key) => payloads.get(key) },
+  };
+}
+
+/** Append one `approval.requested` through the real gate, at a chosen instant. */
+function requestAt(world: Live, index: number, ts: string): string {
+  const key = world.keys[index] as string;
+  const result = request(
+    world.unit.logPath,
+    {
+      task: TASK,
+      actionKey: key,
+      cls: "communicate.email.external",
+      est_cost_usd: 0.02,
+      reversible: false,
+      summary: `chase invoice ${41 + index}`,
+    },
+    ts,
+    ACTOR,
+    world.unit.options,
+  );
+  assert.equal(result.ok, true, `request failed: ${JSON.stringify(result)}`);
+  return key;
+}
+
+function capture(): { streams: Streams; out: string[]; err: string[] } {
+  const out: string[] = [];
+  const err: string[] = [];
+  return {
+    streams: { out: (text: string) => out.push(text), err: (text: string) => err.push(text) },
+    out,
+    err,
+  };
+}
+
+function setupFor(world: Live, channel: TelegramChannel): ListenSetup {
+  return {
+    channel,
+    logPath: world.unit.logPath,
+    actor: HUMAN,
+    json: false,
+    once: false,
+    gateOptions: world.unit.options,
+    tagOptions: world.tagOptions,
+  };
+}
+
+/** How many bot messages mention this action key. One delivery is one or more. */
+function messagesMentioning(key: string): number {
+  return mock.sentTexts().filter((text) => text.includes(key)).length;
+}
+
+test("a request appended after startup is delivered on the next cycle, exactly once", async () => {
+  const world = staged(3);
+  const channel = channelFor();
+  const setup = setupFor(world, channel);
+  const state = newDispatchState();
+  const { streams, err } = capture();
+
+  const a = requestAt(world, 0, at(1));
+
+  // Cycle 1 is the startup send: the same call, with an empty delivered set.
+  const first = await dispatchPending(setup, streams, state, at(2));
+  assert.deepEqual(
+    first.delivered.map((entry) => entry.action_key),
+    [a],
+  );
+  assert.equal(first.failed.length, 0);
+  const aMessages = messagesMentioning(a);
+  assert.ok(aMessages > 0, "the first cycle sent nothing");
+
+  // A request the listener could not have known about when it started.
+  const b = requestAt(world, 1, at(3));
+
+  const second = await dispatchPending(setup, streams, state, at(4));
+  assert.deepEqual(
+    second.delivered.map((entry) => entry.action_key),
+    [b],
+    "the newly requested action was not delivered without a restart",
+  );
+  assert.equal(messagesMentioning(a), aMessages, "the first request was sent a second time");
+  assert.ok(messagesMentioning(b) > 0, "the second request never reached the chat");
+
+  // A decision through the real callback path, then a cycle that must be quiet:
+  // the derivation no longer holds A, and B is already delivered.
+  channel.onDecision(handlerFor(world, at(5)));
+  const outcome = await press(channel, a, "grant");
+  assert.equal(outcome?.ok, true, `grant refused: ${JSON.stringify(outcome)}`);
+
+  const third = await dispatchPending(setup, streams, state, at(6));
+  assert.equal(third.delivered.length, 0, "a settled cycle still sent something");
+  assert.equal(third.failed.length, 0);
+
+  // C is requested and then left to lapse: the TTL is 24h in this policy, and a
+  // cycle a week later must not put an expired request in front of a human.
+  const c = requestAt(world, 2, at(7));
+  const late = await dispatchPending(setup, streams, state, at(7 * 24 * 60));
+  assert.equal(late.delivered.length, 0, "an expired request was delivered");
+  assert.equal(messagesMentioning(c), 0, "an expired request reached the chat");
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("a send that fails leaves the request pending and the next cycle retries it", async () => {
+  const world = staged(1);
+  const channel = channelFor();
+  const setup = setupFor(world, channel);
+  const state = newDispatchState();
+  const { streams } = capture();
+
+  const key = requestAt(world, 0, at(1));
+
+  mock.fail("500");
+  const failed = await dispatchPending(setup, streams, state, at(2));
+  mock.fail(null);
+  assert.equal(failed.delivered.length, 0);
+  assert.deepEqual(
+    failed.failed.map((entry) => entry.action_key),
+    [key],
+  );
+  assert.equal(failed.failed[0]?.attempts, 1);
+  // The Bot API refused, so there is no delivery to press a button on. (The
+  // mock records the attempt, which is why this asserts on the channel's answer
+  // rather than on the text log.)
+  assert.throws(() => mock.callbackDataFor(key, "grant"));
+
+  const retried = await dispatchPending(setup, streams, state, at(3));
+  assert.deepEqual(
+    retried.delivered.map((entry) => entry.action_key),
+    [key],
+    "the failed request was not retried on the next cycle",
+  );
+  assert.ok(messagesMentioning(key) > 0);
+  assert.doesNotThrow(() => mock.callbackDataFor(key, "grant"));
+  assertClean(world.unit);
+});
+
+test("a fresh listener re-sends everything still pending: a duplicate, never silence", async () => {
+  const world = staged(1);
+  const channel = channelFor();
+  const setup = setupFor(world, channel);
+  const { streams } = capture();
+
+  const key = requestAt(world, 0, at(1));
+
+  const before = newDispatchState();
+  await dispatchPending(setup, streams, before, at(2));
+  const once = messagesMentioning(key);
+  assert.ok(once > 0);
+
+  // The process died. Its delivery bookkeeping went with it (SPEC.md §10.3),
+  // and the pending set is re-derived from the log rather than remembered.
+  const after = newDispatchState();
+  const restarted = await dispatchPending(setup, streams, after, at(3));
+  assert.deepEqual(
+    restarted.delivered.map((entry) => entry.action_key),
+    [key],
+  );
+  assert.equal(messagesMentioning(key), once * 2, "the restart did not re-send the request");
+  assertClean(world.unit);
+});
+
+test("an unreadable log is a reported cycle failure, not a send and not a crash", async () => {
+  const world = staged(1);
+  const channel = channelFor();
+  // A directory where a log should be: unreadable in a way an absent file is
+  // not (an absent log is an empty log, and an empty queue is a valid answer).
+  const setup = { ...setupFor(world, channel), logPath: world.unit.dir };
+  const { streams } = capture();
+
+  const result = await dispatchPending(setup, streams, newDispatchState(), at(2));
+  assert.equal(result.delivered.length, 0);
+  assert.ok(result.queueError !== undefined, "an unreadable log produced no queue error");
+});
+
+test("listen runs the dispatch hook before every poll, including after a poll error", async () => {
+  const channel = channelFor();
+
+  let calls = 0;
+  await channel.listen({
+    once: true,
+    beforePoll: async () => {
+      calls += 1;
+    },
+  });
+  assert.equal(calls, 1, "--once did not run exactly one dispatch cycle");
+
+  // Steady state: the hook runs at the top of every iteration, so a request
+  // appended between two polls is picked up by the next one.
+  calls = 0;
+  await channel.listen({
+    beforePoll: async () => {
+      calls += 1;
+      if (calls === 3) channel.stop();
+    },
+  });
+  assert.equal(calls, 3);
+
+  // And a poll that fails does not cost a dispatch cycle: the loop retries the
+  // whole iteration, hook included.
+  calls = 0;
+  mock.fail("500");
+  await channel.listen({
+    beforePoll: async () => {
+      calls += 1;
+      if (calls === 2) {
+        mock.fail(null);
+        channel.stop();
+      }
+    },
+  });
+  mock.fail(null);
+  assert.ok(calls >= 2, `the hook did not run again after a poll error (${calls})`);
 });
