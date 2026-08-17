@@ -14,8 +14,9 @@ Conventions:
   worktree. Worktrees are disposable and an ignored file there is orphaned when
   the worktree is removed.
 - Positioning drafts, community and conference references, essay hooks, and
-  similar strategy material belong here. Anything intended for publication moves
-  out to `docs/`, `LAUNCH.md`, or the site.
+  similar strategy material belong here, as does `LAUNCH.md` (the
+  cross-milestone open-threads list, moved here at M5 close, 2026-08-17).
+  Anything intended for publication moves out to `docs/` or the site.
 - Credentials never go here. Secrets belong in the vault and `.approval/`
   handling described in CLAUDE.md, and this directory does not change that rule.
 - Nothing here is a source of truth. SPEC.md and Backlog.md tasks remain the
