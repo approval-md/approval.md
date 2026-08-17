@@ -133,7 +133,16 @@ function describe(event: DaemonEvent): { text: string; stderr: boolean } {
       return {
         text: `envelope.drift: ${event.task} (${event.file}) claims state ${
           event.declared_state === null ? "<none>" : event.declared_state
-        }, the log says ${event.derived_state} — recorded at seq ${String(event.seq)}; the file was NOT rewritten`,
+        }, the log says ${event.derived_state} — recorded at seq ${String(
+          event.seq,
+        )}; the file is repaired to match the log later in this tick`,
+        stderr: false,
+      };
+    case "write_back":
+      return {
+        text: `write-back: ${event.task} (${event.file}) state ${
+          event.from === null ? "<none>" : event.from
+        } -> ${event.to}, ${String(event.bytes)} bytes; the file now says what the log says`,
         stderr: false,
       };
     case "expired":
