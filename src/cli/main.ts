@@ -70,6 +70,7 @@ import { commandPayload } from "./payload.js";
 import { commandPolicy } from "./policy.js";
 import { commandRender } from "./render.js";
 import { commandConsume, commandToken } from "./token.js";
+import { commandAdapter } from "./adapter.js";
 import { commandVault } from "./vault.js";
 import {
   DEFAULT_INDEX_PATH,
@@ -644,6 +645,26 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // Nothing under this verb appends to the log.
     case "vault":
       return commandVault(rest, streams, cwd);
+    // The side-effect verb (APRV-69). `adapter email` is the first thing in
+    // this CLI that reaches the world: it executes one granted action through
+    // the adapter contract, which spends the token and writes both execution
+    // events around the send. It is asynchronous for the obvious reason (a
+    // socket), and is unwrapped exactly as `channel` and `daemon` are.
+    case "adapter": {
+      const outcome = commandAdapter(rest, streams, cwd);
+      void outcome.then(
+        (code) => {
+          process.exitCode = code;
+        },
+        (cause: unknown) => {
+          streams.err(
+            `approval: adapter failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+          );
+          process.exitCode = EXIT_IO;
+        },
+      );
+      return EXIT_OK;
+    }
     // The interoperability verb (APRV-64). `import agents-md` reads permissions
     // PROSE and prints a draft policy block. It is the only verb whose output is
     // a proposal: it writes no policy, appends nothing, and attests nothing —

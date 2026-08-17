@@ -147,8 +147,13 @@ function now(): string {
  * Everything else follows the split the gate and token verbs already draw —
  * filesystem facts are 4, a crashed write is 3, and every decision the runtime
  * itself made is 1.
+ *
+ * Exported because `approval adapter` (APRV-69) is the second caller of the core
+ * execution path and must map its refusals identically. Two copies of this
+ * switch would drift the first time a code was added, and an agent's retry logic
+ * keys on the difference between 5 and 1.
  */
-function refusalExitCode(refusal: ExecuteRefusal): number {
+export function executeRefusalExitCode(refusal: ExecuteRefusal): number {
   switch (refusal.code) {
     case "token-required":
       return EXIT_NO_TOKEN;
@@ -182,7 +187,7 @@ function emitRefusal(streams: Streams, json: boolean, refusal: ExecuteRefusal): 
   } else {
     streams.err(`approval: ${refusal.code}: ${refusal.message}\n`);
   }
-  return refusalExitCode(refusal);
+  return executeRefusalExitCode(refusal);
 }
 
 /** Where policy lives, from `--policy` / `--dir`, with the CLI's cwd default. */
