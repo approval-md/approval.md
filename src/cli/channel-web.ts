@@ -14,7 +14,11 @@
  * 1. **It reads the log.** {@link buildPendingQueue} runs here, once per page
  *    view, and the channel is handed the resulting {@link ChannelRequest}s. A
  *    channel that read the log would be deriving the facts it is meant to be
- *    transporting.
+ *    transporting. Because that read happens per *request* rather than per
+ *    process, this channel needs no dispatch of its own (APRV-55): a request
+ *    appended while the server is running appears on the next page load, and a
+ *    decided or TTL-lapsed one disappears the same way. Pull channels get for
+ *    free what the Telegram listener has to arrange with a per-cycle send.
  * 2. **It declares who is approving.** `--as` / `APPROVAL_HUMAN`, never
  *    anything the browser sent — there is nothing in an unauthenticated form
  *    post that could name a person. SPEC.md §11: identity is config-declared,

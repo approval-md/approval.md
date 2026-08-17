@@ -56,6 +56,14 @@
  * only job is to call {@link recordChannelDecision}. The prompt loop collects a
  * gesture and hands it over; whether that gesture becomes an event is the gate's
  * answer, not this file's.
+ *
+ * It also does not dispatch (APRV-55). This channel is **one-shot by design**:
+ * the runtime derives the queue once, renders it, collects decisions on the
+ * requests in front of the operator, and the process ends. There is no cycle in
+ * which a newly appended request could arrive, so there is nothing to push —
+ * the operator running the verb again is the refresh. Only the long-lived push
+ * channel (Telegram) needs a per-cycle send; the long-lived pull channel (web)
+ * re-derives per page view.
  */
 
 import { createInterface, type Interface } from "node:readline";

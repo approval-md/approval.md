@@ -112,7 +112,8 @@ Commands:
             "channel cli" renders the queue with [computed]/[claimed] markers and
             the full payload in delimiters, and with a terminal collects
             decisions through the same human-only gate as grant/reject.
-            "channel telegram listen" delivers the queue to a Telegram chat and
+            "channel telegram listen" delivers the queue to a Telegram chat on
+            every poll cycle (including requests that arrive while it runs) and
             long-polls for Approve/Reject taps; config is environment-only
             (APPROVAL_TG_TOKEN, APPROVAL_TG_CHAT)
   daemon    "daemon run" is the watch loop of SPEC.md §10.2, in the FOREGROUND:
@@ -2170,14 +2171,25 @@ Flags:
                    per invocation — a listener is a stream, not a query
   -h, --help       this text
 
-On start it sends every pending manual request to the configured chat: the
+It sends every pending manual request to the configured chat: the
 computed fields (class, resolved autonomy, budgets, attestation, payload hash,
 chain position, TTL) under one heading, the agent's CLAIMED fields (summary,
 cost estimate, rationale) under another that says they are not verified, and
 the full payload verbatim in its own block (SPEC.md §9, §10.4). Each message
 carries an inline Approve/Reject keyboard.
 
-Then it long-polls getUpdates. A callback FROM THE CONFIGURED CHAT is recorded
+DELIVERY IS PER CYCLE, NOT ONLY AT STARTUP. Before every getUpdates the
+listener re-derives the pending queue from the verified log and sends whatever
+it has not already sent, so a request appended while this listener is running
+reaches the phone on the next cycle without a restart. Decided and TTL-lapsed
+requests fall out of that derivation and are never sent. A send that fails
+leaves the request undelivered and is retried on every later cycle, with no
+attempt limit — an unreachable Bot API must not turn into a pending request
+nobody sees — though the stderr warnings thin out after a few consecutive
+failures for the same request. A failure during the STARTUP send still exits
+non-zero, so a mistyped token or chat id is immediate.
+
+It long-polls getUpdates. A callback FROM THE CONFIGURED CHAT is recorded
 through the same human-only gate the CLI verbs use — TTL, budgets, attestation,
 idempotency and compare-and-append all still apply. A callback from ANY OTHER
 chat is ignored: counted as an anomaly, answered with a refusal, never turned

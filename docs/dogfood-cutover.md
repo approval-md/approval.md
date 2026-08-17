@@ -66,6 +66,28 @@ approval channel telegram listen   # pushes requests to the phone, records taps
 (Foreground processes by design; two terminals or a multiplexer. Backgrounding
 is the operator's business at v0.1.)
 
+The listener delivers requests **as they arrive**, not only the ones pending
+when it started (APRV-55). Before every `getUpdates` it re-derives the pending
+queue from the verified log and sends whatever it has not already sent this
+process lifetime, so a session that runs `approval request` an hour into the
+day gets its message on the phone within one poll cycle, with no restart. The
+M5 proof ran the other way round (request first, listener second) and so never
+exercised this; the order no longer matters.
+
+Two consequences worth knowing at the terminal. A restarted listener re-sends
+everything still pending, because the "already sent" set lives only in the
+process (SPEC.md §10.3: channels hold no state that is truth), and the buttons
+on the pre-restart messages stop resolving: a duplicate on the phone, never a
+request nobody sees. And a send that fails is retried on every later cycle
+without an attempt limit, so a phone out of signal or a Bot API outage delays
+delivery rather than dropping it; the stderr warnings thin out after a few
+consecutive failures for the same request. Only a failure during the startup
+send exits non-zero, which is how a mistyped token or chat id announces itself.
+
+`approval channel web` needs no equivalent: it builds the queue from the log on
+every page load, so a refresh shows what is pending now. `approval channel cli`
+is one-shot by design; running the verb again is its refresh.
+
 ## Drafts for the human's hands
 
 Agents do not edit CLAUDE.md or APPROVAL.md. The two edits this cutover wants
