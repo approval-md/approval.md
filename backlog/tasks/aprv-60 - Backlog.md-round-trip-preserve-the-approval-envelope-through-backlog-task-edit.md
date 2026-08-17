@@ -6,8 +6,12 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-17 15:51'
+updated_date: '2026-08-17 16:18'
 labels: []
-dependencies: []
+milestone: m-8
+dependencies:
+  - APRV-63
+  - APRV-66
 priority: high
 type: bug
 ordinal: 59000
@@ -25,3 +29,9 @@ Observed live at M5 close: backlog task edit rewrote the APRV-51 task file and s
 - [ ] #2 A file whose task has registered actions but no envelope is detected and reported distinctly by the runtime
 - [ ] #3 Round-trip test: envelope survives a backlog task edit, or the failure is caught by the detection above
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+M6 decomposition (2026-08-17): split into APRV-63 (detection half) and APRV-66 (upstream filing half); this task closes when both do and serves as the incident record.
+<!-- SECTION:NOTES:END -->

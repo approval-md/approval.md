@@ -4,7 +4,9 @@ title: Move payloadStoreCensus from daemon/prune.ts to core
 status: To Do
 assignee: []
 created_date: '2026-08-17 15:51'
+updated_date: '2026-08-17 16:18'
 labels: []
+milestone: m-8
 dependencies: []
 priority: low
 type: chore

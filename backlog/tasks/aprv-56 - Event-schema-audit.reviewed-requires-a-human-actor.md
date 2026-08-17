@@ -4,7 +4,9 @@ title: 'Event schema: audit.reviewed requires a human: actor'
 status: To Do
 assignee: []
 created_date: '2026-08-17 15:51'
+updated_date: '2026-08-17 16:18'
 labels: []
+milestone: m-8
 dependencies: []
 priority: medium
 type: chore
