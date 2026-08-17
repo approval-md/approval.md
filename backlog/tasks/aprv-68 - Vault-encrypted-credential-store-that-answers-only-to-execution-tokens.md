@@ -1,9 +1,11 @@
 ---
 id: APRV-68
 title: 'Vault: encrypted credential store that answers only to execution tokens'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@fable'
 created_date: '2026-08-17 21:40'
+updated_date: '2026-08-17 22:12'
 labels: []
 milestone: m-9
 dependencies:
@@ -26,3 +28,9 @@ SPEC 10.4: adapters hold credentials in an encrypted vault, and credentials only
 - [ ] #3 doctor reports vault presence, decryptability, and gitignore status; init scaffolds the gitignore line
 - [ ] #4 Threat model stated in module and SPEC 10.4; passphrase supplied by env var name only
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Opus subagent, worktree from aprv-67 branch (needs CredentialProvider). 2. src/core/vault.ts: AES-256-GCM over a JSON map of named credentials, key via scrypt from a passphrase read from the env var named by policy (vault.passphrase_env, additive vocabulary; schema+SPEC same-commit) or APPROVAL_VAULT_PASSPHRASE default; file .approval/vault.enc; header carries salt, nonce, kdf params, version. 3. src/adapters/vault-provider.ts implements CredentialProvider: opens the vault lazily inside get(), scoped by the contract window. 4. Human-only verbs approval vault set|list|remove (list names only). 5. doctor check: presence, decryptable with env passphrase, gitignored. 6. Threat model in module + SPEC 10.4 wording. Tests: round-trip, wrong passphrase refused, tamper (GCM tag) refused, no value in any output/log/fixture. PR.
+<!-- SECTION:PLAN:END -->

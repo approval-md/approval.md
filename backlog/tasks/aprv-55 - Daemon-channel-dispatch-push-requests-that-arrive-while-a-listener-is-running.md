@@ -1,10 +1,11 @@
 ---
 id: APRV-55
 title: 'Daemon channel dispatch: push requests that arrive while a listener is running'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@fable'
 created_date: '2026-08-17 15:51'
-updated_date: '2026-08-17 21:41'
+updated_date: '2026-08-17 22:12'
 labels: []
 milestone: m-9
 dependencies: []
@@ -25,6 +26,12 @@ Found during the M5 proof (APRV-51): the v0.1 Telegram listener sends every pend
 - [ ] #2 Exactly one delivery per request across restarts and ticks, derived from the log
 - [ ] #3 The web and cli channels either gain the same behavior or document why they do not need it
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Opus subagent, worktree from main, parallel. 2. Daemon channel dispatch: on each tick, for approval.requested records with no delivery yet (log-derived: no channel notify record exists — decide the dedupe: a delivery is not a log event today; the telegram listener keeps in-memory state; simplest correct design: the daemon does not dispatch itself but the listener re-scans pending on every poll cycle, deduping by action_key in memory for its process lifetime plus a startup send; document why dispatch stays in the listener at v0.1). 3. Idempotency: exactly one delivery per request per listener lifetime; restart re-sends pending (documented, and the phone shows a duplicate rather than a silence). 4. web/cli channels: document they poll on render (web) or are one-shot (cli). Tests against mock Bot API. PR.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
