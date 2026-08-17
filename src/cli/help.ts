@@ -108,9 +108,10 @@ Commands:
             (APPROVAL_TG_TOKEN, APPROVAL_TG_CHAT)
   daemon    "daemon run" is the watch loop of SPEC.md §10.2, in the FOREGROUND:
             it records envelope.drift when a task file's state: contradicts the
-            log, appends approval.expired for lapsed requests, regenerates
-            QUEUE.md, and surfaces loop escalations. It rewrites no task file and
-            holds no lock; backgrounding is the operator's business in v0.1
+            log, appends approval.expired for lapsed requests, writes the log's
+            state back into the task files, regenerates QUEUE.md, and surfaces
+            loop escalations. It holds no lock; backgrounding is the operator's
+            business in v0.1
   payload   "payload hash" prints the payload_hash of a JSON document (SHA-256
             over its RFC 8785 canonical serialization), the value a declaration
             carries and a grant binds to. Most flows never need it: "request
@@ -2221,17 +2222,23 @@ Each tick, in order:
 
   ENVELOPE DRIFT (§6.3) — every task file is read and its approval: envelope
     validated. When the file's state: contradicts the state the log implies, an
-    envelope.drift event is appended (actor system:daemon) naming both. The FILE
-    IS NEVER REWRITTEN: the log is the truth, and repairing a human's edit would
-    resolve a disagreement this verb only records. Identical drift is recorded
-    once — the same claim against the same log is not appended again until the
-    file or the log changes.
+    envelope.drift event is appended (actor system:daemon) naming both.
+    Identical drift is recorded once — the same claim against the same log is not
+    appended again until the file or the log changes.
   TTL SWEEP — every live request whose TTL lapsed gets an approval.expired
     (actor system:gate, through the same "approval expire" the CLI calls). The
     gate ALREADY refuses a late grant whether or not this event exists; the sweep
     makes the lapse visible rather than changing any verdict. Idempotent with
     lazy expiry, with itself, and across restarts, because the candidate list is
     re-derived from the verified log every sweep and nothing is remembered.
+  WRITE-BACK (§6.3) — every task file whose state: still disagrees with the log
+    is rewritten to match it, AFTER the events above are appended and never
+    before: the log is the truth and the file is its projection. Exactly the
+    state: line changes; every other byte, key, comment and line ending is
+    preserved. A file with no approval: envelope is never given one, and a file
+    the writer cannot round-trip safely is left untouched with a
+    write-back-refused warning. So a drift record marks a file found wrong AND
+    fixed; a file that keeps drifting is one another writer is fighting over.
   LOOP ESCALATION (§10.2) — tasks with three consecutive execution.failed are
     reported when they escalate and when they clear. The gate and the executor
     enforce it; this only surfaces it, and "approval status" reports the same set.

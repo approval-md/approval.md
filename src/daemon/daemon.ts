@@ -6,10 +6,28 @@
  * > samples supervised actions for audit, re-renders projections, and
  * > (optionally) polls upstream sources."
  *
- * This module is the loop's core: watch, envelope drift, TTL sweep, queue
- * regeneration, and loop-escalation surfacing. Channel dispatch belongs to the
- * channel verbs (APRV-23/25/26), audit sampling to APRV-40, and payload-retention
- * pruning to APRV-41; each is its own task and none of them is smuggled in here.
+ * This module is the loop's core: watch, envelope drift, TTL sweep, projection
+ * write-back, queue regeneration, and loop-escalation surfacing. Channel dispatch
+ * belongs to the channel verbs (APRV-23/25/26), audit sampling to APRV-40, and
+ * payload-retention pruning to APRV-41; each is its own task and none of them is
+ * smuggled in here.
+ *
+ * ## Drift, then repair (SPEC.md §6.3, §10.2, APRV-62)
+ *
+ * A task file's `state:` is a projection and the log is the truth, so the two
+ * halves of that sentence are two steps of one tick. The drift scan runs first
+ * and appends `envelope.drift` for every file whose claim the log contradicts;
+ * the write-back pass runs after every append this tick could make and rewrites
+ * those files through `core/task-file.ts` so the projection matches the log
+ * again. Write-back never appends and never precedes an append: it only copies a
+ * fact the log already carries into a file that disagreed with it.
+ *
+ * So a drift record marks the moment a file was found wrong **and fixed**, not a
+ * standing disagreement. That reading is what makes the records worth watching:
+ * a file that keeps drifting after repair is a file some other writer is fighting
+ * the daemon over, and the repeated records are how an operator sees it. One
+ * record per transition is the healthy shape (the log moved, the file caught up);
+ * a run of identical records against an unmoving log is not.
  *
  * ## It decides nothing of its own
  *
@@ -65,17 +83,18 @@
  */
 
 import { watch, type FSWatcher } from "node:fs";
-import { readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 
 import { writeQueue } from "../channels/render-queue.js";
 import { tick as readClock, type Clock } from "../core/clock.js";
-import { readTaskFile } from "../core/frontmatter.js";
+import { parseFrontmatter, readTaskFile } from "../core/frontmatter.js";
 import { expire, type GateOptions } from "../core/gate.js";
 import { appendEvent, type EventRecord } from "../core/log.js";
 import { loopEscalation } from "../core/loop.js";
 import { payloadHash } from "../core/payload.js";
 import { loadPolicy, type LoadPolicyOptions } from "../core/policy-load.js";
+import { rewriteTaskFile, writeTaskFileAtomic, type RewriteOptions } from "../core/task-file.js";
 import {
   readVerifiedRecords,
   type LogReadRefusal,
@@ -138,6 +157,23 @@ export type DaemonEvent =
       derived_state: string;
       seq: number;
     }
+  | {
+      /**
+       * A task file's `state:` was rewritten to match the log (SPEC.md §6.3).
+       * Additive (APRV-62): the union grows, and no existing entry changes
+       * meaning. A rewritten file is a change to a human's working tree, so it
+       * gets a line of its own rather than hiding inside the drift record that
+       * preceded it.
+       */
+      event: "write_back";
+      task: string;
+      file: string;
+      /** The `state:` the file claimed, or `null` when it declared none. */
+      from: string | null;
+      /** The state the log implies, now on disk. */
+      to: string;
+      bytes: number;
+    }
   | { event: "expired"; action_key: string; task: string | null; seq: number }
   | {
       event: "rendered";
@@ -196,6 +232,12 @@ export const DAEMON_WARNING_CODES = [
    * file, and the next tick re-derives; nothing is ever deleted unlogged.
    */
   "prune-refused",
+  /**
+   * The projection write-back was refused by the writer, or the rewritten bytes
+   * could not be placed (APRV-62). The file is left exactly as it was and the
+   * log is untouched; the message carries `core/task-file.ts`'s own code.
+   */
+  "write-back-refused",
 ] as const;
 
 export type DaemonWarningCode = (typeof DAEMON_WARNING_CODES)[number];
@@ -426,7 +468,8 @@ export class Daemon {
   // -------------------------------------------------------------------------
 
   /**
-   * One full pass: drift scan, TTL sweep, escalation surfacing, queue render.
+   * One full pass: drift scan, TTL sweep, write-back, escalation surfacing,
+   * queue render.
    *
    * Returns `null` to continue, or the outcome that must stop the loop. Every
    * step re-reads the verified log rather than sharing one snapshot across the
@@ -475,6 +518,14 @@ export class Daemon {
       // owns the rule, the append and the unlink; the daemon owns only the
       // scheduling, which is the one thing `daemon/prune.ts` deliberately lacks.
       this.prune();
+
+      // Projection write-back (SPEC.md §6.3, APRV-62). Last, because it copies
+      // the log into the files and every append this tick can make has now been
+      // made: a request expired by the sweep above is reflected on disk by this
+      // same tick rather than surfacing as drift on the next one. It appends
+      // nothing itself, so its position cannot affect any record.
+      const wrote = this.writeBack();
+      if (wrote !== null) return wrote;
 
       const closing = this.read();
       if (!closing.ok) return this.fatal(closing);
@@ -547,10 +598,10 @@ export class Daemon {
    * daemon after the event is appended, never the reverse. A file edit that
    * contradicts the log is itself logged (`envelope.drift`) and surfaced."
    *
-   * The daemon **does not repair the file**. Rewriting a task file is M6's
-   * round-trip work (unknown-key preservation is a hard requirement there), and a
-   * daemon that silently corrected a human's edit would be resolving a
-   * disagreement it is only supposed to record.
+   * This scan **only records**. The repair is {@link writeBack}, later in the
+   * same tick: the disagreement is written to the log first and copied into the
+   * file second, in that order, so nothing is ever corrected off the record. A
+   * drift record therefore names a moment, not a standing condition.
    *
    * A schema-invalid envelope is warned about and skipped, not logged as drift: a
    * malformed file is not a *contradiction* of the log, it is a file the runtime
@@ -779,6 +830,131 @@ export class Daemon {
     for (const warning of prunePayloads(options).warnings) {
       this.warn("prune-refused", `${warning.code}: ${warning.message}`);
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Projection write-back (SPEC.md §6.3, §10.2, APRV-62)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Rewrite every task file whose `state:` disagrees with the log, so the
+   * projection says what the log says.
+   *
+   * §6.3: "`state` is a projection of log events; the file is updated by the
+   * daemon after the event is appended, never the reverse." Both halves are
+   * enforced structurally here. *After the event*: this runs at the end of the
+   * tick, when the drift scan and the TTL sweep have appended everything they
+   * are going to. *Never the reverse*: this method appends nothing at all, reads
+   * the state it writes from `daemon/projection.ts`'s rollup over the verified
+   * log, and produces bytes only through `core/task-file.ts`. A file can no more
+   * teach the log a state than a screenshot can teach a database a row.
+   *
+   * Four rules, each of which is a way of not making things worse:
+   *
+   * 1. **Only files that already have an envelope.** `set-state` refuses
+   *    `no-envelope`, and that refusal is honoured silently: a task with no
+   *    `approval:` key is a plain Backlog.md task (SPEC.md §6 requires tolerating
+   *    it), and a daemon that gave one an envelope would be enrolling a task
+   *    nobody enrolled. The register path is where an envelope comes from.
+   * 2. **No write when the bytes would not change.** The writer reports
+   *    `changed`, and the bytes are compared besides. An unnecessary write moves
+   *    an mtime, which wakes the watcher, which schedules a tick — a loop that
+   *    costs nothing but looks exactly like one that does not terminate.
+   * 3. **A refusal leaves the file alone.** Anything the round-trip writer will
+   *    not do — corrupt YAML, an `approval:` key that is not a mapping, a
+   *    self-check that failed — becomes one `write-back-refused` warning carrying
+   *    the writer's own code. Nothing partial is ever written, because
+   *    `rewriteTaskFile` produces bytes or a refusal and `writeTaskFileAtomic`
+   *    renames a complete temp file into place.
+   * 4. **Silence where the drift scan already spoke.** An unreadable file, a
+   *    frontmatter that does not parse, a missing `id`, a schema-invalid
+   *    envelope: each was warned about a few milliseconds ago by
+   *    {@link scanForDrift} over the same folder. Repeating it here would double
+   *    every line an operator reads without adding a fact.
+   *
+   * Loop safety comes from the comparison, not from a remembered flag: the next
+   * tick derives the same state from the same log, finds the file already
+   * declaring it, and does nothing — no drift, no write, no event. A file that
+   * *keeps* needing repair is being rewritten by something else, and the drift
+   * records are the trail of that fight.
+   */
+  private writeBack(): DaemonOutcome | null {
+    const files = this.taskFiles();
+    if (files.length === 0) return null;
+
+    const records = this.read();
+    if (!records.ok) return this.fatal(records);
+    const ts = readClock(this.options.clock === undefined ? {} : { clock: this.options.clock });
+    const ttlMs = this.ttlMs();
+    const rewriteOptions: RewriteOptions =
+      this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir };
+
+    for (const file of files) {
+      let text: string;
+      try {
+        text = readFileSync(file, "utf8");
+      } catch {
+        // Warned by the drift scan, or a file that vanished between the two
+        // passes. Either way the next tick re-scans.
+        continue;
+      }
+
+      const parsed = parseFrontmatter(text);
+      if (!parsed.ok) continue;
+
+      const envelope = parsed.data["approval"];
+      if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) continue;
+
+      const id = parsed.data["id"];
+      if (typeof id !== "string" || id.length === 0) continue;
+
+      const validation = validate(
+        "envelope",
+        envelope,
+        this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir },
+      );
+      if (!validation.ok) continue;
+
+      const declaredRaw = (envelope as { state?: unknown }).state;
+      const declaredState = typeof declaredRaw === "string" ? declaredRaw : null;
+      const derived = taskEnvelopeState(records.records, id, ts, ttlMs).state;
+      if (declaredState === derived) continue;
+
+      const rewritten = rewriteTaskFile(text, { kind: "set-state", state: derived }, rewriteOptions);
+      if (!rewritten.ok) {
+        if (rewritten.code === "no-envelope") continue;
+        this.warn(
+          "write-back-refused",
+          `${this.display(file)}: the state: line could not be rewritten to ${derived} (${
+            rewritten.code
+          }): ${rewritten.message} The file is exactly as it was, the log is unchanged, and the envelope.drift record stands.`,
+        );
+        continue;
+      }
+      if (!rewritten.changed || rewritten.bytes === text) continue;
+
+      const written = writeTaskFileAtomic(file, rewritten.bytes);
+      if (!written.ok) {
+        this.warn(
+          "write-back-refused",
+          `${this.display(file)}: the rewritten task file could not be placed (${written.code}): ${
+            written.message
+          }`,
+        );
+        continue;
+      }
+
+      this.emit({
+        event: "write_back",
+        task: id,
+        file: this.display(file),
+        from: declaredState,
+        to: derived,
+        bytes: written.bytes,
+      });
+    }
+
+    return null;
   }
 
   // -------------------------------------------------------------------------
