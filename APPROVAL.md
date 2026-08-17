@@ -35,4 +35,5 @@ budgets:
 
 audit:
   supervised_sample_rate: 0.15
+  sampling_secret_env: APPROVAL_SAMPLING_SECRET   # name only; secret in the env
 ```
