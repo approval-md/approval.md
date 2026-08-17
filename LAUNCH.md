@@ -3,7 +3,10 @@
 A running document of threads that outlive any one session. Future sessions
 update it as tasks close: mark threads done with a pointer to the task or
 commit, add new threads as they appear, and keep entries to a few lines.
-Seeded at the close of the founding session (2026-08-05).
+Seeded at the close of the founding session (2026-08-05); updated at M5
+close (2026-08-17). docs/HANDOVER.md, the founding session's orientation for
+M5, was retired then: everything it carried is either done, in CLAUDE.md, or
+in task notes.
 
 ## Engineering
 
@@ -33,5 +36,12 @@ Seeded at the close of the founding session (2026-08-05).
 
 - **Launch post.** The write-up: the gap (prose permissions without
   enforcement), the mantra, the seq 2 story as the demo of why logs beat
-  memory. Draft after M5 lands and the demo runs against real Telegram.
+  memory. Its precondition is met: M5 landed and the demo ran against real
+  Telegram (APRV-51, main 7d632e5, log seq 5-12: a real deps.add granted from
+  the phone). Story material accumulated on the way, all cited by task: the
+  first CI catch was two catches (APRV-48); the tool's own build performed the
+  last unapproved dependency change and the first approved one within two
+  weeks (APRV-50, APRV-51); the doctor sampler check caught an unset secret
+  the hour the policy named it (APRV-49); Backlog.md dropped the first
+  envelope ever written into a task file (APRV-60). Ready to draft.
 - **Emanuel preview DM.** Send the preview before the public post.
