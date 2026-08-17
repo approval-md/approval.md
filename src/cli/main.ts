@@ -65,6 +65,7 @@ import { commandChannel } from "./channel.js";
 import { commandDaemon } from "./daemon.js";
 import { commandDoctor } from "./doctor.js";
 import { commandImport } from "./import.js";
+import { commandInit } from "./init.js";
 import { commandPayload } from "./payload.js";
 import { commandPolicy } from "./policy.js";
 import { commandRender } from "./render.js";
@@ -506,6 +507,12 @@ export function main(argv: string[], options: MainOptions = {}): number {
   }
 
   switch (command) {
+    // The scaffolding verb (APRV-71). It is the only command that writes files
+    // a human has not asked for by name, and it is deliberately the least
+    // authoritative one in the CLI: it appends nothing, attests nothing, and
+    // overwrites nothing. Everything it creates is inert until a human attests.
+    case "init":
+      return commandInit(rest, streams, cwd);
     case "log":
       return commandLog(rest, streams, cwd);
     case "policy":

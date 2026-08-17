@@ -276,7 +276,7 @@ Every displayed field is one of two kinds and MUST be visibly distinguished: **c
 ### 10.1 CLI (primary interface, for humans and agents)
 
 ```
-approval init                      # scaffold APPROVAL.md, .approval/, schemas
+approval init                      # scaffold APPROVAL.md, .approval/, gitignore
 approval instructions              # full agent-facing usage guide (also in --help)
 approval register  <task-file>     # validate envelope, append task.registered
 approval request   <task> [--action <key>]   # -> approval.requested (manual classes;

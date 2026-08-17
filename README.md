@@ -49,11 +49,16 @@ deciding a request. Everything below is one of those three.
 ## Ceremony one: the first attestation
 
 A policy is a fenced `yaml approval-policy` block inside a markdown file named
-`APPROVAL.md`. There is no `approval init` verb yet, so write the file by hand.
-That is the point of the format: the thing you are signing for is text you read.
+`APPROVAL.md`. `approval init` scaffolds one (the SPEC section 5.1 canonical
+example, plus `.approval/`, an empty queue, and the gitignore lines) and never
+overwrites anything that exists. For this walkthrough, write a smaller policy
+by hand instead, because that is the point of the format: the thing you are
+signing for is text you read.
 
 ````sh
 mkdir -p ~/approval-demo && cd ~/approval-demo
+approval init            # scaffolds; then replace the example policy below
+rm APPROVAL.md
 
 cat > APPROVAL.md <<'EOF'
 # Approval policy

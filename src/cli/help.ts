@@ -6,6 +6,8 @@
  * full exit-code table, and its exact `--json` shape.
  */
 
+import { GITIGNORE_ENTRY_LINES, GITIGNORE_MARKER } from "./scaffold.js";
+
 const EXIT_CODES = `Exit codes (frozen public API):
   0  success
   1  integrity failure (corrupt log)
@@ -22,6 +24,7 @@ Usage:
   approval log verify [--log <path>] [--json]
   approval log tail   [--log <path>] [-n <count>] [--json]
   approval log export [--log <path>] [--json]
+  approval init       [--dir <path>] [--json]
   approval policy check|test <class> [--reversible true|false] [--policy <path>] [--dir <path>] [--json]
   approval policy attest [--policy <path>] [--dir <path>] [--as human:<id>] [--json]
   approval policy amend  [--policy <path>] [--dir <path>] [--log <path>]
@@ -62,6 +65,12 @@ Usage:
   approval --help
 
 Commands:
+  init      scaffold a working directory: APPROVAL.md (SPEC.md §5.1's canonical
+            policy, to be read and edited), the empty .approval/log/ directory,
+            .approval/QUEUE.md in its empty state, and the .gitignore lines for
+            the index, the vault and the atomic-write temp files. Appends
+            nothing, attests nothing, overwrites nothing; a re-run writes
+            nothing and reports what already exists
   log       inspect the append-only event log (verify | tail | export)
   policy    explain what APPROVAL.md does with an action class (check | test),
             record a human's sign-off on the policy file (attest), or run the
@@ -1872,6 +1881,56 @@ JSON shape (stdout, one object per line):
   {"event":"stopped","notified":3,"views":7,"decisions":2,"refused":1}
   The token NEVER appears in this stream: --json output is the thing most
   likely to be piped into a file or a log aggregator.`;
+
+export const INIT_HELP = `approval init — scaffold a working directory (SPEC.md §10.1)
+
+Usage:
+  approval init [--dir <path>] [--json]
+
+Writes four things into <dir> (default: the working directory):
+  APPROVAL.md         SPEC.md §5.1's canonical policy, verbatim. A STARTING
+                      POINT, not your policy: read every class before you sign
+                      for it
+  .approval/log/      the log DIRECTORY, empty. "approval policy attest" is what
+                      creates events.jsonl, because a log entry nobody signed is
+                      not evidence of anything
+  .approval/QUEUE.md  the read-only queue projection in its empty state, written
+                      by the same renderer "approval render" uses
+  .gitignore          three lines merged under a "${GITIGNORE_MARKER}" marker:
+                      ${GITIGNORE_ENTRY_LINES}
+
+Flags:
+  --dir <path>   directory to scaffold (default: the working directory)
+  --json         machine-readable output
+  -h, --help     this text
+
+IT APPENDS NOTHING AND ATTESTS NOTHING. init holds no authority: the policy it
+writes authorizes nothing until a human reads it and attests it.
+
+IT NEVER OVERWRITES. init plans every target before writing any of them, then
+writes only what is missing and reports the rest in "existing" with a per-file
+code (policy-exists, log-dir-exists, queue-exists, gitignore-entries-present).
+A re-run in a scaffolded directory therefore writes nothing and exits 0. An
+existing APPROVAL.md or QUEUE.md is never modified; .gitignore is the one file
+that is merged, append-only, and no existing line is rewritten or removed.
+A directory carrying APPROVALS.md (the SPEC.md §5 fallback filename) already has
+a policy: init reports policy-exists and writes no APPROVAL.md beside it.
+
+Payloads are TRACKED. .approval/payloads/ is deliberately NOT ignored: those
+bytes are what each approval bound to, and evidence belongs in the history. To
+ignore them instead, add ".approval/payloads/" yourself — the log keeps every
+payload_hash, but the bytes behind them stop being rebuildable.
+
+A path of the WRONG KIND is a refusal, not a report: a directory named
+APPROVAL.md, or a regular file where .approval/ belongs, exits 4 with
+error.code "path-conflict" and NOTHING is written.
+
+${EXIT_CODES}
+
+JSON shape (one object on stdout):
+  {"ok":true,"dir","written":["APPROVAL.md",...],
+   "existing":[{"path","code"}],"next_steps":["…"]}
+${JSON_ERRORS}`;
 
 export const IMPORT_HELP = `approval import — turn existing permissions prose into a draft policy
 
