@@ -39,6 +39,8 @@ Usage:
                       [--as <id>] [--json]                            (internal)
   approval run        <action-key> [--token <t>] [--payload-hash <64hex>]
                       [--as <id>] [--json] -- <cmd…>
+  approval adapter email <action-key> --token <t> --payload <file|->
+                      [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
   approval execution resolve <action-key> --outcome completed|failed
                       --note "<text>" [--as human:<id>] [--json]
   approval audit list|review [<seq|action-key>] [--note "<text>"]
@@ -91,6 +93,13 @@ Commands:
   run       execute a command behind the gate: appends execution.started before
             spawning it, execution.completed/failed with the child's exit code
             after, and exits with that same code
+  adapter   execute an approved action through a side-effect adapter, the hard
+            boundary of SPEC.md §10.4. "adapter email" sends one RFC 5322
+            message over SMTP for a communicate.email.external action: the
+            credentials come from the vault inside the verified-token window,
+            the payload is the bytes the grant bound to, and the runtime — not
+            the adapter — recomputes the hash, spends the token, and writes both
+            execution events around the send
   execution recovery verbs for executions the runtime could not close itself.
             "execution resolve" records the outcome a HUMAN OBSERVED for a
             dangling execution: mandatory --note, human-only, exit_code null,
@@ -2622,4 +2631,118 @@ ${EXIT_CODES}
 
 JSON shape (stdout, one object):
   {"ok":true,"name":"api-key","count":1,"path":"/…/.approval/vault.enc"}
+${JSON_ERRORS}`;
+
+export const ADAPTER_HELP = `approval adapter — execute an approved action through a side-effect adapter
+
+Usage:
+  approval adapter email <action-key> --token <t> --payload <file|->
+                      [--as human:<id>|agent:<id>] [--vault <path>]
+                      [--policy <path>] [--dir <path>] [--log <path>]
+                      [--timeout <ms>] [--json]
+
+Adapters:
+  email   send one RFC 5322 message over SMTP, for actions declared under
+          communicate.email.external (SPEC.md §6.1's canonical example)
+
+An adapter is the HARD BOUNDARY of SPEC.md §10.4: it holds the credentials and
+refuses to act without a valid, unexpired, single-use execution token bound to
+the action's idempotency_key AND its payload_hash. An agent that bypasses this
+CLI still cannot send, because the credentials only answer to tokens.
+
+The runtime, not the adapter, owns the sequence: recompute the payload hash,
+verify and consume the token, append execution.started, call the adapter, append
+execution.completed or execution.failed. The adapter implements one method and
+cannot skip a step, because it never holds the sequence.
+
+${EXIT_CODES}
+  adapter: 5 when no valid token was presented (nothing was appended and nothing
+  was sent), 1 for everything else the runtime decided — including a payload
+  that is not the approved bytes (payload-mismatch), a spent token
+  (token-consumed), a misrouted class (adapter-class-mismatch), and a send the
+  far side refused (adapter-failed, with the SMTP reply code in adapter_code).
+${JSON_ERRORS}`;
+
+export const ADAPTER_EMAIL_HELP = `approval adapter email — send one approved message over SMTP
+
+Usage:
+  approval adapter email <action-key> --token <t> --payload <file|->
+                      [--as human:<id>|agent:<id>] [--vault <path>]
+                      [--policy <path>] [--dir <path>] [--log <path>]
+                      [--timeout <ms>] [--json]
+
+Arguments:
+  <action-key>  the action's idempotency_key, as declared and granted
+  --token       the single-use token "approval grant" printed. REQUIRED
+  --payload     the JSON payload the grant bound to; "-" reads stdin. REQUIRED.
+                There is deliberately no flag that takes the message inline: a
+                body on a command line is a body in the shell history
+  --timeout     whole-SMTP-session budget in milliseconds (default 30000).
+                Exceeding it is recorded as execution.failed with smtp-timeout
+
+The payload (its RFC 8785 canonical hash is what the grant approved):
+  {"from":"a@example.com","to":["b@example.com"],"cc":[…],"bcc":[…],
+   "subject":"…","body":"…","content_type":"text/plain"|"text/html"}
+
+  bcc is INSIDE the hash and appears in NO header: a blind recipient is still a
+  recipient, and an approval that did not cover them would approve a different
+  act. Addresses are plain ASCII local@domain — no display names, no angle
+  brackets, no internationalized addresses (this client does not negotiate
+  SMTPUTF8). Unknown keys are refused rather than ignored.
+
+Two fields are stamped by the runtime and are NOT part of the hash:
+  Date        the moment of the send. The grant binds the message CONTENT; a
+              Date inside the payload would make every grant expire into a
+              payload-mismatch as soon as the clock moved
+  Message-ID  SHA-256 over the action key and the payload hash, at the From
+              domain — deterministic, so an operator holding the log can
+              recompute the exact Message-ID the far side saw and trace a
+              bounce back to an approval
+
+A non-ASCII body is sent quoted-printable and a non-ASCII subject as RFC 2047
+encoded-words; an all-ASCII body is sent 8bit, byte for byte as approved.
+
+Configuration comes from the VAULT, read inside the verified-token window and
+from nowhere else (no environment, no config file):
+  smtp.host  smtp.port  smtp.security  smtp.user  smtp.password
+
+  smtp.security is "implicit" (TLS from the first byte), "starttls" (a MANDATORY
+  upgrade — a server that does not offer it is a failure, never a silent
+  downgrade), or "none". A credential is never sent over "none". Storing neither
+  smtp.user nor smtp.password means an unauthenticated relay; storing exactly
+  one is refused, because sending unauthenticated because half a credential is
+  missing puts the message on a path nobody configured.
+
+No credential value reaches the log, this command's output, or an error message.
+The adapter scrubs every diagnostic it builds, and the contract scans everything
+the adapter returns for the values it handed out and redacts them again.
+
+Failure codes (in adapter_code):
+  email-payload-invalid   the approved bytes are not a well-formed email.
+                          Nothing was connected to
+  email-config-invalid    the vault holds unusable SMTP configuration
+  credential-unavailable | credential-refused
+                          the vault could not supply a name. Nothing was sent
+  smtp-connect-failed | smtp-tls-failed | smtp-timeout | smtp-protocol-error
+  smtp-<NNN>              the server refused a verb; NNN is its own reply code
+                          (smtp-535 authentication, smtp-550 mailbox, …), and
+                          the message carries the verb and the reply's FIRST
+                          line and nothing else
+
+${EXIT_CODES}
+  adapter email: 5 when no valid token was presented, 1 for every refusal
+  including a refused send, 2 for usage, 4 when the payload file or the log
+  could not be read.
+
+JSON shapes (the adapter contract's own result, unmodified):
+  stdout, on a completed send:
+  {"ok":true,"adapter":"email","action_key":"…","task":"…","class":"…",
+   "autonomy":"manual","payload_hash":"<64hex>","started_seq":N,
+   "outcome":"execution.completed","outcome_seq":N,"exit_code":0,
+   "detail":{"message_id":"<…>","recipients":N,"bytes":N,"secure":true,
+             "auth":"PLAIN","smtp_code":250,"transcript":[…]},"redactions":0}
+  stderr, on a refusal:
+  {"ok":false,"code":"…","message":"…","adapter":"email","action_key":"…",
+   "acted":true|false,"started_seq":N,"outcome":"execution.failed",
+   "outcome_seq":N,"exit_code":1,"adapter_code":"smtp-550","redactions":0}
 ${JSON_ERRORS}`;

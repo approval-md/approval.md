@@ -121,6 +121,18 @@ export interface AdapterConformanceCase {
 export interface AdapterConformanceHarness {
   setup(): AdapterConformanceCase | Promise<AdapterConformanceCase>;
   credential: { name: string; value: string };
+  /**
+   * Everything else the adapter needs to reach its far side — a host, a port, a
+   * transport setting, a second half of a login.
+   *
+   * A real adapter rarely needs exactly one credential (the email adapter needs
+   * five), and the checks that must SUCCEED — the happy path, single use, the
+   * live token after a payload mismatch — cannot succeed against an adapter that
+   * cannot configure itself. `credential` stays the one the suite hunts for in
+   * the log and the result; these are merely present, and `credential` wins any
+   * collision so the hunted value cannot be shadowed. (Added APRV-69.)
+   */
+  credentials?: Readonly<Record<string, string>>;
   /** A declared class this adapter must refuse. Defaults to a synthetic one. */
   foreignClass?: string;
 }
@@ -172,7 +184,11 @@ function callOptions(
   return {
     ...unit.options,
     token,
-    credentials: inMemoryCredentials({ [harness.credential.name]: harness.credential.value }),
+    credentials: inMemoryCredentials({
+      ...harness.credentials,
+      // Last, so the hunted value cannot be shadowed by a configuration entry.
+      [harness.credential.name]: harness.credential.value,
+    }),
   };
 }
 
