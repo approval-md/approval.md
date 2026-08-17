@@ -3,11 +3,11 @@ id: APRV-38
 title: >-
   M5 vocabulary: payload_retention, payload.pruned, first-class
   batch_delivery_id, sampling secret
-status: In Progress
+status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-05 14:18'
-updated_date: '2026-08-05 16:14'
+updated_date: '2026-08-17 15:35'
 labels: []
 milestone: m-7
 dependencies: []
@@ -42,3 +42,9 @@ The milestone's spec-and-schema groundwork, all additive and version-noted since
 <!-- SECTION:NOTES:BEGIN -->
 Built by an Opus subagent in an isolated worktree, reviewed by fable, delivered as PR #1 (branch aprv-38-m5-vocabulary). All four pieces landed additively: payload_retention (policy schema $ref duration + SPEC 5.2 bullet + Durations list mention + 5 fixtures), payload.pruned (17th type: SPEC 8 enum + enum-versioning bullet, event schema per-type rule requiring system: actor and payload_hash [64-hex], 5 fixtures including the orphan case), first-class batch_delivery_id (gate DecideOptions.batchDeliveryId written on grant/reject only, revoke ignores it by design; recordChannelDecision stops note-encoding; batchDeliveryIdOf prefers field with note fallback; dual-read window documented in SPEC 10.3 and contract.ts), audit.sampling_secret_env (env-var name only, B1 restated). INVARIANT NOTE: the gate write path (decide) was touched to add the payload field; ts assignment stays runtime-side (invariant 2 unaffected, confirmed in review) and the field is caller-supplied grouping metadata that raises no scrutiny question (invariant 4 untouched). One existing assertion rewritten rather than extended: channels-web batch test asserted the note-encoding verbatim, which is deliberately no longer written; it now asserts the first-class field and that note stays absent without a human note. Design note: empty-string batchDeliveryId is dropped silently (documented in DecideOptions), consistent with schema minLength 1; a refusal code was deliberately not added for a vocabulary task. Verification: 972 tests (953 baseline +19), lint, typecheck; PR #1 ci aggregator green on both matrix jobs. MERGE PENDING: gh pr merge was blocked twice by the session permission classifier; the human merges PR #1 or grants the permission.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Four additive vocabulary pieces landed (payload_retention, payload.pruned as 17th event type, first-class batch_delivery_id with dual-read window, audit.sampling_secret_env), all with schema+SPEC same-commit and fixtures both ways. Merged as PR #1 with both matrix jobs green (972 tests at the time). Status closed late: Done was omitted at the APRV-38 review stop and applied at M5 close.
+<!-- SECTION:FINAL_SUMMARY:END -->
