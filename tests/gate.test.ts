@@ -1137,6 +1137,10 @@ test("the refusal-code union is frozen public API", () => {
     "envelope-invalid",
     "task-file-unreadable",
     "task-already-registered",
+    // APRV-63: a file with no envelope whose task the LOG registered has lost
+    // one, and reads as an ordinary envelope-less task without a code of its
+    // own. An addition to the union, not a rename.
+    "envelope-missing",
     "not-registered",
     "action-not-registered",
     "duplicate-request",

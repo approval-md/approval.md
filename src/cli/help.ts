@@ -606,6 +606,13 @@ const GATE_REFUSAL_CODES_HELP = `Refusal codes (error.code with --json; frozen p
                           file has no frontmatter / no approval: key.
   task-file-unreadable    the task file could not be read (exit 4).
   task-already-registered this task id already has a task.registered record.
+  envelope-missing        the file carries no approval: envelope AND the log
+                          holds a task.registered for its task: the envelope was
+                          LOST after registration (an external rewrite is the
+                          observed cause). Nothing is appended, because
+                          re-registering a stripped file would narrow the record
+                          to what survives in it. Restore the block by hand from
+                          the log; the runtime never rewrites a task file.
   not-registered          the task has no task.registered record.
   action-not-registered   the task declares no action with that idempotency key.
   duplicate-request       a live approval.requested already awaits a decision.
@@ -1329,12 +1336,14 @@ export const DOCTOR_HELP = `approval doctor — environment sanity in one verb
 
 Usage:
   approval doctor [--log <path>] [--policy <path>] [--dir <path>]
-                  [--api-base <url>] [--json]
+                  [--tasks <dir>] [--api-base <url>] [--json]
 
 Flags:
   --log <path>       log file to verify (never written by this command)
   --policy <path>    policy file whose bytes attestation is judged against
   --dir <path>       directory to discover APPROVAL.md / APPROVALS.md in
+  --tasks <dir>      task folder the envelope-integrity check reads
+                     (default <--dir>/backlog/tasks, the daemon's default)
   --api-base <url>   Bot API base for the Telegram probe
                      (default https://api.telegram.org)
   --root <path>      TEST-ONLY: point the build-freshness check at another tree.
@@ -1344,7 +1353,7 @@ Flags:
   --json             machine-readable output
   -h, --help         this text
 
-Seven checks, in the order in which their failures cascade:
+Nine checks, in the order in which their failures cascade:
 
   build-freshness  dist/src/cli/main.js — the exact file the bin loader runs —
                    is present and NOT OLDER than the newest file under src/ or
@@ -1392,6 +1401,24 @@ Seven checks, in the order in which their failures cascade:
                    accepted by the gate would refuse payload-store-failed mid
                    ceremony. The probe creates and removes one empty file and
                    reads no payload.
+  audit-sampling   whether the supervised-action sampler is actually running.
+                   Sampling FAILS OPEN by design (SPEC.md §5.2), so an
+                   unconfigured sampler silently audits nothing; this states the
+                   disabled reason out loud. A sampler nobody configured (no
+                   rate, or rate 0) SKIPS; a half-configured one (a rate with no
+                   secret, an unset secret variable, an unloadable policy) FAILS,
+                   because someone intended sampling and is not getting it. The
+                   secret value is never printed.
+  envelope-integrity
+                   every task file whose task the LOG registered still carries
+                   an approval: envelope. The loss this names was observed live
+                   (APRV-60): a task-file rewrite by a tool that did not know
+                   the key simply dropped it, and nothing refused. FAILS with
+                   the task ids and the seq of each registration; the fix is a
+                   human restoring the block from the log. NOTHING HERE REWRITES
+                   A TASK FILE: the log holds the actions, and re-emitting the
+                   envelope from it would turn a projection into a source. SKIPS
+                   when there is no task folder.
 
 APPENDS NOTHING. Not an event, not a marker. An operator reaching for a
 diagnostic while the log is in a state they do not understand must not have that
@@ -1419,10 +1446,12 @@ JSON shape (stdout, one object):
     {"check":"log","status":"pass","detail":"..."},
     {"check":"telegram","status":"skip","detail":"..."},
     {"check":"web-port","status":"pass","detail":"..."},
-    {"check":"payload-store","status":"pass","detail":"..."}]}
+    {"check":"payload-store","status":"pass","detail":"..."},
+    {"check":"audit-sampling","status":"skip","detail":"..."},
+    {"check":"envelope-integrity","status":"pass","detail":"..."}]}
   status is "pass" | "fail" | "skip". fix is present only when there is
   something to do. ok is true when no check failed — a skip does not make it
-  false. The seven checks always appear, in this order.
+  false. The nine checks always appear, in this order.
 ${JSON_ERRORS}`;
 
 export const AUDIT_HELP = `approval audit — the retrospective review of sampled supervised actions

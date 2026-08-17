@@ -143,6 +143,26 @@ commits are the human's, by hand, and never ride feature branches; branch
 protection makes this the one push that uses their bypass, which is fitting,
 because the log records why it was allowed).
 
+## If an envelope goes missing
+
+A task file can lose its `approval:` block to an ordinary board edit: the pinned
+Backlog.md CLI rewrites the frontmatter it knows and drops the key it does not,
+which is what happened to APRV-51 and is captured byte for byte in
+`tests/fixtures/backlog/envelope-edit-{before,after}/`. The log still holds the
+registration, so the runtime treats the file as having lost something rather
+than as a task that never had one (APRV-63). `approval register` refuses the
+stripped file with `envelope-missing`, naming the seq of the registration,
+because re-registering it would narrow the record to whatever survived in the
+file. The daemon records the loss once per episode as `envelope.drift` with
+`payload.reason: "envelope-missing"`, distinct from a state mismatch. `approval
+doctor`'s `envelope-integrity` check lists every task whose log history implies
+an envelope its file lacks. Restoration is by hand: `approval log tail` shows
+the `task.registered` record with the declared actions, and you copy the block
+back into the file yourself. Nothing in the runtime rewrites a task file to
+repair this, and nothing will — the log records the actions, so a writer could
+re-emit the envelope from it, and an envelope generated from a projection is no
+longer a declaration anyone made.
+
 ## Why this page exists
 
 The enforcement layer was built by sessions operating on trust plus review.

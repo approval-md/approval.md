@@ -120,6 +120,16 @@ function describe(event: DaemonEvent): { text: string; stderr: boolean } {
         stderr: false,
       };
     case "drift":
+      // The envelope-missing case (APRV-63) reads differently on purpose: there
+      // is no claim to quote, and the repair is a restoration a human makes.
+      if (event.reason === "envelope-missing") {
+        return {
+          text: `envelope.drift: ${event.task} (${event.file}) has NO approval: envelope, but the log registered it — the log says state ${event.derived_state}; recorded at seq ${String(
+            event.seq,
+          )}. Restore the envelope by hand from the log; the runtime never rewrites the file`,
+          stderr: false,
+        };
+      }
       return {
         text: `envelope.drift: ${event.task} (${event.file}) claims state ${
           event.declared_state === null ? "<none>" : event.declared_state

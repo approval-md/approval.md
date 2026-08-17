@@ -95,7 +95,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import {
   ATTESTATION_REFUSAL,
@@ -175,6 +175,18 @@ export const GATE_REFUSAL_CODES = [
   "task-file-unreadable",
   /** This task id already has a `task.registered` record. */
   "task-already-registered",
+  /**
+   * The task has log history and the file no longer carries an envelope
+   * (APRV-63).
+   *
+   * Observed live in APRV-60: a third-party rewrite of a task file dropped the
+   * `approval:` key it did not recognize. Without this code the file reads as an
+   * ordinary envelope-less task, and a re-registration from a stripped file
+   * would narrow the record silently — declaring fewer actions, or none, for a
+   * task the log already says declared them. The loss is named instead, and the
+   * envelope is restored by a human from the log; nothing here repairs a file.
+   */
+  "envelope-missing",
   /** No `task.registered` record for this task id. */
   "not-registered",
   /** The task is registered but declares no action with this key (SPEC.md §7). */
@@ -511,12 +523,40 @@ function budgetOf(envelope: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
-type Resolved = { ok: true; task: string; envelope: unknown } | GateRefusal;
+/**
+ * A file that carries no envelope, and the id to ask the log about (APRV-63).
+ *
+ * `kind` records which of the two shapes of loss the file has, because the
+ * message a human reads should say what they are looking at. `loose` marks the
+ * id as *derived from the file name* rather than read out of frontmatter, which
+ * is the only handle a file with no frontmatter at all leaves behind; it is
+ * matched case-insensitively and never used as the registered id.
+ */
+interface NoEnvelope {
+  task: string;
+  kind: "no-approval-key" | "no-frontmatter";
+  loose: boolean;
+}
+
+type Resolved =
+  | { ok: true; task: string; envelope: unknown }
+  | { ok: false; refusal: GateRefusal; missing?: NoEnvelope };
+
+/**
+ * The Backlog.md board key a task file's name begins with (`task-3 - Slug.md`).
+ *
+ * A hint and nothing more: it is used only to *ask the log a question*, and the
+ * answer, when there is one, comes from the log's own record.
+ */
+function taskIdFromFileName(path: string): string | null {
+  const match = /^([A-Za-z][A-Za-z0-9_]*-\d+)/u.exec(basename(path));
+  return match?.[1] ?? null;
+}
 
 function resolveSource(source: RegisterSource): Resolved {
   if (!("file" in source)) {
     if (typeof source.task !== "string" || source.task.length === 0) {
-      return refuse("envelope-invalid", "register requires a non-empty task id");
+      return { ok: false, refusal: refuse("envelope-invalid", "register requires a non-empty task id") };
     }
     return { ok: true, task: source.task, envelope: source.envelope };
   }
@@ -526,24 +566,89 @@ function resolveSource(source: RegisterSource): Resolved {
 function readTaskFileSource(path: string): Resolved {
   const read = readTaskFile(path);
   if (!read.ok) {
-    if (read.code === "io") return refuse("task-file-unreadable", read.message);
-    return refuse("envelope-invalid", `${path}: ${read.message}`);
+    if (read.code === "io") {
+      return { ok: false, refusal: refuse("task-file-unreadable", read.message) };
+    }
+    const refusal = refuse("envelope-invalid", `${path}: ${read.message}`);
+    // A file with no frontmatter at all has lost more than the envelope, and
+    // leaves no id behind. Its name is the only handle; whether it means
+    // anything is the log's answer, not this file's.
+    const hint = read.code === "no-frontmatter" ? taskIdFromFileName(path) : null;
+    if (hint === null) return { ok: false, refusal };
+    return {
+      ok: false,
+      refusal,
+      missing: { task: hint, kind: "no-frontmatter", loose: true },
+    };
   }
   const id = read.data["id"];
   if (typeof id !== "string" || id.length === 0) {
-    return refuse(
-      "envelope-invalid",
-      `${path}: frontmatter has no usable \`id\`; the task id is a Backlog.md board key and the gate needs it to key the registration`,
-    );
+    return {
+      ok: false,
+      refusal: refuse(
+        "envelope-invalid",
+        `${path}: frontmatter has no usable \`id\`; the task id is a Backlog.md board key and the gate needs it to key the registration`,
+      ),
+    };
   }
   const envelope = read.data["approval"];
   if (envelope === undefined) {
-    return refuse(
-      "envelope-invalid",
-      `${path}: frontmatter has no \`approval:\` key. SPEC.md §6 tolerates a task with no envelope — it simply cannot request side-effecting execution — so there is nothing to register.`,
-    );
+    return {
+      ok: false,
+      refusal: refuse(
+        "envelope-invalid",
+        `${path}: frontmatter has no \`approval:\` key. SPEC.md §6 tolerates a task with no envelope — it simply cannot request side-effecting execution — so there is nothing to register.`,
+      ),
+      missing: { task: id, kind: "no-approval-key", loose: false },
+    };
   }
   return { ok: true, task: id, envelope };
+}
+
+/**
+ * Was this envelope-less file's task registered? Then the envelope was lost
+ * (APRV-63), and saying so is the whole job.
+ *
+ * Log-derived on both sides: the question is asked of the verified records, the
+ * task id in the answer is the log's, and the file's own (absent) claim is
+ * trusted for nothing. Returns `null` when the log has never heard of the task,
+ * which is the ordinary "a task with no envelope" case SPEC.md §6 tolerates and
+ * this function must leave exactly as it found it.
+ */
+function envelopeLost(
+  logPath: string,
+  path: string,
+  missing: NoEnvelope,
+  options: GateOptions,
+): GateRefusal | null {
+  const read = readGateRecords(logPath, options.schemaDir);
+  // The log could not be read or does not verify. That refusal outranks any
+  // reading of the file: nothing is concluded from a log nobody can trust.
+  if (!read.ok) return read;
+
+  const wanted = missing.loose ? missing.task.toLowerCase() : missing.task;
+  let registration: EventRecord | null = null;
+  for (const record of read.records) {
+    if (record.event !== "task.registered") continue;
+    const id = record.task;
+    if (typeof id !== "string") continue;
+    if ((missing.loose ? id.toLowerCase() : id) !== wanted) continue;
+    registration = record;
+  }
+  if (registration === null) return null;
+
+  const declared = payloadOf(registration)["actions"];
+  const count = Array.isArray(declared) ? declared.length : 0;
+  const shape =
+    missing.kind === "no-frontmatter"
+      ? "has no frontmatter at all"
+      : "has frontmatter but no `approval:` key";
+  return refuse(
+    "envelope-missing",
+    `${path} ${shape}, yet task ${String(registration.task)} was registered at seq ${String(
+      registration.seq,
+    )} with ${String(count)} declared action(s). The envelope was removed after registration — an external rewrite is the observed cause (APRV-60) — and re-registering a stripped file would silently narrow the record to what survives in the file. Nothing was appended: restore the \`approval:\` block by hand from the log (\`approval log tail\`), then re-run. The runtime never rewrites a task file to repair this.`,
+  );
 }
 
 /**
@@ -580,7 +685,16 @@ export function register(
   }
 
   const resolved = resolveSource(source);
-  if (!resolved.ok) return resolved;
+  if (!resolved.ok) {
+    // A file with no envelope is ordinary (SPEC.md §6) unless the log says this
+    // task once had one. That question is asked here, of the log, and only when
+    // the file gave the gate nothing to register (APRV-63).
+    if (resolved.missing !== undefined && "file" in source) {
+      const lost = envelopeLost(logPath, source.file, resolved.missing, options);
+      if (lost !== null) return lost;
+    }
+    return resolved.refusal;
+  }
 
   const validation = validate(
     "envelope",
