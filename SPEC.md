@@ -221,6 +221,19 @@ Dotted, hierarchical, extensible. Top-level namespaces are reserved by this spec
 | `physical.*` | orders, bookings with cancellation cost | manual |
 | `record.*` | `.write.stage`, `.categorize`, `.create`, `.archive` | supervised or manual, per ownership preference |
 
+The developer-workstation namespaces below are reserved alongside them. They name the side effects of an agent working inside a software repository, which is where AGENTS.md permissions prose lives and where `approval import agents-md` (§12) lands; the reference repository's own policy has used them since its policy engine landed, and the import verb emits them. Their gravity is stated for a shared codebase; a solo scratch repository may loosen it.
+
+| Namespace | Examples | Default gravity |
+|---|---|---|
+| `vcs.*` | `.commit.branch`, `.push.branch`, `.push.main`, `.history.rewrite` | autonomous for branch commits and pushes; supervised for the trunk; manual for history rewrites |
+| `deps.*` | `.add`, `.upgrade`, `.remove` | manual: a dependency change is a supply-chain decision |
+| `release.*` | `.publish`, `.tag`, `.version` | manual, always |
+| `exec.*` | `.local` (tests, lint, build, scripts inside the workspace) | autonomous |
+| `network.*` | `.call` (any request beyond package installs) | manual |
+| `policy.*` | `.edit` (the policy file, agent instructions, CI and release configuration) | manual, always |
+
+`files.delete.out_of_scope` (destructive deletes outside the task's stated scope, inside the workspace) sits under the existing `files` namespace at manual; `data.delete` remains the class for deletes outside the workspace.
+
 Two invariants: an action's class MUST be declared before an execution token can be requested for it, and `reversible: false` actions MUST NOT be eligible for `autonomous` regardless of policy (the runtime enforces this floor).
 
 The irreversibility floor resolves to `manual`: an action declared `reversible: false` MUST NOT execute under `autonomous` or `supervised` regardless of policy. Retrospective audit cannot undo an irreversible action, so execute-then-sample is not meaningful oversight for one. Implementations MUST apply the floor after class resolution and record in the decision trace when the floor, rather than the matched rule, determined the outcome.
