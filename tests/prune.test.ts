@@ -30,9 +30,10 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 
 import { Daemon, type DaemonEvent } from "../src/daemon/daemon.js";
-import { payloadStoreCensus, planPrune, prunePayloads } from "../src/daemon/prune.js";
+import { planPrune, prunePayloads } from "../src/daemon/prune.js";
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
+import { payloadStoreCensus } from "../src/core/payload-census.js";
 import { payloadPath, payloadStoreDirFor, storePayload } from "../src/core/payload-store.js";
 import {
   decide,
