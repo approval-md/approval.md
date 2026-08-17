@@ -30,6 +30,16 @@
  * This is stated in `--help` because it is the single place this CLI departs
  * from "one JSON object on stdout".
  *
+ * **`run` and the adapter contract are two callers of one core path.** A command
+ * is an adapter whose `act` is a spawn, whose payload is SPEC.md §6.2's `{argv,
+ * cwd}`, and whose credentials are the ambient environment.
+ * `src/adapters/contract.ts` wraps the same `startExecution` / `finishExecution`
+ * pair for adapters that are objects rather than processes; `run` calls the core
+ * verbs directly because its stdio inheritance, exit-code transparency, and `--`
+ * argv split are CLI concerns with nothing to do with adapters. What both must
+ * obey belongs in `core/execute.ts`, where both already read it; a rule added to
+ * the adapter contract alone protects adapters and not this verb.
+ *
  * **`status` and `queue` answer different questions.** `queue` is the pending
  * decision inbox and nothing else: requests awaiting a human, inside their TTL.
  * `status` is system health: attestation, dangling executions, budget headroom,
