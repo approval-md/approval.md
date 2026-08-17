@@ -4,7 +4,9 @@ title: 'Daemon channel dispatch: push requests that arrive while a listener is r
 status: To Do
 assignee: []
 created_date: '2026-08-17 15:51'
+updated_date: '2026-08-17 21:41'
 labels: []
+milestone: m-9
 dependencies: []
 priority: high
 type: feature
@@ -23,3 +25,9 @@ Found during the M5 proof (APRV-51): the v0.1 Telegram listener sends every pend
 - [ ] #2 Exactly one delivery per request across restarts and ticks, derived from the log
 - [ ] #3 The web and cli channels either gain the same behavior or document why they do not need it
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Assigned to M7 at decomposition (2026-08-17): the M7 demo (APRV-70) needs a request that arrives while daemon and listener are running to reach the phone without a restart, which is exactly this task. It is on the demo critical path.
+<!-- SECTION:NOTES:END -->
