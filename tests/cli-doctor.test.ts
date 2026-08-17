@@ -320,6 +320,8 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // APRV-63: the envelope-loss check, appended to the list rather than
       // inserted, so a reader's position-based expectations still hold.
       "envelope-integrity",
+      // APRV-68: the credential vault, appended for the same reason.
+      "vault",
     ],
   );
   assert.deepEqual(
@@ -329,7 +331,9 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
     // failure (APRV-49 rider to the APRV-40 fail-open sign-off).
     // envelope-integrity skips: the healthy fixture has no task folder, and a
     // check that could not look must not report that it looked (APRV-63).
-    ["pass", "pass", "pass", "pass", "pass", "pass", "pass", "skip", "skip"],
+    // vault skips: the healthy fixture has no credential vault, and a runtime
+    // that never needs a credential is healthy without one (APRV-68).
+    ["pass", "pass", "pass", "pass", "pass", "pass", "pass", "skip", "skip", "skip"],
   );
   for (const entry of parsed.checks) {
     assert.equal(entry.fix, undefined, `a passing check carried a fix: ${entry.check}`);
@@ -364,7 +368,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
 
   assert.equal(run.code, 1, run.stderr);
   const lines = run.stdout.trimEnd().split("\n");
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 9);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 10);
   assert.ok(lines.some((line) => line.startsWith("✗ identity:")));
   assert.ok(lines.some((line) => line.startsWith("– telegram:")));
   // The fix belongs to the failing check and is indented under it.
@@ -761,7 +765,7 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  assert.equal(parsed.checks.length, 9);
+  assert.equal(parsed.checks.length, 10);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);
@@ -932,4 +936,202 @@ test("doctor: a sampler nobody configured is a stated skip, not a failure", asyn
   assert.equal(check.status, "skip");
   assert.match(check.detail, /rate-absent/u);
   assert.equal(check.fix, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// vault (APRV-68)
+// ---------------------------------------------------------------------------
+
+const VAULT_PASSPHRASE = "a doctor-suite vault passphrase";
+const VAULT_SECRET = "sk-live-doctor-vault-51ce8b-DO-NOT-USE";
+const VAULT_FILE = ".approval/vault.enc";
+
+/**
+ * A home holding a real vault, written by the real `approval vault set`.
+ *
+ * `git` and `gitignored` decide whether the tree looks like a repository that
+ * would carry the file into a commit. The credential arrives through
+ * `--value-env` rather than stdin because this suite's `runCli` is asynchronous
+ * and writes no stdin; the bytes take the same path either way.
+ */
+async function homeWithVault(
+  port: number,
+  options: { git?: boolean; gitignored?: boolean } = {},
+): Promise<string> {
+  counter += 1;
+  const dir = join(scratch, `vault-home-${counter}`);
+  mkdirSync(join(dir, ".approval", "log"), { recursive: true });
+  writeFileSync(join(dir, "APPROVAL.md"), policyWith(port));
+  if (options.git !== false) {
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    writeFileSync(
+      join(dir, ".gitignore"),
+      options.gitignored === false ? "node_modules/\n" : `node_modules/\n${VAULT_FILE}\n`,
+    );
+  }
+  const attested = await runCli(["policy", "attest"], dir, { APPROVAL_HUMAN: "human:carter" });
+  assert.equal(attested.code, 0, attested.stderr);
+  const stored = await runCli(
+    ["vault", "set", "api-key", "--value-env", "APPROVAL_TEST_VAULT_VALUE"],
+    dir,
+    {
+      APPROVAL_HUMAN: "human:carter",
+      APPROVAL_VAULT_PASSPHRASE: VAULT_PASSPHRASE,
+      APPROVAL_TEST_VAULT_VALUE: VAULT_SECRET,
+    },
+  );
+  assert.equal(stored.code, 0, stored.stderr);
+  return dir;
+}
+
+/** GREEN_ENV plus a passphrase, the shape most of these cases want. */
+function unlocked(passphrase = VAULT_PASSPHRASE): Record<string, string> {
+  return { ...GREEN_ENV, APPROVAL_VAULT_PASSPHRASE: passphrase };
+}
+
+test("doctor: no vault is a skip that names the consequence", async () => {
+  const { home } = healthy();
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "vault");
+  assert.equal(check.status, "skip");
+  assert.match(check.detail, /no credential vault at/u);
+  assert.match(check.detail, /credential-unavailable/u);
+  assert.match(check.detail, /\$APPROVAL_VAULT_PASSPHRASE/u);
+  assert.equal(check.fix, undefined);
+});
+
+test("doctor: a decryptable, gitignored vault passes and names only the COUNT", async () => {
+  const { port } = healthy();
+  const home = await homeWithVault(port);
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, unlocked());
+  const check = checkNamed(run, "vault");
+  assert.equal(check.status, "pass", check.detail);
+  assert.match(check.detail, /holds 1 credential\(s\)/u);
+  assert.match(check.detail, /gitignored/u);
+  // Not the value, not the passphrase, and not even the credential's NAME.
+  assert.equal(run.stdout.includes(VAULT_SECRET), false);
+  assert.equal(run.stdout.includes(VAULT_PASSPHRASE), false);
+  assert.equal(check.detail.includes("api-key"), false);
+});
+
+test("doctor: a vault that is not gitignored fails, and the fix is the exact line", async () => {
+  const { port } = healthy();
+  const home = await homeWithVault(port, { gitignored: false });
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, unlocked());
+  const check = checkNamed(run, "vault");
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /NOT gitignored/u);
+  assert.match(check.fix ?? "", /add the line `\.approval\/vault\.enc`/u);
+  assert.match(check.fix ?? "", /rotate/u);
+  assert.equal(parseDoctor(run).ok, false);
+});
+
+test("doctor: the gitignore verdict is reported ahead of an unset passphrase", async () => {
+  const { port } = healthy();
+  const home = await homeWithVault(port, { gitignored: false });
+  // Both faults at once. The one named is the one that publishes the file and
+  // that stays wrong after everything else here is fixed.
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  assert.match(checkNamed(run, "vault").detail, /NOT gitignored/u);
+});
+
+test("doctor: an unset passphrase on an existing vault fails, naming the variable", async () => {
+  const { port } = healthy();
+  const home = await homeWithVault(port);
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "vault");
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /\$APPROVAL_VAULT_PASSPHRASE is unset or empty/u);
+  assert.match(check.fix ?? "", /export APPROVAL_VAULT_PASSPHRASE/u);
+});
+
+test("doctor: a wrong passphrase fails as one undistinguished verdict", async () => {
+  const { port } = healthy();
+  const home = await homeWithVault(port);
+  const run = await runCli(
+    ["doctor", "--json", "--root", makeRoot("fresh")],
+    home,
+    unlocked("not the passphrase"),
+  );
+  const check = checkNamed(run, "vault");
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /vault-unreadable/u);
+  assert.match(check.detail, /passphrase wrong or file altered/u);
+  assert.match(check.fix ?? "", /confirm a guessed passphrase/u);
+  assert.equal(run.stdout.includes(VAULT_SECRET), false);
+});
+
+test("doctor: an altered vault reads exactly like a wrong passphrase", async () => {
+  const { port } = healthy();
+  const home = await homeWithVault(port);
+  const vaultFile = join(home, ".approval", "vault.enc");
+  const file = JSON.parse(readFileSync(vaultFile, "utf8")) as Record<string, string>;
+  const bytes = Buffer.from(file["ciphertext_b64"] as string, "base64");
+  bytes[0] = (bytes[0] ?? 0) ^ 0x01;
+  file["ciphertext_b64"] = bytes.toString("base64");
+  writeFileSync(vaultFile, JSON.stringify(file));
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, unlocked());
+  const check = checkNamed(run, "vault");
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /passphrase wrong or file altered/u);
+});
+
+test("doctor: outside a git repository there is nothing to commit the vault to", async () => {
+  const { port } = healthy();
+  const home = await homeWithVault(port, { git: false });
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, unlocked());
+  const check = checkNamed(run, "vault");
+  assert.equal(check.status, "pass", check.detail);
+  assert.match(check.detail, /no git repository at/u);
+});
+
+test("doctor: the policy's vault.passphrase_env is honoured", async () => {
+  const { port } = healthy();
+  counter += 1;
+  const dir = join(scratch, `vault-named-${counter}`);
+  mkdirSync(join(dir, ".approval", "log"), { recursive: true });
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    policyWith(port).replace(
+      "channels:",
+      ["vault:", "  passphrase_env: APPROVAL_TEST_DOCTOR_VAULT_PASS", "channels:"].join("\n"),
+    ),
+  );
+
+  // No vault yet: the skip already names the variable the policy chose.
+  const empty = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], dir, GREEN_ENV);
+  assert.match(checkNamed(empty, "vault").detail, /\$APPROVAL_TEST_DOCTOR_VAULT_PASS/u);
+
+  const stored = await runCli(
+    ["vault", "set", "api-key", "--value-env", "APPROVAL_TEST_VAULT_VALUE"],
+    dir,
+    {
+      APPROVAL_HUMAN: "human:carter",
+      APPROVAL_TEST_DOCTOR_VAULT_PASS: VAULT_PASSPHRASE,
+      APPROVAL_TEST_VAULT_VALUE: VAULT_SECRET,
+    },
+  );
+  assert.equal(stored.code, 0, stored.stderr);
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], dir, {
+    ...GREEN_ENV,
+    APPROVAL_TEST_DOCTOR_VAULT_PASS: VAULT_PASSPHRASE,
+  });
+  const check = checkNamed(run, "vault");
+  assert.equal(check.status, "pass", check.detail);
+  assert.match(check.detail, /\$APPROVAL_TEST_DOCTOR_VAULT_PASS/u);
+});
+
+test("doctor: the vault check leaks neither the passphrase nor the credential", async () => {
+  const { port } = healthy();
+  const home = await homeWithVault(port);
+  const before = readFileSync(logPathOf(home));
+  const run = await runCli(["doctor", "--root", makeRoot("fresh")], home, unlocked());
+  for (const needle of [VAULT_SECRET, VAULT_PASSPHRASE]) {
+    assert.equal(run.stdout.includes(needle), false);
+    assert.equal(run.stderr.includes(needle), false);
+  }
+  // And doctor appended nothing to the log it read.
+  assert.deepEqual(readFileSync(logPathOf(home)), before);
 });

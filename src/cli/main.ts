@@ -70,6 +70,7 @@ import { commandPayload } from "./payload.js";
 import { commandPolicy } from "./policy.js";
 import { commandRender } from "./render.js";
 import { commandConsume, commandToken } from "./token.js";
+import { commandVault } from "./vault.js";
 import {
   DEFAULT_INDEX_PATH,
   DEFAULT_LOG_PATH,
@@ -635,6 +636,14 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // It reads no log and writes nothing.
     case "payload":
       return commandPayload(rest, streams, cwd);
+    // The credential verbs (APRV-68). `vault set|list|remove` manage the
+    // encrypted store adapters read from, and all three are human-only. There
+    // is deliberately no `vault get`: a credential's only sanctioned journey is
+    // from the vault into an adapter inside the verified-token window, and a
+    // verb that printed one would put it in a terminal and a shell history.
+    // Nothing under this verb appends to the log.
+    case "vault":
+      return commandVault(rest, streams, cwd);
     // The interoperability verb (APRV-64). `import agents-md` reads permissions
     // PROSE and prints a draft policy block. It is the only verb whose output is
     // a proposal: it writes no policy, appends nothing, and attests nothing —

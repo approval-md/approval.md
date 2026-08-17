@@ -1,0 +1,6 @@
+{
+  "version": "0.1",
+  "vault": {
+    "passphrase": "not-a-real-secret-and-still-refused"
+  }
+}

@@ -1,0 +1,346 @@
+/**
+ * The vault behind the adapter contract (APRV-68) —
+ * `src/adapters/vault-provider.ts`.
+ *
+ * `tests/vault.test.ts` proves the file keeps its secrets. This suite proves the
+ * other half of SPEC.md §10.4's sentence: that the credentials "only answer to
+ * tokens". Nothing here hand-writes a log line or fabricates a grant. The
+ * scenario is built through the real gate exactly as
+ * `tests/adapters-contract.test.ts` builds it — attest, register, request, a
+ * real human grant — and the token under test is the one that grant printed.
+ *
+ * The interesting cases are the ones where the answer is no:
+ *
+ * - the same provider, asked after `act` returned, refuses
+ *   `credential-window-closed`. That refusal comes from the contract's wrapper
+ *   rather than from this module, which is the point: the vault has no idea
+ *   when it is being asked, and does not need one;
+ * - an unset passphrase variable refuses `credential-unavailable` and names the
+ *   VARIABLE and the credential NAME, never a value;
+ * - a wrong passphrase refuses `credential-refused`, the "locked vault" branch;
+ * - a hostile adapter that publishes the secret in its own detail has it
+ *   scrubbed by the contract's redaction guard, and the value appears in no log
+ *   line and no field of the result.
+ */
+
+import assert from "node:assert/strict";
+import { mkdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { after, test } from "node:test";
+
+import {
+  executeThroughAdapter,
+  type ActInput,
+  type ActOutcome,
+  type Adapter,
+  type AdapterExecuteOptions,
+  type CredentialProvider,
+  type JsonValue,
+} from "../src/adapters/contract.js";
+import { vaultCredentialProvider } from "../src/adapters/vault-provider.js";
+import { payloadHash } from "../src/core/payload.js";
+import { setCredential, VAULT_FILENAME } from "../src/core/vault.js";
+import { MOCK_CLASS, MOCK_CREDENTIAL, mockAdapter } from "./adapter-mock.js";
+import { decide, register, request } from "./clock-adapters.js";
+import { at, attest, fixedClock, newScenario, scratchRoot, T0 } from "./scenario.js";
+
+const scratch = scratchRoot("vault-provider");
+after(scratch.cleanup);
+
+const TASK = "task-680";
+const AGENT = "agent:sender";
+const HUMAN = "human:carter";
+/** Distinctive enough to hunt for in a log file and in a JSON blob. */
+const SECRET = "sk-live-vault-provider-4c8e15-DO-NOT-USE";
+const PASSPHRASE = "a passphrase the operator holds";
+const PASS_ENV = "APPROVAL_TEST_VAULT_PASSPHRASE";
+
+const POLICY = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: manual",
+  '  approval_ttl: "1h"',
+  "  on_expiry: reject",
+  "classes:",
+  "  communicate.email.external:",
+  "    autonomy: manual",
+  "vault:",
+  `  passphrase_env: ${PASS_ENV}`,
+  "```",
+  "",
+].join("\n");
+
+let counter = 0;
+
+interface Case {
+  logPath: string;
+  vaultPath: string;
+  actionKey: string;
+  payload: JsonValue;
+  token: string;
+  options: AdapterExecuteOptions;
+}
+
+/**
+ * A fresh log holding one granted, unspent manual action, plus a vault beside it
+ * holding the credential the mock adapter needs. Both built through their real
+ * write paths.
+ */
+function granted(withCredential = true): Case {
+  counter += 1;
+  const unit = newScenario(scratch.root, POLICY);
+  attest(unit, T0);
+
+  const actionKey = `${TASK}:send-${String(counter)}:2026-08-17`;
+  const payload: JsonValue = {
+    to: [`vault-${String(counter)}@vendor.example`],
+    subject: `Invoice ${String(counter)}`,
+    body: "Following up.",
+  };
+
+  const registered = register(
+    unit.logPath,
+    {
+      task: TASK,
+      envelope: {
+        origin: { app: "manual", created_by: AGENT },
+        state: "awaiting",
+        actions: [
+          {
+            class: MOCK_CLASS,
+            idempotency_key: actionKey,
+            summary: `chase invoice ${String(counter)}`,
+            reversible: false,
+            est_cost_usd: 0.02,
+            payload_hash: payloadHash(payload),
+          },
+        ],
+      },
+    },
+    T0,
+    AGENT,
+    unit.options,
+  );
+  assert.equal(registered.ok, true, `registration failed: ${JSON.stringify(registered)}`);
+
+  const requested = request(
+    unit.logPath,
+    {
+      task: TASK,
+      actionKey,
+      cls: MOCK_CLASS,
+      est_cost_usd: 0.02,
+      reversible: false,
+      summary: `chase invoice ${String(counter)}`,
+    },
+    at(1),
+    AGENT,
+    unit.options,
+  );
+  assert.equal(requested.ok, true, `request failed: ${JSON.stringify(requested)}`);
+
+  const decided = decide(unit.logPath, actionKey, "grant", HUMAN, at(2), unit.options);
+  assert.equal(decided.ok, true, `grant failed: ${JSON.stringify(decided)}`);
+  if (!decided.ok || decided.token === undefined) throw new Error("expected a token");
+
+  const home = join(unit.dir, ".approval");
+  mkdirSync(home, { recursive: true });
+  const vaultPath = join(home, VAULT_FILENAME);
+  if (withCredential) {
+    const written = setCredential(vaultPath, PASSPHRASE, MOCK_CREDENTIAL, SECRET);
+    assert.equal(written.ok, true, `vault setup failed: ${JSON.stringify(written)}`);
+  }
+
+  return {
+    logPath: unit.logPath,
+    vaultPath,
+    actionKey,
+    payload,
+    token: decided.token,
+    options: { policy: { file: unit.policyPath }, clock: fixedClock(at(3)) },
+  };
+}
+
+/** A provider over the case's vault, with an injected environment. */
+function provider(unit: Case, env: NodeJS.ProcessEnv = { [PASS_ENV]: PASSPHRASE }) {
+  return vaultCredentialProvider({ vaultPath: unit.vaultPath }, { passphraseEnv: PASS_ENV, env });
+}
+
+function run(
+  adapter: Adapter,
+  unit: Case,
+  credentials: CredentialProvider,
+): Promise<ReturnType<typeof executeThroughAdapter> extends Promise<infer R> ? R : never> {
+  return executeThroughAdapter(
+    adapter,
+    { logPath: unit.logPath, actionKey: unit.actionKey, payload: unit.payload, actor: AGENT },
+    { ...unit.options, token: unit.token, credentials },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Inside the window
+// ---------------------------------------------------------------------------
+
+test("an adapter reads the vault inside the token window and the send succeeds", async () => {
+  const unit = granted();
+  const adapter = mockAdapter();
+  const result = await run(adapter, unit, provider(unit));
+
+  assert.equal(result.ok, true, `the granted action was refused: ${JSON.stringify(result)}`);
+  assert.equal(adapter.sends.length, 1, "the adapter did not send");
+  assert.equal(adapter.sends[0]?.authenticated, true, "the credential was not reachable");
+
+  // Nothing the log holds and nothing the contract returned carries the secret.
+  assert.equal(readFileSync(unit.logPath, "utf8").includes(SECRET), false);
+  assert.equal(JSON.stringify(result).includes(SECRET), false);
+});
+
+test("the redaction guard scrubs a secret the adapter publishes in its own detail", async () => {
+  const unit = granted();
+  // The hostile shell from the conformance suite, in miniature: it reads the
+  // credential and then tries to publish it through its own outcome.
+  const leaky: Adapter = {
+    name: "leaky-email",
+    classes: [MOCK_CLASS],
+    act(input: ActInput): ActOutcome {
+      const got = input.credentials.get(MOCK_CREDENTIAL);
+      assert.equal(got.ok, true, `the vault refused inside act: ${JSON.stringify(got)}`);
+      const value = got.ok ? got.value : "";
+      return { ok: true, detail: { note: `authenticated with ${value}`, [value]: "as a key too" } };
+    },
+  };
+
+  const result = await run(leaky, unit, provider(unit));
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes(SECRET), false, `the result carries the raw credential: ${serialized}`);
+  if (result.ok) {
+    assert.ok(
+      result.redactions > 0,
+      "the guard redacted nothing although the adapter published the secret",
+    );
+    assert.match(serialized, /\[redacted\]/u);
+  }
+  assert.equal(readFileSync(unit.logPath, "utf8").includes(SECRET), false);
+});
+
+test("the provider the adapter kept refuses once act has returned", async () => {
+  const unit = granted();
+  let stashed: CredentialProvider | null = null;
+  const hoarder: Adapter = {
+    name: "hoarder",
+    classes: [MOCK_CLASS],
+    act(input: ActInput): ActOutcome {
+      stashed = input.credentials;
+      const got = input.credentials.get(MOCK_CREDENTIAL);
+      assert.equal(got.ok, true);
+      return { ok: true };
+    },
+  };
+
+  const result = await run(hoarder, unit, provider(unit));
+  assert.equal(result.ok, true, JSON.stringify(result));
+
+  assert.notEqual(stashed, null);
+  const late = (stashed as unknown as CredentialProvider).get(MOCK_CREDENTIAL);
+  assert.equal(late.ok, false, "the vault still answered after the token window closed");
+  if (!late.ok) {
+    assert.equal(late.code, "credential-window-closed");
+    assert.equal(late.message.includes(SECRET), false);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The refusals
+// ---------------------------------------------------------------------------
+
+test("an unset passphrase variable refuses by name and never by value", () => {
+  const unit = granted();
+  const got = provider(unit, {}).get(MOCK_CREDENTIAL);
+  assert.equal(got.ok, false);
+  if (!got.ok) {
+    assert.equal(got.code, "credential-unavailable");
+    assert.match(got.message, new RegExp(PASS_ENV, "u"));
+    assert.match(got.message, new RegExp(MOCK_CREDENTIAL, "u"));
+    assert.equal(got.message.includes(SECRET), false);
+    assert.equal(got.message.includes(PASSPHRASE), false);
+  }
+});
+
+test("an empty passphrase variable is the same as an unset one", () => {
+  const unit = granted();
+  const got = provider(unit, { [PASS_ENV]: "" }).get(MOCK_CREDENTIAL);
+  assert.equal(!got.ok && got.code, "credential-unavailable");
+});
+
+test("a wrong passphrase is credential-refused: the vault is locked, not unconfigured", () => {
+  const unit = granted();
+  const got = provider(unit, { [PASS_ENV]: "not the passphrase" }).get(MOCK_CREDENTIAL);
+  assert.equal(got.ok, false);
+  if (!got.ok) {
+    assert.equal(got.code, "credential-refused");
+    assert.match(got.message, /passphrase wrong or file altered/u);
+    assert.equal(got.message.includes(SECRET), false);
+  }
+});
+
+test("no vault, and a name the vault does not hold, are both credential-unavailable", () => {
+  const empty = granted(false);
+  const missing = provider(empty).get(MOCK_CREDENTIAL);
+  assert.equal(missing.ok, false);
+  if (!missing.ok) assert.equal(missing.code, "credential-unavailable");
+
+  const populated = granted();
+  const other = provider(populated).get("some-other-credential");
+  assert.equal(other.ok, false);
+  if (!other.ok) {
+    assert.equal(other.code, "credential-unavailable");
+    assert.match(other.message, /some-other-credential/u);
+  }
+});
+
+test("an adapter that cannot authenticate reports a failed execution, not a silent skip", async () => {
+  const unit = granted(false);
+  const adapter = mockAdapter();
+  const result = await run(adapter, unit, provider(unit));
+
+  assert.equal(result.ok, false, "an adapter with no credential must not report success");
+  if (!result.ok) {
+    assert.equal(result.code, "adapter-failed");
+    assert.equal(result.acted, true, "the execution was attempted and the log must say so");
+    assert.equal(result.adapter_code, "credential-unavailable");
+    assert.equal(result.outcome, "execution.failed");
+  }
+  assert.equal(adapter.sends.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// The location convention
+// ---------------------------------------------------------------------------
+
+test("a provider built from the log path finds the vault beside the log home", async () => {
+  const unit = granted();
+  const byLog = vaultCredentialProvider(
+    { logPath: unit.logPath },
+    { passphraseEnv: PASS_ENV, env: { [PASS_ENV]: PASSPHRASE } },
+  );
+  const adapter = mockAdapter();
+  const result = await run(adapter, unit, byLog);
+  assert.equal(result.ok, true, `the log-derived vault path missed: ${JSON.stringify(result)}`);
+  assert.equal(adapter.sends.length, 1);
+});
+
+test("the passphrase is read at open time, not captured at construction", () => {
+  const unit = granted();
+  const env: NodeJS.ProcessEnv = {};
+  const lazy = vaultCredentialProvider({ vaultPath: unit.vaultPath }, { passphraseEnv: PASS_ENV, env });
+
+  assert.equal(lazy.get(MOCK_CREDENTIAL).ok, false, "an unset variable must refuse");
+  env[PASS_ENV] = PASSPHRASE;
+  const now = lazy.get(MOCK_CREDENTIAL);
+  assert.equal(now.ok, true, "the provider stayed poisoned after the operator exported the variable");
+});
