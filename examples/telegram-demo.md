@@ -78,11 +78,24 @@ export APPROVAL_MD=~/dev/approval-md
 approval() { node "$APPROVAL_MD/dist/src/cli/main.js" "$@"; }
 
 mkdir -p /tmp/approval-demo && cd /tmp/approval-demo
+approval init
 ```
+
+`approval init` scaffolds the directory: `APPROVAL.md` (SPEC.md section 5.1's
+canonical policy), the empty `.approval/log/` directory, `.approval/QUEUE.md` in
+its empty state, and the `.gitignore` lines for the index, the vault and the
+atomic-write temp files. It appends nothing, attests nothing, and overwrites
+nothing, so re-running it in a scaffolded directory writes nothing and exits 0.
+The first `approval policy attest` is what creates `events.jsonl`.
 
 ### Step 1: write the policy
 
+This demo replaces the scaffolded policy with a smaller one carrying the
+Telegram channel config the walkthrough needs, so delete the scaffolded file
+first (`init` never overwrites, and refusing here would be its whole point):
+
 ````sh
+rm APPROVAL.md
 cat > APPROVAL.md <<'EOF'
 # Approval policy (demo)
 
