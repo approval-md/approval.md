@@ -236,31 +236,7 @@ function reasonOf(payload: Record<string, unknown>): string {
   return typeof value === "string" ? value : "state-mismatch";
 }
 
-/**
- * The latest `task.registered` record for `task`, or `null`.
- *
- * `loose` matches the task id case-insensitively, for the one caller that has
- * no frontmatter to read an id out of and must work from the Backlog.md file
- * name (`task-3 - Slug.md` for a board key written `TASK-3`). It is a matching
- * relaxation only: the record returned, and therefore the id every later step
- * uses, is the log's, never the file name's.
- */
-export function latestRegistration(
-  records: EventRecord[],
-  task: string,
-  loose = false,
-): EventRecord | null {
-  const wanted = loose ? task.toLowerCase() : task;
-  let latest: EventRecord | null = null;
-  for (const record of records) {
-    if (record.event !== "task.registered") continue;
-    const id = record.task;
-    if (typeof id !== "string") continue;
-    if ((loose ? id.toLowerCase() : id) !== wanted) continue;
-    latest = record;
-  }
-  return latest;
-}
+export { latestRegistration } from "../core/registration.js";
 
 /** The facts one `envelope.drift` record carries, and the dedupe key. */
 export interface DriftFacts {

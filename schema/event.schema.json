@@ -160,6 +160,32 @@
       }
     },
     {
+      "$comment": "SPEC.md §5.2/§8 (APRV-56): reviewing a sampled action is a human decision, made through the CLI, and the runtime already refuses any other reviewer. A `system:` or `agent:` reviewer would be the party under oversight signing off on its own sample, which is the one reading of the record that must never be possible, so the actor MUST carry the `human:` prefix.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "audit.reviewed"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^human:"
+          }
+        },
+        "required": [
+          "actor"
+        ]
+      }
+    },
+    {
       "$comment": "SPEC.md §8: execution events report on one keyed action of one task.",
       "if": {
         "type": "object",

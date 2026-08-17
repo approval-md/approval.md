@@ -133,6 +133,22 @@ test("approval decisions must come from a human actor (SPEC.md §10.1)", () => {
   }
 });
 
+test("audit review must come from a human actor (SPEC.md §5.2)", () => {
+  const record = fixture("audit.reviewed");
+  assert.equal(validate("event", record).ok, true);
+
+  // The runtime already refuses a non-human reviewer (`approval audit review`
+  // is human-only), and the schema says so too: a sampled action reviewed by
+  // `system:` or `agent:` is the party under oversight clearing its own sample.
+  for (const actor of ["agent:chaser", "system:auditor"]) {
+    assert.equal(
+      validate("event", { ...record, actor }).ok,
+      false,
+      `audit.reviewed accepted a non-human actor "${actor}"`,
+    );
+  }
+});
+
 test("non-decision events accept agent and system actors", () => {
   for (const actor of ["human:carter", "agent:chaser", "system:daemon"]) {
     const result = validate("event", { ...fixture("approval.expired"), actor });

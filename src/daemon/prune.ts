@@ -67,7 +67,10 @@
  *
  * ## Nothing else here decides anything
  *
- * Approval state per action is `core/state.ts`'s `requestState`; the append is
+ * Which hashes the log already binds, and which it already says are pruned, is
+ * `core/payload-census.ts`'s — the same computation the reporting surfaces read,
+ * so what a reader is shown and what this module would delete can never drift
+ * apart. Approval state per action is `core/state.ts`'s `requestState`; the append is
  * `core/log.ts`'s `appendEvent` with `expectedHead` (compare-and-append, SPEC.md
  * §11.1 invariant 5); the unlink is `core/payload-store.ts`'s. The timestamp on
  * every `payload.pruned` is the runtime's, read from the injected clock at the
@@ -78,13 +81,14 @@
 import { tick as readClock, type Clock } from "../core/clock.js";
 import { appendEvent, type EventRecord } from "../core/log.js";
 import { isPayloadHash } from "../core/payload.js";
+import { bindingsOf, prunedHashes } from "../core/payload-census.js";
 import {
   listStoredPayloadHashes,
   payloadStoreDirFor,
   removeStoredPayload,
 } from "../core/payload-store.js";
 import { loadPolicy, parseDuration, type LoadPolicyOptions } from "../core/policy-load.js";
-import { payloadOf, readVerifiedRecords, requestState } from "../core/state.js";
+import { readVerifiedRecords, requestState } from "../core/state.js";
 
 /**
  * SPEC.md §8 and `event.schema.json`: `payload.pruned` carries a `system:` actor.
@@ -132,105 +136,6 @@ function emptyPlan(): PrunePlan {
 // ---------------------------------------------------------------------------
 // Eligibility (pure)
 // ---------------------------------------------------------------------------
-
-/** Hashes a `payload.pruned` record already names. */
-function prunedHashes(records: EventRecord[]): Set<string> {
-  const pruned = new Set<string>();
-  for (const record of records) {
-    if (record.event !== "payload.pruned") continue;
-    const hash = payloadOf(record)["payload_hash"];
-    if (isPayloadHash(hash)) pruned.add(hash);
-  }
-  return pruned;
-}
-
-interface Binding {
-  /** Action keys that declared this hash. */
-  actionKeys: Set<string>;
-  /** A record named the hash without an action key: bound, but unattributable. */
-  unattributed: boolean;
-}
-
-/** Every payload-hash-shaped string anywhere inside a value. */
-function hashesWithin(value: unknown, found: Set<string>): void {
-  if (isPayloadHash(value)) {
-    found.add(value);
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) hashesWithin(item, found);
-    return;
-  }
-  if (typeof value === "object" && value !== null) {
-    for (const item of Object.values(value)) hashesWithin(item, found);
-  }
-}
-
-/**
- * Every hash any record binds to, mapped to the actions that declared it.
- *
- * Two attributions are understood, because they are the two the runtime writes:
- * a `payload_hash` beside a record's own `action_key` (`approval.requested` and
- * `approval.granted` carry it there), and the `payload_hash` of each action
- * inside a `task.registered` envelope, attributed to that action's
- * `idempotency_key` — which is where a *registered but not yet requested* action
- * declares its bytes. Without the second, a payload stored at registration time
- * would look like residue nothing bound and be pruned out from under the request
- * about to be made for it.
- *
- * Everything else is caught by a deep scan and deliberately treated as a
- * binding this module cannot attribute: an unattributable binding is never
- * prunable, so an event shape nobody here anticipated makes a payload immortal
- * rather than making it disposable. The only event exempt from the scan is
- * `payload.pruned`, whose whole job is to name bytes that are going.
- */
-function bindingsOf(records: EventRecord[]): Map<string, Binding> {
-  const bindings = new Map<string, Binding>();
-  const bindingFor = (hash: string): Binding => {
-    let binding = bindings.get(hash);
-    if (binding === undefined) {
-      binding = { actionKeys: new Set<string>(), unattributed: false };
-      bindings.set(hash, binding);
-    }
-    return binding;
-  };
-
-  for (const record of records) {
-    if (record.event === "payload.pruned") continue;
-    const payload = payloadOf(record);
-    const attributed = new Set<string>();
-
-    const own = payload["payload_hash"];
-    const key = record.action_key;
-    if (isPayloadHash(own) && typeof key === "string" && key.length > 0) {
-      bindingFor(own).actionKeys.add(key);
-      attributed.add(own);
-    }
-
-    const actions = payload["actions"];
-    if (Array.isArray(actions)) {
-      for (const action of actions) {
-        if (typeof action !== "object" || action === null) continue;
-        const item = action as Record<string, unknown>;
-        const hash = item["payload_hash"];
-        const declaredKey = item["idempotency_key"];
-        if (!isPayloadHash(hash)) continue;
-        if (typeof declaredKey === "string" && declaredKey.length > 0) {
-          bindingFor(hash).actionKeys.add(declaredKey);
-          attributed.add(hash);
-        }
-      }
-    }
-
-    const mentioned = new Set<string>();
-    hashesWithin(payload, mentioned);
-    for (const hash of mentioned) {
-      if (attributed.has(hash)) continue;
-      bindingFor(hash).unattributed = true;
-    }
-  }
-  return bindings;
-}
 
 interface Terminal {
   state: TerminalState;
@@ -560,40 +465,4 @@ function durationText(ms: number): string {
     if (ms % scale === 0 && ms >= scale) return `${String(ms / scale)}${unit}`;
   }
   return `${String(ms)}ms`;
-}
-
-// ---------------------------------------------------------------------------
-// Reporting (status, doctor)
-// ---------------------------------------------------------------------------
-
-export interface PayloadStoreCensus {
-  /** Files the store currently holds, by hash. */
-  files: number;
-  /** Distinct hashes a `payload.pruned` event names — evidence that outlived bytes. */
-  pruned: number;
-  /** Files present that no record binds: head-moved residue, prunable when enabled. */
-  orphans: number;
-  /** Files present whose prune event is already logged (a crash mid-prune). */
-  awaitingRemoval: number;
-}
-
-/**
- * Count what the store holds against what the log says about it.
- *
- * Honest in both directions and about both failure modes: `pruned` is a fact of
- * the log (it stays true forever, whatever the store does), `orphans` and
- * `awaitingRemoval` are facts about the disagreement between the two. None of
- * them is a health verdict; a reader is being told what is there.
- */
-export function payloadStoreCensus(records: EventRecord[], storeDir: string): PayloadStoreCensus {
-  const present = listStoredPayloadHashes(storeDir);
-  const pruned = prunedHashes(records);
-  const bindings = bindingsOf(records);
-  let orphans = 0;
-  let awaitingRemoval = 0;
-  for (const hash of present) {
-    if (pruned.has(hash)) awaitingRemoval += 1;
-    else if (!bindings.has(hash)) orphans += 1;
-  }
-  return { files: present.length, pruned: pruned.size, orphans, awaitingRemoval };
 }

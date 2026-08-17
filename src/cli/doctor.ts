@@ -58,10 +58,9 @@ import {
 import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
 import { readTaskFile } from "../core/frontmatter.js";
 import type { EventRecord } from "../core/log.js";
+import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
-import { DEFAULT_TASKS_DIR } from "../daemon/daemon.js";
-import { latestRegistration } from "../daemon/projection.js";
-import { payloadStoreCensus } from "../daemon/prune.js";
+import { DEFAULT_TASKS_DIR, latestRegistration } from "../core/registration.js";
 import { POLICY_FILENAMES, loadPolicy, type PolicyLoadResult } from "../core/policy-load.js";
 import { resolveSampler } from "../core/sampler.js";
 import { verifyWithRecords, type VerifyResult } from "../core/verify.js";

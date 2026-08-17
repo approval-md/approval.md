@@ -57,8 +57,8 @@ import {
   type ResolveOutcome,
 } from "../core/execute.js";
 import { isPayloadHash, runPayloadHash } from "../core/payload.js";
+import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
-import { payloadStoreCensus } from "../daemon/prune.js";
 import { readVerifiedRecords, requestState } from "../core/state.js";
 import type { EventRecord } from "../core/log.js";
 import { loadPolicy, parseDuration, POLICY_FILENAMES } from "../core/policy-load.js";

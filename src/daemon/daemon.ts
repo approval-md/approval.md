@@ -121,7 +121,7 @@ import {
 export const DAEMON_ACTOR = "system:daemon";
 
 /** Backlog.md's conventional task folder, relative to the working directory. */
-export const DEFAULT_TASKS_DIR = "backlog/tasks";
+export { DEFAULT_TASKS_DIR } from "../core/registration.js";
 
 /** How often the daemon looks, absent any watcher event. */
 export const DEFAULT_INTERVAL_MS = 30_000;
