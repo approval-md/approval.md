@@ -4,3 +4,7 @@ dist/
 .DS_Store
 .approval/*.sqlite
 .claude/settings.local.json
+
+# Private strategy notes: never committed, never published (Pages serves repo root)
+private/*
+!private/README.md
