@@ -1,0 +1,14 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual",
+    "approval_ttl": "24h",
+    "on_expiry": "reject"
+  },
+  "classes": {
+    "communicate.email.external": { "autonomy": "manual" }
+  },
+  "vault": {
+    "passphrase_env": "APPROVAL_VAULT_PASSPHRASE"
+  }
+}

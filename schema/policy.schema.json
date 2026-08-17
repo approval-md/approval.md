@@ -109,6 +109,19 @@
         }
       }
     },
+    "vault": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "SPEC.md §5.2/§10.4 (amended, APRV-68): configuration for the encrypted credential vault adapters read from (`.approval/vault.enc`). Exactly one key, and it holds a NAME.",
+      "properties": {
+        "passphrase_env": {
+          "type": "string",
+          "minLength": 1,
+          "description": "SPEC.md §5.2/§10.4 (amended, APRV-68): name of the environment variable holding the vault passphrase, from which the AES-256-GCM key is derived by scrypt. Named indirectly for the same reason `audit.sampling_secret_env`, `chat_id_env` and `token_env` are: agents may read APPROVAL.md, and a passphrase they can read is a vault they can open. The passphrase itself lives outside the repository and outside any agent-readable path; this policy carries the variable name only. Absent means the runtime reads `APPROVAL_VAULT_PASSPHRASE`, because the variable's NAME is not a permission and an unnamed one must not lock an operator out of credentials they created.",
+          "examples": ["APPROVAL_VAULT_PASSPHRASE"]
+        }
+      }
+    },
     "channels": {
       "type": "object",
       "description": "SPEC.md §5.1/§10.3: map of channel name -> channel configuration. Known channels are typed; unknown channel names are accepted as objects so a third-party transport plugin does not invalidate the whole policy (and, per §5.2, force everything to `manual`).",

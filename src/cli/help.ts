@@ -53,6 +53,8 @@ Usage:
   approval doctor     [--log <path>] [--policy <path>] [--dir <path>]
                       [--api-base <url>] [--json]
   approval payload hash <file|-> [--json]
+  approval vault set <name> [--value-env <VAR>] [--as human:<id>] [--json]
+  approval vault list|remove [<name>] [--as human:<id>] [--json]
   approval import agents-md <file> [--out <path>] [--json]
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
   approval render     [--log <path>] [--out <path>] [--policy <path>]
@@ -121,6 +123,12 @@ Commands:
             no verb: the daemon selects supervised actions with an operator-held
             secret, because a caller who could sample could also decline to
             sample itself
+  vault     the encrypted credential store adapters read from (SPEC.md §10.4).
+            "vault set|list|remove" are HUMAN-ONLY; list shows NAMES and never
+            values, and there is no "vault get" — a credential's only sanctioned
+            journey is from .approval/vault.enc into an adapter, inside the
+            verified-token window. The passphrase comes from the environment
+            variable the policy NAMES (vault.passphrase_env), never from a flag
   import    "import agents-md" parses an AGENTS.md-style permissions section
             into DRAFT policy classes for a human to confirm (SPEC.md §12). It
             prints; it never writes APPROVAL.md, never logs, never attests
@@ -137,6 +145,9 @@ Defaults:
   payloads .approval/payloads/<payload_hash>.json  (the bytes a request bound
            to, written by request --payload; read by render and every channel,
            and re-hashed on every read)
+  vault  .approval/vault.enc  (AES-256-GCM over the named credentials; written
+         only by "vault set|remove", read only by an adapter inside a verified
+         token window. GITIGNORE IT — doctor fails if you have not)
 
 ${EXIT_CODES}
 
@@ -1353,7 +1364,7 @@ Flags:
   --json             machine-readable output
   -h, --help         this text
 
-Nine checks, in the order in which their failures cascade:
+Ten checks, in the order in which their failures cascade:
 
   build-freshness  dist/src/cli/main.js — the exact file the bin loader runs —
                    is present and NOT OLDER than the newest file under src/ or
@@ -1419,6 +1430,18 @@ Nine checks, in the order in which their failures cascade:
                    A TASK FILE: the log holds the actions, and re-emitting the
                    envelope from it would turn a projection into a source. SKIPS
                    when there is no task folder.
+  vault            .approval/vault.enc, when there is one. THE GITIGNORE CHECK
+                   RUNS FIRST, because a vault about to be committed is the
+                   worse fault and stays wrong after every other problem is
+                   fixed; the fix is the exact line to add. Then the passphrase
+                   variable the policy names must be set, and the file must
+                   actually decrypt under it — a wrong passphrase and an altered
+                   file are reported as one verdict on purpose, since telling
+                   them apart would confirm a guessed passphrase against a file
+                   someone had modified. PASSES naming the credential COUNT and
+                   never a name or a value. SKIPS when there is no vault, with
+                   the note that adapters needing credentials will refuse until
+                   one exists.
 
 APPENDS NOTHING. Not an event, not a marker. An operator reaching for a
 diagnostic while the log is in a state they do not understand must not have that
@@ -1448,10 +1471,11 @@ JSON shape (stdout, one object):
     {"check":"web-port","status":"pass","detail":"..."},
     {"check":"payload-store","status":"pass","detail":"..."},
     {"check":"audit-sampling","status":"skip","detail":"..."},
-    {"check":"envelope-integrity","status":"pass","detail":"..."}]}
+    {"check":"envelope-integrity","status":"pass","detail":"..."},
+    {"check":"vault","status":"skip","detail":"..."}]}
   status is "pass" | "fail" | "skip". fix is present only when there is
   something to do. ok is true when no check failed — a skip does not make it
-  false. The nine checks always appear, in this order.
+  false. The ten checks always appear, in this order.
 ${JSON_ERRORS}`;
 
 export const AUDIT_HELP = `approval audit — the retrospective review of sampled supervised actions
@@ -2347,4 +2371,184 @@ JSON shape (stdout, ONE OBJECT PER LINE):
    "hash":"<sha256 of the head record>","records":2}
   and, on a git failure, {"event":"git_evidence_failed","step":"commit",
   "message":"..."} on STDERR. Neither ever stops the loop.
+${JSON_ERRORS}`;
+
+// ---------------------------------------------------------------------------
+// The vault (APRV-68)
+// ---------------------------------------------------------------------------
+
+const VAULT_NO_GET = `THERE IS NO "approval vault get", and it is not an oversight. A verb that
+printed a credential would put it in a terminal, a scrollback buffer, a CI log
+and — through the shell that ran it — a history file. A credential's only
+sanctioned journey is from the vault into an adapter, inside the verified-token
+window the adapter contract holds open (SPEC.md §10.4: "the credentials only
+answer to tokens"). Names are visible; values are not.`;
+
+const VAULT_THREAT_MODEL = `What the vault DEFENDS: credentials at rest, and casual reads by an agent that
+can read files in the working tree — the ciphertext hides the NAMES as well as
+the values.
+What it does NOT defend (SPEC.md §11, plainly): a compromised host, and an agent
+that can read the passphrase variable. That agent does not need this CLI; it can
+decrypt the file itself. Keep the passphrase in an operator-held environment and
+outside every agent-readable path.`;
+
+export const VAULT_HELP = `approval vault — the encrypted credential store adapters read from
+
+Usage:
+  approval vault set <name> [--value-env <VAR>] [--vault <path>] [--log <path>]
+                    [--policy <path>] [--dir <path>] [--as human:<id>] [--json]
+  approval vault list   [--vault <path>] [--log <path>] [--as human:<id>] [--json]
+  approval vault remove <name> [--vault <path>] [--log <path>]
+                    [--as human:<id>] [--json]
+
+Subcommands:
+  set     store a credential (value from STDIN or --value-env; never a flag),
+          creating .approval/vault.enc if it does not exist
+  list    the NAMES the vault holds, the count, and the file path. Never values
+  remove  delete one credential by name
+
+ALL THREE ARE HUMAN-ONLY: the actor must match human:<id>, from --as or
+APPROVAL_HUMAN, exactly as "policy attest" requires. Identity is declared, not
+proved (SPEC.md §11: the trust boundary is the local machine); the check is what
+stops an agent's tooling from storing or deleting a credential in passing.
+
+The file is AES-256-GCM over a JSON map of name -> credential, under a key
+derived by scrypt (N=16384, r=8, p=1, 32-byte key) from a passphrase read from
+the environment variable named by the policy's vault.passphrase_env (default
+APPROVAL_VAULT_PASSPHRASE). The policy carries the variable NAME and never the
+value, the same convention as channels.telegram.token_env and
+audit.sampling_secret_env. There is no --passphrase flag.
+
+APPENDS NOTHING TO THE LOG. A credential's existence is configuration, not an
+authorized action, and a log line naming the credentials an operator holds would
+be a map of the machine's reach written into the one file this project promises
+never to rewrite.
+
+${VAULT_NO_GET}
+
+${VAULT_THREAT_MODEL}
+
+${EXIT_CODES}
+  vault: 1 for anything the runtime decided (wrong passphrase, altered file, a
+  name the vault does not hold), 4 for filesystem failures, 2 for usage —
+  including a missing human identity and a missing passphrase variable.
+${JSON_ERRORS}`;
+
+export const VAULT_SET_HELP = `approval vault set — store one credential (HUMAN-ONLY)
+
+Usage:
+  approval vault set <name> [--value-env <VAR>] [--vault <path>] [--log <path>]
+                    [--policy <path>] [--dir <path>] [--as human:<id>] [--json]
+
+Flags:
+  --value-env <VAR>  read the value from this environment variable
+  --vault <path>     the vault file (default: <log home>/vault.enc)
+  --log <path>       log file the vault path is derived from
+  --policy <path>    policy file to read vault.passphrase_env from
+  --dir <path>       directory to discover APPROVAL.md / APPROVALS.md in
+  --as human:<id>    the human doing this (else APPROVAL_HUMAN)
+  --json             machine-readable output
+  -h, --help         this text
+
+THE VALUE IS NEVER A COMMAND-LINE ARGUMENT. There is no --value flag, because a
+secret on a command line is a secret in the shell history and in "ps" output for
+the length of the call. The value comes from STDIN:
+
+  pass show smtp/app | approval vault set smtp-password
+  approval vault set api-key <<'EOF'
+  sk-live-…
+  EOF
+
+or from a variable named with --value-env:
+
+  APPROVAL_TMP_SECRET="$(op read op://vault/item/field)" \\
+    approval vault set api-key --value-env APPROVAL_TMP_SECRET
+
+One trailing newline is stripped from stdin and nothing else: interior
+whitespace is preserved, because some tokens legitimately contain it and a
+silently trimmed credential fails at the far end with no local evidence of why.
+An empty value is refused rather than stored.
+
+Creates the vault when there is none. Every write re-encrypts the WHOLE map
+under a FRESH nonce and lands atomically (temp file at mode 0600, then rename),
+so an interrupted write leaves the previous vault intact and two writes of the
+same value never produce the same bytes on disk.
+
+${VAULT_NO_GET}
+
+${EXIT_CODES}
+
+JSON shape (stdout, one object):
+  {"ok":true,"name":"smtp-password","created":true,"count":2,
+   "path":"/…/.approval/vault.enc"}
+  created is false when the name was already present and has been replaced. The
+  VALUE appears in no field, on either the success or the failure path.
+${JSON_ERRORS}`;
+
+export const VAULT_LIST_HELP = `approval vault list — the names in the vault (HUMAN-ONLY)
+
+Usage:
+  approval vault list [--vault <path>] [--log <path>] [--policy <path>]
+                      [--dir <path>] [--as human:<id>] [--json]
+
+Flags:
+  --vault <path>     the vault file (default: <log home>/vault.enc)
+  --log <path>       log file the vault path is derived from
+  --policy <path>    policy file to read vault.passphrase_env from
+  --dir <path>       directory to discover APPROVAL.md / APPROVALS.md in
+  --as human:<id>    the human doing this (else APPROVAL_HUMAN)
+  --json             machine-readable output
+  -h, --help         this text
+
+Prints the credential NAMES, sorted, with a count and the file path. No value is
+printed on any path, including the failure paths.
+
+A VAULT NOBODY CREATED IS A STATE, NOT A FAULT: when the file does not exist
+this says so and exits 0. A runtime driven by "approval run" and the CLI channel
+never needs a credential, exactly as a runtime with no Telegram configuration is
+healthy without one. The passphrase is not read in that case, so an absent vault
+reports absent rather than complaining about an unset variable.
+
+A wrong passphrase and an altered file both refuse "vault-unreadable" and are
+NOT distinguished: a runtime that told you which would let someone confirm a
+guessed passphrase against a file they had modified.
+
+${EXIT_CODES}
+
+JSON shape (stdout, one object):
+  {"ok":true,"present":true,"path":"/…/.approval/vault.enc","count":2,
+   "names":["api-key","smtp-password"]}
+  and, for a vault that does not exist,
+  {"ok":true,"present":false,"path":"…","count":0,"names":[]}
+${JSON_ERRORS}`;
+
+export const VAULT_REMOVE_HELP = `approval vault remove — delete one credential (HUMAN-ONLY)
+
+Usage:
+  approval vault remove <name> [--vault <path>] [--log <path>]
+                        [--policy <path>] [--dir <path>] [--as human:<id>]
+                        [--json]
+
+Flags:
+  --vault <path>     the vault file (default: <log home>/vault.enc)
+  --log <path>       log file the vault path is derived from
+  --policy <path>    policy file to read vault.passphrase_env from
+  --dir <path>       directory to discover APPROVAL.md / APPROVALS.md in
+  --as human:<id>    the human doing this (else APPROVAL_HUMAN)
+  --json             machine-readable output
+  -h, --help         this text
+
+A name the vault does not hold refuses "credential-absent" (exit 1) rather than
+reporting success: an operator removing a credential wants to know whether they
+removed the one they meant. The remaining credentials are re-encrypted under a
+fresh nonce and written atomically.
+
+Removing a credential an adapter still needs makes that adapter refuse
+credential-unavailable at execution time. Nothing here checks for that, because
+the check would require this verb to know every adapter a machine might run.
+
+${EXIT_CODES}
+
+JSON shape (stdout, one object):
+  {"ok":true,"name":"api-key","count":1,"path":"/…/.approval/vault.enc"}
 ${JSON_ERRORS}`;
