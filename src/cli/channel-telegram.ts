@@ -42,6 +42,57 @@
  * produces a visible skip instead. Requests whose material is missing are
  * reported on stderr and NOT delivered: a manual request rendered without its
  * payload would be exactly the §10.4 violation the contract refuses.
+ *
+ * ## Dispatch: where it lives, and why it lives here (APRV-55) — flagged
+ *
+ * SPEC.md §10.2 lists "dispatches channel notifications" among the daemon's
+ * jobs. At v0.1 the reference runtime performs that dispatch **in this
+ * listener**, on every poll cycle, and the placement is deliberate:
+ *
+ * 1. The listener already holds the channel connection (the bot token, the
+ *    chat id) and the approver identity. The daemon holds neither, and giving
+ *    it either would put a credential and a human identity into a process
+ *    whose job is to read files and append events.
+ * 2. The daemon is the sole writer of the log; dispatch appends nothing. Moving
+ *    a read-and-send out of the daemon costs the single-writer stance nothing,
+ *    because dispatch was never a write.
+ * 3. A network round-trip inside the daemon's tick couples the projection loop
+ *    to Telegram's availability. A slow Bot API would delay TTL expiry and
+ *    write-back, which are the daemon's actual obligations.
+ *
+ * So this is an implementation placement, not a change to the daemon's stated
+ * role: a later build MAY move dispatch into the daemon (or a supervisor) with
+ * no change to the log or to any event shape. SPEC.md §10.3 records the same.
+ *
+ * ### The cycle
+ *
+ * {@link dispatchPending} runs before every `getUpdates` — the startup send and
+ * every later cycle are the same call with the same state, the startup one
+ * merely finding an empty delivered set. Each call **re-derives** the pending
+ * queue from the verified log ({@link buildPendingQueue}), so which requests
+ * are pending is always the log's answer and never this process's memory. A
+ * request appended while the listener is running is therefore delivered on the
+ * next cycle, without a restart; a request that was decided or whose TTL lapsed
+ * simply stops appearing in the derivation and is never sent.
+ *
+ * What *is* remembered, and only in {@link DispatchState} for this process's
+ * lifetime, is which action keys this listener has already put on the phone.
+ * Losing that memory (a restart, a crash) re-sends everything still pending:
+ * a duplicate on the phone, never silence. That direction is the whole design
+ * (SPEC.md §10.3: channels hold no state that is a source of truth).
+ *
+ * ### Send failures
+ *
+ * A key that fails to send stays undelivered, so the next cycle retries it.
+ * There is **no attempt limit**: giving up would turn a transient outage into a
+ * pending request no human ever sees, which is the one failure this project
+ * exists to prevent. The retry rate is bounded by the poll cycle itself (the
+ * long-poll timeout, or the channel's doubling backoff after a poll error), and
+ * the stderr warnings are throttled after {@link DISPATCH_LOUD_ATTEMPTS}
+ * consecutive failures for one key so a long outage cannot bury the terminal.
+ * The one exception is the **startup** dispatch, which still exits non-zero on
+ * a send failure: an operator who has just mistyped a chat id or a token should
+ * learn it immediately rather than watch a listener retry forever.
  */
 
 import { readFileSync } from "node:fs";
@@ -53,8 +104,13 @@ import {
   recordChannelDecision,
   type ChannelDecision,
   type DecisionOutcome,
+  type DeliveryId,
 } from "../channels/contract.js";
-import { buildPendingQueue, type TagOptions } from "../channels/tagging.js";
+import {
+  buildPendingQueue,
+  type ChannelTagRefusalCode,
+  type TagOptions,
+} from "../channels/tagging.js";
 import {
   TelegramChannel,
   TELEGRAM_CHAT_ENV,
@@ -117,7 +173,7 @@ function env(name: string): string | null {
 // approval channel telegram listen
 // ---------------------------------------------------------------------------
 
-interface ListenSetup {
+export interface ListenSetup {
   channel: TelegramChannel;
   logPath: string;
   actor: string;
@@ -283,6 +339,136 @@ function setUp(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Dispatch (APRV-55) — one cycle's worth of "put pending requests on the phone"
+// ---------------------------------------------------------------------------
+
+/**
+ * Consecutive failures for one action key after which stderr warnings thin out.
+ *
+ * Not an attempt limit: the send is retried on every cycle forever (see the
+ * module doc). Only the complaining is throttled, to every tenth attempt.
+ */
+export const DISPATCH_LOUD_ATTEMPTS = 3;
+
+/**
+ * What one listener process remembers between cycles. **In memory only.**
+ *
+ * SPEC.md §10.3: channels hold no state that is a source of truth. Nothing here
+ * is truth — the pending set is re-derived from the verified log every cycle,
+ * and this only prevents a second copy of a message this process already sent.
+ * Its loss (restart, crash) degrades to a re-send, never to a request that is
+ * pending in the log and absent from the approver's phone.
+ */
+export interface DispatchState {
+  /** action key -> the delivery id this process sent it under. Never pruned. */
+  readonly delivered: Map<string, DeliveryId>;
+  /** action key -> consecutive failed send attempts. Cleared on success. */
+  readonly attempts: Map<string, number>;
+  /** `<action key>:<code>` skips already reported, so cycles do not repeat them. */
+  readonly warned: Set<string>;
+}
+
+export function newDispatchState(): DispatchState {
+  return { delivered: new Map(), attempts: new Map(), warned: new Set() };
+}
+
+/** What one {@link dispatchPending} call did. Total: it never throws. */
+export interface DispatchResult {
+  /** Requests put in front of the approver by this cycle. */
+  delivered: { action_key: string; delivery_id: DeliveryId }[];
+  /** Sends that failed and will be retried on the next cycle. */
+  failed: { action_key: string; attempts: number; message: string }[];
+  /**
+   * The queue could not be derived at all: the log is unreadable or does not
+   * verify. Nothing was sent. Fatal at startup, retried on later cycles.
+   */
+  queueError?: { code: ChannelTagRefusalCode; message: string };
+}
+
+/**
+ * One dispatch cycle: re-derive the pending queue from the verified log, send
+ * whatever this process has not already sent.
+ *
+ * `now` is a parameter, not a clock read: TTL judgment inside
+ * {@link buildPendingQueue} is deterministic and the tests drive it at chosen
+ * instants. Requests that are decided, expired, or not yet requested are absent
+ * from the derivation and so are never sent.
+ */
+export async function dispatchPending(
+  setup: ListenSetup,
+  streams: Streams,
+  state: DispatchState,
+  now: string,
+): Promise<DispatchResult> {
+  const result: DispatchResult = { delivered: [], failed: [] };
+
+  const queue = buildPendingQueue(setup.logPath, setup.tagOptions, now);
+  if (!queue.ok) {
+    result.queueError = { code: queue.code, message: queue.message };
+    return result;
+  }
+
+  for (const skipped of queue.skipped) {
+    const token = `${skipped.action_key}:${skipped.code}`;
+    if (state.warned.has(token)) continue;
+    state.warned.add(token);
+    streams.err(
+      `approval: telegram cannot deliver ${skipped.action_key} (${skipped.code}): ${skipped.message}\n`,
+    );
+  }
+
+  for (const request of queue.requests) {
+    const actionKey = request.action_key.value;
+    if (state.delivered.has(actionKey)) continue;
+    try {
+      const deliveryId = await setup.channel.notify(request);
+      state.delivered.set(actionKey, deliveryId);
+      state.attempts.delete(actionKey);
+      result.delivered.push({ action_key: actionKey, delivery_id: deliveryId });
+      if (setup.json) {
+        streams.out(
+          `${JSON.stringify({
+            event: "notified",
+            action_key: actionKey,
+            delivery_id: deliveryId,
+          })}\n`,
+        );
+      } else {
+        streams.out(`notified ${actionKey} (message ${deliveryId})\n`);
+      }
+    } catch (cause) {
+      // The key stays out of `delivered`, so the next cycle tries again.
+      const attempts = (state.attempts.get(actionKey) ?? 0) + 1;
+      state.attempts.set(actionKey, attempts);
+      const message = cause instanceof Error ? cause.message : String(cause);
+      result.failed.push({ action_key: actionKey, attempts, message });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Report a steady-state cycle's problems on stderr. Startup reports its own,
+ * as exit codes, in {@link runListener}.
+ */
+function reportCycle(result: DispatchResult, streams: Streams): void {
+  if (result.queueError !== undefined) {
+    streams.err(
+      `approval: telegram cannot read the pending queue (${result.queueError.code}): ${result.queueError.message} — retrying next cycle\n`,
+    );
+  }
+  for (const failure of result.failed) {
+    // Loud for the first few, then every tenth: an outage must stay visible
+    // without turning the operator's terminal into a log of one message.
+    if (failure.attempts > DISPATCH_LOUD_ATTEMPTS && failure.attempts % 10 !== 0) continue;
+    streams.err(
+      `approval: telegram sendMessage failed for ${failure.action_key} (attempt ${failure.attempts}): ${failure.message} — still pending, retrying next cycle\n`,
+    );
+  }
+}
+
 /** The decision handler: the only thing this process does with a button press. */
 function handlerFor(setup: ListenSetup, streams: Streams): (d: ChannelDecision) => DecisionOutcome {
   return (decision) => {
@@ -337,52 +523,39 @@ async function runListener(setup: ListenSetup, streams: Streams): Promise<number
   const { channel } = setup;
   channel.onDecision(handlerFor(setup, streams));
 
-  const queue = buildPendingQueue(setup.logPath, setup.tagOptions, new Date().toISOString());
-  if (!queue.ok) {
-    return queue.code === "log-unreadable"
-      ? ioError(streams, setup.json, queue.message)
-      : integrityError(streams, setup.json, queue.message);
-  }
-
-  for (const skipped of queue.skipped) {
-    streams.err(
-      `approval: telegram cannot deliver ${skipped.action_key} (${skipped.code}): ${skipped.message}\n`,
-    );
-  }
-
   // Delivery bookkeeping is in memory only — channels hold no state (SPEC.md
   // §10.3). A restarted listener therefore re-sends everything still pending,
   // and the buttons on the messages it sent before the restart stop resolving.
   // Duplicated messages are the acceptable failure; a decision that depends on
   // a channel's memory surviving a crash is not.
-  for (const request of queue.requests) {
-    try {
-      const deliveryId = await channel.notify(request);
-      if (setup.json) {
-        streams.out(
-          `${JSON.stringify({
-            event: "notified",
-            action_key: request.action_key.value,
-            delivery_id: deliveryId,
-          })}\n`,
-        );
-      } else {
-        streams.out(`notified ${request.action_key.value} (message ${deliveryId})\n`);
-      }
-    } catch (cause) {
-      return ioError(
-        streams,
-        setup.json,
-        `telegram sendMessage failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-      );
-    }
+  const state = newDispatchState();
+
+  // The startup cycle. Same call as every later one; only its *failures* are
+  // treated differently, because an operator who has just mistyped a token or
+  // pointed at an unreadable log should get an exit code, not a retry loop.
+  const startup = await dispatchPending(setup, streams, state, new Date().toISOString());
+  if (startup.queueError !== undefined) {
+    return startup.queueError.code === "log-unreadable"
+      ? ioError(streams, setup.json, startup.queueError.message)
+      : integrityError(streams, setup.json, startup.queueError.message);
   }
+  const firstFailure = startup.failed[0];
+  if (firstFailure !== undefined) {
+    return ioError(streams, setup.json, `telegram sendMessage failed: ${firstFailure.message}`);
+  }
+
+  // Every subsequent cycle: re-derive, send what is new, complain and carry on.
+  // Runs before each `getUpdates`, including the poll after a recovered poll
+  // error, so a request appended mid-run is delivered without a restart.
+  const beforePoll = async (): Promise<void> => {
+    reportCycle(await dispatchPending(setup, streams, state, new Date().toISOString()), streams);
+  };
 
   const stop = (): void => channel.stop();
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   try {
-    await channel.listen(setup.once ? { once: true } : {});
+    await channel.listen(setup.once ? { once: true, beforePoll } : { beforePoll });
   } finally {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);

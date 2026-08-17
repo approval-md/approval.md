@@ -530,6 +530,22 @@ export interface TelegramPollResult {
 export interface TelegramListenOptions {
   /** Process exactly one successful `getUpdates` batch, then return. */
   once?: boolean;
+  /**
+   * Run before every `getUpdates`, including the first and including the poll
+   * that follows a recovered poll error (APRV-55).
+   *
+   * This is how the runtime gets a dispatch cycle without the channel growing
+   * an opinion about what is pending: the callback belongs to
+   * `cli/channel-telegram.ts`, which re-derives the pending queue from the
+   * verified log and sends what it has not sent yet. The channel neither reads
+   * the log nor remembers a queue, so nothing here makes it stateful.
+   *
+   * It MUST NOT throw. A rejection is treated exactly like a poll failure
+   * (counted, complained about, retried after backoff) rather than being
+   * allowed to end the loop, because a listener that stops listening is the
+   * failure mode this loop exists to rule out.
+   */
+  beforePoll?: () => Promise<void>;
 }
 
 /** One delivered request, as this process remembers it. Never a decision. */
@@ -742,6 +758,11 @@ export class TelegramChannel implements TestableChannel {
    * whole value of a push channel is that a human's inbox keeps receiving, and
    * a listener that died at 3am on a transient 502 would fail exactly when the
    * queue was filling up.
+   *
+   * Each iteration begins with {@link TelegramListenOptions.beforePoll} when
+   * one is supplied, which is where the runtime's dispatch cycle runs: the
+   * loop is therefore "deliver anything newly pending, then wait for a
+   * decision", not "deliver once at startup, then wait forever".
    */
   async listen(options: TelegramListenOptions = {}): Promise<void> {
     this.stopped = false;
@@ -749,6 +770,10 @@ export class TelegramChannel implements TestableChannel {
 
     while (!this.stopped) {
       try {
+        if (options.beforePoll !== undefined) {
+          await options.beforePoll();
+          if (this.stopped) return;
+        }
         await this.pollOnce();
         backoff = this.backoffMs;
         if (options.once === true) return;
