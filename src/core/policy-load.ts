@@ -133,6 +133,17 @@ export interface Policy {
     sampling_secret_env?: string;
   };
   channels?: Record<string, Record<string, unknown>>;
+  /**
+   * Amended SPEC.md §5.2 (APRV-68): the credential vault's configuration. One
+   * key, and it is a NAME: `passphrase_env` holds the name of the environment
+   * variable the operator keeps the vault passphrase in, exactly as
+   * `channels.telegram.token_env` and `audit.sampling_secret_env` do. A policy
+   * that carried the passphrase itself would be a passphrase in a file agents
+   * may read, which is the thing the vault exists to prevent.
+   */
+  vault?: {
+    passphrase_env?: string;
+  };
 }
 
 /**

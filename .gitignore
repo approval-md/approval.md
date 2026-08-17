@@ -3,6 +3,13 @@ dist/
 *.tsbuildinfo
 .DS_Store
 .approval/*.sqlite
+
+# The encrypted credential vault (SPEC.md §10.4). Never committed, in any
+# repository: the contents stay encrypted, but a published vault is a permanent
+# offline-attack target against one human-chosen passphrase, and a commit is not
+# something a later commit removes. `approval doctor` fails when this line is
+# missing.
+.approval/vault.enc
 .claude/settings.local.json
 
 # Private strategy notes: never committed, never published (Pages serves repo root)

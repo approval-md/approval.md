@@ -15,7 +15,7 @@
  *
  * Neither failure was a bug in the runtime. Both were facts about the
  * environment that nothing was in a position to state out loud. `doctor` is
- * that statement: nine checks, in the order in which their failures cascade,
+ * that statement: ten checks, in the order in which their failures cascade,
  * each with a concrete repair.
  *
  * ## What it will not do
@@ -45,7 +45,7 @@
  */
 
 import { createServer } from "node:net";
-import { closeSync, openSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve as resolvePathSegments } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -63,6 +63,13 @@ import { payloadStoreDirFor } from "../core/payload-store.js";
 import { DEFAULT_TASKS_DIR, latestRegistration } from "../core/registration.js";
 import { POLICY_FILENAMES, loadPolicy, type PolicyLoadResult } from "../core/policy-load.js";
 import { resolveSampler } from "../core/sampler.js";
+import {
+  checkVault,
+  passphraseEnvFor,
+  passphraseFrom,
+  vaultExists,
+  vaultPathFor,
+} from "../core/vault.js";
 import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { policyWebPort } from "./channel-web.js";
@@ -776,6 +783,140 @@ function checkEnvelopeIntegrity(tasksDir: string, records: EventRecord[]): Docto
   };
 }
 
+// ---------------------------------------------------------------------------
+// 10. vault
+// ---------------------------------------------------------------------------
+
+/**
+ * Patterns in a `.gitignore` that cover `.approval/vault.enc`.
+ *
+ * A deliberately small, literal set rather than a gitignore engine. The two
+ * error directions are not symmetric: a false PASS says an encrypted credential
+ * file is safe from a commit when it is not, and a false FAIL costs an operator
+ * one glance at a fix line they can ignore. So only forms whose meaning is
+ * unambiguous are accepted, and anything cleverer (a negation, a nested
+ * `.gitignore`, a `core.excludesFile`) reads as "not covered here".
+ */
+const VAULT_IGNORE_PATTERNS: readonly string[] = [
+  ".approval/vault.enc",
+  "/.approval/vault.enc",
+  ".approval/",
+  "/.approval/",
+  ".approval",
+  "/.approval",
+  ".approval/*",
+  "/.approval/*",
+  "*.enc",
+  "vault.enc",
+];
+
+/** The exact line doctor tells an operator to add. */
+const VAULT_IGNORE_LINE = ".approval/vault.enc";
+
+type IgnoreVerdict = "ignored" | "not-ignored" | "not-a-repo";
+
+/**
+ * Is the vault covered by the project's `.gitignore`?
+ *
+ * `not-a-repo` when `dir` holds no `.git` entry (a directory in a normal clone,
+ * a file in a worktree or submodule): outside a repository there is nothing to
+ * accidentally commit the vault to, and failing a check about a risk that does
+ * not exist trains people to ignore the check.
+ */
+function vaultIgnoreVerdict(dir: string): IgnoreVerdict {
+  try {
+    statSync(join(dir, ".git"));
+  } catch {
+    return "not-a-repo";
+  }
+  let text: string;
+  try {
+    text = readFileSync(join(dir, ".gitignore"), "utf8");
+  } catch {
+    return "not-ignored";
+  }
+  for (const raw of text.split(/\r\n|\n|\r/u)) {
+    const line = raw.trim();
+    if (line.length === 0 || line.startsWith("#")) continue;
+    if (VAULT_IGNORE_PATTERNS.includes(line)) return "ignored";
+  }
+  return "not-ignored";
+}
+
+/**
+ * Can the credential vault be opened, and is it kept out of the repository?
+ *
+ * Three verdicts, in an order chosen for what stays wrong the longest:
+ *
+ * 1. **Not gitignored** is reported FIRST, ahead of any passphrase problem. A
+ *    vault that is one `git add -A` from being published is the worse fault, it
+ *    is silent, and it remains true after every other problem here is fixed. An
+ *    encrypted file in a public repository is not a catastrophe, but it is a
+ *    permanent offline-attack target against one human-chosen passphrase, and
+ *    history is not something a later commit removes.
+ * 2. **No passphrase, or it does not decrypt.** Both fail: the credentials are
+ *    unreachable, so every adapter that needs one refuses at execution time,
+ *    and that refusal reads as "the adapter is broken" rather than "this
+ *    machine cannot open the vault". The fix names the variable.
+ * 3. **Absent vault** is a SKIP with the consequence stated. Nobody has created
+ *    one, which is a legitimate configuration — the same reading the Telegram
+ *    check gives an unconfigured channel.
+ *
+ * The detail names the credential COUNT and never a name, never a value, and
+ * the passphrase is read but never printed (SPEC.md §11.1 invariant 3).
+ */
+function checkVaultHealth(logPath: string, dir: string, load: PolicyLoadResult): DoctorCheck {
+  const vaultPath = vaultPathFor(logPath);
+  const passphraseEnv = passphraseEnvFor(load);
+
+  if (!vaultExists(vaultPath)) {
+    return {
+      check: "vault",
+      status: "skip",
+      detail: `no credential vault at ${vaultPath}; adapters that need a credential will refuse credential-unavailable until one exists, which is a legitimate configuration for a runtime driven by \`approval run\` and the CLI channel. The passphrase would be read from $${passphraseEnv} (\`approval vault set <name>\` creates the file)`,
+    };
+  }
+
+  const ignored = vaultIgnoreVerdict(dir);
+  if (ignored === "not-ignored") {
+    return {
+      check: "vault",
+      status: "fail",
+      detail: `${vaultPath} exists and is NOT gitignored in ${dir}: one \`git add -A\` publishes an encrypted credential file, and a commit is not something a later commit removes. The contents stay encrypted, but a published vault is a permanent offline-attack target against one human-chosen passphrase`,
+      fix: `add the line \`${VAULT_IGNORE_LINE}\` to ${join(dir, ".gitignore")} (and if it has already been committed, treat every credential in it as disclosed and rotate)`,
+    };
+  }
+
+  const passphrase = passphraseFrom(passphraseEnv);
+  if (passphrase === null) {
+    return {
+      check: "vault",
+      status: "fail",
+      detail: `${vaultPath} exists and $${passphraseEnv} is unset or empty in this process, so no credential can be read: every adapter that needs one will refuse credential-unavailable, which reads like a broken adapter rather than an unopened vault`,
+      fix: `export ${passphraseEnv} with the vault passphrase in the environment that runs the adapters (the policy names the variable, never the value; there is no --passphrase flag)`,
+    };
+  }
+
+  const opened = checkVault(vaultPath, passphrase);
+  if (!opened.ok) {
+    return {
+      check: "vault",
+      status: "fail",
+      detail: `${vaultPath} did not open (${opened.code}): ${opened.message}`,
+      fix:
+        opened.code === "vault-unreadable"
+          ? `check that $${passphraseEnv} holds the passphrase this vault was created with, then check the file's provenance — a wrong passphrase and an altered file are ONE verdict on purpose, because distinguishing them would confirm a guessed passphrase against a file someone had modified`
+          : `inspect ${vaultPath}; it is not a vault this build can read, and nothing here rewrites it`,
+    };
+  }
+
+  return {
+    check: "vault",
+    status: "pass",
+    detail: `${vaultPath} opens with the passphrase in $${passphraseEnv} and holds ${String(opened.count)} credential(s)${ignored === "not-a-repo" ? "; no git repository at " + dir + ", so there is nothing here to commit it to" : ", and it is gitignored"}. No credential name or value is printed by this check`,
+  };
+}
+
 /** The Backlog.md board key a task file's name begins with (`task-3 - Slug.md`). */
 function taskIdFromFileName(name: string): string | null {
   const match = /^([A-Za-z][A-Za-z0-9_]*-\d+)/u.exec(name);
@@ -874,6 +1015,9 @@ export function commandDoctor(
       checkPayloadStore(logPath, verified.records),
       checkSampling(policyLoad),
       checkEnvelopeIntegrity(tasksDir, verified.records),
+      // APRV-68: appended rather than inserted, for the same reason the
+      // envelope check was — a reader's position-based expectations still hold.
+      checkVaultHealth(logPath, dir, policyLoad),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");
