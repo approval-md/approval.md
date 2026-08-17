@@ -53,6 +53,7 @@ Usage:
   approval doctor     [--log <path>] [--policy <path>] [--dir <path>]
                       [--api-base <url>] [--json]
   approval payload hash <file|-> [--json]
+  approval import agents-md <file> [--out <path>] [--json]
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
   approval render     [--log <path>] [--out <path>] [--policy <path>]
                       [--dir <path>] [--json]
@@ -120,6 +121,9 @@ Commands:
             no verb: the daemon selects supervised actions with an operator-held
             secret, because a caller who could sample could also decline to
             sample itself
+  import    "import agents-md" parses an AGENTS.md-style permissions section
+            into DRAFT policy classes for a human to confirm (SPEC.md §12). It
+            prints; it never writes APPROVAL.md, never logs, never attests
   reindex   rebuild the SQLite index projection from the log
   render    regenerate .approval/QUEUE.md, the READ-ONLY markdown queue
             projection (SPEC.md §9.1): pending requests and the sampled-audit
@@ -1815,6 +1819,88 @@ JSON shape (stdout, one object per line):
   {"event":"stopped","notified":3,"views":7,"decisions":2,"refused":1}
   The token NEVER appears in this stream: --json output is the thing most
   likely to be piped into a file or a log aggregator.`;
+
+export const IMPORT_HELP = `approval import — turn existing permissions prose into a draft policy
+
+Usage:
+  approval import agents-md <file> [--out <path>] [--json]
+
+Commands:
+  agents-md parse an AGENTS.md-style permissions section ("allowed without
+            prompting" / "require approval first" / "never") into draft policy
+            classes for a human to confirm (SPEC.md §12)
+
+${EXIT_CODES}
+${JSON_ERRORS}`;
+
+export const IMPORT_AGENTS_MD_HELP = `approval import agents-md — permissions prose -> draft policy classes
+
+Usage:
+  approval import agents-md <file> [--out <path>] [--json]
+
+Reads one markdown file, finds its permissions section, and prints a DRAFT
+\`\`\`yaml approval-policy block. SPEC.md §2: AGENTS.md permissions lists are
+instructions an agent is trusted to obey and nothing checks. This verb is the
+first step in making one checkable.
+
+Flags:
+  --out <path>     write the draft YAML (without the fence) to <path> instead of
+                   printing it. REFUSES to overwrite an existing file
+  --json           machine-readable output
+  -h, --help       this text
+
+THE DRAFT AUTHORIZES NOTHING. This verb never writes APPROVAL.md, never appends
+to the log, never attests, and consults no attestation. Review the draft, paste
+it into APPROVAL.md, and run "approval policy amend" — that ceremony, run by a
+human, is what puts a policy in force.
+
+What it recognises:
+  region         a heading containing "permissions", at any level (or the three
+                 sub-headings on their own, the bare AGENTS.md layout)
+  allowed        "allowed without prompting" / "allowed" / "autonomous"
+  approval-first "require approval first" / "requires approval" / "ask first" /
+                 "approval required"
+  never          "never" / "forbidden" / "prohibited"
+  bullets        "- " / "* " list items under those headings; a wrapped
+                 continuation line is joined to its bullet
+
+How bullets become classes:
+  A FIXED, ORDERED KEYWORD TABLE, first match wins — no model is consulted, and
+  the same bytes always produce the same draft. Order (precedence):
+  account.credential, vcs.history.rewrite, policy.edit, vcs.push, vcs.push.main,
+  release.publish, network.call, deps.add, data.delete, vcs.commit.branch,
+  exec.local, files.write.workspace, read.*. Every mapping carries its source
+  bullet as a "# from:" comment so the human can check the guess.
+
+Fail closed:
+  - a bullet the table cannot place is NOT guessed at: it is preserved verbatim
+    as a comment, listed under UNMAPPED, and covered by defaults.autonomy
+    (manual)
+  - v0.1 has no forbid level, so "never" bullets are rendered manual with a
+    "# never:" comment. Manual is not never; read those lines
+  - the same class claimed by two sections resolves to the STRICTER autonomy
+    (SPEC.md §5.2, deny beats allow) and both bullets are named in a warning
+  - unrecognised headings inside the permissions area are reported (stderr, or
+    "ignored" with --json), never silently skipped
+  - a file with no permissions section is exit 0 with an empty draft and a
+    warning: a draft of nothing is a correct answer, not an error
+
+No approvers and no channels are generated: a machine must not name who may
+approve. The draft carries defaults (manual, 24h, reject) and classes only.
+
+--json prints:
+  {"ok":true,
+   "source":"<path as given>",
+   "out":"<path>"|null,
+   "classes":[{"class","autonomy","from","section"}],
+   "unmapped":[{"text","section"}],
+   "ignored":["<heading>"],
+   "warnings":["<text>"]}
+"from" is the bullet that DECIDED the autonomy (the stricter one on a conflict);
+the draft YAML comments list every bullet that mapped to the class.
+
+${EXIT_CODES}
+${JSON_ERRORS}`;
 
 export const PAYLOAD_HELP = `approval payload — work with the bytes an approval binds to
 

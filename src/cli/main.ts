@@ -64,6 +64,7 @@ import { commandAudit } from "./audit.js";
 import { commandChannel } from "./channel.js";
 import { commandDaemon } from "./daemon.js";
 import { commandDoctor } from "./doctor.js";
+import { commandImport } from "./import.js";
 import { commandPayload } from "./payload.js";
 import { commandPolicy } from "./policy.js";
 import { commandRender } from "./render.js";
@@ -627,6 +628,12 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // It reads no log and writes nothing.
     case "payload":
       return commandPayload(rest, streams, cwd);
+    // The interoperability verb (APRV-64). `import agents-md` reads permissions
+    // PROSE and prints a draft policy block. It is the only verb whose output is
+    // a proposal: it writes no policy, appends nothing, and attests nothing —
+    // the human's `policy amend` is what puts any of it in force.
+    case "import":
+      return commandImport(rest, streams, cwd);
     case "reindex":
       return commandReindex(rest, streams, cwd);
     // The projection verb (APRV-24). `render` writes .approval/QUEUE.md and
