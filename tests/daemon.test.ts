@@ -15,6 +15,13 @@
  *
  * Timing: the TTL cases use a short but real TTL and poll until the condition
  * holds, with a generous ceiling. No test sleeps a fixed amount and hopes.
+ *
+ * The write-back cases (APRV-62) assert on bytes and on mtimes rather than on
+ * parsed frontmatter: the claim is that one value changed and nothing else did,
+ * and a parse would hide exactly the whitespace, comment and line-ending damage
+ * the round-trip writer exists to avoid. An unchanged mtime is how "the daemon
+ * did not rewrite this file with identical content" is checked, which is the
+ * property that keeps a watcher-triggered write from looping.
  */
 
 import assert from "node:assert/strict";
@@ -28,6 +35,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -307,9 +315,9 @@ test("drift: a file whose state contradicts the log appends envelope.drift", () 
   assert.equal(payload["reason"], "state-mismatch");
   assert.equal(typeof payload["envelope_sha256"], "string");
 
-  // The file is never rewritten: the log is the truth and the daemon records
-  // the disagreement rather than resolving it.
-  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("proposed"));
+  // Drift, then repair (APRV-62): the disagreement reaches the log first and the
+  // file is corrected second, in the same tick.
+  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("awaiting"));
   assertClean(dir);
 });
 
@@ -335,7 +343,8 @@ test("drift: the same claim against the same log is recorded once, a new claim a
   daemonOnce(dir);
   assert.equal(eventsOf(dir, "envelope.drift").length, 1);
 
-  // Two more passes over an unchanged world append nothing.
+  // Two more passes over an unchanged world append nothing: the first pass
+  // repaired the file, so there is no longer a contradiction to record.
   daemonOnce(dir);
   daemonOnce(dir);
   assert.equal(eventsOf(dir, "envelope.drift").length, 1);
@@ -379,15 +388,204 @@ test("drift: a schema-invalid envelope warns and appends nothing", () => {
 
 test("drift: a task file with no envelope is silently tolerated (SPEC.md §6)", () => {
   const dir = ready(POLICY, "proposed");
-  writeFileSync(
-    join(dir, "backlog", "tasks", "task-099.md"),
-    ["---", "id: task-099", "title: No envelope", "---", "", "Body.", ""].join("\n"),
-    "utf8",
-  );
+  const plain = join(dir, "backlog", "tasks", "task-099.md");
+  const text = ["---", "id: task-099", "title: No envelope", "---", "", "Body.", ""].join("\n");
+  writeFileSync(plain, text, "utf8");
   const { run } = daemonOnce(dir);
   assert.equal(run.code, 0, run.stderr);
   assert.equal(run.stderr, "");
   assert.equal(eventsOf(dir, "envelope.drift").length, 0);
+  // Write-back is not this file's business either: no envelope is invented for
+  // it, and no warning is spent on a task that is simply a plain task.
+  assert.equal(readFileSync(plain, "utf8"), text);
+  assertClean(dir);
+});
+
+// ===========================================================================
+// Projection write-back (SPEC.md §6.3, §10.2, APRV-62)
+// ===========================================================================
+
+/** Indices of the lines on which two texts differ. Both must have the same count. */
+function differingLines(before: string, after: string): number[] {
+  const b = before.split("\n");
+  const a = after.split("\n");
+  assert.equal(a.length, b.length, "the rewrite changed the number of lines");
+  const out: number[] = [];
+  for (let index = 0; index < a.length; index += 1) if (a[index] !== b[index]) out.push(index);
+  return out;
+}
+
+test("write-back: the log's state is written into the file, one line and no other byte", () => {
+  const dir = ready(POLICY, "proposed");
+  request(dir, "task-042:chaser");
+  const before = readFileSync(taskPath(dir), "utf8");
+
+  const { run, lines } = daemonOnce(dir);
+  assert.equal(run.code, 0, run.stderr);
+
+  const back = lines.find((line) => line["event"] === "write_back");
+  assert.ok(back !== undefined, `no write_back line: ${run.stdout}`);
+  assert.equal(back["task"], "task-042");
+  assert.equal(back["from"], "proposed");
+  assert.equal(back["to"], "awaiting");
+  assert.equal(typeof back["bytes"], "number");
+
+  const after = readFileSync(taskPath(dir), "utf8");
+  const changed = differingLines(before, after);
+  assert.equal(changed.length, 1, `more than the state: line changed: ${JSON.stringify(changed)}`);
+  assert.equal(after.split("\n")[changed[0] as number]?.trim(), "state: awaiting");
+  assert.equal(after, taskFile("awaiting"), "the file is the original with one value replaced");
+  assertClean(dir);
+});
+
+test("write-back: the repaired file is quiet on the next tick — no drift, no rewrite", () => {
+  const dir = ready(POLICY, "proposed");
+  request(dir, "task-042:chaser");
+  daemonOnce(dir);
+
+  const repaired = readFileSync(taskPath(dir), "utf8");
+  const mtime = statSync(taskPath(dir)).mtimeMs;
+  const drifts = eventsOf(dir, "envelope.drift").length;
+  const total = records(dir).length;
+
+  // Two further passes see a file that already agrees with the log. Nothing is
+  // appended and nothing is written, so the watcher this write would have woken
+  // never fires and the loop is not a loop.
+  for (let pass = 0; pass < 2; pass += 1) {
+    const { run, lines } = daemonOnce(dir);
+    assert.equal(run.code, 0, run.stderr);
+    assert.equal(lines.some((line) => line["event"] === "write_back"), false, run.stdout);
+    assert.equal(lines.some((line) => line["event"] === "drift"), false, run.stdout);
+  }
+
+  assert.equal(readFileSync(taskPath(dir), "utf8"), repaired);
+  assert.equal(statSync(taskPath(dir)).mtimeMs, mtime, "the file was rewritten with the same bytes");
+  assert.equal(eventsOf(dir, "envelope.drift").length, drifts);
+  assert.equal(records(dir).length, total);
+  assertClean(dir);
+});
+
+test("write-back: a live daemon repairs once and then leaves the file alone", async () => {
+  const dir = ready(POLICY, "proposed");
+  request(dir, "task-042:chaser");
+
+  const daemon = new LiveDaemon(dir, ["--interval", "100ms"]);
+  await until(
+    () => readFileSync(taskPath(dir), "utf8") === taskFile("awaiting"),
+    "the daemon to repair the file",
+  );
+  const mtime = statSync(taskPath(dir)).mtimeMs;
+
+  // A write wakes the watcher, which schedules a tick, which could write again.
+  // Several intervals later the file must still carry the same bytes and the
+  // same mtime, and the log must carry exactly one drift record.
+  await until(
+    () => daemon.lines().filter((line) => line["event"] === "tick").length >= 5,
+    "five ticks",
+  );
+  const code = await daemon.stopWith("SIGINT");
+  assert.equal(code, 0, `daemon exited ${code}: ${daemon.stderr}`);
+
+  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("awaiting"));
+  assert.equal(statSync(taskPath(dir)).mtimeMs, mtime, "the daemon rewrote the file repeatedly");
+  assert.equal(daemon.lines().filter((line) => line["event"] === "write_back").length, 1);
+  assert.equal(eventsOf(dir, "envelope.drift").length, 1);
+  assertClean(dir);
+});
+
+test("write-back: a file the writer will not round-trip is warned about and left untouched", () => {
+  const dir = ready(POLICY, "proposed");
+  request(dir, "task-042:chaser");
+
+  // A flow-style envelope: schema-valid, so the drift scan reads a claim out of
+  // it, and unrewritable, because a state-only edit rewrites one line and a flow
+  // mapping does not have one. Exactly the shape the writer refuses.
+  const flow = [
+    "---",
+    "id: task-042",
+    "title: Chase deposit refund",
+    `approval: {origin: {app: example-capture, created_by: "human:carter"}, state: proposed, actions: [{class: communicate.email.external, summary: "Send deposit chaser", reversible: false, est_cost_usd: 0.02, idempotency_key: "task-042:chaser", payload_hash: "${PAYLOAD_HASH}"}]}`,
+    "---",
+    "",
+    "## Description",
+    "Body.",
+    "",
+  ].join("\n");
+  writeFileSync(taskPath(dir), flow, "utf8");
+
+  const { run } = daemonOnce(dir);
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stderr, /write-back-refused/u);
+  assert.match(run.stderr, /unsupported-shape/u);
+
+  // The refusal is total: the file is exactly as it was, and the drift record
+  // that preceded it still stands.
+  assert.equal(readFileSync(taskPath(dir), "utf8"), flow);
+  assert.equal(eventsOf(dir, "envelope.drift").length, 1);
+  assert.deepEqual(
+    readdirSync(join(dir, "backlog", "tasks")).filter((name) => name.includes(".tmp-")),
+    [],
+    "a temp task file survived a refused write-back",
+  );
+  assertClean(dir);
+});
+
+test("write-back: the file follows the log through registered, requested, granted, executed", () => {
+  const dir = ready(POLICY, "proposed");
+
+  // Registered, and the file already agrees: nothing to record and nothing to
+  // write. This is the shape of the APRV-51 proof, which under the M5 deferral
+  // left three drift records and a file that never moved.
+  daemonOnce(dir);
+  assert.equal(eventsOf(dir, "envelope.drift").length, 0);
+  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("proposed"));
+
+  request(dir, "task-042:chaser");
+  daemonOnce(dir);
+  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("awaiting"));
+
+  const granted = runCli(["grant", "task-042:chaser", "--as", "human:carter", "--json"], dir);
+  assert.equal(granted.code, 0, granted.stderr);
+  const token = String((JSON.parse(granted.stdout) as Record<string, unknown>)["token"]);
+  daemonOnce(dir);
+  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("approved"));
+
+  const executed = runCli(
+    [
+      "run",
+      "task-042:chaser",
+      "--payload-hash",
+      PAYLOAD_HASH,
+      "--token",
+      token,
+      "--as",
+      "agent:claude",
+      "--",
+      process.execPath,
+      "-e",
+      "process.exit(0)",
+    ],
+    dir,
+  );
+  assert.equal(executed.code, 0, executed.stderr);
+  daemonOnce(dir);
+  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("executed"));
+
+  // One drift record per transition the daemon observed: each marks a moment the
+  // file was found behind the log and brought up to it, and none is a repeat.
+  const drifts = eventsOf(dir, "envelope.drift");
+  assert.equal(drifts.length, 3);
+  assert.deepEqual(
+    drifts.map((record) => {
+      const payload = record["payload"] as Record<string, unknown>;
+      return [payload["declared_state"], payload["derived_state"]];
+    }),
+    [
+      ["proposed", "awaiting"],
+      ["awaiting", "approved"],
+      ["approved", "executed"],
+    ],
+  );
   assertClean(dir);
 });
 
