@@ -13,8 +13,9 @@ here with a matching display name, so drift fails CI.
 | M3 | `m-3` | M3 - Gate | done | Budgets, attestation, request lifecycle, tokens, run/wait/status/queue |
 | M3.1 | `m-3.1` | m-3.1 (virtual) | done | Consolidation: holistic review, Part A retrofit, Part B spec pass |
 | M4 | `m-5` | M4 - Channels | done | Channel contract, cli/web/telegram channels, QUEUE.md, e2e demo |
-| M4.1 | `m-6` | M4.1 - Human ergonomics | active | Payload store, amend/doctor/payload verbs, README, tiering, CI |
-| M5 | `m-7` | M5 - Daemon | pending | approvald: watch, sampling, retention pruning, git commits, head caching |
+| M4.1 | `m-6` | M4.1 - Human ergonomics | done | Payload store, amend/doctor/payload verbs, README, tiering, CI |
+| M5 | `m-7` | M5 - Daemon | done | approvald: watch, sampling, retention pruning, git commits, head caching, dogfood cutover |
+| M6 | `m-8` | M6 - Backlog.md round-trip and AGENTS.md import | active | Round-trip writer, envelope write-back, envelope-loss detection, AGENTS.md import, format-fixture drift guard |
 
 Retired ids: `m-4` was an empty duplicate of M3.1 created by the implicit-
 creation footgun described below; it was removed and its number is not reused.
