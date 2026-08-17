@@ -211,6 +211,33 @@ export function lapsedRequests(
   return lapsed;
 }
 
+/**
+ * Why an `envelope.drift` record was written (APRV-63).
+ *
+ * `state-mismatch` is the original reading of SPEC.md §6.3: the file makes a
+ * claim about `state:` and the log implies another one. `envelope-missing` is
+ * the loss case observed live in APRV-60: the log holds a `task.registered` for
+ * the task, and the file that declared it now carries no `approval:` key at all.
+ * They are separated because they call for different human actions — one is an
+ * edit to reconcile, the other is a *deletion to restore* — and a reader who
+ * could not tell them apart would treat a lost envelope as a stale one.
+ *
+ * `reason` is absent from records written before this vocabulary existed;
+ * readers (including {@link driftAlreadyLogged}) treat absence as
+ * `state-mismatch`, which is what every such record was.
+ */
+export const DRIFT_REASONS = ["state-mismatch", "envelope-missing"] as const;
+
+export type DriftReason = (typeof DRIFT_REASONS)[number];
+
+/** What an `envelope.drift` payload's `reason` says, defaulting for old records. */
+function reasonOf(payload: Record<string, unknown>): string {
+  const value = payload["reason"];
+  return typeof value === "string" ? value : "state-mismatch";
+}
+
+export { latestRegistration } from "../core/registration.js";
+
 /** The facts one `envelope.drift` record carries, and the dedupe key. */
 export interface DriftFacts {
   /** The `state:` the file claims, or `null` when it declares none. */
@@ -224,14 +251,23 @@ export interface DriftFacts {
    * drift and not a suppressed one.
    */
   envelopeDigest: string | null;
+  /**
+   * Which kind of drift this is (APRV-63). Part of the dedupe key: a file that
+   * contradicts the log and a file that lost its envelope are different facts
+   * about the same task, and neither may suppress the other. Absent means
+   * `state-mismatch`, matching every record written before the vocabulary
+   * existed.
+   */
+  reason?: DriftReason;
 }
 
 /**
  * Has this exact drift already been recorded for `task`?
  *
  * The rule: compare against the **latest** `envelope.drift` for the task. Equal
- * `(declared_state, derived_state, envelope_sha256)` means the situation the log
- * already describes is the situation now, so nothing is appended. Any difference
+ * `(reason, declared_state, derived_state, envelope_sha256)` means the situation
+ * the log already describes is the situation now, so nothing is appended. Any
+ * difference
  * — the human edited the file again, or the log moved and the derived state
  * changed — is a new fact and is recorded.
  *
@@ -239,6 +275,15 @@ export interface DriftFacts {
  * deliberate: a task that drifts, is repaired, and drifts the same way again has
  * genuinely drifted twice, and an audit that collapsed those into one would be
  * hiding a repetition from the person whose attention this system spends.
+ *
+ * For `envelope-missing` (APRV-63) the same rule reads as: one record per
+ * episode of loss, re-derived every tick from the file and the log rather than
+ * remembered, and a new record when the derived state moves underneath a file
+ * that is still stripped. Its limit is stated where it is felt: a file whose
+ * envelope is restored by hand *in agreement with the log* leaves no record of
+ * the restoration, so a second loss at the same derived state reads as the same
+ * episode and is not appended twice. Recording the restoration would need an
+ * event nobody has specified; detection does not invent one.
  */
 export function driftAlreadyLogged(
   records: EventRecord[],
@@ -255,6 +300,7 @@ export function driftAlreadyLogged(
   const derived = payload["derived_state"];
   const digest = payload["envelope_sha256"];
   return (
+    reasonOf(payload) === (facts.reason ?? "state-mismatch") &&
     (declared === undefined ? null : declared) === facts.declaredState &&
     derived === facts.derivedState &&
     (digest === undefined ? null : digest) === facts.envelopeDigest

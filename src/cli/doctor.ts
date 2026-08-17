@@ -15,7 +15,7 @@
  *
  * Neither failure was a bug in the runtime. Both were facts about the
  * environment that nothing was in a position to state out loud. `doctor` is
- * that statement: seven checks, in the order in which their failures cascade,
+ * that statement: nine checks, in the order in which their failures cascade,
  * each with a concrete repair.
  *
  * ## What it will not do
@@ -56,9 +56,11 @@ import {
   TELEGRAM_TOKEN_ENV,
 } from "../channels/telegram.js";
 import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
+import { readTaskFile } from "../core/frontmatter.js";
 import type { EventRecord } from "../core/log.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
+import { DEFAULT_TASKS_DIR, latestRegistration } from "../core/registration.js";
 import { POLICY_FILENAMES, loadPolicy, type PolicyLoadResult } from "../core/policy-load.js";
 import { resolveSampler } from "../core/sampler.js";
 import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
@@ -74,6 +76,9 @@ const FLAGS: Record<string, FlagKind> = {
   "--policy": "string",
   "--dir": "string",
   "--api-base": "string",
+  // Where the task files live, for the envelope-integrity check (APRV-63).
+  // Defaults to <--dir>/backlog/tasks, the same default the daemon uses.
+  "--tasks": "string",
   // Test-only (documented as such in --help): retarget the build-freshness
   // check at a fixture tree. It moves no other check, and a wrong value can
   // only make check 1 wrong — never the log, the policy, or the network.
@@ -688,6 +693,96 @@ function checkSampling(load: PolicyLoadResult): DoctorCheck {
 }
 
 // ---------------------------------------------------------------------------
+// 9. envelope integrity
+// ---------------------------------------------------------------------------
+
+/**
+ * Which task files have lost the envelope the log says they had? (APRV-63)
+ *
+ * The failure this reports was observed live in APRV-60: a task-file rewrite by
+ * a tool that did not know the `approval:` key dropped it. Nothing was corrupt,
+ * nothing refused, and the loss was invisible until someone looked — which is
+ * precisely the shape of question doctor exists to answer out loud.
+ *
+ * Log-derived in both directions. A file is only interesting when the *log*
+ * holds a `task.registered` for its id; the file's own claims are read for one
+ * thing, whether an `approval:` key is present, and trusted for nothing else. A
+ * file with no frontmatter at all leaves no id, so its Backlog.md file name is
+ * matched case-insensitively against registered ids — a way of asking the log a
+ * question, never a way of deciding the answer.
+ *
+ * **It repairs nothing**, in the strong sense doctor means it: the registration
+ * in the log holds every action the envelope declared, so a writer could re-emit
+ * one, and doing so would make a projection into a source. The fix is a human
+ * restoring the block by hand.
+ */
+function checkEnvelopeIntegrity(tasksDir: string, records: EventRecord[]): DoctorCheck {
+  let entries;
+  try {
+    entries = readdirSync(tasksDir, { withFileTypes: true });
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+      return {
+        check: "envelope-integrity",
+        status: "skip",
+        detail: `no task folder at ${tasksDir}, so no task file can be compared against the log (pass --tasks <dir> if your task files live elsewhere)`,
+      };
+    }
+    return {
+      check: "envelope-integrity",
+      status: "fail",
+      detail: `${tasksDir} could not be listed: ${detailOf(cause)}; whether any task lost its envelope is unknown`,
+      fix: `make ${tasksDir} readable by the user running approval, or point --tasks at the task folder`,
+    };
+  }
+
+  const files = entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
+    .map((entry) => entry.name)
+    .sort();
+
+  const lost: string[] = [];
+  for (const name of files) {
+    const read = readTaskFile(join(tasksDir, name));
+    // Unreadable or unparseable frontmatter is the daemon's warning to raise,
+    // not this check's verdict: the question here is only "is the envelope
+    // gone", and a file nobody can parse has not answered it.
+    if (read.ok && read.data["approval"] !== undefined) continue;
+    if (!read.ok && read.code !== "no-frontmatter") continue;
+
+    const declared = read.ok ? read.data["id"] : undefined;
+    const hasId = typeof declared === "string" && declared.length > 0;
+    const id = hasId ? declared : taskIdFromFileName(name);
+    if (id === null) continue;
+    const registration = latestRegistration(records, id, !hasId);
+    if (registration === null) continue;
+    lost.push(`${String(registration.task)} (${name}, registered at seq ${String(registration.seq)})`);
+  }
+
+  if (lost.length === 0) {
+    return {
+      check: "envelope-integrity",
+      status: "pass",
+      detail: `${String(files.length)} task file(s) in ${tasksDir}; every task the log has registered still carries its approval: envelope`,
+    };
+  }
+  return {
+    check: "envelope-integrity",
+    status: "fail",
+    detail: `${String(lost.length)} task(s) have log history and no envelope in their file: ${lost.join(
+      "; ",
+    )}. The log still holds every action they declared; the file does not.`,
+    fix: "the envelope was removed by an external rewrite; restore it from the log by hand — see docs/dogfood-cutover.md (\"If an envelope goes missing\") and the APRV-60 record. `approval log tail` shows the registered actions. Nothing here rewrites a task file: re-emitting the envelope from the log would turn a projection into a source.",
+  };
+}
+
+/** The Backlog.md board key a task file's name begins with (`task-3 - Slug.md`). */
+function taskIdFromFileName(name: string): string | null {
+  const match = /^([A-Za-z][A-Za-z0-9_]*-\d+)/u.exec(name);
+  return match?.[1] ?? null;
+}
+
+// ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
@@ -765,6 +860,9 @@ export function commandDoctor(
 
   const apiBase = stringFlag(parsed.flags, "--api-base") ?? TELEGRAM_DEFAULT_API_BASE;
 
+  const tasksFlag = stringFlag(parsed.flags, "--tasks");
+  const tasksDir = tasksFlag === null ? join(dir, DEFAULT_TASKS_DIR) : absolute(tasksFlag, cwd);
+
   return (async (): Promise<number> => {
     const checks: DoctorCheck[] = [
       build,
@@ -775,6 +873,7 @@ export function commandDoctor(
       await checkWebPort(port ?? WEB_DEFAULT_PORT),
       checkPayloadStore(logPath, verified.records),
       checkSampling(policyLoad),
+      checkEnvelopeIntegrity(tasksDir, verified.records),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

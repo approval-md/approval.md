@@ -317,6 +317,9 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       "web-port",
       "payload-store",
       "audit-sampling",
+      // APRV-63: the envelope-loss check, appended to the list rather than
+      // inserted, so a reader's position-based expectations still hold.
+      "envelope-integrity",
     ],
   );
   assert.deepEqual(
@@ -324,7 +327,9 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
     // audit-sampling skips: the healthy fixture never configured a rate, and a
     // sampler the operator plainly chose not to have is a stated skip, not a
     // failure (APRV-49 rider to the APRV-40 fail-open sign-off).
-    ["pass", "pass", "pass", "pass", "pass", "pass", "pass", "skip"],
+    // envelope-integrity skips: the healthy fixture has no task folder, and a
+    // check that could not look must not report that it looked (APRV-63).
+    ["pass", "pass", "pass", "pass", "pass", "pass", "pass", "skip", "skip"],
   );
   for (const entry of parsed.checks) {
     assert.equal(entry.fix, undefined, `a passing check carried a fix: ${entry.check}`);
@@ -359,7 +364,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
 
   assert.equal(run.code, 1, run.stderr);
   const lines = run.stdout.trimEnd().split("\n");
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 8);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 9);
   assert.ok(lines.some((line) => line.startsWith("✗ identity:")));
   assert.ok(lines.some((line) => line.startsWith("– telegram:")));
   // The fix belongs to the failing check and is indented under it.
@@ -756,7 +761,7 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  assert.equal(parsed.checks.length, 8);
+  assert.equal(parsed.checks.length, 9);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);

@@ -84,7 +84,7 @@
 
 import { watch, type FSWatcher } from "node:fs";
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 
 import { writeQueue } from "../channels/render-queue.js";
 import { tick as readClock, type Clock } from "../core/clock.js";
@@ -107,6 +107,7 @@ import { prunePayloads } from "./prune.js";
 import {
   driftAlreadyLogged,
   lapsedRequests,
+  latestRegistration,
   taskEnvelopeState,
   type DriftFacts,
 } from "./projection.js";
@@ -120,7 +121,7 @@ import {
 export const DAEMON_ACTOR = "system:daemon";
 
 /** Backlog.md's conventional task folder, relative to the working directory. */
-export const DEFAULT_TASKS_DIR = "backlog/tasks";
+export { DEFAULT_TASKS_DIR } from "../core/registration.js";
 
 /** How often the daemon looks, absent any watcher event. */
 export const DEFAULT_INTERVAL_MS = 30_000;
@@ -156,6 +157,12 @@ export type DaemonEvent =
       declared_state: string | null;
       derived_state: string;
       seq: number;
+      /**
+       * Why (APRV-63). Present only for `envelope-missing`: a `state-mismatch`
+       * line is what every `drift` line has always been, and a field that
+       * appeared on all of them would change a shape supervisors already parse.
+       */
+      reason?: "envelope-missing";
     }
   | {
       /**
@@ -309,6 +316,19 @@ interface RenderSummary {
 
 function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+/**
+ * The Backlog.md board key a task file's name begins with (`task-3 - Slug.md`).
+ *
+ * Used for one question only (APRV-63): a file that has lost its frontmatter
+ * entirely leaves no id anywhere, so the name is the only handle left with
+ * which to ask the log whether this task ever registered anything. The answer,
+ * and the id every record is written under, come from the log.
+ */
+function taskIdFromFileName(path: string): string | null {
+  const match = /^([A-Za-z][A-Za-z0-9_]*-\d+)/u.exec(basename(path));
+  return match?.[1] ?? null;
 }
 
 /**
@@ -645,8 +665,14 @@ export class Daemon {
     const read = readTaskFile(file);
     if (!read.ok) {
       if (read.code === "no-frontmatter") {
-        // SPEC.md §6: a task with no envelope is valid markdown. Silent by design.
-        return { appended: false, stop: null };
+        // SPEC.md §6: a task with no envelope is valid markdown. Silent by
+        // design — unless the log says this task once declared actions, which
+        // makes it a loss rather than an absence (APRV-63). The file name is
+        // the only id such a file leaves; the log decides whether it means
+        // anything.
+        const hint = taskIdFromFileName(file);
+        if (hint === null) return { appended: false, stop: null };
+        return this.reportEnvelopeLoss(file, hint, true, "no-frontmatter");
       }
       this.warn(
         read.code === "io" ? "task-unreadable" : "frontmatter-invalid",
@@ -656,7 +682,22 @@ export class Daemon {
     }
 
     const envelope = read.data["approval"];
-    if (envelope === undefined) return { appended: false, stop: null };
+    if (envelope === undefined) {
+      // Frontmatter, no `approval:` key. Ordinary for a task that never had
+      // one; envelope loss for a task the log registered (APRV-63).
+      const declaredId = read.data["id"];
+      const id =
+        typeof declaredId === "string" && declaredId.length > 0
+          ? declaredId
+          : taskIdFromFileName(file);
+      if (id === null) return { appended: false, stop: null };
+      return this.reportEnvelopeLoss(
+        file,
+        id,
+        typeof declaredId !== "string" || declaredId.length === 0,
+        "no-approval-key",
+      );
+    }
 
     const id = read.data["id"];
     if (typeof id !== "string" || id.length === 0) {
@@ -739,6 +780,95 @@ export class Daemon {
       declared_state: declaredState,
       derived_state: facts.derivedState,
       seq: result.record.seq,
+    });
+    return { appended: true, stop: null };
+  }
+
+  /**
+   * A task file with no envelope whose task the log registered: the envelope was
+   * lost (APRV-63, the defense half of APRV-60).
+   *
+   * Recorded as `envelope.drift` with `payload.reason: "envelope-missing"` —
+   * the same event type, because it is the same §6.3 question ("the file and
+   * the log disagree"), and a distinct reason, because the answer is different:
+   * a state mismatch is an edit to reconcile, a missing envelope is a deletion
+   * to restore. `declared_state` is `null` because the file makes no claim at
+   * all, and `envelope_sha256` is absent because there is no envelope to digest.
+   *
+   * **Nothing is repaired.** The registration in the log holds every action the
+   * envelope declared, so a writer *could* re-emit it — and that would turn a
+   * projection into a source, which is the one thing the log's authority rests
+   * on not happening. The daemon reports; a human restores by hand.
+   *
+   * `loose` says the id came from the file name rather than from frontmatter;
+   * it relaxes only the *matching*, and the record is written under the id the
+   * log itself holds.
+   */
+  private reportEnvelopeLoss(
+    file: string,
+    id: string,
+    loose: boolean,
+    kind: "no-frontmatter" | "no-approval-key",
+  ): { appended: boolean; stop: DaemonOutcome | null } {
+    // Re-read immediately before deciding, exactly as the mismatch path does:
+    // the head this append is compared against is the head it decided from.
+    const records = this.read();
+    if (!records.ok) return { appended: false, stop: this.fatal(records) };
+
+    const registration = latestRegistration(records.records, id, loose);
+    if (registration === null) {
+      // The log has never heard of this task. SPEC.md §6: a task with no
+      // envelope is valid markdown, and this one is exactly that.
+      return { appended: false, stop: null };
+    }
+    const task = registration.task;
+    if (typeof task !== "string" || task.length === 0) return { appended: false, stop: null };
+
+    const ts = readClock(this.options.clock === undefined ? {} : { clock: this.options.clock });
+    const projection = taskEnvelopeState(records.records, task, ts, this.ttlMs());
+    const facts: DriftFacts = {
+      declaredState: null,
+      derivedState: projection.state,
+      envelopeDigest: null,
+      reason: "envelope-missing",
+    };
+    if (driftAlreadyLogged(records.records, task, facts)) return { appended: false, stop: null };
+
+    const payload: Record<string, unknown> = {
+      file: this.display(file),
+      declared_state: null,
+      derived_state: facts.derivedState,
+      registered: projection.registered,
+      reason: "envelope-missing",
+      missing: kind,
+      registered_seq: registration.seq,
+    };
+
+    const result = appendEvent(
+      this.options.logPath,
+      { ts, event: "envelope.drift", actor: DAEMON_ACTOR, task, payload },
+      {
+        ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
+        expectedHead: records.head,
+      },
+    );
+    if (!result.ok) {
+      this.warn(
+        "append-refused",
+        `envelope.drift (envelope-missing) for ${task} was not appended (${result.error.code}): ${result.error.message}`,
+      );
+      return { appended: false, stop: null };
+    }
+
+    this.drifts += 1;
+    this.emit({
+      event: "drift",
+      task,
+      file: this.display(file),
+      declared_state: null,
+      derived_state: facts.derivedState,
+      seq: result.record.seq,
+      reason: "envelope-missing",
     });
     return { appended: true, stop: null };
   }
