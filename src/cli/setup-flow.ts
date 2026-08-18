@@ -422,6 +422,13 @@ export interface CredentialFlow {
 // Collection
 // ---------------------------------------------------------------------------
 
+/**
+ * A Google app password as the account page displays it: sixteen lowercase
+ * letters in four groups separated by single spaces (APRV-97). Anchored and
+ * exact, so an ordinary password that happens to contain a space never matches.
+ */
+const DISPLAY_SPACED_APP_PASSWORD = /^[a-z]{4} [a-z]{4} [a-z]{4} [a-z]{4}$/u;
+
 type Collected =
   | { kind: "value"; value: string }
   | { kind: "skip" }
@@ -437,11 +444,29 @@ function collectDefault(
   if (spec.kind === "secret") {
     const read = prompter.readSecret(`${spec.label} (not echoed): `);
     if (!read.ok) return { kind: "abort", message: `the entry for ${spec.name} was aborted` };
-    const value = read.value;
+    let value = read.value;
     if (value.length === 0) {
       return spec.required
         ? { kind: "abort", message: `${spec.name} is required and nothing was entered` }
         : { kind: "skip" };
+    }
+    // The count, never the value (APRV-97). What setup collects are app
+    // passwords and tokens whose lengths are public, so a count leaks nothing
+    // and turns "blind paste, then a provider's 535" into "received 19".
+    streams.out(`  received ${String(value.length)} character(s)\n`);
+    if (DISPLAY_SPACED_APP_PASSWORD.test(value)) {
+      // Google shows app passwords as four groups with display spaces, and
+      // Gmail's AUTH rejects the spaced form. The shape is unmistakable, so
+      // the offer defaults to yes; it is still an offer, because a secret
+      // that genuinely contains spaces is stored exactly as typed.
+      const strip = prompter.confirm(
+        `  that is the shape of a Google app password pasted with its display spaces (16 letters shown as 4 groups); store the 16 characters without the spaces?`,
+        false,
+      );
+      if (strip) {
+        value = value.split(" ").join("");
+        streams.out(`  storing ${String(value.length)} character(s)\n`);
+      }
     }
     return { kind: "value", value };
   }
