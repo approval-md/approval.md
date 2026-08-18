@@ -6,10 +6,13 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-18 11:00'
+updated_date: '2026-08-18 11:29'
 labels:
   - cli
   - dogfood
-dependencies: []
+milestone: m-11
+dependencies:
+  - APRV-85
 references:
   - SPEC.md
   - docs/dogfood-cutover.md
@@ -41,3 +44,9 @@ Constraints: classifier is pure and exhaustively tested; every gate write goes t
 - [ ] #6 SPEC §14 names the harness hook as v1 with the Rust engine as its post-v1 accelerator; edit called out to the human
 - [ ] #7 npm test and lint pass; dogfood test confirms every class in the repo's own APPROVAL.md is reachable from the classifier table
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Assigned to M8 at decomposition (2026-08-18) per its stated intended slot: the MCP wrapper (APRV-87) and this hook are the two harness-facing surfaces, and both should derive their verb knowledge from the APRV-85 instructions/schemas registry where they overlap (the class table here is its own thing; the request/wait semantics are shared). Sequenced after 85 and in parallel with 86/87: it does not need the SDK. It closes the gap that produced APRV-50 and that APRV-81 tripped again from prose alone.
+<!-- SECTION:NOTES:END -->
