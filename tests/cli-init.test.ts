@@ -193,7 +193,7 @@ test("QUEUE.md is the real renderer's empty state, not an imitation of it", () =
   assert.ok(written.includes("_empty log_"), "the empty log is not reported as empty");
 });
 
-test("the .gitignore lines are the index, the vault and the temp files, under one marker", () => {
+test("the .gitignore lines are the index, the vault, the env map and the temp files, under one marker", () => {
   const dir = caseDir();
   runCli(["init"], dir);
 
@@ -414,9 +414,12 @@ test("the --json shape is exactly {ok, dir, written, existing, next_steps}", () 
     ".gitignore",
   ]);
   assert.deepEqual(parsed.existing, []);
-  assert.equal(parsed.next_steps.length, 4);
+  assert.equal(parsed.next_steps.length, 5);
   assert.ok(parsed.next_steps.some((step) => step.includes("approval policy attest")));
   assert.ok(parsed.next_steps.some((step) => step.includes("approval doctor")));
+  // APRV-73: the environment source map, after doctor and before the payload
+  // note, because it is the step that makes the gate verbs work at all.
+  assert.ok(parsed.next_steps.some((step) => step.includes("approval env --check")));
 });
 
 test("--dir scaffolds somewhere else and leaves the working directory alone", () => {

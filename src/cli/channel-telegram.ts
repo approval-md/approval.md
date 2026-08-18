@@ -113,10 +113,11 @@ import {
 } from "../channels/tagging.js";
 import {
   TelegramChannel,
-  TELEGRAM_CHAT_ENV,
-  TELEGRAM_TOKEN_ENV,
+  telegramChatEnvFor,
+  telegramTokenEnvFor,
   type TelegramConfig,
 } from "../channels/telegram.js";
+import { loadPolicy } from "../core/policy-load.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import {
@@ -246,22 +247,37 @@ function setUp(
 
   const flags = parsed.flags;
 
+  // Resolved here rather than after the log preflight because the policy is
+  // what NAMES the credential variables (below), and a message about a missing
+  // variable must name the one this policy actually asked for.
+  const policyFlag = stringFlag(flags, "--policy");
+  const dirFlag = stringFlag(flags, "--dir");
+  const policy =
+    policyFlag !== null
+      ? { file: absolute(policyFlag, cwd) }
+      : { dir: dirFlag === null ? cwd : absolute(dirFlag, cwd) };
+
   // Configuration is environment-only: policy names the variables, never the
   // values (SPEC.md §5.1), and there is no flag that would put a bot token in
-  // a shell history or a process listing.
-  const token = env(TELEGRAM_TOKEN_ENV);
-  const chatId = env(TELEGRAM_CHAT_ENV);
+  // a shell history or a process listing. A policy that fails to load names
+  // nothing and the reference defaults apply — the load is fail-closed for
+  // autonomy and budgets, and a variable name is not a permission.
+  const policyLoad = loadPolicy(policy);
+  const tokenEnv = telegramTokenEnvFor(policyLoad);
+  const chatEnv = telegramChatEnvFor(policyLoad);
+  const token = env(tokenEnv);
+  const chatId = env(chatEnv);
   if (token === null || chatId === null) {
     const missing = [
-      token === null ? TELEGRAM_TOKEN_ENV : null,
-      chatId === null ? TELEGRAM_CHAT_ENV : null,
+      token === null ? tokenEnv : null,
+      chatId === null ? chatEnv : null,
     ].filter((name): name is string => name !== null);
     return {
       kind: "handled",
       code: usageError(
         streams,
         json,
-        `telegram is not configured: ${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} unset or empty (both ${TELEGRAM_TOKEN_ENV} and ${TELEGRAM_CHAT_ENV} are required; APPROVAL.md carries only their names)`,
+        `telegram is not configured: ${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} unset or empty (both ${tokenEnv} and ${chatEnv} are required; APPROVAL.md carries only their names)`,
         TELEGRAM_LISTEN_HELP,
       ),
     };
@@ -304,13 +320,6 @@ function setUp(
   if (!payloads.ok) {
     return { kind: "handled", code: ioError(streams, json, payloads.message) };
   }
-
-  const policyFlag = stringFlag(flags, "--policy");
-  const dirFlag = stringFlag(flags, "--dir");
-  const policy =
-    policyFlag !== null
-      ? { file: absolute(policyFlag, cwd) }
-      : { dir: dirFlag === null ? cwd : absolute(dirFlag, cwd) };
 
   const config: TelegramConfig = {
     token,
@@ -597,17 +606,37 @@ export function commandTelegramListen(
  * listener and are surfaced by `TelegramChannel.health()` / `stats()` in
  * process, and on the listener's stderr as they happen.
  */
-export function commandTelegramHealth(argv: string[], streams: Streams): number {
+export function commandTelegramHealth(argv: string[], streams: Streams, cwd: string): number {
   const json = argv.includes("--json");
-  const parsed = parseFlags(argv, { "--json": "boolean", "--help": "boolean", "-h": "boolean" });
+  const parsed = parseFlags(argv, {
+    "--policy": "string",
+    "--dir": "string",
+    "--json": "boolean",
+    "--help": "boolean",
+    "-h": "boolean",
+  });
   if (!parsed.ok) return usageError(streams, json, parsed.message, TELEGRAM_HEALTH_HELP);
   if (boolFlag(parsed.flags, "--help") || boolFlag(parsed.flags, "-h")) {
     streams.out(`${TELEGRAM_HEALTH_HELP}\n`);
     return EXIT_OK;
   }
 
-  const token = env(TELEGRAM_TOKEN_ENV);
-  const chatId = env(TELEGRAM_CHAT_ENV);
+  // Which variables to look at is a policy question (§5.1), so this offline
+  // check reads the policy for the NAMES — and only the names. It still makes
+  // no network call, and an unloadable policy leaves the defaults in force
+  // rather than reporting a channel that cannot be configured at all.
+  const policyFlag = stringFlag(parsed.flags, "--policy");
+  const dirFlag = stringFlag(parsed.flags, "--dir");
+  const policyLoad = loadPolicy(
+    policyFlag !== null
+      ? { file: absolute(policyFlag, cwd) }
+      : { dir: dirFlag === null ? cwd : absolute(dirFlag, cwd) },
+  );
+  const tokenEnv = telegramTokenEnvFor(policyLoad);
+  const chatEnv = telegramChatEnvFor(policyLoad);
+
+  const token = env(tokenEnv);
+  const chatId = env(chatEnv);
   const ok = token !== null && chatId !== null;
 
   if (json) {
@@ -616,19 +645,19 @@ export function commandTelegramHealth(argv: string[], streams: Streams): number 
         ok,
         channel: "telegram",
         // Presence only. The token's value never appears in any output.
-        token_env: TELEGRAM_TOKEN_ENV,
+        token_env: tokenEnv,
         token_set: token !== null,
-        chat_env: TELEGRAM_CHAT_ENV,
+        chat_env: chatEnv,
         chat_id: chatId,
       })}\n`,
     );
   } else if (ok) {
-    streams.out(`telegram: configured (${TELEGRAM_TOKEN_ENV} set, chat ${String(chatId)})\n`);
+    streams.out(`telegram: configured (${tokenEnv} set, chat ${String(chatId)})\n`);
   } else {
     streams.err(
       `approval: telegram is not configured: ${[
-        token === null ? TELEGRAM_TOKEN_ENV : null,
-        chatId === null ? TELEGRAM_CHAT_ENV : null,
+        token === null ? tokenEnv : null,
+        chatId === null ? chatEnv : null,
       ]
         .filter((name) => name !== null)
         .join(" and ")} unset or empty\n`,
@@ -661,7 +690,7 @@ export function commandTelegram(
     case "listen":
       return commandTelegramListen(rest, streams, cwd);
     case "health":
-      return commandTelegramHealth(rest, streams);
+      return commandTelegramHealth(rest, streams, cwd);
     default:
       return usageError(
         streams,

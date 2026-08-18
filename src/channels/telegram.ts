@@ -121,11 +121,17 @@ import type {
 // Configuration
 // ---------------------------------------------------------------------------
 
-/** The environment variable naming the bot token (SPEC.md §5.1 `token_env`). */
-export const TELEGRAM_TOKEN_ENV = "APPROVAL_TG_TOKEN";
-
-/** The environment variable naming the approver chat (§5.1 `chat_id_env`). */
-export const TELEGRAM_CHAT_ENV = "APPROVAL_TG_CHAT";
+// The variable NAMES and their resolvers live in `core/telegram-config.ts`
+// (APRV-72, moved in APRV-73 so `approval env` can read them without a
+// core -> channels import). Re-exported here so channel callers keep one
+// import path. Still true: nothing under `src/channels/` reads `process.env`.
+import { TELEGRAM_CHAT_ENV, TELEGRAM_TOKEN_ENV } from "../core/telegram-config.js";
+export {
+  TELEGRAM_CHAT_ENV,
+  TELEGRAM_TOKEN_ENV,
+  telegramChatEnvFor,
+  telegramTokenEnvFor,
+} from "../core/telegram-config.js";
 
 /** The real Bot API. Overridden only by tests, against a local mock. */
 export const TELEGRAM_DEFAULT_API_BASE = "https://api.telegram.org";
@@ -168,7 +174,8 @@ export type TelegramFetch = (
 
 export interface TelegramConfig {
   /**
-   * The bot token. Resolved by the *verb* from {@link TELEGRAM_TOKEN_ENV};
+   * The bot token. Resolved by the *verb* from the variable
+   * {@link telegramTokenEnvFor} names ({@link TELEGRAM_TOKEN_ENV} by default);
    * this constructor takes the value, so nothing in the channel reads the
    * environment and a test cannot accidentally pick up a real token.
    */

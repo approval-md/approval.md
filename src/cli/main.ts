@@ -64,6 +64,7 @@ import { commandAudit } from "./audit.js";
 import { commandChannel } from "./channel.js";
 import { commandDaemon } from "./daemon.js";
 import { commandDoctor } from "./doctor.js";
+import { commandEnv } from "./env.js";
 import { commandImport } from "./import.js";
 import { commandInit } from "./init.js";
 import { commandPayload } from "./payload.js";
@@ -637,6 +638,15 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // It reads no log and writes nothing.
     case "payload":
       return commandPayload(rest, streams, cwd);
+    // The environment verb (APRV-73). `env` resolves `.approval/env` — the
+    // source map naming where each *_env variable's value lives — and prints an
+    // export block for a shell to evaluate. IT IS THE ONLY COMMAND IN THIS
+    // SWITCH THAT READS THAT FILE, and no command in this switch loads it into
+    // its own environment: human identity is one of the variables it can carry,
+    // so a file a process read on its own would let anything able to write it
+    // act as the human on every human-only verb (SPEC.md §11.1 invariant 7).
+    case "env":
+      return commandEnv(rest, streams, cwd);
     // The credential verbs (APRV-68). `vault set|list|remove` manage the
     // encrypted store adapters read from, and all three are human-only. There
     // is deliberately no `vault get`: a credential's only sanctioned journey is
