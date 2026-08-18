@@ -3,10 +3,11 @@ id: APRV-70
 title: >-
   M7 end-to-end demo: agent drafts chaser, Telegram ping, approve from phone,
   email sent, log verifies
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@fable'
 created_date: '2026-08-17 21:40'
-updated_date: '2026-08-17 21:41'
+updated_date: '2026-08-18 01:07'
 labels: []
 milestone: m-9
 dependencies:
@@ -24,7 +25,19 @@ SPEC 14 M7 exit criterion, and the abstract made real: an agent drafts the canon
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Scripted demo test walks register -> request -> notify -> approve -> send -> log verify against mocks and passes in CI
+- [x] #1 Scripted demo test walks register -> request -> notify -> approve -> send -> log verify against mocks and passes in CI
 - [ ] #2 examples/email-demo.md runbook exists; the human has run it once against real Telegram and SMTP and the log seq range is recorded on this task
-- [ ] #3 README documents the fourth ceremony
+- [x] #3 README documents the fourth ceremony
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Opus subagent, worktree from main (has 55/67/68/69). 2. tests/e2e-email-demo.test.ts: real CLI processes against temp dirs: init, write demo policy (communicate.email.external manual, telegram channel), attest, vault set smtp.* against the mock SMTP server, register the SPEC 6.1 chaser task (payload = the message, reversible false), request --payload, telegram listener --once against the mock Bot API delivers to the chat, callback approve through the mock, token minted, approval adapter email sends via the mock SMTP, DATA bytes equal the rendering, execution.completed, log verify clean; assert every hop against the log. 3. examples/email-demo.md: the human runbook against real Telegram + real SMTP (app password into the vault via --value-env, doctor all green, run the same commands), recording where the seq range goes on this task. 4. README fourth ceremony section (agent-editable) in the incident-grounded style. PR. 5. HUMAN: run the runbook once; record seq range here.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Agent half merged as PR #37 (1396 tests): scripted demo test asserts ten hops end to end against mock Bot API + mock SMTP through the real CLI, with a secret sweep across every surface (password, passphrase, username, bot token in no log byte / output / Bot API body; raw token in exactly one captured stream); examples/email-demo.md runbook; README ceremony four. CLI FRICTION FOUND, all documented in the runbook and relevant to the human run: (1) callback nonces are process-local, so the tap must land on the RUNNING listener newest message (a restarted listener re-sends with fresh buttons and older buttons stop resolving); (2) no CLI TLS relaxation by design, so the mock demo trusts the fixture CA via NODE_EXTRA_CA_CERTS; (3) doctor telegram check reaches the real Bot API (runbook step, not test step); (4) payload hash --json emits {hash} not {payload_hash}; (5) vault set cannot validate a credential, first proof is the send; (6) security none plus a login is a refusal by design. AC 2 (human runs the runbook once against real Telegram and SMTP; seq range recorded here) is the remaining step and the reason this task, and M7, stay open.
+<!-- SECTION:NOTES:END -->
