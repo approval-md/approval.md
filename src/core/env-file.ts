@@ -91,7 +91,7 @@ import { userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 import { HUMAN_ACTOR_ENV } from "./attest.js";
-import { telegramChatEnvFor, telegramTokenEnvFor } from "../channels/telegram.js";
+import { telegramChatEnvFor, telegramTokenEnvFor } from "./telegram-config.js";
 import type { PolicyLoadResult } from "./policy-load.js";
 import { passphraseEnvFor } from "./vault.js";
 

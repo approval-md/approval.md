@@ -116,64 +116,22 @@ import type {
   TaggedField,
   TestableChannel,
 } from "./contract.js";
-// Type-only: the resolvers below read a loaded policy's SHAPE and nothing else,
-// so this adds no runtime edge from `src/channels/` to `src/core/` and no
-// possibility of a channel reaching for configuration on its own.
-import type { PolicyLoadResult } from "../core/policy-load.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-/**
- * The environment variable the bot token is read from when the policy declares
- * no `channels.telegram.token_env` (SPEC.md §5.1). A DEFAULT, not a fixed name:
- * see {@link telegramTokenEnvFor}.
- */
-export const TELEGRAM_TOKEN_ENV = "APPROVAL_TG_TOKEN";
-
-/**
- * The environment variable the approver chat id is read from when the policy
- * declares no `channels.telegram.chat_id_env` (§5.1). Also a default.
- */
-export const TELEGRAM_CHAT_ENV = "APPROVAL_TG_CHAT";
-
-/**
- * The NAME of the environment variable this policy says the bot token lives in
- * (SPEC.md §5.1 `channels.telegram.token_env`, amended §5.2 by APRV-72).
- *
- * The name only, in both directions: a policy that carried the token would be a
- * bot credential in a file agents may read, which is exactly what §5.1's
- * name-indirection exists to prevent. A policy that failed to load names
- * nothing, so the default applies — a variable name is not a permission, and
- * treating it as one would mean an unrelated policy typo locked the operator out
- * of their own channel. This is `passphraseEnvFor`'s argument, verbatim, for the
- * same reason: these are the same kind of key.
- *
- * Returns a NAME and reads no environment. Nothing under `src/channels/` touches
- * `process.env` (see {@link TelegramConfig.token}); the CLI layer takes the name
- * from here and looks the value up.
- */
-export function telegramTokenEnvFor(load: PolicyLoadResult): string {
-  return declaredEnvName(load, "token_env") ?? TELEGRAM_TOKEN_ENV;
-}
-
-/**
- * The NAME of the environment variable this policy says the approver chat id
- * lives in (`channels.telegram.chat_id_env`). Same contract, same fallback, and
- * the same reason as {@link telegramTokenEnvFor}.
- */
-export function telegramChatEnvFor(load: PolicyLoadResult): string {
-  return declaredEnvName(load, "chat_id_env") ?? TELEGRAM_CHAT_ENV;
-}
-
-/** A non-empty string under `channels.telegram.<key>`, or `null`. */
-function declaredEnvName(load: PolicyLoadResult, key: string): string | null {
-  if (!load.ok) return null;
-  const telegram = load.policy.channels?.["telegram"];
-  const declared = telegram === undefined ? undefined : telegram[key];
-  return typeof declared === "string" && declared.length > 0 ? declared : null;
-}
+// The variable NAMES and their resolvers live in `core/telegram-config.ts`
+// (APRV-72, moved in APRV-73 so `approval env` can read them without a
+// core -> channels import). Re-exported here so channel callers keep one
+// import path. Still true: nothing under `src/channels/` reads `process.env`.
+import { TELEGRAM_CHAT_ENV, TELEGRAM_TOKEN_ENV } from "../core/telegram-config.js";
+export {
+  TELEGRAM_CHAT_ENV,
+  TELEGRAM_TOKEN_ENV,
+  telegramChatEnvFor,
+  telegramTokenEnvFor,
+} from "../core/telegram-config.js";
 
 /** The real Bot API. Overridden only by tests, against a local mock. */
 export const TELEGRAM_DEFAULT_API_BASE = "https://api.telegram.org";
