@@ -261,13 +261,21 @@ export const defaultKeystoreRunner: KeystoreRunner = {
 
     // Attempt one: the value on `security`'s STDIN. Its `-w` with no argument
     // prompts twice (the value and its confirmation), so it is written twice.
-    // If the build of `security` on this machine insists on a real tty, this
-    // fails cleanly and nothing has been stored.
+    //
+    // Exit status is NOT trusted as proof of a correct store. A probe against a
+    // scratch keychain (APRV-74 review) showed `security … -w` with piped stdin
+    // exiting 0 while leaving no findable item under the service name, which
+    // is the worst outcome: a fallback that never triggers and a later lookup
+    // that fails. So every attempt is followed by a read-back, and success is
+    // "the keystore returns exactly the bytes we generated", nothing less.
     const piped = spawnSync("security", [...base, "-w"], {
       encoding: "utf8",
       input: `${value}\n${value}\n`,
     });
-    if (piped.error === undefined && piped.status === 0) return { ok: true, viaArgv: false };
+    if (piped.error === undefined && piped.status === 0) {
+      const back = defaultKeystoreRunner.read(service);
+      if (back.ok && back.value === value) return { ok: true, viaArgv: false };
+    }
 
     // Attempt two, for GENERATED VALUES ONLY: the argv form. See the module doc
     // for exactly what is being accepted here and why it is not extended to a
@@ -276,7 +284,14 @@ export const defaultKeystoreRunner: KeystoreRunner = {
     if (argv.error !== undefined) {
       return { ok: false, message: `security could not be run: ${detail(argv.error)}` };
     }
-    if (argv.status === 0) return { ok: true, viaArgv: true };
+    if (argv.status === 0) {
+      const back = defaultKeystoreRunner.read(service);
+      if (back.ok && back.value === value) return { ok: true, viaArgv: true };
+      return {
+        ok: false,
+        message: `security add-generic-password reported success for service ${JSON.stringify(service)} but the read-back did not return the stored value; nothing this run wrote can be trusted, inspect the keychain by hand`,
+      };
+    }
     return {
       ok: false,
       message: `security add-generic-password exited ${String(argv.status)} for service ${JSON.stringify(service)}`,
