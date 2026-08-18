@@ -43,7 +43,7 @@
  * configured with (`APPROVAL_HUMAN` / `--as`), not against anything the
  * callback carried. So the guarantee is "someone with access to the configured
  * chat, on a runtime configured by someone with local control, tapped Approve"
- * — not "carter tapped Approve". Anyone in that chat can approve as the
+ * — not "alice tapped Approve". Anyone in that chat can approve as the
  * configured actor. Use a private chat with the bot, and treat the chat's
  * membership as part of the trust boundary. Cryptographic identity is future
  * work and is not a v0.1 claim.
