@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-18 08:13'
-updated_date: '2026-08-18 09:27'
+updated_date: '2026-08-18 10:14'
 labels: []
 milestone: m-10
 dependencies:
@@ -37,6 +37,8 @@ Prompted by the human notes-app design (notes submitted via a Telegram bot, auto
 
 <!-- SECTION:NOTES:BEGIN -->
 Opus subagent (docs-only), PR #49. docs/record-example.md (302 lines): setting, policy (manual, or supervised+sampling with the 7/11 rationale for each), envelope, lifecycle as events, the in-app surface as a fourth channel (computed vs claimed; batching per B7), enforcement stated plainly (channel never the boundary; write path is; different credentials for human and agent; where 11 future-work identity lands), rerouting today, grant-with-choice as an UNRESOLVED question with three options and the recommendation ((ii) as v0.2 with the binding rule spelled out; (i) as the v0.1 answer the example uses), the capture bot as the 12 inbound-adapter example. SPEC 7 pointer paragraph drafted (flagged); README one sentence. FIVE TENSIONS RECORDED (valuable; feed the v0.2 spec pass): (1) the envelope assumes a task file (6); a notes deployment has notes; approval register --json is hinted but no non-file envelope shape exists: SHARPEST; (2) 10.3 batching vs 10.4 full-payload rule at forty notes; (3) a fourth channel beside 13 non-goal (resolved in prose as constraining what the reference ships; flagged for a first-pass reader); (4) the identity boundary moving off the local machine (stronger; v0.1 does not define it; deployments must state it); (5) re-request-after-reject idempotency_key reuse undefined (example uses :2). docs-guard green.
+
+Human ruling 2026-08-18: docs/record-example.md moved to private/ (untracked, primary checkout only) while the notes-app product thinking stays private; SPEC 7 pointer and README sentence removed. The five spec tensions remain on record here. The doc returns to docs/ when the human decides it is ready.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
