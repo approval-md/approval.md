@@ -7,7 +7,7 @@ status: Done
 assignee:
   - Claude
 created_date: '2026-08-18 20:26'
-updated_date: '2026-08-18 20:26'
+updated_date: '2026-08-18 20:41'
 labels:
   - bug
   - cli
@@ -32,4 +32,6 @@ Observed running examples/email-demo.md (2026-08-18). (1) Rotating only smtp.pas
 
 <!-- SECTION:NOTES:BEGIN -->
 check hook signature widened to (values, kept) in setup-flow.ts and setup-adapter.ts; the flow passes plan.skipped. checkEmailCredentialSet(values, names, kept) treats kept names as present. The app-password pattern now uses a whitespace-class separator (covers U+00A0) and case-insensitive letters, and the strip removes all whitespace. Two new tests in tests/cli-setup.test.ts. Found during the email demo, second adapter run.
+
+Also: outer whitespace on any secret is trimmed and reported ('trimmed N leading/trailing whitespace character(s); M remain') before the shape check; the shape check is now alphabet-agnostic (four groups of four non-space characters). Field cause turned out to be a web-page copy that dropped the last letter or carried a trailing space, not NBSP.
 <!-- SECTION:NOTES:END -->

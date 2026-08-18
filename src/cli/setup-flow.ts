@@ -461,6 +461,16 @@ function collectDefault(
     // passwords and tokens whose lengths are public, so a count leaks nothing
     // and turns "blind paste, then a provider's 535" into "received 19".
     streams.out(`  received ${String(value.length)} character(s)\n`);
+    // Outer whitespace is a paste artefact far more often than it is part of a
+    // secret (APRV-98: a copy from a web page arrived with a trailing space,
+    // and a provider's 535 was the only symptom). It is trimmed, and said.
+    const trimmed = value.trim();
+    if (trimmed.length !== value.length) {
+      streams.out(
+        `  trimmed ${String(value.length - trimmed.length)} leading/trailing whitespace character(s); ${String(trimmed.length)} remain\n`,
+      );
+      value = trimmed;
+    }
     if (DISPLAY_SPACED_APP_PASSWORD.test(value)) {
       // Google shows app passwords as four groups with display spaces, and
       // Gmail's AUTH rejects the spaced form. The shape is unmistakable, so

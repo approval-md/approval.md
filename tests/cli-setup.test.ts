@@ -1603,6 +1603,36 @@ test("setup adapter email: a Google app password pasted with non-breaking spaces
   assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.password), "abcdefghijklmnop");
 });
 
+test("setup adapter email: outer whitespace on a pasted secret is trimmed and reported, then the shape check runs (APRV-98)", async () => {
+  // A trailing space from a web-page copy, on top of the display spaces: 20
+  // characters that would fail AUTH. Trimmed to 19, recognised, stripped to 16.
+  const home = makeHome();
+  const prompter = scriptedPrompter(["127.0.0.1", "587", "", SMTP_USER, "abcd efgh ijkl mnop ", true, false]);
+  const result = await run(["adapter", "email", "--as", HUMAN], home, {
+    prompter,
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+  });
+  assert.equal(result.code, EXIT_OK, result.err);
+  assert.match(result.out, /received 20 character\(s\)/u);
+  assert.match(result.out, /trimmed 1 leading\/trailing whitespace character\(s\); 19 remain/u);
+  assert.match(result.out, /storing 16 character\(s\)/u);
+  assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.password), "abcdefghijklmnop");
+
+  // A plain secret with stray outer whitespace: trimmed, no offer.
+  const other = makeHome();
+  const p2 = scriptedPrompter(["127.0.0.1", "587", "", SMTP_USER, "  hunter2 ", false]);
+  const r2 = await run(["adapter", "email", "--as", HUMAN], other, {
+    prompter: p2,
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+  });
+  assert.equal(r2.code, EXIT_OK, r2.err);
+  assert.deepEqual(p2.remaining, []);
+  assert.match(r2.out, /trimmed 3 leading\/trailing whitespace character\(s\); 7 remain/u);
+  assert.equal(vaultValue(other, DEFAULT_CREDENTIAL_NAMES.password), "hunter2");
+});
+
 test("setup adapter email: a vault that will not open refuses BEFORE a password is typed", async () => {
   const home = makeHome();
   await run(["adapter", "email", "--as", HUMAN], home, {
