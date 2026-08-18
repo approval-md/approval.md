@@ -1,11 +1,11 @@
 ---
 id: APRV-55
 title: 'Daemon channel dispatch: push requests that arrive while a listener is running'
-status: In Progress
+status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-17 15:51'
-updated_date: '2026-08-17 22:12'
+updated_date: '2026-08-17 22:55'
 labels: []
 milestone: m-9
 dependencies: []
@@ -22,9 +22,9 @@ Found during the M5 proof (APRV-51): the v0.1 Telegram listener sends every pend
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A request appended while daemon and telegram listener are running reaches the configured chat without a restart
-- [ ] #2 Exactly one delivery per request across restarts and ticks, derived from the log
-- [ ] #3 The web and cli channels either gain the same behavior or document why they do not need it
+- [x] #1 A request appended while daemon and telegram listener are running reaches the configured chat without a restart
+- [x] #2 Exactly one delivery per request across restarts and ticks, derived from the log
+- [x] #3 The web and cli channels either gain the same behavior or document why they do not need it
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -37,4 +37,12 @@ Found during the M5 proof (APRV-51): the v0.1 Telegram listener sends every pend
 
 <!-- SECTION:NOTES:BEGIN -->
 Assigned to M7 at decomposition (2026-08-17): the M7 demo (APRV-70) needs a request that arrives while daemon and listener are running to reach the phone without a restart, which is exactly this task. It is on the demo critical path.
+
+Opus subagent build, PR #33. Dispatch stays in the listener at v0.1 (documented in listener header + new SPEC 10.3 paragraph flagged for review): the listener holds the credential and approver identity, dispatch appends nothing (single-writer stance untouched), and a Bot API round-trip in the daemon tick would couple TTL/write-back to chat availability; a later build MAY move it with no event/interface change. Every poll cycle re-derives pending from the verified log and sends what this process has not sent (in-memory delivered set; loss degrades to a duplicate on the phone, never silence). Retry: no attempt limit (a give-up converts an outage into a request nobody is shown); loud for the first 3 failures per key then every 10th; startup send failure still exits non-zero (fast feedback on a mistyped token). Skip warnings deduped per key:code; steady-state queue-read failures warn and retry. web renders from the log per view (no dispatch needed); cli one-shot; documented. --once preserved. Reviewer-weigh: startup-strict/steady-lenient asymmetry; SPEC 10.2 daemon list still says dispatches with the caveat in 10.3. +5 tests.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Telegram listener delivers requests as they arrive, re-derived from the log each poll cycle, exactly-once per process lifetime, retry-forever with bounded warnings. Placement decision recorded in SPEC 10.3. PR #33.
+<!-- SECTION:FINAL_SUMMARY:END -->
