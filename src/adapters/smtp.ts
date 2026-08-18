@@ -20,6 +20,28 @@
  * adapter would be a second side effect under one consumed token, and deciding
  * to send again is a decision the gate exists to make.
  *
+ * ## The probe, and the limit of what it proves
+ *
+ * {@link probeSmtp} runs the same session as {@link sendMail} up to and
+ * including AUTH, then says QUIT. It is the same code, one call away
+ * (`runSession` with no envelope), because a setup check that exercises a
+ * different client than the send does is a check that can pass while the send
+ * fails.
+ *
+ * A successful probe proves three things and no more: the host and port accept
+ * a connection, the requested transport security (implicit TLS, or the STARTTLS
+ * upgrade, with the same no-downgrade rule the send obeys) was actually
+ * established, and this server accepts this credential.
+ *
+ * It does **not** prove that a message would be accepted. MAIL FROM, RCPT TO
+ * and DATA are never issued, so nothing about the server's sender policy, its
+ * relaying rules, its recipient validation, its size limits or its content
+ * filtering is exercised. A probe that succeeds against a server which will
+ * later refuse `MAIL FROM:<…>` with a 550 is a probe behaving correctly. Any
+ * caller reporting the result to an operator (`setup adapter email` says
+ * "verified") owes them that distinction: the transport and the login are
+ * verified, the delivery is not.
+ *
  * ## Failure vocabulary
  *
  * Everything is reported, nothing is thrown out of {@link sendMail}. Two
@@ -151,6 +173,29 @@ export type SmtpSendResult =
       /** `VERB code` for each step, in order. Never a command argument. */
       transcript: string[];
       /** Was the message handed over on an encrypted socket? */
+      secure: boolean;
+      /** Did the session authenticate, and with which mechanism? */
+      authenticated: "PLAIN" | "LOGIN" | null;
+    }
+  | {
+      ok: false;
+      code: SmtpTransportFailureCode | `smtp-${number}`;
+      message: string;
+      transcript: string[];
+      secure: boolean;
+    };
+
+/**
+ * What {@link probeSmtp} reports: {@link SmtpSendResult} without `reply`, since
+ * a probe never issues a verb whose reply is anything but a step of the
+ * session. The failure codes are the same union, from the same code path.
+ */
+export type SmtpProbeResult =
+  | {
+      ok: true;
+      /** `VERB code` for each step, in order. Never a command argument. */
+      transcript: string[];
+      /** Was the session encrypted when it ended? */
       secure: boolean;
       /** Did the session authenticate, and with which mechanism? */
       authenticated: "PLAIN" | "LOGIN" | null;
@@ -308,7 +353,14 @@ function advertises(capabilities: readonly string[], keyword: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Run one SMTP transaction and report how it went. Never throws.
+ * Run one SMTP session and report how it went. Never throws.
+ *
+ * With an envelope this is the whole transaction: greeting, EHLO, STARTTLS,
+ * AUTH, MAIL FROM, RCPT TO, DATA, QUIT. With `envelope` and `message` both
+ * null it is a probe: the same session, stopped after AUTH (or after EHLO and
+ * the STARTTLS upgrade when no credential was supplied), then QUIT. One
+ * function rather than two, so the probe cannot drift away from the send it is
+ * meant to predict.
  *
  * `message` must already be a complete RFC 5322 message with CRLF line endings;
  * dot-stuffing and the terminating `.` are applied here, because they are
@@ -320,11 +372,21 @@ function advertises(capabilities: readonly string[], keyword: string): boolean {
  * open is a log entry with no outcome, which is the state this project works
  * hardest to avoid.
  */
-export async function sendMail(
+async function runSession(
   options: SmtpTransportOptions,
   envelope: SmtpEnvelope,
   message: string,
-): Promise<SmtpSendResult> {
+): Promise<SmtpSendResult>;
+async function runSession(
+  options: SmtpTransportOptions,
+  envelope: null,
+  message: null,
+): Promise<SmtpProbeResult>;
+async function runSession(
+  options: SmtpTransportOptions,
+  envelope: SmtpEnvelope | null,
+  message: string | null,
+): Promise<SmtpSendResult | SmtpProbeResult> {
   const redact = options.redact ?? ((text: string): string => text);
   const timeoutMs = options.timeoutMs ?? DEFAULT_SMTP_TIMEOUT_MS;
   const clientName = options.clientName ?? "approval.md";
@@ -546,20 +608,27 @@ export async function sendMail(
     }
 
     // (5) The envelope. Bcc recipients are here and in no header.
-    await say("MAIL FROM", `MAIL FROM:<${envelope.from}>`, [250]);
-    for (const recipient of envelope.recipients) {
-      await say("RCPT TO", `RCPT TO:<${recipient}>`, [250, 251]);
-    }
+    //     A probe stops before this line: MAIL FROM is the first verb that
+    //     tells the server a message is coming, and a probe has nothing to say.
+    let accepted: SmtpReply | null = null;
+    if (envelope !== null && message !== null) {
+      await say("MAIL FROM", `MAIL FROM:<${envelope.from}>`, [250]);
+      for (const recipient of envelope.recipients) {
+        await say("RCPT TO", `RCPT TO:<${recipient}>`, [250, 251]);
+      }
 
-    // (6) The message. Dot-stuffing and the terminator are transport framing.
-    await say("DATA", "DATA", [354]);
-    socket.write(dotStuff(message));
-    const accepted = await say("message", ".", [250]);
+      // (6) The message. Dot-stuffing and the terminator are transport framing.
+      await say("DATA", "DATA", [354]);
+      socket.write(dotStuff(message));
+      accepted = await say("message", ".", [250]);
+    }
 
     // (7) QUIT is courtesy: the message is already accepted, and a server that
     //     mishandles the goodbye has not unsent it. Failures here are ignored
     //     on purpose — reporting one would turn a delivered message into a
     //     failed execution, which is the worst lie this adapter could tell.
+    //     A probe has nothing to lose here either; it has already learned
+    //     everything the session can tell it.
     clearTimeout(deadline);
     abandon(socket);
     // `end`, not `write` then `destroy`: a destroyed TLS socket discards the
@@ -572,6 +641,7 @@ export async function sendMail(
       /* already delivered */
     }
 
+    if (accepted === null) return { ok: true, transcript, secure, authenticated };
     return {
       ok: true,
       reply: { code: accepted.code, text: redact(accepted.first) },
@@ -596,6 +666,35 @@ export async function sendMail(
       secure,
     };
   }
+}
+
+/**
+ * Run one SMTP transaction and report how it went. Never throws.
+ *
+ * The whole of it is {@link runSession}; this is the entry point that supplies
+ * an envelope and a message, and its result is unchanged from the day it was
+ * the whole function.
+ */
+export async function sendMail(
+  options: SmtpTransportOptions,
+  envelope: SmtpEnvelope,
+  message: string,
+): Promise<SmtpSendResult> {
+  return runSession(options, envelope, message);
+}
+
+/**
+ * Open a session, authenticate, send nothing, and report. Never throws.
+ *
+ * Exactly {@link sendMail}'s session up to AUTH — the same connection, the same
+ * STARTTLS rules including the no-downgrade refusal and the response-injection
+ * guard, the same refusal to put a password on a cleartext socket, the same
+ * one-session budget, the same redaction of every string it returns — and then
+ * QUIT. See this module's header for what a success does and does not prove:
+ * transport, TLS mode and credential, never that a message would be delivered.
+ */
+export async function probeSmtp(options: SmtpTransportOptions): Promise<SmtpProbeResult> {
+  return runSession(options, null, null);
 }
 
 /**
