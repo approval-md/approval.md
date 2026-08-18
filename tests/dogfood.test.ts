@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 
+import { CLASSIFIER_CLASSES } from "../src/core/command-class.js";
 import { loadPolicy, type PolicyLoadResult } from "../src/core/policy-load.js";
 import { resolve, type Provenance } from "../src/core/policy-match.js";
 import type { Autonomy } from "../src/core/policy-load.js";
@@ -180,7 +181,42 @@ test("APPROVAL.md + irreversibility floor: vcs.push.main reversible:false → ma
 });
 
 // ---------------------------------------------------------------------------
-// 4. Read-only proof (the `after` hook above is the enforcement)
+// 4. The harness hook can reach every class this policy declares (APRV-82)
+// ---------------------------------------------------------------------------
+
+test("every literal class in APPROVAL.md is reachable from the command classifier", () => {
+  const { policy } = loadRepoPolicy();
+  const declared = Object.keys(policy.classes ?? {});
+  assert.ok(declared.length > 0, BROKEN_POLICY_MESSAGE);
+
+  // Wildcard patterns (`read.*`) name a namespace rather than a class; the
+  // classifier emits members of it (`read.shell`, `read.vcs.remote`), and the
+  // pattern itself is never an action class.
+  const literal = declared.filter((pattern) => !pattern.includes("*"));
+  const unreachable = literal.filter((cls) => !CLASSIFIER_CLASSES.includes(cls));
+  assert.deepEqual(
+    unreachable,
+    [],
+    `APPROVAL.md gates ${unreachable.join(", ")}, and no rule in the Claude Code hook's classifier ` +
+      "can emit it: a command in that class would be classified as something else, or refused as " +
+      "unclassified, and the policy line would never fire. Add a rule to src/core/command-class.ts " +
+      "or remove the class from the policy.",
+  );
+});
+
+test("the classifier's read.* classes are covered by the policy's read.* rule", () => {
+  const load = loadRepoPolicy();
+  for (const cls of CLASSIFIER_CLASSES.filter((candidate) => candidate.startsWith("read."))) {
+    assert.equal(
+      resolve(load, cls).autonomy,
+      "autonomous",
+      `${cls} is emitted by the classifier and must be covered by the policy's read.* rule`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 5. Read-only proof (the `after` hook above is the enforcement)
 // ---------------------------------------------------------------------------
 
 test("APPROVAL.md is unchanged mid-suite", () => {
