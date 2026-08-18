@@ -521,7 +521,7 @@ export interface EnvFileWrite {
  * at the end. Comments, blank lines, ordering, and every entry this call was
  * not asked about survive byte for byte. A writer that reparsed and re-emitted
  * would be simpler and would quietly delete the operator's own comments the
- * first time `approval setup telegram` ran — this file is one a human edits by
+ * first time `approval setup channel telegram` ran — this file is one a human edits by
  * hand, and round-trip fidelity for a hand-edited file is the same requirement
  * the Backlog.md task files carry.
  *
@@ -889,13 +889,13 @@ export function wantedVariables(load: PolicyLoadResult): Wanted[] {
       name: telegramTokenEnvFor(load),
       declared: declaredTelegram("token_env"),
       secretBearing: true,
-      fix: setupFix("telegram", telegramTokenEnvFor(load)),
+      fix: setupFix("channel telegram", telegramTokenEnvFor(load)),
     },
     {
       name: telegramChatEnvFor(load),
       declared: declaredTelegram("chat_id_env"),
       secretBearing: false,
-      fix: setupFix("telegram", telegramChatEnvFor(load)),
+      fix: setupFix("channel telegram", telegramChatEnvFor(load)),
     },
     {
       name: passphraseEnvFor(load),

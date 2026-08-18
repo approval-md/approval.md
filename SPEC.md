@@ -295,9 +295,10 @@ approval policy check|test <class> # explain what policy does with a class
 approval env [--check] [--json]    # resolve .approval/env and print an export block
                                    #   for a shell to evaluate; the ONLY reader of
                                    #   that file (--check prints no values)
-approval setup identity|vault|sampling|telegram|adapter <name>   # interactive configuration; stores
-                                   #   secrets in the OS keystore, writes .approval/env,
-                                   #   refuses when stdin is not a terminal
+approval setup identity|vault|sampling|channel <name>|adapter <name>
+                                   # interactive configuration; a channel's credential goes
+                                   #   to the OS keystore and .approval/env, an adapter's to
+                                   #   the vault; refuses when stdin is not a terminal
 approval reindex | render
 approval daemon run                # the §10.2 watch loop, in the foreground
 ```
@@ -312,7 +313,7 @@ The reference runtime ships the daemon as a CLI verb, `approval daemon run`, run
 
 ### 10.3 Channels
 
-Interface: `notify(request) -> delivery_id`, `poll()/webhook() -> decision`. Decisions become log events; channels hold no state. v0.1 ships **cli** (zero-config prompt), **web** (local queue page with grant/reject), and **telegram** (reference push channel: message with declared effects + inline Approve/Reject buttons; callback verified against approver identity). Channel breadth is explicitly out of scope; HumanLayer exists for Slack/email/SMS enterprises.
+Interface: `notify(request) -> delivery_id`, `poll()/webhook() -> decision`. Decisions become log events; channels hold no state. The reference runtime's interactive writer for a channel's transport credential is `approval setup channel <name>`, a separate noun from `approval setup adapter <name>` (§10.4) because the two fill different stores for the reason §4 separates the terms: a channel holds no state, so what it needs is the credential that lets the runtime reach a human, recorded in the environment source map of §5.2, while an adapter holds the credentials a side effect spends and those belong in the vault. (Amended APRV-79.) v0.1 ships **cli** (zero-config prompt), **web** (local queue page with grant/reject), and **telegram** (reference push channel: message with declared effects + inline Approve/Reject buttons; callback verified against approver identity). Channel breadth is explicitly out of scope; HumanLayer exists for Slack/email/SMS enterprises.
 
 Where dispatch runs (amended APRV-55). §10.2 gives the daemon the job of dispatching channel notifications. At v0.1 the reference runtime performs that dispatch in the channel listener instead, on every poll cycle, re-deriving the pending set from the verified log each time and sending only what that listener process has not sent yet. The listener already holds the channel credential and the approver identity, dispatch appends nothing, and a network round-trip inside the daemon's pass would couple TTL expiry and write-back to a chat service's availability. This is an implementation placement and not a change to the daemon's stated role: a later build MAY move dispatch into the daemon with no change to any event, projection, or channel interface. A listener's record of what it has already sent is not state in this section's sense, since it is never read as an answer to what is pending; its loss MUST degrade to a re-send (a duplicate in front of the approver), never to a pending request nobody is shown. Pull channels need no dispatch at all: a page that builds its queue from the log per view shows a newly requested action on the next refresh.
 

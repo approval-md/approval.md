@@ -1,15 +1,18 @@
 /**
  * The credential-collection flow (SPEC.md §5.2, §10.1, §10.4; APRV-78).
  *
- * `setup identity|vault|sampling|telegram` each hand-roll their own
+ * `setup identity|vault|sampling|telegram` each hand-rolled their own
  * conversation, and that was right while there were four of them and each was
- * different. `setup adapter <name>` is the first verb whose conversation is
+ * different. `setup adapter <name>` was the first verb whose conversation is
  * DERIVED — from a manifest of {@link CredentialSpec}s an adapter declares — so
  * the conversation itself becomes a function, and this file is that function.
+ * APRV-79 made it the second caller's too: `setup channel telegram` runs this
+ * flow over the Telegram channel's manifest, into `.approval/env` instead of
+ * into the vault, which is what the destination seam was built for.
  *
- * It knows nothing about email, SMTP, or the vault's file format. It is handed
- * a list of specs, somewhere to put the values ({@link FlowDestination}), and
- * up to four hooks, and it runs one fixed order:
+ * It knows nothing about email, SMTP, Telegram, or the vault's file format. It
+ * is handed a list of specs, somewhere to put the values
+ * ({@link FlowDestination}), and up to four hooks, and it runs one fixed order:
  *
  * 1. the title and the prerequisite line;
  * 2. **the checklist** — one line per spec, before a single question is asked,
@@ -148,10 +151,9 @@ export function vaultDestination(vaultPath: string, passphrase: string): FlowDes
  * The `.approval/env` source map (SPEC.md §5.2).
  *
  * Unused by `setup adapter` — an adapter's credentials go to the vault, never
- * to this file — and implemented here anyway, with its own test, because the
- * flow's whole claim is that the destination is a seam. A destination interface
- * with exactly one implementation is an abstraction nobody has checked, and
- * APRV-79 moves `setup telegram` onto this one.
+ * to this file — and used by `setup channel telegram`, which is what a channel's
+ * two values are: a source for the token and a literal chat id, both of them
+ * things that unlock the machine rather than things an adapter spends.
  *
  * The value written is whatever the caller collected, which on this path is a
  * SOURCE (`keychain:<service>`), an identity, or a chat id. Nothing here decides
@@ -265,11 +267,9 @@ export function reportLeftAlone(
 /**
  * A numbered picker over a closed list.
  *
- * Extracted from `setup telegram`'s chat picker, which is the same
- * conversation over different nouns: print the options with an index, read a
- * number, refuse anything else without a re-prompt. Telegram still calls its
- * own copy — unifying them is APRV-79, and doing it here would put a change to
- * the Telegram flow inside a task about adapters.
+ * Extracted from the Telegram chat picker, which is the same conversation over
+ * different nouns: print the options with an index, read a number, refuse
+ * anything else without a re-prompt. Both callers use this one (APRV-79).
  *
  * An unparseable answer is a REFUSAL rather than a re-ask. `setup` refuses on
  * every other bad answer it gets (a malformed identity, a `y` where `yes` was
@@ -330,12 +330,32 @@ export interface FlowProgress {
   skipped: readonly string[];
 }
 
+/**
+ * What a {@link FlowHooks.collect} or {@link FlowHooks.discover} attempt did.
+ *
+ * `refused` carries an exit code and nothing else, because the hook has already
+ * printed its own sentences. A channel's refusals are specific to the far end
+ * it just talked to — an invalid bot token, a 409 from a running listener, no
+ * message reaching the bot after three attempts, each with its own repair and
+ * its own code from the frozen table — and a flow that re-derived them from a
+ * message string would be a second opinion about what went wrong.
+ */
+export type HookOutcome =
+  | { kind: "value"; value: string }
+  /** Nothing to store for this spec. A required spec may not do this. */
+  | { kind: "skip" }
+  | { kind: "refused"; code: number };
+
 export interface FlowHooks {
   /**
-   * Collect one value, overriding the built-in prompts. `null` skips the spec
-   * (which a required spec may not do; the flow refuses).
+   * Collect one value, overriding the built-in prompts.
+   *
+   * Async because a hook may need to prove what it collected before the flow
+   * writes anything: `setup channel telegram` calls `getMe` at the end of its
+   * token collection, so an invalid token refuses at step five and no line is
+   * ever written. Handed what has been collected so far, in manifest order.
    */
-  collect?(spec: CredentialSpec): string | null;
+  collect?(spec: CredentialSpec, state: Readonly<Record<string, string>>): Promise<HookOutcome>;
   /**
    * The cross-field rule, run over everything collected, before any write.
    * Returns the refusal sentence, or `null`.
@@ -353,12 +373,21 @@ export interface FlowHooks {
    */
   verify?(values: Record<string, string>, progress: FlowProgress): Promise<VerifyOutcome>;
   /**
-   * Reserved: ask the service what its own settings are, so a spec's default
-   * can be discovered rather than typed (APRV-79 gives Telegram one). Typed
-   * now so the shape of the seam is settled before a second adapter arrives;
-   * nothing calls it.
+   * Ask the SERVICE what a value is, rather than asking the human to type it.
+   *
+   * Called for one spec at a time, and only when {@link FlowHooks.collect}
+   * skipped it (or there is no `collect` and the spec is optional and empty),
+   * so the two compose: a manifest can have some values typed and some
+   * discovered without the flow knowing which is which. It is handed what has
+   * been collected so far, because discovery generally needs it — Telegram's
+   * chat discovery cannot happen before the token it polls with.
+   *
+   * APRV-78 reserved this hook and called nothing; APRV-79 is the caller.
    */
-  discover?(specs: readonly CredentialSpec[]): Promise<Record<string, string>>;
+  discover?(
+    spec: CredentialSpec,
+    state: Readonly<Record<string, string>>,
+  ): Promise<HookOutcome>;
 }
 
 export interface FlowLabels {
@@ -396,6 +425,7 @@ export interface CredentialFlow {
 type Collected =
   | { kind: "value"; value: string }
   | { kind: "skip" }
+  | { kind: "refused"; code: number }
   | { kind: "abort"; message: string };
 
 /** The built-in prompts, one per {@link CredentialSpec.kind}. */
@@ -517,14 +547,24 @@ export async function runCredentialFlow(flow: CredentialFlow): Promise<FlowResul
   // (5) Collection, in manifest order. A skipped name is never asked for.
   const values: Record<string, string> = {};
   for (const spec of wanted) {
-    const hooked = hooks.collect?.(spec) ?? null;
-    const collected: Collected =
+    let collected: Collected =
       hooks.collect === undefined
         ? collectDefault(streams, prompter, spec)
-        : hooked === null
-          ? { kind: "skip" }
-          : { kind: "value", value: hooked };
+        : await hooks.collect(spec, values);
 
+    // Discovery is the second chance, not the first: a value the operator
+    // typed is never overwritten by one the service reported. The hook runs
+    // only where collection left a hole, which for a channel is exactly the
+    // spec whose value the service is the authority on.
+    if (collected.kind === "skip" && hooks.discover !== undefined) {
+      collected = await hooks.discover(spec, values);
+    }
+
+    if (collected.kind === "refused") {
+      // The hook has already said what happened and why, in the words of the
+      // far end it was talking to. Nothing is added here.
+      return { ...nothing, code: collected.code, skipped: plan.skipped };
+    }
     if (collected.kind === "abort") {
       streams.err(`approval: ${collected.message}; nothing was written to ${where}\n`);
       return { ...nothing, code: EXIT_USAGE, skipped: plan.skipped };

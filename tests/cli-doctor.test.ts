@@ -1317,7 +1317,7 @@ test("doctor: a plaintext secret in the env file is a reported skip, naming the 
   assert.equal(check.status, "skip");
   assert.match(check.detail, /APPROVAL_TG_TOKEN/u);
   assert.match(check.detail, /PLAINTEXT literal/u);
-  assert.match(check.detail, /approval setup telegram/u);
+  assert.match(check.detail, /approval setup channel telegram/u);
   assert.equal(check.fix, undefined);
   // The chat id is a literal too and is NOT a secret, so it is described
   // without the plaintext alarm and is not in the failure list.

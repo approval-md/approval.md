@@ -1,14 +1,39 @@
 /**
- * `approval setup` — interactive configuration (SPEC.md §5.2, §10.1; APRV-74).
+ * `approval setup` — the interactive configuration family (SPEC.md §5.2, §10.1).
  *
  * APRV-73 gave `.approval/env` a format and `approval env` a reader. This verb
- * is the writer, and it is the only one: it establishes the four things an
- * operator must have before any gate operation works — a declared human
- * identity, a vault passphrase, a sampling secret, and a live Telegram bot and
- * chat — by putting each VALUE in the OS keystore and each SOURCE in
- * `.approval/env`. A fifth subcommand, `setup adapter <name>` (APRV-78), fills
- * the VAULT from an adapter's declared credential manifest; it lives in
- * `cli/setup-adapter.ts` and is dispatched from the bottom of this file.
+ * is the writer, and it is the only one: it establishes the things an operator
+ * must have before any gate operation works — a declared human identity, a
+ * vault passphrase, a sampling secret, a live Telegram bot and chat, and an
+ * adapter's credentials — by putting each VALUE where that kind of value
+ * belongs and each SOURCE in `.approval/env`.
+ *
+ * ## Who lives where
+ *
+ * This file holds the three subcommands whose subject is a value this runtime
+ * MINTS or a name it records, plus the dispatch:
+ *
+ * ```
+ * setup identity                 # APPROVAL_HUMAN, in this file
+ * setup vault                    # the vault passphrase, in this file
+ * setup sampling                 # the audit sampling secret, in this file
+ * setup channel <name>           # cli/setup-channel.ts  (keystore + .approval/env)
+ * setup adapter <name>           # cli/setup-adapter.ts  (the vault)
+ * ```
+ *
+ * The last two are **two nouns and not one list**, and the split is SPEC.md
+ * §4's: a CHANNEL surfaces requests and collects decisions and holds no state,
+ * so its setup fills the keystore and `.approval/env`; an ADAPTER executes side
+ * effects and holds credentials, so its setup fills the vault.
+ * An older build spelled the Telegram one without the `channel` noun, and that
+ * form is gone (APRV-79): the dispatch answers it with the new one and exits 2
+ * rather than aliasing it, because an alias would leave two spellings of a
+ * distinction the SPEC draws on purpose.
+ *
+ * Everything the three files share — the dependency bag, the keystore seam, the
+ * front matter, the human-only gate, the service names, the plaintext-literal
+ * offer — is `cli/setup-common.ts`, which imports from none of them. The
+ * conversation `setup channel|adapter` both run is `cli/setup-flow.ts`.
  *
  * ## The order these run in
  *
@@ -28,7 +53,7 @@
  * NAMES out of it. The `eval` comes before `setup adapter`, because that
  * subcommand needs the passphrase's VALUE in the environment and will not read
  * `.approval/env` to get it (§11.1 invariant 7). `setup sampling` and
- * `setup telegram` slot in anywhere after the policy.
+ * `setup channel telegram` slot in anywhere after the policy.
  *
  * ## What this verb is not allowed to do
  *
@@ -37,15 +62,15 @@
  * authorized actions; a "telegram configured" event would be a line in the one
  * file this project promises never to rewrite, saying something the log has no
  * business knowing. `tests/cli-setup.test.ts` byte-compares `events.jsonl`
- * across a complete run of all four subcommands to keep that true by assertion.
+ * across a complete run of every subcommand to keep that true by assertion.
  * When a policy line is needed (the sampling secret's name), this verb PRINTS
  * the `approval policy amend` invocation and stops: an amendment is a human
  * ceremony with an attestation at the end of it, and a setup wizard that
  * silently edited an attested policy would be forging the sign-off.
  *
- * It writes exactly two things: lines in `.approval/env`, through a writer that
- * preserves every other line and comment (`core/env-file.ts`), and items in the
- * OS keystore.
+ * It writes exactly three things: lines in `.approval/env`, through a writer
+ * that preserves every other line and comment (`core/env-file.ts`), items in
+ * the OS keystore, and entries in the vault (`setup adapter` only).
  *
  * ## Interactive or nothing
  *
@@ -59,9 +84,9 @@
  * so establishing it must be an act of the human at the machine. The refusal
  * text is the documented scripted path, so nobody has to reverse-engineer one.
  *
- * `setup identity` is EXEMPT from the human-only `--as` gate that `vault` and
- * `sampling` carry, and the exemption is not a hole: identity is what that gate
- * reads. A verb that demanded `APPROVAL_HUMAN` before it would let you set
+ * `setup identity` is EXEMPT from the human-only `--as` gate that every other
+ * subcommand carries, and the exemption is not a hole: identity is what that
+ * gate reads. A verb that demanded `APPROVAL_HUMAN` before it would let you set
  * `APPROVAL_HUMAN` could only ever be run by someone who did not need it. The
  * control on this path is the terminal itself.
  *
@@ -86,10 +111,10 @@
  * stdio, Apple's prompt reads it from the terminal, and the token reaches this
  * runtime only afterwards, on the stdout of a `find-generic-password -w` read
  * that puts nothing in an argv either. Off macOS it comes through
- * {@link readSecret}, which at least keeps it off the screen.
+ * `Prompter.readSecret`, which at least keeps it off the screen.
  *
  * **A value we generate ourselves is a different question**, and it is the one
- * place this file makes a trade rather than following a rule. The vault
+ * place this family makes a trade rather than following a rule. The vault
  * passphrase and the sampling secret are `randomBytes(32)`, minted in this
  * process, so they are already in this process and there is nobody to prompt.
  * They reach the keystore by STDIN first: `security add-generic-password -w`
@@ -100,19 +125,19 @@
  * minted one millisecond earlier, never used, visible in `ps` to the same user
  * who is running the command and to root — which is the boundary §11 already
  * declares undefended. It is accepted for generated values and for nothing
- * else: no path in this file ever puts an operator's own token in an argv.
+ * else: no path in this family ever puts an operator's own token in an argv.
  *
  * **And there is one standing exception to the rule above, which
  * `setup adapter <name>` takes.** A credential bound for the VAULT must pass
  * through this process, because the vault is not a helper with a prompt: it is
  * a file this runtime encrypts, so `setCredential` needs the bytes. There is
  * nothing to delegate the typing to and no third party to hold the value. The
- * secret is read with {@link Prompter.readSecret} (no echo), handed straight to
- * the cipher, and never printed, logged, or placed in an argv — which is
- * exactly what `approval vault set` already does when a human pastes a
- * credential onto its stdin. The rule is "never handle a value someone else can
- * hold for you"; for the vault nobody can, so it is stated here rather than
- * left to look like an oversight.
+ * secret is read with `Prompter.readSecret` (no echo), handed straight to the
+ * cipher, and never printed, logged, or placed in an argv — which is exactly
+ * what `approval vault set` already does when a human pastes a credential onto
+ * its stdin. The rule is "never handle a value someone else can hold for you";
+ * for the vault nobody can, so it is stated here rather than left to look like
+ * an oversight.
  *
  * ## Seams
  *
@@ -124,482 +149,39 @@
  * the terminal check, so nothing under `npm test` can reach a keystore at all.
  */
 
-import { randomBytes } from "node:crypto";
-import { spawnSync } from "node:child_process";
-import { userInfo } from "node:os";
-import { isAbsolute, resolve as resolvePathSegments } from "node:path";
-
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
-import {
-  defaultSourceRunner,
-  envFilePathFor,
-  readEnvFile,
-  upsertEnvFileEntries,
-  type EnvFileRefusal,
-} from "../core/env-file.js";
-import { loadPolicy, type PolicyLoadResult } from "../core/policy-load.js";
-import { telegramChatEnvFor, telegramTokenEnvFor } from "../core/telegram-config.js";
+import { readEnvFile, upsertEnvFileEntries, type EnvFileRefusal } from "../core/env-file.js";
 import { passphraseEnvFor, vaultExists, vaultPathFor } from "../core/vault.js";
-import type { probeSmtp } from "../adapters/smtp.js";
-import { TELEGRAM_DEFAULT_API_BASE, type TelegramFetch } from "../channels/telegram.js";
-import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
-import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
+import { EXIT_IO, EXIT_OK } from "./exit-codes.js";
 import {
+  SETUP_CHANNEL_HELP,
   SETUP_HELP,
   SETUP_IDENTITY_HELP,
   SETUP_SAMPLING_HELP,
-  SETUP_TELEGRAM_HELP,
   SETUP_VAULT_HELP,
 } from "./help.js";
 import { commandSetupAdapter } from "./setup-adapter.js";
+import { RENAMED_NOTICE, commandSetupChannel } from "./setup-channel.js";
+import {
+  DEFAULT_SAMPLING_ENV,
+  SERVICE_SAMPLING_SECRET,
+  SERVICE_VAULT_PASSPHRASE,
+  emitRefusal,
+  front,
+  offerLiteral,
+  requireHuman,
+  retrievalCommand,
+  samplingEnvName,
+  schemeFor,
+  storageCommand,
+  usageError,
+  type Context,
+  type HintContext,
+  type SetupDeps,
+} from "./setup-common.js";
 import { PLAN_PHRASES, planWrites, reportLeftAlone } from "./setup-flow.js";
 import type { Streams } from "./main.js";
-import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
-import { createPrompter, type Prompter } from "./prompt.js";
-
-// ---------------------------------------------------------------------------
-// Names
-// ---------------------------------------------------------------------------
-
-/**
- * The keystore item names, one per secret. Fixed strings rather than a flag:
- * an operator reading `.approval/env` sees the service name in the file itself
- * (`keychain:approval-tg-token`), so the name is already discoverable, and a
- * `--service-prefix` would add a way for two checkouts to disagree about which
- * item is which without adding a capability the file's own value does not
- * already have.
- */
-export const SERVICE_TELEGRAM_TOKEN = "approval-tg-token";
-export const SERVICE_VAULT_PASSPHRASE = "approval-vault-passphrase";
-export const SERVICE_SAMPLING_SECRET = "approval-sampling-secret";
-
-/**
- * The variable a sampling secret goes into when the policy names none. The
- * value is stored either way; what the operator is then told to do is add the
- * `audit.sampling_secret_env` line, because until the POLICY names a variable
- * the sampler stays off (SPEC.md §5.2) and no amount of environment fixes that.
- */
-export const DEFAULT_SAMPLING_ENV = "APPROVAL_SAMPLING_SECRET";
-
-/** The long-poll `getUpdates` asks for, in seconds. */
-const POLL_TIMEOUT_SECONDS = 10;
-
-/** doctor's probe timeout, for the calls that answer immediately. */
-const PROBE_TIMEOUT_MS = 10_000;
-
-/**
- * The abort for the long poll is the poll's own timeout PLUS the probe's slack:
- * a `getUpdates` that is SUPPOSED to hang for ten seconds must not be aborted
- * at ten seconds for the wrong reason — the same reasoning
- * `TelegramConfig.requestTimeoutMs` documents.
- */
-
-/** How many times the human is asked to send a message before we give up. */
-const CHAT_DISCOVERY_ATTEMPTS = 3;
-
-const FLAGS: Record<string, FlagKind> = {
-  "--policy": "string",
-  "--dir": "string",
-  "--log": "string",
-  "--api-base": "string",
-  "--as": "string",
-  "--json": "boolean",
-  "--help": "boolean",
-  "-h": "boolean",
-};
-
-// ---------------------------------------------------------------------------
-// The keystore seam
-// ---------------------------------------------------------------------------
-
-/** Which credential store this machine has, as a closed set. */
-export type KeystoreKind = "keychain" | "secret-service" | "none";
-
-/** What a store attempt did. `viaArgv` is reported, never hidden. */
-export type StoreOutcome =
-  | {
-      ok: true;
-      /**
-       * The value passed through the helper's argv rather than its stdin. True
-       * only on the generated-secret fallback path; see the module doc.
-       */
-      viaArgv: boolean;
-    }
-  | { ok: false; message: string };
-
-/**
- * The keystore operations `setup` needs, injectable for exactly the reason
- * {@link defaultSourceRunner}'s seam exists: no test in this repository may
- * touch a real Keychain or a real secret service, and the way to guarantee that
- * is for the tests to hand over a fake rather than for the runtime to grow a
- * test-only flag.
- */
-export interface KeystoreRunner {
-  /** What is available here. Consulted once per run. */
-  kind(): KeystoreKind;
-  /**
-   * Store a value THIS PROCESS GENERATED. Prefers the helper's stdin; may fall
-   * back to its argv, and says which it did.
-   */
-  storeGenerated(service: string, value: string): StoreOutcome;
-  /**
-   * Have the HELPER'S OWN no-echo prompt collect the value from the terminal.
-   * The value never enters this process. macOS and `secret-tool` both support
-   * this; there is no such thing on a machine with neither.
-   */
-  storePrompted(service: string): StoreOutcome;
-  /** Read a stored value back. The value arrives on stdout, never in an argv. */
-  read(service: string): { ok: true; value: string } | { ok: false; message: string };
-}
-
-/** Is `binary` on PATH? An ENOENT from a spawn is the honest way to ask. */
-function onPath(binary: string, probeArgs: string[]): boolean {
-  const result = spawnSync(binary, probeArgs, { encoding: "utf8", stdio: "ignore" });
-  return (result.error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT";
-}
-
-function detail(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
-}
-
-/** The real one. Nothing in the test suite constructs it. */
-export const defaultKeystoreRunner: KeystoreRunner = {
-  kind(): KeystoreKind {
-    if (process.platform === "darwin" && onPath("security", ["help"])) return "keychain";
-    // `secret-tool` with no arguments prints its usage and exits non-zero,
-    // which is all this probe needs: it touches no keyring and unlocks nothing.
-    if (onPath("secret-tool", [])) return "secret-service";
-    return "none";
-  },
-
-  storeGenerated(service: string, value: string): StoreOutcome {
-    const backend = defaultKeystoreRunner.kind();
-    if (backend === "secret-service") {
-      // `secret-tool store` reads the secret from stdin. One canonical form,
-      // no fallback needed, and the value is never in an argv.
-      const stored = spawnSync(
-        "secret-tool",
-        ["store", "--label", service, "approval", service],
-        { encoding: "utf8", input: value },
-      );
-      if (stored.error !== undefined) {
-        return { ok: false, message: `secret-tool could not be run: ${detail(stored.error)}` };
-      }
-      return stored.status === 0
-        ? { ok: true, viaArgv: false }
-        : { ok: false, message: `secret-tool store exited ${String(stored.status)}` };
-    }
-    if (backend !== "keychain") {
-      return { ok: false, message: "no OS keystore is available on this machine" };
-    }
-
-    const account = process.env["USER"] ?? userInfo().username;
-    const base = ["add-generic-password", "-a", account, "-s", service, "-U"];
-
-    // Attempt one: the value on `security`'s STDIN. Its `-w` with no argument
-    // prompts twice (the value and its confirmation), so it is written twice.
-    //
-    // Exit status is NOT trusted as proof of a correct store. A probe against a
-    // scratch keychain (APRV-74 review) showed `security … -w` with piped stdin
-    // exiting 0 while leaving no findable item under the service name, which
-    // is the worst outcome: a fallback that never triggers and a later lookup
-    // that fails. So every attempt is followed by a read-back, and success is
-    // "the keystore returns exactly the bytes we generated", nothing less.
-    const piped = spawnSync("security", [...base, "-w"], {
-      encoding: "utf8",
-      input: `${value}\n${value}\n`,
-    });
-    if (piped.error === undefined && piped.status === 0) {
-      const back = defaultKeystoreRunner.read(service);
-      if (back.ok && back.value === value) return { ok: true, viaArgv: false };
-    }
-
-    // Attempt two, for GENERATED VALUES ONLY: the argv form. See the module doc
-    // for exactly what is being accepted here and why it is not extended to a
-    // value the operator brought with them.
-    const argv = spawnSync("security", [...base, "-w", value], { encoding: "utf8" });
-    if (argv.error !== undefined) {
-      return { ok: false, message: `security could not be run: ${detail(argv.error)}` };
-    }
-    if (argv.status === 0) {
-      const back = defaultKeystoreRunner.read(service);
-      if (back.ok && back.value === value) return { ok: true, viaArgv: true };
-      return {
-        ok: false,
-        message: `security add-generic-password reported success for service ${JSON.stringify(service)} but the read-back did not return the stored value; nothing this run wrote can be trusted, inspect the keychain by hand`,
-      };
-    }
-    return {
-      ok: false,
-      message: `security add-generic-password exited ${String(argv.status)} for service ${JSON.stringify(service)}`,
-    };
-  },
-
-  storePrompted(service: string): StoreOutcome {
-    const backend = defaultKeystoreRunner.kind();
-    if (backend === "keychain") {
-      const account = process.env["USER"] ?? userInfo().username;
-      // `stdio: "inherit"`: Apple's own prompt owns the terminal for the length
-      // of this call, and the value it reads is never seen by this process.
-      const result = spawnSync(
-        "security",
-        ["add-generic-password", "-a", account, "-s", service, "-U", "-w"],
-        { stdio: "inherit" },
-      );
-      if (result.error !== undefined) {
-        return { ok: false, message: `security could not be run: ${detail(result.error)}` };
-      }
-      return result.status === 0
-        ? { ok: true, viaArgv: false }
-        : { ok: false, message: `security add-generic-password exited ${String(result.status)}` };
-    }
-    if (backend === "secret-service") {
-      const result = spawnSync(
-        "secret-tool",
-        ["store", "--label", service, "approval", service],
-        { stdio: "inherit" },
-      );
-      if (result.error !== undefined) {
-        return { ok: false, message: `secret-tool could not be run: ${detail(result.error)}` };
-      }
-      return result.status === 0
-        ? { ok: true, viaArgv: false }
-        : { ok: false, message: `secret-tool store exited ${String(result.status)}` };
-    }
-    return { ok: false, message: "no OS keystore is available on this machine" };
-  },
-
-  read(service: string): { ok: true; value: string } | { ok: false; message: string } {
-    const backend = defaultKeystoreRunner.kind();
-    const outcome =
-      backend === "keychain"
-        ? defaultSourceRunner.keychain(service)
-        : defaultSourceRunner.secretService(service);
-    return outcome.ok ? { ok: true, value: outcome.value } : { ok: false, message: outcome.message };
-  },
-};
-
-/** The `.approval/env` scheme a backend writes. */
-function schemeFor(kind: KeystoreKind, service: string): string | null {
-  if (kind === "keychain") return `keychain:${service}`;
-  if (kind === "secret-service") return `secret-service:${service}`;
-  return null;
-}
-
-/** The command an operator runs by hand to see that the item is really there. */
-function retrievalCommand(kind: KeystoreKind, service: string): string {
-  return kind === "keychain"
-    ? `security find-generic-password -a "$USER" -s ${service} -w`
-    : `secret-tool lookup approval ${service}`;
-}
-
-/** The command an operator runs by hand to STORE the item, with no value in it. */
-function storageCommand(kind: KeystoreKind, service: string): string {
-  return kind === "secret-service"
-    ? `secret-tool store --label ${service} approval ${service}`
-    : `security add-generic-password -a "$USER" -s ${service} -U -w`;
-}
-
-// ---------------------------------------------------------------------------
-// Dependencies and the front matter
-// ---------------------------------------------------------------------------
-
-/** Everything this verb reaches the world through. Defaults are the real ones. */
-export interface SetupDeps {
-  prompter?: Prompter | null;
-  keystore?: KeystoreRunner;
-  fetch?: TelegramFetch;
-  apiBase?: string;
-  /** Overridable so a test can assert on a value it chose. */
-  generate?: () => string;
-  /**
-   * The `getUpdates` long poll, in seconds. Overridable for one reason: the
-   * "nobody messaged the bot" path polls {@link CHAT_DISCOVERY_ATTEMPTS} times,
-   * and a suite that spent thirty seconds proving a refusal is a suite people
-   * stop running. Not a flag — no operator has a reason to change it.
-   */
-  pollTimeoutSeconds?: number;
-  /**
-   * The environment the passphrase is read from. `process.env` by default.
-   *
-   * A seam and not a back door: it is read through `passphraseFrom`, which is
-   * the same function `approval vault set` uses, and it never resolves
-   * `.approval/env` (§11.1 invariant 7). Injectable so a test can prove both
-   * the unset refusal and the happy path without mutating the suite's own
-   * environment, which is shared by every other test in the process.
-   */
-  env?: NodeJS.ProcessEnv;
-  /**
-   * The SMTP probe `setup adapter email` verifies with. The real one by
-   * default; a test injects a wrapper so that the only TLS relaxation in this
-   * repository stays inside the test that needs it (`tests/smtp-mock.ts`'s
-   * self-signed fixture on 127.0.0.1).
-   */
-  probe?: typeof probeSmtp;
-}
-
-export function usageError(
-  streams: Streams,
-  json: boolean,
-  message: string,
-  helpText: string,
-): number {
-  if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${helpText}\n`);
-  return EXIT_USAGE;
-}
-
-function absolute(value: string, cwd: string): string {
-  return isAbsolute(value) ? value : resolvePathSegments(cwd, value);
-}
-
-function refusalExitCode(refusal: EnvFileRefusal): number {
-  return refusal.code === "env-file-io" || refusal.code === "env-file-mode"
-    ? EXIT_IO
-    : EXIT_INTEGRITY;
-}
-
-function emitRefusal(streams: Streams, refusal: EnvFileRefusal): number {
-  streams.err(`approval: ${refusal.code}: ${refusal.message}\n`);
-  return refusalExitCode(refusal);
-}
-
-export interface Context {
-  flags: Record<string, string | boolean>;
-  positionals: string[];
-  prompter: Prompter;
-  keystore: KeystoreRunner;
-  /**
-   * Which keystore this machine has. Named `backend` rather than `kind` because
-   * the outcome union around this context already discriminates on `kind`.
-   */
-  backend: KeystoreKind;
-  load: PolicyLoadResult;
-  logPath: string;
-  envPath: string;
-  apiBase: string;
-  generate: () => string;
-  pollTimeoutSeconds: number;
-}
-
-export type FrontOutcome = { kind: "handled"; code: number } | ({ kind: "run" } & Context);
-
-/**
- * `--help`, the paths, the policy, the terminal check.
- *
- * The terminal check has no `process.stdin.isTTY` in it, deliberately: the real
- * prompter refuses to construct without one ({@link createPrompter}), so "there
- * is no prompter" IS "there is no terminal", and a test that injects one has
- * not bypassed a check that a CI job could also bypass — it has supplied the
- * human's side of the conversation, which is the only thing a test can honestly
- * do here.
- */
-/**
- * What a non-interactive hint needs: where the map lives, which keystore is
- * present, and the variable NAMES the loaded policy resolves to. The hints
- * must print the names the interactive path would write, or an operator on a
- * renamed policy copies a line the runtime never reads.
- */
-export interface HintContext {
-  envPath: string;
-  kind: KeystoreKind;
-  passphraseEnv: string;
-  samplingEnv: string;
-  tokenEnv: string;
-  chatEnv: string;
-}
-
-function hintContextFor(load: PolicyLoadResult, envPath: string, kind: KeystoreKind): HintContext {
-  return {
-    envPath,
-    kind,
-    passphraseEnv: passphraseEnvFor(load),
-    samplingEnv: samplingEnvName(load) ?? DEFAULT_SAMPLING_ENV,
-    tokenEnv: telegramTokenEnvFor(load),
-    chatEnv: telegramChatEnvFor(load),
-  };
-}
-
-export function front(
-  subcommand: string,
-  argv: string[],
-  streams: Streams,
-  cwd: string,
-  deps: SetupDeps,
-  helpText: string,
-  nonInteractiveHint: (context: HintContext) => string,
-): FrontOutcome {
-  const json = argv.includes("--json");
-  const parsed = parseFlags(argv, FLAGS);
-  if (!parsed.ok) return { kind: "handled", code: usageError(streams, json, parsed.message, helpText) };
-  if (boolFlag(parsed.flags, "--help") || boolFlag(parsed.flags, "-h")) {
-    streams.out(`${helpText}\n`);
-    return { kind: "handled", code: EXIT_OK };
-  }
-
-  const logPath = resolvePath(stringFlag(parsed.flags, "--log"), DEFAULT_LOG_PATH, cwd);
-  const envPath = envFilePathFor(logPath);
-  const policyFlag = stringFlag(parsed.flags, "--policy");
-  const dirFlag = stringFlag(parsed.flags, "--dir");
-  const load = loadPolicy(
-    policyFlag !== null
-      ? { file: absolute(policyFlag, cwd) }
-      : { dir: dirFlag === null ? cwd : absolute(dirFlag, cwd) },
-  );
-
-  const keystore = deps.keystore ?? defaultKeystoreRunner;
-  const kind = keystore.kind();
-  const prompter = deps.prompter ?? createPrompter(streams);
-
-  if (json || prompter === null) {
-    streams.err(
-      `approval: \`approval setup ${subcommand}\` is interactive and ${
-        json
-          ? "--json was given"
-          : "stdin is not a terminal"
-      }. Nothing was written.\n\nIdentity in v0.1 is config-declared (SPEC.md §11), so establishing it — and the credentials beside it — is an act of the human at the machine, not something a pipe or a CI job can do. The non-interactive path is explicit, and here it is:\n\n${nonInteractiveHint(hintContextFor(load, envPath, kind))}\n\nThen check it with \`approval env --check\`, which prints no values.\n`,
-    );
-    return { kind: "handled", code: EXIT_USAGE };
-  }
-
-  return {
-    kind: "run",
-    flags: parsed.flags,
-    positionals: parsed.positionals,
-    prompter,
-    keystore,
-    backend: kind,
-    load,
-    logPath,
-    envPath,
-    apiBase: deps.apiBase ?? stringFlag(parsed.flags, "--api-base") ?? TELEGRAM_DEFAULT_API_BASE,
-    generate: deps.generate ?? (() => randomBytes(32).toString("base64")),
-    pollTimeoutSeconds: deps.pollTimeoutSeconds ?? POLL_TIMEOUT_SECONDS,
-  };
-}
-
-/** The human-only rule, spelled exactly as `vault set` spells it. */
-export function requireHuman(
-  flags: Record<string, string | boolean>,
-  streams: Streams,
-  helpText: string,
-  verb: string,
-): { ok: true; actor: string } | { ok: false; code: number } {
-  const asFlag = stringFlag(flags, "--as");
-  const actor = resolveHumanActor(asFlag === null ? {} : { actor: asFlag });
-  if (actor !== null) return { ok: true, actor };
-  return {
-    ok: false,
-    code: usageError(
-      streams,
-      false,
-      asFlag === null
-        ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>. \`approval setup identity\` is the verb that establishes it, and it is the one subcommand exempt from this check`
-        : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; \`approval setup ${verb}\` stores a credential and is human-only`,
-      helpText,
-    ),
-  };
-}
+import type { Prompter } from "./prompt.js";
 
 // ---------------------------------------------------------------------------
 // Replacing what is already there
@@ -618,10 +200,10 @@ export function requireHuman(
  * echoed "replacing 7654321:AA…?" would undo the choice on their behalf.
  *
  * The asking itself is {@link planWrites} (APRV-78), shared with the credential
- * flow. What stays here is the part that is about THIS file: reading it, and
- * turning a read refusal into a refusal the caller can return. The sentences
- * are unchanged, deliberately — an operator who has run `setup` before should
- * not be told the same fact in new words.
+ * flow `setup channel|adapter` run. What stays here is the part that is about
+ * THIS file: reading it, and turning a read refusal into a refusal the caller
+ * can return. The sentences are unchanged, deliberately — an operator who has
+ * run `setup` before should not be told the same fact in new words.
  */
 function planReplacements(
   streams: Streams,
@@ -671,32 +253,8 @@ function writeLines(
 }
 
 // ---------------------------------------------------------------------------
-// Storing a secret, whichever way this machine can
+// Storing a secret this runtime minted
 // ---------------------------------------------------------------------------
-
-/**
- * The plaintext-literal offer, for a machine with no keystore.
- *
- * An explicit typed `yes` — not `y`, not Enter — because the whole content of
- * this question is that the operator understood it. The warning is worded to
- * match what `approval env --check` will print at them on every run afterwards,
- * so the two never read as different claims about the same file.
- */
-function offerLiteral(
-  streams: Streams,
-  prompter: Prompter,
-  envPath: string,
-  what: string,
-): boolean {
-  streams.out(
-    `\nThis machine has no OS keystore this runtime can drive: \`security\` (macOS) and\n\`secret-tool\` (Linux, libsecret) are both absent, so there is nowhere to put the\n${what} except ${envPath} itself, in plaintext.\n\nThat is PERMITTED and it is always reported: \`approval env --check\` will list the\nvariable under PLAINTEXT for as long as the line exists. The file is mode 0600 and\n\`approval init\` gitignores it. A rule people route around is not a control — the\nalternative to writing it here is writing it into a shell profile, where nothing in\nthis runtime can see it to tell you.\n\n`,
-  );
-  const answer = prompter.readLine(`type \`yes\` in full to write it in plaintext: `);
-  const typed = (answer ?? "").trim();
-  if (typed === "yes") return true;
-  streams.out("not confirmed: nothing was stored and nothing was written\n");
-  return false;
-}
 
 interface Stored {
   /** The `.approval/env` VALUE for this secret: a scheme, or the secret itself. */
@@ -710,6 +268,11 @@ interface Stored {
  *
  * `null` means the operator declined the plaintext offer, or the keystore
  * refused; either way nothing was written and the caller stops.
+ *
+ * This stays in this file rather than in `setup-common.ts` because `vault` and
+ * `sampling` are the only two subcommands that MINT a value: a channel's token
+ * and an adapter's password are the operator's, and the whole argument in the
+ * module doc turns on that difference.
  */
 function storeGeneratedSecret(
   streams: Streams,
@@ -904,13 +467,6 @@ export function commandSetupVault(
 const SAMPLING_HINT = (where: HintContext): string =>
   `  # 1. store the secret (the helper prompts; no value on this command line):\n  ${storageCommand(where.kind === "none" ? "keychain" : where.kind, SERVICE_SAMPLING_SECRET)}\n\n  # 2. record where it lives:\n  printf '%s\\n' '${where.samplingEnv}=${schemeFor(where.kind === "none" ? "keychain" : where.kind, SERVICE_SAMPLING_SECRET) ?? ""}' >> ${where.envPath}\n  chmod 600 ${where.envPath}\n\n  # 3. name the variable in the policy, through the amendment ceremony:\n  #    audit: { sampling_secret_env: ${where.samplingEnv} }\n  approval policy amend`;
 
-/** The policy's `audit.sampling_secret_env`, or `null`. */
-function samplingEnvName(load: PolicyLoadResult): string | null {
-  if (!load.ok) return null;
-  const declared = load.policy.audit?.sampling_secret_env;
-  return typeof declared === "string" && declared.length > 0 ? declared : null;
-}
-
 /** `approval setup sampling` — mint and store the audit sampling secret. HUMAN-ONLY. */
 export function commandSetupSampling(
   argv: string[],
@@ -973,326 +529,10 @@ export function commandSetupSampling(
 }
 
 // ---------------------------------------------------------------------------
-// approval setup telegram
-// ---------------------------------------------------------------------------
-
-const TELEGRAM_HINT = (where: HintContext): string =>
-  `  # 1. store the bot token (the helper prompts for it with NO ECHO; the token is\n  #    never an argument, so it never reaches your shell history or \`ps\`):\n  ${storageCommand(where.kind === "none" ? "keychain" : where.kind, SERVICE_TELEGRAM_TOKEN)}\n\n  # 2. find the chat id — send your bot a message first, then:\n  curl -s "https://api.telegram.org/bot<token>/getUpdates" \\\n    | grep -o '"chat":{"id":[-0-9]*' | head -1\n\n  # 3. record both (a chat id is not a secret):\n  printf '%s\\n' '${where.tokenEnv}=${schemeFor(where.kind === "none" ? "keychain" : where.kind, SERVICE_TELEGRAM_TOKEN) ?? ""}' '${where.chatEnv}=<id>' >> ${where.envPath}\n  chmod 600 ${where.envPath}`;
-
-/** Replace the token wherever it appears. Nothing leaves this file with it. */
-function redact(text: string, token: string): string {
-  return token.length === 0 ? text : text.split(token).join("<token redacted>");
-}
-
-interface BotCall {
-  ok: boolean;
-  status: number;
-  envelope: Record<string, unknown>;
-}
-
-/** One Bot API call, with doctor's probe shape: the token is in the URL only. */
-async function call(
-  fetchImpl: TelegramFetch,
-  apiBase: string,
-  token: string,
-  method: string,
-  body: unknown,
-  timeoutMs: number,
-): Promise<BotCall | { failed: string }> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetchImpl(`${apiBase}/bot${token}/${method}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    const raw = await response.text();
-    let envelope: Record<string, unknown> = {};
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      if (typeof parsed === "object" && parsed !== null) envelope = parsed as Record<string, unknown>;
-    } catch {
-      /* a non-JSON body is not an ok envelope; handled by the caller */
-    }
-    return { ok: response.ok, status: response.status, envelope };
-  } catch (cause) {
-    return { failed: redact(detail(cause), token) };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/** One chat the bot has heard from. */
-interface Candidate {
-  id: string;
-  type: string;
-  name: string;
-}
-
-/**
- * The chats in a `getUpdates` result, newest first and deduplicated by id.
- *
- * `title ?? username ?? first_name` is Telegram's own precedence for what to
- * call a chat: groups and channels carry a title, a private chat carries the
- * user's username or, for a user who has set none, their first name.
- */
-function candidatesFrom(updates: unknown): Candidate[] {
-  const found = new Map<string, Candidate>();
-  const list = Array.isArray(updates) ? [...updates].reverse() : [];
-  for (const update of list) {
-    if (typeof update !== "object" || update === null) continue;
-    const message = (update as Record<string, unknown>)["message"];
-    if (typeof message !== "object" || message === null) continue;
-    const chat = (message as Record<string, unknown>)["chat"];
-    if (typeof chat !== "object" || chat === null) continue;
-    const record = chat as Record<string, unknown>;
-    const id = record["id"];
-    if (typeof id !== "number" && typeof id !== "string") continue;
-    const key = String(id);
-    if (found.has(key)) continue;
-    const name =
-      typeof record["title"] === "string"
-        ? record["title"]
-        : typeof record["username"] === "string"
-          ? `@${record["username"]}`
-          : typeof record["first_name"] === "string"
-            ? record["first_name"]
-            : "unnamed";
-    found.set(key, {
-      id: key,
-      type: typeof record["type"] === "string" ? record["type"] : "unknown",
-      name,
-    });
-  }
-  return [...found.values()];
-}
-
-/** `approval setup telegram` — token, identity probe, chat discovery, both lines. */
-export async function commandSetupTelegram(
-  argv: string[],
-  streams: Streams,
-  cwd: string,
-  deps: SetupDeps = {},
-): Promise<number> {
-  const outcome = front("telegram", argv, streams, cwd, deps, SETUP_TELEGRAM_HELP, TELEGRAM_HINT);
-  if (outcome.kind === "handled") return outcome.code;
-  const context = outcome;
-
-  const tokenEnv = telegramTokenEnvFor(context.load);
-  const chatEnv = telegramChatEnvFor(context.load);
-  const fetchImpl = deps.fetch ?? (globalThis.fetch as unknown as TelegramFetch);
-  const apiBase = context.apiBase.replace(/\/+$/u, "");
-
-  streams.out(
-    `approval setup telegram — the bot token, the approver chat, and the two lines in\n${context.envPath} that say where they live.\n\nIF \`approval channel telegram listen\` IS RUNNING, STOP IT FIRST. Two processes\nlong-polling one bot is a 409 from the Bot API, and the loser is whichever asked\nsecond. This verb is a configuration verb; it is not meant to run beside the\nlistener.\n\n`,
-  );
-
-  const plan = planReplacements(streams, context.prompter, context.envPath, [tokenEnv, chatEnv]);
-  if (!plan.ok) return emitRefusal(streams, plan.refusal);
-  if (plan.write.length === 0) {
-    reportSkipped(streams, context.envPath, plan.skipped);
-    return EXIT_OK;
-  }
-
-  // (a) The token. On a machine with a keystore, the HELPER's prompt collects
-  // it and this process learns it only by reading the item back on stdout.
-  let token: string;
-  let tokenSource: Stored;
-  if (context.backend === "none") {
-    const read = context.prompter.readSecret(
-      `bot token from @BotFather (not echoed): `,
-    );
-    if (!read.ok) {
-      return usageError(
-        streams,
-        false,
-        "the token entry was aborted; nothing was stored and nothing was written",
-        SETUP_TELEGRAM_HELP,
-      );
-    }
-    token = read.value.trim();
-    if (token.length === 0) {
-      return usageError(streams, false, "no token was entered; nothing was written", SETUP_TELEGRAM_HELP);
-    }
-    if (!offerLiteral(streams, context.prompter, context.envPath, "bot token")) return EXIT_OK;
-    tokenSource = { value: token, describe: `a plaintext literal in ${context.envPath} (PLAINTEXT)` };
-  } else {
-    streams.out(
-      `The bot token is collected by ${context.backend === "keychain" ? "macOS `security`" : "`secret-tool`"}'s own prompt, below — it goes\nstraight into the keystore and this process never sees you type it.\n\n`,
-    );
-    const stored = context.keystore.storePrompted(SERVICE_TELEGRAM_TOKEN);
-    if (!stored.ok) {
-      streams.err(
-        `approval: the token could not be stored (${stored.message}); nothing was written to ${context.envPath}\n`,
-      );
-      return EXIT_IO;
-    }
-    const read = context.keystore.read(SERVICE_TELEGRAM_TOKEN);
-    if (!read.ok) {
-      streams.err(
-        `approval: the token was stored but could not be read back (${read.message}); nothing was written to ${context.envPath}\n`,
-      );
-      return EXIT_IO;
-    }
-    token = read.value.trim();
-    const scheme = schemeFor(context.backend, SERVICE_TELEGRAM_TOKEN) as string;
-    tokenSource = { value: scheme, describe: scheme };
-    streams.out(`stored the token as ${scheme}\n`);
-    streams.out(`  read it back with: ${retrievalCommand(context.backend, SERVICE_TELEGRAM_TOKEN)}\n`);
-  }
-
-  // (b) getMe — doctor's probe, verbatim in shape: it mutates nothing, sends
-  // nothing, and acknowledges nothing.
-  const identity = await call(fetchImpl, apiBase, token, "getMe", {}, PROBE_TIMEOUT_MS);
-  if ("failed" in identity) {
-    streams.err(`approval: getMe on ${apiBase} failed: ${identity.failed}\n`);
-    streams.err(`  check network reachability of ${apiBase}\n`);
-    return EXIT_IO;
-  }
-  if (!identity.ok || identity.envelope["ok"] !== true) {
-    const description = redact(String(identity.envelope["description"] ?? "no description"), token);
-    streams.err(`approval: getMe on ${apiBase} was refused: HTTP ${String(identity.status)} (${description})\n`);
-    streams.err(
-      identity.status === 401 || /unauthorized/iu.test(description)
-        ? `  the bot token is not valid: re-copy it from @BotFather into ${tokenEnv}\n`
-        : `  check the token and that ${apiBase} is the right Bot API base\n`,
-    );
-    streams.err(`  nothing was written to ${context.envPath}\n`);
-    return EXIT_INTEGRITY;
-  }
-  const result = (identity.envelope["result"] ?? {}) as Record<string, unknown>;
-  const username = typeof result["username"] === "string" ? `@${result["username"]}` : "the bot";
-  streams.out(`\ntoken valid: ${username} via ${apiBase}\n`);
-
-  // (c)-(e) The chat. THE getUpdates BELOW CARRIES NO OFFSET, EVER.
-  let candidates: Candidate[] = [];
-  for (let attempt = 1; attempt <= CHAT_DISCOVERY_ATTEMPTS; attempt += 1) {
-    context.prompter.readLine(
-      attempt === 1
-        ? `\nOpen Telegram and send any message to ${username} now, then press Enter: `
-        : `\nNo message seen yet. Send one to ${username} and press Enter (attempt ${String(attempt)} of ${String(CHAT_DISCOVERY_ATTEMPTS)}): `,
-    );
-
-    // NO OFFSET, EVER. An `offset` is an ACKNOWLEDGEMENT: it tells the Bot API
-    // that everything below it may be discarded. A running
-    // `approval channel telegram listen` owns that acknowledgement, and a
-    // decision tap consumed here would never reach the listener that was
-    // waiting for it — which is exactly why `approval doctor` refuses to call
-    // getUpdates at all. Reading WITHOUT an offset confirms nothing: the
-    // pending callback_query updates a listener is waiting for are still
-    // pending when this returns. `allowed_updates: ["message"]` narrows the
-    // read to the only kind this verb has any use for, so a callback is not
-    // even delivered here.
-    const updates = await call(
-      fetchImpl,
-      apiBase,
-      token,
-      "getUpdates",
-      { timeout: context.pollTimeoutSeconds, allowed_updates: ["message"] },
-      context.pollTimeoutSeconds * 1000 + PROBE_TIMEOUT_MS,
-    );
-    if ("failed" in updates) {
-      streams.err(`approval: getUpdates on ${apiBase} failed: ${updates.failed}\n`);
-      streams.err(`  nothing was written to ${context.envPath}\n`);
-      return EXIT_IO;
-    }
-    if (!updates.ok || updates.envelope["ok"] !== true) {
-      const description = redact(String(updates.envelope["description"] ?? "no description"), token);
-      streams.err(
-        `approval: getUpdates on ${apiBase} was refused: HTTP ${String(updates.status)} (${description})\n`,
-      );
-      streams.err(
-        `  a 409 here means another process is long-polling this bot: stop \`approval channel telegram listen\` and re-run\n`,
-      );
-      return EXIT_INTEGRITY;
-    }
-    candidates = candidatesFrom(updates.envelope["result"]);
-    if (candidates.length > 0) break;
-  }
-
-  if (candidates.length === 0) {
-    streams.err(
-      `approval: no message reached ${username} after ${String(CHAT_DISCOVERY_ATTEMPTS)} attempts, so there is no chat id to record.\n\nThe token is stored; only the two ${context.envPath} lines are missing. Find the id\nby hand — send the bot a message, then:\n\n  curl -s "${apiBase}/bot<token>/getUpdates" | grep -o '"chat":{"id":[-0-9]*'\n\n(the <token> is yours to substitute; it is deliberately not printed here). Then:\n\n  printf '%s\\n' '${chatEnv}=<id>' >> ${context.envPath}\n\nIf the bot is in a GROUP, check that privacy mode is off in @BotFather, or the\nbot never sees plain group messages at all.\n`,
-    );
-    return EXIT_INTEGRITY;
-  }
-
-  let chosen: Candidate;
-  if (candidates.length === 1) {
-    const only = candidates[0] as Candidate;
-    if (!context.prompter.confirm(`use chat ${only.id} (${only.type}, ${only.name})?`)) {
-      streams.out("aborted: nothing was written\n");
-      return EXIT_OK;
-    }
-    chosen = only;
-  } else {
-    streams.out(`\n${String(candidates.length)} chats have messaged ${username}, newest first:\n`);
-    candidates.forEach((candidate, index) => {
-      streams.out(`  ${String(index + 1)}. ${candidate.id} (${candidate.type}, ${candidate.name})\n`);
-    });
-    const picked = context.prompter.readLine(`which one? [1-${String(candidates.length)}]: `);
-    const index = Number.parseInt((picked ?? "").trim(), 10);
-    if (!Number.isInteger(index) || index < 1 || index > candidates.length) {
-      return usageError(
-        streams,
-        false,
-        `${JSON.stringify((picked ?? "").trim())} is not one of 1-${String(candidates.length)}; nothing was written`,
-        SETUP_TELEGRAM_HELP,
-      );
-    }
-    chosen = candidates[index - 1] as Candidate;
-  }
-
-  // (f) The optional proof. Default NO: a configuration verb that buzzes a
-  // phone by default is one an operator runs once and then avoids, which is
-  // doctor's argument for calling getMe and nothing else.
-  if (context.prompter.confirm(`send a test message to ${chosen.id} to prove it?`)) {
-    const sent = await call(
-      fetchImpl,
-      apiBase,
-      token,
-      "sendMessage",
-      { chat_id: chosen.id, text: "approval.md: setup test message. Nothing is pending." },
-      PROBE_TIMEOUT_MS,
-    );
-    if ("failed" in sent || !sent.ok || sent.envelope["ok"] !== true) {
-      const why =
-        "failed" in sent
-          ? sent.failed
-          : redact(String(sent.envelope["description"] ?? "no description"), token);
-      streams.out(`  the test message did not send (${why}); the chat id is still recorded below\n`);
-    } else {
-      streams.out(`  sent — check ${chosen.name}\n`);
-    }
-  }
-
-  // (g) Both lines, in one write. A chat id is not a secret and goes in as a
-  // literal; the token goes in as a source.
-  const written = writeLines(
-    streams,
-    context.envPath,
-    [
-      { key: tokenEnv, value: tokenSource.value, describe: tokenSource.describe },
-      { key: chatEnv, value: chosen.id, describe: `${chosen.id} (a chat id is not a secret)` },
-    ],
-    plan.write,
-  );
-  if (!written.ok) return written.code;
-  reportSkipped(streams, context.envPath, plan.skipped);
-
-  streams.out(
-    `\nNo update was acknowledged by this verb: every getUpdates above carried no\noffset, so a running listener's pending callbacks are exactly where they were.\n\nEstablish the variables and check the channel:\n\n  eval "$(approval env)"\n  approval channel telegram health\n`,
-  );
-  return EXIT_OK;
-}
-
-// ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
-/** `approval setup <identity|vault|sampling|telegram|adapter <name>>`. */
+/** `approval setup <identity|vault|sampling|channel <name>|adapter <name>>`. */
 export function commandSetup(
   argv: string[],
   streams: Streams,
@@ -1313,10 +553,14 @@ export function commandSetup(
   if (sub === "identity") return commandSetupIdentity(rest, streams, cwd, deps);
   if (sub === "vault") return commandSetupVault(rest, streams, cwd, deps);
   if (sub === "sampling") return commandSetupSampling(rest, streams, cwd, deps);
-  if (sub === "telegram") return commandSetupTelegram(rest, streams, cwd, deps);
-  // `adapter` is the one subcommand with a subject of its own: the adapter's
-  // name selects the manifest, so it is a positional and not a flag.
+  // `channel` and `adapter` are the two subcommands with a subject of their
+  // own: the name selects the entry, so it is a positional and not a flag.
+  if (sub === "channel") return commandSetupChannel(rest, streams, cwd, deps);
   if (sub === "adapter") return commandSetupAdapter(rest, streams, cwd, deps);
+  // The one former spelling that gets a sentence rather than "unknown
+  // subcommand". It is NOT an alias: it refuses at exit 2 and says what to run.
+  // See {@link RENAMED_NOTICE} and this file's module doc.
+  if (sub === "telegram") return usageError(streams, json, RENAMED_NOTICE, SETUP_CHANNEL_HELP);
   return usageError(
     streams,
     json,

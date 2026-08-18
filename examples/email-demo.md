@@ -52,7 +52,7 @@ because no mock can assert it:
 - Node 20 or newer, and this repository built (`npm run build`).
 - A Telegram bot. Create it with **@BotFather** exactly as
   `examples/telegram-demo.md` describes. The chat id and the two variables that
-  carry the bot are established by `approval setup telegram` in
+  carry the bot are established by `approval setup channel telegram` in
   [Configure the environment](#configure-the-environment) below;
   `docs/dogfood-cutover.md` names the same variables for the live runtime.
 - **An app-specific password for a mail account you control.** Every major
@@ -150,9 +150,9 @@ each of them reads the variable *names* out of it, and they run in the demo
 directory, because `.approval/env` is per-directory.
 
 ```sh
-approval setup identity      # APPROVAL_HUMAN=human:carter
-approval setup vault         # mints the passphrase, stores it, records where
-approval setup telegram      # token, getMe, chat discovery, both variables
+approval setup identity          # APPROVAL_HUMAN=human:carter
+approval setup vault             # mints the passphrase, stores it, records where
+approval setup channel telegram  # token, getMe, chat discovery, both variables
 eval "$(approval env)"
 ```
 
@@ -170,7 +170,7 @@ What each one does:
   already exists the verb warns first and defaults to no: a vault cannot be
   re-keyed by changing a variable, and every credential in it would become
   unreadable.
-- **`setup telegram`** stores the token, proves it with `getMe`, asks you to
+- **`setup channel telegram`** stores the token, proves it with `getMe`, asks you to
   message the bot, reads the chat id back, and writes both variables. On macOS
   the token is collected by `security`'s own no-echo prompt, so it is never typed
   into this process; on Linux `secret-tool` plays the same part; with neither, it

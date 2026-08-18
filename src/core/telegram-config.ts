@@ -20,6 +20,7 @@
  * the value up.
  */
 
+import type { CredentialSpec } from "./credential-spec.js";
 import type { PolicyLoadResult } from "./policy-load.js";
 
 /**
@@ -43,6 +44,43 @@ export function telegramTokenEnvFor(load: PolicyLoadResult): string {
 /** The NAME of the variable this policy says the approver chat id lives in. */
 export function telegramChatEnvFor(load: PolicyLoadResult): string {
   return declaredEnvName(load, "chat_id_env") ?? TELEGRAM_CHAT_ENV;
+}
+
+/**
+ * The Telegram channel's credential manifest (APRV-79).
+ *
+ * The same shape an adapter declares (`core/credential-spec.ts`), for the same
+ * reason: `approval setup channel telegram` runs the shared conversation in
+ * `cli/setup-flow.ts`, and that conversation is DERIVED from a manifest. What
+ * differs from an adapter's is the destination and not the vocabulary — a
+ * channel's two values go to the OS keystore and `.approval/env`, because a
+ * channel holds no state and its token is what unlocks the machine, while an
+ * adapter's go to the vault (SPEC.md §4, §10.3, §10.4).
+ *
+ * The NAMES are the policy's, resolved through the two functions above, so the
+ * checklist an operator reads names the variables their own policy declares.
+ * A spec carries no value and no default on either entry: the token is the
+ * operator's and the chat id is discovered.
+ */
+export function telegramCredentialSpecs(load: PolicyLoadResult): CredentialSpec[] {
+  return [
+    {
+      name: telegramTokenEnvFor(load),
+      kind: "secret",
+      label: "bot token from @BotFather",
+      describe:
+        "the bot credential, stored in the OS keystore; this file records only where it lives",
+      required: true,
+    },
+    {
+      name: telegramChatEnvFor(load),
+      kind: "config",
+      label: "approver chat id",
+      describe:
+        "discovered from the bot's updates, written as a literal: a chat id is not a secret",
+      required: true,
+    },
+  ];
 }
 
 /** A non-empty string under `channels.telegram.<key>`, or `null`. */

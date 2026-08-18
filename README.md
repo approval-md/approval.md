@@ -173,9 +173,9 @@ walkthrough, with the exact commands and the expected output at every step, is i
 [examples/telegram-demo.md](examples/telegram-demo.md).
 
 ```sh
-approval setup identity        # APPROVAL_HUMAN, validated
-approval setup telegram        # token into the keystore, getMe, chat discovery
-eval "$(approval env)"         # put them in this shell
+approval setup identity          # APPROVAL_HUMAN, validated
+approval setup channel telegram  # token into the keystore, getMe, chat discovery
+eval "$(approval env)"           # put them in this shell
 ```
 
 `setup` is the writer of `.approval/env`, the environment source map: the secret
