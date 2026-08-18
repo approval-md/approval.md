@@ -426,14 +426,15 @@ export interface CredentialFlow {
 // ---------------------------------------------------------------------------
 
 /**
- * A Google app password as the account page displays it: sixteen letters in
- * four groups separated by single spaces (APRV-97). The separator is `\s`
- * rather than a literal space because a copy from the browser can carry a
- * non-breaking space (U+00A0), which is invisible, 19 characters long, and
- * exactly what Gmail's AUTH then rejects. Anchored and exact otherwise, so an
- * ordinary password that happens to contain a space never matches.
+ * A Google app password as the account page displays it: four groups of four
+ * characters separated by single spaces (APRV-97, APRV-98). Matched on SHAPE
+ * (`\S{4}` groups, `\s` separators) rather than on an alphabet, because the
+ * first field run met a 19-character paste that a `[a-z]`-only pattern did not
+ * recognise, and a copy from a browser can carry U+00A0 for the space. The
+ * count is printed and the strip is a `[Y/n]` question, so a genuine password
+ * of this exact shape that contains spaces is one keystroke from being kept.
  */
-const DISPLAY_SPACED_APP_PASSWORD = /^[a-z]{4}\s[a-z]{4}\s[a-z]{4}\s[a-z]{4}$/iu;
+const DISPLAY_SPACED_APP_PASSWORD = /^\S{4}\s\S{4}\s\S{4}\s\S{4}$/u;
 
 type Collected =
   | { kind: "value"; value: string }
