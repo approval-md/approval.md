@@ -435,6 +435,32 @@ type FrontOutcome = { kind: "handled"; code: number } | ({ kind: "run" } & Conte
  * human's side of the conversation, which is the only thing a test can honestly
  * do here.
  */
+/**
+ * What a non-interactive hint needs: where the map lives, which keystore is
+ * present, and the variable NAMES the loaded policy resolves to. The hints
+ * must print the names the interactive path would write, or an operator on a
+ * renamed policy copies a line the runtime never reads.
+ */
+interface HintContext {
+  envPath: string;
+  kind: KeystoreKind;
+  passphraseEnv: string;
+  samplingEnv: string;
+  tokenEnv: string;
+  chatEnv: string;
+}
+
+function hintContextFor(load: PolicyLoadResult, envPath: string, kind: KeystoreKind): HintContext {
+  return {
+    envPath,
+    kind,
+    passphraseEnv: passphraseEnvFor(load),
+    samplingEnv: samplingEnvName(load) ?? DEFAULT_SAMPLING_ENV,
+    tokenEnv: telegramTokenEnvFor(load),
+    chatEnv: telegramChatEnvFor(load),
+  };
+}
+
 function front(
   subcommand: string,
   argv: string[],
@@ -442,7 +468,7 @@ function front(
   cwd: string,
   deps: SetupDeps,
   helpText: string,
-  nonInteractiveHint: (context: { envPath: string; kind: KeystoreKind }) => string,
+  nonInteractiveHint: (context: HintContext) => string,
 ): FrontOutcome {
   const json = argv.includes("--json");
   const parsed = parseFlags(argv, FLAGS);
@@ -472,7 +498,7 @@ function front(
         json
           ? "--json was given"
           : "stdin is not a terminal"
-      }. Nothing was written.\n\nIdentity in v0.1 is config-declared (SPEC.md §11), so establishing it — and the credentials beside it — is an act of the human at the machine, not something a pipe or a CI job can do. The non-interactive path is explicit, and here it is:\n\n${nonInteractiveHint({ envPath, kind })}\n\nThen check it with \`approval env --check\`, which prints no values.\n`,
+      }. Nothing was written.\n\nIdentity in v0.1 is config-declared (SPEC.md §11), so establishing it — and the credentials beside it — is an act of the human at the machine, not something a pipe or a CI job can do. The non-interactive path is explicit, and here it is:\n\n${nonInteractiveHint(hintContextFor(load, envPath, kind))}\n\nThen check it with \`approval env --check\`, which prints no values.\n`,
     );
     return { kind: "handled", code: EXIT_USAGE };
   }
@@ -682,7 +708,7 @@ function storeGeneratedSecret(
 // approval setup identity
 // ---------------------------------------------------------------------------
 
-const IDENTITY_HINT = (where: { envPath: string }): string =>
+const IDENTITY_HINT = (where: HintContext): string =>
   `  # in your shell profile, which is where a declared identity belongs:\n  export ${HUMAN_ACTOR_ENV}=human:<id>\n\n  # or, recorded for \`approval env\` to hand back to you:\n  printf '%s\\n' '${HUMAN_ACTOR_ENV}=human:<id>' >> ${where.envPath}\n  chmod 600 ${where.envPath}`;
 
 /**
@@ -763,8 +789,8 @@ export function commandSetupIdentity(
 // approval setup vault
 // ---------------------------------------------------------------------------
 
-const VAULT_HINT = (where: { envPath: string; kind: KeystoreKind }): string =>
-  `  # 1. store a passphrase you generated yourself (no value on this command line;\n  #    the helper prompts for it with no echo):\n  ${storageCommand(where.kind === "none" ? "keychain" : where.kind, SERVICE_VAULT_PASSPHRASE)}\n\n  # 2. record where it lives:\n  printf '%s\\n' 'APPROVAL_VAULT_PASSPHRASE=${schemeFor(where.kind === "none" ? "keychain" : where.kind, SERVICE_VAULT_PASSPHRASE) ?? ""}' >> ${where.envPath}\n  chmod 600 ${where.envPath}`;
+const VAULT_HINT = (where: HintContext): string =>
+  `  # 1. store a passphrase you generated yourself (no value on this command line;\n  #    the helper prompts for it with no echo):\n  ${storageCommand(where.kind === "none" ? "keychain" : where.kind, SERVICE_VAULT_PASSPHRASE)}\n\n  # 2. record where it lives:\n  printf '%s\\n' '${where.passphraseEnv}=${schemeFor(where.kind === "none" ? "keychain" : where.kind, SERVICE_VAULT_PASSPHRASE) ?? ""}' >> ${where.envPath}\n  chmod 600 ${where.envPath}`;
 
 /** `approval setup vault` — mint and store the vault passphrase. HUMAN-ONLY. */
 export function commandSetupVault(
@@ -833,8 +859,8 @@ export function commandSetupVault(
 // approval setup sampling
 // ---------------------------------------------------------------------------
 
-const SAMPLING_HINT = (where: { envPath: string; kind: KeystoreKind }): string =>
-  `  # 1. store the secret (the helper prompts; no value on this command line):\n  ${storageCommand(where.kind === "none" ? "keychain" : where.kind, SERVICE_SAMPLING_SECRET)}\n\n  # 2. record where it lives:\n  printf '%s\\n' '${DEFAULT_SAMPLING_ENV}=${schemeFor(where.kind === "none" ? "keychain" : where.kind, SERVICE_SAMPLING_SECRET) ?? ""}' >> ${where.envPath}\n  chmod 600 ${where.envPath}\n\n  # 3. name the variable in the policy, through the amendment ceremony:\n  #    audit: { sampling_secret_env: ${DEFAULT_SAMPLING_ENV} }\n  approval policy amend`;
+const SAMPLING_HINT = (where: HintContext): string =>
+  `  # 1. store the secret (the helper prompts; no value on this command line):\n  ${storageCommand(where.kind === "none" ? "keychain" : where.kind, SERVICE_SAMPLING_SECRET)}\n\n  # 2. record where it lives:\n  printf '%s\\n' '${where.samplingEnv}=${schemeFor(where.kind === "none" ? "keychain" : where.kind, SERVICE_SAMPLING_SECRET) ?? ""}' >> ${where.envPath}\n  chmod 600 ${where.envPath}\n\n  # 3. name the variable in the policy, through the amendment ceremony:\n  #    audit: { sampling_secret_env: ${where.samplingEnv} }\n  approval policy amend`;
 
 /** The policy's `audit.sampling_secret_env`, or `null`. */
 function samplingEnvName(load: PolicyLoadResult): string | null {
@@ -908,8 +934,8 @@ export function commandSetupSampling(
 // approval setup telegram
 // ---------------------------------------------------------------------------
 
-const TELEGRAM_HINT = (where: { envPath: string; kind: KeystoreKind }): string =>
-  `  # 1. store the bot token (the helper prompts for it with NO ECHO; the token is\n  #    never an argument, so it never reaches your shell history or \`ps\`):\n  ${storageCommand(where.kind === "none" ? "keychain" : where.kind, SERVICE_TELEGRAM_TOKEN)}\n\n  # 2. find the chat id — send your bot a message first, then:\n  curl -s "https://api.telegram.org/bot<token>/getUpdates" \\\n    | grep -o '"chat":{"id":[-0-9]*' | head -1\n\n  # 3. record both (a chat id is not a secret):\n  printf '%s\\n' 'APPROVAL_TG_TOKEN=${schemeFor(where.kind === "none" ? "keychain" : where.kind, SERVICE_TELEGRAM_TOKEN) ?? ""}' 'APPROVAL_TG_CHAT=<id>' >> ${where.envPath}\n  chmod 600 ${where.envPath}`;
+const TELEGRAM_HINT = (where: HintContext): string =>
+  `  # 1. store the bot token (the helper prompts for it with NO ECHO; the token is\n  #    never an argument, so it never reaches your shell history or \`ps\`):\n  ${storageCommand(where.kind === "none" ? "keychain" : where.kind, SERVICE_TELEGRAM_TOKEN)}\n\n  # 2. find the chat id — send your bot a message first, then:\n  curl -s "https://api.telegram.org/bot<token>/getUpdates" \\\n    | grep -o '"chat":{"id":[-0-9]*' | head -1\n\n  # 3. record both (a chat id is not a secret):\n  printf '%s\\n' '${where.tokenEnv}=${schemeFor(where.kind === "none" ? "keychain" : where.kind, SERVICE_TELEGRAM_TOKEN) ?? ""}' '${where.chatEnv}=<id>' >> ${where.envPath}\n  chmod 600 ${where.envPath}`;
 
 /** Replace the token wherever it appears. Nothing leaves this file with it. */
 function redact(text: string, token: string): string {

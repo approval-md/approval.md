@@ -35,27 +35,15 @@ prompts. BotFather answers with a token of the form `1234567890:AA...`. That
 token is a credential: it is the entire authentication for the Bot API, which
 carries it in the URL path. Treat it like a password.
 
-### 2. Find your chat id
+### 2. Everything else is `approval setup`
 
-Send any message to your new bot (a bot cannot message you first), then fetch the
-update queue:
+The chat id and the two variables that carry the bot are established by
+`approval setup telegram` in the demo directory, once the policy is written:
+see [Configure the environment](#configure-the-environment) below. That verb
+writes `.approval/env`, the environment source map of SPEC.md section 5.2, which
+is per-directory, so it comes after `approval init` rather than before it.
 
-```sh
-curl -s "https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates"
-```
-
-The reply contains `"chat":{"id":123456789,...}`. That number is your chat id.
-The listener answers only that chat and ignores every other one.
-
-### 3. Export the configuration
-
-```sh
-export APPROVAL_TG_TOKEN='1234567890:AA...'   # from BotFather
-export APPROVAL_TG_CHAT='123456789'           # your chat id
-export APPROVAL_HUMAN='human:carter'          # who the approvals are recorded as
-```
-
-`APPROVAL.md` carries only the *names* of the first two variables and never their
+`APPROVAL.md` carries only the *names* of the bot's two variables and never their
 values (SPEC.md section 5.1). There is no flag that would put a bot token into a
 shell history or a process listing.
 
@@ -125,6 +113,71 @@ The policy block inside the heredoc is itself a fenced block, which is why the
 command above is wrapped in four backticks. What matters is that `APPROVAL.md`
 ends up holding one fenced block opened with `yaml approval-policy` and carrying
 exactly that YAML.
+
+### Configure the environment
+
+Two interactive verbs write `.approval/env`, and one command puts what they
+wrote into this shell. Run them from the demo directory, after the policy above:
+`setup telegram` reads the variable *names* out of
+`channels.telegram.token_env` and `chat_id_env`.
+
+```sh
+approval setup identity
+approval setup telegram
+eval "$(approval env)"
+```
+
+`approval setup identity` asks for a `human:<id>`, validates it against the same
+`^human:.+` pattern the human-only verbs enforce, and records
+`APPROVAL_HUMAN=human:<id>`.
+
+`approval setup telegram` does five things: it stores the bot token, proves it
+with `getMe`, asks you to send your bot a message, reads the chat id back out of
+the update queue, and writes both variables. On macOS the token goes into the
+Keychain through `security`'s own no-echo prompt, so it is never typed into this
+process and never reaches your shell history; on Linux `secret-tool` plays the
+same part; on a machine with neither, the token is offered as a plaintext
+literal in `.approval/env` and written only on a typed `yes`. The chat id is
+written as a literal either way, because a chat id is not a secret.
+
+Two things that verb will not do. It **acknowledges nothing**: every `getUpdates`
+it makes carries no offset, so a decision tap waiting for a running listener is
+exactly where it was. And it refuses to run at all when stdin is not a terminal
+or `--json` is given, printing the non-interactive commands instead. Stop
+`approval channel telegram listen` before running it: two processes long-polling
+one bot is a 409 from the Bot API.
+
+`approval env` is the only command that reads `.approval/env`. Nothing loads that
+file implicitly, because human identity is one of the values it carries and a
+working-tree file any process read on its own would let anything able to write it
+act as you (SPEC.md section 11.1, invariant 7). Look before you evaluate:
+
+```sh
+approval env --check     # a table of NAME / STATUS / SOURCE, with no values
+```
+
+#### By hand
+
+Nothing above is mandatory. The chat id is in the update queue. Send your bot a
+message first, since a bot cannot message you first:
+
+```sh
+curl -s "https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates"
+```
+
+The reply contains `"chat":{"id":123456789,...}`. That number is your chat id;
+the listener answers only that chat and ignores every other one. The three
+variables can then be exported directly, which is what every step below actually
+depends on:
+
+```sh
+export APPROVAL_TG_TOKEN='1234567890:AA...'   # from BotFather
+export APPROVAL_TG_CHAT='123456789'           # your chat id
+export APPROVAL_HUMAN='human:carter'          # who the approvals are recorded as
+```
+
+A variable already set in this shell wins over the file: `approval env` reports
+it as `set-in-environment` and does not consult the line.
 
 ### Step 2: write the payload and its binding
 
@@ -375,6 +428,15 @@ cd .. && rm -rf /tmp/approval-demo
 unset APPROVAL_TG_TOKEN APPROVAL_TG_CHAT APPROVAL_HUMAN TOKEN HASH
 ```
 
+Deleting the directory deletes `.approval/env` with it, and that file held only
+*where* the token lives. If you ran `approval setup telegram` on a machine with a
+keystore, the token itself is still there:
+
+```sh
+security delete-generic-password -a "$USER" -s approval-tg-token    # macOS
+secret-tool clear approval approval-tg-token                        # Linux
+```
+
 If the bot was created only for this walkthrough, revoke its token with
 BotFather (`/revoke`) or delete the bot (`/deletebot`).
 
@@ -382,8 +444,9 @@ BotFather (`/revoke`) or delete the bot (`/deletebot`).
 
 | Symptom | Cause |
 | --- | --- |
-| `telegram is not configured` at exit 2 | `APPROVAL_TG_TOKEN` or `APPROVAL_TG_CHAT` is unset or empty. The message names which. |
-| `no human identity` at exit 2 | `APPROVAL_HUMAN` is unset and no `--as human:<id>` was given. The listener refuses to record decisions against nobody. |
+| `telegram is not configured` at exit 2 | `APPROVAL_TG_TOKEN` or `APPROVAL_TG_CHAT` is unset or empty in *this* shell. The message names which. `approval env --check` prints the whole table with no values; `eval "$(approval env)"` establishes it. |
+| `no human identity` at exit 2 | `APPROVAL_HUMAN` is unset and no `--as human:<id>` was given. The listener refuses to record decisions against nobody. `approval setup identity` records it; `eval "$(approval env)"` puts it in the shell. |
+| `approval setup telegram` exits 2 saying stdin is not a terminal | It is interactive by design: a setup a pipe could drive would let a CI job declare a human identity and store a credential. The refusal prints the exact non-interactive commands. |
 | The listener starts but no message arrives | The chat id is wrong, or you have not messaged the bot yet. A bot cannot open a conversation. |
 | `telegram cannot deliver ... (payload-unavailable)` | Nothing is stored at `.approval/payloads/<hash>.json` — the request was made without `--payload` — and no `--payloads` override was given. |
 | `telegram cannot deliver ... (payload-mismatch)` | The stored (or overriding) payload no longer hashes to the recorded binding. A store file is refused rather than rendered when its contents stop matching its name. |

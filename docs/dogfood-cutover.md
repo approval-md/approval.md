@@ -56,12 +56,18 @@ is the human's step, which is what makes the human the gate.
 The human runs, in the primary checkout:
 
 ```sh
-export APPROVAL_TG_TOKEN='<bot token>'    # BotFather
-export APPROVAL_TG_CHAT='<chat id>'
-export APPROVAL_HUMAN='human:carter'
+eval "$(approval env)"         # APPROVAL_HUMAN, APPROVAL_TG_TOKEN, APPROVAL_TG_CHAT
 approval daemon run &          # watch, drift, TTL, QUEUE.md — the sole writer
 approval channel telegram listen   # pushes requests to the phone, records taps
 ```
+
+That eval establishes the identity the human-only verbs read and the bot token
+and chat id the listener needs, from the sources recorded in `.approval/env`.
+`approval setup identity` and `approval setup telegram` are what write that file
+(the token goes into the OS keystore, the file records where); `approval env
+--check` prints the whole table with no values in it; and nothing reads the file
+implicitly, which is why the eval is a step a human takes. Exporting the three
+variables by hand still works and is what the eval expands to.
 
 (Foreground processes by design; two terminals or a multiplexer. Backgrounding
 is the operator's business at v0.1.)
@@ -129,8 +135,12 @@ audit:
 ```
 
 and, if request volume grows, per-class `limits.max_pending` per SPEC §5.2.
-`approval doctor` now reports the sampler's state either way: an unconfigured
-sampler is a stated skip, a half-configured one is a failure with the fix.
+`approval setup sampling` mints and stores the secret and records where it
+lives; it prints this amendment rather than making it, because an amendment ends
+in a human attestation and a wizard that edited an attested policy would be
+forging the sign-off. `approval doctor` reports the sampler's state either way:
+an unconfigured sampler is a stated skip, a half-configured one is a failure
+with the fix.
 
 ## The proof runbook (APRV-51)
 
