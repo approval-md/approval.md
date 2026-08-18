@@ -1300,7 +1300,7 @@ test("doctor: an env file a `git add -A` would commit fails with the exact ignor
   assert.equal(clean.status, "skip", clean.detail);
 });
 
-test("doctor: a plaintext secret in the env file fails, naming the setup verb", async () => {
+test("doctor: a plaintext secret in the env file is a reported skip, naming the setup verb", async () => {
   const { port } = healthy();
   const home = await homeWithEnvFile(port, [
     "# a source map with a token written straight into it",
@@ -1310,10 +1310,15 @@ test("doctor: a plaintext secret in the env file fails, naming the setup verb", 
 
   const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
   const check = checkNamed(run, "environment");
-  assert.equal(check.status, "fail");
+  // A skip, not a fail: SPEC 5.2 permits the literal and `approval setup`
+  // itself writes one on a machine with no keystore, so doctor reports the
+  // state prominently and names the upgrade rather than calling setup's own
+  // documented fallback wrong (APRV-76 review). Skips carry no fix field.
+  assert.equal(check.status, "skip");
   assert.match(check.detail, /APPROVAL_TG_TOKEN/u);
   assert.match(check.detail, /PLAINTEXT literal/u);
-  assert.match(check.fix ?? "", /^approval setup telegram\b/u);
+  assert.match(check.detail, /approval setup telegram/u);
+  assert.equal(check.fix, undefined);
   // The chat id is a literal too and is NOT a secret, so it is described
   // without the plaintext alarm and is not in the failure list.
   assert.match(check.detail, /APPROVAL_TG_CHAT declared in \.approval\/env as a literal/u);
@@ -1495,7 +1500,8 @@ test("doctor: every failing check's fix begins with a runnable command", async (
       cwd: lockedVault,
       env: unlocked("not the passphrase"),
     },
-    // environment: mode, gitignore, plaintext, and a whole-file refusal.
+    // environment: mode, gitignore, and a whole-file refusal (plaintext is a
+    // reported skip since APRV-76 and rides along to prove it carries no fix).
     { args: ["doctor", "--json", "--root", fresh], cwd: badMode, env: GREEN_ENV },
     { args: ["doctor", "--json", "--root", fresh], cwd: openEnv, env: GREEN_ENV },
     { args: ["doctor", "--json", "--root", fresh], cwd: plaintextEnv, env: GREEN_ENV },

@@ -1180,17 +1180,23 @@ function checkEnvironment(logPath: string, dir: string, load: PolicyLoadResult):
     };
   }
 
+  // A plaintext secret is REPORTED, never failed (APRV-76 review). SPEC §5.2
+  // permits the literal form and `approval setup` itself writes one, behind a
+  // typed "yes", on a machine with no keystore; a verdict that called setup's
+  // own documented fallback wrong would have two verbs disagreeing about the
+  // same line. So the state is a skip: prominent, named, with the upgrade in
+  // the detail, and never a pass with a fix (passing checks carry none).
   const plaintext = variables.filter((variable) => variable.plaintext);
   if (plaintext.length > 0) {
     const thing = setupThingFor(plaintext[0]?.name ?? "", load);
+    const upgrade =
+      thing === null
+        ? `move each one to \`<NAME>=keychain:<service>\` (macOS) or \`<NAME>=secret-service:<label>\` (Linux) in ${resolved.path}`
+        : `run \`approval setup ${thing}\` on a machine with a keystore, or edit ${resolved.path} to \`<NAME>=keychain:<service>\` (macOS) / \`<NAME>=secret-service:<label>\` (Linux)`;
     return {
       check: "environment",
-      status: "fail",
-      detail: `${preamble}. ${plaintext.map((variable) => variable.name).join(", ")} ${plaintext.length === 1 ? "is a secret written" : "are secrets written"} literally into ${resolved.path}: the value sits in the working tree, where a backup, an editor swap file or a stray \`git add -f\` reaches it`,
-      fix:
-        thing === null
-          ? `approval env --check — lists every plaintext variable; move each one to \`<NAME>=keychain:<service>\` (macOS) or \`<NAME>=secret-service:<label>\` (Linux) in ${resolved.path}`
-          : `approval setup ${thing} — stores it outside the working tree; or edit ${resolved.path} by hand to \`<NAME>=keychain:<service>\` (macOS) / \`<NAME>=secret-service:<label>\` (Linux)`,
+      status: "skip",
+      detail: `${preamble}. ${plaintext.map((variable) => variable.name).join(", ")} ${plaintext.length === 1 ? "is a secret written" : "are secrets written"} literally into ${resolved.path}: permitted, and reported every time because the value sits in the working tree where a backup, an editor swap file or a stray \`git add -f\` reaches it; to stop seeing this, ${upgrade}`,
     };
   }
 
