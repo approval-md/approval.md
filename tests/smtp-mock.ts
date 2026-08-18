@@ -76,6 +76,16 @@ export interface MockSmtpOptions {
   /** The one credential this server accepts. Omit to accept any. */
   user?: string;
   password?: string;
+  /**
+   * Extra bytes written immediately after the `220 Ready to start TLS` reply
+   * and before the handshake, in the same write, so the client sees them as
+   * part of the same segment. This is the STARTTLS response-injection attack
+   * (an on-path attacker queueing a reply the client will attribute to the
+   * encrypted session), and a client that does anything but abandon the
+   * session has the hole. Default: nothing is injected, so every existing
+   * test is unaffected.
+   */
+  injectAfterStarttls?: string;
 }
 
 export interface MockSmtpFailure {
@@ -252,7 +262,8 @@ export async function startMockSmtp(options: MockSmtpOptions = {}): Promise<Mock
         }
         case "STARTTLS": {
           if (!proceed("starttls")) return;
-          say("220 2.0.0 Ready to start TLS");
+          // One write, so the injected bytes cannot lose a race with the 220.
+          say(`220 2.0.0 Ready to start TLS\r\n${options.injectAfterStarttls ?? ""}`.trimEnd());
           // Detach BEFORE wrapping: the TLSSocket must be the only reader of
           // the raw socket from the handshake's first byte.
           socket.removeAllListeners("data");
