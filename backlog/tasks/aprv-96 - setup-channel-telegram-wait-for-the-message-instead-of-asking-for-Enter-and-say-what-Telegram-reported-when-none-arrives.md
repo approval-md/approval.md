@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-18 19:14'
+updated_date: '2026-08-18 19:16'
 labels:
   - cli
   - ux
@@ -27,3 +28,9 @@ Observed running examples/email-demo.md (2026-08-18): the operator sent the bot 
 - [ ] #4 examples/telegram-demo.md and email-demo.md transcripts updated
 - [ ] #5 npm test and lint clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Field evidence 2026-08-18: 'hello' was sent to @approval_md_bot at 19:54 local, yet by ~20:05 getWebhookInfo showed pending_update_count 1 holding only a later 'testing'. Unacked updates persist 24h and setup never sends an offset, so a second poller with an offset consumed it (nothing matching dist/src/cli/main.js was running locally besides setup). The timeout report should therefore say: if pending_update_count is 0 right after you sent a message, another process (daemon/listener, possibly on another machine or a cloud session) is acknowledging this bot's updates, and it will also fight the listener with 409s.
+<!-- SECTION:NOTES:END -->
