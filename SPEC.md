@@ -243,8 +243,6 @@ The irreversibility floor resolves to `manual`: an action declared `reversible: 
 
 For `record.*` classes, grant means adoption: the action proposes a write to a system of record (a task stage, a note category, a pipeline state), and approval commits it. The "adapter" is whatever write path owns the record; it MUST hold proposed writes in a staged state invisible to, or visibly provisional in, the record proper until granted. `record.*` actions are typically reversible; policies gate them for cognitive ownership rather than consequence, and both rationales are first-class (see §11).
 
-A worked `record.*` example, an LLM-categorised note a human adopts or reroutes from an app, is in `docs/record-example.md`. It carries the policy, the envelope, the event sequence, and the enforcement boundary in full, and it raises one question this version does not answer: whether a grant may choose among candidate payloads instead of binding the single payload a request proposed. (Amended APRV-80.)
-
 ## 8. The event log
 
 `.approval/log/events.jsonl`, append-only. One JSON object per line:

@@ -15,7 +15,10 @@ Conventions:
   the worktree is removed.
 - Positioning drafts, community and conference references, essay hooks, and
   similar strategy material belong here, as does `LAUNCH.md` (the
-  cross-milestone open-threads list, moved here at M5 close, 2026-08-17).
+  cross-milestone open-threads list, moved here at M5 close, 2026-08-17), and
+  `record-example.md` (the record.* worked example and grant-with-choice
+  question, moved here 2026-08-18 while the notes-app product thinking is still
+  private; it returns to `docs/` when the human decides it is ready).
   Anything intended for publication moves out to `docs/` or the site.
 - Credentials never go here. Secrets belong in the vault and `.approval/`
   handling described in CLAUDE.md, and this directory does not change that rule.
