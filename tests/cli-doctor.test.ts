@@ -628,6 +628,62 @@ test("doctor: an unreachable Bot API is a network failure, not a bad token", asy
   assert.equal(run.code, 1);
 });
 
+/**
+ * A home whose policy is exactly `text`. Never `healthyHome`, which is shared
+ * by every other case in this file and must stay untouched.
+ */
+function homeWithPolicy(text: string): string {
+  counter += 1;
+  const dir = join(scratch, `policy-home-${counter}`);
+  mkdirSync(join(dir, ".approval", "log"), { recursive: true });
+  writeFileSync(join(dir, "APPROVAL.md"), text);
+  return dir;
+}
+
+/** {@link policyWith}, plus a `telegram` block renaming both variables. */
+function policyRenamingTelegram(port: number): string {
+  return policyWith(port).replace(
+    "channels:\n",
+    "channels:\n  telegram:\n    token_env: MY_BOT_TOKEN\n    chat_id_env: MY_BOT_CHAT\n",
+  );
+}
+
+test("doctor: the telegram skip names the variables the POLICY declared (APRV-72)", async () => {
+  const home = homeWithPolicy(policyRenamingTelegram(await freePort()));
+  const requestsBefore = mock.requests.length;
+
+  const check = checkNamed(
+    await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV),
+    "telegram",
+  );
+
+  assert.equal(check.status, "skip");
+  assert.match(check.detail, /MY_BOT_TOKEN and MY_BOT_CHAT are unset/u);
+  assert.equal(
+    check.detail.includes("APPROVAL_TG_"),
+    false,
+    "doctor must not tell an operator to set a variable their policy never named",
+  );
+  // Still no probe: an unconfigured channel is a skip whatever it is called.
+  assert.equal(mock.requests.length, requestsBefore);
+});
+
+test("doctor: an unparseable policy leaves the default variable names in force", async () => {
+  const home = homeWithPolicy(
+    ["# Policy", "", "```yaml approval-policy", "version: [", "```", ""].join("\n"),
+  );
+
+  const check = checkNamed(
+    await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV),
+    "telegram",
+  );
+
+  // Fail-closed governs autonomy, not names: a policy typo must not make the
+  // channel unconfigurable by hiding which variables the runtime reads.
+  assert.equal(check.status, "skip");
+  assert.match(check.detail, /APPROVAL_TG_TOKEN and APPROVAL_TG_CHAT are unset/u);
+});
+
 // ---------------------------------------------------------------------------
 // 6. web port
 // ---------------------------------------------------------------------------
