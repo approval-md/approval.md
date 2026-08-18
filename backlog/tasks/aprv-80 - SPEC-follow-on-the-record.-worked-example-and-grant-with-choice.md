@@ -1,9 +1,11 @@
 ---
 id: APRV-80
 title: 'SPEC follow-on: the record.* worked example and grant-with-choice'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@fable'
 created_date: '2026-08-18 08:13'
+updated_date: '2026-08-18 09:27'
 labels: []
 milestone: m-10
 dependencies:
@@ -21,6 +23,24 @@ Prompted by the human notes-app design (notes submitted via a Telegram bot, auto
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 SPEC and/or docs/record-example.md text drafted in the prose style, flagged for sign-off, consistent with SPEC 7/9/10.3/10.4/11 as written
-- [ ] #2 The grant-with-choice question is written as options with a recommendation and the binding rule for (ii) spelled out
+- [x] #1 SPEC and/or docs/record-example.md text drafted in the prose style, flagged for sign-off, consistent with SPEC 7/9/10.3/10.4/11 as written
+- [x] #2 The grant-with-choice question is written as options with a recommendation and the binding rule for (ii) spelled out
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Opus subagent (docs-only), worktree from main. 2. docs/record-example.md: the notes-app record.* worked example consistent with SPEC 7/9/10.3/10.4/11; SPEC pointer sentence in 7 or 12; the grant-with-choice question as options + recommendation. 3. Prose style; flagged for sign-off. PR.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Opus subagent (docs-only), PR #49. docs/record-example.md (302 lines): setting, policy (manual, or supervised+sampling with the 7/11 rationale for each), envelope, lifecycle as events, the in-app surface as a fourth channel (computed vs claimed; batching per B7), enforcement stated plainly (channel never the boundary; write path is; different credentials for human and agent; where 11 future-work identity lands), rerouting today, grant-with-choice as an UNRESOLVED question with three options and the recommendation ((ii) as v0.2 with the binding rule spelled out; (i) as the v0.1 answer the example uses), the capture bot as the 12 inbound-adapter example. SPEC 7 pointer paragraph drafted (flagged); README one sentence. FIVE TENSIONS RECORDED (valuable; feed the v0.2 spec pass): (1) the envelope assumes a task file (6); a notes deployment has notes; approval register --json is hinted but no non-file envelope shape exists: SHARPEST; (2) 10.3 batching vs 10.4 full-payload rule at forty notes; (3) a fourth channel beside 13 non-goal (resolved in prose as constraining what the reference ships; flagged for a first-pass reader); (4) the identity boundary moving off the local machine (stronger; v0.1 does not define it; deployments must state it); (5) re-request-after-reject idempotency_key reuse undefined (example uses :2). docs-guard green.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The record.* worked example and the grant-with-choice question, plus five honest spec tensions the notes-app story surfaces. PR #49.
+<!-- SECTION:FINAL_SUMMARY:END -->

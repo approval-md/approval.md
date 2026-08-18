@@ -1,11 +1,11 @@
 ---
 id: APRV-77
 title: 'probeSmtp: an SMTP session that authenticates and sends nothing'
-status: In Progress
+status: Done
 assignee:
   - '@fable'
 created_date: '2026-08-18 08:12'
-updated_date: '2026-08-18 08:13'
+updated_date: '2026-08-18 08:22'
 labels: []
 milestone: m-10
 dependencies: []
@@ -22,9 +22,9 @@ approval vault set cannot tell an operator whether the five smtp.* values make a
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 probeSmtp against the mock with credentials completes: session records QUIT, mailFrom null, no DATA
-- [ ] #2 Failure codes identical to sendMail (connect-failed, tls-failed, smtp-535, timeout); no-credentials probe sends no AUTH and reports authenticated null; a mock reply echoing the password comes back redacted
-- [ ] #3 tests/adapter-email.test.ts is UNMODIFIED and green, proving the refactor changed no send behavior
+- [x] #1 probeSmtp against the mock with credentials completes: session records QUIT, mailFrom null, no DATA
+- [x] #2 Failure codes identical to sendMail (connect-failed, tls-failed, smtp-535, timeout); no-credentials probe sends no AUTH and reports authenticated null; a mock reply echoing the password comes back redacted
+- [x] #3 tests/adapter-email.test.ts is UNMODIFIED and green, proving the refactor changed no send behavior
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -32,3 +32,15 @@ approval vault set cannot tell an operator whether the five smtp.* values make a
 <!-- SECTION:PLAN:BEGIN -->
 1. Opus subagent, worktree from main. 2. Extract runSession from sendMail; sendMail delegates unchanged; probeSmtp export; redaction. 3. tests/smtp-probe.test.ts; adapter-email suite untouched. PR.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Opus subagent build, PR #46. runSession private overload (envelope|null); sendMail delegates unchanged; adapter-email test file byte-identical to main. probeSmtp shape mirrors SmtpSendResult minus reply. Security comments carried verbatim. Bonus coverage: the STARTTLS injection guard had no send-path test; a minimal inert-by-default mock option now covers it on the probe path. Redaction test asserts the exported REDACTION_PLACEHOLDER rather than a hardcoded string. 10 tests.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+probeSmtp extracted from sendMail without changing send behavior (adapter-email suite untouched); same codes, redaction, and security properties; injection guard now covered. PR #46.
+<!-- SECTION:FINAL_SUMMARY:END -->
