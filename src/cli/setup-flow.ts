@@ -358,9 +358,12 @@ export interface FlowHooks {
   collect?(spec: CredentialSpec, state: Readonly<Record<string, string>>): Promise<HookOutcome>;
   /**
    * The cross-field rule, run over everything collected, before any write.
-   * Returns the refusal sentence, or `null`.
+   * Returns the refusal sentence, or `null`. `kept` names the values already
+   * in the store that the operator declined to replace this run (APRV-98): the
+   * flow never reads a value back, so a rule that needs to know whether a
+   * kept name is PRESENT gets that from here rather than from `values`.
    */
-  check?(values: Record<string, string>): string | null;
+  check?(values: Record<string, string>, kept: readonly string[]): string | null;
   /**
    * Prove the stored configuration against the far end. Runs after the write.
    *
@@ -423,11 +426,14 @@ export interface CredentialFlow {
 // ---------------------------------------------------------------------------
 
 /**
- * A Google app password as the account page displays it: sixteen lowercase
- * letters in four groups separated by single spaces (APRV-97). Anchored and
- * exact, so an ordinary password that happens to contain a space never matches.
+ * A Google app password as the account page displays it: sixteen letters in
+ * four groups separated by single spaces (APRV-97). The separator is `\s`
+ * rather than a literal space because a copy from the browser can carry a
+ * non-breaking space (U+00A0), which is invisible, 19 characters long, and
+ * exactly what Gmail's AUTH then rejects. Anchored and exact otherwise, so an
+ * ordinary password that happens to contain a space never matches.
  */
-const DISPLAY_SPACED_APP_PASSWORD = /^[a-z]{4} [a-z]{4} [a-z]{4} [a-z]{4}$/u;
+const DISPLAY_SPACED_APP_PASSWORD = /^[a-z]{4}\s[a-z]{4}\s[a-z]{4}\s[a-z]{4}$/iu;
 
 type Collected =
   | { kind: "value"; value: string }
@@ -464,7 +470,7 @@ function collectDefault(
         false,
       );
       if (strip) {
-        value = value.split(" ").join("");
+        value = value.replace(/\s/gu, "");
         streams.out(`  storing ${String(value.length)} character(s)\n`);
       }
     }
@@ -616,7 +622,7 @@ export async function runCredentialFlow(flow: CredentialFlow): Promise<FlowResul
   }
 
   // (6) The cross-field rule, before anything is stored.
-  const crossField = hooks.check?.(values) ?? null;
+  const crossField = hooks.check?.(values, plan.skipped) ?? null;
   if (crossField !== null) {
     streams.err(`approval: ${crossField}; nothing was written to ${where}\n`);
     return { ...nothing, code: EXIT_USAGE, skipped: plan.skipped };
