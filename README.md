@@ -43,8 +43,9 @@ broadly cooperative agents, with hard enforcement at the adapter boundaries that
 hold the credentials. [CLAUDE.md](CLAUDE.md) describes how this repository builds
 itself, including the point at which it starts running behind its own gate.
 
-Three ceremonies belong to the human. Attesting a policy, amending it, and
-deciding a request. Everything below is one of those three.
+Four ceremonies belong to the human. Attesting a policy, amending it, deciding a
+request, and handing the resulting grant to an adapter that holds a real
+credential. Everything below is one of those four.
 
 ## Ceremony one: the first attestation
 
@@ -246,6 +247,47 @@ composes with `make`, CI, and `&&` exactly as an unwrapped command would. Runnin
 it before the approval refuses `token-required` at exit 5 and writes nothing.
 Running it a second time with the same token refuses `token-consumed`, so a
 retried agent cannot double-send.
+
+## Ceremony four: sending mail from a phone approval
+
+`echo sent` is a demo. The point of the gate is the send that cannot be undone,
+and that means the runtime has to hold a credential the agent never sees. Two
+commands carry the whole ceremony. The full walkthrough, against real Telegram
+and a real mail provider, is in [examples/email-demo.md](examples/email-demo.md);
+the scripted twin is `tests/e2e-email-demo.test.ts`.
+
+```sh
+V="$(security find-generic-password -a "$USER" -s smtp-app-password -w)" \
+  approval vault set smtp.password --value-env V --as human:you
+approval adapter email task-042:chaser --token "$TOKEN" \
+  --payload message.json --as agent:claude-admin
+```
+
+`approval vault set` stores one credential in `.approval/vault.enc`, encrypted
+under a passphrase the policy names and never carries. The value comes from
+stdin or from `--value-env <VAR>`; there is no `--value` flag, because a secret
+on a command line is a secret in the shell history and in `ps` output. There is
+also no `approval vault get`, and there will not be one: `approval vault list`
+shows the names, and a credential's only sanctioned journey is into an adapter.
+
+`approval adapter email` is that journey. It verifies the token, re-hashes
+`message.json` and checks it against the binding the grant recorded, appends
+`execution.started`, opens the vault, reads the five SMTP settings **inside the
+token window**, sends over STARTTLS, closes the window, and appends
+`execution.completed`. The credential exists for the length of one send and
+appears in no event, no output, and no error message. Nothing about the vault is
+ever a log entry: the log records actions the gate authorized, and a list of the
+credentials an operator holds is a map of the machine's reach.
+
+Two properties are worth checking in your own mailbox. The bytes that left are
+the bytes the human approved, since the hash the token spend verified is the hash
+of the payload the phone displayed. And the `Message-ID` is derived from the
+action key, the payload hash and the sender, so the header sitting in a mailbox
+and the binding sitting in the chain identify each other months later.
+
+An email is `reversible: false`, which engages SPEC.md section 7's
+irreversibility floor: the class resolves to `manual` even where a policy says
+`supervised`, because retrospective sampling cannot un-send a message.
 
 ## Two things stated plainly
 
