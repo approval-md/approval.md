@@ -55,17 +55,17 @@ import { DEFAULT_CREDENTIAL_NAMES } from "../src/adapters/email.js";
 import { probeSmtp, type SmtpTransportOptions } from "../src/adapters/smtp.js";
 import { envFileDestination } from "../src/cli/setup-flow.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "../src/cli/exit-codes.js";
+import { commandSetup } from "../src/cli/setup.js";
 import {
   DEFAULT_SAMPLING_ENV,
   SERVICE_SAMPLING_SECRET,
   SERVICE_TELEGRAM_TOKEN,
   SERVICE_VAULT_PASSPHRASE,
-  commandSetup,
   type KeystoreKind,
   type KeystoreRunner,
   type SetupDeps,
   type StoreOutcome,
-} from "../src/cli/setup.js";
+} from "../src/cli/setup-common.js";
 import type { Prompter, SecretRead } from "../src/cli/prompt.js";
 import type { Streams } from "../src/cli/main.js";
 import type { TelegramFetch } from "../src/channels/telegram.js";
@@ -361,13 +361,25 @@ function spawnCli(args: string[], cwd: string): Spawned {
   return run;
 }
 
-const SUBCOMMANDS = ["identity", "vault", "sampling", "telegram"] as const;
+/**
+ * Every subcommand, as the argv that reaches it.
+ *
+ * `channel telegram` is two words since APRV-79 (SPEC.md §4 gives channels and
+ * adapters separate setup nouns), so this list holds arrays rather than names.
+ */
+const SUBCOMMANDS: ReadonlyArray<readonly string[]> = [
+  ["identity"],
+  ["vault"],
+  ["sampling"],
+  ["channel", "telegram"],
+];
 
-for (const sub of SUBCOMMANDS) {
+for (const argv of SUBCOMMANDS) {
+  const sub = argv.join(" ");
   test(`setup ${sub} refuses a non-terminal stdin at exit 2 and prints the scripted path`, () => {
     const home = makeHome();
     const before = readFileSync(home.logPath, "utf8");
-    const result = spawnCli(["setup", sub], home.dir);
+    const result = spawnCli(["setup", ...argv], home.dir);
 
     assert.equal(result.code, EXIT_USAGE, result.stderr);
     assert.match(result.stderr, /stdin is not a terminal/u);
@@ -384,7 +396,7 @@ for (const sub of SUBCOMMANDS) {
 
   test(`setup ${sub} refuses --json at exit 2`, () => {
     const home = makeHome();
-    const result = spawnCli(["setup", sub, "--json"], home.dir);
+    const result = spawnCli(["setup", ...argv, "--json"], home.dir);
     assert.equal(result.code, EXIT_USAGE, result.stderr);
     assert.match(result.stderr, /--json was given/u);
     assert.equal(existsSync(home.envPath), false);
@@ -402,24 +414,58 @@ test("setup with no subcommand, an unknown one, and --help", () => {
   assert.equal(unknown.code, EXIT_USAGE);
   assert.match(unknown.stderr, /unknown subcommand "keychain"/u);
 
+  // The OLD spelling. A sentence rather than "unknown subcommand", and a
+  // refusal rather than an alias: SPEC.md §4 gives channels and adapters
+  // separate setup nouns, and two spellings would blur the one distinction the
+  // rename exists to draw (APRV-79).
+  const renamed = spawnCli(["setup", "telegram"], home.dir);
+  assert.equal(renamed.code, EXIT_USAGE);
+  assert.match(renamed.stderr, /is now `approval setup channel telegram`/u);
+  assert.match(renamed.stderr, /there is no alias/u);
+  assert.match(renamed.stderr, /SPEC\.md §4/u);
+  // It did not RUN: the refusal is the rename, not the terminal check, and
+  // nothing was written.
+  assert.doesNotMatch(renamed.stderr, /Nothing was written\./u);
+  assert.equal(existsSync(home.envPath), false);
+
   const help = spawnCli(["setup", "--help"], home.dir);
   assert.equal(help.code, EXIT_OK);
   assert.match(help.stdout, /approval setup — interactive configuration/u);
   assert.match(help.stdout, /REFUSES WHEN STDIN IS NOT A TERMINAL/u);
   assert.match(help.stdout, /never {3}appends to the log/u);
 
-  for (const sub of SUBCOMMANDS) {
-    const subHelp = spawnCli(["setup", sub, "--help"], home.dir);
+  for (const argv of SUBCOMMANDS) {
+    const subHelp = spawnCli(["setup", ...argv, "--help"], home.dir);
     assert.equal(subHelp.code, EXIT_OK, subHelp.stderr);
-    assert.match(subHelp.stdout, new RegExp(`approval setup ${sub} —`, "u"));
+    assert.match(subHelp.stdout, new RegExp(`approval setup ${argv.join(" ")} —`, "u"));
   }
+
+  const channel = spawnCli(["setup", "channel", "--help"], home.dir);
+  assert.equal(channel.code, EXIT_OK, channel.stderr);
+  assert.match(channel.stdout, /approval setup channel —/u);
+  assert.match(channel.stdout, /Known channels:/u);
+
+  const missingName = spawnCli(["setup", "channel"], home.dir);
+  assert.equal(missingName.code, EXIT_USAGE);
+  assert.match(missingName.stderr, /missing <name>/u);
+  assert.match(missingName.stderr, /known channels: telegram/u);
+
+  const unknownName = spawnCli(["setup", "channel", "slack"], home.dir);
+  assert.equal(unknownName.code, EXIT_USAGE);
+  assert.match(unknownName.stderr, /unknown channel "slack"/u);
+  assert.match(unknownName.stderr, /known channels: telegram/u);
+  // A typo is answered with the list, not with a lecture about terminals.
+  assert.doesNotMatch(unknownName.stderr, /Nothing was written\./u);
 });
 
 test("the root help lists setup and says it is interactive", () => {
   const home = makeHome();
   const help = spawnCli(["--help"], home.dir);
   assert.equal(help.code, EXIT_OK);
-  assert.match(help.stdout, /approval setup {6}identity\|vault\|sampling\|telegram/u);
+  assert.match(
+    help.stdout,
+    /approval setup {6}identity\|vault\|sampling\|channel <name>\|adapter <name>/u,
+  );
   assert.match(help.stdout, /\n {2}setup {5}the WRITER for that file/u);
 });
 
@@ -708,7 +754,7 @@ function getUpdatesBodies(requests: ReadonlyArray<{ method: string; body: Record
   return requests.filter((entry) => entry.method === "getUpdates").map((entry) => entry.body);
 }
 
-test("setup telegram: token, getMe, chat discovery, both lines — and no offset, ever", async () => {
+test("setup channel telegram: token, getMe, chat discovery, both lines — and no offset, ever", async () => {
   const mock = await startMockBotApi(TOKEN);
   try {
     const home = makeHome();
@@ -726,7 +772,7 @@ test("setup telegram: token, getMe, chat discovery, both lines — and no offset
       true, // use chat <id>?
       false, // send a test message? — default no, and taken
     ]);
-    const result = await run(["telegram", "--as", HUMAN], home, {
+    const result = await run(["channel", "telegram", "--as", HUMAN], home, {
       prompter,
       keystore,
       fetch: mockFetch(),
@@ -761,7 +807,7 @@ test("setup telegram: token, getMe, chat discovery, both lines — and no offset
       assert.equal(
         Object.hasOwn(body, "offset"),
         false,
-        "a getUpdates from `approval setup telegram` carried an offset. An offset is an ACKNOWLEDGEMENT: it tells the Bot API everything below it may be discarded, and a running listener's callback_query would never arrive.",
+        "a getUpdates from `approval setup channel telegram` carried an offset. An offset is an ACKNOWLEDGEMENT: it tells the Bot API everything below it may be discarded, and a running listener's callback_query would never arrive.",
       );
       assert.deepEqual(body["allowed_updates"], ["message"]);
     }
@@ -789,7 +835,7 @@ test("setup telegram: token, getMe, chat discovery, both lines — and no offset
   }
 });
 
-test("setup telegram: several candidates are numbered and picked", async () => {
+test("setup channel telegram: several candidates are numbered and picked", async () => {
   const mock = await startMockBotApi(TOKEN);
   try {
     const home = makeHome();
@@ -798,7 +844,7 @@ test("setup telegram: several candidates are numbered and picked", async () => {
     mock.queueUpdate(messageUpdate({ chatId: "333", firstName: "Nameless" }));
 
     const prompter = scriptedPrompter(["", "2", false]);
-    const result = await run(["telegram", "--as", HUMAN], home, {
+    const result = await run(["channel", "telegram", "--as", HUMAN], home, {
       prompter,
       keystore: fakeKeystore("keychain", { prompted: TOKEN }),
       fetch: mockFetch(),
@@ -817,12 +863,12 @@ test("setup telegram: several candidates are numbered and picked", async () => {
   }
 });
 
-test("setup telegram: zero candidates exits 1 with the manual curl, and writes nothing", async () => {
+test("setup channel telegram: zero candidates exits 1 with the manual curl, and writes nothing", async () => {
   const mock = await startMockBotApi(TOKEN);
   try {
     const home = makeHome();
     const prompter = scriptedPrompter(["", "", ""]);
-    const result = await run(["telegram", "--as", HUMAN], home, {
+    const result = await run(["channel", "telegram", "--as", HUMAN], home, {
       prompter,
       keystore: fakeKeystore("keychain", { prompted: TOKEN }),
       fetch: mockFetch(),
@@ -844,14 +890,14 @@ test("setup telegram: zero candidates exits 1 with the manual curl, and writes n
   }
 });
 
-test("setup telegram: a refused getMe stops before the chat questions", async () => {
+test("setup channel telegram: a refused getMe stops before the chat questions", async () => {
   const mock = await startMockBotApi("a-different-token-entirely");
   try {
     const home = makeHome();
     // The keystore hands back OUR token; the mock only answers for its own, so
     // the path is unauthorised — the 401-shaped refusal the real API gives.
     const prompter = scriptedPrompter([]);
-    const result = await run(["telegram", "--as", HUMAN], home, {
+    const result = await run(["channel", "telegram", "--as", HUMAN], home, {
       prompter,
       keystore: fakeKeystore("keychain", { prompted: TOKEN }),
       fetch: mockFetch(),
@@ -870,13 +916,13 @@ test("setup telegram: a refused getMe stops before the chat questions", async ()
   }
 });
 
-test("setup telegram with no keystore: Ctrl-C mid-token stores nothing", async () => {
+test("setup channel telegram with no keystore: Ctrl-C mid-token stores nothing", async () => {
   const mock = await startMockBotApi(TOKEN);
   try {
     const home = makeHome();
     const keystore = fakeKeystore("none");
     const prompter = scriptedPrompter(["ABORT"]);
-    const result = await run(["telegram", "--as", HUMAN], home, {
+    const result = await run(["channel", "telegram", "--as", HUMAN], home, {
       prompter,
       keystore,
       fetch: mockFetch(),
@@ -894,12 +940,12 @@ test("setup telegram with no keystore: Ctrl-C mid-token stores nothing", async (
   }
 });
 
-test("setup telegram: the optional proof sends exactly one message when asked", async () => {
+test("setup channel telegram: the optional proof sends exactly one message when asked", async () => {
   const mock = await startMockBotApi(TOKEN);
   try {
     const home = makeHome();
     mock.queueUpdate(messageUpdate({ chatId: CHAT, username: "carter" }));
-    const result = await run(["telegram", "--as", HUMAN], home, {
+    const result = await run(["channel", "telegram", "--as", HUMAN], home, {
       prompter: scriptedPrompter(["", true, true]),
       keystore: fakeKeystore("keychain", { prompted: TOKEN }),
       fetch: mockFetch(),
@@ -915,12 +961,12 @@ test("setup telegram: the optional proof sends exactly one message when asked", 
   }
 });
 
-test("setup telegram: a declined chat writes nothing", async () => {
+test("setup channel telegram: a declined chat writes nothing", async () => {
   const mock = await startMockBotApi(TOKEN);
   try {
     const home = makeHome();
     mock.queueUpdate(messageUpdate({ chatId: CHAT, username: "carter" }));
-    const result = await run(["telegram", "--as", HUMAN], home, {
+    const result = await run(["channel", "telegram", "--as", HUMAN], home, {
       prompter: scriptedPrompter(["", false]),
       keystore: fakeKeystore("keychain", { prompted: TOKEN }),
       fetch: mockFetch(),
@@ -935,14 +981,134 @@ test("setup telegram: a declined chat writes nothing", async () => {
   }
 });
 
+test("setup channel telegram is human-only, and an agent: actor never reaches the bot", async () => {
+  const mock = await startMockBotApi(TOKEN);
+  try {
+    const home = makeHome();
+    const keystore = fakeKeystore("keychain", { prompted: TOKEN });
+    const result = await run(["channel", "telegram", "--as", "agent:bot"], home, {
+      prompter: scriptedPrompter([]),
+      keystore,
+      fetch: mockFetch(),
+      apiBase: assertLocal(mock.url),
+    });
+
+    // NEW in APRV-79. The help had claimed HUMAN-ONLY since APRV-74 and
+    // nothing enforced it: this verb stores a credential and writes
+    // .approval/env, which is what `vault` and `sampling` are gated for.
+    assert.equal(result.code, EXIT_USAGE);
+    assert.match(result.err, /human-only/u);
+    assert.match(result.err, /approval setup channel telegram/u);
+    assert.equal(existsSync(home.envPath), false);
+    assert.deepEqual(keystore.calls, [], "a refused actor still reached the keystore");
+    assert.deepEqual(mock.requests, [], "a refused actor still reached the Bot API");
+  } finally {
+    await mock.close();
+  }
+});
+
+test("setup channel telegram with no human identity at all refuses too", async () => {
+  const home = makeHome();
+  const result = await run(["channel", "telegram"], home, {
+    prompter: scriptedPrompter([]),
+    keystore: fakeKeystore("keychain", { prompted: TOKEN }),
+  });
+  assert.equal(result.code, EXIT_USAGE);
+  assert.match(result.err, /no human identity/u);
+  assert.match(result.err, /setup identity/u);
+  assert.equal(existsSync(home.envPath), false);
+});
+
+// ===========================================================================
+// One conversation, two verbs (APRV-79)
+// ===========================================================================
+
+/**
+ * The claim the shared flow exists to make: `setup channel telegram` and
+ * `setup adapter email` are the SAME conversation over different manifests.
+ *
+ * Asserted as three shapes rather than as byte equality, because the values
+ * legitimately differ (two names into `.approval/env`, five into the vault) and
+ * the point is that an operator who has run one recognises the other: the
+ * checklist header, the replace question, and the closing report.
+ */
+test("setup channel telegram and setup adapter email print the same conversation", async () => {
+  const mock = await startMockBotApi(TOKEN);
+  try {
+    // Both run twice: the first pass fills the store, the second is the one
+    // that has something to replace, which is where the shared plan speaks.
+    const tgHome = makeHome();
+    const tgDeps: SetupDeps = {
+      keystore: fakeKeystore("keychain", { prompted: TOKEN }),
+      fetch: mockFetch(),
+      apiBase: assertLocal(mock.url),
+      pollTimeoutSeconds: 1,
+    };
+    mock.queueUpdate(messageUpdate({ chatId: CHAT, username: "carter" }));
+    const telegram = await run(["channel", "telegram", "--as", HUMAN], tgHome, {
+      ...tgDeps,
+      prompter: scriptedPrompter(["", true, false]),
+    });
+    assert.equal(telegram.code, EXIT_OK, telegram.err);
+    // Replace the token, leave the chat alone: the partial re-run is where the
+    // shared plan's "left alone" report speaks, in both verbs.
+    const telegramAgain = await run(["channel", "telegram", "--as", HUMAN], tgHome, {
+      ...tgDeps,
+      prompter: scriptedPrompter([true, false]),
+    });
+    assert.equal(telegramAgain.code, EXIT_OK, telegramAgain.err);
+
+    const mailHome = makeHome();
+    const mailDeps: SetupDeps = {
+      keystore: fakeKeystore("keychain"),
+      env: { APPROVAL_VAULT_PASSPHRASE: PASSPHRASE },
+    };
+    const email = await run(["adapter", "email", "--as", HUMAN], mailHome, {
+      ...mailDeps,
+      prompter: scriptedPrompter(["127.0.0.1", "587", "", SMTP_USER, SMTP_PASSWORD, false]),
+    });
+    assert.equal(email.code, EXIT_OK, email.err);
+    const emailAgain = await run(["adapter", "email", "--as", HUMAN], mailHome, {
+      ...mailDeps,
+      prompter: scriptedPrompter([
+        true,
+        false,
+        false,
+        false,
+        false,
+        "127.0.0.2",
+      ]),
+    });
+    assert.equal(emailAgain.code, EXIT_OK, emailAgain.err);
+
+    // (1) The checklist header: the count, and where every value lands.
+    const CHECKLIST = /It will ask for \d+ value\(s\), all of them into \S+:\n/u;
+    assert.match(telegram.out, CHECKLIST);
+    assert.match(email.out, CHECKLIST);
+
+    // (2) The replace question, asked before any work, printing no old value.
+    assert.match(telegramAgain.out, /already has a line in \S+ \(its value is not printed here\)/u);
+    assert.match(emailAgain.out, /is already in \S+ \(its value is not printed here\)/u);
+
+    // (3) The closing report: how many, where, and which names.
+    const REPORT = /\nstored \d+ value\(s\) in \S+: \S+/u;
+    assert.match(telegram.out, REPORT);
+    assert.match(email.out, REPORT);
+    assert.match(telegramAgain.out, /left alone in \S+: /u);
+    assert.match(emailAgain.out, /left alone in \S+: /u);
+  } finally {
+    await mock.close();
+  }
+});
+
 // ===========================================================================
 // The whole-run log claim
 // ===========================================================================
 
-/** The home the four-subcommand walk left behind, for the `env --check` case. */
+/** The home the whole-run walk left behind, for the `env --check` case. */
 let fullWalkHome = "";
 
-test("a complete run of all four subcommands leaves the log byte-identical", async () => {
+test("a complete run of all five subcommands leaves the log byte-identical", async () => {
   const mock = await startMockBotApi(TOKEN);
   try {
     const home = makeHome();
@@ -962,13 +1128,29 @@ test("a complete run of all four subcommands leaves the log byte-identical", asy
     await run(["identity"], home, { ...deps, prompter: scriptedPrompter([HUMAN]) });
     await run(["vault", "--as", HUMAN], home, { ...deps, prompter: scriptedPrompter([]) });
     await run(["sampling", "--as", HUMAN], home, { ...deps, prompter: scriptedPrompter([]) });
-    await run(["telegram", "--as", HUMAN], home, {
+    await run(["channel", "telegram", "--as", HUMAN], home, {
       ...deps,
       prompter: scriptedPrompter(["", true, false]),
     });
+    // The fifth, and the only one whose values go somewhere else: an adapter's
+    // credentials land in the VAULT and add no line to .approval/env at all
+    // (SPEC.md §4, §10.4). The env file below is the proof of that division.
+    await run(["adapter", "email", "--as", HUMAN], home, {
+      ...deps,
+      env: { APPROVAL_VAULT_PASSPHRASE: PASSPHRASE },
+      prompter: scriptedPrompter([
+        "127.0.0.1",
+        "587",
+        "",
+        SMTP_USER,
+        SMTP_PASSWORD,
+        false, // probe it? — declined; the vault is what this case is about
+      ]),
+    });
 
     assert.deepEqual(readFileSync(home.logPath), before);
-    // All five lines, one file, every earlier line intact.
+    // Five lines, one file, every earlier line intact — and not one of them
+    // from the adapter.
     assert.deepEqual(readEnvLines(home), [
       `APPROVAL_HUMAN=${HUMAN}`,
       `APPROVAL_VAULT_PASSPHRASE=keychain:${SERVICE_VAULT_PASSPHRASE}`,
@@ -976,6 +1158,7 @@ test("a complete run of all four subcommands leaves the log byte-identical", asy
       `APPROVAL_TG_TOKEN=keychain:${SERVICE_TELEGRAM_TOKEN}`,
       `APPROVAL_TG_CHAT=${CHAT}`,
     ]);
+    assert.deepEqual(vaultNames(home), Object.values(DEFAULT_CREDENTIAL_NAMES).sort());
     assert.equal(statSync(home.envPath).mode & 0o777, 0o600);
     // And the policy it read is the policy it left.
     assert.equal(readFileSync(join(home.dir, "APPROVAL.md"), "utf8"), FULL_POLICY);

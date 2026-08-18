@@ -18,7 +18,7 @@
  *
  * `allowed_updates` IS honoured, and it earns its place (APRV-74): an update
  * whose type is not in the list is neither returned nor consumed, exactly as
- * the real API behaves. `approval setup telegram` reads with
+ * the real API behaves. `approval setup channel telegram` reads with
  * `allowed_updates: ["message"]` and no offset precisely so that a running
  * listener's pending `callback_query` is untouched, and consume-on-delivery
  * means this mock can PROVE that — the callback is still in the queue after
@@ -75,7 +75,7 @@ export interface MockBotApi {
    *
    * Consume-on-delivery makes this a direct assertion about what a later poll
    * will receive: a `callback_query` still counted here after
-   * `approval setup telegram` has run is a callback the listener will still
+   * `approval setup channel telegram` has run is a callback the listener will still
    * get (APRV-74).
    */
   pendingUpdateCount(): number;
@@ -372,7 +372,7 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
 /**
  * A `message` update, as Telegram would deliver one (APRV-74).
  *
- * `approval setup telegram` discovers the approver chat by reading the `chat`
+ * `approval setup channel telegram` discovers the approver chat by reading the `chat`
  * of a message the human just sent, so the shape that matters here is
  * `message.chat`: an id, a type, and whichever of title / username / first_name
  * the chat carries. Groups have a title; a private chat has a username, or only

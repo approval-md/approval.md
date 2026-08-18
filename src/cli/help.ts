@@ -60,9 +60,9 @@ Usage:
   approval payload hash <file|-> [--json]
   approval env        [--check] [--policy <path>] [--dir <path>] [--log <path>]
                       [--json]
-  approval setup      identity|vault|sampling|telegram|adapter <name> [--as human:<id>]
-                      [--api-base <url>] [--policy <path>] [--dir <path>]
-                      [--log <path>]                       (interactive; no --json)
+  approval setup      identity|vault|sampling|channel <name>|adapter <name>
+                      [--as human:<id>] [--api-base <url>] [--policy <path>]
+                      [--dir <path>] [--log <path>]        (interactive; no --json)
   approval vault set <name> [--value-env <VAR>] [--as human:<id>] [--json]
   approval vault list|remove [<name>] [--as human:<id>] [--json]
   approval import agents-md <file> [--out <path>] [--json]
@@ -155,11 +155,14 @@ Commands:
             read on its own would let anything able to write it act as you. The
             default output carries secrets by design; "env --check" prints a
             table with no values on any path
-  setup     the WRITER for that file: "setup identity|vault|sampling|telegram"
-            stores each secret in the OS keystore and records where it lives,
-            and "setup adapter <name>" fills the VAULT from the credential
-            manifest the adapter itself declares, then proves it against the
-            service without sending anything. INTERACTIVE ONLY — it refuses a
+  setup     the WRITER for that file: "setup identity|vault|sampling" and
+            "setup channel <name>" store each secret in the OS keystore and
+            record where it lives, and "setup adapter <name>" fills the VAULT
+            from the credential manifest the adapter itself declares, then
+            proves it against the service without sending anything. The two
+            nouns are SPEC.md §4's: a channel holds no state and needs a
+            transport credential, an adapter holds the credentials a side
+            effect spends. INTERACTIVE ONLY — it refuses a
             non-terminal stdin and --json, and prints the exact commands to run
             instead, because a setup a pipe could drive would let a CI job
             declare a human identity. It appends nothing to the log, attests
@@ -2921,7 +2924,8 @@ Usage:
   approval setup identity [--log <path>] [--dir <path>] [--policy <path>]
   approval setup vault    [--as human:<id>] [--log <path>] [--dir <path>]
   approval setup sampling [--as human:<id>] [--log <path>] [--dir <path>]
-  approval setup telegram [--as human:<id>] [--api-base <url>] [--log <path>]
+  approval setup channel telegram [--as human:<id>] [--api-base <url>]
+                                [--log <path>] [--dir <path>] [--policy <path>]
   approval setup adapter <name> [--as human:<id>] [--log <path>] [--dir <path>]
                                 [--policy <path>]
 
@@ -2932,18 +2936,21 @@ Subcommands:
   vault     mint a vault passphrase, store it, and record where it lives
   sampling  mint the audit sampling secret of §5.2, store it, and print the
             policy line that turns sampling on
-  telegram  collect the bot token, prove it with getMe, discover the approver
-            chat, and record both variables
-  adapter   fill the VAULT with one adapter's credentials, asked for from the
+  channel   configure one CHANNEL's transport credential: for telegram, collect
+            the bot token, prove it with getMe, discover the approver chat, and
+            record both variables
+  adapter   fill the VAULT with one ADAPTER's credentials, asked for from the
             manifest that adapter declares, and prove them against the service
             without sending anything
 
-ADAPTER CREDENTIALS GO TO THE VAULT, and to nothing else. Not the OS keystore,
-where the four subcommands above put their secrets, and not .approval/env. The
-division is SPEC.md §10.4's: .approval/env says where the values that unlock the
-machine live, and .approval/vault.enc holds the values a gated adapter SPENDS,
-read by the adapter inside the verified-token window and by nothing else. There
-is no verb that prints one back.
+CHANNEL AND ADAPTER ARE TWO NOUNS, not one list, and SPEC.md §4 is why. A
+channel surfaces requests and collects decisions and holds no state, so its
+setup fills the OS keystore and .approval/env — the map of where the values that
+unlock the machine live. An adapter executes side effects and holds credentials,
+so its setup fills .approval/vault.enc, which holds the values a gated adapter
+SPENDS, read inside the verified-token window and by nothing else. There is no
+verb that prints one back. (An older build spelled the Telegram one without the
+\`channel\` noun. That form exits 2 and names this one; there is no alias.)
 
 EVERY SUBCOMMAND REFUSES WHEN STDIN IS NOT A TERMINAL, and when --json is given,
 and exits 2 printing the exact non-interactive commands to run instead. A setup
@@ -3125,11 +3132,40 @@ ${EXIT_CODES}
   passphrase in your environment.
 ${JSON_ERRORS}`;
 
-export const SETUP_TELEGRAM_HELP = `approval setup telegram — the bot token and the approver chat
+export const SETUP_CHANNEL_HELP = `approval setup channel — configure one channel's transport credential (HUMAN-ONLY)
 
 Usage:
-  approval setup telegram [--as human:<id>] [--api-base <url>] [--log <path>]
-                          [--dir <path>] [--policy <path>]
+  approval setup channel <name> [--as human:<id>] [--api-base <url>]
+                                [--log <path>] [--dir <path>] [--policy <path>]
+
+Known channels:
+  telegram  the bot token and the approver chat: APPROVAL_TG_TOKEN and
+            APPROVAL_TG_CHAT, or the names channels.telegram.token_env /
+            chat_id_env declare
+
+A CHANNEL IS NOT AN ADAPTER, and the two setup verbs fill different stores.
+SPEC.md §4: a channel surfaces requests and collects decisions and holds no
+state, so what it needs is a transport credential — it goes into the OS keystore,
+and .approval/env records where. An adapter executes side effects and holds
+credentials, so \`approval setup adapter <name>\` fills the vault instead, with
+values a gated adapter spends inside the verified-token window.
+
+An older build spelled the Telegram one without the \`channel\` noun. That form
+exits 2 and names this one; there is deliberately no alias, because two
+spellings of a distinction the SPEC draws on purpose is how the distinction
+stops being drawn.
+
+${EXIT_CODES}
+
+  2 here also means "this is interactive and your stdin is not a terminal".
+  1 means the far end refused.
+${JSON_ERRORS}`;
+
+export const SETUP_CHANNEL_TELEGRAM_HELP = `approval setup channel telegram — the bot token and the approver chat (HUMAN-ONLY)
+
+Usage:
+  approval setup channel telegram [--as human:<id>] [--api-base <url>]
+                                  [--log <path>] [--dir <path>] [--policy <path>]
 
 Five steps: store the token, prove it with getMe, ask you to message the bot,
 read the chat id back, and write both variables (the names come from
@@ -3151,6 +3187,10 @@ an offset confirms nothing, and allowed_updates is ["message"], so a pending
 callback_query is not even delivered here.
 
 The chat id is written as a LITERAL. A chat id is not a secret; the token is.
+
+HUMAN-ONLY, and enforced (APRV-79): it stores a credential and writes
+.approval/env, exactly as \`setup vault\` and \`setup sampling\` do. --as expects a
+human:<id>; an agent: or system: actor is refused at exit 2.
 
 ${EXIT_CODES}
 

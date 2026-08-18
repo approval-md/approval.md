@@ -71,13 +71,13 @@ import {
   type EmailPayload,
 } from "../src/adapters/email.js";
 import { payloadHash } from "../src/core/payload.js";
+import { commandSetup } from "../src/cli/setup.js";
 import {
-  commandSetup,
   type KeystoreKind,
   type KeystoreRunner,
   type SetupDeps,
   type StoreOutcome,
-} from "../src/cli/setup.js";
+} from "../src/cli/setup-common.js";
 import type { Prompter, SecretRead } from "../src/cli/prompt.js";
 import type { Streams } from "../src/cli/main.js";
 import type { TelegramFetch } from "../src/channels/telegram.js";
@@ -1136,7 +1136,7 @@ test("the setup path: `approval setup` + `approval env` reaches the same log", a
     assert.equal(existsSync(setupLog), false, "init created a log");
 
     // -----------------------------------------------------------------------
-    // (2) `approval setup identity|vault|telegram`, in process, through the
+    // (2) `approval setup identity|vault|channel telegram`, in process, through the
     // seams. Nothing here can reach a real keystore: the interface IS the seam.
     const deps: SetupDeps = {
       keystore: noKeystore(),
@@ -1161,7 +1161,7 @@ test("the setup path: `approval setup` + `approval env` reaches the same log", a
     assert.equal(vault.code, 0, vault.stderr);
 
     bot2.queueUpdate(messageUpdate({ chatId: CHAT, username: "carter" }));
-    const telegram = await setupSubcommand(["telegram", "--as", HUMAN], {
+    const telegram = await setupSubcommand(["channel", "telegram", "--as", HUMAN], {
       ...deps,
       prompter: scripted([
         BOT_TOKEN, // the no-echo read, on a machine with no keystore

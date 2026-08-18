@@ -63,7 +63,7 @@ approval channel telegram listen   # pushes requests to the phone, records taps
 
 That eval establishes the identity the human-only verbs read and the bot token
 and chat id the listener needs, from the sources recorded in `.approval/env`.
-`approval setup identity` and `approval setup telegram` are what write that file
+`approval setup identity` and `approval setup channel telegram` are what write that file
 (the token goes into the OS keystore, the file records where); `approval env
 --check` prints the whole table with no values in it; and nothing reads the file
 implicitly, which is why the eval is a step a human takes. Exporting the three

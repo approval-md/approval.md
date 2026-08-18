@@ -653,7 +653,7 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // non-terminal stdin and --json, because a setup a pipe could drive would
     // be a way for a CI job or an agent to declare a human identity and store
     // a credential. It appends nothing to the log, attests nothing, and edits
-    // no policy file. `setup telegram` reaches the network, so the dispatch
+    // no policy file. `setup channel telegram` reaches the network, so the dispatch
     // unwraps a promise exactly as `channel`, `daemon` and `adapter` do.
     case "setup": {
       const outcome = commandSetup(rest, streams, cwd);

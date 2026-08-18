@@ -496,8 +496,8 @@ async function checkTelegram(apiBase: string, load: PolicyLoadResult): Promise<D
       status: "skip",
       // A skip carries no `fix` — there is nothing wrong to repair — but a
       // reader who WANTED Telegram still needs the path out, so the detail ends
-      // with it. (`approval setup telegram` lands in APRV-74, in parallel.)
-      detail: `${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} unset: the Telegram channel is not configured, which is a legitimate configuration and not a fault; run \`approval setup telegram\` to configure it`,
+      // with it. (`approval setup channel telegram` is the verb; APRV-79 renamed it.)
+      detail: `${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} unset: the Telegram channel is not configured, which is a legitimate configuration and not a fault; run \`approval setup channel telegram\` to configure it`,
     };
   }
 
@@ -530,7 +530,7 @@ async function checkTelegram(apiBase: string, load: PolicyLoadResult): Promise<D
         detail: `getMe on ${base} was refused: HTTP ${response.status} (${description})`,
         fix:
           response.status === 401 || /unauthorized/iu.test(description)
-            ? `approval setup telegram — the bot token is not valid; re-copy it from @BotFather into ${tokenEnv}`
+            ? `approval setup channel telegram — the bot token is not valid; re-copy it from @BotFather into ${tokenEnv}`
             : `approval channel telegram health — the offline configuration report; then check ${tokenEnv} and that ${base} is the right Bot API base`,
       };
     }
@@ -1069,7 +1069,12 @@ function isDeferred(variable: ResolvedVariable): boolean {
  */
 function setupThingFor(name: string, load: PolicyLoadResult): string | null {
   if (name === HUMAN_ACTOR_ENV) return "identity";
-  if (name === telegramTokenEnvFor(load) || name === telegramChatEnvFor(load)) return "telegram";
+  // Two words, because the verb is two words: SPEC.md §4 gives channels and
+  // adapters separate setup nouns, and a fix line that printed the old
+  // one-word spelling would be a command that exits 2 (APRV-79).
+  if (name === telegramTokenEnvFor(load) || name === telegramChatEnvFor(load)) {
+    return "channel telegram";
+  }
   if (name === passphraseEnvFor(load)) return "vault";
   if (name === resolveSampler(load).secretEnv) return "sampling";
   return null;

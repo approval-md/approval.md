@@ -21,7 +21,7 @@
  * ## Where the values go, and where they do NOT
  *
  * **Into the vault, always.** Not the OS keystore, which is where `setup
- * vault|sampling|telegram` put their secrets, and not `.approval/env`. The
+ * vault|sampling|channel <name>` put their secrets, and not `.approval/env`. The
  * distinction is the one §10.4 draws: `.approval/env` holds what unlocks the
  * machine (the human identity, the passphrase's source, the channel's token),
  * and the vault holds what a gated adapter SPENDS inside a verified-token
@@ -71,7 +71,13 @@ import { isSmtpSecurity, probeSmtp, type SmtpSecurity } from "../adapters/smtp.j
 import { EXIT_OK } from "./exit-codes.js";
 import { SETUP_ADAPTER_EMAIL_HELP, SETUP_ADAPTER_HELP } from "./help.js";
 import type { Streams } from "./main.js";
-import { front, requireHuman, usageError, type HintContext, type SetupDeps } from "./setup.js";
+import {
+  front,
+  requireHuman,
+  usageError,
+  type HintContext,
+  type SetupDeps,
+} from "./setup-common.js";
 import {
   runCredentialFlow,
   vaultDestination,

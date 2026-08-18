@@ -589,8 +589,8 @@ test("unresolved variables are COMMENTS naming a setup verb, and the block still
   assert.equal(run.code, EXIT_OK, "the output is destined for eval and must never fail a shell");
   for (const [name, verb] of [
     ["APPROVAL_HUMAN", "identity"],
-    ["APPROVAL_TG_TOKEN", "telegram"],
-    ["APPROVAL_TG_CHAT", "telegram"],
+    ["APPROVAL_TG_TOKEN", "channel telegram"],
+    ["APPROVAL_TG_CHAT", "channel telegram"],
     ["APPROVAL_VAULT_PASSPHRASE", "vault"],
     ["APPROVAL_AUDIT_SECRET", "sampling"],
   ] as const) {

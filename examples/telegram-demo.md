@@ -38,7 +38,7 @@ carries it in the URL path. Treat it like a password.
 ### 2. Everything else is `approval setup`
 
 The chat id and the two variables that carry the bot are established by
-`approval setup telegram` in the demo directory, once the policy is written:
+`approval setup channel telegram` in the demo directory, once the policy is written:
 see [Configure the environment](#configure-the-environment) below. That verb
 writes `.approval/env`, the environment source map of SPEC.md section 5.2, which
 is per-directory, so it comes after `approval init` rather than before it.
@@ -118,12 +118,20 @@ exactly that YAML.
 
 Two interactive verbs write `.approval/env`, and one command puts what they
 wrote into this shell. Run them from the demo directory, after the policy above:
-`setup telegram` reads the variable *names* out of
+`setup channel telegram` reads the variable *names* out of
 `channels.telegram.token_env` and `chat_id_env`.
+
+The `channel` noun is not decoration. SPEC.md section 4 separates channels, which
+surface requests and collect decisions and hold no state, from adapters, which
+execute side effects and hold credentials, and the two setup verbs fill different
+stores: a channel's token goes to the OS keystore with its source recorded in
+`.approval/env`, while `approval setup adapter <name>` fills the encrypted vault.
+An older build spelled this one without the noun; that form now exits 2 and names
+this one.
 
 ```sh
 approval setup identity
-approval setup telegram
+approval setup channel telegram
 eval "$(approval env)"
 ```
 
@@ -131,7 +139,7 @@ eval "$(approval env)"
 `^human:.+` pattern the human-only verbs enforce, and records
 `APPROVAL_HUMAN=human:<id>`.
 
-`approval setup telegram` does five things: it stores the bot token, proves it
+`approval setup channel telegram` does five things: it stores the bot token, proves it
 with `getMe`, asks you to send your bot a message, reads the chat id back out of
 the update queue, and writes both variables. On macOS the token goes into the
 Keychain through `security`'s own no-echo prompt, so it is never typed into this
@@ -429,7 +437,7 @@ unset APPROVAL_TG_TOKEN APPROVAL_TG_CHAT APPROVAL_HUMAN TOKEN HASH
 ```
 
 Deleting the directory deletes `.approval/env` with it, and that file held only
-*where* the token lives. If you ran `approval setup telegram` on a machine with a
+*where* the token lives. If you ran `approval setup channel telegram` on a machine with a
 keystore, the token itself is still there:
 
 ```sh
@@ -446,7 +454,7 @@ BotFather (`/revoke`) or delete the bot (`/deletebot`).
 | --- | --- |
 | `telegram is not configured` at exit 2 | `APPROVAL_TG_TOKEN` or `APPROVAL_TG_CHAT` is unset or empty in *this* shell. The message names which. `approval env --check` prints the whole table with no values; `eval "$(approval env)"` establishes it. |
 | `no human identity` at exit 2 | `APPROVAL_HUMAN` is unset and no `--as human:<id>` was given. The listener refuses to record decisions against nobody. `approval setup identity` records it; `eval "$(approval env)"` puts it in the shell. |
-| `approval setup telegram` exits 2 saying stdin is not a terminal | It is interactive by design: a setup a pipe could drive would let a CI job declare a human identity and store a credential. The refusal prints the exact non-interactive commands. |
+| `approval setup channel telegram` exits 2 saying stdin is not a terminal | It is interactive by design: a setup a pipe could drive would let a CI job declare a human identity and store a credential. The refusal prints the exact non-interactive commands. |
 | The listener starts but no message arrives | The chat id is wrong, or you have not messaged the bot yet. A bot cannot open a conversation. |
 | `telegram cannot deliver ... (payload-unavailable)` | Nothing is stored at `.approval/payloads/<hash>.json` — the request was made without `--payload` — and no `--payloads` override was given. |
 | `telegram cannot deliver ... (payload-mismatch)` | The stored (or overriding) payload no longer hashes to the recorded binding. A store file is refused rather than rendered when its contents stop matching its name. |
