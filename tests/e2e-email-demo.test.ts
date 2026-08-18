@@ -1231,24 +1231,43 @@ test("the setup path: `approval setup` + `approval env` reaches the same log", a
     const attested = runSetupWalkSync(["policy", "attest", "--json"], { APPROVAL_HUMAN: human });
     assert.equal(attested.code, 0, attested.stderr);
 
-    const credentials: [string, string][] = [
-      ["smtp.host", smtp2.host === "127.0.0.1" ? "localhost" : smtp2.host],
-      ["smtp.port", String(smtp2.port)],
-      ["smtp.security", "starttls"],
-      ["smtp.user", SMTP_USER],
-      ["smtp.password", SMTP_PASSWORD],
-    ];
-    for (const [name, value] of credentials) {
-      // The adapter's secrets live in the VAULT and never in `.approval/env`;
-      // what the env file carries is the passphrase that opens it.
-      const set = runSetupWalkSync(["vault", "set", name, "--value-env", "DEMO_VALUE", "--json"], {
-        APPROVAL_HUMAN: human,
-        [PASS_ENV]: passphrase,
-        DEMO_VALUE: value,
-      });
-      assert.equal(set.code, 0, set.stderr);
-    }
+    // The five adapter credentials, through ONE verb (APRV-78). The manual walk
+    // above spells out five `approval vault set` calls, which is still the
+    // scripted path and is still what the runbook documents under "by hand";
+    // what `examples/email-demo.md` now LEADS with is this, and the claim is
+    // the same claim as the prelude's: it reaches the same vault.
+    //
+    // The probe is DECLINED. It is offered and it defaults to yes, but this
+    // walk asserts that exactly one SMTP session happens — the send — and a
+    // verification session would be a second one. That the probe works is
+    // `tests/cli-setup.test.ts`'s business, against its own mock.
+    //
+    // The adapter's secrets live in the VAULT and never in `.approval/env`;
+    // what the env file carries is the passphrase that opens it.
+    const filled = await setupSubcommand(["adapter", "email", "--as", HUMAN], {
+      ...deps,
+      env: { [PASS_ENV]: passphrase },
+      prompter: scripted([
+        smtp2.host === "127.0.0.1" ? "localhost" : smtp2.host, // smtp.host
+        String(smtp2.port), // smtp.port
+        "", // smtp.security — Enter takes starttls
+        SMTP_USER, // smtp.user
+        SMTP_PASSWORD, // smtp.password, read with no echo
+        false, // probe it? — declined, see above
+      ]),
+    });
+    assert.equal(filled.code, 0, filled.stderr);
     assert.equal(existsSync(setupVault), true, "no vault was created");
+
+    const stored = runSetupWalkSync(["vault", "list", "--json"], {
+      APPROVAL_HUMAN: human,
+      [PASS_ENV]: passphrase,
+    });
+    assert.equal(stored.code, 0, stored.stderr);
+    assert.deepEqual(
+      (JSON.parse(stored.stdout) as { names: string[] }).names,
+      ["smtp.host", "smtp.password", "smtp.port", "smtp.security", "smtp.user"],
+    );
 
     writeFileSync(join(setupDemo, "message.json"), `${JSON.stringify(PAYLOAD, null, 2)}\n`, "utf8");
     writeFileSync(join(setupDemo, `${TASK}.md`), taskFile(PAYLOAD_HASH), "utf8");
