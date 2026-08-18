@@ -326,7 +326,7 @@ function telegramHooks(
         ? '"password data for new item:" and then "retype password for new item:"'
         : '"Password:"';
     streams.out(
-      `Next: paste the BOT TOKEN from @BotFather (Telegram: /mytoken; it looks like 123456789:AAH...).\n` +
+      `Next: paste the BOT TOKEN from @BotFather (Telegram: /mybots, pick the bot, "API Token"; it looks like 123456789:AAH...).\n` +
         `${helper} asks for it with its own prompt, ${helperPrompt}. Nothing is echoed as\n` +
         `you paste, and the value goes straight into the keystore as ${SERVICE_TELEGRAM_TOKEN};\n` +
         `this process never sees you type it. There is nothing to look up first: this creates the item.\n\n`,
