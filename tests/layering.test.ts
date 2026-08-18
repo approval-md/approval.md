@@ -72,6 +72,47 @@ test("no CLI module imports from src/daemon/ except the daemon verb (APRV-59)", 
   );
 });
 
+/**
+ * The `setup` family's own direction (APRV-79).
+ *
+ * `cli/setup.ts` dispatches to `setup-adapter.ts` and `setup-channel.ts`, so an
+ * import back from either of them is a cycle — and a cycle in ESM is not a
+ * compile error, it is a `const` that is `undefined` in one direction on the day
+ * an initialisation order changes. `setup-adapter.ts` HAD one (it reached back
+ * for `front` and `requireHuman`), which is why `setup-common.ts` exists: the
+ * shared code moved there, and this test is the thing that keeps it there.
+ */
+const SETUP_DISPATCHED = ["setup-adapter.ts", "setup-channel.ts"] as const;
+
+test("the setup subcommand modules do not import the file that dispatches them (APRV-79)", () => {
+  const offenders: string[] = [];
+  for (const file of SETUP_DISPATCHED) {
+    assert.ok(CLI_FILES.includes(file), `src/cli/${file} does not exist`);
+    const source = readFileSync(join(CLI_DIR, file), "utf8");
+    for (const specifier of specifiersOf(source)) {
+      if (specifier === "./setup.js") {
+        offenders.push(`src/cli/${file} imports "${specifier}"`);
+      }
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `cli/setup.ts dispatches these modules; an import back from one of them is an ESM cycle. Shared code belongs in cli/setup-common.ts:\n${offenders.join("\n")}`,
+  );
+});
+
+test("setup-common.ts imports from neither the dispatcher nor the dispatched (APRV-79)", () => {
+  const source = readFileSync(join(CLI_DIR, "setup-common.ts"), "utf8");
+  const forbidden = ["./setup.js", "./setup-adapter.js", "./setup-channel.js"];
+  const offenders = specifiersOf(source).filter((specifier) => forbidden.includes(specifier));
+  assert.deepEqual(
+    offenders,
+    [],
+    `cli/setup-common.ts is the bottom of the setup family: everything else imports IT. It must import none of ${forbidden.join(", ")}, and it imported ${offenders.join(", ")}`,
+  );
+});
+
 test("the exception list names only files that exist and do import the daemon", () => {
   for (const file of DAEMON_IMPORTERS_ALLOWED) {
     assert.ok(
