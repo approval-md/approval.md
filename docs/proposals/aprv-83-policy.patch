@@ -1,0 +1,73 @@
+--- a/APPROVAL.md	2026-08-18 11:32:43
++++ b/APPROVAL.md	2026-08-18 13:20:27
+@@ -1,8 +1,14 @@
+ # Approval Policy — approval.md repository
+ 
+-This repo builds the tool this file configures. Until the gate (M3) and
+-channels (M4) exist, enforcement is social: agents read this policy and
+-CLAUDE.md holds them to it. From M3 it becomes mechanical.
++This repo builds the tool this file configures, and this file is the
++authoritative statement of what agents here may do: CLAUDE.md's Permissions
++section is the AGENTS.md-shaped summary and yields to this file wherever the
++two disagree. Enforcement is mechanical where the runtime sits in the path:
++`approval run` for actions executed through the gate, and `approval hook
++claude-code` (docs/claude-code-hook.md) for the shell commands and policy-file
++edits a Claude Code session issues directly, once `.claude/settings.json`
++carries the hook entry. Anything outside those two paths is still held to this
++policy by CLAUDE.md prose and the agent's reading of it.
+ 
+ ```yaml approval-policy
+ version: "0.1"
+@@ -21,11 +27,13 @@
+   read.*:                    { autonomy: autonomous }
+   files.write.workspace:     { autonomy: autonomous }   # src, tests, fixtures, backlog/
+   vcs.commit.branch:         { autonomy: autonomous }
+-  vcs.push.branch:           { autonomy: autonomous}
+-  vcs.push.main:             { autonomy: supervised }   # gated by per-task human review
++  vcs.push.branch:           { autonomy: autonomous }
++  vcs.push.main:             { autonomy: supervised }   # gated by per-task human review; includes gh pr merge
++  vcs.pr.*:                  { autonomy: supervised }   # gh pr create / edit / comment on a feature branch
+   vcs.history.rewrite:       { autonomy: manual}
+   files.delete.out_of_scope: { autonomy: manual }
+   deps.add:                  { autonomy: manual }       # every new package, runtime or dev
++  deps.install:              { autonomy: autonomous }   # bare npm install / npm ci from the lockfile
+   network.call:              { autonomy: manual }       # anything beyond package installs
+   release.publish:           { autonomy: manual }       # npm, tags, versions
+   policy.edit:               { autonomy: manual }       # this file, CLAUDE.md, CI config
+--- a/CLAUDE.md	2026-08-18 11:32:43
++++ b/CLAUDE.md	2026-08-18 13:20:58
+@@ -120,17 +120,32 @@
+   commits never ride feature branches, and hash chains do not survive git
+   merges. A session that cannot reach the gate (daemon down, channel dark,
+   wait timed out) is back under the old rule: stop and escalate.
++- **Harness-run commands are gated too.** Shell commands and policy-file
++  edits a Claude Code session issues directly used to bypass the policy;
++  `approval hook claude-code` (APRV-82, docs/claude-code-hook.md) closes
++  that once the human commits the hook entry in `.claude/settings.json`.
++  The hook classifies the command, resolves it against the PRIMARY
++  checkout's policy, and answers allow or deny; there is no "ask". Before
++  it is wired, or when in doubt, run `approval hook classify -- "<command>"`
++  and treat its class as binding.
+ 
+ ## Permissions
+ 
++`APPROVAL.md` is authoritative. This section is the AGENTS.md-shaped summary
++of it; where the two disagree, `APPROVAL.md` wins, and `approval hook classify
++-- "<command>"` shows which class a command falls under.
++
+ ### Allowed without prompting
+ - Read files, list directories, search the repo
+ - Edit source, tests, fixtures, and Backlog.md task files
+-- Run tests, lint, typecheck, build; `node`/`tsx` scripts inside the repo
++- Run tests, lint, typecheck, build; `node`/`tsx` scripts inside the repo;
++  `npm ci` (lockfile-pinned, adds nothing)
+ - Local git: status, diff, add, commit on feature branches
++- `git push` of a feature branch; opening or updating a pull request against
++  it (supervised: proceed, sampled for review)
+ 
+ ### Require approval first
+-- `git push`, merges to `main`, tag creation
++- Merges to `main` (including `gh pr merge`), tag creation
+ - `npm publish`, `npm version`, any registry interaction
+ - Adding or upgrading dependencies
+ - Deleting files outside the current task's stated scope

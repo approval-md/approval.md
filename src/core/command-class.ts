@@ -768,7 +768,7 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     bins: ["gh"],
     subs: ["pr", "issue", "repo", "run", "cache"],
     class: "network.call",
-    emits: ["read.vcs.remote", "network.call"],
+    emits: ["read.vcs.remote", "network.call", "vcs.pr.open", "vcs.pr.update", "vcs.push.main", "vcs.commit.branch"],
     refine: refineGh,
   },
 
@@ -863,10 +863,35 @@ const GH_READ_ACTIONS: readonly string[] = [
   "download",
 ];
 
+/**
+ * `gh pr` writes get their own classes (APRV-83). Opening or updating a pull
+ * request is the routine partner of pushing a feature branch, and a policy
+ * that wants to treat it as such needs a class narrower than `network.call`.
+ * Merging is a write to main whatever the transport, so it shares
+ * `vcs.push.main`; `checkout` only touches the local clone.
+ */
+const GH_PR_UPDATE_ACTIONS: readonly string[] = [
+  "edit",
+  "comment",
+  "review",
+  "ready",
+  "close",
+  "reopen",
+  "lock",
+  "unlock",
+];
+
 function refineGh(ctx: RuleContext): Refinement {
+  const noun = ctx.positionals[0];
   const action = ctx.positionals[1];
   if (action !== undefined && GH_READ_ACTIONS.includes(action)) {
     return { class: "read.vcs.remote", rule: "gh-read" };
+  }
+  if (noun === "pr" && action !== undefined) {
+    if (action === "create") return { class: "vcs.pr.open", rule: "gh-pr-open" };
+    if (GH_PR_UPDATE_ACTIONS.includes(action)) return { class: "vcs.pr.update", rule: "gh-pr-update" };
+    if (action === "merge") return { class: "vcs.push.main", rule: "gh-pr-merge" };
+    if (action === "checkout") return { class: "vcs.commit.branch", rule: "gh-pr-checkout" };
   }
   return { class: "network.call", rule: "gh-write" };
 }

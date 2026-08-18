@@ -75,8 +75,12 @@ const FIXTURES: readonly Fixture[] = [
   { command: "gh pr view 51", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
   { command: "gh pr checks", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
   { command: "gh issue list", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
-  { command: "gh pr create --fill", class: "network.call", rule: "gh-write", row: "gh" },
-  { command: "gh pr merge 51 --squash", class: "network.call", rule: "gh-write", row: "gh" },
+  { command: "gh pr create --fill", class: "vcs.pr.open", rule: "gh-pr-open", row: "gh" },
+  { command: "gh pr edit 51 --title t", class: "vcs.pr.update", rule: "gh-pr-update", row: "gh" },
+  { command: "gh pr comment 51 --body hi", class: "vcs.pr.update", rule: "gh-pr-update", row: "gh" },
+  { command: "gh pr merge 51 --squash", class: "vcs.push.main", rule: "gh-pr-merge", row: "gh" },
+  { command: "gh pr checkout 51", class: "vcs.commit.branch", rule: "gh-pr-checkout", row: "gh" },
+  { command: "gh pr unknown-verb", class: "network.call", rule: "gh-write", row: "gh" },
   { command: "gh issue comment 12 --body hi", class: "network.call", rule: "gh-write", row: "gh" },
 
   // -- package managers -----------------------------------------------------
