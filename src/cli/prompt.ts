@@ -42,6 +42,17 @@
  *
  * Nothing here throws, and nothing here ever writes the value it read to any
  * stream.
+ *
+ * ## EAGAIN is "not yet", never "end of input" (APRV-84)
+ *
+ * Every caller checks `process.stdin.isTTY` before it prompts, and merely
+ * touching `process.stdin` on a terminal has libuv put fd 0 into non-blocking
+ * mode. From then on a `readSync(0, …)` issued before the human has typed
+ * fails with EAGAIN instead of waiting. The first shipped line reader treated
+ * every error as EOF, so `approval setup identity` on a macOS terminal printed
+ * "no identity was entered" the instant the prompt appeared. Both readers now
+ * go through {@link readByteBlocking}, which sleeps a few milliseconds on
+ * EAGAIN and tries again, and treats nothing else as "wait".
  */
 
 import { readSync } from "node:fs";
@@ -68,20 +79,46 @@ const LF = 0x0a;
  * function, after output has already been written, and it must not consume more
  * of stdin than the line it was asked for.
  */
-export function readLineFromStdin(): string | null {
+export function readLineFromStdin(read: ByteReader = readByteBlocking): string | null {
   const buffer = Buffer.alloc(1);
   const chars: string[] = [];
   for (;;) {
-    let read = 0;
+    let count = 0;
     try {
-      read = readSync(0, buffer, 0, 1, null);
+      count = read(buffer);
     } catch {
       return chars.length === 0 ? null : chars.join("");
     }
-    if (read === 0) return chars.length === 0 ? null : chars.join("");
+    if (count === 0) return chars.length === 0 ? null : chars.join("");
     const char = buffer.toString("utf8");
     if (char === "\n") return chars.join("");
     if (char !== "\r") chars.push(char);
+  }
+}
+
+/** One byte of stdin into `buffer[0]`; returns the count read (0 at EOF). */
+export type ByteReader = (buffer: Buffer) => number;
+
+/** How long to sleep between EAGAIN retries. Short enough that a keystroke feels immediate. */
+const EAGAIN_NAP_MS = 5;
+const napCell = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * One byte from fd 0, blocking, whatever mode libuv left the descriptor in.
+ *
+ * EAGAIN means the terminal has nothing yet: nap and retry (`Atomics.wait` is
+ * the one synchronous sleep JavaScript has, and it keeps the wait from being a
+ * hot loop). Every other error propagates, and 0 bytes is EOF, exactly as with
+ * `readSync` itself.
+ */
+export function readByteBlocking(buffer: Buffer): number {
+  for (;;) {
+    try {
+      return readSync(0, buffer, 0, 1, null);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "EAGAIN") throw cause;
+      Atomics.wait(napCell, 0, 0, EAGAIN_NAP_MS);
+    }
   }
 }
 
@@ -114,7 +151,7 @@ function popCharacter(bytes: number[]): void {
  * Raw mode is restored in a `finally`, and a newline is printed after, so the
  * caller's next output starts on its own line whichever way the read ended.
  */
-export function readSecret(streams: Streams, prompt: string): SecretRead {
+export function readSecret(streams: Streams, prompt: string, read: ByteReader = readByteBlocking): SecretRead {
   streams.out(prompt);
   const stdin = process.stdin;
   const wasRaw = stdin.isRaw === true;
@@ -124,15 +161,14 @@ export function readSecret(streams: Streams, prompt: string): SecretRead {
   try {
     stdin.setRawMode(true);
     for (;;) {
-      let read = 0;
+      let count = 0;
       try {
-        read = readSync(0, buffer, 0, 1, null);
-      } catch (cause) {
-        // EAGAIN on a tty means "nothing to read yet", not "end of input".
-        if ((cause as NodeJS.ErrnoException).code === "EAGAIN") continue;
+        count = read(buffer);
+      } catch {
+        // EAGAIN never reaches here (readByteBlocking waits it out); anything else is the terminal going away.
         return { ok: false, reason: "aborted" };
       }
-      if (read === 0) {
+      if (count === 0) {
         return bytes.length === 0
           ? { ok: false, reason: "aborted" }
           : { ok: true, value: Buffer.from(bytes).toString("utf8") };

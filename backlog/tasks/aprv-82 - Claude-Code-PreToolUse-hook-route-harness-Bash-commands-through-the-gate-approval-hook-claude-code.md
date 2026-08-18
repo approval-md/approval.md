@@ -7,11 +7,13 @@ status: Done
 assignee:
   - fable
 created_date: '2026-08-18 11:00'
-updated_date: '2026-08-18 11:42'
+updated_date: '2026-08-18 12:03'
 labels:
   - cli
   - dogfood
-dependencies: []
+milestone: m-11
+dependencies:
+  - APRV-85
 references:
   - SPEC.md
   - docs/dogfood-cutover.md
@@ -66,4 +68,8 @@ Fable review changes: the poll loop now checks exactly the keys this invocation 
 Global invariants touched (SPEC 11): enforcement reads only verified records (readVerifiedRecords in the poll); no caller timestamps; refusals machine-readable and distinct (HOOK_DENY_CODES); self-reported fields never reduce scrutiny; all writes go through register/request, no new log writer.
 
 Not done here, human-owned: the .claude/settings.json hooks entry (policy.edit); docs/claude-code-hook.md has the snippet. Verified: npm test 1652/1652, oxlint clean, end-to-end probe against a scratch attested policy (autonomous allow with no log growth, unclassified deny, Write to APPROVAL.md gated, curl gated then allowed on grant, log verify clean).
+
+Assigned to M8 at decomposition (2026-08-18) per its stated intended slot: the MCP wrapper (APRV-87) and this hook are the two harness-facing surfaces, and both should derive their verb knowledge from the APRV-85 instructions/schemas registry where they overlap (the class table here is its own thing; the request/wait semantics are shared). Sequenced after 85 and in parallel with 86/87: it does not need the SDK. It closes the gap that produced APRV-50 and that APRV-81 tripped again from prose alone.
+
+Merged with main's M8 decomposition (m-11, dependency APRV-85, ordinal) on 2026-08-18. Built ahead of APRV-85: the hook's request/wait semantics call core/gate.ts and core/state.ts directly and do not read the instructions/schemas registry; if 85 lands a shared verb-knowledge layer, the hook can adopt it in a follow-up without changing its contract.
 <!-- SECTION:NOTES:END -->

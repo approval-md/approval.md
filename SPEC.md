@@ -86,7 +86,7 @@ defaults:
   on_expiry: reject
 
 approvers:
-  carter:
+  alice:
     channels: [telegram, cli]
 
 classes:
@@ -96,10 +96,10 @@ classes:
   communicate.email.draft:      { autonomy: autonomous }
   communicate.email.external:
     autonomy: manual
-    approvers: [carter]
+    approvers: [alice]
   financial.spend:
     autonomy: manual
-    approvers: [carter]
+    approvers: [alice]
     limits: { per_action_usd: 25, daily_usd: 100 }
   public.post:                  { autonomy: manual }
   data.delete:                  { autonomy: manual }
@@ -152,7 +152,7 @@ status: In Progress            # owned by Backlog.md / your board
 approval:
   origin:
     app: example-capture       # provenance: which system created this
-    created_by: "human:carter" # or "agent:<id>"
+    created_by: "human:alice" # or "agent:<id>"
   route:
     assignee: "agent:claude-admin"
     confidence: 0.82
@@ -250,7 +250,7 @@ For `record.*` classes, grant means adoption: the action proposes a write to a s
 ```json
 {"seq":17,"ts":"2026-08-04T09:14:02Z","event":"approval.granted",
  "task":"task-042","action_key":"task-042:chaser:2026-08-04",
- "actor":"human:carter","channel":"telegram",
+ "actor":"human:alice","channel":"telegram",
  "payload":{"note":"go, but cc me"},
  "alg":"sha256/jcs","prev":"b3c9…","hash":"a41f…"}
 ```

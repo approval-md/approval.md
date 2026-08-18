@@ -370,7 +370,7 @@ export function commandSetupIdentity(
     return usageError(
       streams,
       false,
-      `${JSON.stringify(identity)} is not a human identity: it must match ^human:.+ (for example human:carter). An agent: or system: actor cannot be declared here — those are what the human-only verbs refuse. Nothing was written`,
+      `${JSON.stringify(identity)} is not a human identity: it must match ^human:.+ (for example human:alice). An agent: or system: actor cannot be declared here — those are what the human-only verbs refuse. Nothing was written`,
       SETUP_IDENTITY_HELP,
     );
   }
