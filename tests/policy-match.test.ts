@@ -92,11 +92,11 @@ test("every class in the canonical policy resolves to its expected rule", () => 
 
 test("canonical approvers and limits come from the matched rule only", () => {
   const spend = resolve(CANONICAL, "financial.spend");
-  assert.deepEqual(spend.approvers, ["carter"]);
+  assert.deepEqual(spend.approvers, ["alice"]);
   assert.deepEqual(spend.limits, { per_action_usd: 25, daily_usd: 100 });
 
   const external = resolve(CANONICAL, "communicate.email.external");
-  assert.deepEqual(external.approvers, ["carter"]);
+  assert.deepEqual(external.approvers, ["alice"]);
   assert.equal(external.limits, null, "rule without limits carries null");
 
   const read = resolve(CANONICAL, "read.web");
