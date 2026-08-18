@@ -1677,7 +1677,7 @@ ${EXIT_CODES}
 
 JSON shape (stdout, one object):
   success  {"ok":true,"seq":11,"sample_seq":9,"action_key":"...","task":"...",
-            "actor":"human:carter"}
+            "actor":"human:alice"}
   refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
            on stderr
 ${JSON_ERRORS}`;
@@ -1748,7 +1748,7 @@ ${EXIT_CODES}
 JSON shape (stdout, one object):
   success  {"ok":true,"action_key":"...","task":"...",
             "event":"execution.completed","outcome":"completed","seq":7,
-            "attested_by_human":true,"actor":"human:carter"}
+            "attested_by_human":true,"actor":"human:alice"}
   refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
            on stderr
 ${JSON_ERRORS}`;
@@ -1953,7 +1953,7 @@ ${JSON_ERRORS}
 
 JSON shape (stdout, one object per line):
   {"event":"listening","channel":"web","url":"http://127.0.0.1:4680/",
-   "host":"127.0.0.1","port":4680,"actor":"human:carter"}
+   "host":"127.0.0.1","port":4680,"actor":"human:alice"}
   {"event":"stopped","notified":3,"views":7,"decisions":2,"refused":1}
   The token NEVER appears in this stream: --json output is the thing most
   likely to be piped into a file or a log aggregator.`;
@@ -2873,7 +2873,7 @@ and gitignored by "approval init". VALUE says WHERE the value lives:
                                with something that looks like a scheme
 
 A value with some other word: prefix is a LITERAL, not an error —
-APPROVAL_HUMAN=human:carter is the commonest line this file will ever hold. Near
+APPROVAL_HUMAN=human:alice is the commonest line this file will ever hold. Near
 misses of the real schemes (keyring:, secret_service:, plaintext:, vault:, …) are
 reserved and refused rather than silently exported as their own text, since a
 mistyped source would otherwise surface as a 401 from the far end hours later.

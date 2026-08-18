@@ -181,7 +181,7 @@ depends on:
 ```sh
 export APPROVAL_TG_TOKEN='1234567890:AA...'   # from BotFather
 export APPROVAL_TG_CHAT='123456789'           # your chat id
-export APPROVAL_HUMAN='human:carter'          # who the approvals are recorded as
+export APPROVAL_HUMAN='human:alice'          # who the approvals are recorded as
 ```
 
 A variable already set in this shell wins over the file: `approval env` reports
@@ -346,7 +346,7 @@ approving.
 The listener's terminal prints:
 
 ```
-granted task-demo:chaser (seq 4) by human:carter via telegram
+granted task-demo:chaser (seq 4) by human:alice via telegram
 execution token for task-demo:chaser: 9c92f89a81cbfc4e6c2f1ebc48f8539dc904dd894cff5b665aaabce0f1fee629
 approval: that token is single-use, stored nowhere, and was NOT sent to Telegram — copy it now
 ```
@@ -416,10 +416,10 @@ verification: clean (6 record(s))
 dangling executions: none
 budgets: none configured
 loop escalations: none
-1  2026-08-05T12:07:51.096Z  policy.updated       human:carter   -
+1  2026-08-05T12:07:51.096Z  policy.updated       human:alice    -
 2  2026-08-05T12:07:51.285Z  task.registered      agent:drafter  task-demo
 3  2026-08-05T12:07:51.447Z  approval.requested   agent:drafter  task-demo
-4  2026-08-05T12:07:52.371Z  approval.granted     human:carter   task-demo
+4  2026-08-05T12:07:52.371Z  approval.granted     human:alice    task-demo
 5  2026-08-05T12:08:05.292Z  execution.started    agent:drafter  task-demo
 6  2026-08-05T12:08:05.524Z  execution.completed  agent:drafter  task-demo
 clean: 6 record(s), head seq 6 81627b0e...

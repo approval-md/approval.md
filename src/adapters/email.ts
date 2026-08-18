@@ -144,7 +144,7 @@ const PAYLOAD_KEYS = ["from", "to", "cc", "bcc", "subject", "body", "content_typ
  *
  * RFC 5322's real grammar admits far more than this, and every extra form is
  * another way for a string to mean one thing to a reader and another to a
- * server. `"carter@example.com" <attacker@evil.example>` is a valid mailbox
+ * server. `"alice@example.com" <attacker@evil.example>` is a valid mailbox
  * whose display name is an address, and a human skimming a rendered approval
  * would read the wrong one. So the adapter accepts the boring form only, and an
  * operator who needs a display name gets a refusal explaining why rather than a
