@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "approval hook claude-code --dir /Users/carter/dev/approval-md --as agent:claude-code --timeout 9m",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}
