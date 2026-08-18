@@ -295,6 +295,9 @@ approval policy check|test <class> # explain what policy does with a class
 approval env [--check] [--json]    # resolve .approval/env and print an export block
                                    #   for a shell to evaluate; the ONLY reader of
                                    #   that file (--check prints no values)
+approval setup identity|vault|sampling|telegram   # interactive configuration; stores
+                                   #   secrets in the OS keystore, writes .approval/env,
+                                   #   refuses when stdin is not a terminal
 approval reindex | render
 approval daemon run                # the §10.2 watch loop, in the foreground
 ```

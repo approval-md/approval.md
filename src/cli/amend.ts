@@ -57,7 +57,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { accessSync, constants, mkdtempSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePathSegments, sep } from "node:path";
 
@@ -82,6 +82,7 @@ import {
 import { POLICY_AMEND_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { readLineFromStdin } from "./prompt.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--policy": "string",
@@ -304,28 +305,6 @@ function recoverBaseline(policyPath: string, attestedSha256: string | null): Bas
 }
 
 // ---------------------------------------------------------------------------
-// Confirmation
-// ---------------------------------------------------------------------------
-
-/** Read one line from stdin, synchronously. `null` at EOF. */
-function readLine(): string | null {
-  const buffer = Buffer.alloc(1);
-  const chars: string[] = [];
-  for (;;) {
-    let read = 0;
-    try {
-      read = readSync(0, buffer, 0, 1, null);
-    } catch {
-      return chars.length === 0 ? null : chars.join("");
-    }
-    if (read === 0) return chars.length === 0 ? null : chars.join("");
-    const char = buffer.toString("utf8");
-    if (char === "\n") return chars.join("");
-    if (char !== "\r") chars.push(char);
-  }
-}
-
-// ---------------------------------------------------------------------------
 // The verb
 // ---------------------------------------------------------------------------
 
@@ -537,7 +516,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       );
     }
     streams.out(`\nattest these bytes and record the amendment? [y/N] `);
-    const answer = (readLine() ?? "").trim().toLowerCase();
+    const answer = (readLineFromStdin() ?? "").trim().toLowerCase();
     if (answer !== "y" && answer !== "yes") {
       streams.out("aborted: nothing was attested and nothing was written\n");
       return EXIT_OK;

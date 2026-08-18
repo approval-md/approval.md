@@ -60,6 +60,9 @@ Usage:
   approval payload hash <file|-> [--json]
   approval env        [--check] [--policy <path>] [--dir <path>] [--log <path>]
                       [--json]
+  approval setup      identity|vault|sampling|telegram [--as human:<id>]
+                      [--api-base <url>] [--policy <path>] [--dir <path>]
+                      [--log <path>]                       (interactive; no --json)
   approval vault set <name> [--value-env <VAR>] [--as human:<id>] [--json]
   approval vault list|remove [<name>] [--as human:<id>] [--json]
   approval import agents-md <file> [--out <path>] [--json]
@@ -152,6 +155,12 @@ Commands:
             read on its own would let anything able to write it act as you. The
             default output carries secrets by design; "env --check" prints a
             table with no values on any path
+  setup     the WRITER for that file: "setup identity|vault|sampling|telegram"
+            stores each secret in the OS keystore and records where it lives.
+            INTERACTIVE ONLY — it refuses a non-terminal stdin and --json, and
+            prints the exact commands to run instead, because a setup a pipe
+            could drive would let a CI job declare a human identity. It appends
+            nothing to the log, attests nothing, and never edits APPROVAL.md
   vault     the encrypted credential store adapters read from (SPEC.md §10.4).
             "vault set|list|remove" are HUMAN-ONLY; list shows NAMES and never
             values, and there is no "vault get" — a credential's only sanctioned
@@ -2901,4 +2910,168 @@ JSON shape (stdout, one object):
   resolved-from-secret-service | resolved-literal | unset. "value" is present
   only when there is one AND --check was not passed. "ok" is the --check verdict
   on every path: false when a policy-named variable is unresolved.
+${JSON_ERRORS}`;
+
+export const SETUP_HELP = `approval setup — interactive configuration (SPEC.md §5.2, §10.1)
+
+Usage:
+  approval setup identity [--log <path>] [--dir <path>] [--policy <path>]
+  approval setup vault    [--as human:<id>] [--log <path>] [--dir <path>]
+  approval setup sampling [--as human:<id>] [--log <path>] [--dir <path>]
+  approval setup telegram [--as human:<id>] [--api-base <url>] [--log <path>]
+
+Subcommands:
+  identity  declare who the human is (APPROVAL_HUMAN). The one subcommand that
+            is NOT human-only, because it is what declares the identity the
+            human-only check reads
+  vault     mint a vault passphrase, store it, and record where it lives
+  sampling  mint the audit sampling secret of §5.2, store it, and print the
+            policy line that turns sampling on
+  telegram  collect the bot token, prove it with getMe, discover the approver
+            chat, and record both variables
+
+EVERY SUBCOMMAND REFUSES WHEN STDIN IS NOT A TERMINAL, and when --json is given,
+and exits 2 printing the exact non-interactive commands to run instead. A setup
+that a pipe could drive would be a way for a CI job or an agent to declare a
+human identity and store a credential, and identity in v0.1 is config-declared
+(SPEC.md §11): establishing it is an act of the human at the machine.
+
+WHAT IT WRITES, AND WHAT IT WILL NOT:
+  writes  .approval/env (one KEY=VALUE line per variable, mode 0600, every other
+          line and comment preserved) and items in the OS keystore
+  never   appends to the log, attests anything, or edits APPROVAL.md. When a
+          policy line is needed it prints the \`approval policy amend\` ceremony
+          and stops: an amendment ends in a human attestation, and a wizard that
+          edited an attested policy would be forging the sign-off
+
+WHERE SECRETS GO:
+  macOS (security on PATH)     keychain:<service>
+  Linux (secret-tool on PATH)  secret-service:<service>
+  neither                      offered as a PLAINTEXT literal in .approval/env,
+                               taken only on a typed \`yes\`, and reported as
+                               plaintext by \`approval env --check\` forever after
+
+  approval-tg-token            the bot token
+  approval-vault-passphrase    the vault passphrase
+  approval-sampling-secret     the audit sampling secret
+
+A VALUE YOU ALREADY HOLD IS NEVER HANDLED BY THIS PROCESS. The Telegram token is
+collected by the keystore helper's OWN no-echo prompt (\`security
+add-generic-password … -w\` with NO value on the command line), and reaches this
+runtime only by being read back on stdout. Values this runtime GENERATES (the
+passphrase, the sampling secret) go to the helper on its stdin; if a helper will
+not take stdin, the fallback puts a just-minted value in an argv and says so.
+
+${EXIT_CODES}
+
+  2 here also means "this is interactive and your stdin is not a terminal".
+  1 means the far end refused (an invalid bot token, no chat found).
+${JSON_ERRORS}`;
+
+export const SETUP_IDENTITY_HELP = `approval setup identity — declare who the human is
+
+Usage:
+  approval setup identity [--log <path>] [--dir <path>] [--policy <path>]
+
+Asks for a \`human:<id>\` identity, validates it against the ^human:.+ pattern
+\`policy attest\` enforces, and writes APPROVAL_HUMAN=human:<id> into
+.approval/env. Nothing is appended to the log.
+
+NOT HUMAN-ONLY, unlike every other setup subcommand, and that is not a hole: a
+verb that required APPROVAL_HUMAN before it would let you set APPROVAL_HUMAN
+could only be run by someone who did not need it. The terminal is the control on
+this path.
+
+This is CONFIG-DECLARED identity (SPEC.md §11). The trust boundary is this
+machine: whoever can set the variable and write to the log is inside it. v0.1
+makes no cryptographic claim about who attested.
+
+The line it writes is INERT. No verb reads .approval/env on its own (§11.1
+invariant 7); \`eval "$(approval env)"\` is what puts it in your shell.
+
+Refuses when stdin is not a terminal, printing the export line to use instead.
+
+${EXIT_CODES}
+${JSON_ERRORS}`;
+
+export const SETUP_VAULT_HELP = `approval setup vault — mint and store the vault passphrase (HUMAN-ONLY)
+
+Usage:
+  approval setup vault [--as human:<id>] [--log <path>] [--dir <path>]
+                       [--policy <path>]
+
+Generates 32 random bytes, base64-encodes them, stores the result in the OS
+keystore as approval-vault-passphrase, and writes the source line for the
+variable your policy names in vault.passphrase_env (APPROVAL_VAULT_PASSPHRASE by
+default). The value is not printed here or anywhere else — there is no verb in
+this CLI that prints it.
+
+WARNS FIRST if .approval/vault.enc already exists. A vault is encrypted under
+its passphrase and cannot be re-keyed by changing a variable: every credential
+in it becomes unreadable. The warning comes before the generation, and the
+confirmation defaults to no.
+
+The generated value reaches the keystore on the helper's STDIN. If this build of
+the helper will not take stdin, the fallback passes it in an argv and says so:
+a value minted one moment earlier, never used, visible in \`ps\` to your own user
+for the length of one call. That trade is made for generated values only.
+
+${EXIT_CODES}
+${JSON_ERRORS}`;
+
+export const SETUP_SAMPLING_HELP = `approval setup sampling — mint the audit sampling secret (HUMAN-ONLY)
+
+Usage:
+  approval setup sampling [--as human:<id>] [--log <path>] [--dir <path>]
+                          [--policy <path>]
+
+Generates the operator-held secret that selects which supervised actions are
+sampled for retrospective review (SPEC.md §5.2), stores it as
+approval-sampling-secret, and writes its source line.
+
+Selection is HMAC-SHA-256 over the event hash under this secret. Seeding from
+event content alone is forbidden: the agent authoring the event controls that
+content and could search it until its action falls outside the sample.
+
+IF YOUR POLICY NAMES NO audit.sampling_secret_env, the secret is recorded under
+the conventional name APPROVAL_SAMPLING_SECRET and SAMPLING STAYS OFF — §5.2
+disables it whenever the policy names no variable, and this verb does not edit an
+attested policy file. It prints the block to add and the \`approval policy amend\`
+ceremony that attests it.
+
+${EXIT_CODES}
+${JSON_ERRORS}`;
+
+export const SETUP_TELEGRAM_HELP = `approval setup telegram — the bot token and the approver chat
+
+Usage:
+  approval setup telegram [--as human:<id>] [--api-base <url>] [--log <path>]
+                          [--dir <path>] [--policy <path>]
+
+Five steps: store the token, prove it with getMe, ask you to message the bot,
+read the chat id back, and write both variables (the names come from
+channels.telegram.token_env / chat_id_env, or the defaults).
+
+STOP \`approval channel telegram listen\` FIRST. Two processes long-polling one
+bot is a 409 from the Bot API, and the loser is whichever asked second.
+
+THE TOKEN IS NEVER TYPED INTO THIS PROCESS on a machine with a keystore: the
+helper's own no-echo prompt collects it, and this runtime reads it back on
+stdout to make the getMe call. With no keystore, it is read with no echo and —
+after a typed \`yes\` — written as a plaintext literal.
+
+NO getUpdates FROM THIS VERB CARRIES AN OFFSET, EVER. An offset is an
+ACKNOWLEDGEMENT: it tells the Bot API that everything below it may be discarded,
+and a decision tap consumed here would never reach the listener waiting for it.
+That is why \`approval doctor\` refuses to call getUpdates at all. Reading without
+an offset confirms nothing, and allowed_updates is ["message"], so a pending
+callback_query is not even delivered here.
+
+The chat id is written as a LITERAL. A chat id is not a secret; the token is.
+
+${EXIT_CODES}
+
+  1 here means the far end refused: an invalid token (re-copy it from
+  @BotFather), a 409 from a running listener, or no message reaching the bot
+  after three attempts — in which case the manual curl is printed.
 ${JSON_ERRORS}`;

@@ -72,6 +72,7 @@ import { commandPolicy } from "./policy.js";
 import { commandRender } from "./render.js";
 import { commandConsume, commandToken } from "./token.js";
 import { commandAdapter } from "./adapter.js";
+import { commandSetup } from "./setup.js";
 import { commandVault } from "./vault.js";
 import {
   DEFAULT_INDEX_PATH,
@@ -647,6 +648,29 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // act as the human on every human-only verb (SPEC.md §11.1 invariant 7).
     case "env":
       return commandEnv(rest, streams, cwd);
+    // The configuration verb (APRV-74) and the only WRITER of .approval/env.
+    // It is interactive by construction: every subcommand refuses a
+    // non-terminal stdin and --json, because a setup a pipe could drive would
+    // be a way for a CI job or an agent to declare a human identity and store
+    // a credential. It appends nothing to the log, attests nothing, and edits
+    // no policy file. `setup telegram` reaches the network, so the dispatch
+    // unwraps a promise exactly as `channel`, `daemon` and `adapter` do.
+    case "setup": {
+      const outcome = commandSetup(rest, streams, cwd);
+      if (typeof outcome === "number") return outcome;
+      void outcome.then(
+        (code) => {
+          process.exitCode = code;
+        },
+        (cause: unknown) => {
+          streams.err(
+            `approval: setup failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+          );
+          process.exitCode = EXIT_IO;
+        },
+      );
+      return EXIT_OK;
+    }
     // The credential verbs (APRV-68). `vault set|list|remove` manage the
     // encrypted store adapters read from, and all three are human-only. There
     // is deliberately no `vault get`: a credential's only sanctioned journey is
