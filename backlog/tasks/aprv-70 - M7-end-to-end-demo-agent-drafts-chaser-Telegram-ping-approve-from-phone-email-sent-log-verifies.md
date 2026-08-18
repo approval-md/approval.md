@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@fable'
 created_date: '2026-08-17 21:40'
-updated_date: '2026-08-18 01:07'
+updated_date: '2026-08-18 21:47'
 labels: []
 milestone: m-9
 dependencies:
@@ -40,4 +40,6 @@ SPEC 14 M7 exit criterion, and the abstract made real: an agent drafts the canon
 
 <!-- SECTION:NOTES:BEGIN -->
 Agent half merged as PR #37 (1396 tests): scripted demo test asserts ten hops end to end against mock Bot API + mock SMTP through the real CLI, with a secret sweep across every surface (password, passphrase, username, bot token in no log byte / output / Bot API body; raw token in exactly one captured stream); examples/email-demo.md runbook; README ceremony four. CLI FRICTION FOUND, all documented in the runbook and relevant to the human run: (1) callback nonces are process-local, so the tap must land on the RUNNING listener newest message (a restarted listener re-sends with fresh buttons and older buttons stop resolving); (2) no CLI TLS relaxation by design, so the mock demo trusts the fixture CA via NODE_EXTRA_CA_CERTS; (3) doctor telegram check reaches the real Bot API (runbook step, not test step); (4) payload hash --json emits {hash} not {payload_hash}; (5) vault set cannot validate a credential, first proof is the send; (6) security none plus a login is a refusal by design. AC 2 (human runs the runbook once against real Telegram and SMTP; seq range recorded here) is the remaining step and the reason this task, and M7, stay open.
+
+Real run 2026-08-18 (examples/email-demo.md, macOS, real Telegram + Gmail SMTP). Scratch dir /tmp/approval-email-demo, policy attested seq 1 sha256 f29bac7b373ef925ead4fd0bb4e32d8459cca5b6a7c5a1e8af4ffabf8fe3307d (identical to the doc's). Records: seq 1 policy.updated, 2 task.registered, 3 approval.requested (21:38:38Z), 4 approval.granted by human:carter via telegram (21:43:05Z, tapped on a phone), 5 execution.started, 6 execution.completed (21:45:37Z). Head seq 6 hash 3f7929659aa9c2697ab90502b816d84107bf8c2004e02e7fe92aa06b526cba79; approval log verify clean, status health ok. Payload hash a5170bb802deb4f84a8466854a363a01eb660410ffb8e1a76fff475cb8d5ce34; from cartcrc@gmail.com to carter@jfcrouch.com cc cartcrc@gmail.com via smtp.gmail.com:587 starttls AUTH PLAIN. Second spend of the token refused token-consumed, exit 1, no second execution.started. Message-ID: to be added after the mailbox check. Setup-time defects found and fixed during this run: APRV-84, 94, 95, 97, 98; UX tasks filed: APRV-90, 91, 96, 99.
 <!-- SECTION:NOTES:END -->
