@@ -101,8 +101,12 @@ export interface VerifyContext {
 export interface AdapterSetupEntry {
   /** The manifest, declared by the adapter itself. */
   specs: readonly CredentialSpec[];
-  /** The adapter's cross-field rule, or `undefined` when it has none. */
-  check?(values: Record<string, string>): string | null;
+  /**
+   * The adapter's cross-field rule, or `undefined` when it has none. `kept`
+   * names the values already in the store that this run left alone (APRV-98):
+   * the flow never reads a value back, but presence is a fact it does know.
+   */
+  check?(values: Record<string, string>, kept: readonly string[]): string | null;
   /** One line of what this adapter is, for the title. */
   summary: string;
   /** The non-interactive path: the exact `vault set` calls, generated. */
@@ -253,7 +257,7 @@ async function verifyEmail(
 export const ADAPTER_SETUPS: Record<string, AdapterSetupEntry> = {
   email: {
     specs: EMAIL_CREDENTIAL_SPECS,
-    check: (values) => checkEmailCredentialSet(values),
+    check: (values, kept) => checkEmailCredentialSet(values, DEFAULT_CREDENTIAL_NAMES, kept),
     summary:
       "the SMTP settings `approval adapter email` reads inside the verified-token window",
     hint: (context) => manifestHint(EMAIL_CREDENTIAL_SPECS, context),

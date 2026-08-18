@@ -590,8 +590,13 @@ export const EMAIL_CREDENTIAL_SPECS: readonly CredentialSpec[] = [
 export function checkEmailCredentialSet(
   values: Record<string, string | undefined>,
   names: EmailCredentialNames = DEFAULT_CREDENTIAL_NAMES,
+  kept: readonly string[] = [],
 ): string | null {
+  // A name the operator kept from an earlier run is present in the vault even
+  // though this run never saw its value (APRV-98). Presence is all the pair
+  // rule asks about.
   const has = (name: string): boolean => {
+    if (kept.includes(name)) return true;
     const value = values[name];
     return typeof value === "string" && value.length > 0;
   };
