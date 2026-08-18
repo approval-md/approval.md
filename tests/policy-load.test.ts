@@ -71,13 +71,13 @@ test("the SPEC §5.1 canonical policy loads from surrounding prose", () => {
   assert.equal(result.policy.defaults?.autonomy, "manual");
   assert.equal(result.policy.defaults?.channel, "telegram");
   assert.equal(result.policy.defaults?.on_expiry, "reject");
-  assert.deepEqual(result.policy.approvers?.["carter"], {
+  assert.deepEqual(result.policy.approvers?.["alice"], {
     channels: ["telegram", "cli"],
   });
   assert.deepEqual(result.policy.classes?.["read.*"], { autonomy: "autonomous" });
   assert.deepEqual(result.policy.classes?.["financial.spend"], {
     autonomy: "manual",
-    approvers: ["carter"],
+    approvers: ["alice"],
     limits: { per_action_usd: 25, daily_usd: 100 },
   });
   assert.deepEqual(result.policy.budgets?.["global"], {

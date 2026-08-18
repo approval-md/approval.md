@@ -120,17 +120,32 @@ grandfathered — apply this to new and rewritten text only.
   commits never ride feature branches, and hash chains do not survive git
   merges. A session that cannot reach the gate (daemon down, channel dark,
   wait timed out) is back under the old rule: stop and escalate.
+  - **Harness-run commands are gated too.** Shell commands and policy-file
+  edits a Claude Code session issues directly used to bypass the policy;
+  `approval hook claude-code` (APRV-82, docs/claude-code-hook.md) closes
+  that once the human commits the hook entry in `.claude/settings.json`.
+  The hook classifies the command, resolves it against the PRIMARY
+  checkout's policy, and answers allow or deny; there is no "ask". Before
+  it is wired, or when in doubt, run `approval hook classify -- "<command>"`
+  and treat its class as binding.
 
 ## Permissions
+
+`APPROVAL.md` is authoritative. This section is the AGENTS.md-shaped summary
+of it; where the two disagree, `APPROVAL.md` wins, and `approval hook classify
+-- "<command>"` shows which class a command falls under.
 
 ### Allowed without prompting
 - Read files, list directories, search the repo
 - Edit source, tests, fixtures, and Backlog.md task files
-- Run tests, lint, typecheck, build; `node`/`tsx` scripts inside the repo
+- Run tests, lint, typecheck, build; `node`/`tsx` scripts inside the repo;
+  `npm ci` (lockfile-pinned, adds nothing)
 - Local git: status, diff, add, commit on feature branches
+- `git push` of a feature branch; opening or updating a pull request against
+  it (supervised: proceed, sampled for review)
 
 ### Require approval first
-- `git push`, merges to `main`, tag creation
+- Merges to `main` (including `gh pr merge`), tag creation
 - `npm publish`, `npm version`, any registry interaction
 - Adding or upgrading dependencies
 - Deleting files outside the current task's stated scope

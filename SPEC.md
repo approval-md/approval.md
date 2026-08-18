@@ -86,7 +86,7 @@ defaults:
   on_expiry: reject
 
 approvers:
-  carter:
+  alice:
     channels: [telegram, cli]
 
 classes:
@@ -96,10 +96,10 @@ classes:
   communicate.email.draft:      { autonomy: autonomous }
   communicate.email.external:
     autonomy: manual
-    approvers: [carter]
+    approvers: [alice]
   financial.spend:
     autonomy: manual
-    approvers: [carter]
+    approvers: [alice]
     limits: { per_action_usd: 25, daily_usd: 100 }
   public.post:                  { autonomy: manual }
   data.delete:                  { autonomy: manual }
@@ -152,7 +152,7 @@ status: In Progress            # owned by Backlog.md / your board
 approval:
   origin:
     app: example-capture       # provenance: which system created this
-    created_by: "human:carter" # or "agent:<id>"
+    created_by: "human:alice" # or "agent:<id>"
   route:
     assignee: "agent:claude-admin"
     confidence: 0.82
@@ -250,7 +250,7 @@ For `record.*` classes, grant means adoption: the action proposes a write to a s
 ```json
 {"seq":17,"ts":"2026-08-04T09:14:02Z","event":"approval.granted",
  "task":"task-042","action_key":"task-042:chaser:2026-08-04",
- "actor":"human:carter","channel":"telegram",
+ "actor":"human:alice","channel":"telegram",
  "payload":{"note":"go, but cc me"},
  "alg":"sha256/jcs","prev":"b3c9…","hash":"a41f…"}
 ```
@@ -299,6 +299,10 @@ approval setup identity|vault|sampling|channel <name>|adapter <name>
                                    # interactive configuration; a channel's credential goes
                                    #   to the OS keystore and .approval/env, an adapter's to
                                    #   the vault; refuses when stdin is not a terminal
+approval hook claude-code           # gate an agent harness: reads a PreToolUse
+                                   #   event on stdin, classifies the command,
+                                   #   answers allow/deny (never "ask")
+approval hook classify -- <cmd…>   # what the classifier makes of a command
 approval reindex | render
 approval daemon run                # the §10.2 watch loop, in the foreground
 ```
@@ -388,7 +392,7 @@ No new task file format. No kanban UI. No agent framework or orchestration platf
 
 Post-v1 (non-normative): `review: adversarial` as a per-class flag. Before a flagged `manual` request reaches the approver, an independent agent instance with the raw payload and no stake in the outcome writes a dissent: worst plausible reading, omissions, questions a suspicious reviewer would ask. The approver adjudicates between framings instead of consuming one. Untrusted monitoring, spent where human attention is scarcest.
 
-Post-v1 (non-normative): a Rust fast-path implementation of the hot loop (policy resolution, chain-tail verification, gate verdict) as the engine for per-tool-call hook adapters, where Node startup latency is unacceptable. Conformance is defined by the fixture suite; the crates.io name `approval-md` is reserved for it. The TypeScript runtime remains the reference implementation for the full surface.
+Post-v1 (non-normative): a Rust fast-path implementation of the hot loop (policy resolution, chain-tail verification, gate verdict) as the latency accelerator for the v1 harness hook of §14 (`approval hook claude-code`) and the per-tool-call adapters like it, where Node startup latency on every gated tool call is unacceptable. Conformance is defined by the fixture suite; the crates.io name `approval-md` is reserved for it. The TypeScript runtime remains the reference implementation for the full surface.
 
 ## 14. Repository layout and roadmap
 
@@ -413,7 +417,7 @@ Milestones sized for agent-driven development (each = one reviewable task):
 - **M5** Daemon: watch, TTL, sampling, loop-escalation.
 - **M6** Backlog.md round-trip + AGENTS.md import.
 - **M7** First adapter (email) + vault; end-to-end demo: agent drafts chaser → Telegram ping → approve from phone → sent → log verifies.
-- **M8** MCP wrapper. Post-v1: TickTick/GCal sinks, inbound capture adapters.
+- **M8** MCP wrapper (§10.5) and the agent-harness hook, `approval hook claude-code`: a Claude Code PreToolUse adapter that classifies the command a harness is about to run, resolves it against the policy, and returns allow only on a decision the log records. Both expose the same gate to a client that is not a shell. The §13 Rust fast-path is this hook's post-v1 latency accelerator, not a prerequisite. Post-v1: TickTick/GCal sinks, inbound capture adapters.
 
 ## 15. References
 

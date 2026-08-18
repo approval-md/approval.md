@@ -65,6 +65,7 @@ import { commandChannel } from "./channel.js";
 import { commandDaemon } from "./daemon.js";
 import { commandDoctor } from "./doctor.js";
 import { commandEnv } from "./env.js";
+import { commandHook } from "./hook.js";
 import { commandImport } from "./import.js";
 import { commandInit } from "./init.js";
 import { commandPayload } from "./payload.js";
@@ -699,6 +700,14 @@ export function main(argv: string[], options: MainOptions = {}): number {
       );
       return EXIT_OK;
     }
+    // The harness verb (APRV-82). `hook claude-code` reads a PreToolUse event
+    // on STDIN and answers allow or deny, so a command the harness runs itself
+    // cannot skip the gate the way `approval run` cannot. It is the one command
+    // whose stdout is a decision object for another program rather than a
+    // report for a human, and the one whose exit code is deliberately 0 on a
+    // refusal: the harness reads a hook's verdict only on exit 0.
+    case "hook":
+      return commandHook(rest, streams, cwd);
     // The interoperability verb (APRV-64). `import agents-md` reads permissions
     // PROSE and prints a draft policy block. It is the only verb whose output is
     // a proposal: it writes no policy, appends nothing, and attests nothing —

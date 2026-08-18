@@ -120,14 +120,14 @@ defaults:
   on_expiry: reject
   channel: telegram
 approvers:
-  carter:
+  alice:
     channels: [telegram, cli]
 classes:
   read.*:
     autonomy: autonomous
   communicate.email.external:
     autonomy: manual
-    approvers: [carter]
+    approvers: [alice]
     limits:
       per_action_usd: 1
 channels:
@@ -150,7 +150,7 @@ each of them reads the variable *names* out of it, and they run in the demo
 directory, because `.approval/env` is per-directory.
 
 ```sh
-approval setup identity          # APPROVAL_HUMAN=human:carter
+approval setup identity          # APPROVAL_HUMAN=human:alice
 approval setup vault             # mints the passphrase, stores it, records where
 approval setup channel telegram  # token, getMe, chat discovery, both variables
 eval "$(approval env)"
@@ -213,7 +213,7 @@ because that is what the demo policy declares:
 
 ```sh
 printf '%s\n' \
-  'APPROVAL_HUMAN=human:carter' \
+  'APPROVAL_HUMAN=human:alice' \
   'APPROVAL_TG_TOKEN=keychain:approval-tg-token' \
   'APPROVAL_TG_CHAT=123456789' \
   'APPROVAL_DEMO_VAULT_PASSPHRASE=keychain:approval-vault-passphrase' \
@@ -225,7 +225,7 @@ or export the four variables directly, which is what every step below actually
 depends on:
 
 ```sh
-export APPROVAL_HUMAN='human:carter'
+export APPROVAL_HUMAN='human:alice'
 export APPROVAL_TG_TOKEN="$(security find-generic-password -a "$USER" -s approval-tg-token -w)"
 export APPROVAL_TG_CHAT='123456789'
 export APPROVAL_DEMO_VAULT_PASSPHRASE="$(security find-generic-password -a "$USER" -s approval-vault-passphrase -w)"
@@ -246,7 +246,7 @@ this shell and so must come after the `eval` above.
 ### Step 2: attest it
 
 ```sh
-approval policy attest --as human:carter
+approval policy attest --as human:alice
 ```
 
 ```
@@ -264,7 +264,7 @@ are what the adapter spends. One verb asks for all five, because the email
 adapter declares what it needs and the setup verb reads that declaration:
 
 ```sh
-approval setup adapter email --as human:carter
+approval setup adapter email --as human:alice
 ```
 
 The passphrase that opens the vault is already in this shell, from
@@ -321,12 +321,12 @@ the user and the password are the secret, and the secret never appears as an
 argument:
 
 ```sh
-V='smtp.example.net' approval vault set smtp.host --value-env V --as human:carter
-V='587'              approval vault set smtp.port --value-env V --as human:carter
-V='starttls'         approval vault set smtp.security --value-env V --as human:carter
-V='you@example.net'  approval vault set smtp.user --value-env V --as human:carter
+V='smtp.example.net' approval vault set smtp.host --value-env V --as human:alice
+V='587'              approval vault set smtp.port --value-env V --as human:alice
+V='starttls'         approval vault set smtp.security --value-env V --as human:alice
+V='you@example.net'  approval vault set smtp.user --value-env V --as human:alice
 V="$(security find-generic-password -a "$USER" -s approval-demo-smtp-password -w)" \
-  approval vault set smtp.password --value-env V --as human:carter
+  approval vault set smtp.password --value-env V --as human:alice
 ```
 
 ```
@@ -339,7 +339,7 @@ a verb that printed a credential would put it in a terminal, a scrollback buffer
 and a CI log. Check what you stored by name:
 
 ```sh
-approval vault list --as human:carter
+approval vault list --as human:alice
 ```
 
 ```
@@ -394,7 +394,7 @@ status: In Progress
 approval:
   origin:
     app: example-capture
-    created_by: "human:carter"
+    created_by: "human:alice"
   route:
     assignee: "agent:claude-admin"
     confidence: 0.82
@@ -449,7 +449,7 @@ approval doctor
 
 ```
 ✓ build-freshness: …/dist/src/cli/main.js built …, not older than the source tree
-✓ identity: APPROVAL_HUMAN=human:carter (config-declared: the trust boundary is this machine, not cryptography)
+✓ identity: APPROVAL_HUMAN=human:alice (config-declared: the trust boundary is this machine, not cryptography)
 ✓ attestation: /tmp/approval-email-demo/APPROVAL.md is attested at seq 1 (sha256 f29bac7b373e…)
 ✓ log: …/events.jsonl verifies: 1 record(s), head seq 1 c5250281dd91…
 ✓ telegram: getMe on https://api.telegram.org succeeded …
@@ -522,7 +522,7 @@ what you think you are approving.
 ### Step 9: tap Approve
 
 ```
-granted task-042:chaser:2026-08-04 (seq 4) by human:carter via telegram
+granted task-042:chaser:2026-08-04 (seq 4) by human:alice via telegram
 execution token for task-042:chaser:2026-08-04: aceea22f…
 approval: that token is single-use, stored nowhere, and was NOT sent to Telegram — copy it now
 ```
@@ -603,10 +603,10 @@ approval status
 ```
 
 ```
-1	2026-08-18T00:55:18.432Z	policy.updated	human:carter	-
+1	2026-08-18T00:55:18.432Z	policy.updated	human:alice	-
 2	2026-08-18T00:55:20.365Z	task.registered	agent:claude-admin	task-042
 3	2026-08-18T00:55:20.555Z	approval.requested	agent:claude-admin	task-042
-4	2026-08-18T00:55:21.195Z	approval.granted	human:carter	task-042
+4	2026-08-18T00:55:21.195Z	approval.granted	human:alice	task-042
 5	2026-08-18T00:55:21.431Z	execution.started	agent:claude-admin	task-042
 6	2026-08-18T00:55:21.679Z	execution.completed	agent:claude-admin	task-042
 clean: 6 record(s), head seq 6 835ebcb576f1…

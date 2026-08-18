@@ -65,6 +65,10 @@ Usage:
                       [--dir <path>] [--log <path>]        (interactive; no --json)
   approval vault set <name> [--value-env <VAR>] [--as human:<id>] [--json]
   approval vault list|remove [<name>] [--as human:<id>] [--json]
+  approval hook claude-code [--as agent:<id>] [--timeout <duration>]
+                      [--interval <d>] [--policy <path>] [--dir <path>]
+                      [--log <path>]                    (reads PreToolUse JSON)
+  approval hook classify [--json] -- <command…>
   approval import agents-md <file> [--out <path>] [--json]
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
   approval render     [--log <path>] [--out <path>] [--policy <path>]
@@ -173,6 +177,13 @@ Commands:
             journey is from .approval/vault.enc into an adapter, inside the
             verified-token window. The passphrase comes from the environment
             variable the policy NAMES (vault.passphrase_env), never from a flag
+  hook      put the gate in front of an agent HARNESS. "hook claude-code" reads
+            a Claude Code PreToolUse event on stdin, classifies the command it
+            is about to run, resolves the class against APPROVAL.md, and answers
+            allow or deny — waiting on a real approval decision when the class
+            is manual. It never answers "ask": a decision taken outside the log
+            is a decision nothing can audit. "hook classify" prints what the
+            classifier makes of a command and touches nothing
   import    "import agents-md" parses an AGENTS.md-style permissions section
             into DRAFT policy classes for a human to confirm (SPEC.md §12). It
             prints; it never writes APPROVAL.md, never logs, never attests
@@ -1677,7 +1688,7 @@ ${EXIT_CODES}
 
 JSON shape (stdout, one object):
   success  {"ok":true,"seq":11,"sample_seq":9,"action_key":"...","task":"...",
-            "actor":"human:carter"}
+            "actor":"human:alice"}
   refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
            on stderr
 ${JSON_ERRORS}`;
@@ -1748,7 +1759,7 @@ ${EXIT_CODES}
 JSON shape (stdout, one object):
   success  {"ok":true,"action_key":"...","task":"...",
             "event":"execution.completed","outcome":"completed","seq":7,
-            "attested_by_human":true,"actor":"human:carter"}
+            "attested_by_human":true,"actor":"human:alice"}
   refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
            on stderr
 ${JSON_ERRORS}`;
@@ -1953,7 +1964,7 @@ ${JSON_ERRORS}
 
 JSON shape (stdout, one object per line):
   {"event":"listening","channel":"web","url":"http://127.0.0.1:4680/",
-   "host":"127.0.0.1","port":4680,"actor":"human:carter"}
+   "host":"127.0.0.1","port":4680,"actor":"human:alice"}
   {"event":"stopped","notified":3,"views":7,"decisions":2,"refused":1}
   The token NEVER appears in this stream: --json output is the thing most
   likely to be piped into a file or a log aggregator.`;
@@ -2007,6 +2018,77 @@ JSON shape (one object on stdout):
   {"ok":true,"dir","written":["APPROVAL.md",...],
    "existing":[{"path","code"}],"next_steps":["…"]}
 ${JSON_ERRORS}`;
+
+export const HOOK_HELP = `approval hook — put the gate in front of an agent harness
+
+Usage:
+  approval hook claude-code [--as agent:<id>] [--timeout <duration>]
+                            [--interval <duration>] [--policy <path>]
+                            [--dir <path>] [--log <path>]
+  approval hook classify [--json] -- <command…>
+
+Commands:
+  claude-code  read one Claude Code PreToolUse event as JSON on STDIN and print
+               the harness's decision object on stdout. Bash commands are
+               classified into SPEC.md §7 action classes; Edit/Write/MultiEdit/
+               NotebookEdit are gated only when the file is policy-protected
+               (APPROVAL.md, .approval/, CLAUDE.md, AGENTS.md, .claude/settings*,
+               .github/workflows/, .npmrc); every other tool passes through
+  classify     print what the classifier makes of a command line and exit. Reads
+               no log, resolves no policy, writes nothing. Put the command after
+               "--" so its own flags are not parsed as this verb's
+
+Flags (claude-code):
+  --as <id>        the proposing identity (default agent:claude-code)
+  --timeout <d>    how long to wait for a decision (default 55s). Set it BELOW
+                   the hook timeout configured in .claude/settings.json
+  --interval <d>   poll interval while waiting (default 1s)
+  --policy <path>  policy file to resolve classes against
+  --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in — point
+                   it at the PRIMARY checkout, whose log the daemon writes
+  --log <path>     log file (default .approval/log/events.jsonl under --dir's
+                   sibling working directory rules)
+  -h, --help       this text
+
+What it decides:
+  autonomous class   allow, and NOTHING is appended (amended SPEC.md §6.3)
+  supervised class   allow, after registering the task; no approval event exists
+  manual class       register + request, then WAIT for a human decision. Allow
+                     on granted; deny on rejected, revoked, expired or timeout
+  gate.self          the "approval" CLI itself is pass-through: it is the
+                     enforcement path, and gating it with itself would deadlock
+
+Deny reasons (the reason string is "<code>: <detail>"):
+  hook-unclassified       no rule covers some segment of the command
+  hook-opaque             a construct whose effect cannot be read from the text
+                          (bash -c, eval, backticks, a non-read substitution)
+  hook-unparseable        the command line could not be tokenized
+  hook-rejected           a human said no
+  hook-revoked            a granted approval was withdrawn
+  hook-expired            the TTL lapsed before a decision
+  hook-timeout            no decision inside --timeout; the request stays live
+  hook-gate-refused:<c>   the gate refused intake; <c> is its own frozen code
+                          (policy-not-attested, budget-exceeded, …)
+  hook-policy-unavailable APPROVAL.md could not be loaded, so nothing resolves
+  hook-io                 malformed hook input, or an unreadable log
+
+EXIT 0 CARRIES THE VERDICT. Claude Code reads stdout as a decision only on exit
+0, treats exit 2 as a block with stderr as the reason, and treats any other code
+as a non-blocking error. So allow and deny are both exit 0 with JSON on stdout,
+and exit 2 is reserved for a MISCONFIGURED hook (unknown flag, bad identity),
+where blocking is the right failure mode. No new exit code is defined here.
+
+THE VERDICT IS NEVER "ask". The harness's own prompt would collect a decision
+that no event records, no channel delivered, and no audit can reconstruct.
+
+The classifier is BEST EFFORT and is not scheming-robust (SPEC.md §11). It reads
+the command text and nothing else — never the agent's own "description" field,
+which is self-reported. The hard boundary remains the vault and the execution
+token (SPEC.md §10.4). See docs/claude-code-hook.md for the settings.json entry,
+which a HUMAN commits: it is policy.edit.
+
+${EXIT_CODES}
+  claude-code uses only 0 and 2, as above.`;
 
 export const IMPORT_HELP = `approval import — turn existing permissions prose into a draft policy
 
@@ -2873,7 +2955,7 @@ and gitignored by "approval init". VALUE says WHERE the value lives:
                                with something that looks like a scheme
 
 A value with some other word: prefix is a LITERAL, not an error —
-APPROVAL_HUMAN=human:carter is the commonest line this file will ever hold. Near
+APPROVAL_HUMAN=human:alice is the commonest line this file will ever hold. Near
 misses of the real schemes (keyring:, secret_service:, plaintext:, vault:, …) are
 reserved and refused rather than silently exported as their own text, since a
 mistyped source would otherwise surface as a 401 from the far end hours later.
