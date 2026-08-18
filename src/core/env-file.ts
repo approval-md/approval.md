@@ -86,7 +86,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -132,7 +132,13 @@ export const ENV_FILE_REQUIRED_MODE = 0o600;
 export const ENV_FILE_REFUSAL_CODES = [
   /** The file's mode is not 0600. The refusal carries the `chmod` to run. */
   "env-file-mode",
-  /** The file exists and could not be read or stat'd. A filesystem fact. */
+  /**
+   * The file exists and could not be read, stat'd, or (APRV-74) written. A
+   * filesystem fact in every case, with a filesystem repair, which is why the
+   * write path reuses this code rather than adding a fourth I/O name to a
+   * frozen union: "the directory is read-only" and "the file is unreadable"
+   * are the same morning and the same exit code.
+   */
   "env-file-io",
   /** A line is neither blank, nor a comment, nor `KEY=VALUE`. */
   "env-file-syntax",
@@ -474,6 +480,148 @@ export function readEnvFile(path: string): EnvFileRead {
   const parsed = parseEnvFile(text, path);
   if (!parsed.ok) return parsed;
   return { ok: true, present: true, path, entries: parsed.entries };
+}
+
+// ---------------------------------------------------------------------------
+// Writing
+// ---------------------------------------------------------------------------
+
+/** What one upserted KEY did to the file. */
+export interface EnvFileChange {
+  key: string;
+  /** The line as it will now read: `KEY=VALUE`. Never a secret — see below. */
+  value: string;
+  /**
+   * The VALUE that was on the line before, or `null` when the key was added.
+   *
+   * This CAN be a plaintext secret, if the operator had written one as a bare
+   * literal, so it exists for a caller that needs to decide whether it is
+   * REPLACING something, and no caller in this repository prints it. The
+   * boolean below is what the CLI reports on.
+   */
+  previous: string | null;
+  /** The value is unchanged: the line already said exactly this. */
+  unchanged: boolean;
+}
+
+/** A successful write. */
+export interface EnvFileWrite {
+  ok: true;
+  path: string;
+  /** The file did not exist and was created at 0600. */
+  created: boolean;
+  changes: EnvFileChange[];
+}
+
+/**
+ * Add or replace `KEY=VALUE` lines, preserving everything else in the file.
+ *
+ * **Line-oriented, not a rewrite.** The file is read as text, the line whose
+ * KEY matches is replaced IN PLACE, and a key that is not present is appended
+ * at the end. Comments, blank lines, ordering, and every entry this call was
+ * not asked about survive byte for byte. A writer that reparsed and re-emitted
+ * would be simpler and would quietly delete the operator's own comments the
+ * first time `approval setup telegram` ran — this file is one a human edits by
+ * hand, and round-trip fidelity for a hand-edited file is the same requirement
+ * the Backlog.md task files carry.
+ *
+ * The file is validated before it is touched: {@link readEnvFile}'s mode check
+ * and full parse both run, so `setup` never appends a line to a file it could
+ * not have read, and never lands a valid line in a file whose earlier line is a
+ * syntax error. A file that does not exist is created at 0600, along with its
+ * directory.
+ *
+ * Callers pass values, and a value here is a SOURCE (`keychain:<service>`), a
+ * chat id, or an identity — never a credential, except on the one path where an
+ * operator explicitly chose a plaintext literal after being told what it means.
+ * Nothing in this function prints anything.
+ */
+export function upsertEnvFileEntries(
+  path: string,
+  entries: ReadonlyArray<{ key: string; value: string }>,
+): EnvFileWrite | EnvFileRefusal {
+  const existing = readEnvFile(path);
+  if (!existing.ok) return existing;
+
+  for (const entry of entries) {
+    if (!KEY_PATTERN.test(entry.key)) {
+      return refuse(
+        "env-file-key-invalid",
+        path,
+        `${JSON.stringify(entry.key)} is not an environment variable name (it must match [A-Z_][A-Z0-9_]*), so no line was written`,
+      );
+    }
+    if (entry.value.length === 0) {
+      return refuse(
+        "env-file-empty-value",
+        path,
+        `${entry.key} would be written with an empty value, which is not a source; nothing was written`,
+      );
+    }
+    if (entry.value.includes("\n")) {
+      return refuse(
+        "env-file-syntax",
+        path,
+        `the value for ${entry.key} contains a newline, and one line is one variable; nothing was written`,
+      );
+    }
+  }
+
+  let text = "";
+  if (existing.present) {
+    try {
+      text = readFileSync(path, "utf8");
+    } catch (cause) {
+      return refuse("env-file-io", path, `${path} could not be re-read: ${detail(cause)}`);
+    }
+  }
+
+  // Split into lines WITHOUT the trailing terminator, so an append lands on its
+  // own line and the file ends with exactly one newline whichever state it was
+  // in. An empty (or absent) file is zero lines, not one empty one.
+  const lines =
+    text.length === 0 ? [] : (text.endsWith("\n") ? text.slice(0, -1) : text).split("\n");
+
+  const changes: EnvFileChange[] = [];
+  for (const entry of entries) {
+    const line = `${entry.key}=${entry.value}`;
+    const index = lines.findIndex((candidate) => {
+      const trimmed = candidate.trim();
+      if (trimmed.startsWith("#")) return false;
+      const equals = trimmed.indexOf("=");
+      return equals !== -1 && trimmed.slice(0, equals) === entry.key;
+    });
+    if (index === -1) {
+      lines.push(line);
+      changes.push({ key: entry.key, value: entry.value, previous: null, unchanged: false });
+      continue;
+    }
+    const before = (lines[index] as string).trim();
+    const previous = before.slice(before.indexOf("=") + 1);
+    lines[index] = line;
+    changes.push({
+      key: entry.key,
+      value: entry.value,
+      previous,
+      unchanged: previous === entry.value,
+    });
+  }
+
+  const body = lines.length === 0 ? "" : `${lines.join("\n")}\n`;
+
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    // 0600 at creation, and re-asserted after: `writeFileSync`'s mode argument
+    // is a request against the umask on creation and is ignored entirely for an
+    // existing file, so the explicit chmod is what actually holds the guarantee
+    // the reader depends on.
+    writeFileSync(path, body, { encoding: "utf8", mode: ENV_FILE_REQUIRED_MODE });
+    chmodSync(path, ENV_FILE_REQUIRED_MODE);
+  } catch (cause) {
+    return refuse("env-file-io", path, `${path} could not be written: ${detail(cause)}`);
+  }
+
+  return { ok: true, path, created: !existing.present, changes };
 }
 
 // ---------------------------------------------------------------------------

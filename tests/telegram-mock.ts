@@ -16,6 +16,16 @@
  * offset is still honoured for filtering, so the channel's own offset
  * arithmetic is still exercised.
  *
+ * `allowed_updates` IS honoured, and it earns its place (APRV-74): an update
+ * whose type is not in the list is neither returned nor consumed, exactly as
+ * the real API behaves. `approval setup telegram` reads with
+ * `allowed_updates: ["message"]` and no offset precisely so that a running
+ * listener's pending `callback_query` is untouched, and consume-on-delivery
+ * means this mock can PROVE that — the callback is still in the queue after
+ * setup has run, and a later poll still receives it. Without the filter the
+ * mock would hand setup a callback it never asked for and swallow it, which
+ * would be the mock inventing the bug the test is there to rule out.
+ *
  * Not a test file (no `.test.ts` suffix), so the runner ignores it.
  */
 
@@ -60,6 +70,15 @@ export interface MockBotApi {
   readonly requests: MockRequest[];
   /** Queue an update for the next `getUpdates`. */
   queueUpdate(update: Record<string, unknown>): void;
+  /**
+   * How many queued updates are still undelivered.
+   *
+   * Consume-on-delivery makes this a direct assertion about what a later poll
+   * will receive: a `callback_query` still counted here after
+   * `approval setup telegram` has run is a callback the listener will still
+   * get (APRV-74).
+   */
+  pendingUpdateCount(): number;
   /** Inject a failure mode for every subsequent call, or `null` to behave. */
   fail(mode: MockFailure | null): void;
   /** The `callback_data` of the Approve/Reject button delivered for `actionKey`. */
@@ -190,9 +209,20 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
     if (method === "getUpdates") {
       const offset = typeof body["offset"] === "number" ? body["offset"] : 0;
       const timeoutSeconds = typeof body["timeout"] === "number" ? body["timeout"] : 0;
+      const allowed = Array.isArray(body["allowed_updates"])
+        ? new Set((body["allowed_updates"] as unknown[]).map((entry) => String(entry)))
+        : null;
+
+      /** An update's TYPE is its one key besides `update_id`. */
+      const typeOf = (update: Record<string, unknown>): string =>
+        Object.keys(update).find((key) => key !== "update_id") ?? "unknown";
 
       const take = (): { update_id: number }[] => {
-        const ready = queued.filter((entry) => entry.update_id >= offset);
+        const ready = queued.filter(
+          (entry) =>
+            entry.update_id >= offset &&
+            (allowed === null || allowed.has(typeOf(entry.update))),
+        );
         for (const entry of ready) queued.splice(queued.indexOf(entry), 1);
         return ready.map((entry) => ({ update_id: entry.update_id, ...entry.update }));
       };
@@ -266,6 +296,9 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
       queued.push({ update_id: updateId, update });
       wake();
     },
+    pendingUpdateCount() {
+      return queued.length;
+    },
     fail(mode) {
       failure = mode;
       if (mode === null) {
@@ -334,6 +367,41 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
   };
 
   return api;
+}
+
+/**
+ * A `message` update, as Telegram would deliver one (APRV-74).
+ *
+ * `approval setup telegram` discovers the approver chat by reading the `chat`
+ * of a message the human just sent, so the shape that matters here is
+ * `message.chat`: an id, a type, and whichever of title / username / first_name
+ * the chat carries. Groups have a title; a private chat has a username, or only
+ * a first name for a user who set none.
+ */
+export function messageUpdate(options: {
+  chatId: string | number;
+  type?: string;
+  text?: string;
+  username?: string;
+  firstName?: string;
+  title?: string;
+}): Record<string, unknown> {
+  const chat: Record<string, unknown> = {
+    id: options.chatId,
+    type: options.type ?? "private",
+  };
+  if (options.title !== undefined) chat["title"] = options.title;
+  if (options.username !== undefined) chat["username"] = options.username;
+  if (options.firstName !== undefined) chat["first_name"] = options.firstName;
+  return {
+    message: {
+      message_id: 1,
+      from: { id: 42, is_bot: false, username: options.username ?? "approver" },
+      chat,
+      date: 1_700_000_000,
+      text: options.text ?? "hello",
+    },
+  };
 }
 
 /** A `callback_query` update, as Telegram would deliver one. */
