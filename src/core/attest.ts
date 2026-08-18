@@ -162,7 +162,7 @@ export function policyFileHash(path: string): string {
  * The event is deliberately minimal:
  *
  * ```json
- * { "event": "policy.updated", "actor": "human:carter",
+ * { "event": "policy.updated", "actor": "human:alice",
  *   "payload": { "policy_path": "APPROVAL.md", "sha256": "<64 hex>" } }
  * ```
  *

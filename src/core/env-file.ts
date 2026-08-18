@@ -14,7 +14,7 @@
  *
  * ```
  * # one line per variable; # comments and blank lines are ignored
- * APPROVAL_HUMAN=human:carter
+ * APPROVAL_HUMAN=human:alice
  * APPROVAL_TG_TOKEN=keychain:approval-telegram-token
  * APPROVAL_VAULT_PASSPHRASE=secret-service:vault-passphrase
  * APPROVAL_AUDIT_SECRET=env:
@@ -36,7 +36,7 @@
  *   shell profile instead, where nothing in this runtime can see it to say so.
  *
  * A value carrying some OTHER `word:` prefix is a literal, not an error, because
- * `APPROVAL_HUMAN=human:carter` is the commonest line this file will ever hold.
+ * `APPROVAL_HUMAN=human:alice` is the commonest line this file will ever hold.
  * Near misses of the real schemes are reserved by name and refused rather than
  * silently exported as text; see {@link RESERVED_SCHEMES}.
  *
@@ -247,12 +247,12 @@ const KNOWN_SCHEMES: ReadonlySet<string> = new Set([
  * file will ever hold:
  *
  * ```
- * APPROVAL_HUMAN=human:carter
+ * APPROVAL_HUMAN=human:alice
  * ```
  *
  * `human:<id>` is the actor syntax of SPEC.md §8. A parser that treated every
  * `word:` prefix as a scheme would refuse the identity line every operator
- * writes first and send them to `literal:human:carter`, which nobody would ever
+ * writes first and send them to `literal:human:alice`, which nobody would ever
  * guess and nobody should have to.
  *
  * A silent literal reading is still wrong for a MISTYPED source, though:
@@ -374,7 +374,7 @@ export function parseEnvFile(
     const argument = scheme[2] as string;
     if (!KNOWN_SCHEMES.has(name)) {
       if (!RESERVED_SCHEMES.has(name)) {
-        // Not a scheme at all: `human:carter` and every other value that merely
+        // Not a scheme at all: `human:alice` and every other value that merely
         // contains a colon. See RESERVED_SCHEMES for why this is the default.
         entries.push({ key, kind: "literal", argument: value, line });
         continue;

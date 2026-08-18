@@ -40,7 +40,7 @@ defaults:
   on_expiry: reject
 
 approvers:
-  carter:
+  alice:
     channels: [telegram, cli]
 
 classes:
@@ -50,10 +50,10 @@ classes:
   communicate.email.draft:      { autonomy: autonomous }
   communicate.email.external:
     autonomy: manual
-    approvers: [carter]
+    approvers: [alice]
   financial.spend:
     autonomy: manual
-    approvers: [carter]
+    approvers: [alice]
     limits: { per_action_usd: 25, daily_usd: 100 }
   public.post:                  { autonomy: manual }
   data.delete:                  { autonomy: manual }
