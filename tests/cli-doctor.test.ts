@@ -42,6 +42,7 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { FIX_COMMAND_PREFIXES } from "../src/cli/doctor.js";
 import { assertLocal, startMockBotApi, type MockBotApi } from "./telegram-mock.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -322,6 +323,8 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       "envelope-integrity",
       // APRV-68: the credential vault, appended for the same reason.
       "vault",
+      // APRV-75: the environment source map, appended for the same reason.
+      "environment",
     ],
   );
   assert.deepEqual(
@@ -333,7 +336,10 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
     // check that could not look must not report that it looked (APRV-63).
     // vault skips: the healthy fixture has no credential vault, and a runtime
     // that never needs a credential is healthy without one (APRV-68).
-    ["pass", "pass", "pass", "pass", "pass", "pass", "pass", "skip", "skip", "skip"],
+    // environment skips: the fixture has no .approval/env and the vault
+    // passphrase is unset in this shell, which is a state, not a fault
+    // (APRV-75).
+    ["pass", "pass", "pass", "pass", "pass", "pass", "pass", "skip", "skip", "skip", "skip"],
   );
   for (const entry of parsed.checks) {
     assert.equal(entry.fix, undefined, `a passing check carried a fix: ${entry.check}`);
@@ -368,12 +374,14 @@ test("doctor: human output is one line per check with indented fixes", async () 
 
   assert.equal(run.code, 1, run.stderr);
   const lines = run.stdout.trimEnd().split("\n");
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 10);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 11);
   assert.ok(lines.some((line) => line.startsWith("✗ identity:")));
   assert.ok(lines.some((line) => line.startsWith("– telegram:")));
-  // The fix belongs to the failing check and is indented under it.
+  // The fix belongs to the failing check, is indented under it, and begins with
+  // the command (APRV-75).
   const identityIndex = lines.findIndex((line) => line.startsWith("✗ identity:"));
-  assert.match(lines[identityIndex + 1] as string, /^ {4}fix: export APPROVAL_HUMAN=/u);
+  assert.match(lines[identityIndex + 1] as string, /^ {4}fix: approval setup identity\b/u);
+  assert.match(lines[identityIndex + 1] as string, /export APPROVAL_HUMAN=human:<id>/u);
 });
 
 // ---------------------------------------------------------------------------
@@ -388,7 +396,7 @@ test("doctor: a stale build is named as a stale build", async () => {
   const check = checkNamed(run, "build-freshness");
   assert.equal(check.status, "fail");
   assert.match(check.detail, /STALE BUILD/u);
-  assert.equal(check.fix, "run `npm run build`");
+  assert.equal(check.fix, "npm run build");
   assert.equal(parseDoctor(run).ok, false);
 });
 
@@ -821,7 +829,7 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  assert.equal(parsed.checks.length, 10);
+  assert.equal(parsed.checks.length, 11);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);
@@ -1077,7 +1085,7 @@ test("doctor: a vault that is not gitignored fails, and the fix is the exact lin
   const check = checkNamed(run, "vault");
   assert.equal(check.status, "fail");
   assert.match(check.detail, /NOT gitignored/u);
-  assert.match(check.fix ?? "", /add the line `\.approval\/vault\.enc`/u);
+  assert.match(check.fix ?? "", /^echo '\.approval\/vault\.enc' >> /u);
   assert.match(check.fix ?? "", /rotate/u);
   assert.equal(parseDoctor(run).ok, false);
 });
@@ -1190,4 +1198,368 @@ test("doctor: the vault check leaks neither the passphrase nor the credential", 
   }
   // And doctor appended nothing to the log it read.
   assert.deepEqual(readFileSync(logPathOf(home)), before);
+});
+
+// ---------------------------------------------------------------------------
+// environment (APRV-75)
+// ---------------------------------------------------------------------------
+
+/** A plausible-looking bot token, only ever written into a fixture file. */
+const ENV_FILE_TOKEN = "1234567:AA-approval-md-env-file-fixture-token-DO-NOT-USE";
+const ENV_FILE_PASSPHRASE = "an env-file fixture vault passphrase";
+
+/**
+ * A home whose `.approval/env` is exactly `lines`.
+ *
+ * `mode` defaults to 0600, the only mode the runtime reads the file at, so a
+ * case that wants the mode refusal has to ask for it. `git` / `gitignored`
+ * shape the tree the same way {@link homeWithVault} does.
+ */
+async function homeWithEnvFile(
+  port: number,
+  lines: string[],
+  options: { mode?: number; git?: boolean; gitignored?: boolean } = {},
+): Promise<string> {
+  counter += 1;
+  const dir = join(scratch, `env-home-${counter}`);
+  mkdirSync(join(dir, ".approval", "log"), { recursive: true });
+  writeFileSync(join(dir, "APPROVAL.md"), policyWith(port));
+  if (options.git === true) {
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    writeFileSync(
+      join(dir, ".gitignore"),
+      options.gitignored === true ? "node_modules/\n.approval/env\n" : "node_modules/\n",
+    );
+  }
+  const envPath = join(dir, ".approval", "env");
+  writeFileSync(envPath, `${lines.join("\n")}\n`);
+  chmodSync(envPath, options.mode ?? 0o600);
+  const attested = await runCli(["policy", "attest"], dir, { APPROVAL_HUMAN: "human:carter" });
+  assert.equal(attested.code, 0, attested.stderr);
+  return dir;
+}
+
+test("doctor: with no env file and variables unset, environment is a skip that names them", async () => {
+  const { home } = healthy();
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+
+  const check = checkNamed(run, "environment");
+  assert.equal(check.status, "skip");
+  assert.equal(check.fix, undefined);
+  // The file that does not exist is named, and so is every unset variable.
+  assert.match(check.detail, /\.approval\/env is absent/u);
+  for (const name of ["APPROVAL_TG_TOKEN", "APPROVAL_TG_CHAT", "APPROVAL_VAULT_PASSPHRASE"]) {
+    assert.ok(check.detail.includes(name), `${name} missing from: ${check.detail}`);
+  }
+  // The one that IS set is reported as set rather than omitted.
+  assert.match(check.detail, /APPROVAL_HUMAN set in the environment/u);
+  assert.match(check.detail, /approval env --check/u);
+  // A skip does not make the run unhealthy.
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+});
+
+test("doctor: an env file that is not mode 0600 fails with the chmod", async () => {
+  const { port } = healthy();
+  const home = await homeWithEnvFile(port, ["APPROVAL_TG_CHAT=12345"], { mode: 0o644 });
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "environment");
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /env-file-mode/u);
+  assert.match(check.fix ?? "", /^chmod 600 /u);
+  assert.equal(run.code, 1);
+  // The refusal's own message carries its chmod on a second line; doctor folds
+  // it, because the human renderer is one line per check.
+  assert.equal(check.detail.includes("\n"), false);
+});
+
+test("doctor: an env file a `git add -A` would commit fails with the exact ignore line", async () => {
+  const { port } = healthy();
+  const home = await homeWithEnvFile(port, ["APPROVAL_TG_CHAT=12345"], {
+    git: true,
+    gitignored: false,
+  });
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "environment");
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /NOT gitignored/u);
+  assert.match(check.fix ?? "", /^echo '\.approval\/env' >> /u);
+  assert.ok((check.fix ?? "").includes(join(home, ".gitignore")));
+
+  // Gitignored, the same file is fine: the generalised pattern helper answers
+  // for `.approval/env` exactly as it always did for the vault.
+  const ignored = await homeWithEnvFile(port, ["APPROVAL_TG_CHAT=12345"], {
+    git: true,
+    gitignored: true,
+  });
+  const clean = checkNamed(
+    await runCli(["doctor", "--json", "--root", makeRoot("fresh")], ignored, GREEN_ENV),
+    "environment",
+  );
+  assert.equal(clean.status, "skip", clean.detail);
+});
+
+test("doctor: a plaintext secret in the env file fails, naming the setup verb", async () => {
+  const { port } = healthy();
+  const home = await homeWithEnvFile(port, [
+    "# a source map with a token written straight into it",
+    `APPROVAL_TG_TOKEN=${ENV_FILE_TOKEN}`,
+    "APPROVAL_TG_CHAT=12345",
+  ]);
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "environment");
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /APPROVAL_TG_TOKEN/u);
+  assert.match(check.detail, /PLAINTEXT literal/u);
+  assert.match(check.fix ?? "", /^approval setup telegram\b/u);
+  // The chat id is a literal too and is NOT a secret, so it is described
+  // without the plaintext alarm and is not in the failure list.
+  assert.match(check.detail, /APPROVAL_TG_CHAT declared in \.approval\/env as a literal/u);
+  // And the value itself never appears, on stdout or on stderr.
+  assert.equal(run.stdout.includes(ENV_FILE_TOKEN), false);
+  assert.equal(run.stderr.includes(ENV_FILE_TOKEN), false);
+});
+
+test("doctor: every policy-named variable set in this shell is a pass", async () => {
+  const { port } = healthy();
+  const home = await makeHome({ port });
+
+  const run = await runCli(
+    ["doctor", "--json", "--root", makeRoot("fresh"), "--api-base", assertLocal(mock.url)],
+    home,
+    { ...TG_ENV, APPROVAL_VAULT_PASSPHRASE: ENV_FILE_PASSPHRASE },
+  );
+  const check = checkNamed(run, "environment");
+  assert.equal(check.status, "pass", check.detail);
+  assert.equal(check.fix, undefined);
+  assert.match(check.detail, /Every variable your policy names is available/u);
+  assert.equal(run.stdout.includes(ENV_FILE_PASSPHRASE), false);
+});
+
+test("doctor: a keystore source is reported as declared and is never looked up", async () => {
+  const { port } = healthy();
+  const home = await homeWithEnvFile(port, [
+    "APPROVAL_TG_TOKEN=keychain:approval-md-doctor-fixture",
+    "APPROVAL_TG_CHAT=12345",
+    "APPROVAL_VAULT_PASSPHRASE=secret-service:approval-md-doctor-fixture",
+  ]);
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "environment");
+  // Declared counts as configured: the operator wrote the line, and only
+  // `approval env --check` may run a lookup that can block on a GUI prompt.
+  assert.equal(check.status, "pass", check.detail);
+  assert.match(check.detail, /keychain:approval-md-doctor-fixture/u);
+  assert.match(check.detail, /secret-service:approval-md-doctor-fixture/u);
+  assert.match(check.detail, /not resolved by doctor/u);
+  assert.match(check.detail, /approval env --check/u);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+});
+
+test("doctor: an unreadable env file fails with the value-free report as the fix", async () => {
+  const { port } = healthy();
+  const home = await homeWithEnvFile(port, ["APPROVAL_TG_TOKEN=keyring:approval-token"]);
+
+  const check = checkNamed(
+    await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV),
+    "environment",
+  );
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /env-file-unknown-scheme/u);
+  assert.match(check.fix ?? "", /^approval env --check\b/u);
+});
+
+test("doctor: no env-file secret reaches the output on any path", async () => {
+  const { port } = healthy();
+  const home = await homeWithEnvFile(port, [
+    `APPROVAL_TG_TOKEN=${ENV_FILE_TOKEN}`,
+    `APPROVAL_VAULT_PASSPHRASE=${ENV_FILE_PASSPHRASE}`,
+    "APPROVAL_TG_CHAT=12345",
+  ]);
+  const before = readFileSync(logPathOf(home));
+
+  const runs = [
+    // The file's secrets, resolved from the file.
+    await runCli(["doctor", "--root", makeRoot("fresh")], home, GREEN_ENV),
+    await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV),
+    // And the same secret sitting in the ambient environment instead, where the
+    // variable resolves `set-in-environment` and carries a value.
+    await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, {
+      ...GREEN_ENV,
+      APPROVAL_VAULT_PASSPHRASE: ENV_FILE_PASSPHRASE,
+    }),
+  ];
+  for (const run of runs) {
+    for (const needle of [ENV_FILE_TOKEN, ENV_FILE_PASSPHRASE]) {
+      assert.equal(run.stdout.includes(needle), false);
+      assert.equal(run.stderr.includes(needle), false);
+    }
+  }
+  // Reading the source map appended nothing, as no other path does.
+  assert.deepEqual(readFileSync(logPathOf(home)), before);
+});
+
+// ---------------------------------------------------------------------------
+// Every fix begins with a command (APRV-75)
+// ---------------------------------------------------------------------------
+
+/**
+ * The pinned allowlist, written out here rather than only imported, so that
+ * widening it in the runtime is a two-file diff a reviewer sees.
+ */
+const PINNED_FIX_PREFIXES = ["approval ", "chmod ", "echo ", "export ", "mv ", "node ", "npm "];
+
+test("doctor: the fix-command allowlist is what the runtime pins", () => {
+  assert.deepEqual([...FIX_COMMAND_PREFIXES], PINNED_FIX_PREFIXES);
+});
+
+/**
+ * A SHAPE test, not a wording test: it drives every failing verdict this suite
+ * can produce and asserts only that the `fix` opens with a runnable command.
+ * What the prose after the command says is each check's own business.
+ */
+test("doctor: every failing check's fix begins with a runnable command", async () => {
+  const { home, port } = healthy();
+  const fresh = makeRoot("fresh");
+
+  // Fixtures whose damage is not a flag: one home each, built once here.
+  const unreadablePolicy = await makeHome({ port: await freePort(), attest: false });
+  rmSync(join(unreadablePolicy, "APPROVAL.md"));
+
+  const edited = await makeHome({ port });
+  writeFileSync(join(edited, "APPROVAL.md"), `${policyWith(port)}\n<!-- edited -->\n`);
+
+  const torn = await makeHome({ port });
+  appendFileSync(logPathOf(torn), '{"seq":2,"ts":"2026-08-05T00:00:00Z"');
+
+  const corrupt = await makeHome({ port });
+  appendFileSync(logPathOf(corrupt), '{"not":"an event"}\n');
+
+  const sampler = await homeWithAudit(port, [
+    "audit:",
+    "  supervised_sample_rate: 0.25",
+    "  sampling_secret_env: APPROVAL_TEST_DOCTOR_SECRET",
+  ]);
+
+  const openVault = await homeWithVault(port, { gitignored: false });
+  const lockedVault = await homeWithVault(port);
+
+  const badMode = await homeWithEnvFile(port, ["APPROVAL_TG_CHAT=12345"], { mode: 0o644 });
+  const openEnv = await homeWithEnvFile(port, ["APPROVAL_TG_CHAT=12345"], {
+    git: true,
+    gitignored: false,
+  });
+  const plaintextEnv = await homeWithEnvFile(port, [`APPROVAL_TG_TOKEN=${ENV_FILE_TOKEN}`]);
+  const badScheme = await homeWithEnvFile(port, ["APPROVAL_TG_TOKEN=keyring:nope"]);
+
+  counter += 1;
+  const emptyRoot = join(scratch, `root-${counter}-empty-fixes`);
+  mkdirSync(emptyRoot, { recursive: true });
+
+  const dead = await freePort();
+  const cases: { args: string[]; cwd: string; env: Record<string, string> }[] = [
+    // build-freshness, all four failing shapes.
+    { args: ["doctor", "--json", "--root", makeRoot("stale")], cwd: home, env: GREEN_ENV },
+    { args: ["doctor", "--json", "--root", makeRoot("unbuilt")], cwd: home, env: GREEN_ENV },
+    { args: ["doctor", "--json", "--root", makeRoot("no-loader")], cwd: home, env: GREEN_ENV },
+    { args: ["doctor", "--json", "--root", emptyRoot], cwd: home, env: GREEN_ENV },
+    // identity, both shapes.
+    { args: ["doctor", "--json", "--root", fresh], cwd: home, env: {} },
+    { args: ["doctor", "--json", "--root", fresh], cwd: home, env: { APPROVAL_HUMAN: "nope" } },
+    // attestation: unreadable, and edited since attestation.
+    { args: ["doctor", "--json", "--root", fresh], cwd: unreadablePolicy, env: GREEN_ENV },
+    { args: ["doctor", "--json", "--root", fresh], cwd: edited, env: GREEN_ENV },
+    // log: torn and corrupt.
+    { args: ["doctor", "--json", "--root", fresh], cwd: torn, env: GREEN_ENV },
+    { args: ["doctor", "--json", "--root", fresh], cwd: corrupt, env: GREEN_ENV },
+    // telegram: a refused token, and an unreachable Bot API.
+    {
+      args: ["doctor", "--json", "--root", fresh, "--api-base", assertLocal(mock.url)],
+      cwd: home,
+      env: { ...TG_ENV, APPROVAL_TG_TOKEN: "9999999:AA-wrong-token-entirely" },
+    },
+    {
+      args: ["doctor", "--json", "--root", fresh, "--api-base", assertLocal(`http://127.0.0.1:${dead}`)],
+      cwd: home,
+      env: TG_ENV,
+    },
+    // audit-sampling: a rate whose secret variable is not exported.
+    { args: ["doctor", "--json", "--root", fresh], cwd: sampler, env: GREEN_ENV },
+    // vault: ungitignored, unset passphrase, wrong passphrase.
+    { args: ["doctor", "--json", "--root", fresh], cwd: openVault, env: unlocked() },
+    { args: ["doctor", "--json", "--root", fresh], cwd: lockedVault, env: GREEN_ENV },
+    {
+      args: ["doctor", "--json", "--root", fresh],
+      cwd: lockedVault,
+      env: unlocked("not the passphrase"),
+    },
+    // environment: mode, gitignore, plaintext, and a whole-file refusal.
+    { args: ["doctor", "--json", "--root", fresh], cwd: badMode, env: GREEN_ENV },
+    { args: ["doctor", "--json", "--root", fresh], cwd: openEnv, env: GREEN_ENV },
+    { args: ["doctor", "--json", "--root", fresh], cwd: plaintextEnv, env: GREEN_ENV },
+    { args: ["doctor", "--json", "--root", fresh], cwd: badScheme, env: GREEN_ENV },
+  ];
+
+  const seen = new Set<string>();
+  const collect = (run: Run): void => {
+    for (const check of parseDoctor(run).checks) {
+      if (check.status !== "fail") {
+        assert.equal(
+          check.fix,
+          undefined,
+          `a non-failing check carried a fix: ${check.check} (${check.status})`,
+        );
+        continue;
+      }
+      assert.ok(
+        check.fix !== undefined && check.fix.length > 0,
+        `a failing check carried no fix: ${check.check}`,
+      );
+      assert.ok(
+        PINNED_FIX_PREFIXES.some((prefix) => (check.fix ?? "").startsWith(prefix)),
+        `${check.check} fix does not begin with a command: ${JSON.stringify(check.fix)}`,
+      );
+      seen.add(check.check);
+    }
+  };
+
+  for (const entry of cases) collect(await runCli(entry.args, entry.cwd, entry.env));
+
+  // payload-store: an existing directory this process cannot write. Root
+  // ignores the mode bits, so the case is skipped rather than faked.
+  const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
+  if (!asRoot) {
+    const store = await makeHome({ port });
+    const storeDir = join(store, ".approval", "payloads");
+    mkdirSync(storeDir, { recursive: true });
+    chmodSync(storeDir, 0o555);
+    try {
+      collect(await runCli(["doctor", "--json", "--root", fresh], store, GREEN_ENV));
+    } finally {
+      chmodSync(storeDir, 0o755);
+    }
+  }
+
+  // The battery really did reach every check that can fail. web-port is absent
+  // on purpose: its only failing verdict is a bind error (EACCES on a
+  // privileged port), which a suite that must not run as root cannot produce
+  // portably — see the note beside the web-port cases above. envelope-integrity
+  // is absent for the same class of reason: its failing verdict needs a task
+  // folder this process cannot list.
+  assert.deepEqual(
+    [...seen].sort(),
+    [
+      "attestation",
+      "audit-sampling",
+      "build-freshness",
+      "environment",
+      "identity",
+      "log",
+      ...(asRoot ? [] : ["payload-store"]),
+      "telegram",
+      "vault",
+    ].sort(),
+  );
 });

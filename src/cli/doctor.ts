@@ -15,8 +15,18 @@
  *
  * Neither failure was a bug in the runtime. Both were facts about the
  * environment that nothing was in a position to state out loud. `doctor` is
- * that statement: ten checks, in the order in which their failures cascade,
+ * that statement: eleven checks, in the order in which their failures cascade,
  * each with a concrete repair.
+ *
+ * ## Every fix begins with a command (APRV-75)
+ *
+ * A `fix` string starts with something the operator can paste, and the prose
+ * comes after it. The reason is the reading order of a failed run: an operator
+ * scanning a wall of `fix:` lines is looking for the next thing to type, and a
+ * line that opens with "check that…" makes them read a sentence to discover
+ * there is nothing to type at all. {@link FIX_COMMAND_PREFIXES} is the pinned
+ * allowlist, and `tests/cli-doctor.test.ts` drives every failing verdict this
+ * command can produce and asserts the shape (never the wording).
  *
  * ## What it will not do
  *
@@ -56,6 +66,13 @@ import {
   telegramTokenEnvFor,
 } from "../channels/telegram.js";
 import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
+import {
+  envFilePathFor,
+  resolveEnvironment,
+  type ResolvedVariable,
+  type SourceOutcome,
+  type SourceRunner,
+} from "../core/env-file.js";
 import { readTaskFile } from "../core/frontmatter.js";
 import type { EventRecord } from "../core/log.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
@@ -106,8 +123,44 @@ export interface DoctorCheck {
   fix?: string;
 }
 
+/**
+ * Every `fix` string begins with one of these, and the prose follows (APRV-75).
+ *
+ * A closed, small list rather than "looks like a command": the point is that a
+ * reader can paste the head of the line, and a `fix` that opened with a verb
+ * nobody has installed would be no better than a sentence. `approval ` is by far
+ * the commonest — most repairs in this runtime are another verb of this CLI —
+ * and the shell builtins here are the ones an actual repair needs: a variable to
+ * export, a mode to set, an ignore line to append, a directory to move aside.
+ *
+ * Note what is NOT here: no `rm`, no `sudo`, no `git commit`. Doctor repairs
+ * nothing, and a fix line that told an operator to delete or to commit would be
+ * making the decision this project exists to keep human.
+ */
+export const FIX_COMMAND_PREFIXES: readonly string[] = [
+  "approval ",
+  "chmod ",
+  "echo ",
+  "export ",
+  "mv ",
+  "node ",
+  "npm ",
+];
+
 function detailOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+/**
+ * Fold a multi-line message onto one line.
+ *
+ * The human renderer is one line per check plus one indented `fix:`, and a
+ * message that arrived with an embedded newline (the `.approval/env` mode
+ * refusal carries its `chmod` on a second line) would silently break that shape
+ * for every reader and every test that counts lines.
+ */
+function oneLine(text: string): string {
+  return text.replace(/\s*\n\s*/gu, " ").trim();
 }
 
 function absolute(value: string, cwd: string): string {
@@ -219,7 +272,7 @@ function checkBuildFreshness(root: string): DoctorCheck {
         loaderMtime === null
           ? `neither ${loader} nor ${marker} exists — ${root} is not an approval.md installation`
           : `${loader} exists but ${marker} does not: this is an unbuilt checkout, a bin loader with no build behind it`,
-      fix: "run `npm run build` in this checkout (and check you are in the checkout you think you are: `node -p \"process.argv[1]\"`)",
+      fix: 'npm run build — in this checkout; if you are not sure this is the checkout you meant, `node -p "process.argv[1]"` names the one you just ran',
     };
   }
 
@@ -228,7 +281,7 @@ function checkBuildFreshness(root: string): DoctorCheck {
       check: "build-freshness",
       status: "fail",
       detail: `${marker} exists but the bin loader ${loader} does not: \`approval\` on PATH cannot reach this build`,
-      fix: "reinstall the package, or invoke the build directly with `node dist/src/cli/main.js`",
+      fix: "node dist/src/cli/main.js — invoke the build directly, or reinstall the package so `approval` on PATH reaches it",
     };
   }
 
@@ -249,7 +302,7 @@ function checkBuildFreshness(root: string): DoctorCheck {
       check: "build-freshness",
       status: "fail",
       detail: `${marker} is older than the source tree (build ${new Date(markerMtime).toISOString()}, newest source ${new Date(newestSource).toISOString()}): you are running a STALE BUILD, and verbs added since it was compiled are simply absent`,
-      fix: "run `npm run build`",
+      fix: "npm run build",
     };
   }
 
@@ -288,7 +341,10 @@ function checkIdentity(): DoctorCheck {
       raw === undefined || raw.length === 0
         ? `${HUMAN_ACTOR_ENV} is unset: the human-only verbs (grant, reject, revoke, policy attest) will refuse`
         : `${HUMAN_ACTOR_ENV}=${JSON.stringify(raw)} does not match human:<id>, so it is ignored rather than guessed at`,
-    fix: `export ${HUMAN_ACTOR_ENV}=human:<id>, or pass --as human:<id> to each human-only verb`,
+    // `approval setup identity` lands in APRV-74, in parallel with this task;
+    // the manual alternative is kept after it deliberately, because a fix that
+    // named only a verb would be useless to anyone on an older build.
+    fix: `approval setup identity — or set it yourself: export ${HUMAN_ACTOR_ENV}=human:<id>, or pass --as human:<id> to each human-only verb`,
   };
 }
 
@@ -341,21 +397,21 @@ function checkAttestationHealth(records: EventRecord[], policyPath: string): Doc
         check: "attestation",
         status: "fail",
         detail: `${policyPath} has never been attested; every gated operation will refuse with policy-not-attested`,
-        fix: "run `approval policy attest --as human:<id>` after reading the file",
+        fix: "approval policy attest --as human:<id> — after reading the file",
       };
     case "hash-mismatch":
       return {
         check: "attestation",
         status: "fail",
         detail: `${policyPath} has changed since it was attested at seq ${status.seq} (attested ${status.attestedSha256.slice(0, 12)}…, live ${status.liveSha256.slice(0, 12)}…); an edited policy is inoperative until a human re-attests it`,
-        fix: "review the diff, then re-attest the new bytes with `approval policy attest --as human:<id>`",
+        fix: `approval policy attest --as human:<id> — after reviewing the diff (\`git diff -- ${policyPath}\`); re-attesting is what makes the new bytes operative`,
       };
     case "unreadable":
       return {
         check: "attestation",
         status: "fail",
         detail: `${status.message}; an unverifiable policy is treated as unattested`,
-        fix: `create the policy file (or point --policy / --dir at it), then run \`approval policy attest --as human:<id>\``,
+        fix: `approval init — to scaffold a policy file here (or point --policy / --dir at the one you have), then \`approval policy attest --as human:<id>\``,
       };
   }
 }
@@ -381,7 +437,7 @@ function checkLog(logPath: string, result: VerifyResult): DoctorCheck {
         check: "log",
         status: "fail",
         detail: `${logPath} ends with an unterminated final line — the signature of a crashed write, not of tampering; records 1..${result.intactThroughSeq} verify clean`,
-        fix: "run `approval log verify` for the full report; nothing here truncates the torn line, because that is a human decision",
+        fix: "approval log verify — the full report; nothing here truncates the torn line, because that is a human decision",
       };
     case "corrupt":
       return {
@@ -390,7 +446,7 @@ function checkLog(logPath: string, result: VerifyResult): DoctorCheck {
         detail: `${logPath} does not verify (${result.reason}${
           result.firstBadSeq === null ? "" : ` at seq ${result.firstBadSeq}`
         }): ${result.message}`,
-        fix: "run `approval log verify`, and authorize nothing from this log until a human has accounted for the break",
+        fix: "approval log verify — and authorize nothing from this log until a human has accounted for the break",
       };
   }
 }
@@ -438,7 +494,10 @@ async function checkTelegram(apiBase: string, load: PolicyLoadResult): Promise<D
     return {
       check: "telegram",
       status: "skip",
-      detail: `${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} unset: the Telegram channel is not configured, which is a legitimate configuration and not a fault`,
+      // A skip carries no `fix` — there is nothing wrong to repair — but a
+      // reader who WANTED Telegram still needs the path out, so the detail ends
+      // with it. (`approval setup telegram` lands in APRV-74, in parallel.)
+      detail: `${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} unset: the Telegram channel is not configured, which is a legitimate configuration and not a fault; run \`approval setup telegram\` to configure it`,
     };
   }
 
@@ -471,8 +530,8 @@ async function checkTelegram(apiBase: string, load: PolicyLoadResult): Promise<D
         detail: `getMe on ${base} was refused: HTTP ${response.status} (${description})`,
         fix:
           response.status === 401 || /unauthorized/iu.test(description)
-            ? `the bot token is not valid: re-copy it from @BotFather into ${tokenEnv}`
-            : `check ${tokenEnv} and that ${base} is the right Bot API base`,
+            ? `approval setup telegram — the bot token is not valid; re-copy it from @BotFather into ${tokenEnv}`
+            : `approval channel telegram health — the offline configuration report; then check ${tokenEnv} and that ${base} is the right Bot API base`,
       };
     }
 
@@ -489,7 +548,7 @@ async function checkTelegram(apiBase: string, load: PolicyLoadResult): Promise<D
       check: "telegram",
       status: "fail",
       detail: `getMe on ${base} failed: ${redact(detailOf(cause), token)}`,
-      fix: `check network reachability of ${base} (and ${tokenEnv} if it is a TLS or auth failure)`,
+      fix: `approval channel telegram health — the offline configuration report; then check network reachability of ${base} (and ${tokenEnv} if it is a TLS or auth failure)`,
     };
   } finally {
     clearTimeout(timer);
@@ -535,7 +594,7 @@ async function checkWebPort(port: number): Promise<DoctorCheck> {
           check: "web-port",
           status: "fail",
           detail: `127.0.0.1:${port} cannot be bound: EACCES (a privileged port this process may not open)`,
-          fix: "set channels.web.port in APPROVAL.md to a port above 1023, then re-attest the policy",
+          fix: "approval policy attest --as human:<id> — after setting channels.web.port in APPROVAL.md to a port above 1023 (an edited policy is inoperative until it is re-attested)",
         });
         return;
       }
@@ -543,7 +602,7 @@ async function checkWebPort(port: number): Promise<DoctorCheck> {
         check: "web-port",
         status: "fail",
         detail: `127.0.0.1:${port} cannot be bound: ${detailOf(cause)}`,
-        fix: "set a usable channels.web.port in APPROVAL.md, then re-attest the policy",
+        fix: "approval policy attest --as human:<id> — after setting a usable channels.web.port in APPROVAL.md (an edited policy is inoperative until it is re-attested)",
       });
     });
     server.once("listening", () => {
@@ -600,7 +659,7 @@ function checkPayloadStore(logPath: string, records: EventRecord[]): DoctorCheck
       check: "payload-store",
       status: "fail",
       detail: `${storeDir} could not be stat'd: ${detailOf(cause)}; ${PAYLOAD_STORE_WARNING}`,
-      fix: `make ${storeDir} readable and writable by the user running approval`,
+      fix: `chmod u+rwx ${storeDir} — make it readable and writable by the user running approval, and check its ownership`,
     };
   }
 
@@ -609,7 +668,7 @@ function checkPayloadStore(logPath: string, records: EventRecord[]): DoctorCheck
       check: "payload-store",
       status: "fail",
       detail: `${storeDir} exists and is not a directory, so no payload can be stored beside the log; ${PAYLOAD_STORE_WARNING}`,
-      fix: `move whatever occupies ${storeDir} aside, then re-run the request`,
+      fix: `mv ${storeDir} ${storeDir}.aside — move whatever occupies the store's path out of the way (do not delete it until you know what it is), then re-run the request`,
     };
   }
 
@@ -622,7 +681,7 @@ function checkPayloadStore(logPath: string, records: EventRecord[]): DoctorCheck
       check: "payload-store",
       status: "fail",
       detail: `${storeDir} exists but is not writable (${detailOf(cause)}): a request carrying --payload will refuse payload-store-failed; ${PAYLOAD_STORE_WARNING}`,
-      fix: `make ${storeDir} writable by the user running approval (e.g. \`chmod u+w ${storeDir}\`), and check its ownership`,
+      fix: `chmod u+w ${storeDir} — make it writable by the user running approval, and check its ownership`,
     };
   } finally {
     try {
@@ -704,8 +763,8 @@ function checkSampling(load: PolicyLoadResult): DoctorCheck {
     detail: `disabled (${sampler.reason}): ${sampler.message}`,
     fix:
       sampler.reason === "secret-unset" && sampler.secretEnv !== null
-        ? `export ${sampler.secretEnv} with the operator-held sampling secret in the environment that runs the daemon`
-        : "set audit.supervised_sample_rate and audit.sampling_secret_env in the policy, re-attest, and export the named variable where the daemon runs",
+        ? `approval setup sampling — or set it yourself: export ${sampler.secretEnv} with the operator-held sampling secret in the environment that runs the daemon`
+        : "approval policy attest --as human:<id> — after setting audit.supervised_sample_rate and audit.sampling_secret_env in the policy; then export the named variable where the daemon runs",
   };
 }
 
@@ -749,7 +808,7 @@ function checkEnvelopeIntegrity(tasksDir: string, records: EventRecord[]): Docto
       check: "envelope-integrity",
       status: "fail",
       detail: `${tasksDir} could not be listed: ${detailOf(cause)}; whether any task lost its envelope is unknown`,
-      fix: `make ${tasksDir} readable by the user running approval, or point --tasks at the task folder`,
+      fix: `chmod u+rx ${tasksDir} — make it readable by the user running approval, or point --tasks at the task folder`,
     };
   }
 
@@ -789,7 +848,7 @@ function checkEnvelopeIntegrity(tasksDir: string, records: EventRecord[]): Docto
     detail: `${String(lost.length)} task(s) have log history and no envelope in their file: ${lost.join(
       "; ",
     )}. The log still holds every action they declared; the file does not.`,
-    fix: "the envelope was removed by an external rewrite; restore it from the log by hand — see docs/dogfood-cutover.md (\"If an envelope goes missing\") and the APRV-60 record. `approval log tail` shows the registered actions. Nothing here rewrites a task file: re-emitting the envelope from the log would turn a projection into a source.",
+    fix: "approval log tail — it shows the actions each registration declared. The envelope was removed by an external rewrite; restore it from the log by hand — see docs/dogfood-cutover.md (\"If an envelope goes missing\") and the APRV-60 record. Nothing here rewrites a task file: re-emitting the envelope from the log would turn a projection into a source.",
   };
 }
 
@@ -797,43 +856,54 @@ function checkEnvelopeIntegrity(tasksDir: string, records: EventRecord[]): Docto
 // 10. vault
 // ---------------------------------------------------------------------------
 
+/** The exact line doctor tells an operator to add for the vault. */
+const VAULT_IGNORE_LINE = ".approval/vault.enc";
+
+/** The same, for the environment source map (APRV-75). */
+const ENV_IGNORE_LINE = ".approval/env";
+
 /**
- * Patterns in a `.gitignore` that cover `.approval/vault.enc`.
+ * Patterns in a `.gitignore` that cover one path under `.approval/`.
  *
  * A deliberately small, literal set rather than a gitignore engine. The two
- * error directions are not symmetric: a false PASS says an encrypted credential
- * file is safe from a commit when it is not, and a false FAIL costs an operator
- * one glance at a fix line they can ignore. So only forms whose meaning is
- * unambiguous are accepted, and anything cleverer (a negation, a nested
- * `.gitignore`, a `core.excludesFile`) reads as "not covered here".
+ * error directions are not symmetric: a false PASS says a file holding
+ * credentials is safe from a commit when it is not, and a false FAIL costs an
+ * operator one glance at a fix line they can ignore. So only forms whose
+ * meaning is unambiguous are accepted, and anything cleverer (a negation, a
+ * nested `.gitignore`, a `core.excludesFile`) reads as "not covered here".
+ *
+ * Generalised from the vault's fixed list (APRV-68) when the env file arrived
+ * (APRV-75), because the two questions are the same question: the bare basename
+ * is included in both cases because a `.gitignore` pattern with no slash matches
+ * at every level, so a line `vault.enc` — or `env` — does cover the file.
  */
-const VAULT_IGNORE_PATTERNS: readonly string[] = [
-  ".approval/vault.enc",
-  "/.approval/vault.enc",
-  ".approval/",
-  "/.approval/",
-  ".approval",
-  "/.approval",
-  ".approval/*",
-  "/.approval/*",
-  "*.enc",
-  "vault.enc",
-];
-
-/** The exact line doctor tells an operator to add. */
-const VAULT_IGNORE_LINE = ".approval/vault.enc";
+function ignorePatternsFor(relative: string): readonly string[] {
+  const base = relative.slice(relative.lastIndexOf("/") + 1);
+  return [
+    relative,
+    `/${relative}`,
+    ".approval/",
+    "/.approval/",
+    ".approval",
+    "/.approval",
+    ".approval/*",
+    "/.approval/*",
+    base,
+    ...(relative.endsWith(".enc") ? ["*.enc"] : []),
+  ];
+}
 
 type IgnoreVerdict = "ignored" | "not-ignored" | "not-a-repo";
 
 /**
- * Is the vault covered by the project's `.gitignore`?
+ * Is `relative` covered by the project's `.gitignore`?
  *
  * `not-a-repo` when `dir` holds no `.git` entry (a directory in a normal clone,
  * a file in a worktree or submodule): outside a repository there is nothing to
- * accidentally commit the vault to, and failing a check about a risk that does
+ * accidentally commit the file to, and failing a check about a risk that does
  * not exist trains people to ignore the check.
  */
-function vaultIgnoreVerdict(dir: string): IgnoreVerdict {
+function ignoreVerdict(dir: string, relative: string): IgnoreVerdict {
   try {
     statSync(join(dir, ".git"));
   } catch {
@@ -845,10 +915,11 @@ function vaultIgnoreVerdict(dir: string): IgnoreVerdict {
   } catch {
     return "not-ignored";
   }
+  const patterns = ignorePatternsFor(relative);
   for (const raw of text.split(/\r\n|\n|\r/u)) {
     const line = raw.trim();
     if (line.length === 0 || line.startsWith("#")) continue;
-    if (VAULT_IGNORE_PATTERNS.includes(line)) return "ignored";
+    if (patterns.includes(line)) return "ignored";
   }
   return "not-ignored";
 }
@@ -887,13 +958,13 @@ function checkVaultHealth(logPath: string, dir: string, load: PolicyLoadResult):
     };
   }
 
-  const ignored = vaultIgnoreVerdict(dir);
+  const ignored = ignoreVerdict(dir, VAULT_IGNORE_LINE);
   if (ignored === "not-ignored") {
     return {
       check: "vault",
       status: "fail",
       detail: `${vaultPath} exists and is NOT gitignored in ${dir}: one \`git add -A\` publishes an encrypted credential file, and a commit is not something a later commit removes. The contents stay encrypted, but a published vault is a permanent offline-attack target against one human-chosen passphrase`,
-      fix: `add the line \`${VAULT_IGNORE_LINE}\` to ${join(dir, ".gitignore")} (and if it has already been committed, treat every credential in it as disclosed and rotate)`,
+      fix: `echo '${VAULT_IGNORE_LINE}' >> ${join(dir, ".gitignore")} — and if the file has already been committed, treat every credential in it as disclosed and rotate`,
     };
   }
 
@@ -903,7 +974,7 @@ function checkVaultHealth(logPath: string, dir: string, load: PolicyLoadResult):
       check: "vault",
       status: "fail",
       detail: `${vaultPath} exists and $${passphraseEnv} is unset or empty in this process, so no credential can be read: every adapter that needs one will refuse credential-unavailable, which reads like a broken adapter rather than an unopened vault`,
-      fix: `export ${passphraseEnv} with the vault passphrase in the environment that runs the adapters (the policy names the variable, never the value; there is no --passphrase flag)`,
+      fix: `approval setup vault — or set it yourself: export ${passphraseEnv} with the vault passphrase in the environment that runs the adapters (the policy names the variable, never the value; there is no --passphrase flag)`,
     };
   }
 
@@ -915,8 +986,8 @@ function checkVaultHealth(logPath: string, dir: string, load: PolicyLoadResult):
       detail: `${vaultPath} did not open (${opened.code}): ${opened.message}`,
       fix:
         opened.code === "vault-unreadable"
-          ? `check that $${passphraseEnv} holds the passphrase this vault was created with, then check the file's provenance — a wrong passphrase and an altered file are ONE verdict on purpose, because distinguishing them would confirm a guessed passphrase against a file someone had modified`
-          : `inspect ${vaultPath}; it is not a vault this build can read, and nothing here rewrites it`,
+          ? `approval env --check — confirm value-free where $${passphraseEnv} is coming from, and that it is the passphrase this vault was created with; then check the file's provenance. A wrong passphrase and an altered file are ONE verdict on purpose, because distinguishing them would confirm a guessed passphrase against a file someone had modified`
+          : `mv ${vaultPath} ${vaultPath}.unreadable — set it aside and inspect it by hand (do NOT delete it: it may be the only copy of a credential). It is not a vault this build can read, and nothing here rewrites it`,
     };
   }
 
@@ -924,6 +995,239 @@ function checkVaultHealth(logPath: string, dir: string, load: PolicyLoadResult):
     check: "vault",
     status: "pass",
     detail: `${vaultPath} opens with the passphrase in $${passphraseEnv} and holds ${String(opened.count)} credential(s)${ignored === "not-a-repo" ? "; no git repository at " + dir + ", so there is nothing here to commit it to" : ", and it is gitignored"}. No credential name or value is printed by this check`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 11. environment (APRV-75)
+// ---------------------------------------------------------------------------
+
+/**
+ * WHY DOCTOR DOES NOT RESOLVE KEYSTORE SOURCES.
+ *
+ * `resolveEnvironment` is called here exactly as `approval env --check` calls it
+ * — same function, same policy load, same file path — so doctor and env cannot
+ * disagree about what the environment IS. The one difference is this runner,
+ * and it is a difference about what doctor is allowed to DO.
+ *
+ * `security find-generic-password -w` is not a read. On macOS it can raise a GUI
+ * prompt: an item whose ACL does not already trust the calling binary produces
+ * the "wants to access key … in your keychain" dialog, and a locked keychain
+ * produces an unlock dialog. Both BLOCK the process until a human answers, and
+ * both ask a human for a password. `secret-tool lookup` has the same shape
+ * against a locked keyring. Neither is acceptable from a diagnostic: doctor is
+ * the command an operator runs when something is already wrong, frequently over
+ * ssh or from a CI job where no one will ever see the dialog, and a `doctor`
+ * that hangs forever is worse than no doctor. It is also the wrong thing to
+ * TEACH: a command that pops a keychain prompt trains people to click through
+ * keychain prompts.
+ *
+ * So a keystore-backed variable is reported as DECLARED, never resolved, and the
+ * report says which scheme and which service or label — facts `.approval/env`
+ * already carries in the open. `approval env --check`, which the human runs
+ * deliberately and watches, is the command that resolves them.
+ *
+ * This is not a general exception to doctor probing: the Telegram check does
+ * make a network call. The line is that a probe may cost time and packets, and
+ * may not block on a human or ask anyone for a password.
+ */
+const KEYSTORE_DEFERRED = "not resolved by doctor";
+
+const NON_RESOLVING_RUNNER: SourceRunner = {
+  keychain(service: string): SourceOutcome {
+    return {
+      ok: false,
+      code: "helper-failed",
+      message: `${KEYSTORE_DEFERRED}: keychain:${service} is declared here and looked up by \`approval env --check\`. \`security find-generic-password -w\` can block on a keychain-unlock or ACL prompt, and a diagnostic must never hang or ask a human for a password`,
+    };
+  },
+  secretService(label: string): SourceOutcome {
+    return {
+      ok: false,
+      code: "helper-failed",
+      message: `${KEYSTORE_DEFERRED}: secret-service:${label} is declared here and looked up by \`approval env --check\`. \`secret-tool lookup\` can block on a keyring-unlock prompt, and a diagnostic must never hang or ask a human for a password`,
+    };
+  },
+};
+
+/** Was this variable left unresolved by {@link NON_RESOLVING_RUNNER}? */
+function isDeferred(variable: ResolvedVariable): boolean {
+  return (
+    variable.refusal !== undefined &&
+    variable.refusal.code === "helper-failed" &&
+    variable.refusal.message.startsWith(KEYSTORE_DEFERRED)
+  );
+}
+
+/**
+ * The `approval setup <thing>` that knows a given variable, or `null`.
+ *
+ * Derived here from the names doctor already resolves rather than read off the
+ * resolution, so that a fix line in this file is a fix line this file can be
+ * read to verify. A name the policy invented under the `_env` convention maps to
+ * nothing, and its repair is the generic one.
+ */
+function setupThingFor(name: string, load: PolicyLoadResult): string | null {
+  if (name === HUMAN_ACTOR_ENV) return "identity";
+  if (name === telegramTokenEnvFor(load) || name === telegramChatEnvFor(load)) return "telegram";
+  if (name === passphraseEnvFor(load)) return "vault";
+  if (name === resolveSampler(load).secretEnv) return "sampling";
+  return null;
+}
+
+/**
+ * One variable, in words, with NO VALUE ON ANY PATH.
+ *
+ * `ResolvedVariable.value` is never read by this check — not to length-check it,
+ * not to redact it. The fields consulted are `status`, `source`, `plaintext` and
+ * `refusal`, and `source` is a scheme and a service label, which is what
+ * `.approval/env` carries in the open (SPEC.md §11.1 invariant 3).
+ */
+function describeVariable(variable: ResolvedVariable): string {
+  switch (variable.status) {
+    case "set-in-environment":
+      return "set in the environment";
+    case "resolved-from-keychain":
+    case "resolved-from-secret-service":
+      return `resolved from ${variable.source}`;
+    case "resolved-literal":
+      return variable.plaintext
+        ? `declared in ${ENV_IGNORE_LINE} as a PLAINTEXT literal`
+        : `declared in ${ENV_IGNORE_LINE} as a literal`;
+    case "unset":
+      if (isDeferred(variable)) {
+        return `declared in ${ENV_IGNORE_LINE} as ${variable.source} (${KEYSTORE_DEFERRED}; \`approval env --check\` resolves it)`;
+      }
+      if (variable.refusal !== undefined) {
+        return `unresolved — ${variable.refusal.code}: ${variable.refusal.message}`;
+      }
+      if (variable.source.startsWith("env:")) {
+        return `declared in ${ENV_IGNORE_LINE} as env: (inherited), and not set in this shell`;
+      }
+      return "unset";
+  }
+}
+
+/**
+ * Are the variables the policy NAMES actually going to be there? (APRV-75)
+ *
+ * The gap this closes: every check above reports on ONE variable at the moment
+ * it needs it (identity, the sampling secret, the vault passphrase, the Telegram
+ * pair), each in its own message, and nothing states the environment as a whole
+ * or mentions `.approval/env` — the file SPEC.md §5.2 made the written-down
+ * place for where those values come from. An operator whose file has the wrong
+ * mode learns it one refusal at a time.
+ *
+ * ## The verdict rule, and why unset is a SKIP
+ *
+ * - **PASS** when every policy-named variable is set in this environment,
+ *   resolved, or declared against a keystore (see {@link NON_RESOLVING_RUNNER}:
+ *   declared-and-deferred counts as configured, because the operator wrote the
+ *   line and only `approval env --check` may run the lookup).
+ * - **FAIL** for something that is WRONG: a mode other than 0600, an unreadable
+ *   or unparseable file, a secret-bearing variable sitting in the working tree
+ *   as a plaintext literal, an env file a `git add -A` would commit, or a
+ *   variable whose declared source refused for a real reason (a missing helper
+ *   binary, an item that is not there, a policy `_env` key that is not a usable
+ *   variable name).
+ * - **SKIP**, naming the variables, when the only thing true is that some are
+ *   unset. Unset is a STATE, exactly as an absent vault and an unconfigured
+ *   Telegram are states, and each of those is a skip already. It is a real
+ *   consideration that doctor runs in THIS shell and an unset variable here
+ *   means the verbs run from here will refuse — but doctor is also run from a
+ *   shell that never intends to grant anything, and a machine with no Telegram
+ *   and no vault would then be permanently "unhealthy" for declining features it
+ *   was never asked to have. The state is stated loudly instead, with the verb
+ *   that gives the full table. The checks that DO fail on a specific unset
+ *   variable are the ones that know it is needed: `identity` fails because
+ *   human-only verbs refuse without it, `vault` fails only once a vault exists,
+ *   and `audit-sampling` fails only once a rate has been configured.
+ */
+function checkEnvironment(logPath: string, dir: string, load: PolicyLoadResult): DoctorCheck {
+  const envPath = envFilePathFor(logPath);
+  const resolved = resolveEnvironment(load, envPath, NON_RESOLVING_RUNNER, process.env);
+
+  if (!resolved.ok) {
+    return {
+      check: "environment",
+      status: "fail",
+      detail: `${resolved.path}: ${resolved.code}: ${oneLine(resolved.message)}`,
+      fix:
+        resolved.code === "env-file-mode"
+          ? `chmod 600 ${resolved.path} — the file may carry a plaintext secret, so it is read only at mode 0600`
+          : `approval env --check — the value-free report on this file; fix the line it names (nothing here rewrites it)`,
+    };
+  }
+
+  const variables = resolved.variables;
+  const table = variables
+    .map((variable) => `${variable.name} ${describeVariable(variable)}`)
+    .join("; ");
+  const head = resolved.present
+    ? `${resolved.path} (mode 0600, and no verb loads it implicitly: \`eval "$(approval env)"\` is how a human puts these in a shell)`
+    : `${resolved.path} is absent, so every variable below is inherited from this shell or unset`;
+  const preamble = `${head}. ${table}`;
+
+  // Ordered by what stays wrong the longest, the same reading the vault check
+  // uses: a file one `git add -A` from publication is the fault that survives
+  // fixing everything else here.
+  if (resolved.present && ignoreVerdict(dir, ENV_IGNORE_LINE) === "not-ignored") {
+    return {
+      check: "environment",
+      status: "fail",
+      detail: `${preamble}. The file is NOT gitignored in ${dir}: one \`git add -A\` commits it, and it is the file whose whole purpose is to say where credentials come from — a plaintext literal in it would be published outright, and even a keychain: line publishes the service names`,
+      fix: `echo '${ENV_IGNORE_LINE}' >> ${join(dir, ".gitignore")} — and if the file has already been committed, treat anything literal in it as disclosed and rotate`,
+    };
+  }
+
+  const plaintext = variables.filter((variable) => variable.plaintext);
+  if (plaintext.length > 0) {
+    const thing = setupThingFor(plaintext[0]?.name ?? "", load);
+    return {
+      check: "environment",
+      status: "fail",
+      detail: `${preamble}. ${plaintext.map((variable) => variable.name).join(", ")} ${plaintext.length === 1 ? "is a secret written" : "are secrets written"} literally into ${resolved.path}: the value sits in the working tree, where a backup, an editor swap file or a stray \`git add -f\` reaches it`,
+      fix:
+        thing === null
+          ? `approval env --check — lists every plaintext variable; move each one to \`<NAME>=keychain:<service>\` (macOS) or \`<NAME>=secret-service:<label>\` (Linux) in ${resolved.path}`
+          : `approval setup ${thing} — stores it outside the working tree; or edit ${resolved.path} by hand to \`<NAME>=keychain:<service>\` (macOS) / \`<NAME>=secret-service:<label>\` (Linux)`,
+    };
+  }
+
+  const broken = variables.filter(
+    (variable) => variable.refusal !== undefined && !isDeferred(variable),
+  );
+  const first = broken[0];
+  if (first !== undefined) {
+    const thing = setupThingFor(first.name, load);
+    return {
+      check: "environment",
+      status: "fail",
+      detail: `${preamble}. ${broken.map((variable) => variable.name).join(", ")} ${broken.length === 1 ? "declares a source that did not resolve" : "declare sources that did not resolve"}: a line was written for ${broken.length === 1 ? "it" : "them"}, so this is a configuration that is not working rather than one nobody made`,
+      fix:
+        first.refusal?.code === "invalid-variable-name"
+          ? `approval policy attest --as human:<id> — after fixing the _env key in APPROVAL.md: ${JSON.stringify(first.name)} is not a usable shell variable name, so no export line is ever emitted for it`
+          : thing === null
+            ? `approval env --check — the full value-free report, with the helper's own reason for each variable`
+            : `approval setup ${thing} — re-store the item the file names; \`approval env --check\` shows the helper's own reason`,
+    };
+  }
+
+  const unset = variables.filter(
+    (variable) => variable.status === "unset" && !isDeferred(variable),
+  );
+  if (unset.length > 0) {
+    return {
+      check: "environment",
+      status: "skip",
+      detail: `${preamble}. ${unset.map((variable) => variable.name).join(", ")} ${unset.length === 1 ? "is" : "are"} unset in this shell, which is a state and not a fault — but the verbs run from THIS shell will refuse anything that needs ${unset.length === 1 ? "it" : "them"}; run \`approval env --check\` for the full table, and \`eval "$(approval env)"\` once you have written the file`,
+    };
+  }
+
+  return {
+    check: "environment",
+    status: "pass",
+    detail: `${preamble}. Every variable your policy names is available to the verbs run from this shell. No value is printed by this check on any path`,
   };
 }
 
@@ -1028,6 +1332,9 @@ export function commandDoctor(
       // APRV-68: appended rather than inserted, for the same reason the
       // envelope check was — a reader's position-based expectations still hold.
       checkVaultHealth(logPath, dir, policyLoad),
+      // APRV-75: appended, for the third time and the same reason — the check
+      // list is a frozen shape that grows only at the end.
+      checkEnvironment(logPath, dir, policyLoad),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

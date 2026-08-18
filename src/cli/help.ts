@@ -1405,7 +1405,7 @@ Flags:
   --json             machine-readable output
   -h, --help         this text
 
-Ten checks, in the order in which their failures cascade:
+Eleven checks, in the order in which their failures cascade:
 
   build-freshness  dist/src/cli/main.js — the exact file the bin loader runs —
                    is present and NOT OLDER than the newest file under src/ or
@@ -1487,6 +1487,38 @@ Ten checks, in the order in which their failures cascade:
                    never a name or a value. SKIPS when there is no vault, with
                    the note that adapters needing credentials will refuse until
                    one exists.
+  environment      whether the variables your POLICY NAMES will be there when a
+                   verb needs them, and what .approval/env (the source map,
+                   SPEC.md §5.2) says about where each one comes from. Every
+                   other check reports on one variable at the moment it needs
+                   it; this one states the environment as a whole. It resolves
+                   exactly what "approval env --check" resolves, so the two
+                   cannot disagree, WITH ONE DELIBERATE DIFFERENCE: a
+                   keychain:/secret-service: source is reported as DECLARED and
+                   is NOT looked up, because "security find-generic-password -w"
+                   and "secret-tool lookup" can block on a keychain-unlock or
+                   ACL prompt, and a diagnostic must never hang or ask a human
+                   for a password. Run "approval env --check" to resolve them.
+                   PASSES when every named variable is set here, resolved, or
+                   declared against a keystore. FAILS on a mode other than 0600
+                   (with the chmod), an unreadable or unparseable file, a
+                   secret-bearing variable written into the file as a PLAINTEXT
+                   literal, an env file a "git add -A" would commit (with the
+                   exact ignore line), or a declared source that refused for a
+                   real reason. SKIPS, naming them, when the only thing true is
+                   that some variables are unset — unset is a state, like an
+                   absent vault, and the checks that know a variable is REQUIRED
+                   (identity, vault, audit-sampling) fail on it themselves.
+                   VALUE-FREE BY CONSTRUCTION: this check reads each variable's
+                   status and source and never its value, on any path.
+
+EVERY FIX BEGINS WITH A COMMAND. A "fix:" line opens with something you can
+paste — approval …, chmod …, echo …, export …, mv …, node …, npm … — and the
+prose explaining it comes after. An operator scanning a failed run is looking
+for the next thing to type, and a line that opens with "check that…" makes them
+read a sentence to find out there is nothing to type. Nothing in that list
+deletes or commits: doctor repairs nothing, and a fix that told you to rm or to
+git commit would be making the decision this project keeps human.
 
 APPENDS NOTHING. Not an event, not a marker. An operator reaching for a
 diagnostic while the log is in a state they do not understand must not have that
@@ -1517,10 +1549,12 @@ JSON shape (stdout, one object):
     {"check":"payload-store","status":"pass","detail":"..."},
     {"check":"audit-sampling","status":"skip","detail":"..."},
     {"check":"envelope-integrity","status":"pass","detail":"..."},
-    {"check":"vault","status":"skip","detail":"..."}]}
+    {"check":"vault","status":"skip","detail":"..."},
+    {"check":"environment","status":"skip","detail":"..."}]}
   status is "pass" | "fail" | "skip". fix is present only when there is
-  something to do. ok is true when no check failed — a skip does not make it
-  false. The ten checks always appear, in this order.
+  something to do, and it always begins with a runnable command. ok is true when
+  no check failed — a skip does not make it false. The eleven checks always
+  appear, in this order.
 ${JSON_ERRORS}`;
 
 export const AUDIT_HELP = `approval audit — the retrospective review of sampled supervised actions
