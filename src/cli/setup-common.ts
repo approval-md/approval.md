@@ -34,7 +34,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
 import { userInfo } from "node:os";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
@@ -189,16 +189,33 @@ export const defaultKeystoreRunner: KeystoreRunner = {
     // Attempt one: the value on `security`'s STDIN. Its `-w` with no argument
     // prompts twice (the value and its confirmation), so it is written twice.
     //
+    // `detached: true` is load-bearing (APRV-94). `security -w` reads the
+    // secret from the CONTROLLING TTY whenever the process has one and ignores
+    // stdin entirely, so from a real terminal the pipe below was never read:
+    // Apple's "password data for new item:" prompt appeared to the human,
+    // whatever they typed was stored, and only the read-back mismatch and the
+    // argv fallback rescued the run (Ctrl-C at that prompt stored nothing at
+    // all). A detached child starts its own session with no controlling
+    // terminal, so `security` has nothing to prompt on and reads the pipe.
+    // spawnSync still waits for it; detaching changes the session, not the
+    // synchrony. The option is absent from the sync typings (undocumented for
+    // spawnSync, honoured by Node's SyncProcessRunner, verified against Node
+    // 24 with a scratch item), hence the widened type. A Node that ignored it
+    // would land on exactly the pre-APRV-94 path, and the read-back below is
+    // what catches that.
+    //
     // Exit status is NOT trusted as proof of a correct store. A probe against a
     // scratch keychain (APRV-74 review) showed `security … -w` with piped stdin
-    // exiting 0 while leaving no findable item under the service name, which
-    // is the worst outcome: a fallback that never triggers and a later lookup
-    // that fails. So every attempt is followed by a read-back, and success is
-    // "the keystore returns exactly the bytes we generated", nothing less.
-    const piped = spawnSync("security", [...base, "-w"], {
+    // exiting 0 while leaving no findable item under the service name (that
+    // was this same tty behaviour, seen from the other side). So every attempt
+    // is followed by a read-back, and success is "the keystore returns exactly
+    // the bytes we generated", nothing less.
+    const pipedOptions: SpawnSyncOptionsWithStringEncoding & { detached: boolean } = {
       encoding: "utf8",
       input: `${value}\n${value}\n`,
-    });
+      detached: true,
+    };
+    const piped = spawnSync("security", [...base, "-w"], pipedOptions);
     if (piped.error === undefined && piped.status === 0) {
       const back = defaultKeystoreRunner.read(service);
       if (back.ok && back.value === value) return { ok: true, viaArgv: false };

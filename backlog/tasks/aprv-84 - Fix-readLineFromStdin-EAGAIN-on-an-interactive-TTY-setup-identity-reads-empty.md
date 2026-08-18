@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - Claude
 created_date: '2026-08-18 11:14'
-updated_date: '2026-08-18 11:21'
+updated_date: '2026-08-18 12:02'
 labels:
   - bug
   - cli
@@ -26,7 +26,7 @@ On macOS, `approval setup identity` returned "no identity was entered; nothing w
 - [x] #1 readLineFromStdin treats EAGAIN as "nothing yet" and keeps waiting (like readSecret), and does not spin a hot loop while waiting
 - [x] #2 Both readers share the one blocking-byte-read helper so the EAGAIN handling exists in one place
 - [x] #3 A unit test covers the EAGAIN-then-data path for readLineFromStdin via an injectable readSync
-- [ ] #4 Verified by hand: approval setup identity on a macOS terminal waits for and accepts human:carter
+- [x] #4 Verified by hand: approval setup identity on a macOS terminal waits for and accepts human:carter
 - [x] #5 npm test and lint clean
 <!-- AC:END -->
 
