@@ -58,6 +58,8 @@ Usage:
   approval doctor     [--log <path>] [--policy <path>] [--dir <path>]
                       [--api-base <url>] [--json]
   approval payload hash <file|-> [--json]
+  approval env        [--check] [--policy <path>] [--dir <path>] [--log <path>]
+                      [--json]
   approval vault set <name> [--value-env <VAR>] [--as human:<id>] [--json]
   approval vault list|remove [<name>] [--as human:<id>] [--json]
   approval import agents-md <file> [--out <path>] [--json]
@@ -70,7 +72,8 @@ Commands:
   init      scaffold a working directory: APPROVAL.md (SPEC.md §5.1's canonical
             policy, to be read and edited), the empty .approval/log/ directory,
             .approval/QUEUE.md in its empty state, and the .gitignore lines for
-            the index, the vault and the atomic-write temp files. Appends
+            the index, the vault, the environment source map and the
+            atomic-write temp files. Appends
             nothing, attests nothing, overwrites nothing; a re-run writes
             nothing and reports what already exists
   log       inspect the append-only event log (verify | tail | export)
@@ -142,6 +145,13 @@ Commands:
             no verb: the daemon selects supervised actions with an operator-held
             secret, because a caller who could sample could also decline to
             sample itself
+  env       resolve .approval/env — the environment SOURCE MAP — and print an
+            export block for your shell to evaluate. THE ONLY VERB THAT READS
+            THAT FILE: no command loads it implicitly, because human identity is
+            one of the variables it carries and a working-tree file any process
+            read on its own would let anything able to write it act as you. The
+            default output carries secrets by design; "env --check" prints a
+            table with no values on any path
   vault     the encrypted credential store adapters read from (SPEC.md §10.4).
             "vault set|list|remove" are HUMAN-ONLY; list shows NAMES and never
             values, and there is no "vault get" — a credential's only sanctioned
@@ -164,6 +174,9 @@ Defaults:
   payloads .approval/payloads/<payload_hash>.json  (the bytes a request bound
            to, written by request --payload; read by render and every channel,
            and re-hashed on every read)
+  env    .approval/env  (the environment SOURCE MAP: KEY=keychain:<service> /
+         secret-service:<label> / env: / a plaintext literal. Mode 0600, and read
+         by exactly one command, "approval env". GITIGNORED by init)
   vault  .approval/vault.enc  (AES-256-GCM over the named credentials; written
          only by "vault set|remove", read only by an adapter inside a verified
          token window. GITIGNORE IT — doctor fails if you have not)
@@ -2765,4 +2778,93 @@ JSON shapes (the adapter contract's own result, unmodified):
   {"ok":false,"code":"…","message":"…","adapter":"email","action_key":"…",
    "acted":true|false,"started_seq":N,"outcome":"execution.failed",
    "outcome_seq":N,"exit_code":1,"adapter_code":"smtp-550","redactions":0}
+${JSON_ERRORS}`;
+
+export const ENV_HELP = `approval env — resolve .approval/env into an export block for your shell
+
+Usage:
+  approval env [--check] [--policy <path>] [--dir <path>] [--log <path>] [--json]
+
+Flags:
+  --check            print a value-free table (NAME / status / source) instead of
+                     the export block, and exit 1 if a variable your POLICY NAMES
+                     is unresolved
+  --policy <path>    policy file whose *_env keys name the variables
+  --dir <path>       directory to discover APPROVAL.md / APPROVALS.md in
+  --log <path>       log file the .approval/env path is derived from
+  --json             machine-readable output (carries values; --json --check does
+                     not)
+  -h, --help         this text
+
+THIS COMMAND IS THE ONLY THING THAT READS .approval/env, and its default output
+CARRIES SECRETS, deliberately: its job is to put them into your shell.
+
+    approval env --check      # look first: no value is printed on this path
+    eval "$(approval env)"    # then establish the environment yourself
+
+No other verb loads that file. Human identity (APPROVAL_HUMAN) is one of the
+variables it can carry, and in v0.1 identity is config-declared (SPEC.md §11), so
+a working-tree file that any process read on its own would let anything able to
+write that file act as you on every human-only verb — policy attest, grant,
+vault set. The file is inert; a human evaluating this output is what makes it
+take effect (SPEC.md §11.1 invariant 7).
+
+The file: one KEY=VALUE per line, # comments and blank lines ignored, no quoting
+and no interpolation, mode 0600 (anything else is refused with the chmod to run),
+and gitignored by "approval init". VALUE says WHERE the value lives:
+
+  KEY=keychain:<service>       macOS: security find-generic-password -a "$USER"
+                               -s <service> -w
+  KEY=secret-service:<label>   Linux: secret-tool lookup approval <label>
+  KEY=env:                     inherited from the shell that launched you
+  KEY=<value>                  a plaintext literal — PERMITTED, and always
+                               reported as plaintext by --check and by --json.
+                               A rule people route around is not a control
+  KEY=literal:<value>          the same, spelled out, for a value that begins
+                               with something that looks like a scheme
+
+A value with some other word: prefix is a LITERAL, not an error —
+APPROVAL_HUMAN=human:carter is the commonest line this file will ever hold. Near
+misses of the real schemes (keyring:, secret_service:, plaintext:, vault:, …) are
+reserved and refused rather than silently exported as their own text, since a
+mistyped source would otherwise surface as a 401 from the far end hours later.
+
+THE VALUE IS NEVER PUT IN AN ARGV: the helper commands receive a service name or
+a label and hand the secret back on stdout.
+
+Which variables are answered for: APPROVAL_HUMAN, the Telegram token and chat id
+(channels.telegram.token_env / chat_id_env, or the defaults), the vault
+passphrase (vault.passphrase_env, or the default), the sampling secret when — and
+only when — audit.sampling_secret_env names one, and any other string-valued key
+ending in _env anywhere in the loaded policy.
+
+ALREADY-EXPORTED VALUES WIN. A variable set in this shell is reported
+"set-in-environment" and its line in the file is not consulted: your shell is the
+authority, and a file that could override it would be a file that silently
+redirects a gate operation's credentials.
+
+An ABSENT file is not an error: every variable then falls to set-in-environment
+or unset, which is the world before the file existed.
+
+Exit 0 even when variables are unresolved, because the output is destined for
+eval and a shell function that failed on an unconfigured channel is one nobody
+keeps in their profile. Unresolved variables are printed as # comments naming the
+repair. --check is the path with an opinion: 1 when a variable the policy NAMED
+is unresolved. A defaulted variable nobody mentioned is an offer, not a promise.
+
+${EXIT_CODES}
+
+  4 here means the file could not be read, or its mode is not 0600.
+  1 means the file's contents were refused (a syntax error, a duplicate key, an
+  unknown scheme) or, with --check, that a policy-named variable is unresolved.
+
+JSON shape (stdout, one object):
+  {"ok":true,"path":"/…/.approval/env","present":true,
+   "variables":[{"name":"APPROVAL_TG_TOKEN","status":"resolved-from-keychain",
+                 "source":"keychain:approval-tg","plaintext":false,
+                 "declared":true,"value":"…","fix"?:"…","refusal"?:{…}}]}
+  status is one of set-in-environment | resolved-from-keychain |
+  resolved-from-secret-service | resolved-literal | unset. "value" is present
+  only when there is one AND --check was not passed. "ok" is the --check verdict
+  on every path: false when a policy-named variable is unresolved.
 ${JSON_ERRORS}`;

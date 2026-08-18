@@ -95,6 +95,11 @@ export const GITIGNORE_MARKER = "# approval.md";
  * - `.approval/vault.enc` — the encrypted credential store (M7). Encrypted or
  *   not, the vault is the one file in the layout whose contents are secrets, and
  *   secrets do not go in a repository.
+ * - `.approval/env` — the environment source map (APRV-73). Usually it holds
+ *   only keychain service names, and it is ignored anyway: the format permits a
+ *   plaintext literal, an operator will eventually paste one in, and the day
+ *   they do must not be the day a bot token lands in a commit. Ignoring it also
+ *   states the intent — the environment is per-machine, not per-repository.
  * - `.approval/**\/*.tmp-*` — the atomic-write temp files. Both writers that
  *   rename into place (`channels/render-queue.ts`, `core/payload-store.ts`) name
  *   their temp `.<basename>.tmp-<pid>-<counter>`, so this pattern is written to
@@ -109,6 +114,7 @@ export const GITIGNORE_MARKER = "# approval.md";
 export const GITIGNORE_ENTRIES: readonly string[] = [
   ".approval/*.sqlite",
   ".approval/vault.enc",
+  ".approval/env",
   ".approval/**/*.tmp-*",
 ];
 
