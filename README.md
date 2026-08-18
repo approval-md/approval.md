@@ -42,6 +42,8 @@ posture is stated honestly in SPEC.md section 11: this is an oversight layer for
 broadly cooperative agents, with hard enforcement at the adapter boundaries that
 hold the credentials. [CLAUDE.md](CLAUDE.md) describes how this repository builds
 itself, including the point at which it starts running behind its own gate.
+[docs/record-example.md](docs/record-example.md) works the `record.*` half of the
+taxonomy end to end, using an LLM-categorised note a human adopts or reroutes.
 
 Four ceremonies belong to the human. Attesting a policy, amending it, deciding a
 request, and handing the resulting grant to an adapter that holds a real
