@@ -108,9 +108,10 @@ Then confirm the world is sane before you trust anything it tells you:
 approval doctor
 ```
 
-`doctor` runs seven checks in the order their failures cascade: build freshness,
-identity, attestation, log chain, Telegram reachability, the web port, and the
-payload store. It
+`doctor` runs eleven checks in the order their failures cascade: build freshness,
+identity, attestation, log chain, Telegram reachability, the web port, the
+payload store, audit sampling, envelope integrity, the vault, and the
+environment source map behind `approval env`. It
 appends nothing, sends no message, and repairs nothing. Each failure comes with a
 concrete fix string you run yourself. It exists because a real ceremony lost time
 twice to a stale `dist/` and an unbuilt checkout, neither of which was a runtime
@@ -167,19 +168,30 @@ truth.
 ## Ceremony three: approving from your phone
 
 The Telegram channel is the reference adapter. Create a bot by messaging
-**@BotFather** with `/newbot`, message your new bot once so it can answer you,
-and read your chat id out of `getUpdates`. The full walkthrough, with the exact
-commands and the expected output at every step, is in
+**@BotFather** with `/newbot`, then let `approval setup` do the rest. The full
+walkthrough, with the exact commands and the expected output at every step, is in
 [examples/telegram-demo.md](examples/telegram-demo.md).
 
 ```sh
-export APPROVAL_TG_TOKEN='1234567890:AA...'   # from BotFather
-export APPROVAL_TG_CHAT='123456789'           # your chat id
-export APPROVAL_HUMAN='human:you'
+approval setup identity        # APPROVAL_HUMAN, validated
+approval setup telegram        # token into the keystore, getMe, chat discovery
+eval "$(approval env)"         # put them in this shell
 ```
 
-`APPROVAL.md` carries only the *names* of those first two variables and never
-their values. No flag puts a bot token into a shell history or a process listing.
+`setup` is the writer of `.approval/env`, the environment source map: the secret
+goes into the OS keystore (macOS Keychain, or `secret-tool` on Linux) and the
+file records only where it lives. It is interactive by refusal (a pipe or
+`--json` exits 2 and prints the non-interactive commands), because a setup a CI
+job could drive would be a way for a CI job to declare a human identity.
+
+`approval env` is the only command that reads that file, and evaluating it is a
+step a human takes: nothing loads it implicitly, since human identity is one of
+the values it carries. `approval env --check` prints the same table with no
+values in it. Exporting the three variables by hand still works and is exactly
+what the eval expands to.
+
+`APPROVAL.md` carries only the *names* of the bot's two variables and never their
+values. No flag puts a bot token into a shell history or a process listing.
 
 An approval binds to specific bytes. The payload lives in a file, the envelope
 declares its `payload_hash`, and `--payload` supplies the bytes at request time:
@@ -257,11 +269,19 @@ and a real mail provider, is in [examples/email-demo.md](examples/email-demo.md)
 the scripted twin is `tests/e2e-email-demo.test.ts`.
 
 ```sh
+approval setup vault           # mint the passphrase, store it, record where
+eval "$(approval env)"         # the variable the policy names, in this shell
 V="$(security find-generic-password -a "$USER" -s smtp-app-password -w)" \
   approval vault set smtp.password --value-env V --as human:you
 approval adapter email task-042:chaser --token "$TOKEN" \
   --payload message.json --as agent:claude-admin
 ```
+
+The two stores meet here and divide cleanly. `.approval/env` says where the
+values that unlock the machine come from, and `approval setup vault` writes the
+passphrase line under whatever name the policy's `vault.passphrase_env` declares.
+The SMTP password is an adapter credential, so it goes in the vault instead,
+where a gated adapter spends it inside a verified token window.
 
 `approval vault set` stores one credential in `.approval/vault.enc`, encrypted
 under a passphrase the policy names and never carries. The value comes from

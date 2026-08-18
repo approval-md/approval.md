@@ -50,46 +50,24 @@ because no mock can assert it:
 ## Prerequisites
 
 - Node 20 or newer, and this repository built (`npm run build`).
-- A Telegram bot and your chat id. Create them with **@BotFather** exactly as
-  `examples/telegram-demo.md` describes; `docs/dogfood-cutover.md` names the
-  environment variables the live runtime reads.
+- A Telegram bot. Create it with **@BotFather** exactly as
+  `examples/telegram-demo.md` describes. The chat id and the two variables that
+  carry the bot are established by `approval setup telegram` in
+  [Configure the environment](#configure-the-environment) below;
+  `docs/dogfood-cutover.md` names the same variables for the live runtime.
 - **An app-specific password for a mail account you control.** Every major
   provider issues these: a separate password, scoped to one client, revocable on
   its own, and usable with SMTP submission on port 587 with STARTTLS. Use one.
   Do not put your account password in a vault, and do not use an account whose
   outbound mail you would mind a scripted demo touching.
-- A vault passphrase. Generate one rather than inventing one:
 
-```sh
-openssl rand -base64 32
-```
+A vault passphrase is *not* a prerequisite: `approval setup vault` generates one
+(32 random bytes) and stores it for you, and no verb in this CLI ever prints it.
 
-### Keep the secrets out of your shell history
-
-Nothing below types a secret as an argument. On macOS, put each one in the
-Keychain once and read it back with `security find-generic-password -w` at the
-moment it is needed. (On Linux, `secret-tool lookup` or `pass show` fills the
-same role; what matters is that the value reaches a variable rather than a
-command line.)
-
-```sh
-security add-generic-password -a "$USER" -s approval-demo-smtp-password -w
-security add-generic-password -a "$USER" -s approval-demo-vault-passphrase -w
-security add-generic-password -a "$USER" -s approval-demo-bot-token -w
-```
-
-Each `-w` with no value prompts for the secret and reads it without echoing it.
-
-```sh
-export APPROVAL_TG_TOKEN="$(security find-generic-password -a "$USER" -s approval-demo-bot-token -w)"
-export APPROVAL_TG_CHAT='123456789'           # your chat id
-export APPROVAL_HUMAN='human:carter'          # who the approvals are recorded as
-export APPROVAL_DEMO_VAULT_PASSPHRASE="$(security find-generic-password -a "$USER" -s approval-demo-vault-passphrase -w)"
-```
-
-`APPROVAL.md` carries only the *names* of those variables and never their
-values (SPEC.md sections 5.1 and 5.2). There is no flag that puts a bot token, a
-passphrase, or an SMTP password into a shell history or a process listing.
+`APPROVAL.md` carries only the *names* of the bot's and the vault's variables and
+never their values (SPEC.md sections 5.1 and 5.2). There is no flag that puts a
+bot token, a passphrase, or an SMTP password into a shell history or a process
+listing.
 
 **Identity caveat (SPEC.md section 11).** Human identity in v0.1 is
 config-declared: `APPROVAL_HUMAN` or `--as human:<id>`, declared and not proved.
@@ -165,6 +143,105 @@ EOF
 The policy block inside the heredoc is itself a fenced block, which is why the
 command is wrapped in four backticks.
 
+### Configure the environment
+
+Three interactive verbs and one command. They come after the policy, because
+each of them reads the variable *names* out of it, and they run in the demo
+directory, because `.approval/env` is per-directory.
+
+```sh
+approval setup identity      # APPROVAL_HUMAN=human:carter
+approval setup vault         # mints the passphrase, stores it, records where
+approval setup telegram      # token, getMe, chat discovery, both variables
+eval "$(approval env)"
+```
+
+What each one does:
+
+- **`setup identity`** asks for a `human:<id>` and validates it against the same
+  `^human:.+` pattern the human-only verbs enforce. It is the one subcommand that
+  is not human-only, because it is what declares the identity that check reads.
+- **`setup vault`** generates 32 random bytes, stores them in the OS keystore as
+  `approval-vault-passphrase`, and writes the source line for
+  **the variable your policy names**. The policy above says
+  `vault.passphrase_env: APPROVAL_DEMO_VAULT_PASSPHRASE`, so that is the line it
+  writes; with no `vault:` block it would write `APPROVAL_VAULT_PASSPHRASE`. The
+  passphrase is not printed here or anywhere else. If `.approval/vault.enc`
+  already exists the verb warns first and defaults to no: a vault cannot be
+  re-keyed by changing a variable, and every credential in it would become
+  unreadable.
+- **`setup telegram`** stores the token, proves it with `getMe`, asks you to
+  message the bot, reads the chat id back, and writes both variables. On macOS
+  the token is collected by `security`'s own no-echo prompt, so it is never typed
+  into this process; on Linux `secret-tool` plays the same part; with neither, it
+  is offered as a plaintext literal in `.approval/env` on a typed `yes`. Every
+  `getUpdates` it makes carries no offset, so a tap waiting for a running
+  listener stays where it is. Stop `approval channel telegram listen` first.
+
+All three refuse when stdin is not a terminal, or when `--json` is given, and
+print the exact non-interactive commands instead: a setup a pipe could drive
+would let a CI job declare a human identity and store a credential.
+
+`approval env` is the only command that reads `.approval/env`. Nothing loads that
+file implicitly, because human identity is one of the values it carries and a
+working-tree file any process read on its own would let anything able to write it
+act as you (SPEC.md section 11.1, invariant 7). Look before you evaluate:
+
+```sh
+approval env --check     # NAME / STATUS / SOURCE, with no values on any path
+```
+
+#### What setup does for you (or: by hand)
+
+The same three secrets, placed by hand. Each `-w` with no value prompts for the
+secret and reads it without echoing it, and the value never reaches an argument:
+
+```sh
+security add-generic-password -a "$USER" -s approval-demo-smtp-password -w
+security add-generic-password -a "$USER" -s approval-vault-passphrase -w
+security add-generic-password -a "$USER" -s approval-tg-token -w
+```
+
+(On Linux, `secret-tool store --label <name> approval <name>`; on a machine with
+neither helper, the values go into `.approval/env` in plaintext, which
+`approval env --check` and `approval doctor` then report as plaintext forever
+after.) Generate a passphrase rather than inventing one: `openssl rand -base64 32`.
+
+Then either record the sources in `.approval/env`, naming the variables your
+policy names. The passphrase line here is `APPROVAL_DEMO_VAULT_PASSPHRASE`
+because that is what the demo policy declares:
+
+```sh
+printf '%s\n' \
+  'APPROVAL_HUMAN=human:carter' \
+  'APPROVAL_TG_TOKEN=keychain:approval-tg-token' \
+  'APPROVAL_TG_CHAT=123456789' \
+  'APPROVAL_DEMO_VAULT_PASSPHRASE=keychain:approval-vault-passphrase' \
+  >> .approval/env
+chmod 600 .approval/env
+```
+
+or export the four variables directly, which is what every step below actually
+depends on:
+
+```sh
+export APPROVAL_HUMAN='human:carter'
+export APPROVAL_TG_TOKEN="$(security find-generic-password -a "$USER" -s approval-tg-token -w)"
+export APPROVAL_TG_CHAT='123456789'
+export APPROVAL_DEMO_VAULT_PASSPHRASE="$(security find-generic-password -a "$USER" -s approval-vault-passphrase -w)"
+```
+
+A variable already set in this shell wins over the file: `approval env` reports
+it as `set-in-environment` and does not consult the line.
+
+The SMTP app password is deliberately absent from all of that. It is an
+**adapter credential**, and adapter credentials live in the vault
+(`.approval/vault.enc`), not in `.approval/env`. This is the one place the two
+stores meet, and the division is the whole design: `.approval/env` says where the
+values that unlock the machine come from, and the vault holds the values a
+gated adapter spends inside a verified token window. Step 3 puts the password
+there.
+
 ### Step 2: attest it
 
 ```sh
@@ -181,8 +258,11 @@ again.
 
 ### Step 3: fill the vault
 
-Five credentials. Host, port and security are configuration; the user and the
-password are the secret, and the secret never appears as an argument.
+Five credentials, all of them in the vault rather than in `.approval/env`: they
+are what the adapter spends, and `vault set` is the only way in. Host, port and
+security are configuration; the user and the password are the secret, and the
+secret never appears as an argument. The passphrase that opens the vault is
+already in this shell, from `eval "$(approval env)"`.
 
 ```sh
 approval vault set smtp.host     --value-env V --as human:carter   # V=smtp.example.net
@@ -330,7 +410,17 @@ approval doctor
 ✓ web-port: 127.0.0.1:4680 is free (bound and released; nothing was left listening)
 ✓ payload-store: …
 ✓ vault: /tmp/approval-email-demo/.approval/vault.enc opens with the passphrase in $APPROVAL_DEMO_VAULT_PASSPHRASE and holds 5 credential(s) … No credential name or value is printed by this check
+✓ environment: /tmp/approval-email-demo/.approval/env (mode 0600, and no verb loads it implicitly: `eval "$(approval env)"` is how a human puts these in a shell) … Every variable your policy names is available to the verbs run from this shell
 ```
+
+The `environment` check is the one that reads the work of the setup verbs back.
+It passes when every variable the policy names is set here or declared against a
+keystore, fails on something that is wrong (a mode other than 0600, an env file
+a `git add -A` would commit, a secret sitting in the working tree as a plaintext
+literal, a declared source that did not resolve), and skips loudly, naming them,
+when variables are merely unset. Every failure it prints comes with a
+command first: `approval setup <thing>` where a setup verb owns the repair,
+`approval env --check` where nothing does.
 
 The vault check opens the vault and counts what is in it. It does not test the
 SMTP credential: the only way to learn whether a password is accepted is to
@@ -495,9 +585,15 @@ unset APPROVAL_TG_TOKEN APPROVAL_TG_CHAT APPROVAL_HUMAN TOKEN HASH V
 unset APPROVAL_DEMO_VAULT_PASSPHRASE
 
 security delete-generic-password -a "$USER" -s approval-demo-smtp-password
-security delete-generic-password -a "$USER" -s approval-demo-vault-passphrase
-security delete-generic-password -a "$USER" -s approval-demo-bot-token
+security delete-generic-password -a "$USER" -s approval-vault-passphrase
+security delete-generic-password -a "$USER" -s approval-tg-token
 ```
+
+Deleting the directory takes `.approval/env` with it, and that file held only the
+*sources*. The two items above are where `approval setup` put the values, under
+the service names it documents (`approval setup --help` lists all three). On
+Linux the same two are `secret-tool clear approval approval-vault-passphrase`
+and `secret-tool clear approval approval-tg-token`.
 
 Revoke the app-specific password with your mail provider. If the bot was created
 only for this walkthrough, revoke its token with BotFather (`/revoke`) or delete
@@ -511,7 +607,8 @@ are the ones specific to the vault and the mail hop.
 
 | Symptom | Cause |
 | --- | --- |
-| `APPROVAL_DEMO_VAULT_PASSPHRASE is unset or empty` at exit 2 | The passphrase variable the policy names is not set in *this* shell. The policy names the variable; nothing carries the value. |
+| `APPROVAL_DEMO_VAULT_PASSPHRASE is unset or empty` at exit 2 | The passphrase variable the policy names is not set in *this* shell. The policy names the variable; nothing carries the value. `approval env --check` says whether a source is recorded for it; `eval "$(approval env)"` puts it in the shell. |
+| `approval setup vault` wrote a variable the adapter does not read | The policy's `vault.passphrase_env` changed after the line was written. `setup vault` writes whatever the policy names at the moment it runs; re-run it, or rename the line in `.approval/env` by hand. |
 | `vault-unreadable` at exit 1 | The ciphertext did not authenticate: the passphrase is wrong, or the file was altered. The two are deliberately not distinguished. There is no recovery path; re-create the vault and store the credentials again. |
 | `vault-absent` or `credential-absent` at exit 1 | No vault, or nothing under that name. `approval vault list` says which. |
 | `email-config-invalid` naming `smtp.security` | The stored value is not `implicit`, `starttls` or `none`. The adapter refuses to guess a transport security setting. |

@@ -264,7 +264,7 @@ function emitExports(
   const unresolved = variables.filter((entry) => entry.status === "unset");
   if (unresolved.length > 0) {
     streams.out(
-      `#\n# The \`approval setup\` verbs named below are not implemented yet (APRV-74);\n# until they land, export the variable yourself or add a line to the file.\n`,
+      `#\n# The \`approval setup\` verbs named below write those lines for you, one\n# secret at a time. Export the variable yourself, or add the line by hand,\n# if you would rather not run them.\n`,
     );
   }
   streams.out(`\n`);

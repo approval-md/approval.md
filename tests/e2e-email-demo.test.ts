@@ -72,8 +72,19 @@ import {
 } from "../src/adapters/email.js";
 import { payloadHash } from "../src/core/payload.js";
 import {
+  commandSetup,
+  type KeystoreKind,
+  type KeystoreRunner,
+  type SetupDeps,
+  type StoreOutcome,
+} from "../src/cli/setup.js";
+import type { Prompter, SecretRead } from "../src/cli/prompt.js";
+import type { Streams } from "../src/cli/main.js";
+import type { TelegramFetch } from "../src/channels/telegram.js";
+import {
   assertLocal,
   callbackUpdate,
+  messageUpdate,
   startMockBotApi,
   type MockBotApi,
 } from "./telegram-mock.js";
@@ -441,6 +452,10 @@ function startListener(): { done: Promise<Run> } {
   });
   return { done };
 }
+
+/** The manual walk's `[event, actor]` list, recorded at hop (i) and reproduced
+ * by the setup walk at the bottom of this file. */
+let manualShape: [string, string][] = [];
 
 /** Filled in at the Telegram hop; spent at the SMTP hop. */
 let executionToken = "";
@@ -861,6 +876,9 @@ test("the M7 demo: draft -> telegram -> approve -> mail sent -> chain clean", as
     const tail = json(tailed);
     assert.equal(tail["status"], "ok");
     const records = tail["records"] as Record<string, unknown>[];
+    // The shape the second walk has to reproduce: same events, same actors, in
+    // the same order, reached through `approval setup` instead of by hand.
+    manualShape = records.map((record) => [String(record["event"]), String(record["actor"])]);
     assert.deepEqual(
       records.map((record) => [record["event"], record["actor"]]),
       [
@@ -943,4 +961,431 @@ test("the M7 demo: draft -> telegram -> approve -> mail sent -> chain clean", as
     const session = smtp.last();
     assert.equal(session?.message?.includes(executionToken), false, "the token reached the mail");
   });
+});
+
+// ===========================================================================
+// The same walk, reached through `approval setup` (APRV-76)
+// ===========================================================================
+
+/**
+ * The walk above exports its variables by hand. `examples/email-demo.md` no
+ * longer tells a human to do that: it tells them to run `approval setup
+ * identity|vault|telegram` and then `eval "$(approval env)"`. This test is the
+ * scripted twin of THAT prelude, and its claim is the one the rewritten runbook
+ * makes — the two paths reach the same log.
+ *
+ * How it is driven, and why:
+ *
+ * - **`setup` runs IN-PROCESS through its injected seams** (`tests/cli-setup.ts`
+ *   does the same, for the same reason): the prompter is scripted, the keystore
+ *   is a fake, and the Bot API is the loopback mock. A spawned `setup` would
+ *   refuse at the terminal check, which is the property that makes the verb safe
+ *   to ship, and nothing under `npm test` may reach a real keystore.
+ * - **The fake keystore reports `kind: "none"`**, so every secret lands in
+ *   `.approval/env` as a plaintext literal. That is deliberate: the SPAWNED
+ *   children below resolve the file with the real runner, and a `keychain:` line
+ *   would send them to the developer's own Keychain. §5.2 permits literals and
+ *   `approval env --check` reports them as plaintext forever after, which is the
+ *   path this test is allowed to walk.
+ * - **`approval env --json` is the seam between the two halves.** The child
+ *   reads what setup wrote and hands back the values; every later hop is spawned
+ *   with exactly those values in its environment, so nothing here re-states a
+ *   credential the file did not already resolve to.
+ *
+ * Assertions are deliberately thinner than the walk above: the hops are the same
+ * hops, already asserted line by line, and what is under test here is the
+ * prelude and the shape of the log it leads to.
+ */
+
+/** The second walk's home, torn down with the first. */
+let setupDemo = "";
+
+after(() => {
+  if (setupDemo !== "") rmSync(setupDemo, { recursive: true, force: true });
+});
+
+/** Everything the second walk's children printed. Swept at the end. */
+const setupCaptured: { label: string; text: string }[] = [];
+
+function runSetupWalkSync(args: string[], env: Record<string, string> = {}): Run {
+  const result = spawnSync(process.execPath, [CLI_ENTRY, ...args], {
+    cwd: setupDemo,
+    encoding: "utf8",
+    env: cliEnv(env),
+  });
+  assert.equal(result.error, undefined, `spawn failed: ${String(result.error)}`);
+  const run = { code: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  setupCaptured.push({ label: `${args[0] ?? "?"} stdout`, text: run.stdout });
+  setupCaptured.push({ label: `${args[0] ?? "?"} stderr`, text: run.stderr });
+  return run;
+}
+
+async function runSetupWalk(args: string[], env: Record<string, string> = {}): Promise<Run> {
+  const run = await new Promise<Run>((resolve, reject) => {
+    const child = spawn(process.execPath, [CLI_ENTRY, ...args], {
+      cwd: setupDemo,
+      env: cliEnv(env),
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code: code ?? -1, stdout, stderr }));
+    child.stdin.end();
+  });
+  setupCaptured.push({ label: `${args[0] ?? "?"} stdout`, text: run.stdout });
+  setupCaptured.push({ label: `${args[0] ?? "?"} stderr`, text: run.stderr });
+  return run;
+}
+
+/**
+ * A keystore that is a `Map` and says this machine has none, so `setup` takes
+ * the documented plaintext-literal path. Nothing here can reach a real keyring:
+ * the interface IS the seam.
+ */
+function noKeystore(): KeystoreRunner {
+  const items = new Map<string, string>();
+  return {
+    kind: (): KeystoreKind => "none",
+    storeGenerated(service, value): StoreOutcome {
+      items.set(service, value);
+      return { ok: true, viaArgv: false };
+    },
+    storePrompted(service): StoreOutcome {
+      items.set(service, BOT_TOKEN);
+      return { ok: true, viaArgv: false };
+    },
+    read(service) {
+      const value = items.get(service);
+      return value === undefined ? { ok: false, message: "fake: absent" } : { ok: true, value };
+    },
+  };
+}
+
+/** The human's side of the conversation, one answer per question, in order. */
+function scripted(script: unknown[]): Prompter {
+  const remaining = [...script];
+  const next = (prompt: string): unknown => {
+    if (remaining.length === 0) {
+      throw new Error(`setup asked an unscripted question: ${JSON.stringify(prompt)}`);
+    }
+    return remaining.shift();
+  };
+  return {
+    readLine(prompt) {
+      const answer = next(prompt);
+      return answer === null ? null : String(answer);
+    },
+    readSecret(prompt): SecretRead {
+      return { ok: true, value: String(next(prompt)) };
+    },
+    confirm(prompt) {
+      return next(prompt) === true;
+    },
+  };
+}
+
+/** Run one `setup` subcommand in-process, capturing what it said. */
+async function setupSubcommand(argv: string[], deps: SetupDeps): Promise<Run> {
+  const out: string[] = [];
+  const err: string[] = [];
+  const streams: Streams = {
+    out: (text) => out.push(text),
+    err: (text) => err.push(text),
+  };
+  const code = await commandSetup(argv, streams, setupDemo, deps);
+  const run = { code, stdout: out.join(""), stderr: err.join("") };
+  setupCaptured.push({ label: `setup ${argv[0] ?? "?"} stdout`, text: run.stdout });
+  setupCaptured.push({ label: `setup ${argv[0] ?? "?"} stderr`, text: run.stderr });
+  return run;
+}
+
+/**
+ * One flat test rather than the ordered subtests above, deliberately: a
+ * `t.test()` awaited from a parent that has already awaited something else does
+ * not reliably hold this Node version's runner (the parent's `finally` ran
+ * before the first subtest did, closing the mock the subtests needed). The hops
+ * are marked by comment, and each assertion still names what it is about.
+ */
+test("the setup path: `approval setup` + `approval env` reaches the same log", async () => {
+  setupDemo = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-e2e-email-setup-")));
+  const setupLog = join(setupDemo, ".approval", "log", "events.jsonl");
+  const setupEnvFile = join(setupDemo, ".approval", "env");
+  const setupVault = join(setupDemo, ".approval", "vault.enc");
+
+  const bot2 = await startMockBotApi(BOT_TOKEN);
+  const smtp2 = await startMockSmtp({ tls: "none", user: SMTP_USER, password: SMTP_PASSWORD });
+  assertLoopback(smtp2.host);
+
+  try {
+    // -----------------------------------------------------------------------
+    // (1) init and the policy, exactly as the manual walk starts. The policy
+    // comes FIRST because setup reads the variable names out of it:
+    // `vault.passphrase_env` here is the demo's own, not the default.
+    const scaffolded = runSetupWalkSync(["init", "--json"]);
+    assert.equal(scaffolded.code, 0, scaffolded.stderr);
+    rmSync(join(setupDemo, "APPROVAL.md"));
+    writeFileSync(join(setupDemo, "APPROVAL.md"), POLICY, "utf8");
+    assert.equal(existsSync(setupLog), false, "init created a log");
+
+    // -----------------------------------------------------------------------
+    // (2) `approval setup identity|vault|telegram`, in process, through the
+    // seams. Nothing here can reach a real keystore: the interface IS the seam.
+    const deps: SetupDeps = {
+      keystore: noKeystore(),
+      fetch: globalThis.fetch as unknown as TelegramFetch,
+      apiBase: assertLocal(bot2.url),
+      generate: () => PASSPHRASE,
+      pollTimeoutSeconds: 1,
+    };
+
+    const identity = await setupSubcommand(["identity"], {
+      ...deps,
+      prompter: scripted([HUMAN]),
+    });
+    assert.equal(identity.code, 0, identity.stderr);
+
+    // With no keystore the generated passphrase is offered as a literal, and
+    // the offer is taken only on a typed `yes` — never `y`, never Enter.
+    const vault = await setupSubcommand(["vault", "--as", HUMAN], {
+      ...deps,
+      prompter: scripted(["yes"]),
+    });
+    assert.equal(vault.code, 0, vault.stderr);
+
+    bot2.queueUpdate(messageUpdate({ chatId: CHAT, username: "carter" }));
+    const telegram = await setupSubcommand(["telegram", "--as", HUMAN], {
+      ...deps,
+      prompter: scripted([
+        BOT_TOKEN, // the no-echo read, on a machine with no keystore
+        "yes", // write it as a plaintext literal
+        "", // Enter, after "send the bot a message"
+        true, // use this chat?
+        false, // send a test message? — default no
+      ]),
+    });
+    assert.equal(telegram.code, 0, telegram.stderr);
+
+    // The file the runbook now tells a human to produce, and nothing else: no
+    // log, no attestation, no edit to the policy. The passphrase line carries
+    // the name the POLICY declares, which is the demo's own and not the
+    // default — the fact `examples/email-demo.md` now states outright.
+    assert.deepEqual(
+      readFileSync(setupEnvFile, "utf8").split("\n").filter((line) => line.length > 0),
+      [
+        `APPROVAL_HUMAN=${HUMAN}`,
+        `${PASS_ENV}=${PASSPHRASE}`,
+        `APPROVAL_TG_TOKEN=${BOT_TOKEN}`,
+        `APPROVAL_TG_CHAT=${CHAT}`,
+      ],
+    );
+    assert.equal(existsSync(setupLog), false, "setup appended to the log");
+    assert.equal(readFileSync(join(setupDemo, "APPROVAL.md"), "utf8"), POLICY);
+    // No getUpdates setup made carried an offset, so nothing it did could
+    // acknowledge an update a listener is waiting for.
+    for (const entry of bot2.requests.filter((request) => request.method === "getUpdates")) {
+      assert.equal("offset" in entry.body, false, "setup acknowledged an update");
+    }
+
+    // -----------------------------------------------------------------------
+    // (3) `approval env --json` — the seam between the two halves. This output
+    // CARRIES VALUES by design (that is the verb's whole job), so it is the one
+    // child of this walk kept out of the secret sweep at the bottom.
+    const envRead = spawnSync(process.execPath, [CLI_ENTRY, "env", "--json"], {
+      cwd: setupDemo,
+      encoding: "utf8",
+      env: cliEnv({}),
+    });
+    assert.equal(envRead.status, 0, envRead.stderr);
+    const resolvedEnv: Record<string, string> = {};
+    for (const variable of (JSON.parse(envRead.stdout) as { variables: Record<string, unknown>[] })
+      .variables) {
+      assert.equal(
+        variable["status"],
+        "resolved-literal",
+        `${String(variable["name"])} did not resolve from the file setup wrote`,
+      );
+      resolvedEnv[String(variable["name"])] = String(variable["value"]);
+    }
+    // The four values the manual walk types out by hand, recovered from the
+    // file instead. This equality IS the claim of the rewritten runbook.
+    assert.deepEqual(resolvedEnv, {
+      APPROVAL_HUMAN: HUMAN,
+      [PASS_ENV]: PASSPHRASE,
+      APPROVAL_TG_TOKEN: BOT_TOKEN,
+      APPROVAL_TG_CHAT: CHAT,
+    });
+    const human = resolvedEnv["APPROVAL_HUMAN"] as string;
+    const passphrase = resolvedEnv[PASS_ENV] as string;
+
+    // -----------------------------------------------------------------------
+    // (4) attest, fill the vault, register and request — every child from here
+    // on carries only what `approval env` handed back.
+    const attested = runSetupWalkSync(["policy", "attest", "--json"], { APPROVAL_HUMAN: human });
+    assert.equal(attested.code, 0, attested.stderr);
+
+    const credentials: [string, string][] = [
+      ["smtp.host", smtp2.host === "127.0.0.1" ? "localhost" : smtp2.host],
+      ["smtp.port", String(smtp2.port)],
+      ["smtp.security", "starttls"],
+      ["smtp.user", SMTP_USER],
+      ["smtp.password", SMTP_PASSWORD],
+    ];
+    for (const [name, value] of credentials) {
+      // The adapter's secrets live in the VAULT and never in `.approval/env`;
+      // what the env file carries is the passphrase that opens it.
+      const set = runSetupWalkSync(["vault", "set", name, "--value-env", "DEMO_VALUE", "--json"], {
+        APPROVAL_HUMAN: human,
+        [PASS_ENV]: passphrase,
+        DEMO_VALUE: value,
+      });
+      assert.equal(set.code, 0, set.stderr);
+    }
+    assert.equal(existsSync(setupVault), true, "no vault was created");
+
+    writeFileSync(join(setupDemo, "message.json"), `${JSON.stringify(PAYLOAD, null, 2)}\n`, "utf8");
+    writeFileSync(join(setupDemo, `${TASK}.md`), taskFile(PAYLOAD_HASH), "utf8");
+
+    const registered = runSetupWalkSync(["register", `${TASK}.md`, "--as", AGENT, "--json"]);
+    assert.equal(registered.code, 0, registered.stderr);
+    const requested = runSetupWalkSync([
+      "request",
+      TASK,
+      "--action",
+      ACTION,
+      "--payload",
+      "message.json",
+      "--as",
+      AGENT,
+      "--json",
+    ]);
+    assert.equal(requested.code, 0, requested.stderr);
+
+    // -----------------------------------------------------------------------
+    // (5) the phone, the tap, and the send.
+    const listener = spawn(
+      process.execPath,
+      [
+        CLI_ENTRY,
+        "channel",
+        "telegram",
+        "listen",
+        "--once",
+        "--api-base",
+        assertLocal(bot2.url),
+        "--poll-timeout",
+        "10",
+      ],
+      {
+        cwd: setupDemo,
+        env: cliEnv({
+          APPROVAL_TG_TOKEN: resolvedEnv["APPROVAL_TG_TOKEN"] as string,
+          APPROVAL_TG_CHAT: resolvedEnv["APPROVAL_TG_CHAT"] as string,
+          APPROVAL_HUMAN: human,
+        }),
+      },
+    );
+    let listened = "";
+    let listenedErr = "";
+    listener.stdout.setEncoding("utf8");
+    listener.stderr.setEncoding("utf8");
+    listener.stdout.on("data", (chunk: string) => {
+      listened += chunk;
+    });
+    listener.stderr.on("data", (chunk: string) => {
+      listenedErr += chunk;
+    });
+    const decided = new Promise<Run>((resolve) => {
+      listener.on("exit", (code) =>
+        resolve({ code: code ?? -1, stdout: listened, stderr: listenedErr }),
+      );
+    });
+
+    // The keyboard rides the LAST message of a request, after the header and
+    // the payload chunks, so waiting for "APPROVAL REQUIRED" would race it.
+    await until(
+      () =>
+        bot2.requests.some(
+          (entry) => entry.method === "sendMessage" && entry.body["reply_markup"] !== undefined,
+        ),
+      "the listener to deliver the request and its buttons",
+    );
+    bot2.queueUpdate(
+      callbackUpdate({ data: bot2.callbackDataFor(ACTION, "grant"), chatId: CHAT }),
+    );
+    const granted = await decided;
+    setupCaptured.push({ label: "listener stderr", text: granted.stderr });
+    assert.equal(granted.code, 0, granted.stderr);
+
+    const printed = /execution token for \S+: (\S+)/u.exec(granted.stdout);
+    assert.ok(printed !== null, `no execution token on the listener's stdout: ${granted.stdout}`);
+    const token = printed[1] as string;
+
+    const sent = await runSetupWalk(
+      [
+        "adapter",
+        "email",
+        ACTION,
+        "--token",
+        token,
+        "--payload",
+        "message.json",
+        "--as",
+        AGENT,
+        "--vault",
+        setupVault,
+        "--json",
+      ],
+      {
+        [PASS_ENV]: passphrase,
+        // The operator's own trust decision, made outside the runtime, exactly
+        // as the walk above makes it.
+        NODE_EXTRA_CA_CERTS: FIXTURE_CA,
+      },
+    );
+    assert.equal(sent.code, 0, `${sent.stdout}${sent.stderr}`);
+    assert.equal(smtp2.connections, 1, "exactly one SMTP session was expected");
+    assert.equal(smtp2.last()?.authenticated, "PLAIN");
+
+    // -----------------------------------------------------------------------
+    // (6) the two paths reach the same log, and nothing leaked.
+    const tailed = runSetupWalkSync(["log", "tail", "-n", "10", "--json"]);
+    assert.equal(tailed.code, 0, tailed.stderr);
+    const records = (JSON.parse(tailed.stdout) as { records: Record<string, unknown>[] }).records;
+    assert.equal(manualShape.length, 6, "the manual walk recorded no shape to compare against");
+    assert.deepEqual(
+      records.map((record) => [String(record["event"]), String(record["actor"])]),
+      manualShape,
+      "the setup path produced a different log from the hand-exported path",
+    );
+
+    const verified = runSetupWalkSync(["log", "verify", "--json"]);
+    assert.equal(verified.code, 0, verified.stderr);
+    assert.equal((JSON.parse(verified.stdout) as Record<string, unknown>)["status"], "clean");
+
+    // The sweep, over this walk's own corpus. `approval env` is exempt and only
+    // `approval env`: it is the verb whose job is to emit these values, and it
+    // was run above with its output kept out of `setupCaptured`.
+    const logBytes = readFileSync(setupLog, "utf8");
+    for (const [label, needle] of [
+      ["SMTP password", SMTP_PASSWORD],
+      ["vault passphrase", PASSPHRASE],
+      ["bot token", BOT_TOKEN],
+    ] as const) {
+      assert.equal(logBytes.includes(needle), false, `the ${label} reached the log`);
+      for (const { label: where, text } of setupCaptured) {
+        assert.equal(text.includes(needle), false, `the ${label} appeared in ${where}`);
+      }
+    }
+  } finally {
+    await bot2.close();
+    await smtp2.close();
+  }
 });
