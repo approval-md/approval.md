@@ -60,7 +60,7 @@ Usage:
   approval payload hash <file|-> [--json]
   approval env        [--check] [--policy <path>] [--dir <path>] [--log <path>]
                       [--json]
-  approval setup      identity|vault|sampling|telegram [--as human:<id>]
+  approval setup      identity|vault|sampling|telegram|adapter <name> [--as human:<id>]
                       [--api-base <url>] [--policy <path>] [--dir <path>]
                       [--log <path>]                       (interactive; no --json)
   approval vault set <name> [--value-env <VAR>] [--as human:<id>] [--json]
@@ -156,11 +156,14 @@ Commands:
             default output carries secrets by design; "env --check" prints a
             table with no values on any path
   setup     the WRITER for that file: "setup identity|vault|sampling|telegram"
-            stores each secret in the OS keystore and records where it lives.
-            INTERACTIVE ONLY — it refuses a non-terminal stdin and --json, and
-            prints the exact commands to run instead, because a setup a pipe
-            could drive would let a CI job declare a human identity. It appends
-            nothing to the log, attests nothing, and never edits APPROVAL.md
+            stores each secret in the OS keystore and records where it lives,
+            and "setup adapter <name>" fills the VAULT from the credential
+            manifest the adapter itself declares, then proves it against the
+            service without sending anything. INTERACTIVE ONLY — it refuses a
+            non-terminal stdin and --json, and prints the exact commands to run
+            instead, because a setup a pipe could drive would let a CI job
+            declare a human identity. It appends nothing to the log, attests
+            nothing, and never edits APPROVAL.md
   vault     the encrypted credential store adapters read from (SPEC.md §10.4).
             "vault set|list|remove" are HUMAN-ONLY; list shows NAMES and never
             values, and there is no "vault get" — a credential's only sanctioned
@@ -2919,6 +2922,8 @@ Usage:
   approval setup vault    [--as human:<id>] [--log <path>] [--dir <path>]
   approval setup sampling [--as human:<id>] [--log <path>] [--dir <path>]
   approval setup telegram [--as human:<id>] [--api-base <url>] [--log <path>]
+  approval setup adapter <name> [--as human:<id>] [--log <path>] [--dir <path>]
+                                [--policy <path>]
 
 Subcommands:
   identity  declare who the human is (APPROVAL_HUMAN). The one subcommand that
@@ -2929,6 +2934,16 @@ Subcommands:
             policy line that turns sampling on
   telegram  collect the bot token, prove it with getMe, discover the approver
             chat, and record both variables
+  adapter   fill the VAULT with one adapter's credentials, asked for from the
+            manifest that adapter declares, and prove them against the service
+            without sending anything
+
+ADAPTER CREDENTIALS GO TO THE VAULT, and to nothing else. Not the OS keystore,
+where the four subcommands above put their secrets, and not .approval/env. The
+division is SPEC.md §10.4's: .approval/env says where the values that unlock the
+machine live, and .approval/vault.enc holds the values a gated adapter SPENDS,
+read by the adapter inside the verified-token window and by nothing else. There
+is no verb that prints one back.
 
 EVERY SUBCOMMAND REFUSES WHEN STDIN IS NOT A TERMINAL, and when --json is given,
 and exits 2 printing the exact non-interactive commands to run instead. A setup
@@ -3040,6 +3055,74 @@ attested policy file. It prints the block to add and the \`approval policy amend
 ceremony that attests it.
 
 ${EXIT_CODES}
+${JSON_ERRORS}`;
+
+export const SETUP_ADAPTER_HELP = `approval setup adapter — fill the vault for one adapter (HUMAN-ONLY)
+
+Usage:
+  approval setup adapter <name> [--as human:<id>] [--log <path>] [--dir <path>]
+                                [--policy <path>]
+
+Known adapters:
+  email     the SMTP settings \`approval adapter email\` reads: smtp.host,
+            smtp.port, smtp.security, smtp.user, smtp.password
+
+Asks for each credential the named adapter DECLARES, validates every answer with
+the adapter's own rules, stores them in .approval/vault.enc, and offers to prove
+the result against the service. The manifest is the adapter's, so the names this
+verb writes are by construction the names its \`act\` reads.
+
+THE PASSPHRASE IS READ, NEVER ESTABLISHED. It comes from the environment
+variable your policy names in vault.passphrase_env, exactly as \`approval vault
+set\` reads it. This verb does not resolve .approval/env (SPEC.md §11.1 invariant
+7) — run \`approval setup vault\` and then \`eval "$(approval env)"\` first. With
+the variable unset, nothing is stored and no vault is created.
+
+WHAT IT REPORTS: the path, the count, the names written and the names left
+alone. Never a value, on any path, including a failed probe.
+
+${EXIT_CODES}
+
+  1 here means the service refused the stored configuration, or the vault would
+  not open. The values are KEPT either way; the undo is printed.
+${JSON_ERRORS}`;
+
+export const SETUP_ADAPTER_EMAIL_HELP = `approval setup adapter email — the SMTP credentials (HUMAN-ONLY)
+
+Usage:
+  approval setup adapter email [--as human:<id>] [--log <path>] [--dir <path>]
+                               [--policy <path>]
+
+The five names the email adapter reads inside the verified-token window:
+
+  smtp.host      the submission server
+  smtp.port      587 for STARTTLS submission, 465 for implicit TLS
+  smtp.security  implicit | starttls | none, picked from a numbered list
+  smtp.user      optional, and both-or-neither with the password
+  smtp.password  optional, read with no echo, written last
+
+A port that is not a port and a security setting that is not one of the three
+words are refused HERE, in the words \`approval adapter email\` would have used at
+send time. A username without a password (or the reverse) is refused before
+anything is stored: sending unauthenticated because half the credential is
+missing would put the message on a path nobody configured.
+
+THE PROBE SENDS NOTHING. It is the same SMTP session a send runs — connect,
+EHLO, STARTTLS, AUTH — and then QUIT. It proves the host answers, the TLS mode is
+the one the server offers, and the credential is accepted. It does not prove
+delivery, and it puts no message on the wire. It defaults to yes and can be
+declined; declining stores the values and says they are unverified.
+
+A FAILED PROBE KEEPS THE VALUES. A laptop behind a captive portal is not a
+reason to make you type five things again. The refusal prints the SMTP code and
+the server's first line, with the credential redacted, and the undo:
+
+  approval vault remove smtp.password --as human:<id>
+
+${EXIT_CODES}
+
+  1 here means the server refused, or the vault would not open with the
+  passphrase in your environment.
 ${JSON_ERRORS}`;
 
 export const SETUP_TELEGRAM_HELP = `approval setup telegram — the bot token and the approver chat

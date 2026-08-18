@@ -39,7 +39,9 @@ import { runAdapterConformance, type AdapterConformanceHarness } from "../src/ad
 import {
   DEFAULT_CREDENTIAL_NAMES,
   EMAIL_CLASS,
+  EMAIL_CREDENTIAL_SPECS,
   EMAIL_FAILURE_CODES,
+  checkEmailCredentialSet,
   deterministicMessageId,
   emailAdapter,
   encodeHeaderValue,
@@ -978,4 +980,81 @@ test("options.classes adds to the canonical class rather than replacing it", () 
 
   const wider = emailAdapter({ classes: ["communicate.email.internal", EMAIL_CLASS] });
   assert.deepEqual(wider.classes, [EMAIL_CLASS, "communicate.email.internal"]);
+});
+
+// ===========================================================================
+// The credential manifest (APRV-78)
+// ===========================================================================
+
+test("the manifest declares exactly the names `act` reads, key for key", () => {
+  const declared = EMAIL_CREDENTIAL_SPECS.map((spec) => spec.name);
+  // Not "the same set of strings": the same names against the same keys. A
+  // manifest that drifted from DEFAULT_CREDENTIAL_NAMES would be a setup verb
+  // filling a vault this adapter cannot read, and the failure would arrive at
+  // send time as `credential-unavailable` for a credential the operator watched
+  // themselves store.
+  assert.deepEqual([...declared].sort(), Object.values(DEFAULT_CREDENTIAL_NAMES).sort());
+  for (const [key, name] of Object.entries(DEFAULT_CREDENTIAL_NAMES)) {
+    const spec = EMAIL_CREDENTIAL_SPECS.find((candidate) => candidate.name === name);
+    assert.ok(spec !== undefined, `no spec declares ${key} (${name})`);
+  }
+
+  // The shape the flow depends on: the secret is LAST, so a write that fails
+  // half way has not already consumed the one value nobody wants to retype; the
+  // password is the only secret; and no secret carries a default.
+  assert.equal(declared[declared.length - 1], DEFAULT_CREDENTIAL_NAMES.password);
+  assert.deepEqual(
+    EMAIL_CREDENTIAL_SPECS.filter((spec) => spec.kind === "secret").map((spec) => spec.name),
+    [DEFAULT_CREDENTIAL_NAMES.password],
+  );
+  for (const spec of EMAIL_CREDENTIAL_SPECS) {
+    if (spec.kind === "secret") assert.equal(spec.default, undefined);
+  }
+
+  const security = EMAIL_CREDENTIAL_SPECS.find(
+    (spec) => spec.name === DEFAULT_CREDENTIAL_NAMES.security,
+  );
+  assert.deepEqual(
+    (security?.choices ?? []).map((choice) => choice.value),
+    ["implicit", "starttls", "none"],
+  );
+  assert.equal(security?.default, "starttls");
+});
+
+test("the manifest's validation refuses in the same words `act` refuses in", () => {
+  const port = EMAIL_CREDENTIAL_SPECS.find((spec) => spec.name === DEFAULT_CREDENTIAL_NAMES.port);
+  const rejected = port?.validate?.("70000");
+  assert.equal(rejected?.ok, false);
+  assert.equal(
+    rejected?.ok === false ? rejected.message : "",
+    `the vault's ${DEFAULT_CREDENTIAL_NAMES.port} is not a TCP port number (1-65535)`,
+  );
+  assert.equal(port?.validate?.("587").ok, true);
+
+  const host = EMAIL_CREDENTIAL_SPECS.find((spec) => spec.name === DEFAULT_CREDENTIAL_NAMES.host);
+  assert.equal(host?.validate?.("").ok, false);
+  assert.equal(host?.validate?.("smtp example net").ok, false);
+  assert.equal(host?.validate?.("smtp.example.net").ok, true);
+
+  const security = EMAIL_CREDENTIAL_SPECS.find(
+    (spec) => spec.name === DEFAULT_CREDENTIAL_NAMES.security,
+  );
+  assert.equal(security?.validate?.("tls").ok, false);
+  assert.equal(security?.validate?.("starttls").ok, true);
+});
+
+test("checkEmailCredentialSet is the both-or-neither rule, and `act` calls this one", () => {
+  const { user, password } = DEFAULT_CREDENTIAL_NAMES;
+  assert.equal(checkEmailCredentialSet({}), null);
+  assert.equal(checkEmailCredentialSet({ [user]: "u", [password]: "p" }), null);
+  // Empty is absent: `setCredential` refuses an empty value, so "" can only
+  // ever mean "not given".
+  assert.equal(checkEmailCredentialSet({ [user]: "", [password]: "" }), null);
+
+  const half = checkEmailCredentialSet({ [user]: "u" });
+  assert.match(half ?? "", new RegExp(`the vault holds ${user} but not ${password}`, "u"));
+  assert.match(half ?? "", /An SMTP login needs both/u);
+
+  const other = checkEmailCredentialSet({ [password]: "p" });
+  assert.match(other ?? "", new RegExp(`the vault holds ${password} but not ${user}`, "u"));
 });

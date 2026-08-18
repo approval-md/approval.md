@@ -240,7 +240,8 @@ The SMTP app password is deliberately absent from all of that. It is an
 stores meet, and the division is the whole design: `.approval/env` says where the
 values that unlock the machine come from, and the vault holds the values a
 gated adapter spends inside a verified token window. Step 3 puts the password
-there.
+there, with `approval setup adapter email`, which reads the passphrase out of
+this shell and so must come after the `eval` above.
 
 ### Step 2: attest it
 
@@ -259,20 +260,65 @@ again.
 ### Step 3: fill the vault
 
 Five credentials, all of them in the vault rather than in `.approval/env`: they
-are what the adapter spends, and `vault set` is the only way in. Host, port and
-security are configuration; the user and the password are the secret, and the
-secret never appears as an argument. The passphrase that opens the vault is
-already in this shell, from `eval "$(approval env)"`.
+are what the adapter spends. One verb asks for all five, because the email
+adapter declares what it needs and the setup verb reads that declaration:
 
 ```sh
-approval vault set smtp.host     --value-env V --as human:carter   # V=smtp.example.net
-approval vault set smtp.port     --value-env V --as human:carter   # V=587
-approval vault set smtp.security --value-env V --as human:carter   # V=starttls
-approval vault set smtp.user     --value-env V --as human:carter   # V=you@example.net
-approval vault set smtp.password --value-env V --as human:carter
+approval setup adapter email --as human:carter
 ```
 
-Concretely, with the value never touching the command line:
+The passphrase that opens the vault is already in this shell, from
+`eval "$(approval env)"`; with it unset, this verb stores nothing and creates no
+vault. What the conversation looks like:
+
+```
+approval setup adapter email — the SMTP settings `approval adapter email` reads inside the verified-token window.
+The values go into the VAULT (SPEC.md §10.4), not into the OS keystore and not
+into .approval/env: what this verb stores is what a gated adapter spends inside
+a verified-token window. Nothing here appends to the log or attests anything.
+
+It will ask for 5 value(s), all of them into /tmp/approval-email-demo/.approval/vault.enc:
+  smtp.host (config) — the submission server this runtime connects to
+  smtp.port (config) — the TCP port: 587 for STARTTLS submission, 465 for implicit TLS
+  smtp.security (choice) — how the connection is protected; this adapter never guesses it
+  smtp.user (config, optional) — the login name, when the relay wants one; leave empty for a relay that does not
+  smtp.password (secret, optional) — the login secret, required exactly when a username is given
+
+SMTP host: smtp.example.net
+SMTP port [587]:
+
+transport security — how the connection is protected; this adapter never guesses it:
+  1. implicit — TLS from the first byte (the submissions port, 465)
+  2. starttls — plaintext, then a mandatory STARTTLS upgrade (port 587) (default)
+  3. none — plaintext throughout; the adapter refuses to AUTH over it
+which one? [1-3]:
+SMTP username: you@example.net
+SMTP password (not echoed):
+open an SMTP session to smtp.example.net:587 to check it? Nothing is sent [Y/n] y
+
+verified: smtp.example.net:587 answered over starttls, and accepted the credential over AUTH PLAIN.
+No message was sent: the session ran to AUTH and then QUIT.
+
+stored 5 value(s) in /tmp/approval-email-demo/.approval/vault.enc: smtp.host, smtp.port, smtp.security, smtp.user, smtp.password
+```
+
+The probe is the same SMTP session a send runs, stopped at AUTH: it proves the
+host answers, that the transport security you chose is the one the server offers,
+and that the credential is accepted. It proves nothing about delivery, and it
+puts no message on the wire. Decline it and the values are stored and reported
+as unverified.
+
+A port that is not a port, a security setting outside the three words, and a
+username with no password are all refused here, in the words the adapter itself
+would have used at send time. A failed probe keeps the values: a laptop behind a
+captive portal is not a reason to type five things again, and the undo it prints
+is `approval vault remove <name>`.
+
+#### By hand (what setup does for you)
+
+The same five, one `vault set` each. Host, port and security are configuration;
+the user and the password are the secret, and the secret never appears as an
+argument:
 
 ```sh
 V='smtp.example.net' approval vault set smtp.host --value-env V --as human:carter

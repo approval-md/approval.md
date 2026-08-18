@@ -6,7 +6,29 @@
  * operator must have before any gate operation works — a declared human
  * identity, a vault passphrase, a sampling secret, and a live Telegram bot and
  * chat — by putting each VALUE in the OS keystore and each SOURCE in
- * `.approval/env`.
+ * `.approval/env`. A fifth subcommand, `setup adapter <name>` (APRV-78), fills
+ * the VAULT from an adapter's declared credential manifest; it lives in
+ * `cli/setup-adapter.ts` and is dispatched from the bottom of this file.
+ *
+ * ## The order these run in
+ *
+ * Nothing enforced it and nothing said it, which APRV-76 noticed the hard way.
+ * It is:
+ *
+ * ```
+ * approval init                       # the directory and the .gitignore
+ * (write APPROVAL.md)                 # the policy NAMES every variable below
+ * approval setup identity             # APPROVAL_HUMAN
+ * approval setup vault                # the passphrase, into the keystore
+ * eval "$(approval env)"              # the ONLY thing that puts them in a shell
+ * approval setup adapter <name>       # the adapter's credentials, into the vault
+ * ```
+ *
+ * The policy comes before every `setup`, because each of them reads variable
+ * NAMES out of it. The `eval` comes before `setup adapter`, because that
+ * subcommand needs the passphrase's VALUE in the environment and will not read
+ * `.approval/env` to get it (§11.1 invariant 7). `setup sampling` and
+ * `setup telegram` slot in anywhere after the policy.
  *
  * ## What this verb is not allowed to do
  *
@@ -80,6 +102,18 @@
  * declares undefended. It is accepted for generated values and for nothing
  * else: no path in this file ever puts an operator's own token in an argv.
  *
+ * **And there is one standing exception to the rule above, which
+ * `setup adapter <name>` takes.** A credential bound for the VAULT must pass
+ * through this process, because the vault is not a helper with a prompt: it is
+ * a file this runtime encrypts, so `setCredential` needs the bytes. There is
+ * nothing to delegate the typing to and no third party to hold the value. The
+ * secret is read with {@link Prompter.readSecret} (no echo), handed straight to
+ * the cipher, and never printed, logged, or placed in an argv — which is
+ * exactly what `approval vault set` already does when a human pastes a
+ * credential onto its stdin. The rule is "never handle a value someone else can
+ * hold for you"; for the vault nobody can, so it is stated here rather than
+ * left to look like an oversight.
+ *
  * ## Seams
  *
  * The prompter, the keystore, and `fetch` are injected. The alternative is a
@@ -106,6 +140,7 @@ import {
 import { loadPolicy, type PolicyLoadResult } from "../core/policy-load.js";
 import { telegramChatEnvFor, telegramTokenEnvFor } from "../core/telegram-config.js";
 import { passphraseEnvFor, vaultExists, vaultPathFor } from "../core/vault.js";
+import type { probeSmtp } from "../adapters/smtp.js";
 import { TELEGRAM_DEFAULT_API_BASE, type TelegramFetch } from "../channels/telegram.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
@@ -116,6 +151,8 @@ import {
   SETUP_TELEGRAM_HELP,
   SETUP_VAULT_HELP,
 } from "./help.js";
+import { commandSetupAdapter } from "./setup-adapter.js";
+import { PLAN_PHRASES, planWrites, reportLeftAlone } from "./setup-flow.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
 import { createPrompter, type Prompter } from "./prompt.js";
@@ -382,9 +419,31 @@ export interface SetupDeps {
    * stop running. Not a flag — no operator has a reason to change it.
    */
   pollTimeoutSeconds?: number;
+  /**
+   * The environment the passphrase is read from. `process.env` by default.
+   *
+   * A seam and not a back door: it is read through `passphraseFrom`, which is
+   * the same function `approval vault set` uses, and it never resolves
+   * `.approval/env` (§11.1 invariant 7). Injectable so a test can prove both
+   * the unset refusal and the happy path without mutating the suite's own
+   * environment, which is shared by every other test in the process.
+   */
+  env?: NodeJS.ProcessEnv;
+  /**
+   * The SMTP probe `setup adapter email` verifies with. The real one by
+   * default; a test injects a wrapper so that the only TLS relaxation in this
+   * repository stays inside the test that needs it (`tests/smtp-mock.ts`'s
+   * self-signed fixture on 127.0.0.1).
+   */
+  probe?: typeof probeSmtp;
 }
 
-function usageError(streams: Streams, json: boolean, message: string, helpText: string): number {
+export function usageError(
+  streams: Streams,
+  json: boolean,
+  message: string,
+  helpText: string,
+): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
   else streams.err(`approval: ${message}\n\n${helpText}\n`);
   return EXIT_USAGE;
@@ -405,7 +464,7 @@ function emitRefusal(streams: Streams, refusal: EnvFileRefusal): number {
   return refusalExitCode(refusal);
 }
 
-interface Context {
+export interface Context {
   flags: Record<string, string | boolean>;
   positionals: string[];
   prompter: Prompter;
@@ -423,7 +482,7 @@ interface Context {
   pollTimeoutSeconds: number;
 }
 
-type FrontOutcome = { kind: "handled"; code: number } | ({ kind: "run" } & Context);
+export type FrontOutcome = { kind: "handled"; code: number } | ({ kind: "run" } & Context);
 
 /**
  * `--help`, the paths, the policy, the terminal check.
@@ -441,7 +500,7 @@ type FrontOutcome = { kind: "handled"; code: number } | ({ kind: "run" } & Conte
  * must print the names the interactive path would write, or an operator on a
  * renamed policy copies a line the runtime never reads.
  */
-interface HintContext {
+export interface HintContext {
   envPath: string;
   kind: KeystoreKind;
   passphraseEnv: string;
@@ -461,7 +520,7 @@ function hintContextFor(load: PolicyLoadResult, envPath: string, kind: KeystoreK
   };
 }
 
-function front(
+export function front(
   subcommand: string,
   argv: string[],
   streams: Streams,
@@ -520,7 +579,7 @@ function front(
 }
 
 /** The human-only rule, spelled exactly as `vault set` spells it. */
-function requireHuman(
+export function requireHuman(
   flags: Record<string, string | boolean>,
   streams: Streams,
   helpText: string,
@@ -546,12 +605,6 @@ function requireHuman(
 // Replacing what is already there
 // ---------------------------------------------------------------------------
 
-interface Replacement {
-  key: string;
-  /** The key already has a line in the file. */
-  present: boolean;
-}
-
 /**
  * Which of `keys` already have a line, asked about BEFORE any work is done.
  *
@@ -563,6 +616,12 @@ interface Replacement {
  * value is not a secret. The file may legitimately hold a plaintext literal on
  * any line (§5.2), the operator chose that with a warning, and a verb that
  * echoed "replacing 7654321:AA…?" would undo the choice on their behalf.
+ *
+ * The asking itself is {@link planWrites} (APRV-78), shared with the credential
+ * flow. What stays here is the part that is about THIS file: reading it, and
+ * turning a read refusal into a refusal the caller can return. The sentences
+ * are unchanged, deliberately — an operator who has run `setup` before should
+ * not be told the same fact in new words.
  */
 function planReplacements(
   streams: Streams,
@@ -574,30 +633,13 @@ function planReplacements(
   if (!file.ok) return { ok: false, refusal: file };
 
   const present = new Set(file.entries.map((entry) => entry.key));
-  const state: Replacement[] = keys.map((key) => ({ key, present: present.has(key) }));
-
-  const write: string[] = [];
-  const skipped: string[] = [];
-  for (const entry of state) {
-    if (!entry.present) {
-      write.push(entry.key);
-      continue;
-    }
-    streams.out(
-      `${entry.key} already has a line in ${envPath} (its value is not printed here).\n`,
-    );
-    if (prompter.confirm(`replace the ${entry.key} line?`)) write.push(entry.key);
-    else skipped.push(entry.key);
-  }
-  return { ok: true, write, skipped };
+  const plan = planWrites(streams, prompter, present, envPath, keys, PLAN_PHRASES["env-file"]);
+  return { ok: true, write: plan.write, skipped: plan.skipped };
 }
 
 /** Report what was left alone, so a re-run's "no" is visible in the output. */
 function reportSkipped(streams: Streams, envPath: string, skipped: string[]): void {
-  if (skipped.length === 0) return;
-  streams.out(
-    `left alone in ${envPath}: ${skipped.join(", ")} (the existing line${skipped.length === 1 ? " is" : "s are"} unchanged)\n`,
-  );
+  reportLeftAlone(streams, envPath, skipped, PLAN_PHRASES["env-file"]);
 }
 
 /**
@@ -1250,7 +1292,7 @@ export async function commandSetupTelegram(
 // Dispatch
 // ---------------------------------------------------------------------------
 
-/** `approval setup <identity|vault|sampling|telegram>`. */
+/** `approval setup <identity|vault|sampling|telegram|adapter <name>>`. */
 export function commandSetup(
   argv: string[],
   streams: Streams,
@@ -1272,6 +1314,9 @@ export function commandSetup(
   if (sub === "vault") return commandSetupVault(rest, streams, cwd, deps);
   if (sub === "sampling") return commandSetupSampling(rest, streams, cwd, deps);
   if (sub === "telegram") return commandSetupTelegram(rest, streams, cwd, deps);
+  // `adapter` is the one subcommand with a subject of its own: the adapter's
+  // name selects the manifest, so it is a positional and not a flag.
+  if (sub === "adapter") return commandSetupAdapter(rest, streams, cwd, deps);
   return usageError(
     streams,
     json,

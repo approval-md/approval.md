@@ -50,6 +50,10 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { envFilePathFor } from "../src/core/env-file.js";
+import { getCredential, listCredentials, vaultPathFor } from "../src/core/vault.js";
+import { DEFAULT_CREDENTIAL_NAMES } from "../src/adapters/email.js";
+import { probeSmtp, type SmtpTransportOptions } from "../src/adapters/smtp.js";
+import { envFileDestination } from "../src/cli/setup-flow.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "../src/cli/exit-codes.js";
 import {
   DEFAULT_SAMPLING_ENV,
@@ -66,6 +70,7 @@ import type { Prompter, SecretRead } from "../src/cli/prompt.js";
 import type { Streams } from "../src/cli/main.js";
 import type { TelegramFetch } from "../src/channels/telegram.js";
 import { assertLocal, callbackUpdate, messageUpdate, startMockBotApi } from "./telegram-mock.js";
+import { assertLoopback, startMockSmtp } from "./smtp-mock.js";
 
 /** dist/tests/cli-setup.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -75,8 +80,23 @@ const GENERATED = "generated-approval-md-setup-3fa91c-DO-NOT-USE";
 const HUMAN = "human:carter";
 const CHAT = "-1001234567890";
 
-/** Every fixture value that must never appear on any path of this verb. */
-const SECRETS = [TOKEN, GENERATED] as const;
+/** The vault passphrase the `setup adapter` cases open their vault with. */
+const PASSPHRASE = "passphrase-approval-md-setup-7c02be-DO-NOT-USE";
+/** The SMTP credential `setup adapter email` stores. Swept for, with no exemption. */
+const SMTP_USER = "you@example.net";
+const SMTP_PASSWORD = "smtp-approval-md-setup-fixture-4e11a7-DO-NOT-USE";
+
+/**
+ * Every fixture value that must never appear on any path of this verb.
+ *
+ * The SMTP password is here with NO exemption, which is the point of adding it:
+ * `setup adapter email` is the first subcommand that takes a credential the
+ * operator holds, types it into this process (the vault has no helper to
+ * delegate to), writes it, and then hands it to an SMTP session whose failures
+ * quote the server back. Four new places for it to escape, and one assertion
+ * over all of them.
+ */
+const SECRETS = [TOKEN, GENERATED, PASSPHRASE, SMTP_PASSWORD] as const;
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-cli-setup-")));
 let counter = 0;
@@ -919,10 +939,14 @@ test("setup telegram: a declined chat writes nothing", async () => {
 // The whole-run log claim
 // ===========================================================================
 
+/** The home the four-subcommand walk left behind, for the `env --check` case. */
+let fullWalkHome = "";
+
 test("a complete run of all four subcommands leaves the log byte-identical", async () => {
   const mock = await startMockBotApi(TOKEN);
   try {
     const home = makeHome();
+    fullWalkHome = home.dir;
     const before = readFileSync(home.logPath);
     const keystore = fakeKeystore("keychain", { prompted: TOKEN });
     mock.queueUpdate(messageUpdate({ chatId: CHAT, username: "carter" }));
@@ -960,9 +984,411 @@ test("a complete run of all four subcommands leaves the log byte-identical", asy
   }
 });
 
+// ===========================================================================
+// setup adapter <name> (APRV-78)
+// ===========================================================================
+
+/** The env a `setup adapter` case runs under: the passphrase and nothing else. */
+const WITH_PASSPHRASE: NodeJS.ProcessEnv = { APPROVAL_VAULT_PASSPHRASE: PASSPHRASE };
+
+/**
+ * The probe seam, pointed at a mock and told to accept its self-signed cert.
+ *
+ * **The only TLS relaxation in this suite, and it is inside the test.** The
+ * runtime always asks for `tlsRejectUnauthorized: true`; this wrapper overrides
+ * it on the way to the mock on 127.0.0.1, so no production path can acquire the
+ * relaxation and no test can reach a real server.
+ */
+function loopbackProbe(): typeof probeSmtp {
+  return async (options: SmtpTransportOptions) => {
+    assertLoopback(options.host);
+    assert.equal(
+      options.tlsRejectUnauthorized,
+      true,
+      "the runtime asked for a relaxed TLS check; only this wrapper may relax it",
+    );
+    return probeSmtp({ ...options, tlsRejectUnauthorized: false });
+  };
+}
+
+/** The names in the vault, read with the fixture passphrase. */
+function vaultNames(home: Home): string[] {
+  const listed = listCredentials(vaultPathFor(home.logPath), PASSPHRASE);
+  assert.equal(listed.ok, true, listed.ok ? "" : listed.message);
+  return listed.ok ? listed.names : [];
+}
+
+/** One credential's value. Read IN-TEST only; never pushed to the transcript. */
+function vaultValue(home: Home, name: string): string {
+  const got = getCredential(vaultPathFor(home.logPath), PASSPHRASE, name);
+  assert.equal(got.ok, true, got.ok ? "" : got.message);
+  return got.ok ? got.value : "";
+}
+
+test("setup adapter email refuses a non-terminal stdin with the manifest's own commands", () => {
+  const home = makeHome();
+  const result = spawnCli(["setup", "adapter", "email"], home.dir);
+
+  assert.equal(result.code, EXIT_USAGE, result.stderr);
+  assert.match(result.stderr, /stdin is not a terminal/u);
+  assert.match(result.stderr, /Nothing was written/u);
+  // The hint is GENERATED from the manifest, so it names the resolved
+  // passphrase variable, the eval that establishes it, and one `vault set` per
+  // credential the adapter actually reads.
+  assert.match(result.stderr, /APPROVAL_VAULT_PASSPHRASE/u);
+  assert.match(result.stderr, /eval "\$\(approval env\)"/u);
+  for (const name of Object.values(DEFAULT_CREDENTIAL_NAMES)) {
+    assert.match(result.stderr, new RegExp(`approval vault set ${name.replace(".", "\\.")} `, "u"));
+  }
+  // And the secret's line still takes its value from the keystore's own reader,
+  // so no printed command carries a credential in an argument.
+  assert.match(result.stderr, /find-generic-password|secret-tool lookup/u);
+  assert.doesNotMatch(result.stderr, /-w \S/u);
+  assert.equal(existsSync(home.envPath), false);
+  assert.equal(existsSync(vaultPathFor(home.logPath)), false, "a refusal created a vault");
+});
+
+test("setup adapter email refuses --json, answers --help, and names the adapters it knows", () => {
+  const home = makeHome();
+
+  const json = spawnCli(["setup", "adapter", "email", "--json"], home.dir);
+  assert.equal(json.code, EXIT_USAGE, json.stderr);
+  assert.match(json.stderr, /--json was given/u);
+
+  const help = spawnCli(["setup", "adapter", "email", "--help"], home.dir);
+  assert.equal(help.code, EXIT_OK, help.stderr);
+  assert.match(help.stdout, /approval setup adapter email —/u);
+  assert.match(help.stdout, /THE PROBE SENDS NOTHING/u);
+  assert.match(help.stdout, /approval vault remove smtp\.password/u);
+
+  const bare = spawnCli(["setup", "adapter", "--help"], home.dir);
+  assert.equal(bare.code, EXIT_OK, bare.stderr);
+  assert.match(bare.stdout, /approval setup adapter —/u);
+
+  const missing = spawnCli(["setup", "adapter"], home.dir);
+  assert.equal(missing.code, EXIT_USAGE);
+  assert.match(missing.stderr, /missing <name>/u);
+  assert.match(missing.stderr, /known adapters: email/u);
+
+  const unknown = spawnCli(["setup", "adapter", "gcal"], home.dir);
+  assert.equal(unknown.code, EXIT_USAGE);
+  assert.match(unknown.stderr, /unknown adapter "gcal"/u);
+  assert.match(unknown.stderr, /known adapters: email/u);
+  // A typo is answered with the list, not with a lecture about terminals.
+  assert.doesNotMatch(unknown.stderr, /stdin is not a terminal/u);
+});
+
+test("setup adapter email with the passphrase unset stores nothing, and diagnoses which repair", async () => {
+  // No vault, no line for the variable: nobody has ever established one.
+  const fresh = makeHome();
+  const untouched = await run(["adapter", "email", "--as", HUMAN], fresh, {
+    prompter: scriptedPrompter([]),
+    keystore: fakeKeystore("keychain"),
+    env: {},
+  });
+  assert.equal(untouched.code, EXIT_USAGE);
+  assert.match(untouched.err, /APPROVAL_VAULT_PASSPHRASE is unset or empty/u);
+  assert.match(untouched.err, /Nobody has established a vault passphrase here/u);
+  assert.match(untouched.err, /approval setup vault --as human:<id>/u);
+  assert.equal(existsSync(vaultPathFor(fresh.logPath)), false, "a refusal created a vault");
+
+  // A line for the variable exists: the passphrase is recorded, this shell just
+  // has not evaluated it, so the repair is one command and not two.
+  const recorded = makeHome({ env: `APPROVAL_VAULT_PASSPHRASE=keychain:approval-vault-passphrase\n` });
+  const unevaluated = await run(["adapter", "email", "--as", HUMAN], recorded, {
+    prompter: scriptedPrompter([]),
+    keystore: fakeKeystore("keychain"),
+    env: {},
+  });
+  assert.equal(unevaluated.code, EXIT_USAGE);
+  assert.match(unevaluated.err, /The passphrase is recorded but not in this shell/u);
+  assert.doesNotMatch(unevaluated.err, /Nobody has established/u);
+  assert.match(unevaluated.err, /eval "\$\(approval env\)"/u);
+});
+
+test("setup adapter email is human-only", async () => {
+  const home = makeHome();
+  const result = await run(["adapter", "email", "--as", "agent:claude"], home, {
+    prompter: scriptedPrompter([]),
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+  });
+  assert.equal(result.code, EXIT_USAGE);
+  assert.match(result.err, /human-only/u);
+  assert.equal(existsSync(vaultPathFor(home.logPath)), false);
+});
+
+test("setup adapter email fills the vault, touches nothing else, and prints no value", async () => {
+  const home = makeHome();
+  const prompter = scriptedPrompter([
+    "127.0.0.1", // smtp.host
+    "587", // smtp.port
+    "", // smtp.security — Enter takes the default, starttls
+    SMTP_USER, // smtp.user
+    SMTP_PASSWORD, // smtp.password, through readSecret
+    false, // probe it? — offered, declined here
+  ]);
+  const result = await run(["adapter", "email", "--as", HUMAN], home, {
+    prompter,
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+  });
+
+  assert.equal(result.code, EXIT_OK, result.err);
+  assert.deepEqual(prompter.remaining, []);
+
+  // Every name the adapter reads, and only those.
+  assert.deepEqual(vaultNames(home), Object.values(DEFAULT_CREDENTIAL_NAMES).sort());
+  assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.host), "127.0.0.1");
+  assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.port), "587");
+  assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.security), "starttls");
+  assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.user), SMTP_USER);
+  assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.password), SMTP_PASSWORD);
+
+  // The checklist came before the first question, and the report names the
+  // names. The suite-wide sweep is the real assertion about values.
+  assert.match(result.out, /smtp\.password \(secret, optional\)/u);
+  assert.match(result.out, /stored 5 value\(s\)/u);
+  assert.match(result.out, /stored and unverified/u);
+  assert.equal(result.out.includes(SMTP_PASSWORD), false);
+  assert.equal(result.out.includes(PASSPHRASE), false);
+
+  // Adapter credentials go to the VAULT and nowhere else: no env line was
+  // written, and the file was never created.
+  assert.equal(existsSync(home.envPath), false, "setup adapter wrote .approval/env");
+});
+
+test("setup adapter email refuses a port that is not a port, in the adapter's own words", async () => {
+  const home = makeHome();
+  const result = await run(["adapter", "email", "--as", HUMAN], home, {
+    prompter: scriptedPrompter(["127.0.0.1", "1e6"]),
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+  });
+  assert.equal(result.code, EXIT_USAGE);
+  // The SAME sentence `approval adapter email` would print at send time.
+  assert.match(result.err, /the vault's smtp\.port is not a TCP port number \(1-65535\)/u);
+  assert.match(result.err, /nothing was written/u);
+  assert.equal(existsSync(vaultPathFor(home.logPath)), false, "a refused value created a vault");
+});
+
+test("setup adapter email refuses a security setting outside the closed set", async () => {
+  const home = makeHome();
+  const result = await run(["adapter", "email", "--as", HUMAN], home, {
+    prompter: scriptedPrompter(["127.0.0.1", "587", "9"]),
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+  });
+  assert.equal(result.code, EXIT_USAGE);
+  assert.match(result.err, /smtp\.security: "9" is not one of 1-3/u);
+  assert.equal(existsSync(vaultPathFor(home.logPath)), false);
+});
+
+test("setup adapter email refuses a username with no password, before anything is stored", async () => {
+  const home = makeHome();
+  const result = await run(["adapter", "email", "--as", HUMAN], home, {
+    prompter: scriptedPrompter([
+      "127.0.0.1",
+      "587",
+      "",
+      SMTP_USER,
+      "", // no password: half a credential
+    ]),
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+  });
+  assert.equal(result.code, EXIT_USAGE);
+  assert.match(
+    result.err,
+    /the vault holds smtp\.user but not smtp\.password\. An SMTP login needs both/u,
+  );
+  // BEFORE anything is stored: the check runs between collection and the writes.
+  assert.equal(existsSync(vaultPathFor(home.logPath)), false, "a half credential created a vault");
+});
+
+test("a re-run asks before replacing each name, and a no leaves the vault byte-identical", async () => {
+  const home = makeHome();
+  await run(["adapter", "email", "--as", HUMAN], home, {
+    prompter: scriptedPrompter(["127.0.0.1", "587", "", SMTP_USER, SMTP_PASSWORD, false]),
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+  });
+  const before = readFileSync(vaultPathFor(home.logPath));
+
+  // Five names present, five confirmations, all declined — and no question is
+  // asked for a VALUE, because a name nobody agreed to replace is never asked
+  // about.
+  const prompter = scriptedPrompter([false, false, false, false, false]);
+  const again = await run(["adapter", "email", "--as", HUMAN], home, {
+    prompter,
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+  });
+
+  assert.equal(again.code, EXIT_OK, again.err);
+  assert.deepEqual(prompter.remaining, []);
+  assert.match(again.out, /smtp\.host is already in .*vault\.enc \(its value is not printed here\)/u);
+  assert.match(again.out, /left alone in .*vault\.enc: smtp\.host, smtp\.port/u);
+  assert.match(again.out, /nothing to do: every name is already in/u);
+  assert.deepEqual(readFileSync(vaultPathFor(home.logPath)), before, "a declined re-run rewrote the vault");
+});
+
+test("setup adapter email: the probe proves the session, sends nothing, and reports the mechanism", async () => {
+  const smtp = await startMockSmtp({ tls: "none", user: SMTP_USER, password: SMTP_PASSWORD });
+  try {
+    const home = makeHome();
+    const result = await run(["adapter", "email", "--as", HUMAN], home, {
+      prompter: scriptedPrompter([
+        assertLoopback(smtp.host),
+        String(smtp.port),
+        "", // starttls
+        SMTP_USER,
+        SMTP_PASSWORD,
+        true, // probe it
+      ]),
+      keystore: fakeKeystore("keychain"),
+      env: WITH_PASSPHRASE,
+      probe: loopbackProbe(),
+    });
+
+    assert.equal(result.code, EXIT_OK, result.err);
+    assert.match(result.out, /verified: 127\.0\.0\.1:\d+ answered over starttls/u);
+    assert.match(result.out, /AUTH PLAIN/u);
+    assert.match(result.out, /No message was sent/u);
+    assert.equal(smtp.connections, 1);
+    // The proof is a session that never names a message: no MAIL, no RCPT, no
+    // DATA reached the server.
+    const commands = smtp.last()?.commands ?? [];
+    assert.equal(commands.some((line) => /^(MAIL|RCPT|DATA)/u.test(line)), false);
+    assert.equal(smtp.last()?.authenticated, "PLAIN");
+  } finally {
+    await smtp.close();
+  }
+});
+
+test("setup adapter email: a refused probe exits 1, KEEPS the values, and prints the undo", async () => {
+  const smtp = await startMockSmtp({ tls: "none", user: SMTP_USER, password: SMTP_PASSWORD });
+  try {
+    smtp.failAt({ step: "auth", reply: "535 5.7.8 authentication failed" });
+    const home = makeHome();
+    const result = await run(["adapter", "email", "--as", HUMAN], home, {
+      prompter: scriptedPrompter([
+        assertLoopback(smtp.host),
+        String(smtp.port),
+        "",
+        SMTP_USER,
+        SMTP_PASSWORD,
+        true,
+      ]),
+      keystore: fakeKeystore("keychain"),
+      env: WITH_PASSPHRASE,
+      probe: loopbackProbe(),
+    });
+
+    assert.equal(result.code, EXIT_INTEGRITY, result.out);
+    assert.match(result.err, /smtp-535/u);
+    assert.match(result.err, /authentication failed/u);
+    assert.match(result.err, /The values ARE stored/u);
+    assert.match(result.err, /approval vault remove smtp\.password --as human:<id>/u);
+    // Kept, all five: a probe failure is not a reason to make anyone retype.
+    assert.deepEqual(vaultNames(home), Object.values(DEFAULT_CREDENTIAL_NAMES).sort());
+  } finally {
+    await smtp.close();
+  }
+});
+
+test("setup adapter email: a partial re-run will not probe, and will not read the vault back", async () => {
+  const home = makeHome();
+  await run(["adapter", "email", "--as", HUMAN], home, {
+    prompter: scriptedPrompter(["127.0.0.1", "587", "", SMTP_USER, SMTP_PASSWORD, false]),
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+  });
+
+  // Replace the host only. Every confirmation is asked FIRST, before a single
+  // value: the other four are left alone, so this run does not hold the whole
+  // configuration — and there is no verb that reads one back.
+  const result = await run(["adapter", "email", "--as", HUMAN], home, {
+    prompter: scriptedPrompter([true, false, false, false, false, "127.0.0.2"]),
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+    probe: () => {
+      throw new Error("a partial run probed the server");
+    },
+  });
+
+  assert.equal(result.code, EXIT_OK, result.err);
+  assert.match(result.out, /not verified: smtp\.port, smtp\.security, smtp\.user, smtp\.password were left alone/u);
+  assert.match(result.out, /stored 1 value\(s\)/u);
+  assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.host), "127.0.0.2");
+  assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.password), SMTP_PASSWORD);
+});
+
+test("setup adapter email: a vault that will not open refuses BEFORE a password is typed", async () => {
+  const home = makeHome();
+  await run(["adapter", "email", "--as", HUMAN], home, {
+    prompter: scriptedPrompter(["127.0.0.1", "587", "", SMTP_USER, SMTP_PASSWORD, false]),
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+  });
+
+  // A different passphrase. The preflight opens the vault, so the refusal
+  // arrives with the script untouched: not one question was asked.
+  const prompter = scriptedPrompter([]);
+  const result = await run(["adapter", "email", "--as", HUMAN], home, {
+    prompter,
+    keystore: fakeKeystore("keychain"),
+    env: { APPROVAL_VAULT_PASSPHRASE: "a-different-passphrase-entirely" },
+  });
+
+  assert.equal(result.code, EXIT_INTEGRITY, result.out);
+  assert.match(result.err, /vault-unreadable/u);
+  assert.match(result.err, /nothing was collected and nothing was written/u);
+  assert.deepEqual(prompter.asked, [], "a wrong passphrase still asked for a credential");
+});
+
+// ---------------------------------------------------------------------------
+// The other destination
+// ---------------------------------------------------------------------------
+
+test("the env-file destination reports what is there, writes a line, and refuses a bad mode", () => {
+  const home = makeHome({ env: `# a comment\nAPPROVAL_TG_CHAT=42\n` });
+  const destination = envFileDestination(home.envPath);
+
+  assert.equal(destination.kind, "env-file");
+  assert.equal(destination.where(), home.envPath);
+
+  const before = destination.present();
+  assert.equal(before.ok, true);
+  assert.deepEqual(before.ok ? [...before.names] : [], ["APPROVAL_TG_CHAT"]);
+
+  const written = destination.write("APPROVAL_HUMAN", HUMAN);
+  assert.equal(written.ok, true, written.ok ? "" : written.message);
+  assert.equal(
+    readFileSync(home.envPath, "utf8"),
+    `# a comment\nAPPROVAL_TG_CHAT=42\nAPPROVAL_HUMAN=${HUMAN}\n`,
+  );
+
+  const after = destination.present();
+  assert.deepEqual(after.ok ? [...after.names].sort() : [], ["APPROVAL_HUMAN", "APPROVAL_TG_CHAT"]);
+
+  // The mode rule belongs to the file, and the destination passes it through
+  // with the exit code the CLI's own table gives it.
+  chmodSync(home.envPath, 0o644);
+  const refused = destination.present();
+  assert.equal(refused.ok, false);
+  if (!refused.ok) {
+    assert.equal(refused.code, "env-file-mode");
+    assert.equal(refused.exitCode, EXIT_IO);
+  }
+});
+
 test("`approval env --check` reads back exactly what setup wrote", () => {
-  const home = homes[homes.length - 1] as string;
-  const result = spawnCli(["env", "--check"], home);
+  // Named explicitly rather than "the last home this suite made": the cases
+  // below it add homes of their own, and a test that read the newest one would
+  // silently start asserting about a different file.
+  assert.notEqual(fullWalkHome, "", "the four-subcommand walk did not run");
+  const result = spawnCli(["env", "--check"], fullWalkHome);
   // Every source is a keychain: line, so nothing resolves without a helper —
   // the point here is that the FILE parses and every variable is accounted for.
   assert.match(result.stdout, /APPROVAL_HUMAN/u);

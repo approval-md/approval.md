@@ -89,12 +89,19 @@
  * vault stays the source for the two that are actually secret; that is a SPEC
  * §5.2 change and therefore its own task, not a flag here.
  *
+ * The same five are also DECLARED, as {@link EMAIL_CREDENTIAL_SPECS}, so that
+ * `approval setup adapter email` can ask for them without knowing what SMTP is
+ * (APRV-78). The manifest is derived from {@link DEFAULT_CREDENTIAL_NAMES} and
+ * its validation borrows `act`'s own refusal sentences, so a value setup accepts
+ * is a value `act` accepts, and the words are the same on both paths.
+ *
  * Deterministic given its clock: no randomness anywhere, no environment reads,
  * and `act` never throws (every path returns an {@link ActOutcome}).
  */
 
 import { createHash } from "node:crypto";
 
+import type { CredentialSpec } from "../core/credential-spec.js";
 import { payloadHash } from "../core/payload.js";
 import {
   CREDENTIAL_REFUSAL_CODES,
@@ -464,6 +471,136 @@ export const DEFAULT_CREDENTIAL_NAMES = {
 
 export type EmailCredentialNames = typeof DEFAULT_CREDENTIAL_NAMES;
 
+// ---------------------------------------------------------------------------
+// The credential manifest (APRV-78)
+// ---------------------------------------------------------------------------
+
+/**
+ * The refusal sentences, written once and used twice.
+ *
+ * `act` refuses a bad port or a bad security setting at send time; `approval
+ * setup adapter email` refuses the same values at collection time. They must
+ * say the same thing in the same words, or an operator learns at 2am that the
+ * port they were allowed to type six weeks earlier was never a port. Each
+ * sentence takes the NAME because `credentialNames` may rename any of them.
+ */
+function portSentence(name: string): string {
+  return `the vault's ${name} is not a TCP port number (1-65535)`;
+}
+
+function securitySentence(name: string): string {
+  return `the vault's ${name} must be "implicit", "starttls" or "none"; it is none of those, and this adapter will not guess a transport security setting`;
+}
+
+/** The both-or-neither sentence. `held` is the one present; `missing` is not. */
+function pairSentence(held: string, missing: string): string {
+  return `the vault holds ${held} but not ${missing}. An SMTP login needs both; sending unauthenticated because half the credential is missing would put the message on a path nobody configured`;
+}
+
+/**
+ * What this adapter reads from the vault, declared rather than discovered.
+ *
+ * DERIVED from {@link DEFAULT_CREDENTIAL_NAMES} rather than restating the five
+ * strings: a manifest that could drift from the names `act` asks for would be a
+ * setup wizard that fills a vault the adapter then cannot read, and
+ * `tests/adapter-email.test.ts` pins the two key for key.
+ *
+ * Order is the order an operator is asked, and it is not alphabetical: the
+ * password is last, so that everything a mistyped host or port can waste is
+ * answered before the one value that is unpleasant to re-enter.
+ */
+export const EMAIL_CREDENTIAL_SPECS: readonly CredentialSpec[] = [
+  {
+    name: DEFAULT_CREDENTIAL_NAMES.host,
+    kind: "config",
+    label: "SMTP host",
+    describe: "the submission server this runtime connects to",
+    required: true,
+    validate(value: string) {
+      const trimmed = value.trim();
+      if (trimmed.length === 0) return { ok: false, message: "the host is empty" };
+      if (/\s/u.test(trimmed)) {
+        return { ok: false, message: "a host name contains no whitespace" };
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: DEFAULT_CREDENTIAL_NAMES.port,
+    kind: "config",
+    label: "SMTP port",
+    describe: "the TCP port: 587 for STARTTLS submission, 465 for implicit TLS",
+    required: true,
+    default: "587",
+    validate(value: string) {
+      const port = Number(value.trim());
+      if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+        return { ok: false, message: portSentence(DEFAULT_CREDENTIAL_NAMES.port) };
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: DEFAULT_CREDENTIAL_NAMES.security,
+    kind: "choice",
+    label: "transport security",
+    describe: "how the connection is protected; this adapter never guesses it",
+    required: true,
+    default: "starttls",
+    choices: [
+      { value: "implicit", describe: "TLS from the first byte (the submissions port, 465)" },
+      { value: "starttls", describe: "plaintext, then a mandatory STARTTLS upgrade (port 587)" },
+      { value: "none", describe: "plaintext throughout; the adapter refuses to AUTH over it" },
+    ],
+    validate(value: string) {
+      if (!isSmtpSecurity(value.trim())) {
+        return { ok: false, message: securitySentence(DEFAULT_CREDENTIAL_NAMES.security) };
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: DEFAULT_CREDENTIAL_NAMES.user,
+    kind: "config",
+    label: "SMTP username",
+    describe: "the login name, when the relay wants one; leave empty for a relay that does not",
+    required: false,
+  },
+  {
+    name: DEFAULT_CREDENTIAL_NAMES.password,
+    kind: "secret",
+    label: "SMTP password",
+    describe: "the login secret, required exactly when a username is given",
+    required: false,
+  },
+];
+
+/**
+ * The cross-field rule: a username and a password are both-or-neither.
+ *
+ * Returns the refusal sentence, or `null` when the set is coherent. Exported so
+ * that `approval setup adapter email` refuses the half-configured pair at the
+ * moment the operator could still fix it, saying exactly what `act` would have
+ * said at send time — and `act` itself calls this, so there is one sentence and
+ * not two that drift.
+ *
+ * An absent value and an empty one are the same thing here: `setCredential`
+ * refuses an empty credential outright, so "" can only ever mean "not given".
+ */
+export function checkEmailCredentialSet(
+  values: Record<string, string | undefined>,
+  names: EmailCredentialNames = DEFAULT_CREDENTIAL_NAMES,
+): string | null {
+  const has = (name: string): boolean => {
+    const value = values[name];
+    return typeof value === "string" && value.length > 0;
+  };
+  const user = has(names.user);
+  const password = has(names.password);
+  if (user === password) return null;
+  return user ? pairSentence(names.user, names.password) : pairSentence(names.password, names.user);
+}
+
 /**
  * Everything this adapter can report. Frozen union, additive only
  * (SPEC.md §11.1(6)), and note the three families it is a union OF:
@@ -595,14 +732,14 @@ export function emailAdapter(options: EmailAdapterOptions = {}): Adapter {
         return {
           ok: false,
           code: "email-config-invalid",
-          message: `the vault's ${names.port} is not a TCP port number (1-65535)`,
+          message: portSentence(names.port),
         };
       }
       if (!isSmtpSecurity(security.value)) {
         return {
           ok: false,
           code: "email-config-invalid",
-          message: `the vault's ${names.security} must be "implicit", "starttls" or "none"; it is none of those, and this adapter will not guess a transport security setting`,
+          message: securitySentence(names.security),
         };
       }
       const transport: SmtpSecurity = security.value;
@@ -619,12 +756,15 @@ export function emailAdapter(options: EmailAdapterOptions = {}): Adapter {
       if (!password.ok && !password.absent) {
         return { ok: false, code: password.code, message: scrub(password.message) };
       }
-      if (user.ok !== password.ok) {
-        return {
-          ok: false,
-          code: "email-config-invalid",
-          message: `the vault holds ${user.ok ? names.user : names.password} but not ${user.ok ? names.password : names.user}. An SMTP login needs both; sending unauthenticated because half the credential is missing would put the message on a path nobody configured`,
-        };
+      const pairProblem = checkEmailCredentialSet(
+        {
+          [names.user]: user.ok ? user.value : undefined,
+          [names.password]: password.ok ? password.value : undefined,
+        },
+        names,
+      );
+      if (pairProblem !== null) {
+        return { ok: false, code: "email-config-invalid", message: pairProblem };
       }
 
       // (4) The two stamped fields, and the message.
