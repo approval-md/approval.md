@@ -17,7 +17,8 @@ here with a matching display name, so drift fails CI.
 | M5 | `m-7` | M5 - Daemon | done | approvald: watch, sampling, retention pruning, git commits, head caching, dogfood cutover |
 | M6 | `m-8` | M6 - Backlog.md round-trip and AGENTS.md import | done |
 | M7 | `m-9` | M7 - First adapter (email) and vault | active (demo run pending) |
-| M7.1 | `m-10` | M7.1 - Setup ergonomics | done | Policy-honoured env names, .approval/env source map + approval env, approval setup verbs, doctor fixes + environment check, docs cutover | Adapter contract + conformance, vault, SMTP email adapter, live channel dispatch, approval init, end-to-end SPEC demo | Round-trip writer, envelope write-back, envelope-loss detection, AGENTS.md import, format-fixture drift guard |
+| M7.1 | `m-10` | M7.1 - Setup ergonomics | done |
+| M8 | `m-11` | M8 - MCP wrapper | active | approval instructions + schemas registry, gated SDK dep-add, agent-only MCP server over CLI code paths, e2e demo, README holistic pass | Policy-honoured env names, .approval/env source map + approval env, approval setup verbs, doctor fixes + environment check, docs cutover | Adapter contract + conformance, vault, SMTP email adapter, live channel dispatch, approval init, end-to-end SPEC demo | Round-trip writer, envelope write-back, envelope-loss detection, AGENTS.md import, format-fixture drift guard |
 
 Retired ids: `m-4` was an empty duplicate of M3.1 created by the implicit-
 creation footgun described below; it was removed and its number is not reused.
