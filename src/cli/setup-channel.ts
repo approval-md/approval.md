@@ -320,8 +320,18 @@ function telegramHooks(
       return { kind: "value", value: token };
     }
 
+    const helper = context.backend === "keychain" ? "macOS `security`" : "`secret-tool`";
+    const helperPrompt =
+      context.backend === "keychain"
+        ? '"password data for new item:" and then "retype password for new item:"'
+        : '"Password:"';
     streams.out(
-      `The bot token is collected by ${context.backend === "keychain" ? "macOS `security`" : "`secret-tool`"}'s own prompt, below — it goes\nstraight into the keystore and this process never sees you type it.\n\n`,
+      `Next: paste the BOT TOKEN from @BotFather (Telegram: /mybots, pick the bot, "API Token"; it looks like 123456789:AAH...).\n` +
+        `${helper} asks for it with its own prompt, ${helperPrompt}. Nothing is echoed as\n` +
+        `you paste, and the value goes straight into the keystore as ${SERVICE_TELEGRAM_TOKEN};\n` +
+        `this process never sees you type it. There is nothing to look up first: this creates the item.\n` +
+        `Already saved it under that name from an earlier run? Pasting the same value updates the item in\n` +
+        `place; print it in another window with: ${retrievalCommand(context.backend, SERVICE_TELEGRAM_TOKEN)}\n\n`,
     );
     const stored = context.keystore.storePrompted(SERVICE_TELEGRAM_TOKEN);
     if (!stored.ok) {

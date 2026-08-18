@@ -142,8 +142,10 @@ eval "$(approval env)"
 `approval setup channel telegram` does five things: it stores the bot token, proves it
 with `getMe`, asks you to send your bot a message, reads the chat id back out of
 the update queue, and writes both variables. On macOS the token goes into the
-Keychain through `security`'s own no-echo prompt, so it is never typed into this
-process and never reaches your shell history; on Linux `secret-tool` plays the
+Keychain through `security`'s own no-echo prompt (Apple's wording: `password
+data for new item:`, then `retype password for new item:`; paste the BotFather
+token at both), so it is never typed into this process and never reaches your
+shell history; on Linux `secret-tool` plays the
 same part; on a machine with neither, the token is offered as a plaintext
 literal in `.approval/env` and written only on a typed `yes`. The chat id is
 written as a literal either way, because a chat id is not a secret.

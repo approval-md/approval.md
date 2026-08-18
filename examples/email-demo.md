@@ -172,8 +172,10 @@ What each one does:
   unreadable.
 - **`setup channel telegram`** stores the token, proves it with `getMe`, asks you to
   message the bot, reads the chat id back, and writes both variables. On macOS
-  the token is collected by `security`'s own no-echo prompt, so it is never typed
-  into this process; on Linux `secret-tool` plays the same part; with neither, it
+  the token is collected by `security`'s own no-echo prompt (Apple's wording:
+  `password data for new item:`, then `retype password for new item:`; paste the
+  BotFather token at both), so it is never typed into this process; on Linux
+  `secret-tool` plays the same part; with neither, it
   is offered as a plaintext literal in `.approval/env` on a typed `yes`. Every
   `getUpdates` it makes carries no offset, so a tap waiting for a running
   listener stays where it is. Stop `approval channel telegram listen` first.

@@ -3,11 +3,11 @@ id: APRV-84
 title: >-
   Fix readLineFromStdin EAGAIN on an interactive TTY (setup identity reads
   empty)
-status: In Progress
+status: Done
 assignee:
   - Claude
 created_date: '2026-08-18 11:14'
-updated_date: '2026-08-18 12:02'
+updated_date: '2026-08-18 18:30'
 labels:
   - bug
   - cli

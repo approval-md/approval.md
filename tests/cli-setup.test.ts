@@ -1341,6 +1341,54 @@ test("setup adapter email fills the vault, touches nothing else, and prints no v
   assert.equal(existsSync(home.envPath), false, "setup adapter wrote .approval/env");
 });
 
+test("setup adapter email reports the secret's length, and offers to strip a Google app password's display spaces (APRV-97)", async () => {
+  const spaced = "abcd efgh ijkl mnop";
+  // Accepted: the 16 letters are stored.
+  {
+    const home = makeHome();
+    const prompter = scriptedPrompter(["127.0.0.1", "587", "", SMTP_USER, spaced, true, false]);
+    const result = await run(["adapter", "email", "--as", HUMAN], home, {
+      prompter,
+      keystore: fakeKeystore("keychain"),
+      env: WITH_PASSPHRASE,
+    });
+    assert.equal(result.code, EXIT_OK, result.err);
+    assert.deepEqual(prompter.remaining, []);
+    assert.match(result.out, /received 19 character\(s\)/u);
+    assert.match(prompter.asked[5] ?? "", /Google app password .* display spaces/u);
+    assert.match(result.out, /storing 16 character\(s\)/u);
+    assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.password), "abcdefghijklmnop");
+    assert.equal(result.out.includes("abcd"), false, "a fragment of the secret was printed");
+  }
+  // Declined: stored exactly as typed. A password may genuinely contain spaces.
+  {
+    const home = makeHome();
+    const prompter = scriptedPrompter(["127.0.0.1", "587", "", SMTP_USER, spaced, false, false]);
+    const result = await run(["adapter", "email", "--as", HUMAN], home, {
+      prompter,
+      keystore: fakeKeystore("keychain"),
+      env: WITH_PASSPHRASE,
+    });
+    assert.equal(result.code, EXIT_OK, result.err);
+    assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.password), spaced);
+    assert.equal(result.out.includes("storing 16"), false);
+  }
+  // Not the shape: no offer, one fewer question. The count still prints.
+  {
+    const home = makeHome();
+    const prompter = scriptedPrompter(["127.0.0.1", "587", "", SMTP_USER, "pass word 1", false]);
+    const result = await run(["adapter", "email", "--as", HUMAN], home, {
+      prompter,
+      keystore: fakeKeystore("keychain"),
+      env: WITH_PASSPHRASE,
+    });
+    assert.equal(result.code, EXIT_OK, result.err);
+    assert.deepEqual(prompter.remaining, []);
+    assert.match(result.out, /received 11 character\(s\)/u);
+    assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.password), "pass word 1");
+  }
+});
+
 test("setup adapter email refuses a port that is not a port, in the adapter's own words", async () => {
   const home = makeHome();
   const result = await run(["adapter", "email", "--as", HUMAN], home, {
