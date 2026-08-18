@@ -110,7 +110,7 @@ an addition).
 | `gh-release` | gh | release | release.publish |
 | `gh-api` | gh | api \| auth \| gist \| secret \| workflow | network.call |
 | `gh-simple-read` | gh | browse \| search \| status | read.vcs.remote |
-| `gh` | gh | pr \| issue \| repo \| run \| cache | network.call, read.vcs.remote |
+| `gh` | gh | pr \| issue \| repo \| run \| cache | read.vcs.remote for view/list/status/checks/diff; `gh pr create` vcs.pr.open, `gh pr edit/comment/review/ready/close/reopen` vcs.pr.update, `gh pr merge` vcs.push.main, `gh pr checkout` vcs.commit.branch; every other write network.call |
 | `npm-publish` | npm, pnpm, yarn, bun | publish \| version \| deprecate \| dist-tag \| unpublish | release.publish |
 | `npm-install` | npm, bun | install \| i \| add | deps.add, deps.install |
 | `yarn-add` | yarn, pnpm | add | deps.add |
