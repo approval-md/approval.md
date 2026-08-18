@@ -51,9 +51,9 @@ import { fileURLToPath } from "node:url";
 
 import { WEB_DEFAULT_PORT } from "../channels/web.js";
 import {
-  TELEGRAM_CHAT_ENV,
   TELEGRAM_DEFAULT_API_BASE,
-  TELEGRAM_TOKEN_ENV,
+  telegramChatEnvFor,
+  telegramTokenEnvFor,
 } from "../channels/telegram.js";
 import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
 import { readTaskFile } from "../core/frontmatter.js";
@@ -415,15 +415,25 @@ function redact(text: string, token: string): string {
  *
  * Absent configuration is a `skip`, not a failure. Telegram is optional; a
  * runtime driven entirely by `channel cli` is perfectly healthy without it.
+ *
+ * WHICH variables carry the configuration is the policy's to say (SPEC.md §5.1
+ * `channels.telegram.token_env` / `chat_id_env`, amended §5.2 by APRV-72), so
+ * the already-computed policy load comes in and every message here names the
+ * variable this operator's policy actually asked for. A policy that failed to
+ * load names nothing and the reference defaults apply: doctor telling an
+ * operator to set a variable their policy never mentions is the failure mode
+ * this parameter removes.
  */
-async function checkTelegram(apiBase: string): Promise<DoctorCheck> {
-  const token = process.env[TELEGRAM_TOKEN_ENV] ?? "";
-  const chat = process.env[TELEGRAM_CHAT_ENV] ?? "";
+async function checkTelegram(apiBase: string, load: PolicyLoadResult): Promise<DoctorCheck> {
+  const tokenEnv = telegramTokenEnvFor(load);
+  const chatEnv = telegramChatEnvFor(load);
+  const token = process.env[tokenEnv] ?? "";
+  const chat = process.env[chatEnv] ?? "";
 
   if (token.length === 0 || chat.length === 0) {
     const missing = [
-      token.length === 0 ? TELEGRAM_TOKEN_ENV : null,
-      chat.length === 0 ? TELEGRAM_CHAT_ENV : null,
+      token.length === 0 ? tokenEnv : null,
+      chat.length === 0 ? chatEnv : null,
     ].filter((name): name is string => name !== null);
     return {
       check: "telegram",
@@ -461,8 +471,8 @@ async function checkTelegram(apiBase: string): Promise<DoctorCheck> {
         detail: `getMe on ${base} was refused: HTTP ${response.status} (${description})`,
         fix:
           response.status === 401 || /unauthorized/iu.test(description)
-            ? `the bot token is not valid: re-copy it from @BotFather into ${TELEGRAM_TOKEN_ENV}`
-            : `check ${TELEGRAM_TOKEN_ENV} and that ${base} is the right Bot API base`,
+            ? `the bot token is not valid: re-copy it from @BotFather into ${tokenEnv}`
+            : `check ${tokenEnv} and that ${base} is the right Bot API base`,
       };
     }
 
@@ -479,7 +489,7 @@ async function checkTelegram(apiBase: string): Promise<DoctorCheck> {
       check: "telegram",
       status: "fail",
       detail: `getMe on ${base} failed: ${redact(detailOf(cause), token)}`,
-      fix: `check network reachability of ${base} (and ${TELEGRAM_TOKEN_ENV} if it is a TLS or auth failure)`,
+      fix: `check network reachability of ${base} (and ${tokenEnv} if it is a TLS or auth failure)`,
     };
   } finally {
     clearTimeout(timer);
@@ -1010,7 +1020,7 @@ export function commandDoctor(
       checkIdentity(),
       checkAttestationHealth(verified.records, policyPath),
       checkLog(logPath, verified.result),
-      await checkTelegram(apiBase),
+      await checkTelegram(apiBase, policyLoad),
       await checkWebPort(port ?? WEB_DEFAULT_PORT),
       checkPayloadStore(logPath, verified.records),
       checkSampling(policyLoad),

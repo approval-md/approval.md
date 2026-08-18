@@ -1404,9 +1404,13 @@ Ten checks, in the order in which their failures cascade:
   log              the hash chain verifies. A torn tail and a corrupt log are
                    both failures here; neither is repaired, and doctor never
                    truncates a torn line.
-  telegram         getMe against --api-base, when APPROVAL_TG_TOKEN and
-                   APPROVAL_TG_CHAT are both set; otherwise SKIP, because a
-                   runtime driven by "channel cli" is healthy without Telegram.
+  telegram         getMe against --api-base, when the bot token and chat id
+                   variables are both set; otherwise SKIP, because a runtime
+                   driven by "channel cli" is healthy without Telegram. WHICH
+                   variables those are comes from the policy this run resolved
+                   (channels.telegram.token_env / chat_id_env), defaulting to
+                   APPROVAL_TG_TOKEN and APPROVAL_TG_CHAT, and the skip and
+                   failure messages name the ones your policy asked for.
                    getMe AND NOTHING ELSE: never sendMessage, which would buzz a
                    human's phone for a diagnostic, and never getUpdates, whose
                    offset a running listener owns — a decision tap consumed here
@@ -2194,7 +2198,8 @@ Flags:
                    supplies them instead. Either way they are re-hashed and
                    checked against the recorded binding; material that does not
                    match is refused, never rendered
-  --policy <path>  policy file to resolve autonomy, budgets and TTL against
+  --policy <path>  policy file to resolve autonomy, budgets and TTL against —
+                   and the NAMES of the credential variables (below)
   --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
   --log <path>     log file (read for the queue, appended to by decisions)
   --api-base <url> Bot API base (default https://api.telegram.org). For tests
@@ -2203,6 +2208,13 @@ Flags:
   --json           machine-readable output: ONE JSON OBJECT PER LINE, not one
                    per invocation — a listener is a stream, not a query
   -h, --help       this text
+
+THE BOT TOKEN AND CHAT ID COME FROM THE ENVIRONMENT, AND THE POLICY NAMES THE
+VARIABLES. channels.telegram.token_env and channels.telegram.chat_id_env carry
+variable NAMES, never values (SPEC.md §5.1); a policy declaring neither gets
+APPROVAL_TG_TOKEN and APPROVAL_TG_CHAT, and so does a policy that fails to load
+— a variable name is not a permission. There is no flag for either value: a bot
+token on a command line is a bot token in the shell history and in "ps".
 
 It sends every pending manual request to the configured chat: the
 computed fields (class, resolved autonomy, budgets, attestation, payload hash,
@@ -2278,15 +2290,23 @@ ${JSON_ERRORS}`;
 export const TELEGRAM_HEALTH_HELP = `approval channel telegram health — is this runtime configured for Telegram?
 
 Usage:
-  approval channel telegram health [--json]
+  approval channel telegram health [--policy <path>] [--dir <path>] [--json]
 
 Flags:
-  --json     machine-readable output
-  -h, --help this text
+  --policy <path>  policy file naming the credential variables
+  --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
+  --json           machine-readable output
+  -h, --help       this text
 
-Reports whether APPROVAL_TG_TOKEN and APPROVAL_TG_CHAT are set. Exit 0 when
-both are, 1 when either is missing. The token's VALUE never appears in the
-output — only whether it is present.
+Reports whether the bot token and chat id variables are set. Exit 0 when both
+are, 1 when either is missing. The token's VALUE never appears in the output —
+only whether it is present.
+
+WHICH VARIABLES ARE READ COMES FROM THE POLICY: channels.telegram.token_env and
+channels.telegram.chat_id_env hold variable NAMES (SPEC.md §5.1), defaulting to
+APPROVAL_TG_TOKEN and APPROVAL_TG_CHAT when a policy declares neither or fails
+to load. The names this run resolved are reported in both output forms, so a
+renamed variable reads back as the name you set.
 
 MAKES NO NETWORK CALL. A health check that contacted the Bot API would announce
 the bot from any shell and would fail for reasons (a captive portal, a rate

@@ -673,7 +673,14 @@ interface Run {
 
 function cliEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
   const env = { ...process.env, ...extra };
-  for (const name of ["APPROVAL_HUMAN", "APPROVAL_TG_TOKEN", "APPROVAL_TG_CHAT"]) {
+  for (const name of [
+    "APPROVAL_HUMAN",
+    "APPROVAL_TG_TOKEN",
+    "APPROVAL_TG_CHAT",
+    // APRV-72's renamed pair, scrubbed for the same reason as the defaults.
+    "MY_BOT_TOKEN",
+    "MY_BOT_CHAT",
+  ]) {
     if (extra[name] === undefined) delete env[name];
   }
   return env;
@@ -708,6 +715,119 @@ test("listen without the environment is a usage error naming both variables", ()
   assert.equal(parsed["ok"], true);
   assert.equal(parsed["token_set"], true);
   assert.equal(health.stdout.includes(TOKEN), false, "health must not print the token");
+});
+
+// ---------------------------------------------------------------------------
+// The policy names the variables (APRV-72)
+// ---------------------------------------------------------------------------
+
+const RENAMED_TOKEN_ENV = "MY_BOT_TOKEN";
+const RENAMED_CHAT_ENV = "MY_BOT_CHAT";
+
+let policyCounter = 0;
+
+/** A policy file in the scratch tree, returned by path. */
+function policyFile(text: string): string {
+  policyCounter += 1;
+  const path = join(scratch.root, `policy-${policyCounter}.md`);
+  writeFileSync(path, text, "utf8");
+  return path;
+}
+
+/** {@link POLICY} plus a `channels.telegram` block renaming both variables. */
+const RENAMED_POLICY = POLICY.replace(
+  "```\n",
+  [
+    "channels:",
+    "  telegram:",
+    `    token_env: ${RENAMED_TOKEN_ENV}`,
+    `    chat_id_env: ${RENAMED_CHAT_ENV}`,
+    "```",
+    "",
+  ].join("\n"),
+);
+
+test("health reads and reports the variables the policy declared", () => {
+  const path = policyFile(RENAMED_POLICY);
+
+  const renamed = runCli(["channel", "telegram", "health", "--json", "--policy", path], {
+    [RENAMED_TOKEN_ENV]: TOKEN,
+    [RENAMED_CHAT_ENV]: CHAT,
+  });
+  assert.equal(renamed.code, 0, renamed.stderr);
+  const parsed = JSON.parse(renamed.stdout) as Record<string, unknown>;
+  assert.equal(parsed["ok"], true);
+  assert.equal(parsed["token_env"], RENAMED_TOKEN_ENV);
+  assert.equal(parsed["chat_env"], RENAMED_CHAT_ENV);
+  assert.equal(parsed["token_set"], true);
+  assert.equal(parsed["chat_id"], CHAT);
+  assert.equal(renamed.stdout.includes(TOKEN), false, "health must not print the token");
+
+  // The defaults are NOT consulted once the policy has named something else:
+  // a runtime that read both would silently accept a variable the operator's
+  // policy never mentions.
+  const defaults = runCli(["channel", "telegram", "health", "--json", "--policy", path], {
+    APPROVAL_TG_TOKEN: TOKEN,
+    APPROVAL_TG_CHAT: CHAT,
+  });
+  assert.equal(defaults.code, 1);
+  const missed = JSON.parse(defaults.stdout) as Record<string, unknown>;
+  assert.equal(missed["ok"], false);
+  assert.equal(missed["token_env"], RENAMED_TOKEN_ENV);
+  assert.equal(missed["token_set"], false);
+});
+
+test("listen's not-configured usage error names the policy's variable", () => {
+  const path = policyFile(RENAMED_POLICY);
+
+  const run = runCli(["channel", "telegram", "listen", "--policy", path], {
+    [RENAMED_TOKEN_ENV]: TOKEN,
+  });
+  assert.equal(run.code, 2);
+  // The first line is the error itself; the help text follows it, and the help
+  // text legitimately names the defaults.
+  const message = run.stderr.split("\n")[0] ?? "";
+  assert.match(message, /MY_BOT_CHAT is unset or empty/u);
+  assert.equal(
+    message.includes("APPROVAL_TG_"),
+    false,
+    "the error must name the variable this policy asked for, not the default",
+  );
+  assert.equal(run.stderr.includes(TOKEN), false, "the token must not be echoed back");
+});
+
+test("a policy declaring neither variable falls back to the reference defaults", () => {
+  const path = policyFile(POLICY);
+
+  const health = runCli(["channel", "telegram", "health", "--json", "--policy", path], {
+    APPROVAL_TG_TOKEN: TOKEN,
+    APPROVAL_TG_CHAT: CHAT,
+  });
+  assert.equal(health.code, 0, health.stderr);
+  const parsed = JSON.parse(health.stdout) as Record<string, unknown>;
+  assert.equal(parsed["ok"], true);
+  assert.equal(parsed["token_env"], "APPROVAL_TG_TOKEN");
+  assert.equal(parsed["chat_env"], "APPROVAL_TG_CHAT");
+});
+
+test("an unparseable policy falls back rather than locking the channel out", () => {
+  // Fail-closed governs autonomy and budgets. A variable NAME is not a
+  // permission (SPEC.md §5.2, as for vault.passphrase_env), so a policy typo
+  // must not make an operator's own credentials unreachable.
+  const path = policyFile(["# Policy", "", "```yaml approval-policy", "version: [", "```", ""].join("\n"));
+
+  const health = runCli(["channel", "telegram", "health", "--json", "--policy", path], {
+    APPROVAL_TG_TOKEN: TOKEN,
+    APPROVAL_TG_CHAT: CHAT,
+  });
+  assert.equal(health.code, 0, health.stderr);
+  const parsed = JSON.parse(health.stdout) as Record<string, unknown>;
+  assert.equal(parsed["ok"], true);
+  assert.equal(parsed["token_env"], "APPROVAL_TG_TOKEN");
+
+  const listen = runCli(["channel", "telegram", "listen", "--policy", path]);
+  assert.equal(listen.code, 2);
+  assert.match(listen.stderr, /APPROVAL_TG_TOKEN and APPROVAL_TG_CHAT are unset or empty/u);
 });
 
 test("listen with no human identity is a usage error", () => {
