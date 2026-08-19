@@ -70,6 +70,7 @@ import {
 import { isSmtpSecurity, probeSmtp, type SmtpSecurity } from "../adapters/smtp.js";
 import { EXIT_OK } from "./exit-codes.js";
 import { SETUP_ADAPTER_EMAIL_HELP, SETUP_ADAPTER_HELP } from "./help.js";
+import { refusal as renderRefusal, style } from "./style.js";
 import type { Streams } from "./main.js";
 import {
   front,
@@ -249,7 +250,7 @@ async function verifyEmail(
     .join("\n");
   return {
     ok: false,
-    detail: `approval: ${result.code}: ${scrub(result.message)}\n\nThe values ARE stored — a probe that failed because a laptop is behind a captive\nportal is not a reason to make you type five things again. Fix the server or the\nsetting and re-run this verb, or undo it by hand:\n\n${undo}\n`,
+    detail: `${renderRefusal(style(), result.code, scrub(result.message))}\n\nThe values ARE stored — a probe that failed because a laptop is behind a captive\nportal is not a reason to make you type five things again. Fix the server or the\nsetting and re-run this verb, or undo it by hand:\n\n${undo}\n`,
   };
 }
 

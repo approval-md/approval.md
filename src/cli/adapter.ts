@@ -64,6 +64,7 @@ import { executeRefusalExitCode } from "./execute.js";
 import { ADAPTER_EMAIL_HELP, ADAPTER_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 /** Identity accepted here: a person or an agent, never the runtime. */
@@ -241,7 +242,14 @@ export async function commandAdapterEmail(
     if (json) streams.err(`${JSON.stringify(result)}\n`);
     else {
       streams.err(
-        `approval: ${result.code}${result.adapter_code === undefined ? "" : ` (${result.adapter_code})`}: ${result.message}\n`,
+        // APRV-102: the one refusal shape. The adapter's own code, when it has
+        // one, rides in the machine-readable column beside the runtime's, since
+        // that pair is what an operator reports and an agent branches on.
+        `${renderRefusal(
+          style({ json }),
+          `${result.code}${result.adapter_code === undefined ? "" : ` (${result.adapter_code})`}`,
+          result.message,
+        )}\n`,
       );
     }
     return refusalExit(result);

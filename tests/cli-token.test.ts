@@ -199,11 +199,15 @@ test("grant prints the raw token on stdout, warns it is shown once, and logs onl
   const run = runCli(["grant", "task-042:chaser", "--as", "human:carter"], dir);
 
   assert.equal(run.code, 0, run.stderr);
-  const match = /^token: ([a-f0-9]{64})$/mu.exec(run.stdout);
+  const match = /^ {2}([a-f0-9]{64})$/mu.exec(run.stdout);
   assert.notEqual(match, null, `no token line in stdout:\n${run.stdout}`);
   const token = String(match?.[1]);
-  assert.match(run.stdout, /shown ONCE/u);
-  assert.match(run.stdout, /revoke and request again/u);
+  // APRV-102 replaced the sentence after the token with the panel's notice
+  // line. The three claims it makes are the three the sentence made.
+  assert.match(run.stdout, /^ {2}execution token {3}task-042:chaser$/mu);
+  assert.match(run.stdout, /single-use · stored nowhere · copy it now/u);
+  // …and the token line itself carries nothing else, so a triple-click is clean.
+  assert.match(run.stdout, new RegExp(`^ {2}${token}$`, "mu"));
 
   const granted = logRecords(dir)[3] as Record<string, unknown>;
   assert.equal(granted["event"], "approval.granted");

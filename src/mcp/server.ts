@@ -176,7 +176,10 @@ export function resolveAgentActor(
   if (!AGENT_ACTOR.test(raw)) {
     return {
       ok: false,
-      message: `--as expects agent:<id>, got ${JSON.stringify(raw)}. This server is agent-facing by construction (SPEC.md §11: the agent is the untrusted policy, the human is the overseer), so it refuses to act as a human or as the system`,
+      // APRV-102: no SPEC citation on an error line. The reason this server is
+      // agent-facing by construction is in `MCP_HELP` and in this file's header,
+      // which are the two places APRV-91 put rationale.
+      message: `--as expects agent:<id>, got ${JSON.stringify(raw)}. This server is agent-facing by construction, so it refuses to act as a human or as the system`,
     };
   }
   return { ok: true, actor: raw };

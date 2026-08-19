@@ -20,10 +20,14 @@ import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { MCP_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { usageErrorText } from "./usage.js";
 
 function usageError(streams: Streams, json: boolean, message: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${MCP_HELP}\n`);
+  // APRV-102: the pointer convention every other verb adopted in APRV-91. The
+  // whole help page used to follow the message, which put this verb's SPEC
+  // citations on an error screen — the exact thing the rule forbids.
+  else streams.err(usageErrorText(message, MCP_HELP));
   return EXIT_USAGE;
 }
 

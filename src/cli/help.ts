@@ -802,12 +802,14 @@ ${why("queue")}`;
 export const STATUS_HELP = `approval status — system health, not the inbox
 
 Usage:
-  approval status [--policy <path>] [--dir <path>] [--log <path>] [--json]
+  approval status [--policy <path>] [--dir <path>] [--log <path>]
+                  [--verbose] [--json]
 
 Flags:
   --policy <path>  policy file whose bytes attestation is judged against
   --dir <path>     directory to discover APPROVAL.md / APPROVALS.md in
   --log <path>     log file to read (never written by this command)
+  --verbose        print the rationale sentences under the rows they explain
   --json           machine-readable output
   -h, --help       this text
 
@@ -825,14 +827,14 @@ export const DOCTOR_HELP = `approval doctor — environment sanity in one verb
 
 Usage:
   approval doctor [--log <path>] [--policy <path>] [--dir <path>]
-                  [--tasks <dir>] [--api-base <url>] [--json]
+                  [--tasks <dir>] [--api-base <url>] [--verbose] [--json]
 
 Flags:
   --log <path>     log file to verify (never written by this command)
   --policy <path> / --dir <path>   the policy file, or where to discover it
   --tasks <dir> / --api-base <url>   task folder to check / Telegram Bot API
   --root <path>    TEST-ONLY: point build-freshness at another tree
-  --json           machine-readable output
+  --verbose / --json   never abbreviate a detail / machine-readable output
   -h, --help       this text
 
 Eleven checks, in the order in which their failures cascade: build-freshness,

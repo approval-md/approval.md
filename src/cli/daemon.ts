@@ -54,6 +54,7 @@ import { DAEMON_HELP, DAEMON_RUN_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
 import { DEFAULT_QUEUE_PATH } from "./render.js";
+import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 const RUN_FLAGS: Record<string, FlagKind> = {
@@ -182,7 +183,7 @@ function describe(event: DaemonEvent): { text: string; stderr: boolean } {
         stderr: false,
       };
     case "warning":
-      return { text: `approval: ${event.code}: ${event.message}`, stderr: true };
+      return { text: renderRefusal(style(), event.code, event.message), stderr: true };
     case "stopped":
       return {
         text: `daemon: stopped (${event.reason}) after ${String(event.ticks)} tick(s): ${String(
@@ -203,7 +204,7 @@ function describe(event: DaemonEvent): { text: string; stderr: boolean } {
  */
 function describeGitEvidence(event: GitEvidenceEvent): { text: string; stderr: boolean } {
   if (event.event === "git_evidence_failed") {
-    return { text: `approval: git-evidence: ${event.message}`, stderr: true };
+    return { text: renderRefusal(style(), "git-evidence", event.message), stderr: true };
   }
   const covered =
     event.records === null

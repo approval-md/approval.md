@@ -907,10 +907,10 @@ test("--once: pending request → message → callback → grant → token on st
   assert.equal(code, 0, `listener exited ${code}: ${stderr}`);
   assert.match(stdout, /notified task-100:/u);
   assert.match(stdout, /granted task-100:.* by human:carter via telegram/u);
-  const token = /execution token for \S+: (\S+)/u.exec(stdout);
+  const token = /execution token +\S+\n {2}(\S+)/u.exec(stdout);
   assert.ok(token !== null, `no execution token on stdout: ${stdout}`);
   assert.ok((token[1] as string).length >= 20, "the printed token looks too short to be one");
-  assert.match(stdout, /NOT sent to Telegram/u);
+  assert.match(stdout, /not sent to Telegram/u);
 
   // The token reached stdout and nothing else: not the chat, not the log.
   const sent = mock.sentTexts().join("\n");

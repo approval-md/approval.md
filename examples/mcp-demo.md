@@ -235,8 +235,11 @@ The listener's terminal prints:
 
 ```
 granted task-mcp-demo:greet (seq 4) by human:alice via telegram
-execution token for task-mcp-demo:greet: 9c92f89a81cbfc4e6c2f1ebc48f8539dc904dd894cff5b665aaabce0f1fee629
-approval: that token is single-use, stored nowhere, and was NOT sent to Telegram — copy it now
+─────────────────────────────────────────────────────────────
+  execution token   task-mcp-demo:greet
+  9c92f89a81cbfc4e6c2f1ebc48f8539dc904dd894cff5b665aaabce0f1fee629
+  single-use · stored nowhere · not sent to Telegram · copy it now
+─────────────────────────────────────────────────────────────
 ```
 
 **The token does not travel over MCP, and handing it over is your step.** The

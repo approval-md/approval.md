@@ -65,7 +65,7 @@ import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { HOOK_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
-import { style, type Style } from "./style.js";
+import { refusal as renderRefusal, style, table, type Style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 /** Identity accepted for the proposing side: a person or an agent. */
@@ -312,25 +312,16 @@ export function renderClassification(
 ): string {
   if (json) return `${JSON.stringify(result)}\n`;
   if (!result.ok) {
-    return `${st.glyph("fail")} ${st.fail(result.code)}  ${result.detail}\n  ${st.key("segment:")} ${st.value(result.segment)}\n`;
+    // APRV-102: the shared refusal shape rather than a second copy of it. The
+    // segment is a copyable value on its own line, which is what `refusal`'s
+    // optional second line is for.
+    return `${renderRefusal(st, result.code, result.detail)}\n  ${st.key("segment:")} ${result.segment}\n`;
   }
 
-  const widths = [
-    Math.max("class".length, ...result.segments.map((segment) => segment.class.length)),
-    Math.max("rule".length, ...result.segments.map((segment) => segment.rule.length)),
-  ];
-  const pad = (text: string, column: number): string =>
-    text + " ".repeat(Math.max(0, (widths[column] ?? 0) - text.length));
-
-  const lines = [
-    [st.key(pad("class", 0)), st.key(pad("rule", 1)), st.key("command")].join("  "),
-    ...result.segments.map((segment) =>
-      [pad(segment.class, 0), pad(segment.rule, 1), st.value(segment.text)].join("  ").trimEnd(),
-    ),
-    "",
-    `${st.key("classes:")} ${st.value(result.classes.join(", "))}`,
-  ];
-  return `${lines.join("\n")}\n`;
+  const rows = result.segments.map((segment) => [segment.class, segment.rule, segment.text]);
+  return `${table(st, rows, { header: ["class", "rule", "command"] })}\n\n${st.key(
+    "classes:",
+  )} ${result.classes.join(", ")}\n`;
 }
 
 /**

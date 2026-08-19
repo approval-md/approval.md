@@ -710,11 +710,11 @@ test("the M7 demo: draft -> telegram -> approve -> mail sent -> chain clean", as
     grantStdout = decided.stdout;
 
     assert.match(decided.stdout, new RegExp(`granted ${ACTION} .*by ${HUMAN} via telegram`, "u"));
-    const printed = /execution token for \S+: (\S+)/u.exec(decided.stdout);
+    const printed = /execution token +\S+\n {2}(\S+)/u.exec(decided.stdout);
     assert.ok(printed !== null, `no execution token on the listener's stdout: ${decided.stdout}`);
     executionToken = printed[1] as string;
     assert.match(executionToken, /^[a-f0-9]{64}$/u);
-    assert.match(decided.stdout, /NOT sent to Telegram/u);
+    assert.match(decided.stdout, /not sent to Telegram/u);
 
     await until(() => events().length === 4, "the grant to land in the log");
     assert.deepEqual(events(), [
@@ -1343,7 +1343,7 @@ test("the setup path: `approval setup` + `approval env` reaches the same log", a
     setupCaptured.push({ label: "listener stderr", text: granted.stderr });
     assert.equal(granted.code, 0, granted.stderr);
 
-    const printed = /execution token for \S+: (\S+)/u.exec(granted.stdout);
+    const printed = /execution token +\S+\n {2}(\S+)/u.exec(granted.stdout);
     assert.ok(printed !== null, `no execution token on the listener's stdout: ${granted.stdout}`);
     const token = printed[1] as string;
 

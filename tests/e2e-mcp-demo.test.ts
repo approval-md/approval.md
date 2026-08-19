@@ -464,11 +464,11 @@ test("the MCP demo: a client requests, a phone grants, the tool call proceeds", 
       assert.equal(granted.code, 0, granted.stderr);
       assert.match(granted.stdout, new RegExp(`granted ${ACTION} .*by ${HUMAN} via telegram`, "u"));
 
-      const printed = /execution token for \S+: (\S+)/u.exec(granted.stdout);
+      const printed = /execution token +\S+\n {2}(\S+)/u.exec(granted.stdout);
       assert.ok(printed !== null, `no execution token on the listener's stdout: ${granted.stdout}`);
       executionToken = printed[1] as string;
       assert.match(executionToken, /^[a-f0-9]{64}$/u);
-      assert.match(granted.stdout, /NOT sent to Telegram/u);
+      assert.match(granted.stdout, /not sent to Telegram/u);
       // The listener's stdout is the one sanctioned appearance, and it is
       // deliberately NOT in `captured`: the sweep at hop (j) asserts that it is
       // the only one by scanning everything else.

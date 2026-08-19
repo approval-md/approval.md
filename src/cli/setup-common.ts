@@ -54,6 +54,7 @@ import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
 import { createPrompter, type Prompter } from "./prompt.js";
+import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 // ---------------------------------------------------------------------------
@@ -384,7 +385,7 @@ export function refusalExitCode(refusal: EnvFileRefusal): number {
 }
 
 export function emitRefusal(streams: Streams, refusal: EnvFileRefusal): number {
-  streams.err(`approval: ${refusal.code}: ${refusal.message}\n`);
+  streams.err(`${renderRefusal(style(), refusal.code, refusal.message)}\n`);
   return refusalExitCode(refusal);
 }
 

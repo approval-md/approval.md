@@ -476,10 +476,18 @@ approval doctor
 ✓ telegram            getMe on https://api.telegram.org succeeded …
 ✓ web-port            127.0.0.1:4680 is free (bound and released; nothing was left listening)
 ✓ payload-store       …
+– audit-sampling      disabled (rate-absent): APPROVAL.md declares no audit.supervised_sample_rate, so no supervised action is escalated for retrospective review
+– envelope-integrity  no task folder at /tmp/approval-email-demo/backlog/tasks, so no task file can be compared against the log (pass --tasks <dir> if your task files live elsewhere)
 ✓ vault               /tmp/approval-email-demo/.approval/vault.enc opens with the passphrase in $APPROVAL_DEMO_VAULT_PASSPHRASE and holds 5 credential(s) … No credential name or value is printed by this check
 ✓ environment         /tmp/approval-email-demo/.approval/env (mode 0600, and no verb loads it implicitly: `eval "$(approval env)"` is how a human puts these in a shell) … Every variable your policy names is available to the verbs run from this shell
-11 ok · 0 not applicable · 0 failed
+9 ok · 2 not applicable · 0 failed
 ```
+
+Eleven rows, and the summary counts all eleven. Two are `–` rather than `✓`, and
+both are *states* rather than faults: this demo's policy declares no sampling
+rate, and `task-042.md` sits in the demo directory rather than in a
+`backlog/tasks` folder, so there is no envelope to compare against the log. A
+check that does not apply never fails the verb, and `doctor` still exits 0.
 
 The glyph column is the whole report at a glance, and the summary line under it
 is the count. On a terminal the glyph and the counts carry their role colour;
@@ -549,8 +557,11 @@ what you think you are approving.
 
 ```
 granted task-042:chaser:2026-08-04 (seq 4) by human:alice via telegram
-execution token for task-042:chaser:2026-08-04: aceea22f…
-approval: that token is single-use, stored nowhere, and was NOT sent to Telegram — copy it now
+─────────────────────────────────────────────────────────────
+  execution token   task-042:chaser:2026-08-04
+  aceea22f…
+  single-use · stored nowhere · not sent to Telegram · copy it now
+─────────────────────────────────────────────────────────────
 ```
 
 Copy the token. It was never sent to Telegram (a chat transcript is not a secrets

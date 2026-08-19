@@ -77,6 +77,7 @@ import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
 import { commandTelegram } from "./channel-telegram.js";
 import { commandWeb } from "./channel-web.js";
+import { refusal as renderRefusal, style, tokenPanel, TOKEN_NOTICE } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 const FLAGS: Record<string, FlagKind> = {
@@ -211,7 +212,7 @@ export function commandChannelCli(argv: string[], streams: Streams, cwd: string)
         `${JSON.stringify({ ok: false, error: { code: queue.code, message: queue.message } })}\n`,
       );
     } else {
-      streams.err(`approval: ${queue.code}: ${queue.message}\n`);
+      streams.err(`${renderRefusal(style({ json }), queue.code, queue.message)}\n`);
     }
     return refusalExit(queue.code);
   }
@@ -269,7 +270,11 @@ function reportSkipped(
   streams: Streams,
 ): void {
   for (const entry of skipped) {
-    streams.err(`approval: skipped ${entry.action_key} (${entry.code}): ${entry.message}\n`);
+    // APRV-102: the shared refusal shape. The action key leads the message
+    // because a skip is ABOUT one request, and the reader is scanning for which.
+    streams.err(
+      `${renderRefusal(style(), entry.code, `skipped ${entry.action_key}: ${entry.message}`)}\n`,
+    );
   }
 }
 
@@ -353,8 +358,11 @@ async function interactiveLoop(
       streams.out(`${describeOutcome(collected.outcome)}\n`);
       if (!collected.outcome.ok) refused = true;
       else if (token !== undefined) {
+        // APRV-102: the rule-boxed panel of APRV-91's brief, from the one helper
+        // every token surface shares. This terminal is the only place the raw
+        // value will ever exist.
         streams.out(
-          `token: ${token}\n(single-use execution token, shown ONCE: the log records only its SHA-256 and nothing can recover it. Spend it with \`approval run\`; if lost, revoke and request again.)\n`,
+          `${tokenPanel(style(), request.action_key.value, token, TOKEN_NOTICE)}\n`,
         );
       }
     }

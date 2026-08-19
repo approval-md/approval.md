@@ -556,7 +556,7 @@ test("the seq-2 shape: the advisory names the failure and a plain amend still at
   assert.equal(run.code, 0, run.stderr);
   // APRV-93: the shouted banner became the `Load` section's verdict line.
   assert.match(run.stdout, /^Load$/mu);
-  assert.match(run.stdout, /✗ DOES NOT LOAD \(schema-invalid\)/u);
+  assert.match(run.stdout, /✗ schema-invalid {2}the policy does not load:/u);
   assert.match(run.stdout, /FAIL CLOSED to all-manual/u);
   // The diff is honest about what the broken side means for every class.
   assert.match(run.stdout, /after: everything manual \(fail-closed: schema-invalid\)/u);

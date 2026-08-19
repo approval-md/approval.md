@@ -168,11 +168,29 @@ const GLYPH_ROLE: Record<Glyph, Role> = {
 function colourEnabled(input: StyleInput, env: Record<string, string | undefined>): boolean {
   if (input.json === true) return false;
   if (input.noColor === true) return false;
-  if (env["FORCE_COLOR"] === "1") return true;
+  if (forcedColour(env)) return true;
   const noColor = env["NO_COLOR"];
   if (noColor !== undefined && noColor !== "") return false;
   if (env["TERM"] === "dumb") return false;
   return input.tty ?? process.stdout.isTTY === true;
+}
+
+/**
+ * Whether FORCE_COLOR says yes (APRV-102).
+ *
+ * The convention every other tool honours is that FORCE_COLOR is a LEVEL, not a
+ * boolean: `1`, `2` and `3` all mean "colour, at this depth", `true` is common
+ * in CI configuration, and only `0` (and, in some tools, `false`) means off. The
+ * literal `=== "1"` this replaced meant `FORCE_COLOR=2` in a CI job silently
+ * fell through to the TTY question and produced a plain log, which is precisely
+ * the case the escape hatch exists for. Depth itself is not modelled: this
+ * palette is one 256-colour parameter and eight basic ones.
+ */
+function forcedColour(env: Record<string, string | undefined>): boolean {
+  const forced = env["FORCE_COLOR"];
+  if (forced === undefined || forced === "") return false;
+  const normalized = forced.toLowerCase();
+  return normalized !== "0" && normalized !== "false";
 }
 
 /**
@@ -248,35 +266,153 @@ class TerminalStyle implements Style {
   }
 
   table(rows: readonly TableRow[], options: TableOptions = {}): string {
-    const indent = " ".repeat(options.indent ?? 0);
-    const gap = " ".repeat(options.gap ?? 2);
-
-    // Width is measured on the UNDRESSED text: escape sequences occupy no
-    // columns, so padding computed after painting would be wrong by exactly
-    // the length of the escapes, and the table would only line up in a pipe.
-    const marks = rows.map((row) => (row.glyph === undefined ? "" : this.rawGlyph(row.glyph)));
-    const markWidth = Math.max(0, ...marks.map((mark) => mark.length));
-    const leftWidth = Math.max(0, ...rows.map((row) => row.left.length));
-
-    const out: string[] = [];
-    rows.forEach((row, index) => {
-      const rawMark = marks[index] ?? "";
-      const mark =
-        row.glyph === undefined
-          ? " ".repeat(markWidth)
-          : this.paint(row.role ?? GLYPH_ROLE[row.glyph], rawMark) +
-            " ".repeat(markWidth - rawMark.length);
-      const head = markWidth === 0 ? "" : `${mark} `;
-      const left = row.plainLeft === true ? row.left : this.key(row.left);
-      const pad = " ".repeat(leftWidth - row.left.length);
-      const right = row.right ?? "";
-      out.push(`${indent}${head}${left}${right === "" ? "" : `${pad}${gap}${right}`}`.trimEnd());
-      for (const extra of row.under ?? []) {
-        out.push(`${indent}${" ".repeat(markWidth === 0 ? 0 : markWidth + 1)}  ${extra}`.trimEnd());
-      }
+    // The two-column shape is the n-column one with a glyph column in front:
+    // one alignment engine, so a change to how width is measured cannot reach
+    // only half of the CLI's tables (APRV-102).
+    const glyphed = rows.some((row) => row.glyph !== undefined);
+    const gap = options.gap ?? 2;
+    const markWidth = Math.max(
+      0,
+      ...rows.map((row) => (row.glyph === undefined ? 0 : this.rawGlyph(row.glyph).length)),
+    );
+    const grid: GridRow[] = rows.map((row) => ({
+      cells: [
+        ...(glyphed
+          ? [
+              row.glyph === undefined
+                ? ""
+                : { text: this.rawGlyph(row.glyph), role: row.role ?? GLYPH_ROLE[row.glyph] },
+            ]
+          : []),
+        row.plainLeft === true ? row.left : { text: row.left, role: "key" as Role },
+        row.right ?? "",
+      ],
+      ...(row.under === undefined ? {} : { under: row.under }),
+    }));
+    return table(this, grid, {
+      indent: options.indent ?? 0,
+      // A single space after the glyph, `gap` after the label: the glyph is a
+      // mark ON the row rather than a column of its own.
+      gaps: glyphed ? [1, gap] : [gap],
+      underHang: glyphed ? markWidth + 3 : 2,
     });
-    return out.join("\n");
   }
+}
+
+// ---------------------------------------------------------------------------
+// The n-column table (APRV-102)
+// ---------------------------------------------------------------------------
+
+/**
+ * One cell. A bare string is an UNDRESSED cell, which is the common case and
+ * the safe default: rule 3 above says a value is never painted, so a caller has
+ * to ask for a role before anything is.
+ */
+export interface Cell {
+  text: string;
+  role?: Role;
+}
+
+export type GridCell = string | Cell;
+
+/** A row, with the lines that hang beneath it when it has any. */
+export interface GridRow {
+  cells: readonly GridCell[];
+  under?: readonly string[];
+}
+
+export type GridInput = readonly GridCell[] | GridRow;
+
+export interface GridOptions {
+  /** A header row, rendered in `key` unless a cell asks for its own role. */
+  header?: readonly GridCell[];
+  /** Per-column alignment; missing entries are `left`. */
+  align?: readonly ("left" | "right")[];
+  /** Spaces before every row. Default 0. */
+  indent?: number;
+  /** Spaces between columns: one number for all, or one per boundary. */
+  gap?: number;
+  gaps?: readonly number[];
+  /** Spaces (after `indent`) before an `under` line. Default 2. */
+  underHang?: number;
+}
+
+function cellOf(cell: GridCell): Cell {
+  return typeof cell === "string" ? { text: cell } : cell;
+}
+
+function rowOf(row: GridInput): GridRow {
+  return Array.isArray(row) ? { cells: row as readonly GridCell[] } : (row as GridRow);
+}
+
+/**
+ * The one aligned-columns renderer in this CLI (APRV-102).
+ *
+ * Three hand-rolled versions of this arithmetic existed — `style.table`,
+ * `execute.ts`'s queue and `hook.ts`'s classify — and they had already drifted
+ * on the question that matters: WIDTH IS MEASURED ON THE UNDRESSED TEXT.
+ * Escape sequences occupy no terminal columns, so padding computed after
+ * painting is wrong by exactly the length of the escapes and the table lines up
+ * only in a pipe. Here the cell text is padded and painted separately, so the
+ * coloured render is the plain one with escapes inserted and nothing else.
+ *
+ * Every line is `trimEnd`ed: trailing spaces are invisible in review and very
+ * visible in the diff of a pinned transcript.
+ *
+ * Returned with no trailing newline; the caller owns the stream.
+ */
+export function table(
+  st: Style,
+  rows: readonly GridInput[],
+  options: GridOptions = {},
+): string {
+  const indent = " ".repeat(options.indent ?? 0);
+  const defaultGap = options.gap ?? 2;
+  const gapAt = (boundary: number): string =>
+    " ".repeat(options.gaps?.[boundary] ?? defaultGap);
+
+  const header =
+    options.header === undefined
+      ? null
+      : options.header.map((cell) => {
+          const normalized = cellOf(cell);
+          return { text: normalized.text, role: normalized.role ?? ("key" as Role) };
+        });
+  const body = rows.map(rowOf);
+  const all = [...(header === null ? [] : [{ cells: header }]), ...body];
+
+  const columns = Math.max(0, ...all.map((row) => row.cells.length));
+  const widths: number[] = [];
+  for (let column = 0; column < columns; column += 1) {
+    widths.push(
+      Math.max(
+        0,
+        ...all.map((row) => cellOf(row.cells[column] ?? "").text.length),
+      ),
+    );
+  }
+
+  const renderRow = (cells: readonly GridCell[]): string => {
+    let line = indent;
+    for (let column = 0; column < columns; column += 1) {
+      const { text, role } = cellOf(cells[column] ?? "");
+      const pad = " ".repeat(Math.max(0, (widths[column] ?? 0) - text.length));
+      const painted = role === undefined ? text : st.paint(role, text);
+      const right = (options.align?.[column] ?? "left") === "right";
+      line += right ? `${pad}${painted}` : `${painted}${pad}`;
+      if (column < columns - 1) line += gapAt(column);
+    }
+    return line.trimEnd();
+  };
+
+  const out: string[] = [];
+  if (header !== null) out.push(renderRow(header));
+  const hang = " ".repeat(options.underHang ?? 2);
+  for (const row of body) {
+    out.push(renderRow(row.cells));
+    for (const extra of row.under ?? []) out.push(`${indent}${hang}${extra}`.trimEnd());
+  }
+  return out.join("\n");
 }
 
 /**
@@ -306,6 +442,60 @@ export function refusal(
 ): string {
   const head = `${style.glyph("fail")} ${style.fail(code)}  ${message}`;
   return fix === undefined ? head : `${head}\n  ${style.key("fix:")} ${fix}`;
+}
+
+/**
+ * The notice under a printed execution token, on a surface that is not Telegram.
+ *
+ * Three facts and an instruction, in the order a reader needs them: it works
+ * once, nothing anywhere can give it back, so the copy has to happen now.
+ */
+export const TOKEN_NOTICE = "single-use · stored nowhere · copy it now";
+
+/** The same, for the Telegram listener, where the extra clause is load-bearing. */
+export const TOKEN_NOTICE_TELEGRAM =
+  "single-use · stored nowhere · not sent to Telegram · copy it now";
+
+/** How wide the rules around a token panel are drawn. */
+const PANEL_WIDTH = 61;
+
+/**
+ * The execution token, in a rule-boxed panel (APRV-91's brief, APRV-102).
+ *
+ *     ─────────────────────────────────────────────────────────────
+ *       execution token   task-042:chaser
+ *       729a25b06567ccc0aed356f3423e39bf12b6252056b7890acde455603010fb11
+ *       single-use · stored nowhere · copy it now
+ *     ─────────────────────────────────────────────────────────────
+ *
+ * Trust surfaces look different from chatter: this is the one value in the whole
+ * CLI that exists for exactly as long as the terminal keeps it, so it gets a box
+ * and whitespace rather than a prefix on a line of prose.
+ *
+ * THE TOKEN LINE IS UNCOLOURED AND ALONE. Rule 3 in the header is not a
+ * preference here: a triple-click on the token must yield the token, and an
+ * escape sequence in the middle of it yields something that cannot be spent.
+ * The label carries the emphasis, the notice wears `secret` (bold yellow, never
+ * red: red is failure and this is a success), and the rules wear `rule`.
+ *
+ * One helper rather than one per surface, because `grant`, the Telegram listener
+ * and the CLI channel each print this and three copies is three chances for the
+ * one that matters to lose its warning.
+ */
+export function tokenPanel(
+  st: Style,
+  actionKey: string,
+  token: string,
+  notice: string = TOKEN_NOTICE,
+): string {
+  const bar = st.rule(PANEL_WIDTH);
+  return [
+    bar,
+    `  ${st.key("execution token")}   ${actionKey}`,
+    `  ${token}`,
+    `  ${st.secret(notice)}`,
+    bar,
+  ].join("\n");
 }
 
 /** Build a style. Tests use this; the CLI uses {@link style}. */

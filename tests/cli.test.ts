@@ -250,7 +250,8 @@ test("log verify: corrupt log reports reason and first bad seq on stderr", () =>
   assert.equal(run.stdout, "");
   assert.equal(
     run.stderr,
-    `approval: corrupt: hash-mismatch at seq 2\napproval: ${hashMismatchMessage(2)}\n`,
+    // APRV-102: the shared refusal shape (glyph, code, message).
+    `✗ corrupt  hash-mismatch at seq 2\napproval: ${hashMismatchMessage(2)}\n`,
   );
 });
 
