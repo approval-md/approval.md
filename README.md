@@ -47,12 +47,12 @@ itself, including the point at which it starts running behind its own gate.
 
 ## Quickstart
 
-Ten lines from an empty directory to a machine that will tell you what it is
+Six commands from an empty directory to a machine that will tell you what it is
 missing. `init` scaffolds and authorizes nothing; `policy attest` is what makes
 a policy operative; `doctor` reports and repairs nothing.
 
 ```sh
-mkdir -p ~/approval-demo && cd ~/approval-demo
+mkdir -p /tmp/approval-demo && cd /tmp/approval-demo
 approval init                    # APPROVAL.md, .approval/log/, QUEUE.md, .gitignore
 approval setup identity          # writes where APPROVAL_HUMAN comes from
 eval "$(approval env)"           # put the resolved variables in this shell
@@ -64,13 +64,15 @@ approval doctor                  # can this machine run the system at all?
 attested /tmp/approval-demo/APPROVAL.md at seq 1: sha256 cff55216c7be9bfbf35a7d980b6a0c75d250ebc039d7584cb9b3aa3bf25b2f91
 ```
 
-`doctor` prints one line per check, and the last line is the tally. Three of the
+`doctor` prints one line per check, and the last line is the tally. Four of the
 eleven lines from a fresh directory, plus that tally:
 
 ```
 ✓ identity            APPROVAL_HUMAN=human:alice (config-declared: the trust boundary is this machine, not cryptography)
 ✓ attestation         /tmp/approval-demo/APPROVAL.md is attested at seq 1 (sha256 cff55216c7be…)
 ✓ log                 /tmp/approval-demo/.approval/log/events.jsonl verifies: 1 record(s), head seq 1 0f3c4a19187a…
+✗ audit-sampling      disabled (secret-env-unnamed): APPROVAL.md sets audit.supervised_sample_rate to 0.1 but names no audit.sampling_secret_env. …
+    fix: approval policy attest --as human:<id> — after setting audit.supervised_sample_rate and audit.sampling_secret_env in the policy; then export the named variable where the daemon runs
 6 ok · 4 not applicable · 1 failed
 ```
 
@@ -78,9 +80,12 @@ The checks run in the order their failures cascade: build freshness, identity,
 attestation, log chain, Telegram reachability, the web port, the payload store,
 audit sampling, envelope integrity, the vault, and the environment source map
 behind `approval env`. Each failure carries a concrete `fix:` line you run
-yourself. `doctor` exists because a real ceremony lost time twice to a stale
-`dist/` and an unbuilt checkout, neither of which was a runtime bug and neither
-of which anything was in a position to say out loud.
+yourself. The one failure above is real and intended: the scaffolded policy
+samples supervised actions for audit, and sampling needs an operator-held secret
+the policy only names, so nothing is sampled until you name it. `doctor` exists
+because a real ceremony lost time twice to a stale `dist/` and an unbuilt
+checkout, neither of which was a runtime bug and neither of which anything was in
+a position to say out loud.
 
 What `init` scaffolds is the canonical example policy of SPEC.md section 5.1,
 which names an approver you are probably not. Read every class before you sign
@@ -97,9 +102,9 @@ A policy is a fenced `yaml approval-policy` block inside a markdown file named
 block and ignores the rest. That is the point of the format: the thing you are
 signing for is text you read.
 
-The `policy attest` line the quickstart ran is what makes the policy operative. An attestation records
-that a human saw these exact bytes, and it records their SHA-256 rather than
-their text. Edit `APPROVAL.md` afterwards and every gated operation refuses with
+The `policy attest` line the quickstart ran is what makes the policy operative.
+An attestation records that a human saw these exact bytes, and it records their
+SHA-256 rather than their text. Edit `APPROVAL.md` afterwards and every gated operation refuses with
 `hash-mismatch` until you attest again. Unattested is not the same as permissive:
 the runtime fails closed, and an unparseable policy resolves every class to
 `manual`.

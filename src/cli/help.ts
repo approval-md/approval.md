@@ -64,7 +64,10 @@ Usage:
                       --note "<text>" [--as human:<id>] [--json]
   approval audit list|review [<seq|action-key>] [--note "<text>"]
                       [--as human:<id>] [--all] [--json]
-  approval wait       <task> --timeout <duration> [--interval <d>] [--json]
+  approval wait       <task> --timeout <duration> [--interval <d>]
+                      [--withdraw-on-timeout] [--json]
+  approval withdraw   <task> --action <key> [--reason <r>] [--note "<text>"]
+                      [--as <id>] [--json]
   approval queue      [--policy <path>] [--dir <path>] [--json]
   approval channel cli [--policy-dir <path>] [--payload-dir <path>]
                       [--as human:<id>] [--interactive] [--json]
@@ -165,7 +168,9 @@ Ask — an agent declares an action and acts on the answer:
             the adapter — recomputes the hash, spends the token, and writes both
             execution events around the send
   wait      block until a task's requests are decided; the exit code IS the
-            decision (0 granted, 1 rejected/revoked, 3 expired, 6 timeout)
+            decision (0 granted, 1 rejected/revoked/withdrawn, 3 expired, 6 timeout)
+  withdraw  take back your OWN pending request (timeout, cancelled, superseded);
+            terminal, requester-only, and a late grant then authorizes nothing
   hook      put the gate in front of an agent HARNESS. "hook claude-code" reads
             a Claude Code PreToolUse event on stdin, classifies the command it
             is about to run, resolves the class against APPROVAL.md, and answers
