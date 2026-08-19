@@ -18,7 +18,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { appendAttestation, decide, expire, register, request } from "./clock-adapters.js";
+import {
+  appendAttestation,
+  decide,
+  expire,
+  register,
+  request,
+  withdraw,
+} from "./clock-adapters.js";
 import {
   EXPIRY_ACTOR,
   GATE_REFUSAL_CODES,
@@ -1129,6 +1136,269 @@ test("a full manual lifecycle leaves the chain clean and the states in order", (
   assertClean(unit);
 });
 
+// ===========================================================================
+// withdraw (APRV-106)
+// ===========================================================================
+
+test("withdraw: the requester retracts its own pending request", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  requestChaser(unit);
+
+  const result = withdraw(unit.logPath, "task-042:chaser", "agent:claude", at(2), {
+    ...unit.options,
+    reason: "timeout",
+    note: "the wait elapsed",
+  });
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  if (!result.ok) throw new Error("unreachable");
+
+  assert.equal(result.record.event, "approval.withdrawn");
+  assert.equal(result.record.actor, "agent:claude");
+  assert.equal(result.record.task, "task-042");
+  assert.deepEqual(result.record.payload, {
+    action_key: "task-042:chaser",
+    reason: "timeout",
+    note: "the wait elapsed",
+  });
+
+  // Terminal, and derived as such from the log alone.
+  assert.equal(
+    requestState(records(unit), "task-042:chaser", at(3), 3_600_000).state,
+    "withdrawn",
+  );
+  assertClean(unit);
+});
+
+test("withdraw: only the requester may, and anyone else is not-requester", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  requestChaser(unit);
+
+  // A human, an approver even, is still not the party that asked.
+  const stranger = asRefusal(
+    withdraw(unit.logPath, "task-042:chaser", "human:carter", at(2), unit.options),
+  );
+  assert.equal(stranger.code, "not-requester");
+  assert.match(stranger.message, /reject it/u);
+
+  // A different agent is refused for exactly the same reason: if any actor
+  // could withdraw, the approver's queue would be clearable by whoever reached
+  // the log first.
+  assert.equal(
+    asRefusal(withdraw(unit.logPath, "task-042:chaser", "agent:mallory", at(2), unit.options)).code,
+    "not-requester",
+  );
+
+  // Nothing was appended by either attempt.
+  assert.equal(eventTypes(unit).filter((event) => event === "approval.withdrawn").length, 0);
+  assert.equal(
+    requestState(records(unit), "task-042:chaser", at(2), 3_600_000).state,
+    "requested",
+  );
+  assertClean(unit);
+});
+
+test("withdraw: system: is refused before the log is even read", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  requestChaser(unit);
+  const refusal = asRefusal(
+    withdraw(unit.logPath, "task-042:chaser", "system:gate", at(2), unit.options),
+  );
+  assert.equal(refusal.code, "actor-invalid");
+  assert.match(refusal.message, /TTL/u);
+  assertClean(unit);
+});
+
+test("withdraw: a decided request is already-decided, and a second withdrawal is terminal", () => {
+  const granted = newCase();
+  attest(granted);
+  registerTask(granted);
+  requestChaser(granted);
+  assert.equal(
+    decide(granted.logPath, "task-042:chaser", "grant", "human:carter", at(2), granted.options).ok,
+    true,
+  );
+  const late = asRefusal(
+    withdraw(granted.logPath, "task-042:chaser", "agent:claude", at(3), granted.options),
+  );
+  assert.equal(late.code, "already-decided");
+  assert.match(late.message, /erase the answer/u);
+  assertClean(granted);
+
+  const twice = newCase();
+  attest(twice);
+  registerTask(twice);
+  requestChaser(twice);
+  assert.equal(
+    withdraw(twice.logPath, "task-042:chaser", "agent:claude", at(2), twice.options).ok,
+    true,
+  );
+  assert.equal(
+    asRefusal(withdraw(twice.logPath, "task-042:chaser", "agent:claude", at(3), twice.options)).code,
+    "request-withdrawn",
+  );
+  assert.equal(
+    eventTypes(twice).filter((event) => event === "approval.withdrawn").length,
+    1,
+    "a refused second withdrawal must append nothing",
+  );
+  assertClean(twice);
+});
+
+test("withdraw: an unrequested key is not-requested and a lapsed one is expired", () => {
+  const never = newCase();
+  attest(never);
+  registerTask(never);
+  assert.equal(
+    asRefusal(withdraw(never.logPath, "task-042:chaser", "agent:claude", at(2), never.options)).code,
+    "not-requested",
+  );
+  assertClean(never);
+
+  // Expiry is judged from the request's own ts, exactly as `decide` judges it,
+  // and the lapse is materialised on the way past.
+  const lapsed = newCase();
+  attest(lapsed);
+  registerTask(lapsed);
+  requestChaser(lapsed);
+  const refusal = asRefusal(
+    withdraw(lapsed.logPath, "task-042:chaser", "agent:claude", at(200), lapsed.options),
+  );
+  assert.equal(refusal.code, "expired");
+  assert.equal(refusal.record?.event, "approval.expired");
+  assert.equal(refusal.record?.actor, EXPIRY_ACTOR);
+  assertClean(lapsed);
+});
+
+test("withdraw: every decision afterwards is refused request-withdrawn", () => {
+  for (const decision of ["grant", "reject", "revoke"] as const) {
+    const unit = newCase();
+    attest(unit);
+    registerTask(unit);
+    requestChaser(unit);
+    assert.equal(
+      withdraw(unit.logPath, "task-042:chaser", "agent:claude", at(2), unit.options).ok,
+      true,
+    );
+    const refusal = asRefusal(
+      decide(unit.logPath, "task-042:chaser", decision, "human:carter", at(3), unit.options),
+    );
+    assert.equal(refusal.code, "request-withdrawn", `${decision} should refuse request-withdrawn`);
+    assert.equal(refusal.state, "withdrawn");
+    // Nothing was recorded: a late grant on a withdrawn request would be an
+    // authorization with no process left to consume it.
+    assert.equal(
+      eventTypes(unit).filter((event) => event.startsWith("approval.")).length,
+      2,
+      "requested + withdrawn, and nothing else",
+    );
+    assertClean(unit);
+  }
+});
+
+test("withdraw: a re-request after a withdrawal starts a fresh, decidable cycle", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  requestChaser(unit);
+  assert.equal(
+    withdraw(unit.logPath, "task-042:chaser", "agent:claude", at(2), unit.options).ok,
+    true,
+  );
+  // The request cycle resets, so the same key can be asked about again — which
+  // is exactly what a retried tool call does.
+  requestChaser(unit, at(3));
+  assert.equal(
+    decide(unit.logPath, "task-042:chaser", "grant", "human:carter", at(4), unit.options).ok,
+    true,
+  );
+  assert.equal(requestState(records(unit), "task-042:chaser", at(5), 3_600_000).state, "granted");
+  assertClean(unit);
+});
+
+// ===========================================================================
+// harness-executed requests mint no token (APRV-106)
+// ===========================================================================
+
+test("a harness-executed request is granted completely and mints no token", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  const requested = request(
+    unit.logPath,
+    {
+      task: "task-042",
+      actionKey: "task-042:chaser",
+      payload_hash: PAYLOAD_HASH,
+      cls: "communicate.email.external",
+      est_cost_usd: 0.02,
+      reversible: false,
+      summary: "Send deposit chaser",
+      execution: "harness",
+      wait_until: at(10),
+    },
+    at(1),
+    "agent:claude",
+    unit.options,
+  );
+  assert.equal(requested.ok, true, requested.ok ? "" : requested.message);
+
+  const granted = decide(
+    unit.logPath,
+    "task-042:chaser",
+    "grant",
+    "human:carter",
+    at(2),
+    unit.options,
+  );
+  assert.equal(granted.ok, true, granted.ok ? "" : granted.message);
+  if (!granted.ok) throw new Error("unreachable");
+
+  // No token was returned to the caller and no digest reached the log: the
+  // hook answers allow/deny and the harness runs the command, so a minted token
+  // would be a live credential with no spender.
+  assert.equal(granted.token, undefined, "a harness-executed grant must mint no token");
+  const payload = granted.record.payload as Record<string, unknown>;
+  assert.equal(payload["token_sha256"], undefined);
+  assert.equal(payload["execution"], "harness");
+
+  // Still a COMPLETE grant: the budgets contract and the content binding are
+  // recorded exactly as they are for a token-bearing one.
+  assert.equal(payload["class"], "communicate.email.external");
+  assert.equal(payload["est_cost_usd"], 0.02);
+  assert.equal(payload["payload_hash"], PAYLOAD_HASH);
+  assert.equal(requestState(records(unit), "task-042:chaser", at(3), 3_600_000).state, "granted");
+  assertClean(unit);
+});
+
+test("an ordinary request is unaffected: it still mints and records a token", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  requestChaser(unit);
+  const granted = decide(
+    unit.logPath,
+    "task-042:chaser",
+    "grant",
+    "human:carter",
+    at(2),
+    unit.options,
+  );
+  assert.equal(granted.ok, true);
+  if (!granted.ok) throw new Error("unreachable");
+  assert.match(String(granted.token), /^[a-f0-9]{64}$/u);
+  assert.equal(
+    (granted.record.payload as Record<string, unknown>)["token_sha256"],
+    tokenHash(granted.token as string),
+  );
+  assertClean(unit);
+});
+
 test("the refusal-code union is frozen public API", () => {
   // Agents branch on these strings; adding one is a spec change and renaming
   // one is a breaking change, so the list is pinned here rather than assumed.
@@ -1165,6 +1435,14 @@ test("the refusal-code union is frozen public API", () => {
     "not-requested",
     "already-decided",
     "not-granted",
+    // APRV-106, both additions. `request-withdrawn` is the requester's
+    // retraction seen from the decision side ("nobody answered and nobody can
+    // now"), deliberately not folded into `already-decided`, which says the
+    // opposite ("somebody answered and the answer stands"). `not-requester`
+    // guards the retraction itself: if any actor could withdraw, the approver's
+    // queue would be clearable by whoever reached the log first.
+    "request-withdrawn",
+    "not-requester",
     "expired",
     "not-expired",
     "actor-invalid",

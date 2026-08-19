@@ -118,6 +118,7 @@ import {
   type TelegramConfig,
 } from "../channels/telegram.js";
 import { loadPolicy } from "../core/policy-load.js";
+import { payloadOf, readVerifiedRecords, requestState } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import {
@@ -378,10 +379,24 @@ export interface DispatchState {
   readonly attempts: Map<string, number>;
   /** `<action key>:<code>` skips already reported, so cycles do not repeat them. */
   readonly warned: Set<string>;
+  /**
+   * Keys this process has already retracted on the approver's phone
+   * (APRV-106). In memory, like `delivered`, and for the same reason: it stops
+   * a second edit of the same message, and its loss costs a duplicate edit at
+   * worst. A fresh listener never sends a withdrawn request in the first place
+   * — `buildPendingQueue` re-derives from the verified log and `withdrawn` is
+   * not `requested` — so there is nothing for a restart to miss.
+   */
+  readonly retracted: Set<string>;
 }
 
 export function newDispatchState(): DispatchState {
-  return { delivered: new Map(), attempts: new Map(), warned: new Set() };
+  return {
+    delivered: new Map(),
+    attempts: new Map(),
+    warned: new Set(),
+    retracted: new Set(),
+  };
 }
 
 /** What one {@link dispatchPending} call did. Total: it never throws. */
@@ -395,6 +410,70 @@ export interface DispatchResult {
    * verify. Nothing was sent. Fatal at startup, retried on later cycles.
    */
   queueError?: { code: ChannelTagRefusalCode; message: string };
+  /** Deliveries annotated as withdrawn and disarmed this cycle (APRV-106). */
+  retracted: { action_key: string; delivery_id: DeliveryId }[];
+}
+
+/** A delivery whose request the log now says was withdrawn (APRV-106). */
+interface WithdrawnDelivery {
+  actionKey: string;
+  deliveryId: DeliveryId;
+  /** The line the approver reads on the edited message. */
+  reason: string;
+}
+
+/**
+ * Which of this process's deliveries the log says are withdrawn (APRV-106).
+ *
+ * Reads only VERIFIED records (SPEC.md §11.1(1)). A channel edit is not an
+ * enforcement decision, but it is a statement to a human about what the log
+ * says, and reading the log unverified to make one would be the same defect in
+ * a smaller hat.
+ *
+ * Never throws: an unreadable or unverifiable log yields an empty list, and the
+ * cycle's own `queueError` path already reports that failure. Retracting on a
+ * log this process could not verify would be worse than leaving the message.
+ */
+function withdrawnDeliveries(
+  setup: ListenSetup,
+  state: DispatchState,
+  now: string,
+): WithdrawnDelivery[] {
+  if (state.delivered.size === 0) return [];
+  const read = readVerifiedRecords(setup.logPath);
+  if (!read.ok) return [];
+
+  const gone: WithdrawnDelivery[] = [];
+  for (const [actionKey, deliveryId] of state.delivered) {
+    // `ttlMs: null` is correct here rather than lazy. A withdrawal SETTLES the
+    // request, so the derivation returns `withdrawn` before it ever reaches the
+    // TTL arithmetic, and the only question this loop asks is "withdrawn or
+    // not". Loading the policy to answer a question that cannot depend on it
+    // would make a cosmetic edit depend on a file read that can fail.
+    const derivation = requestState(read.records, actionKey, now, null);
+    if (derivation.state !== "withdrawn") continue;
+    const record = read.records.find(
+      (entry) => entry.seq === derivation.decisionSeq && entry.event === "approval.withdrawn",
+    );
+    const payload = record === undefined ? {} : payloadOf(record);
+    const why = typeof payload["reason"] === "string" ? payload["reason"] : "withdrawn";
+    const at = record === undefined ? now : record.ts;
+    const note = typeof payload["note"] === "string" ? `\n${payload["note"]}` : "";
+    gone.push({
+      actionKey,
+      deliveryId,
+      reason: `withdrawn by the requester at ${clockOf(at)} (${why}) · nothing to do${note}`,
+    });
+  }
+  return gone;
+}
+
+/** `HH:MM UTC`, or the raw instant when it does not parse. */
+function clockOf(ts: string): string {
+  const ms = Date.parse(ts);
+  if (Number.isNaN(ms)) return ts;
+  const at = new Date(ms);
+  return `${String(at.getUTCHours()).padStart(2, "0")}:${String(at.getUTCMinutes()).padStart(2, "0")} UTC`;
 }
 
 /**
@@ -412,12 +491,47 @@ export async function dispatchPending(
   state: DispatchState,
   now: string,
 ): Promise<DispatchResult> {
-  const result: DispatchResult = { delivered: [], failed: [] };
+  const result: DispatchResult = { delivered: [], failed: [], retracted: [] };
 
   const queue = buildPendingQueue(setup.logPath, setup.tagOptions, now);
   if (!queue.ok) {
     result.queueError = { code: queue.code, message: queue.message };
     return result;
+  }
+
+  // APRV-106, before the sends. A request this process delivered and that the
+  // log now says was withdrawn gets its message annotated and its buttons
+  // taken away, so the approver's phone stops offering a decision nobody is
+  // waiting on. The withdrawal itself is derived from the VERIFIED log by
+  // `withdrawnDeliveries`, not remembered here; this state only prevents a
+  // second edit of the same message.
+  for (const gone of withdrawnDeliveries(setup, state, now)) {
+    if (state.retracted.has(gone.actionKey)) continue;
+    state.retracted.add(gone.actionKey);
+    if (setup.channel.retract === undefined) continue;
+    try {
+      await setup.channel.retract(gone.deliveryId, gone.reason);
+      result.retracted.push({ action_key: gone.actionKey, delivery_id: gone.deliveryId });
+      if (setup.json) {
+        streams.out(
+          `${JSON.stringify({
+            event: "retracted",
+            action_key: gone.actionKey,
+            delivery_id: gone.deliveryId,
+          })}\n`,
+        );
+      } else {
+        streams.out(`retracted ${gone.actionKey} (message ${gone.deliveryId}): withdrawn\n`);
+      }
+    } catch (cause) {
+      // Cosmetic, and said so on stderr. The gate refuses a tap on the stale
+      // buttons anyway (`request-withdrawn`), so nothing can be decided.
+      streams.err(
+        `approval: telegram could not annotate the withdrawn ${gone.actionKey} (message ${gone.deliveryId}): ${
+          cause instanceof Error ? cause.message : String(cause)
+        } — the buttons are stale but the gate refuses a tap on them\n`,
+      );
+    }
   }
 
   for (const skipped of queue.skipped) {

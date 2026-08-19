@@ -43,6 +43,7 @@ import {
   expire as expireCore,
   register as registerCore,
   request as requestCore,
+  withdraw as withdrawCore,
   type Decision,
   type DecideOptions,
   type DecideResult,
@@ -52,6 +53,8 @@ import {
   type RegisterSource,
   type RequestInput,
   type RequestResult,
+  type WithdrawOptions,
+  type WithdrawResult,
 } from "../src/core/gate.js";
 import {
   consumeToken as consumeTokenCore,
@@ -102,6 +105,16 @@ export function expire(
   options: GateOptions = {},
 ): ExpireResult {
   return expireCore(logPath, actionKey, frozen(options, ts));
+}
+
+export function withdraw(
+  logPath: string,
+  actionKey: string,
+  actor: string,
+  ts: string,
+  options: WithdrawOptions = {},
+): WithdrawResult {
+  return withdrawCore(logPath, actionKey, actor, frozen(options, ts));
 }
 
 export function consumeToken(

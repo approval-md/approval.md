@@ -180,7 +180,8 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-rejected` | a human said no |
 | `hook-revoked` | a granted approval was withdrawn before use |
 | `hook-expired` | the TTL lapsed before a decision |
-| `hook-timeout` | no decision inside `--timeout`; the request stays live until TTL, a retry files a new one |
+| `hook-timeout` | no decision inside `--timeout`; the request is WITHDRAWN, a retry files a new one |
+| `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
 | `hook-policy-unavailable` | `APPROVAL.md` could not be loaded |
 | `hook-log-unreachable` | no log where the hook was pointed; it writes to an existing log and creates none |
@@ -191,11 +192,53 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 and any `$(…)` that is not purely a read: all deny. The fix is to write the
 command out, or to run the effect through `approval run` with a granted token.
 
-A `hook-timeout` leaves the request live until its TTL, but a late grant on it
-authorizes nothing: a retried tool call is a new `tool_use_id`, so it files a
-new request (an idempotency key names one execution of one side effect, SPEC
-§6). Raise the hook `timeout` and `--timeout` so decisions normally land inside
-the wait, and treat a timed-out request as one to reject from the queue.
+### When the wait runs out (APRV-106)
+
+A `hook-timeout` now **withdraws** the request it opened. Every path out of the
+wait that is not a decision does: the timeout, an unexpected failure, and a
+`SIGTERM` or `SIGINT` arriving while the hook is polling.
+
+This is a change, and it is worth saying why. Until APRV-106 the request stayed
+pending for the policy's whole TTL after the hook had already denied the tool
+call. On 2026-08-19 that produced exactly the failure it looks like: a
+`git commit --amend` was classified manual, the hook waited nine minutes, got
+nothing, denied and moved on — and half an hour later the human was pinged on
+their phone and approved it. The grant authorized nothing at all, because a
+retried tool call is a new `tool_use_id` and files a new request (an idempotency
+key names one execution of one side effect, SPEC §6). A person spent attention
+on a question whose asker had left, and SPEC §11 makes human attention the audit
+budget.
+
+**What the human sees.** If the message has not been answered, the Telegram
+listener edits it in place: the two buttons go away and the text becomes
+
+```
+WITHDRAWN — no decision is needed
+hook:sess-1:tu-timeout:deps.add
+
+withdrawn by the requester at 10:11 UTC (timeout) · nothing to do
+```
+
+If they tap a stale button before the edit lands, the toast says *"Withdrawn —
+the requester took this back and is no longer waiting; nothing was recorded"*,
+and nothing is. A live prompt now also carries a line saying how long an answer
+still has: `waiting: requested 4 min ago · requester waits until 10:10 UTC`,
+where that deadline is the hook's own `--timeout`, not the policy's TTL.
+
+The withdrawal is **best effort and never changes the verdict**. A failure is
+reported on stderr and the deny still returns `hook-timeout`; a human's answer
+landing mid-flight is `already-decided` and is never touched. Raise the hook
+`timeout` and `--timeout` together so decisions normally land inside the wait.
+
+### No token is minted for a hook grant
+
+The hook answers allow or deny; Claude Code runs the command, and nothing ever
+calls `approval run`. So the hook's requests carry `execution: "harness"`, and a
+grant on one mints no execution token — a minted token would be a live
+credential with no spender. The grant is otherwise complete: class, cost and the
+payload binding are all recorded. `approval token <key>` on such a grant reports
+`none minted: harness-executed`, and `approval run` refuses with the same code,
+so nobody hunts for a token that was deliberately never created.
 
 ## Limits, stated plainly
 

@@ -252,6 +252,10 @@ test("the execution refusal-code union is frozen public API", () => {
     "token-consumed",
     "token-expired",
     "token-revoked",
+    // APRV-106: surfaced verbatim from core/token.ts. The grant is complete
+    // and authorized a process that runs the command itself, so there is no
+    // token and nothing to present.
+    "harness-executed",
     // APRV-20 pass two, amendment A1: the payload presented is not the payload
     // approved. Nothing appended, token still live.
     "payload-mismatch",

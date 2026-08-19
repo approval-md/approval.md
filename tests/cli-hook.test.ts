@@ -381,7 +381,11 @@ test("a rejected request denies with hook-rejected", () => {
   assertClean(dir);
 });
 
-test("no decision inside --timeout denies with hook-timeout and leaves the request live", () => {
+test("no decision inside --timeout denies with hook-timeout and WITHDRAWS the request", () => {
+  // APRV-106, the behaviour change this task exists for. Before it, the request
+  // stayed in the queue for the policy's whole TTL after the hook had already
+  // denied the tool call, so a human could be pinged half an hour later and
+  // approve something that authorized nothing.
   const dir = ready();
   const run = runCli(
     ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
@@ -391,10 +395,39 @@ test("no decision inside --timeout denies with hook-timeout and leaves the reque
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "deny");
   assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(verdict.reason, /WITHDRAWN/u);
 
+  // The event is on the record, with the reason and the hook's own actor.
+  const log = rawLog(dir);
+  assert.match(log, /"event":"approval\.withdrawn"/u);
+  assert.match(log, /"reason":"timeout"/u);
+  assert.match(log, /"actor":"agent:claude-code"/u);
+
+  // And the human's inbox is empty: nobody is asked about a tool call that has
+  // already been denied.
   const queue = runCli(["queue", "--json"], dir);
   assert.equal(queue.code, 0, queue.stderr);
-  assert.match(queue.stdout, /hook:sess-1:tu-timeout:deps\.add/u);
+  assert.doesNotMatch(queue.stdout, /hook:sess-1:tu-timeout:deps\.add/u);
+  assertClean(dir);
+});
+
+test("a withdrawn hook request cannot be granted afterwards", () => {
+  // The incident, replayed: the human reaches the request after the hook has
+  // stopped waiting. The gate refuses rather than recording an authorization
+  // that no process is left to consume.
+  const dir = ready();
+  runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-late"),
+  );
+  const late = runCli(
+    ["grant", "hook:sess-1:tu-late:deps.add", "--as", "human:carter", "--json"],
+    dir,
+  );
+  assert.notEqual(late.code, 0);
+  const error = JSON.parse(late.stderr) as { error: { code: string } };
+  assert.equal(error.error.code, "request-withdrawn");
   assertClean(dir);
 });
 

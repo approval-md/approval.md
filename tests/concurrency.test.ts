@@ -55,6 +55,9 @@ import { verify } from "../src/core/verify.js";
 /** dist/tests/concurrency.test.js -> dist/src/core/token.js */
 const TOKEN_MODULE = fileURLToPath(new URL("../src/core/token.js", import.meta.url));
 
+/** Same relationship, for the APRV-106 grant/withdraw race. */
+const GATE_MODULE = fileURLToPath(new URL("../src/core/gate.js", import.meta.url));
+
 const scratch = mkdtempSync(join(tmpdir(), "approval-md-race-"));
 let counter = 0;
 
@@ -130,6 +133,65 @@ interface RaceCase {
   logPath: string;
   policyPath: string;
   token: string;
+}
+
+/**
+ * Attested, registered and requested: one PENDING request, undecided.
+ *
+ * The state the APRV-106 race starts from — the moment the message is on the
+ * approver's phone and the requester's clock is still running.
+ */
+function pendingCase(): RaceCase {
+  counter += 1;
+  const dir = join(scratch, `race-${counter}`);
+  mkdirSync(dir, { recursive: true });
+  const policyPath = join(dir, "APPROVAL.md");
+  writeFileSync(policyPath, POLICY, "utf8");
+  const logPath = join(dir, ".approval", "log", "events.jsonl");
+  const options = { policy: { file: policyPath } };
+
+  assert.equal(appendAttestation(logPath, policyPath, "human:carter", T0).ok, true);
+  const registered = register(
+    logPath,
+    {
+      task: "task-042",
+      envelope: {
+        origin: { app: "example-capture", created_by: "human:carter" },
+        state: "proposed",
+        actions: [
+          {
+            class: "communicate.email.external",
+            summary: "Send deposit chaser",
+            reversible: false,
+            est_cost_usd: 0.02,
+            idempotency_key: ACTION_KEY,
+            payload_hash: PAYLOAD_HASH,
+          },
+        ],
+      },
+    },
+    T0,
+    "agent:claude",
+  );
+  assert.equal(registered.ok, true, registered.ok ? "" : registered.message);
+
+  const requested = request(
+    logPath,
+    {
+      task: "task-042",
+      actionKey: ACTION_KEY,
+      cls: "communicate.email.external",
+      est_cost_usd: 0.02,
+      reversible: false,
+      payload_hash: PAYLOAD_HASH,
+    },
+    at(1),
+    "agent:claude",
+    options,
+  );
+  assert.equal(requested.ok, true, requested.ok ? "" : requested.message);
+
+  return { dir, logPath, policyPath, token: "" };
 }
 
 /** Attested, registered, requested and granted: exactly one live token. */
@@ -222,6 +284,112 @@ function runChild(script: string, args: string[]): Promise<Consumer> {
     });
   });
 }
+
+/**
+ * The APRV-106 race: the approver's thumb and the requester's timeout.
+ *
+ * This is the interleaving the incident produces in miniature. A human is
+ * looking at the Telegram message and taps Approve at the same instant the
+ * requesting process gives up and withdraws. Both read a log that says
+ * `requested`; both are therefore authorized, by their own lights, to append.
+ *
+ * The invariant is that the log records exactly ONE of them — never a grant
+ * whose request was withdrawn out from under it, and never a withdrawal that
+ * quietly erased a human's answer — and that the loser learns it lost on the
+ * compare-and-append precondition (SPEC.md §11.1(5)) rather than by re-reading.
+ * Either winner is correct; which one wins is a coin flip and the test does not
+ * care, because both outcomes are states the rest of the runtime handles.
+ *
+ * Same mechanism as the token race above: the parent holds the append lock
+ * across both children's reads, so both verify against the same log.
+ */
+const DECIDER_SOURCE = `
+import { existsSync, writeFileSync } from "node:fs";
+import { decide, withdraw } from ${JSON.stringify(GATE_MODULE)};
+
+const [verb, logPath, actionKey, actor, ts, policyFile, ready, go] = process.argv.slice(2);
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+writeFileSync(ready, "ready", "utf8");
+while (!existsSync(go)) sleep(2);
+
+const options = { policy: { file: policyFile }, clock: () => ts };
+const result =
+  verb === "grant"
+    ? decide(logPath, actionKey, "grant", actor, options)
+    : withdraw(logPath, actionKey, actor, { ...options, reason: "timeout" });
+process.stdout.write(JSON.stringify({ ok: result.ok, code: result.code, append: result.append }));
+`;
+
+test("a grant and a withdrawal race one pending request: exactly one lands", async () => {
+  const script = join(scratch, "decide-or-withdraw.mjs");
+  writeFileSync(script, DECIDER_SOURCE, "utf8");
+
+  for (let round = 1; round <= 3; round += 1) {
+    const unit = pendingCase();
+    const go = join(unit.dir, "go");
+    const readyA = join(unit.dir, "ready-a");
+    const readyB = join(unit.dir, "ready-b");
+    const lock = `${unit.logPath}.lock`;
+
+    closeSync(openSync(lock, "wx"));
+
+    const granting = runChild(script, [
+      "grant",
+      unit.logPath,
+      ACTION_KEY,
+      "human:carter",
+      at(3),
+      unit.policyPath,
+      readyA,
+      go,
+    ]);
+    const withdrawing = runChild(script, [
+      "withdraw",
+      unit.logPath,
+      ACTION_KEY,
+      "agent:claude",
+      at(3),
+      unit.policyPath,
+      readyB,
+      go,
+    ]);
+
+    const deadline = Date.now() + 10_000;
+    while (!(existsSync(readyA) && existsSync(readyB))) {
+      assert.ok(Date.now() < deadline, "children never signalled ready");
+      sleep(5);
+    }
+
+    writeFileSync(go, "go", "utf8");
+    sleep(250);
+    unlinkSync(lock);
+
+    const outcomes = await Promise.all([granting, withdrawing]);
+    const winners = outcomes.filter((outcome) => outcome.ok);
+    const losers = outcomes.filter((outcome) => !outcome.ok);
+    assert.equal(winners.length, 1, `round ${round}: expected exactly one winner`);
+    assert.equal(losers.length, 1, `round ${round}: expected exactly one loser`);
+
+    // THE invariant: the request was settled once. Never a grant AND a
+    // withdrawal for the same request.
+    const settling = records(unit.logPath).filter(
+      (record) =>
+        record.action_key === ACTION_KEY &&
+        (record.event === "approval.granted" || record.event === "approval.withdrawn"),
+    );
+    assert.equal(settling.length, 1, `round ${round}: the request was settled twice`);
+
+    const loser = losers[0] as Consumer;
+    assert.equal(loser.code, "append-failed", `round ${round}: ${JSON.stringify(loser)}`);
+    assert.equal(loser.append?.code, "head-moved", `round ${round}: ${JSON.stringify(loser)}`);
+
+    assert.equal(verify(unit.logPath).status, "clean", `round ${round}: log not clean`);
+  }
+});
 
 test("two concurrent processes race one token: exactly one execution.started", async () => {
   const script = join(scratch, "consume.mjs");

@@ -132,6 +132,13 @@ export const EXECUTE_REFUSAL_CODES = [
   /** A human withdrew the grant. */
   "token-revoked",
   /**
+   * The grant was harness-executed and minted no token (APRV-106). Surfaced
+   * verbatim from `core/token.ts` so the executor's vocabulary stays that
+   * module's vocabulary: an agent that reads this has not lost a token, it is
+   * holding a grant that authorized a process which runs the command itself.
+   */
+  "harness-executed",
+  /**
    * The payload presented does not hash to the bytes the grant approved
    * (amended SPEC.md §10, A1). Nothing was appended and the token is still live.
    */

@@ -630,6 +630,29 @@ export const GRANT_HELP = decisionHelp("grant");
 export const REJECT_HELP = decisionHelp("reject");
 export const REVOKE_HELP = decisionHelp("revoke");
 
+export const WITHDRAW_HELP = `approval withdraw — take back your own pending request
+
+Usage:
+  approval withdraw <task> --action <key> [--reason <r>] [--note <text>]
+                    [--as <id>] [--policy <p>] [--dir <p>] [--log <p>] [--json]
+
+Flags:
+  --action <key>   the action's idempotency_key (required)
+  --reason <r>     timeout | cancelled | superseded (default cancelled)
+  --note <text>    free-text elaboration recorded in the event payload
+  --as <id>        human:<id> or agent:<id>; else APPROVAL_HUMAN
+  --policy <p> / --dir <p> / --log <p>   policy, its discovery dir, and the log
+  --json           machine-readable output;  -h, --help   this text
+
+Appends one approval.withdrawn. REQUESTER-ONLY (else not-requester) and
+PENDING-ONLY; terminal, so a later decision is refused request-withdrawn.
+Withdraw when you can no longer consume an answer. A human REJECTS instead.
+
+JSON shape: docs/cli-reference.md#withdraw
+${GATE_CODES_POINTER}
+${JSON_ERRORS}
+${why("withdraw")}`;
+
 export const EXPIRE_HELP = `approval expire — lapse a request whose TTL has passed (system verb)
 
 Usage:
@@ -755,24 +778,24 @@ ${why("run")}`;
 export const WAIT_HELP = `approval wait — block until a task's requests are decided
 
 Usage:
-  approval wait <task> --timeout <duration> [--interval <duration>]
-                [--policy <path>] [--dir <path>] [--log <path>] [--json]
+  approval wait <task> --timeout <d> [--interval <d>] [--withdraw-on-timeout]
+                [--as <id>] [--policy <p>] [--dir <p>] [--log <p>] [--json]
 
 Flags:
   --timeout <d>    how long to wait, in the duration grammar (e.g. 6h). Required
   --interval <d>   poll interval (default 500ms)
-  --policy <path> / --dir <path>   the policy file, or where to discover it
-  --log <path>     log file to read (never written by this command)
-  --json           machine-readable output
-  -h, --help       this text
+  --withdraw-on-timeout  on timeout, withdraw the requests THIS actor opened
+  --as <id>        the withdrawing actor; read only with the flag above
+  --policy <p> / --dir <p> / --log <p>   policy, its discovery dir, and the log
+  --json           machine-readable output;  -h, --help   this text
 
-Polls the log until every approval.requested of the task has a decision, or the
-timeout elapses. WRITES NOTHING. Only the MANUAL path produces requests to wait
-for, so a task with none returns immediately with exit 0.
+Polls until every approval.requested of the task has a decision, or the timeout
+elapses. WRITES NOTHING unless --withdraw-on-timeout. Only the MANUAL path
+produces requests to wait for; a task with none returns at once, exit 0.
 
 JSON shape: docs/cli-reference.md#wait
-${EXIT_CODES_POINTER}. THE CODE IS THE DECISION: 0 granted, 1 rejected or
-revoked, 3 expired, 4 I/O, and
+${EXIT_CODES_POINTER}. THE CODE IS THE DECISION: 0 granted, 1 rejected, revoked
+or withdrawn (--json status says which), 3 expired, 4 I/O, and
   6  TIMEOUT — the wait elapsed with request(s) still undecided.
 ${JSON_ERRORS}
 ${why("wait")}`;
@@ -1082,9 +1105,9 @@ Flags (claude-code):
   -h, --help       this text
 
 Deny reasons: hook-unclassified, hook-opaque, hook-unparseable, hook-rejected,
-hook-revoked, hook-expired, hook-timeout, hook-gate-refused:<code>,
-hook-policy-unavailable, hook-log-unreachable, hook-io.
-EXIT 0 CARRIES THE VERDICT, and the verdict is never "ask".
+hook-revoked, hook-expired, hook-withdrawn, hook-timeout (which WITHDRAWS the
+request), hook-gate-refused:<code>, hook-policy-unavailable,
+hook-log-unreachable, hook-io. EXIT 0 CARRIES THE VERDICT, never "ask".
 
 ${EXIT_CODES_POINTER} (claude-code uses only 0 and 2)
 ${why("hook")}`;

@@ -45,8 +45,8 @@
 
 import assert from "node:assert/strict";
 
-import type { DecideOptions } from "../core/gate.js";
-import { readVerifiedRecords } from "../core/state.js";
+import { withdraw, type DecideOptions } from "../core/gate.js";
+import { readVerifiedRecords, requestState } from "../core/state.js";
 import { assembleBatch } from "./batch.js";
 import {
   assertTagged,
@@ -220,6 +220,131 @@ export async function runChannelConformance(
   await checkTaggingAndPayload(t, makeChannel, harness);
   await checkDecisionRoundTrip(t, makeChannel, harness);
   await checkBatchSemantics(t, makeChannel, harness);
+  await checkWithdrawal(t, makeChannel, harness);
+}
+
+// ---------------------------------------------------------------------------
+// (e) withdrawal — APRV-106
+// ---------------------------------------------------------------------------
+
+/**
+ * A withdrawn request is not pending, and the age/deadline line is computed.
+ *
+ * Two checks, one scenario, both about the same failure: a channel that keeps
+ * asking a question nobody is waiting on. The first is structural — the request
+ * is withdrawn through the real gate, and the channel must not be able to
+ * collect a decision on it. The second is the line that tells an approver
+ * looking at a live request how long an answer still has to reach anyone; it
+ * MUST be presented as computed, because a channel that rendered it as claimed
+ * would be inviting a reader to discount the one number that says whether their
+ * attention is about to be wasted.
+ *
+ * What is deliberately NOT required: that a channel retract a delivery it
+ * already made. `Channel.retract` is optional (see the contract), because a
+ * withdrawn request leaves every queue by derivation and a pull channel has
+ * nothing to retract. What every channel must do is refuse to present one.
+ */
+async function checkWithdrawal(
+  t: ConformanceContext,
+  makeChannel: () => Channel,
+  harness: ConformanceHarness,
+): Promise<void> {
+  say(t, "withdrawn requests are not pending, and the age/deadline line is computed");
+  const unit = await harness.setup(1);
+  try {
+    const request = unit.requests[0];
+    assert.ok(request !== undefined, "harness.setup(1) returned no request");
+    const actionKey = request.action_key.value;
+
+    // The line, on a live request, before anything is withdrawn.
+    assert.ok(
+      isTaggedField(request.waiting),
+      "the request carries no `waiting` field; SPEC.md §6.3 (APRV-106) asks a channel to show how old a question is and how long an answer still has",
+    );
+    assert.equal(
+      request.waiting.kind,
+      "computed",
+      "the age/deadline line must be presented as COMPUTED: it is arithmetic on the log's own timestamps against the display instant, and a reader who took it for an agent's claim would discount the one number that says whether their attention is about to be wasted",
+    );
+    assert.match(
+      request.waiting.value,
+      /requested/u,
+      "the age/deadline line does not say when the request was made",
+    );
+
+    const channel = makeChannel();
+    channel.onDecision(handlerFor(unit));
+    await channel.notify(request);
+
+    const rendered = renderedFor(channel, actionKey);
+    if (rendered !== null) {
+      const shown = rendered.fields.find((field) => field.field === "waiting");
+      assert.ok(
+        shown !== undefined,
+        "the channel rendered no `waiting` line; an approver cannot see whether an answer now still reaches anyone",
+      );
+      assert.equal(
+        shown.kind,
+        "computed",
+        "the channel rendered the age/deadline line as claimed; it is computed",
+      );
+    }
+
+    // Withdraw through the real gate, as the party that requested.
+    const requester = requesterOf(unit.logPath, actionKey);
+    assert.notEqual(requester, null, "the conformance log holds no approval.requested actor");
+    const gone = withdraw(unit.logPath, actionKey, requester ?? "", {
+      ...unit.gateOptions,
+      reason: "timeout",
+    });
+    assert.equal(gone.ok, true, `withdraw refused: ${JSON.stringify(gone)}`);
+
+    // The one requirement: it is not pending any more, by the same derivation
+    // every channel builds its queue from.
+    const state = requestState(recordsOf(unit.logPath), actionKey, new Date().toISOString(), null)
+      .state;
+    assert.equal(
+      state,
+      "withdrawn",
+      "the withdrawal did not settle the request; every channel's queue is derived from `state === \"requested\"`, so a channel would keep presenting it",
+    );
+
+    // And a gesture on it is refused by the gate rather than recorded. This is
+    // the tap that races the withdrawal, which every push channel will see.
+    const before = recordsOf(unit.logPath).length;
+    const outcome = recordChannelDecision(
+      unit.logPath,
+      { action_key: actionKey, decision: "grant", deliveryId: "conformance" },
+      unit.actor,
+      unit.gateOptions ?? {},
+    ).outcome;
+    assert.equal(outcome.ok, false, "a withdrawn request must not be grantable");
+    if (!outcome.ok) {
+      assert.equal(
+        outcome.code,
+        "request-withdrawn",
+        `a decision on a withdrawn request must refuse request-withdrawn, got ${outcome.code}`,
+      );
+    }
+    assert.equal(
+      recordsOf(unit.logPath).length,
+      before,
+      "the refused decision appended something",
+    );
+  } finally {
+    unit.cleanup?.();
+  }
+}
+
+/** The actor on the latest `approval.requested` for `actionKey`. */
+function requesterOf(logPath: string, actionKey: string): string | null {
+  let actor: string | null = null;
+  for (const record of recordsOf(logPath)) {
+    if (record.event === "approval.requested" && record.action_key === actionKey) {
+      actor = record.actor;
+    }
+  }
+  return actor;
 }
 
 // ---------------------------------------------------------------------------

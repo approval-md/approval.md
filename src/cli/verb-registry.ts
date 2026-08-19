@@ -662,6 +662,39 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "withdraw",
+    purpose:
+      "Take back a pending request you opened, appending one approval.withdrawn. REQUESTER-ONLY: the actor must be the one that appended the approval.requested, and any other actor is refused not-requester. Legal only while the request is pending, and terminal once appended — a later grant, reject or revoke is refused request-withdrawn. Withdraw when you can no longer consume an answer (your wait elapsed, you cancelled, a newer request supersedes this one); a decision nobody can act on is human attention spent for nothing.",
+    human_only: false,
+    input: input({
+      positionals: positionals([{ name: "task", description: "the task id" }], 1),
+      flags: {
+        "--action": "string",
+        "--reason": "string",
+        "--note": "string",
+        ...AS_FLAG,
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        task: STRING,
+        action_key: STRING,
+        state: { const: "withdrawn" },
+        reason: { enum: ["timeout", "cancelled", "superseded"] },
+        seq: INTEGER,
+      },
+      ["ok", "task", "action_key", "state", "reason", "seq"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
     name: "expire",
     purpose:
       "Lapse a request whose TTL has passed, appending one approval.expired event with the actor system:gate. No identity is accepted or resolved: no human decides an expiry, the clock does. The gate already refuses a late decision whether or not this event exists, so the verb makes a lapse visible rather than changing a verdict.",
@@ -902,13 +935,15 @@ const VERBS: VerbSpec[] = [
   {
     name: "wait",
     purpose:
-      "Block until every approval.requested of a task has a decision, or the timeout elapses. THE EXIT CODE IS THE DECISION: 0 granted, 1 rejected or revoked, 3 expired, 6 timeout. It writes nothing, not even the expiry it may derive. Only the manual path produces requests to wait for, so a task with none returns immediately at exit 0.",
+      "Block until every approval.requested of a task has a decision, or the timeout elapses. THE EXIT CODE IS THE DECISION: 0 granted, 1 rejected, revoked or withdrawn, 3 expired, 6 timeout. It writes nothing by default, not even the expiry it may derive; --withdraw-on-timeout is the one exception, appending approval.withdrawn for the requests this actor opened so a question nobody can answer to does not sit in a human's queue. Only the manual path produces requests to wait for, so a task with none returns immediately at exit 0.",
     human_only: false,
     input: input({
       positionals: positionals([{ name: "task", description: "the task id" }], 1),
       flags: {
         "--timeout": "string",
         "--interval": "string",
+        "--withdraw-on-timeout": "boolean",
+        ...AS_FLAG,
         ...POLICY_FLAGS,
         ...LOG_FLAG,
         ...JSON_FLAG,
@@ -919,7 +954,7 @@ const VERBS: VerbSpec[] = [
       {
         ok: BOOLEAN,
         task: STRING,
-        status: { enum: ["granted", "rejected", "expired", "timeout"] },
+        status: { enum: ["granted", "rejected", "withdrawn", "expired", "timeout"] },
         actions: arrayOf(
           object({ action_key: STRING, state: STRING, seq: nullable(INTEGER) }, [
             "action_key",
@@ -933,7 +968,11 @@ const VERBS: VerbSpec[] = [
     error: ERROR_SCHEMA,
     exit_codes: [
       { code: 0, meaning: "granted (a task with no requests is granted vacuously)" },
-      { code: 1, meaning: "REJECTED or REVOKED — a human said no; or the log is corrupt" },
+      {
+        code: 1,
+        meaning:
+          "NOT AUTHORIZED and terminal — a human said no (rejected/revoked), or the requester withdrew the request; or the log is corrupt. `status` says which",
+      },
       USAGE,
       { code: 3, meaning: "EXPIRED — the TTL lapsed before a decision landed; or a torn tail" },
       IO,

@@ -207,6 +207,35 @@ export interface ChannelRequest {
   requested_ts: TaggedField<string>;
   /** Milliseconds of TTL left, or `null` when the policy declares no TTL. */
   ttl_remaining_ms: TaggedField<number | null>;
+  /**
+   * One line telling the approver how old this question is and how long an
+   * answer will still reach anyone (APRV-106):
+   *
+   * ```
+   * requested 32 min ago · requester waits until 09:23 UTC
+   * requested 32 min ago · expires 09:23 UTC
+   * ```
+   *
+   * **Computed.** Both halves are arithmetic on instants read from the
+   * verified log against the display instant: the age from the
+   * `approval.requested` record's runtime-assigned `ts`, and the deadline from
+   * either the policy's TTL or, for a request that declared one, the
+   * requester's own `wait_until`.
+   *
+   * That second source is the only place a requester-authored value reaches
+   * this line, and it is safe in the direction that matters. `wait_until` is
+   * always EARLIER than the TTL (a process that waits longer than the TTL is
+   * waiting for something that has already lapsed), so it can only make the
+   * question look more urgent, never less. It bounds nothing, charges nothing
+   * and gates nothing — SPEC.md §11.1's ratchet holds, because the only
+   * scrutiny it can move is upward.
+   *
+   * The line exists because the incident behind APRV-106 was a human answering
+   * a question thirty minutes after its asker had stopped listening. The
+   * withdrawal removes that question from the queue; this tells an approver who
+   * is looking at the message right now how much time is actually left.
+   */
+  waiting: TaggedField<string>;
   /** Position in the hash chain. */
   chain: TaggedField<ChainPosition>;
   /** The derived approval state; always `requested` for a live pending item. */
@@ -443,6 +472,23 @@ export interface Channel {
   onDecision(handler: (decision: ChannelDecision) => DecisionOutcome): void;
   /** Liveness/config self-report. */
   health(): ChannelHealth;
+  /**
+   * Annotate a delivery whose request is no longer answerable, and take away
+   * whatever gesture it offered (APRV-106). Optional.
+   *
+   * A withdrawn request leaves every queue by derivation — it is no longer
+   * `requested`, and that one predicate is what every channel builds its queue
+   * from — so a channel that implements nothing here is still correct: it will
+   * never present the request again. What it will not do is fix the message
+   * ALREADY on the approver's phone, which still shows two buttons for a
+   * question nobody is waiting on. Push channels should implement this;
+   * pull channels (`cli`, `web`) re-render from the queue every time and have
+   * nothing to retract.
+   *
+   * Best effort by contract: the runtime calls it and carries on. It collects
+   * no gesture, returns no decision, and touches no log.
+   */
+  retract?(deliveryId: DeliveryId, reason: string): Promise<void> | void;
 }
 
 /** One field as a channel actually rendered it. */

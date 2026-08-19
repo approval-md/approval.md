@@ -272,6 +272,8 @@ function renderRequest(index: number, request: ChannelRequest): string[] {
   );
   lines.push(computedLine("state", request.state, span(request.state.value)));
   lines.push(computedLine("requested at", request.requested_ts, span(request.requested_ts.value)));
+  // APRV-106: the age and the deadline an answer has to beat, in one line.
+  lines.push(computedLine("waiting", request.waiting, request.waiting.value));
   lines.push(
     computedLine("TTL remaining", request.ttl_remaining_ms, countdown(request.ttl_remaining_ms.value)),
   );

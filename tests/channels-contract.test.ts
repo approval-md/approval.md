@@ -840,6 +840,9 @@ class MockChannel implements TestableChannel {
         text: `$${request_.est_cost_usd.value.toFixed(2)}`,
       },
       { field: "payload_hash", kind: request_.payload_hash.kind, text: request_.payload_hash.value },
+      // APRV-106: the age/deadline line. A conforming channel shows it, and
+      // shows it as computed.
+      { field: "waiting", kind: request_.waiting.kind, text: request_.waiting.value },
     ];
     const rendering = request_.fullPayload.value;
     return {

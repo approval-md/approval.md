@@ -56,10 +56,12 @@ import {
   registeredAction,
   request,
   readGateRecords,
+  withdraw,
   type Decision,
   type GateOptions,
   type GateRefusal,
 } from "../core/gate.js";
+import { isWithdrawReason, WITHDRAW_REASONS } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
   EXIT_INTEGRITY,
@@ -75,6 +77,7 @@ import {
   REJECT_HELP,
   REQUEST_HELP,
   REVOKE_HELP,
+  WITHDRAW_HELP,
 } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
@@ -521,6 +524,99 @@ export function commandDecide(
       // label in front of it, where a triple-click takes the label too.
       streams.out(`${tokenPanel(style({ json }), actionKey, result.token)}\n`);
     }
+  }
+  return EXIT_OK;
+}
+
+// ---------------------------------------------------------------------------
+// withdraw
+// ---------------------------------------------------------------------------
+
+/**
+ * `approval withdraw <task> --action <key>` — the requester takes its own
+ * pending request back (APRV-106).
+ *
+ * Agent-facing, unlike every other terminal verb here: the whole point is that
+ * the party who asked can stop asking, and the party who asks is usually an
+ * agent. Identity resolves through {@link resolvePrincipalActor}, and the gate
+ * then checks it against the actor on the `approval.requested` record — so
+ * passing `--as` does not let a caller withdraw someone else's request, it only
+ * lets the caller say who it is.
+ *
+ * The task id is positional and the action key is a flag, matching
+ * `approval request` exactly: the two verbs are the open and the close of one
+ * gesture, and an agent that can spell one can spell the other.
+ */
+export function commandWithdraw(argv: string[], streams: Streams, cwd: string): number {
+  const outcome = front(
+    argv,
+    {
+      ...COMMON_FLAGS,
+      ...POLICY_FLAGS,
+      "--as": "string",
+      "--action": "string",
+      "--reason": "string",
+      "--note": "string",
+    },
+    WITHDRAW_HELP,
+    streams,
+    cwd,
+  );
+  if (outcome.kind === "handled") return outcome.code;
+  const { flags, positionals, json, logPath } = outcome;
+
+  const task = positionals[0];
+  if (task === undefined) {
+    return usageError(streams, json, "missing <task> argument", WITHDRAW_HELP);
+  }
+  const extra = positionals[1];
+  if (extra !== undefined) {
+    return usageError(streams, json, `unexpected argument ${JSON.stringify(extra)}`, WITHDRAW_HELP);
+  }
+  const actionKey = stringFlag(flags, "--action");
+  if (actionKey === null) {
+    return usageError(streams, json, "missing --action <key>", WITHDRAW_HELP);
+  }
+
+  const asFlag = stringFlag(flags, "--as");
+  const actor = resolvePrincipalActor(asFlag);
+  if (actor === null) return identityUsageError(streams, json, asFlag, WITHDRAW_HELP);
+
+  // Closed vocabulary, refused at exit 2 rather than defaulted. An unrecognized
+  // reason silently becoming `cancelled` would put a word in the requester's
+  // mouth in an append-only log.
+  const reasonFlag = stringFlag(flags, "--reason");
+  if (reasonFlag !== null && !isWithdrawReason(reasonFlag)) {
+    return usageError(
+      streams,
+      json,
+      `--reason expects one of ${WITHDRAW_REASONS.join(" | ")}, got ${JSON.stringify(reasonFlag)}`,
+      WITHDRAW_HELP,
+    );
+  }
+  const note = stringFlag(flags, "--note");
+
+  const result = withdraw(logPath, actionKey, actor, {
+    ...gateOptions(flags, cwd),
+    ...(reasonFlag === null ? {} : { reason: reasonFlag }),
+    ...(note === null ? {} : { note }),
+  });
+  if (!result.ok) return emitRefusal(streams, json, result);
+
+  const reason = reasonFlag ?? "cancelled";
+  if (json) {
+    emitJson(streams, {
+      ok: true,
+      task,
+      action_key: actionKey,
+      state: result.state,
+      reason,
+      seq: result.record.seq,
+    });
+  } else {
+    streams.out(
+      `withdrawn ${actionKey} at seq ${result.record.seq} by ${actor} (${reason})\n`,
+    );
   }
   return EXIT_OK;
 }

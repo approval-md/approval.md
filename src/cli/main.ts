@@ -52,6 +52,7 @@ import {
   commandExpire,
   commandRegister,
   commandRequest,
+  commandWithdraw,
 } from "./gate.js";
 import {
   commandExecution,
@@ -707,6 +708,12 @@ export function main(argv: string[], options: MainOptions = {}): number {
       return commandDecide("reject", rest, streams, cwd);
     case "revoke":
       return commandDecide("revoke", rest, streams, cwd);
+    // APRV-106. The one terminal gate verb that is NOT human-only: withdrawal
+    // is the requester retracting its own question, and the requester is
+    // usually an agent. The gate checks the actor against the request record,
+    // so the verb cannot be used to clear anyone else's queue.
+    case "withdraw":
+      return commandWithdraw(rest, streams, cwd);
     case "expire":
       return commandExpire(rest, streams, cwd);
     // The token verbs (APRV-17). `token` reports status and writes nothing;

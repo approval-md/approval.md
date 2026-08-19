@@ -69,6 +69,7 @@ import {
 import { isPayloadHash, runPayloadHash } from "../core/payload.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
+import { withdraw } from "../core/gate.js";
 import { readVerifiedRecords, requestState } from "../core/state.js";
 import type { EventRecord } from "../core/log.js";
 import { loadPolicy, parseDuration, POLICY_FILENAMES } from "../core/policy-load.js";
@@ -487,7 +488,7 @@ interface WaitedAction {
  */
 function stateRole(state: string): Role {
   if (state === "granted") return "ok";
-  if (state === "expired" || state === "requested") return "warn";
+  if (state === "expired" || state === "requested" || state === "withdrawn") return "warn";
   return "fail";
 }
 
@@ -503,7 +504,8 @@ export function renderWaitHuman(
   actions: readonly WaitedAction[],
   st: Style = style(),
 ): string {
-  const glyph = status === "granted" ? "ok" : status === "expired" ? "skip" : "fail";
+  const glyph =
+    status === "granted" ? "ok" : status === "expired" || status === "withdrawn" ? "skip" : "fail";
   const head = `${st.glyph(glyph)} ${st.key(task)}  ${st.paint(stateRole(status), status)}`;
   if (actions.length === 0) return `${head}\n`;
   const rows: TableRow[] = actions.map((action) => ({
@@ -530,7 +532,14 @@ function requestedKeysOf(records: EventRecord[], task: string): string[] {
 export function commandWait(argv: string[], streams: Streams, cwd: string): number {
   const outcome = front(
     argv,
-    { ...COMMON_FLAGS, ...POLICY_FLAGS, "--timeout": "string", "--interval": "string" },
+    {
+      ...COMMON_FLAGS,
+      ...POLICY_FLAGS,
+      "--timeout": "string",
+      "--interval": "string",
+      "--withdraw-on-timeout": "boolean",
+      "--as": "string",
+    },
     WAIT_HELP,
     streams,
     cwd,
@@ -569,6 +578,24 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
     );
   }
 
+  // APRV-106. OFF by default, and it is the only thing that makes `wait` a
+  // writer: a caller that merely stopped waiting has not necessarily stopped
+  // wanting an answer (a supervisor may wait again), so the retraction is
+  // opt-in. When it is on, the actor is required up front — resolving identity
+  // after a nine-minute wait, and failing then, would leave exactly the stale
+  // request the flag exists to prevent.
+  const withdrawOnTimeout = boolFlag(flags, "--withdraw-on-timeout");
+  const asFlag = stringFlag(flags, "--as");
+  const withdrawActor = asFlag ?? resolveHumanActor();
+  if (withdrawOnTimeout && (withdrawActor === null || !PRINCIPAL_ACTOR.test(withdrawActor))) {
+    return usageError(
+      streams,
+      json,
+      `--withdraw-on-timeout needs an identity: pass --as human:<id> | agent:<id>, or set ${HUMAN_ACTOR_ENV}. Only the actor that opened a request may withdraw it, so there is no default.`,
+      WAIT_HELP,
+    );
+  }
+
   const ttlMs = ttlOf(flags, cwd);
   const deadline = Date.now() + timeoutMs;
 
@@ -599,23 +626,74 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
       // Precedence, documented in --help: a human's "no" outranks a lapse, and
       // both outrank "everything was granted". A task with no requests at all
       // has nothing to wait for and is granted vacuously.
+      //
+      // APRV-106 puts `withdrawn` between the two, and REUSES exit 1 rather
+      // than adding a code. The table in `cli/exit-codes.ts` is frozen public
+      // API — adding a number is a spec change, and agents already branch on
+      // these seven — while the fact an agent needs is the one exit 1 already
+      // carries: this action is NOT authorized and no retry of the same request
+      // will change that. The distinction lives where a distinction can be
+      // added without breaking anyone, in `status`, which is `"withdrawn"` in
+      // the JSON and printed beside the action in the human render.
       const rejected = actions.some(
         (action) => action.state === "rejected" || action.state === "revoked",
       );
+      const withdrawn = actions.some((action) => action.state === "withdrawn");
       const expired = actions.some((action) => action.state === "expired");
-      const status = rejected ? "rejected" : expired ? "expired" : "granted";
-      const code = rejected ? EXIT_INTEGRITY : expired ? EXIT_TORN_TAIL : EXIT_OK;
+      const status = rejected
+        ? "rejected"
+        : withdrawn
+          ? "withdrawn"
+          : expired
+            ? "expired"
+            : "granted";
+      const code = rejected || withdrawn ? EXIT_INTEGRITY : expired ? EXIT_TORN_TAIL : EXIT_OK;
       if (json) emitJson(streams, { ok: true, task, status, actions });
       else streams.out(renderWaitHuman(task, status, actions, style({ json })));
       return code;
     }
 
     if (Date.now() >= deadline) {
+      // APRV-106. Best effort, and never fatal: the exit code is still 6, which
+      // is what the caller branches on. A withdrawal that itself fails leaves
+      // the request live — the pre-APRV-106 behaviour — and says so on stderr
+      // rather than converting a timeout into a different outcome.
+      const withdrawn: string[] = [];
+      if (withdrawOnTimeout && withdrawActor !== null) {
+        for (const action of actions) {
+          if (action.state !== "requested") continue;
+          const result = withdraw(logPath, action.action_key, withdrawActor, {
+            policy: policyLocation(flags, cwd),
+            reason: "timeout",
+            note: `the waiting process stopped waiting after ${timeoutText}; a decision on this request can no longer be consumed`,
+          });
+          if (result.ok) withdrawn.push(action.action_key);
+          else {
+            streams.err(
+              `approval: could not withdraw ${action.action_key} on timeout (${result.code}): ${result.message}\n`,
+            );
+          }
+        }
+      }
       if (json) {
-        streams.err(`${JSON.stringify({ ok: false, task, status: "timeout", actions })}\n`);
+        // `withdrawn` appears only when the flag asked for it. The default
+        // timeout object is the shape callers already parse, and adding an
+        // always-empty array to it would be a breaking change bought for
+        // nothing.
+        streams.err(
+          `${JSON.stringify({
+            ok: false,
+            task,
+            status: "timeout",
+            actions,
+            ...(withdrawOnTimeout ? { withdrawn } : {}),
+          })}\n`,
+        );
       } else {
         streams.err(
-          `approval: timeout: ${task} still has undecided request(s) after ${timeoutText}; nothing was appended and the request(s) remain live\n`,
+          withdrawn.length === 0
+            ? `approval: timeout: ${task} still has undecided request(s) after ${timeoutText}; nothing was appended and the request(s) remain live\n`
+            : `approval: timeout: ${task} was undecided after ${timeoutText}; withdrew ${withdrawn.length} request(s) so no one is asked a question this process can no longer answer to: ${withdrawn.join(", ")}\n`,
         );
       }
       return EXIT_TIMEOUT;
