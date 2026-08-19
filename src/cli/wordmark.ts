@@ -50,7 +50,7 @@ export function plainWordmark(): string {
  * promise UTF-8 is not a terminal to draw on.
  */
 export function wordmark(style: Style = processStyle()): string {
-  if (!style.enabled) return plainWordmark();
+  if (!style.enabled || style.ascii) return plainWordmark();
   const art = ART.map((line) => style.brand(line)).join("\n");
   return `${art}\n${style.muted(`${TAGLINE} · v${VERSION}`)}`;
 }

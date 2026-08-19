@@ -1676,10 +1676,10 @@ Flags:
 
 Speaks MCP over stdin/stdout and runs until interrupted. THE TOOLS ARE THE
 AGENT SURFACE: the verb registry filtered by human_only false, so grant, reject,
-revoke, attest, amend and the channels are not published. SPEC.md §11 names the
-agent the untrusted policy, and an MCP client is an agent's harness. Tool calls
-run SERIALLY, and THIS SERVER READS NO .approval/env. A refusal comes back as a
-tool result carrying the CLI's own error object, never as a JSON-RPC error.
+revoke, attest, amend and the channel listeners are not published: SPEC.md §11
+names the agent the untrusted policy, and an MCP client is an agent's harness.
+Tool calls run SERIALLY, and THIS SERVER READS NO .approval/env. A refusal comes
+back as a tool result with the CLI's own error object, never as a JSON-RPC error.
 POST-V1: mapping the MCP tasks/elicitation extension onto \`awaiting\`.
 
 ${EXIT_CODES_POINTER} (2 is a startup refusal; 0 is a clean shutdown)

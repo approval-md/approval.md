@@ -205,6 +205,15 @@ test("the wordmark degrades to one line whenever colour is off", () => {
   assert.equal(ESCAPE.test(plain), false);
 });
 
+test("the wordmark degrades to one line in ASCII mode even on a colour terminal", () => {
+  // A terminal that cannot promise UTF-8 is not a terminal to draw on, whatever
+  // its colour support says.
+  for (const env of [{ APPROVAL_ASCII: "1" }, { LANG: "C" }, { LC_ALL: "POSIX" }]) {
+    const plain = wordmark(makeStyle({ tty: true, env }));
+    assert.equal(plain, plainWordmark(), `env ${JSON.stringify(env)} drew the banner`);
+  }
+});
+
 test("the wordmark is six lines of ASCII art plus a tagline on a terminal", () => {
   const art = wordmark(makeStyle({ tty: true, env: { LANG: "en_US.UTF-8" } }));
   const lines = art.split("\n");
@@ -224,11 +233,15 @@ test("the version in the wordmark is the package version", () => {
 });
 
 test("the wordmark appears on --help, on init, and on a bare invocation", () => {
+  // Spawned with piped stdio rather than captured in process: in process, the
+  // style is decided from THIS runner's stdout, which is a TTY when a human
+  // runs `npm test` in a terminal, and then the art prints instead of the
+  // one-line form asserted here. A pipe is the same answer everywhere.
   const dir = scratch();
   for (const argv of [["--help"], ["help"], [], ["init"]]) {
-    const run = capture(argv, dir);
+    const run = spawnSync(process.execPath, [CLI_ENTRY, ...argv], { cwd: dir, encoding: "utf8" });
     assert.ok(
-      run.out.includes(plainWordmark()),
+      run.stdout.includes(plainWordmark()),
       `\`approval ${argv.join(" ")}\` printed no wordmark`,
     );
   }
