@@ -61,7 +61,7 @@ import {
 } from "../core/vault.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import type { Streams } from "./main.js";
-import type { Prompter } from "./prompt.js";
+import { askUntil, type AnswerVerdict, type Prompter } from "./prompt.js";
 
 // ---------------------------------------------------------------------------
 // Destinations
@@ -268,13 +268,16 @@ export function reportLeftAlone(
  * A numbered picker over a closed list.
  *
  * Extracted from the Telegram chat picker, which is the same conversation over
- * different nouns: print the options with an index, read a number, refuse
- * anything else without a re-prompt. Both callers use this one (APRV-79).
+ * different nouns: print the options with an index and read a number. Both
+ * callers use this one (APRV-79).
  *
- * An unparseable answer is a REFUSAL rather than a re-ask. `setup` refuses on
- * every other bad answer it gets (a malformed identity, a `y` where `yes` was
- * demanded), and a wizard that loops on one question and not the others is a
- * wizard whose behaviour an operator cannot predict.
+ * **An unparseable answer is asked again** (APRV-90). It used to be a refusal,
+ * on the argument that a wizard which loops on one question and not the others
+ * is unpredictable — the answer to which turned out to be that every question
+ * loops, not that none of them does. The options are printed once; only the
+ * question repeats, under one line saying which number was not on the list.
+ * `ok: false` now means the human withdrew (Ctrl-D) or ran out of attempts, and
+ * the message says which.
  */
 export function pickOne<T>(
   streams: Streams,
@@ -294,18 +297,28 @@ export function pickOne<T>(
     streams.out(`  ${String(index + 1)}. ${options.label(item)}${marker}\n`);
   });
 
-  const answer = (prompter.readLine(options.prompt) ?? "").trim();
-  if (answer.length === 0 && options.defaultIndex !== null) {
-    return { ok: true, item: options.items[options.defaultIndex] as T };
-  }
-  const index = Number.parseInt(answer, 10);
-  if (!Number.isInteger(index) || index < 1 || index > options.items.length) {
+  const range = `1-${String(options.items.length)}`;
+  const picked = askUntil(streams, prompter, options.prompt, (answer): AnswerVerdict<T> => {
+    const typed = answer.trim();
+    if (typed.length === 0 && options.defaultIndex !== null) {
+      return { ok: true, value: options.items[options.defaultIndex] as T };
+    }
+    const index = Number.parseInt(typed, 10);
+    if (!Number.isInteger(index) || index < 1 || index > options.items.length) {
+      return { ok: false, reason: `${JSON.stringify(typed)} is not one of ${range}` };
+    }
+    return { ok: true, value: options.items[index - 1] as T };
+  });
+  if (!picked.ok) {
     return {
       ok: false,
-      message: `${JSON.stringify(answer)} is not one of 1-${String(options.items.length)}`,
+      message:
+        picked.reason === "aborted"
+          ? `nothing was picked from ${range}`
+          : `no answer in ${range} after ${String(picked.attempts)} attempts`,
     };
   }
-  return { ok: true, item: options.items[index - 1] as T };
+  return { ok: true, item: picked.value };
 }
 
 // ---------------------------------------------------------------------------
@@ -505,16 +518,40 @@ function collectDefault(
     return { kind: "value", value: picked.item.value };
   }
 
+  // A config value, asked until it is one (APRV-90). The spec's OWN validator
+  // runs here rather than only after collection, so a mistyped port is one line
+  // and the same question instead of an exit code and a help page. The sentence
+  // is unchanged either way: it is the adapter's refusal, the one the operator
+  // would have been shown at send time.
   const suffix = spec.default === undefined ? "" : ` [${spec.default}]`;
-  const answer = prompter.readLine(`${spec.label}${suffix}: `);
-  const typed = (answer ?? "").trim();
-  const value = typed.length === 0 ? (spec.default ?? "") : typed;
-  if (value.length === 0) {
-    return spec.required
-      ? { kind: "abort", message: `${spec.name} is required and nothing was entered` }
-      : { kind: "skip" };
+  const asked = askUntil(
+    streams,
+    prompter,
+    `${spec.label}${suffix}: `,
+    (answer): AnswerVerdict<string | null> => {
+      const typed = answer.trim();
+      const value = typed.length === 0 ? (spec.default ?? "") : typed;
+      if (value.length === 0) {
+        // `null` is "nothing to store", which is legitimate for an optional
+        // spec and is the one thing a required spec may not be answered with.
+        return spec.required
+          ? { ok: false, reason: `${spec.name} is required; nothing was entered` }
+          : { ok: true, value: null };
+      }
+      const verdict = spec.validate?.(value) ?? { ok: true as const };
+      return verdict.ok ? { ok: true, value } : { ok: false, reason: verdict.message };
+    },
+  );
+  if (!asked.ok) {
+    return {
+      kind: "abort",
+      message:
+        asked.reason === "aborted"
+          ? `the entry for ${spec.name} was aborted`
+          : `${spec.name}: no valid value after ${String(asked.attempts)} attempts`,
+    };
   }
-  return { kind: "value", value };
+  return asked.value === null ? { kind: "skip" } : { kind: "value", value: asked.value };
 }
 
 /** The kind, in the one word the checklist prints. */
@@ -623,9 +660,12 @@ export async function runCredentialFlow(flow: CredentialFlow): Promise<FlowResul
 
     const verdict = spec.validate?.(collected.value) ?? { ok: true as const };
     if (!verdict.ok) {
-      // No re-prompt. The message is the adapter's own refusal sentence, so the
-      // operator is told at collection time exactly what they would have been
-      // told at send time, and re-running the verb is one line.
+      // The backstop, not the front line (APRV-90). A value the operator TYPED
+      // has already been validated inside the prompt loop and asked for again
+      // if it did not fit; what reaches here and fails is a value a
+      // {@link FlowHooks.collect} or {@link FlowHooks.discover} hook produced,
+      // which no re-prompt can fix because no question was asked. The sentence
+      // is the adapter's own refusal either way.
       streams.err(`approval: ${spec.name}: ${verdict.message}; nothing was written to ${where}\n`);
       return { ...nothing, code: EXIT_USAGE, skipped: plan.skipped };
     }

@@ -137,11 +137,36 @@ eval "$(approval env)"
 
 `approval setup identity` asks for a `human:<id>`, validates it against the same
 `^human:.+` pattern the human-only verbs enforce, and records
-`APPROVAL_HUMAN=human:<id>`.
+`APPROVAL_HUMAN=human:<id>`. The prefix is printed because it is what separates
+a human from the `agent:` and `system:` actors those verbs refuse, and it need
+not be retyped: answer `carter` and the line reads `human:carter`. A wrong
+answer to this question, or to any other prompt in `setup`, is one line saying
+what was wrong followed by the same question, never an exit code with a help
+page under it.
 
 `approval setup channel telegram` does five things: it stores the bot token, proves it
-with `getMe`, asks you to send your bot a message, reads the chat id back out of
-the update queue, and writes both variables. On macOS the token goes into the
+with `getMe`, waits for you to send your bot a message, reads the chat id back out of
+the update queue, and writes both variables.
+
+The wait is a continuous long poll of up to 90 seconds and it asks you for
+nothing while it runs (Ctrl-C stops it, and nothing has been written by then):
+
+```
+waiting for a message to @your_bot (up to 90s, Ctrl-C to stop):
+open Telegram and send it anything. No Enter is needed here — this keeps reading
+until your message lands, so it does not matter when you send it.
+
+use chat 123456789 (private, @alice)? [y/N]
+```
+
+Earlier builds asked you to press Enter after sending, which made your timing
+part of whether it worked: a message that landed between two reads was seen by
+nothing and reported as `No message seen yet`. If the deadline does pass, the
+refusal now asks `getWebhookInfo` and prints what Telegram says about this bot —
+the username to check against the chat header on your phone, how many updates
+are pending (any number above zero with no message found means another process
+is long-polling with an offset and consuming them), and whether a webhook is
+registered, since `getUpdates` returns nothing at all while one is. On macOS the token goes into the
 Keychain through `security`'s own no-echo prompt (Apple's wording: `password
 data for new item:`, then `retype password for new item:`; paste the BotFather
 token at both), so it is never typed into this process and never reaches your

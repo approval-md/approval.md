@@ -159,8 +159,12 @@ eval "$(approval env)"
 What each one does:
 
 - **`setup identity`** asks for a `human:<id>` and validates it against the same
-  `^human:.+` pattern the human-only verbs enforce. It is the one subcommand that
-  is not human-only, because it is what declares the identity that check reads.
+  `^human:.+` pattern the human-only verbs enforce. A bare id is enough: type
+  `alice` and it is recorded as `human:alice`, because the prompt has already
+  shown you the prefix and retyping it proves nothing. An `agent:` or `system:`
+  answer is refused in one line and the question comes back, as does any other
+  answer that does not fit. It is the one subcommand that is not human-only,
+  because it is what declares the identity that check reads.
 - **`setup vault`** generates 32 random bytes, stores them in the OS keystore as
   `approval-vault-passphrase`, and writes the source line for
   **the variable your policy names**. The policy above says
@@ -170,8 +174,13 @@ What each one does:
   already exists the verb warns first and defaults to no: a vault cannot be
   re-keyed by changing a variable, and every credential in it would become
   unreadable.
-- **`setup channel telegram`** stores the token, proves it with `getMe`, asks you to
-  message the bot, reads the chat id back, and writes both variables. On macOS
+- **`setup channel telegram`** stores the token, proves it with `getMe`, waits for you
+  to message the bot, reads the chat id back, and writes both variables. The wait is a
+  continuous long poll of up to 90 seconds and asks for nothing while it runs
+  (`waiting for a message to @your_bot (up to 90s, Ctrl-C to stop)`), so when you send
+  the message does not matter; if it does time out, the refusal prints what
+  `getWebhookInfo` says about the bot — the pending update count, and whether a
+  webhook is registered, which would stop `getUpdates` returning anything at all. On macOS
   the token is collected by `security`'s own no-echo prompt (Apple's wording:
   `password data for new item:`, then `retype password for new item:`; paste the
   BotFather token at both), so it is never typed into this process; on Linux
@@ -287,12 +296,16 @@ It will ask for 5 value(s), all of them into /tmp/approval-email-demo/.approval/
   smtp.password (secret, optional) — the login secret, required exactly when a username is given
 
 SMTP host: smtp.example.net
+SMTP port [587]: 58x
+  the vault's smtp.port is not a TCP port number (1-65535)
 SMTP port [587]:
 
 transport security — how the connection is protected; this adapter never guesses it:
   1. implicit — TLS from the first byte (the submissions port, 465)
   2. starttls — plaintext, then a mandatory STARTTLS upgrade (port 587) (default)
   3. none — plaintext throughout; the adapter refuses to AUTH over it
+which one? [1-3]: 4
+  "4" is not one of 1-3
 which one? [1-3]:
 SMTP username: you@example.net
 SMTP password (not echoed):
@@ -303,6 +316,12 @@ No message was sent: the session ran to AUTH and then QUIT.
 
 stored 5 value(s) in /tmp/approval-email-demo/.approval/vault.enc: smtp.host, smtp.port, smtp.security, smtp.user, smtp.password
 ```
+
+The two wrong answers above are deliberate: a prompt that does not like your
+answer says which part it did not like, in one line, and asks again. The
+sentence about the port is the adapter's own, the one a send would print at you
+later. Ctrl-C or Ctrl-D leaves the verb with nothing stored, and five wrong
+answers in a row to one question ends it the same way.
 
 The probe is the same SMTP session a send runs, stopped at AUTH: it proves the
 host answers, that the transport security you chose is the one the server offers,

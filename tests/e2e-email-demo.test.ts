@@ -1166,7 +1166,7 @@ test("the setup path: `approval setup` + `approval env` reaches the same log", a
       prompter: scripted([
         BOT_TOKEN, // the no-echo read, on a machine with no keystore
         "yes", // write it as a plaintext literal
-        "", // Enter, after "send the bot a message"
+        // No Enter: since APRV-96 the verb long-polls until the message lands.
         true, // use this chat?
         false, // send a test message? — default no
       ]),

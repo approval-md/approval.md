@@ -81,6 +81,18 @@ export interface MockBotApi {
   pendingUpdateCount(): number;
   /** Inject a failure mode for every subsequent call, or `null` to behave. */
   fail(mode: MockFailure | null): void;
+  /**
+   * What `getWebhookInfo` answers (APRV-96).
+   *
+   * `approval setup channel telegram` asks for it on ONE path only: when no
+   * message arrived before its deadline, so that the refusal can say whether a
+   * webhook is swallowing the updates and how many Telegram is still holding.
+   * Both fields are settable because the two facts the operator needs are
+   * exactly the two an unconfigured mock cannot invent: `url` defaults to `""`
+   * (no webhook, which is the real default for a bot) and `pendingUpdateCount`
+   * defaults to whatever is still queued here.
+   */
+  setWebhookInfo(info: { url?: string; pendingUpdateCount?: number }): void;
   /** The `callback_data` of the Approve/Reject button delivered for `actionKey`. */
   callbackDataFor(actionKey: string, decision: "grant" | "reject"): string;
   /** Every `text` the bot has sent, in order. */
@@ -114,6 +126,7 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
   let updateId = 1000;
   let messageId = 500;
   let failure: MockFailure | null = null;
+  let webhook: { url?: string; pendingUpdateCount?: number } = {};
   let server: Server;
   let port = 0;
 
@@ -184,6 +197,21 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
       send(response, {
         ok: true,
         result: { id: 424_242, is_bot: true, username: "approval_md_test_bot" },
+      });
+      return;
+    }
+
+    // The give-up diagnosis `approval setup channel telegram` prints (APRV-96).
+    // A real getWebhookInfo answers whether a webhook is set and how many
+    // updates are waiting; both are facts the mock has or can be told.
+    if (method === "getWebhookInfo") {
+      send(response, {
+        ok: true,
+        result: {
+          url: webhook.url ?? "",
+          has_custom_certificate: false,
+          pending_update_count: webhook.pendingUpdateCount ?? queued.length,
+        },
       });
       return;
     }
@@ -298,6 +326,9 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
     },
     pendingUpdateCount() {
       return queued.length;
+    },
+    setWebhookInfo(info) {
+      webhook = { ...info };
     },
     fail(mode) {
       failure = mode;
