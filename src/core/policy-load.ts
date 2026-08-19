@@ -119,6 +119,15 @@ export interface Policy {
    * means retain indefinitely. Read by the M5 daemon; nothing else prunes.
    */
   payload_retention?: string;
+  /**
+   * Amended SPEC.md §5.2 (APRV-107): repo-relative paths whose edit is
+   * `policy.edit` in addition to the runtime's built-in set. Exact file paths
+   * (`SPEC.md`) and directory prefixes ending in `/` (`design/`); no globs, no
+   * negation. Purely ADDITIVE: the built-ins stay protected whatever this
+   * list says, so a policy can widen the protected surface and never narrow
+   * it.
+   */
+  protected_paths?: string[];
   approvers?: Record<string, { channels: string[] }>;
   classes?: Record<string, PolicyClassRule>;
   budgets?: Record<string, { daily_usd?: number; daily_actions?: number }>;

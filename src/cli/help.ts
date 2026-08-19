@@ -87,7 +87,7 @@ Usage:
   approval hook claude-code [--as agent:<id>] [--timeout <duration>]
                       [--interval <d>] [--policy <path>] [--dir <path>]
                       [--log <path>]                    (reads PreToolUse JSON)
-  approval hook classify [--json] -- <command…>
+  approval hook classify [--json] [--policy <path>] [--dir <path>] -- <command…>
   approval import agents-md <file> [--out <path>] [--json]
   approval mcp serve  --as agent:<id> [--dir <path>] [--log <path>]
                       [--policy <path>]              (MCP over stdio; foreground)
@@ -1091,7 +1091,7 @@ export const HOOK_HELP = `approval hook — put the gate in front of an agent ha
 Usage:
   approval hook claude-code [--as agent:<id>] [--timeout <d>] [--interval <d>]
                             [--policy <p>] [--dir <p>] [--log <p>]
-  approval hook classify [--json] -- <command…>
+  approval hook classify [--json] [--policy <p>] [--dir <p>] -- <command…>
 
 Commands:
   claude-code  read one PreToolUse event on STDIN, decide on stdout

@@ -513,6 +513,139 @@ test("docs/claude-code-hook.md still lists every rule and every deny code", () =
   }
 });
 
+// ===========================================================================
+// policy.protected_paths (APRV-107)
+// ===========================================================================
+
+/** A case directory whose attested policy widens the protected set. */
+function readyWithProtectedPaths(): string {
+  counter += 1;
+  const dir = join(scratch, `case-${counter}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    POLICY.replace(
+      "classes:",
+      ["protected_paths:", "  - SPEC.md", "  - design/", "classes:"].join("\n"),
+    ),
+    "utf8",
+  );
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+  return dir;
+}
+
+test("an edit to a policy-listed file is gated; the same file is ungated without the list", () => {
+  const listed = readyWithProtectedPaths();
+  const before = rawLog(listed);
+  const gated = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    listed,
+    event({ tool_name: "Edit", tool_input: { file_path: "SPEC.md" } }),
+  );
+  const verdict = verdictOf(gated);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.notEqual(rawLog(listed), before, "the policy.edit request must reach the log");
+  assert.match(rawLog(listed), /"class":"policy\.edit"/u);
+  assertClean(listed);
+
+  // Same file, a policy that never named it: an ordinary workspace edit.
+  const plain = ready();
+  const plainBefore = rawLog(plain);
+  const ungated = runCli(
+    ["hook", "claude-code"],
+    plain,
+    event({ tool_name: "Edit", tool_input: { file_path: "SPEC.md" } }),
+  );
+  assert.equal(verdictOf(ungated).permission, "allow");
+  assert.equal(rawLog(plain), plainBefore, "an ungated edit must not touch the log");
+});
+
+test("a listed directory prefix gates a Bash write beneath it", () => {
+  const dir = readyWithProtectedPaths();
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("cp notes.md design/notes.md"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(rawLog(dir), /"class":"policy\.edit"/u);
+  assertClean(dir);
+});
+
+test("the built-in protected set survives a policy that lists other paths", () => {
+  const dir = readyWithProtectedPaths();
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    event({ tool_name: "Write", tool_input: { file_path: "CLAUDE.md" } }),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assertClean(dir);
+});
+
+test("an unlisted workspace file is still autonomous under a widened policy", () => {
+  const dir = readyWithProtectedPaths();
+  const before = rawLog(dir);
+  const run = runCli(
+    ["hook", "claude-code"],
+    dir,
+    event({ tool_name: "Write", tool_input: { file_path: "src/core/x.ts" } }),
+  );
+  assert.equal(verdictOf(run).permission, "allow");
+  assert.equal(rawLog(dir), before);
+});
+
+test("hook classify reads the policy, and --dir scopes which policy", () => {
+  const listed = readyWithProtectedPaths();
+  const plain = caseDir();
+
+  const inPlace = runCli(["hook", "classify", "--json", "--", "cp draft.md SPEC.md"], listed);
+  assert.equal(inPlace.code, 0, inPlace.stderr);
+  assert.deepEqual(
+    (JSON.parse(inPlace.stdout) as { classes: string[] }).classes,
+    ["policy.edit"],
+  );
+
+  const elsewhere = runCli(["hook", "classify", "--json", "--", "cp draft.md SPEC.md"], plain);
+  assert.deepEqual(
+    (JSON.parse(elsewhere.stdout) as { classes: string[] }).classes,
+    ["files.write.workspace"],
+  );
+
+  const scoped = runCli(
+    ["hook", "classify", "--json", "--dir", listed, "--", "cp draft.md SPEC.md"],
+    plain,
+  );
+  assert.deepEqual(
+    (JSON.parse(scoped.stdout) as { classes: string[] }).classes,
+    ["policy.edit"],
+  );
+});
+
+test("hook classify with no readable policy still answers, and says it is the narrow answer", () => {
+  const bare = join(scratch, "no-policy");
+  mkdirSync(bare, { recursive: true });
+  const run = runCli(["hook", "classify", "--json", "--", "cp draft.md SPEC.md"], bare);
+  assert.equal(run.code, 0);
+  assert.deepEqual(
+    (JSON.parse(run.stdout) as { classes: string[] }).classes,
+    ["files.write.workspace"],
+  );
+  assert.match(run.stderr, /built-in protected paths only/u);
+  // The built-ins never depend on a policy being readable.
+  const builtin = runCli(["hook", "classify", "--json", "--", "cp draft.md CLAUDE.md"], bare);
+  assert.deepEqual(
+    (JSON.parse(builtin.stdout) as { classes: string[] }).classes,
+    ["policy.edit"],
+  );
+});
+
 test("HOOK_DENY_CODES is the closed vocabulary the help text prints", () => {
   const help = runCli(["hook", "--help"], caseDir()).stdout;
   for (const code of HOOK_DENY_CODES) {

@@ -96,6 +96,56 @@ function pathSegments(candidate: string): string[] {
 }
 
 /**
+ * One entry of `policy.protected_paths`, pre-split (APRV-107).
+ *
+ * `directory` records the trailing `/` that distinguishes `design/` (a subtree)
+ * from `design` (a file named `design`).
+ */
+interface ProtectedEntry {
+  segments: string[];
+  directory: boolean;
+}
+
+/**
+ * Read one `policy.protected_paths` entry, or `null` when it names nothing.
+ *
+ * The schema already rejects globs, absolute paths and `..` segments; this
+ * repeats the structural half of that check so a caller that skipped
+ * validation gets an entry that matches nothing rather than an entry that
+ * matches surprisingly. Pure, like everything else here: no resolution against
+ * a checkout, no disk.
+ */
+function parseProtectedEntry(entry: string): ProtectedEntry | null {
+  const trimmed = entry.trim();
+  if (trimmed.length === 0) return null;
+  const directory = /[/\\]$/u.test(trimmed);
+  const segments = pathSegments(trimmed);
+  if (segments.length === 0) return null;
+  if (segments.some((segment) => segment === "..")) return null;
+  return { segments, directory };
+}
+
+/** Does `segments` match one parsed entry? */
+function matchesEntry(segments: readonly string[], entry: ProtectedEntry): boolean {
+  const want = entry.segments;
+  if (want.length > segments.length) return false;
+  if (entry.directory) {
+    // A directory prefix matches wherever its segments appear as a contiguous
+    // run, exactly as the built-in `.approval/` and `.github/workflows/` do.
+    for (let start = 0; start + want.length <= segments.length; start += 1) {
+      if (want.every((segment, offset) => segment === segments[start + offset])) return true;
+    }
+    return false;
+  }
+  // An exact path matches when the candidate ENDS with it: `docs/x.md` matches
+  // `/repo/docs/x.md` and `./docs/x.md`, and a bare filename (a one-segment
+  // entry) matches that filename in any directory, which is how the built-in
+  // filenames have always behaved.
+  const offset = segments.length - want.length;
+  return want.every((segment, index) => segment === segments[offset + index]);
+}
+
+/**
  * Does this path name something only a human may write? (`policy.edit`.)
  *
  * Deliberately name-based rather than location-based: the hook runs in whatever
@@ -103,8 +153,13 @@ function pathSegments(candidate: string): string[] {
  * checkout would answer differently in a worktree than in the primary. A
  * false positive here costs one approval prompt; a false negative costs the
  * property the whole file exists to defend.
+ *
+ * `extra` carries `policy.protected_paths` (APRV-107). It is strictly
+ * ADDITIVE: the built-in set above is protected whatever a policy says, so a
+ * policy can widen the protected surface and can never narrow it. Still pure —
+ * the caller loads the policy, this function only matches segments.
  */
-export function isProtectedPath(candidate: string): boolean {
+export function isProtectedPath(candidate: string, extra: readonly string[] = []): boolean {
   if (candidate.length === 0) return false;
   const segments = pathSegments(candidate);
   const last = segments[segments.length - 1];
@@ -121,6 +176,11 @@ export function isProtectedPath(candidate: string): boolean {
     }
     // CI configuration.
     if (segment === ".github" && segments[index + 1] === "workflows") return true;
+  }
+
+  for (const raw of extra) {
+    const entry = parseProtectedEntry(raw);
+    if (entry !== null && matchesEntry(segments, entry)) return true;
   }
   return false;
 }
@@ -972,7 +1032,7 @@ type SegmentOutcome =
   | { ok: true; class: string; rule: string }
   | { ok: false; code: ClassifierFailureCode; detail: string };
 
-function classifySegment(segment: LexSegment): SegmentOutcome {
+function classifySegment(segment: LexSegment, protectedPaths: readonly string[]): SegmentOutcome {
   if (segment.opaque !== null) {
     return { ok: false, code: "opaque", detail: segment.opaque };
   }
@@ -982,7 +1042,7 @@ function classifySegment(segment: LexSegment): SegmentOutcome {
   // outer command even starts and the outer class would not describe it.
   for (const word of segment.words) {
     for (const inner of word.substitutions) {
-      const nested = classifyCommand(inner);
+      const nested = classifyCommand(inner, protectedPaths);
       if (!nested.ok) {
         return {
           ok: false,
@@ -1008,7 +1068,7 @@ function classifySegment(segment: LexSegment): SegmentOutcome {
   const writeTargets = segment.redirects
     .filter((redirect) => redirect.op !== "<")
     .map((redirect) => redirect.target.text);
-  const protectedTarget = writeTargets.find((target) => isProtectedPath(target));
+  const protectedTarget = writeTargets.find((target) => isProtectedPath(target, protectedPaths));
   if (protectedTarget !== undefined) {
     return { ok: true, class: "policy.edit", rule: "redirect-protected" };
   }
@@ -1059,7 +1119,7 @@ function classifySegment(segment: LexSegment): SegmentOutcome {
   // A protected path anywhere in an effectful segment is `policy.edit`: the
   // command is editing the rules, whatever else it is doing.
   if (!cls.startsWith("read.") && cls !== GATE_SELF_CLASS) {
-    const named = positionals.find((arg) => isProtectedPath(arg));
+    const named = positionals.find((arg) => isProtectedPath(arg, protectedPaths));
     if (named !== undefined) return { ok: true, class: "policy.edit", rule: "protected-path" };
   }
 
@@ -1079,8 +1139,17 @@ function classifySegment(segment: LexSegment): SegmentOutcome {
  * Every segment must classify: one unreadable segment refuses the whole
  * command, because a command line's effect is the union of its parts and a
  * partial answer would authorize the parts we happened to understand.
+ *
+ * `protectedPaths` is `policy.protected_paths` (APRV-107), added to the
+ * built-in protected set rather than replacing it. Omitting it classifies
+ * against the built-ins alone, which is the strictly narrower answer, so a
+ * caller that forgets it under-reports `policy.edit` rather than inventing an
+ * authorization; every enforcement path passes the loaded policy's list.
  */
-export function classifyCommand(command: string): CommandClassification {
+export function classifyCommand(
+  command: string,
+  protectedPaths: readonly string[] = [],
+): CommandClassification {
   const lexed = lex(command);
   if (!lexed.ok) {
     return { ok: false, code: "unparseable", segment: command.trim(), detail: lexed.detail };
@@ -1092,7 +1161,7 @@ export function classifyCommand(command: string): CommandClassification {
   const segments: ClassifiedSegment[] = [];
   const classes: string[] = [];
   for (const segment of lexed.segments) {
-    const outcome = classifySegment(segment);
+    const outcome = classifySegment(segment, protectedPaths);
     if (!outcome.ok) {
       return { ok: false, code: outcome.code, segment: segment.text, detail: outcome.detail };
     }

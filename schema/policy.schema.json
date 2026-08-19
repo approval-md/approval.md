@@ -45,6 +45,18 @@
       "description": "SPEC.md §5.2 (amended, APRV-38): how long payload bytes are kept in `.approval/payloads/` after the action they bind to reaches a terminal state (`executed`, `rejected`, `expired`, `revoked`). A payload older than this duration in a terminal state MAY be pruned; a payload whose action is still live is never prunable at any age, because the bytes are what a pending or granted approval binds to. Orphaned payloads (bytes with no recorded binding) are prunable regardless of this key. Omitting the key means retain indefinitely: the payload store holds the material evidence of what was approved, so forgetting it is an explicit operator choice rather than a default. Pruning is performed by the daemon and by nothing else, and each removal is recorded as a `payload.pruned` event. Policy vocabulary in v0.1: enforcement lands with the M5 daemon (APRV-41), so a policy may declare it before any runtime reads it.",
       "examples": ["30d", "12w"]
     },
+    "protected_paths": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "SPEC.md §5.2 (amended, APRV-107): repo-relative paths whose edit the runtime classifies as `policy.edit`, so an agent editing them must go through the gate. ADDITIVE ONLY: the built-in protected set (APPROVAL.md, APPROVALS.md, CLAUDE.md, AGENTS.md, .npmrc, anything under .approval/, .claude/settings*, .github/workflows/) is protected whatever this list says or omits, because a policy that could shrink the protected surface would be a policy an agent could edit its way out of. Grammar: an entry is either an exact file path (`SPEC.md`, `docs/constitution.md`) or a directory prefix ending in `/` (`design/`). No globs, no negation, no absolute paths, no `..` — the classifier is a pure segment matcher, not a shell, and a pattern language it half-implemented would be a protection an author believed was in force and the runtime did not apply. Matching is by path segments and never resolves against a checkout, so it answers the same in a worktree as in the primary: an exact path matches a candidate whose TRAILING segments are that path (`SPEC.md` matches `SPEC.md`, `./SPEC.md` and `/abs/repo/SPEC.md`; a single-segment entry therefore also matches `docs/SPEC.md`, exactly as the built-in filenames match anywhere), and a directory prefix matches a candidate containing those segments as a contiguous run (`design/` matches `design/x.md` and `/abs/repo/design/sub/x.md`). Both directions err wide on purpose: a false positive costs one approval prompt, a false negative costs the property the gate exists to defend.",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)[^*?\\[\\]{}\\\\\\s]+$",
+        "description": "A repo-relative path: exact file (`SPEC.md`) or directory prefix with a trailing `/` (`design/`). Leading `/`, `.`/`..` segments, whitespace and the glob characters `* ? [ ] { }` are rejected — each would be a path the matcher cannot honour literally, and silently ignoring one would leave the author believing a file is gated when it is not."
+      },
+      "examples": [["SPEC.md", "design/"]]
+    },
     "approvers": {
       "type": "object",
       "additionalProperties": false,
