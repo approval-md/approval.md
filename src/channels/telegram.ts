@@ -116,6 +116,7 @@ import type {
   TaggedField,
   TestableChannel,
 } from "./contract.js";
+import { payloadRegionText } from "./payload-view.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -428,7 +429,7 @@ export function renderTelegram(request: ChannelRequest): TelegramRendering {
     payloadText:
       payload === null
         ? null
-        : `--- full payload (sha256 ${payload.hash}${payload.truncated ? ", TRUNCATED" : ""}) ---\n${payload.text}`,
+        : `--- full payload (sha256 ${payload.hash}${payload.truncated ? ", TRUNCATED" : ""}) ---\n${payloadRegionText(payload)}`,
   };
 }
 

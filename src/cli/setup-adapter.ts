@@ -56,6 +56,16 @@
  * (redacted), and the undo is printed as `approval vault remove <name>`. Values
  * discarded by a wizard because a laptop was on a captive portal would be five
  * more things to type.
+ *
+ * A PARTIAL RE-RUN is offered the same proof over the STORED set (APRV-99). It
+ * holds only what it just collected, so it reads the rest through
+ * {@link readEmailSmtpConfig} over a {@link vaultCredentialProvider}: the exact
+ * path `approval adapter email` takes at send time, in this process, printed by
+ * nothing. That is not a hole in "there is no verb that reads a credential
+ * out" — that rule is about what reaches a terminal, and nothing here does.
+ * Rotating an app password is the common case for this verb, and a probe no
+ * wider than the send it proves is the difference between a rotation you have
+ * checked and one you find out about from a bounce.
  */
 
 import type { CredentialSpec } from "../core/credential-spec.js";
@@ -66,12 +76,17 @@ import {
   DEFAULT_CREDENTIAL_NAMES,
   EMAIL_CREDENTIAL_SPECS,
   checkEmailCredentialSet,
+  readEmailSmtpConfig,
+  type EmailSmtpConfig,
 } from "../adapters/email.js";
+import type { CredentialProvider } from "../adapters/contract.js";
+import { vaultCredentialProvider } from "../adapters/vault-provider.js";
 import { isSmtpSecurity, probeSmtp, type SmtpSecurity } from "../adapters/smtp.js";
 import { EXIT_OK } from "./exit-codes.js";
 import { SETUP_ADAPTER_EMAIL_HELP, SETUP_ADAPTER_HELP } from "./help.js";
 import { refusal as renderRefusal, style } from "./style.js";
 import type { Streams } from "./main.js";
+import { confirmUntil, type Prompter } from "./prompt.js";
 import {
   front,
   requireHuman,
@@ -94,8 +109,17 @@ import {
 export interface VerifyContext {
   written: readonly string[];
   skipped: readonly string[];
-  prompter: { confirm(prompt: string, defaultNo?: boolean): boolean };
+  streams: Streams;
+  prompter: Prompter;
   probe: typeof probeSmtp;
+  /**
+   * The adapter's own credential provider, over the vault this run just wrote
+   * to (APRV-99). Lazy: a first run never opens it, because a first run holds
+   * everything already. A partial re-run opens it to probe the MERGED set, and
+   * that read is the one the adapter performs at send time, in this process,
+   * printed by nothing.
+   */
+  credentials: CredentialProvider;
 }
 
 /** One adapter, as this verb needs to see it. */
@@ -172,28 +196,126 @@ function redactor(secrets: readonly string[]): (text: string) => string {
   };
 }
 
+/** Today's refusal for a partial run, kept verbatim as the fallback (APRV-99). */
+function partialRefusal(skipped: readonly string[]): string {
+  return `\nnot verified: ${skipped.join(", ")} ${skipped.length === 1 ? "was" : "were"} left alone this run, so this verb does not hold the whole\nconfiguration, and it will not read the missing values back — there is no verb in\nthis CLI that reads a credential out of the vault. Re-run and replace all of them\nto probe the server.\n`;
+}
+
+/**
+ * The session itself, and the two sentences it can end with.
+ *
+ * Shared by the first-run path and the stored-configuration path (APRV-99) so
+ * that a probe reports the same way whichever set it ran over: an operator
+ * rotating an app password is owed the proof they get on day one, in the words
+ * they got it in. `undo` is the list of names this run stored, because the undo
+ * for a failed probe is removing what was just written and nothing else.
+ */
+async function probeAndReport(
+  config: EmailSmtpConfig,
+  scrub: (text: string) => string,
+  probe: typeof probeSmtp,
+  undo: readonly string[],
+): Promise<VerifyOutcome> {
+  const result = await probe({
+    host: config.host,
+    port: config.port,
+    security: config.security,
+    ...(config.user === undefined ? {} : { user: config.user }),
+    ...(config.password === undefined ? {} : { password: config.password }),
+    tlsRejectUnauthorized: true,
+    redact: scrub,
+  });
+
+  if (result.ok) {
+    return {
+      ok: true,
+      detail: `\nverified: ${config.host}:${String(config.port)} answered over ${config.security}, ${
+        result.authenticated === null
+          ? "with no login (neither a user nor a password is stored)"
+          : `and accepted the credential over AUTH ${result.authenticated}`
+      }.\nNo message was sent: the session ran to AUTH and then QUIT.\n`,
+    };
+  }
+
+  const lines = undo.map((name) => `  approval vault remove ${name} --as human:<id>`).join("\n");
+  return {
+    ok: false,
+    // APRV-102: the one refusal shape, here too. A probe failure is the last
+    // thing this verb prints before the operator decides what to fix.
+    detail: `${renderRefusal(style(), result.code, scrub(result.message))}\n\nThe values ARE stored — a probe that failed because a laptop is behind a captive\nportal is not a reason to make you type five things again. Fix the server or the\nsetting and re-run this verb, or undo it by hand:\n\n${lines}\n`,
+  };
+}
+
+/**
+ * The partial re-run: offer to probe the configuration IN THE VAULT (APRV-99).
+ *
+ * This verb used to stop here, on the argument that it did not hold the whole
+ * configuration and that reading the rest back is the thing there is no verb
+ * for. The first half is true and the second half was the wrong inference.
+ * There is no verb that PRINTS a credential, and there still is not; but the
+ * email adapter reads all five out of the vault on every send, through
+ * {@link readEmailSmtpConfig} over a {@link vaultCredentialProvider}, and this
+ * function does exactly that and nothing more. The values are read into this
+ * process, handed to the same SMTP session `sendMail` opens, and dropped. No
+ * count, no prefix, no length, no value reaches a stream — the suite sweeps
+ * every captured byte for the fixture secrets on this path too. A probe that is
+ * no wider than the send it is proving does not widen the exposure; rotating an
+ * app password is the common case for this verb and it deserves the proof.
+ *
+ * When the vault will not open, or what it holds is not usable configuration,
+ * the answer is today's refusal verbatim plus one line naming why the probe
+ * could not run. The provider's sentences name the variable, the path and the
+ * credential NAME, never a value, and they are scrubbed with this run's own
+ * values before they are printed anyway.
+ */
+async function verifyStored(
+  values: Record<string, string>,
+  context: VerifyContext,
+): Promise<VerifyOutcome> {
+  const refusal = partialRefusal(context.skipped);
+  const scrub = redactor(Object.values(values));
+
+  if (
+    !confirmUntil(
+      context.streams,
+      context.prompter,
+      `open an SMTP session using the stored configuration to check it?`,
+      true,
+    )
+  ) {
+    return { ok: true, declined: true, detail: refusal };
+  }
+
+  const configured = readEmailSmtpConfig(context.credentials, DEFAULT_CREDENTIAL_NAMES);
+  if (!configured.ok) {
+    return {
+      ok: true,
+      declined: true,
+      detail: `${refusal}\nthe probe could not run: ${scrub(configured.message)}\n`,
+    };
+  }
+
+  return probeAndReport(
+    configured.config,
+    redactor([...Object.values(values), ...configured.secrets]),
+    context.probe,
+    context.written,
+  );
+}
+
 /**
  * The email adapter's verification: one SMTP session that sends nothing.
  *
- * Runs only when this run collected the whole picture. A run in which the
- * operator declined to replace `smtp.user` would probe with whatever the OTHER
- * four values say and no login, and report a failure about a configuration that
- * is in fact fine — and the alternative, reading the missing values back out of
- * the vault, is the thing there is deliberately no verb for. So a partial run
- * says so and stops, which is honest and one re-run away from a full check.
+ * A run that collected the whole picture probes what it collected. A partial
+ * re-run hands off to {@link verifyStored}, which offers to probe what is in
+ * the vault, read the way the adapter reads it.
  */
 async function verifyEmail(
   values: Record<string, string>,
   context: VerifyContext,
 ): Promise<VerifyOutcome> {
   const names = DEFAULT_CREDENTIAL_NAMES;
-  if (context.skipped.length > 0) {
-    return {
-      ok: true,
-      declined: true,
-      detail: `\nnot verified: ${context.skipped.join(", ")} ${context.skipped.length === 1 ? "was" : "were"} left alone this run, so this verb does not hold the whole\nconfiguration, and it will not read the missing values back — there is no verb in\nthis CLI that reads a credential out of the vault. Re-run and replace all of them\nto probe the server.\n`,
-    };
-  }
+  if (context.skipped.length > 0) return verifyStored(values, context);
 
   const host = values[names.host];
   const port = Number(values[names.port]);
@@ -223,35 +345,20 @@ async function verifyEmail(
     };
   }
 
-  const result = await context.probe({
-    host,
-    port,
-    security: security as SmtpSecurity,
-    ...(user === undefined ? {} : { user }),
-    ...(password === undefined ? {} : { password }),
-    tlsRejectUnauthorized: true,
-    redact: scrub,
-  });
-
-  if (result.ok) {
-    return {
-      ok: true,
-      detail: `\nverified: ${host}:${String(port)} answered over ${security}, ${
-        result.authenticated === null
-          ? "with no login (neither a user nor a password is stored)"
-          : `and accepted the credential over AUTH ${result.authenticated}`
-      }.\nNo message was sent: the session ran to AUTH and then QUIT.\n`,
-    };
-  }
-
-  const undo = [names.host, names.port, names.security, names.user, names.password]
-    .filter((name) => values[name] !== undefined)
-    .map((name) => `  approval vault remove ${name} --as human:<id>`)
-    .join("\n");
-  return {
-    ok: false,
-    detail: `${renderRefusal(style(), result.code, scrub(result.message))}\n\nThe values ARE stored — a probe that failed because a laptop is behind a captive\nportal is not a reason to make you type five things again. Fix the server or the\nsetting and re-run this verb, or undo it by hand:\n\n${undo}\n`,
-  };
+  return probeAndReport(
+    {
+      host,
+      port,
+      security: security as SmtpSecurity,
+      ...(user === undefined ? {} : { user }),
+      ...(password === undefined ? {} : { password }),
+    },
+    scrub,
+    context.probe,
+    [names.host, names.port, names.security, names.user, names.password].filter(
+      (name) => values[name] !== undefined,
+    ),
+  );
 }
 
 /** Every adapter this verb can configure. Keyed by the `adapter <name>` name. */
@@ -384,6 +491,16 @@ export async function commandSetupAdapter(
 
   const vaultPath = vaultPathFor(context.logPath);
   const probe = deps.probe ?? probeSmtp;
+  // The adapter's own reader over the same vault, for the partial-re-run probe
+  // (APRV-99). Built here and not in the hook so that this file keeps the one
+  // fact the hook has no business knowing: which file, and under which
+  // variable. Lazy, so a first run never opens it.
+  const credentials =
+    deps.credentials ??
+    vaultCredentialProvider(
+      { vaultPath },
+      { passphraseEnv: variable, env: deps.env ?? process.env },
+    );
 
   const result: FlowResult = await runCredentialFlow({
     streams,
@@ -401,8 +518,10 @@ export async function commandSetupAdapter(
         entry.verify(values, {
           written: progress.written,
           skipped: progress.skipped,
+          streams,
           prompter: context.prompter,
           probe,
+          credentials,
         }),
     },
   });

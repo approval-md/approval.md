@@ -322,3 +322,41 @@ export function askUntil<T>(
     if (attempts >= maxAttempts) return { ok: false, reason: "exhausted", attempts };
   }
 }
+
+/**
+ * A yes/no question that asks AGAIN when the answer is neither (APRV-99).
+ *
+ * {@link Prompter.confirm} takes the default for anything it does not
+ * recognise, which is the right reading for a question whose default is the
+ * safe answer: a stray keystroke declines. It is the wrong reading for a
+ * question whose default is YES and whose subject is a check the operator
+ * asked for, where a typo would silently skip the proof and report it as a
+ * decision. APRV-90's answer to that class of question is that every question
+ * loops, so this is {@link askUntil} over a yes/no validator: the same bounded
+ * loop, the same indented reason line, the same abort handling.
+ *
+ * Existing `confirm` calls are deliberately untouched — their output is pinned
+ * byte for byte — so this is an addition to the vocabulary, not a replacement.
+ * A withdrawal (Ctrl-D) or an exhausted loop reads as NO, which is the
+ * fail-closed direction for a question that offers to do something.
+ */
+export function confirmUntil(
+  streams: Streams,
+  prompter: Prompter,
+  question: string,
+  defaultYes: boolean,
+): boolean {
+  const asked = askUntil(
+    streams,
+    prompter,
+    `${question} ${defaultYes ? "[Y/n]" : "[y/N]"} `,
+    (answer): AnswerVerdict<boolean> => {
+      const typed = answer.trim().toLowerCase();
+      if (typed.length === 0) return { ok: true, value: defaultYes };
+      if (typed === "y" || typed === "yes") return { ok: true, value: true };
+      if (typed === "n" || typed === "no") return { ok: true, value: false };
+      return { ok: false, reason: `${JSON.stringify(answer.trim())} is not yes or no` };
+    },
+  );
+  return asked.ok ? asked.value : false;
+}

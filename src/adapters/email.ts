@@ -686,6 +686,109 @@ function readCredential(credentials: CredentialProvider, name: string): Fetched 
 }
 
 /**
+ * The SMTP configuration as {@link readEmailSmtpConfig} resolved it: three
+ * required values and the optional login pair.
+ */
+export interface EmailSmtpConfig {
+  host: string;
+  port: number;
+  security: SmtpSecurity;
+  user?: string;
+  password?: string;
+}
+
+/**
+ * What one configuration read produced.
+ *
+ * `secrets` is the redaction corpus in the order the values were read, and it
+ * is returned on BOTH branches because a caller that goes on to open a session
+ * must scrub the far end's sentences with the same corpus this read built. A
+ * refusal's `message` is already scrubbed with everything read before it.
+ */
+export type EmailConfigOutcome =
+  | { ok: true; config: EmailSmtpConfig; secrets: readonly string[] }
+  | { ok: false; code: EmailFailureCode; message: string; secrets: readonly string[] };
+
+/**
+ * Read this adapter's whole configuration from a credential provider.
+ *
+ * Extracted from `act` (APRV-99) so that there is exactly ONE piece of code in
+ * the repository that turns a {@link CredentialProvider} into SMTP settings: the
+ * names it asks for, the order it asks in, the port and security validation,
+ * and the both-or-neither pair rule. `act` calls it inside the verified-token
+ * window, and `setup adapter email` calls it to probe a configuration it only
+ * partly typed, over a provider built the same way. Neither one re-derives the
+ * rules, and a second reader would be a second opinion about what "configured"
+ * means.
+ *
+ * Values never leave the process on either path: what comes back is the
+ * configuration a session is opened with, and every string this function
+ * RETURNS as a message has been through the scrub built from what it read.
+ */
+export function readEmailSmtpConfig(
+  credentials: CredentialProvider,
+  names: EmailCredentialNames = DEFAULT_CREDENTIAL_NAMES,
+): EmailConfigOutcome {
+  const secrets: string[] = [];
+  const scrub = (text: string): string => redactSecrets(text, secrets).text;
+  const read = (name: string): Fetched => {
+    const got = readCredential(credentials, name);
+    if (got.ok && got.value.length > 0) secrets.push(got.value);
+    return got;
+  };
+  const fail = (code: EmailFailureCode, message: string): EmailConfigOutcome => ({
+    ok: false,
+    code,
+    message,
+    secrets,
+  });
+
+  const host = read(names.host);
+  if (!host.ok) return fail(host.code, scrub(host.message));
+  const port = read(names.port);
+  if (!port.ok) return fail(port.code, scrub(port.message));
+  const security = read(names.security);
+  if (!security.ok) return fail(security.code, scrub(security.message));
+
+  const portNumber = Number(port.value);
+  if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65_535) {
+    return fail("email-config-invalid", portSentence(names.port));
+  }
+  if (!isSmtpSecurity(security.value)) {
+    return fail("email-config-invalid", securitySentence(names.security));
+  }
+
+  // The credential pair. Both absent is a relay that needs no login; exactly
+  // one absent is a half-configured deployment, and sending unauthenticated
+  // because the password happens to be missing is how a message goes out over a
+  // path nobody intended.
+  const user = read(names.user);
+  const password = read(names.password);
+  if (!user.ok && !user.absent) return fail(user.code, scrub(user.message));
+  if (!password.ok && !password.absent) return fail(password.code, scrub(password.message));
+  const pairProblem = checkEmailCredentialSet(
+    {
+      [names.user]: user.ok ? user.value : undefined,
+      [names.password]: password.ok ? password.value : undefined,
+    },
+    names,
+  );
+  if (pairProblem !== null) return fail("email-config-invalid", pairProblem);
+
+  return {
+    ok: true,
+    secrets,
+    config: {
+      host: host.value,
+      port: portNumber,
+      security: security.value,
+      ...(user.ok ? { user: user.value } : {}),
+      ...(password.ok ? { password: password.value } : {}),
+    },
+  };
+}
+
+/**
  * A fresh email adapter.
  *
  * Stateless and reusable: it holds no socket, no connection pool, and nothing
@@ -714,63 +817,20 @@ export function emailAdapter(options: EmailAdapterOptions = {}): Adapter {
       }
       const payload = validated.payload;
 
-      // (2) The configuration, from the vault, inside the window. Every value
-      //     handed over joins the local redaction corpus, so a diagnostic this
-      //     adapter builds is scrubbed before the contract scrubs it again.
-      const secrets: string[] = [];
-      const scrub = (text: string): string => redactSecrets(text, secrets).text;
-      const read = (name: string): Fetched => {
-        const got = readCredential(input.credentials, name);
-        if (got.ok && got.value.length > 0) secrets.push(got.value);
-        return got;
-      };
-
-      const host = read(names.host);
-      if (!host.ok) return { ok: false, code: host.code, message: scrub(host.message) };
-      const port = read(names.port);
-      if (!port.ok) return { ok: false, code: port.code, message: scrub(port.message) };
-      const security = read(names.security);
-      if (!security.ok) return { ok: false, code: security.code, message: scrub(security.message) };
-
-      const portNumber = Number(port.value);
-      if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65_535) {
-        return {
-          ok: false,
-          code: "email-config-invalid",
-          message: portSentence(names.port),
-        };
+      // (2) The configuration and the credential pair, from the vault, inside
+      //     the window — through {@link readEmailSmtpConfig}, which is the only
+      //     code in this repository that turns a provider into SMTP settings.
+      //     Every value it read joins the local redaction corpus, so a
+      //     diagnostic this adapter builds is scrubbed before the contract
+      //     scrubs it again.
+      const configured = readEmailSmtpConfig(input.credentials, names);
+      const scrub = (text: string): string => redactSecrets(text, configured.secrets).text;
+      if (!configured.ok) {
+        // Already scrubbed with everything that had been read when it failed.
+        return { ok: false, code: configured.code, message: configured.message };
       }
-      if (!isSmtpSecurity(security.value)) {
-        return {
-          ok: false,
-          code: "email-config-invalid",
-          message: securitySentence(names.security),
-        };
-      }
-      const transport: SmtpSecurity = security.value;
-
-      // (3) The credential pair. Both absent is a relay that needs no login;
-      //     exactly one absent is a half-configured deployment, and sending
-      //     unauthenticated because the password happens to be missing is how a
-      //     message goes out over a path nobody intended.
-      const user = read(names.user);
-      const password = read(names.password);
-      if (!user.ok && !user.absent) {
-        return { ok: false, code: user.code, message: scrub(user.message) };
-      }
-      if (!password.ok && !password.absent) {
-        return { ok: false, code: password.code, message: scrub(password.message) };
-      }
-      const pairProblem = checkEmailCredentialSet(
-        {
-          [names.user]: user.ok ? user.value : undefined,
-          [names.password]: password.ok ? password.value : undefined,
-        },
-        names,
-      );
-      if (pairProblem !== null) {
-        return { ok: false, code: "email-config-invalid", message: pairProblem };
-      }
+      const { host, port: portNumber, security: transport } = configured.config;
+      const { user, password } = configured.config;
 
       // (4) The two stamped fields, and the message.
       const hash = payloadHash(payload);
@@ -784,11 +844,11 @@ export function emailAdapter(options: EmailAdapterOptions = {}): Adapter {
       // (5) The send.
       const sent = await sendMail(
         {
-          host: host.value,
+          host,
           port: portNumber,
           security: transport,
-          ...(user.ok ? { user: user.value } : {}),
-          ...(password.ok ? { password: password.value } : {}),
+          ...(user === undefined ? {} : { user }),
+          ...(password === undefined ? {} : { password }),
           timeoutMs: options.timeoutMs ?? DEFAULT_SMTP_TIMEOUT_MS,
           ...(options.clientName === undefined ? {} : { clientName: options.clientName }),
           tlsRejectUnauthorized: options.tlsRejectUnauthorized ?? true,

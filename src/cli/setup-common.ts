@@ -47,6 +47,7 @@ import {
 import { loadPolicy, type PolicyLoadResult } from "../core/policy-load.js";
 import { telegramChatEnvFor, telegramTokenEnvFor } from "../core/telegram-config.js";
 import { passphraseEnvFor } from "../core/vault.js";
+import type { CredentialProvider } from "../adapters/contract.js";
 import type { probeSmtp } from "../adapters/smtp.js";
 import { TELEGRAM_DEFAULT_API_BASE, type TelegramFetch } from "../channels/telegram.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
@@ -345,6 +346,15 @@ export interface SetupDeps {
    * self-signed fixture on 127.0.0.1).
    */
   probe?: typeof probeSmtp;
+  /**
+   * The vault read `setup adapter email` probes a partial re-run through
+   * (APRV-99). The real {@link vaultCredentialProvider} by default — the same
+   * provider `approval adapter email` hands to `act` — and injectable for one
+   * reason: the fallback for a vault that will not open is unreachable
+   * otherwise, because the flow proved the passphrase at its preflight and the
+   * writes have already landed by the time verification runs.
+   */
+  credentials?: CredentialProvider;
 }
 
 export function usageError(

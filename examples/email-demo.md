@@ -547,6 +547,37 @@ budget verdict, attestation, binding, TTL, chain head) derived by the runtime, a
 **CLAIMED** block naming `agent:claude-admin` and marked unverified, and the
 **FULL PAYLOAD** with the recipients, subject and body, above Approve and Reject.
 
+The payload region is labelled with the `sha256` it binds to, and because this
+payload is email-shaped the channel recognises it and lays it out field by
+field, so you read the mail rather than its JSON encoding (APRV-100):
+
+```
+--- full payload (sha256 4c1f…) ---
+email — rendered field by field; every value below is CLAIMED, authored by the requesting party
+from: you@example.net
+to: someone-you-know@example.com
+cc: you@example.net
+subject: Deposit refund <second chaser> & scheme deadline
+body (5 lines):
+--- body begins ---
+The £1,200 deposit has been due since 12 July.
+
+One chaser was sent on 21 July with no reply. The protection scheme's
+deadline has now passed. Please confirm the refund date by return.
+
+--- body ends ---
+
+--- the same bytes, canonical JSON ---
+{ … }
+```
+
+The line breaks are real line breaks and the `£` is a `£`, which is the point:
+you are being asked to take responsibility for this text, so it is shown as its
+reader will see it. The canonical JSON follows underneath, unchanged, so the
+exact bytes the hash covers stay on the screen; the reading aid is above it, and
+the binding is still the `sha256`. A payload of any other shape is shown as JSON
+exactly as before.
+
 Check the subject on the phone: `Deposit refund &lt;second chaser&gt; &amp;
 scheme deadline` renders as `Deposit refund <second chaser> & scheme deadline`.
 The angle brackets and the ampersand arrived intact and did not become markup,
