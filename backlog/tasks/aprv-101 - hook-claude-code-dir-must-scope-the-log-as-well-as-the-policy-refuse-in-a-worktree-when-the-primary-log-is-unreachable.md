@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-18 22:33'
-updated_date: '2026-08-18 23:39'
+updated_date: '2026-08-19 12:40'
 labels:
   - bug
   - dogfood
@@ -32,3 +32,11 @@ Found 2026-08-18: after a session in an agent worktree, the WORKTREE's .approval
 - [ ] #6 The dogfood runbook and the agent-instructions wording are reconciled with the chosen behaviour (write-through to primary, or refusal); the human's pick is recorded in the notes
 - [ ] #7 npm test and lint clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Review evidence 2026-08-19 (read-only audit of main 3637632): src/cli/hook.ts resolves the log as resolvePath(--log, DEFAULT_LOG_PATH, cwd) at the line after the "gate itself is not gated" allow (around :532), from process cwd; gateOptions(parsed.flags, cwd) scopes only policy, so policy and log diverge exactly as this task says. docs/claude-code-hook.md lines 56-57 ("--dir points policy discovery and the log at the primary checkout") and the hook help text already describe the FIXED behaviour, not the shipped one. tests/cli-hook.test.ts never passes --dir to the hook, which is why it shipped silently: add that case. No refusal code exists yet for "primary log unreachable" (HOOK_DENY_CODES has none); the fix needs one, pinned like the others. Also noted: the manual path polls readVerifiedRecords + requestState itself (hook.ts ~398-443) with its own rejected > expired > granted precedence plus revoked and a hook-io arm, a hand-rolled copy of commandWait (src/cli/execute.ts ~527-579); sharing the loop when 101 is built would remove one drift risk.
+
+Reproduced live 2026-08-19 13:39 local in worktree .claude/worktrees/remote-control-f54e71 (hook wired with --dir /Users/carter/dev/approval-md): gh pr create and gh pr merge --auto (vcs.pr.*, vcs.push.main, both supervised) appended task.registered at seq 27 and 28 to the WORKTREE copy of .approval/log/events.jsonl, leaving that tracked file dirty there while the primary log stayed at seq 26. The worktree file was left untouched (no log mutation by agents; never committed) and the branch there was already merged. Until this task lands, sessions in worktrees should expect this and never commit .approval/ from a worktree.
+<!-- SECTION:NOTES:END -->
