@@ -24,6 +24,7 @@ Usage:
   approval log verify [--log <path>] [--json]
   approval log tail   [--log <path>] [-n <count>] [--json]
   approval log export [--log <path>] [--json]
+  approval instructions [--schemas] [--json]
   approval init       [--dir <path>] [--json]
   approval policy check|test <class> [--reversible true|false] [--policy <path>] [--dir <path>] [--json]
   approval policy attest [--policy <path>] [--dir <path>] [--as human:<id>] [--json]
@@ -76,6 +77,14 @@ Usage:
   approval --help
 
 Commands:
+  instructions
+            the full AGENT-FACING usage guide: what to declare before acting,
+            the register -> request -> wait -> run sequence, what a refusal
+            means, and the invariants an agent must not route around. With
+            --schemas it prints the verb registry as JSON — purpose, input and
+            output schemas, exit codes and the human-only marker for every verb
+            — which is the same source the optional MCP wrapper (SPEC.md §10.5)
+            builds its tools from. Reads nothing, writes nothing
   init      scaffold a working directory: APPROVAL.md (SPEC.md §5.1's canonical
             policy, to be read and edited), the empty .approval/log/ directory,
             .approval/QUEUE.md in its empty state, and the .gitignore lines for
@@ -228,6 +237,47 @@ answer is no. With --json, error.code names the refusal.
 Two codes are ADDITIONS to the table above, each emitted by exactly one verb:
 5 by "approval run" when no valid execution token was presented (nothing is
 appended), and 6 by "approval wait" on timeout. Nothing in 0–4 changed meaning.`;
+
+export const INSTRUCTIONS_HELP = `approval instructions — the agent-facing usage guide (SPEC.md §10.1)
+
+Usage:
+  approval instructions [--json]
+  approval instructions --schemas
+
+Flags:
+  --schemas    print the VERB REGISTRY as JSON instead of the guide: for every
+               verb, its purpose, its input schema (positionals, flags, and the
+               trailing argv where it takes one), its --json output schema, the
+               shared error shape, its exit codes, and its human_only marker.
+               Always JSON, with or without --json
+  --json       print the guide as {"guide":"<text>","verbs":[…]}, the prose and
+               the registry in one object
+  -h, --help   this text
+
+Prints what an agent needs to know before it acts: declare before you execute,
+the register -> request -> wait -> run sequence, that supervised and autonomous
+classes emit no approval event and must not be waited on, what a refusal means
+and that it is FINAL until a human acts again, how to read the exit codes and
+the --json error shapes, and the invariants that are enforced rather than
+requested — never authoring the clock, never touching APPROVAL.md or the log or
+the credentials, never reducing your own scrutiny by self-report.
+
+The verb table at the end is GENERATED FROM THE REGISTRY, so a verb that exists
+in the CLI and not in the guide is a test failure rather than a documentation
+lapse. Verbs marked [HUMAN-ONLY] record or establish a human's authority: an
+agent must not call them, and a wrapper must not publish them as tools.
+
+ONE SOURCE FOR TWO SURFACES. SPEC.md §10.5's optional MCP server exposes the
+same verbs as tools and shares the CLI's code paths, so it derives its tool
+descriptions and input schemas from what --schemas prints here rather than from
+a second list that would drift from this one.
+
+Reads no log, resolves no policy, writes nothing. The output is a pure function
+of this build, so --schemas is byte-stable across runs.
+
+${EXIT_CODES}
+  instructions uses only 0 and 2.
+${JSON_ERRORS}`;
 
 export const LOG_HELP = `approval log — read the append-only event log
 
