@@ -174,8 +174,13 @@ What each one does:
   already exists the verb warns first and defaults to no: a vault cannot be
   re-keyed by changing a variable, and every credential in it would become
   unreadable.
-- **`setup channel telegram`** stores the token, proves it with `getMe`, asks you to
-  message the bot, reads the chat id back, and writes both variables. On macOS
+- **`setup channel telegram`** stores the token, proves it with `getMe`, waits for you
+  to message the bot, reads the chat id back, and writes both variables. The wait is a
+  continuous long poll of up to 90 seconds and asks for nothing while it runs
+  (`waiting for a message to @your_bot (up to 90s, Ctrl-C to stop)`), so when you send
+  the message does not matter; if it does time out, the refusal prints what
+  `getWebhookInfo` says about the bot — the pending update count, and whether a
+  webhook is registered, which would stop `getUpdates` returning anything at all. On macOS
   the token is collected by `security`'s own no-echo prompt (Apple's wording:
   `password data for new item:`, then `retype password for new item:`; paste the
   BotFather token at both), so it is never typed into this process; on Linux

@@ -3355,9 +3355,14 @@ Usage:
   approval setup channel telegram [--as human:<id>] [--api-base <url>]
                                   [--log <path>] [--dir <path>] [--policy <path>]
 
-Five steps: store the token, prove it with getMe, ask you to message the bot,
-read the chat id back, and write both variables (the names come from
+Five steps: store the token, prove it with getMe, WAIT for you to message the
+bot, read the chat id back, and write both variables (the names come from
 channels.telegram.token_env / chat_id_env, or the defaults).
+
+The wait is a continuous long poll of up to 90 seconds, so when you send the
+message does not matter and no Enter is asked for; Ctrl-C stops it. If nothing
+arrives it asks getWebhookInfo and prints what Telegram says about this bot —
+how many updates are pending, and whether a webhook is swallowing them.
 
 STOP \`approval channel telegram listen\` FIRST. Two processes long-polling one
 bot is a 409 from the Bot API, and the loser is whichever asked second.
@@ -3384,5 +3389,6 @@ ${EXIT_CODES}
 
   1 here means the far end refused: an invalid token (re-copy it from
   @BotFather), a 409 from a running listener, or no message reaching the bot
-  after three attempts — in which case the manual curl is printed.
+  before the deadline — in which case Telegram's own view of the bot and the
+  manual curl are printed.
 ${JSON_ERRORS}`;
