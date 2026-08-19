@@ -44,9 +44,10 @@
  * lifecycle: `task.registered`, `approval.requested`, and the human's decision.
  */
 
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { isAbsolute, resolve as resolvePathSegments } from "node:path";
+import { dirname, isAbsolute, join, resolve as resolvePathSegments } from "node:path";
 
 import {
   classifyCommand,
@@ -63,7 +64,7 @@ import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { HOOK_HELP } from "./help.js";
 import type { Streams } from "./main.js";
-import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { DEFAULT_LOG_PATH } from "./paths.js";
 import { style, type Style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
@@ -107,6 +108,13 @@ export const HOOK_DENY_CODES = [
   "hook-gate-refused",
   /** The policy could not be loaded, so no class can be resolved. */
   "hook-policy-unavailable",
+  /**
+   * No log exists where the hook was pointed. The hook is a WRITER to an
+   * existing log, never an initializer: creating one where it happens to stand
+   * (an agent worktree, say) forks a chain off the real log's tail, and git
+   * merges do not reconcile hash chains (APRV-101).
+   */
+  "hook-log-unreachable",
   /** Malformed hook input, or a log/filesystem fact that stopped the check. */
   "hook-io",
 ] as const;
@@ -135,12 +143,59 @@ function usageError(streams: Streams, message: string): number {
   return EXIT_USAGE;
 }
 
-/** Where policy lives, from `--policy` / `--dir`, with the CLI's cwd default. */
-function gateOptions(flags: Record<string, string | boolean>, cwd: string): GateOptions {
+/**
+ * The primary checkout containing `cwd`, or `null` when git cannot say.
+ *
+ * `git rev-parse --git-common-dir` names the SHARED git directory: in a linked
+ * worktree it is the primary checkout's `.git`, in a plain checkout it is this
+ * checkout's own (printed as bare `.git` at the top level, absolute from a
+ * subdirectory). Either way the primary root is its parent, so a plain checkout
+ * resolves to itself.
+ *
+ * Run exactly as `amend.ts` runs git: `spawnSync`, no shell, and every failure
+ * is a value. When git is absent, or `cwd` is not a repository at all, this
+ * returns `null` and the caller falls back to `cwd` — today's behaviour, which
+ * is what a non-git deployment of the hook has always relied on.
+ */
+function primaryRoot(cwd: string): string | null {
+  const result = spawnSync("git", ["rev-parse", "--git-common-dir"], { cwd, encoding: "utf8" });
+  if (result.error !== undefined || result.status !== 0) return null;
+  const common = result.stdout.trim();
+  if (common.length === 0) return null;
+  return dirname(absolute(common, cwd));
+}
+
+/** Where the hook reads policy from and appends to, resolved together. */
+interface HookScope {
+  logPath: string;
+  /** The directory `logPath` sits under, named in the unreachable-log detail. */
+  root: string;
+  options: GateOptions;
+}
+
+/**
+ * Policy and log, resolved from the same root (APRV-101).
+ *
+ * Before this, `--dir` scoped only the policy and the log was resolved from the
+ * process cwd, so a hook invoked with `--dir <primary>` from an agent worktree
+ * read the primary's policy and wrote the worktree's copy of the log: a
+ * dead-end chain that forks from the real one. Explicit flags still win
+ * (`--policy` for the policy, `--log` for the log); otherwise both follow
+ * `--dir`, and with no flags at all both follow the primary checkout.
+ */
+function hookScope(flags: Record<string, string | boolean>, cwd: string): HookScope {
   const policyFlag = stringFlag(flags, "--policy");
+  const logFlag = stringFlag(flags, "--log");
   const dirFlag = stringFlag(flags, "--dir");
-  if (policyFlag !== null) return { policy: { file: absolute(policyFlag, cwd) } };
-  return { policy: { dir: dirFlag === null ? cwd : absolute(dirFlag, cwd) } };
+
+  const root =
+    dirFlag !== null ? absolute(dirFlag, cwd) : (primaryRoot(cwd) ?? cwd);
+  const options: GateOptions =
+    policyFlag === null
+      ? { policy: { dir: root } }
+      : { policy: { file: absolute(policyFlag, cwd) } };
+  const logPath = logFlag === null ? join(root, DEFAULT_LOG_PATH) : absolute(logFlag, cwd);
+  return { logPath, root, options };
 }
 
 // ===========================================================================
@@ -554,8 +609,7 @@ function runClaudeCodeHook(
     return allow(streams, "the approval CLI is the gate itself and is not gated by it");
   }
 
-  const logPath = resolvePath(stringFlag(parsed.flags, "--log"), DEFAULT_LOG_PATH, cwd);
-  const options = gateOptions(parsed.flags, cwd);
+  const { logPath, root, options } = hookScope(parsed.flags, cwd);
 
   // An unloadable policy resolves everything to manual, and a manual request
   // needs a log this hook may not be pointed at. Fail closed and say so, rather
@@ -581,6 +635,20 @@ function runClaudeCodeHook(
     // (amended SPEC.md §6.3), and writing one here would fill the log with the
     // agent's every `ls`.
     return allow(streams, `autonomous: ${classes.join(", ")}`);
+  }
+
+  // Past here the hook appends. It writes to a log that already exists and
+  // creates none: a log the hook scaffolded where it happened to be standing
+  // would be a second chain, forked from the real one's tail, and hash chains
+  // do not survive a merge. An initialized-but-empty `.approval/log/` counts as
+  // reachable — an audit trail that has recorded nothing is an empty log, not a
+  // missing one (see `preflightLog`) — and `register` appends the first line.
+  if (!existsSync(logPath) && !existsSync(dirname(logPath))) {
+    return deny(
+      streams,
+      "hook-log-unreachable",
+      `no log at ${logPath}; the hook writes to an existing log and never creates one. Run \`approval init\` (then \`approval policy attest\`) in ${root}, or pass --log <path> to point the hook at the log that already exists`,
+    );
   }
 
   return gateAndWait(

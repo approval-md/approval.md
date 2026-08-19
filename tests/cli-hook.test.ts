@@ -318,6 +318,12 @@ test("empty stdin denies with hook-io", () => {
 
 test("an unattested policy denies with the gate's own refusal code", () => {
   const dir = caseDir();
+  // APRV-101: the hook writes to an existing log and creates none, so this case
+  // has to be a scaffolded (empty) log — otherwise the refusal under test is
+  // preempted by `hook-log-unreachable`, which is a different sentence about a
+  // different problem. `init` makes .approval/log/ and appends nothing.
+  const init = runCli(["init"], dir);
+  assert.equal(init.code, 0, init.stderr);
   const run = runCli(
     ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
     dir,

@@ -1300,11 +1300,25 @@ its own flags are not parsed as this verb's.
 - `hook-gate-refused:<c>` — the gate refused intake; `<c>` is its own frozen code
   (`policy-not-attested`, `budget-exceeded`, …).
 - `hook-policy-unavailable` — `APPROVAL.md` could not be loaded.
+- `hook-log-unreachable` — there is no log where the hook was pointed. It is a
+  writer to an existing log and never an initializer: a log scaffolded where the
+  session happens to stand is a second chain forked from the real one's tail, and
+  hash chains do not survive a merge. Run `approval init` and `approval policy
+  attest` in the checkout named in the detail, or pass `--log`.
 - `hook-io` — malformed hook input, or an unreadable log.
 
 Set `--timeout` (default 55s) BELOW the hook timeout configured in
-`.claude/settings.json`, and point `--dir` at the PRIMARY checkout, whose log the
-daemon writes.
+`.claude/settings.json`.
+
+**Where the policy and the log come from** (they always come from the same
+place, APRV-101). `--policy` and `--log` each win outright for their half.
+Otherwise `--dir <d>` scopes BOTH: policy discovery in `<d>`, log at
+`<d>/.approval/log/events.jsonl`, never relative to the session's working
+directory. With neither, the hook runs `git rev-parse --git-common-dir` in its
+working directory and takes that directory's parent as the PRIMARY checkout, so
+a session in a linked worktree still reads and writes the one log the daemon
+commits; a plain checkout resolves to itself, and with no git (or no repository)
+the hook falls back to its working directory, as it always did.
 
 ## import agents-md
 
