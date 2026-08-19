@@ -92,6 +92,8 @@ const FLAGS: Record<string, FlagKind> = {
   "--require-load": "boolean",
   "--dry-run": "boolean",
   "--commit": "boolean",
+  "--branch": "string",
+  "--direct": "boolean",
   "--yes": "boolean",
   "--json": "boolean",
   "--help": "boolean",
@@ -105,6 +107,7 @@ type AmendErrorCode =
   | "load-failed"
   | "commit-preconditions"
   | "git-failed"
+  | "pr-failed"
   | "append-failed"
   | "log-unreadable"
   | "log-torn-tail"
@@ -240,6 +243,143 @@ function showHead(root: string, relative_: string): Buffer | null {
 }
 
 // ---------------------------------------------------------------------------
+// Branch protection (APRV-92)
+// ---------------------------------------------------------------------------
+
+/**
+ * What we know about the default branch's protection.
+ *
+ * `unknown` is a first-class answer and the reason this whole probe can never
+ * fail the command: `gh` may be absent, the remote may not be GitHub, the token
+ * may lack the scope that reads protection. An amendment that has already been
+ * attested must not be held hostage to a network call, so every failure here
+ * resolves to `unknown` and the ceremony continues on the direct path, which is
+ * exactly what it did before this flag existed.
+ */
+type Protection = "protected" | "unprotected" | "unknown";
+
+interface ProtectionProbe {
+  protection: Protection;
+  defaultBranch: string | null;
+  currentBranch: string | null;
+  /** Why we answered what we answered, in one clause, for the JSON report. */
+  reason: string;
+}
+
+/** The checked-out branch, or `null` on a detached HEAD. */
+function currentBranch(root: string): string | null {
+  const result = git(["symbolic-ref", "--quiet", "--short", "HEAD"], root);
+  if (!result.ok) return null;
+  const name = result.stdout.trim();
+  return name.length === 0 ? null : name;
+}
+
+/**
+ * The remote's default branch, from `refs/remotes/origin/HEAD` when the clone
+ * recorded one, else from `gh`. Both are read-only lookups.
+ */
+function defaultBranchOf(root: string): string | null {
+  const symbolic = git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], root);
+  if (symbolic.ok) {
+    const name = symbolic.stdout.trim().replace(/^origin\//u, "");
+    if (name.length > 0) return name;
+  }
+  const view = spawnSync("gh", ["repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (view.error === undefined && view.status === 0) {
+    const name = view.stdout.trim();
+    if (name.length > 0) return name;
+  }
+  return null;
+}
+
+/**
+ * Ask GitHub whether the default branch is protected.
+ *
+ * `gh api …/protection` answers 200 for a protected branch and 404 for an
+ * unprotected one, which is the only distinction this verb needs. Anything else
+ * (gh absent, not a GitHub remote, an unauthenticated or under-scoped token) is
+ * `unknown`.
+ */
+function probeProtection(root: string): ProtectionProbe {
+  const branch = currentBranch(root);
+  const target = defaultBranchOf(root);
+  if (target === null) {
+    return {
+      protection: "unknown",
+      defaultBranch: null,
+      currentBranch: branch,
+      reason: "no default branch could be resolved (no origin/HEAD and no gh answer)",
+    };
+  }
+  const probe = spawnSync(
+    "gh",
+    ["api", `repos/{owner}/{repo}/branches/${target}/protection`, "--silent"],
+    { cwd: root, encoding: "utf8" },
+  );
+  if (probe.error !== undefined || probe.status === null) {
+    return {
+      protection: "unknown",
+      defaultBranch: target,
+      currentBranch: branch,
+      reason: "gh is not on PATH, so branch protection could not be read",
+    };
+  }
+  if (probe.status === 0) {
+    return {
+      protection: "protected",
+      defaultBranch: target,
+      currentBranch: branch,
+      reason: `gh reports branch protection on ${target}`,
+    };
+  }
+  const stderr = `${probe.stderr}`;
+  if (/404|Branch not protected|Not Found/iu.test(stderr)) {
+    return {
+      protection: "unprotected",
+      defaultBranch: target,
+      currentBranch: branch,
+      reason: `gh reports no branch protection on ${target}`,
+    };
+  }
+  return {
+    protection: "unknown",
+    defaultBranch: target,
+    currentBranch: branch,
+    reason: `gh could not read protection on ${target}: ${stderr.trim().split("\n")[0] ?? "no detail"}`,
+  };
+}
+
+/** Is `gh` runnable at all? Used to decide whether the PR is opened or printed. */
+function ghAvailable(root: string): boolean {
+  const probe = spawnSync("gh", ["--version"], { cwd: root, encoding: "utf8" });
+  return probe.error === undefined && probe.status === 0;
+}
+
+/** The pull request title. It names the seq, so the PR is findable from the log. */
+function prTitle(summary: string, seq: string): string {
+  return `Policy: ${summary} (attested seq ${seq})`;
+}
+
+/**
+ * The pull request body: the one-commit rule, and the merge instruction.
+ *
+ * One line on purpose. It is printed inside a `gh pr create --body "…"` command
+ * the human may copy, and a body with embedded newlines does not survive that
+ * copy intact.
+ */
+function prBody(seq: string): string {
+  return (
+    `This branch carries exactly one commit: the policy edit and the attestation (seq ${seq}) that names its hash. ` +
+    "They have to stay together on main, because a main that carries the policy without its attestation is a main where every gate operation refuses. " +
+    "Merge with a MERGE COMMIT so the policy edit and its attestation stay one commit on main. " +
+    "A squash or a rebase would also keep the two files together; a merge commit is the convention here, because it puts the attested commit itself on main with the hash the attestation names."
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Baseline recovery
 // ---------------------------------------------------------------------------
 
@@ -341,6 +481,18 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   const requireLoad = boolFlag(parsed.flags, "--require-load");
   const wantCommit = boolFlag(parsed.flags, "--commit");
   const assumeYes = boolFlag(parsed.flags, "--yes");
+  const branchFlag = stringFlag(parsed.flags, "--branch");
+  const forceDirect = boolFlag(parsed.flags, "--direct");
+  if (branchFlag !== null && forceDirect) {
+    return usageError(
+      streams,
+      json,
+      "--branch and --direct ask for opposite ceremonies; pass one of them, or neither and let the protection probe decide",
+    );
+  }
+  if (branchFlag !== null && branchFlag.trim().length === 0) {
+    return usageError(streams, json, "--branch expects a branch name");
+  }
 
   // Identity first, before a byte is read: the ceremony is human-only in every
   // mode, dry runs included. Asking a human to read a diff and only then telling
@@ -432,12 +584,45 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       : diffPolicies(recovered.load, liveLoad, SPEC_NAMESPACES);
   if (recovered.scratch !== null) rmSync(recovered.scratch, { recursive: true, force: true });
 
-  // (e-pre) --commit's preconditions are checked BEFORE anything is written.
-  // Refusing after the attestation would recreate the very interregnum this
-  // verb exists to close: an attested policy with no commit carrying it.
+  // (e-pre) Which ceremony this is: the direct one (commit on the branch you
+  // are standing on and push it) or the branch one (branch, commit, push, PR).
+  //
+  // PRECEDENCE, stated once and documented in the help: --branch <name> forces
+  // the branch flow and names the branch; --direct forces the direct flow; the
+  // two together are a usage error. With neither, the protection probe decides,
+  // and it chooses the branch flow only when the default branch is protected
+  // AND that default branch is the one currently checked out. An `unknown`
+  // probe (no gh, no GitHub remote, no network) is the direct flow, which is
+  // what this verb did before protection was detected at all.
+  const amendRoot = repoRoot(dirname(policyPath));
+  const probe: ProtectionProbe =
+    amendRoot === null
+      ? {
+          protection: "unknown",
+          defaultBranch: null,
+          currentBranch: null,
+          reason: "the policy file is not inside a git repository",
+        }
+      : probeProtection(amendRoot);
+  const onProtectedDefault =
+    probe.protection === "protected" &&
+    probe.currentBranch !== null &&
+    probe.currentBranch === probe.defaultBranch;
+  const useBranch = branchFlag !== null || (!forceDirect && onProtectedDefault);
+  const branchName = (seq: string): string => branchFlag ?? `policy-amend-${seq}`;
+  // The direct flow's push is about to hit a protected branch. Say so before
+  // the human types it, rather than after GitHub says it.
+  const pushWarning =
+    !useBranch && onProtectedDefault
+      ? `${probe.defaultBranch ?? "the default branch"} is protected: this push will be rejected; use --branch`
+      : null;
+
+  // --commit's preconditions are checked BEFORE anything is written. Refusing
+  // after the attestation would recreate the very interregnum this verb exists
+  // to close: an attested policy with no commit carrying it.
   let commitPlan: { root: string; policyArg: string; logArg: string } | null = null;
   if (wantCommit && !dryRun) {
-    const plan = planCommit(policyPath, logPath);
+    const plan = planCommit(policyPath, logPath, useBranch ? { branch: branchFlag } : null);
     if (!plan.ok) {
       return refuse(streams, json, "commit-preconditions", plan.message, EXIT_USAGE);
     }
@@ -445,10 +630,43 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   }
 
   const summary = summarize(policyPath, diff);
-  const gitCommands = (seq: string): string[] => [
+  const commitCommands = (seq: string): string[] => [
     `git add ${policyPath} ${logPath}`,
     `git commit -m ${JSON.stringify(`Policy: ${summary} (attested seq ${seq})`)}`,
   ];
+  const gitCommands = (seq: string): string[] => {
+    if (useBranch) {
+      return [
+        `git checkout -b ${branchName(seq)}`,
+        ...commitCommands(seq),
+        `git push -u origin ${branchName(seq)}`,
+        `gh pr create --title ${JSON.stringify(prTitle(summary, seq))} --body ${JSON.stringify(prBody(seq))}`,
+      ];
+    }
+    return amendRoot === null
+      ? commitCommands(seq)
+      : [...commitCommands(seq), `git push origin ${probe.currentBranch ?? "HEAD"}`];
+  };
+
+  /**
+   * The paragraph a first-time operator reads: two sentences of why, then the
+   * commands for their situation. It is printed whenever the verb did not run
+   * the commands itself.
+   */
+  const whyOneCommit = (): void => {
+    streams.out(
+      "\nThe policy bytes and the attestation that names their hash have to land in the same commit.\n" +
+        "If they land separately, then for as long as the gap lasts the branch carries a policy no attestation covers, and every gate operation refuses until the second commit arrives.\n",
+    );
+    if (useBranch) {
+      streams.out(
+        `${probe.protection === "protected" ? `${probe.defaultBranch ?? "the default branch"} is protected, so the commit goes onto a branch and reaches main through a pull request` : "This amendment goes onto a branch and reaches main through a pull request"}. Run these, in order:\n`,
+      );
+    } else {
+      if (pushWarning !== null) streams.out(`WARNING: ${pushWarning}\n`);
+      streams.out("Run these, in order:\n");
+    }
+  };
 
   // (c) + (d): the report. Human output only; --json emits one object at the end.
   if (!json) {
@@ -484,6 +702,25 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     );
   }
 
+  /** The `git` sub-object of the JSON report. Every key is always present. */
+  const gitReport = (over: {
+    commands: string[];
+    committed: boolean;
+    pushed: boolean;
+    prUrl: string | null;
+    output: string | null;
+    branch: string | null;
+  }): GitReport => ({
+    repo: amendRoot !== null,
+    protection: probe.protection,
+    protectionReason: probe.reason,
+    defaultBranch: probe.defaultBranch,
+    currentBranch: probe.currentBranch,
+    flow: useBranch ? "branch" : "direct",
+    warning: pushWarning,
+    ...over,
+  });
+
   // (e) Confirmation. --dry-run never asks, because it never writes.
   if (dryRun) {
     if (json) {
@@ -495,14 +732,27 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
         diff,
         load: loadSummary(liveLoad),
         attestation: null,
-        git: { repo: repoRoot(dirname(policyPath)) !== null, commands: gitCommands("<seq>"), committed: false, output: null },
+        git: gitReport({
+          commands: gitCommands("<seq>"),
+          committed: false,
+          pushed: false,
+          prUrl: null,
+          output: null,
+          branch: useBranch ? branchName("<seq>") : null,
+        }),
         noop: false,
         dryRun: true,
         aborted: false,
       });
     } else {
       streams.out("--dry-run: nothing was attested, nothing was written. The ceremony would run:\n");
+      whyOneCommit();
       for (const command of gitCommands("<seq>")) streams.out(`  ${command}\n`);
+      if (useBranch) {
+        streams.out(
+          "Merge that pull request with a MERGE COMMIT, so the policy edit and its attestation stay one commit on main.\n",
+        );
+      }
     }
     return EXIT_OK;
   }
@@ -533,9 +783,24 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
 
   // (g) The git ceremony: the two files, together, or the commands to do it.
   const commands = gitCommands(String(seq));
+  const branch = useBranch ? branchName(String(seq)) : null;
   let committed = false;
+  let pushed = false;
+  let prUrl: string | null = null;
   let output: string | null = null;
   if (commitPlan !== null) {
+    if (branch !== null) {
+      const checkout = git(["checkout", "-b", branch], commitPlan.root);
+      if (!checkout.ok) {
+        return refuse(
+          streams,
+          json,
+          "git-failed",
+          `the attestation was appended at seq ${seq}, but \`git checkout -b ${branch}\` failed: ${checkout.stderr.trim()}; run the printed commands by hand`,
+          EXIT_IO,
+        );
+      }
+    }
     const add = git(["add", "--", commitPlan.policyArg, commitPlan.logArg], commitPlan.root);
     if (!add.ok) {
       return refuse(
@@ -559,6 +824,52 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     }
     committed = true;
     output = `${commit.stdout}${commit.stderr}`.trim();
+
+    // The branch flow does not stop at the commit: the commit is only useful on
+    // a protected main once it is on a branch, pushed, and carried by a PR.
+    if (branch !== null) {
+      const push = git(["push", "-u", "origin", branch], commitPlan.root);
+      if (!push.ok) {
+        return refuse(
+          streams,
+          json,
+          "git-failed",
+          `the attestation was appended at seq ${seq} and committed on ${branch}, but \`git push -u origin ${branch}\` failed: ${push.stderr.trim() || push.stdout.trim()}; push the branch and open the pull request by hand`,
+          EXIT_IO,
+        );
+      }
+      pushed = true;
+      output = `${output}\n${`${push.stdout}${push.stderr}`.trim()}`.trim();
+
+      if (ghAvailable(commitPlan.root)) {
+        const args = [
+          "pr",
+          "create",
+          "--title",
+          prTitle(summary, String(seq)),
+          "--body",
+          prBody(String(seq)),
+          "--head",
+          branch,
+        ];
+        if (probe.defaultBranch !== null) args.push("--base", probe.defaultBranch);
+        const pr = spawnSync("gh", args, { cwd: commitPlan.root, encoding: "utf8" });
+        if (pr.error !== undefined || pr.status !== 0) {
+          return refuse(
+            streams,
+            json,
+            "pr-failed",
+            `the attestation was appended at seq ${seq}, committed on ${branch} and pushed, but \`gh pr create\` failed: ${(pr.stderr ?? "").trim() || detail(pr.error ?? "gh did not run")}; open the pull request by hand and merge it with a merge commit`,
+            EXIT_IO,
+          );
+        }
+        const url = pr.stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line.startsWith("http"));
+        prUrl = url[url.length - 1] ?? null;
+      }
+    }
   }
 
   if (json) {
@@ -570,7 +881,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       diff,
       load: loadSummary(liveLoad),
       attestation: { seq, sha256: liveSha256 },
-      git: { repo: commitPlan !== null || repoRoot(dirname(policyPath)) !== null, commands, committed, output },
+      git: gitReport({ commands, committed, pushed, prUrl, output, branch }),
       noop: false,
       dryRun: false,
       aborted: false,
@@ -578,14 +889,40 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   } else {
     streams.out(`attested ${policyPath} at seq ${seq}: sha256 ${liveSha256}\n`);
     if (committed) {
-      streams.out(`committed the policy and the log together:\n`);
-      for (const command of commands) streams.out(`  ${command}\n`);
-      if (output !== null && output.length > 0) streams.out(`${output}\n`);
-    } else {
       streams.out(
-        "now land the edit and its attestation as ONE commit — an attested policy whose commit does not carry the log leaves the log's readers behind:\n",
+        branch === null
+          ? "committed the policy and the log together:\n"
+          : `committed the policy and the log together on ${branch}:\n`,
       );
+      for (const command of commands) {
+        // The PR command is printed as a to-do when gh could not run it.
+        if (command.startsWith("gh pr create") && prUrl === null && branch !== null) continue;
+        streams.out(`  ${command}\n`);
+      }
+      if (output !== null && output.length > 0) streams.out(`${output}\n`);
+      if (branch !== null) {
+        if (prUrl !== null) {
+          streams.out(`pull request: ${prUrl}\n`);
+          streams.out(
+            "Merge it with a MERGE COMMIT, so the policy edit and its attestation stay one commit on main.\n",
+          );
+        } else {
+          streams.out(
+            "gh is not available, so the pull request was not opened. Open it yourself, and merge it with a MERGE COMMIT so the policy edit and its attestation stay one commit on main:\n",
+          );
+          for (const command of commands) {
+            if (command.startsWith("gh pr create")) streams.out(`  ${command}\n`);
+          }
+        }
+      }
+    } else {
+      whyOneCommit();
       for (const command of commands) streams.out(`  ${command}\n`);
+      if (useBranch) {
+        streams.out(
+          "Then merge that pull request with a MERGE COMMIT, so the policy edit and its attestation stay one commit on main.\n",
+        );
+      }
     }
   }
   return EXIT_OK;
@@ -604,6 +941,15 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
 function planCommit(
   policyPath: string,
   logPath: string,
+  /**
+   * The branch flow's preconditions, checked here for the same reason: an
+   * `origin` that does not exist, or a branch name already taken, would fail
+   * AFTER the attestation and leave the operator holding a half-run ceremony.
+   * `null` is the direct flow. `branch: null` inside it is the branch flow with
+   * a generated name, which contains the seq and so cannot be checked before
+   * the append happens.
+   */
+  branchFlow: { branch: string | null } | null,
 ): { ok: true; plan: { root: string; policyArg: string; logArg: string } } | { ok: false; message: string } {
   const root = repoRoot(dirname(policyPath));
   if (root === null) {
@@ -643,6 +989,25 @@ function planCommit(
       message: `--commit refuses: the index carries ${strays.length} staged change(s) beyond the policy and the log (${strays.join(", ")}). The amendment commit carries EXACTLY those two files, so that "this commit is the amendment" stays true. Unstage them, or drop --commit and run the printed commands yourself. Nothing was attested`,
     };
   }
+
+  if (branchFlow !== null) {
+    const remote = git(["remote", "get-url", "origin"], root);
+    if (!remote.ok) {
+      return {
+        ok: false,
+        message: `--commit on a branch needs an "origin" remote to push to, and ${root} has none (${remote.stderr.trim()}); pass --direct to commit in place, or add the remote. Nothing was attested`,
+      };
+    }
+    if (branchFlow.branch !== null) {
+      const exists = git(["rev-parse", "--verify", "--quiet", `refs/heads/${branchFlow.branch}`], root);
+      if (exists.ok) {
+        return {
+          ok: false,
+          message: `--branch ${branchFlow.branch} already exists in ${root}; the amendment branch is created fresh so it carries exactly one commit. Pick another name. Nothing was attested`,
+        };
+      }
+    }
+  }
   return { ok: true, plan: { root, policyArg, logArg } };
 }
 
@@ -650,6 +1015,26 @@ function loadSummary(load: PolicyLoadResult): { ok: boolean; code: string | null
   return load.ok
     ? { ok: true, code: null, message: null }
     : { ok: false, code: load.code, message: load.message };
+}
+
+/**
+ * The `git` sub-object of the report: which ceremony ran, what it knew about
+ * branch protection, and what it did or would do.
+ */
+interface GitReport {
+  repo: boolean;
+  protection: Protection;
+  protectionReason: string;
+  defaultBranch: string | null;
+  currentBranch: string | null;
+  flow: "direct" | "branch";
+  branch: string | null;
+  warning: string | null;
+  commands: string[];
+  committed: boolean;
+  pushed: boolean;
+  prUrl: string | null;
+  output: string | null;
 }
 
 /** The frozen `--json` report. Every key is always present. */
@@ -661,7 +1046,7 @@ interface Report {
   diff: PolicyDiff | null;
   load: { ok: boolean; code: string | null; message: string | null } | null;
   attestation: { seq: number; sha256: string } | null;
-  git: { repo: boolean; commands: string[]; committed: boolean; output: string | null } | null;
+  git: GitReport | null;
   noop: boolean;
   dryRun: boolean;
   aborted: boolean;
