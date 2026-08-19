@@ -67,6 +67,7 @@ import { commandDoctor } from "./doctor.js";
 import { commandEnv } from "./env.js";
 import { commandHook } from "./hook.js";
 import { commandImport } from "./import.js";
+import { commandInstructions } from "./instructions.js";
 import { commandInit } from "./init.js";
 import { commandPayload } from "./payload.js";
 import { commandPolicy } from "./policy.js";
@@ -511,6 +512,13 @@ export function main(argv: string[], options: MainOptions = {}): number {
   }
 
   switch (command) {
+    // The self-describing verb (APRV-85). `instructions` prints the agent-facing
+    // guide, and `--schemas` prints the verb registry the guide's table is
+    // generated from — the one source SPEC.md §10.5's MCP wrapper derives its
+    // tool descriptions and input schemas from, so the two surfaces cannot
+    // drift. It reads no log, resolves no policy, and writes nothing.
+    case "instructions":
+      return commandInstructions(rest, streams, cwd);
     // The scaffolding verb (APRV-71). It is the only command that writes files
     // a human has not asked for by name, and it is deliberately the least
     // authoritative one in the CLI: it appends nothing, attests nothing, and

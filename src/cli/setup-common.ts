@@ -356,6 +356,22 @@ export function usageError(
   return EXIT_USAGE;
 }
 
+/**
+ * A refused PROMPT, as one line and no help page (APRV-90).
+ *
+ * The distinction this function exists to draw: {@link usageError} answers a
+ * mangled command line, so it prints the help for that command line, which is
+ * the thing the operator got wrong. A prompt that was aborted or answered
+ * wrongly five times is not a command line at all — the operator was in a
+ * conversation, the question was on screen, and forty lines of usage under it
+ * teach nothing. Same exit code (the frozen table is unchanged), one line of
+ * output.
+ */
+export function promptRefusal(streams: Streams, message: string): number {
+  streams.err(`approval: ${message}\n`);
+  return EXIT_USAGE;
+}
+
 export function absolute(value: string, cwd: string): string {
   return isAbsolute(value) ? value : resolvePathSegments(cwd, value);
 }
