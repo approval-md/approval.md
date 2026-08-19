@@ -3,9 +3,10 @@ id: APRV-85
 title: >-
   approval instructions: the agent-facing guide and --schemas, one source for
   CLI and MCP
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-18 11:16'
+updated_date: '2026-08-19 01:31'
 labels: []
 milestone: m-11
 dependencies: []
@@ -22,7 +23,13 @@ SPEC 10.1 lists approval instructions (full agent-facing usage guide, also in --
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 approval instructions prints the agent guide; approval instructions --schemas prints a JSON registry with name, purpose, input schema, output schema, exit codes, human_only flag for every verb
-- [ ] #2 Every existing --json output shape validates against its declared output schema in a test (both directions pinned); human-only verbs are marked and the marking is asserted for grant/reject/revoke/attest/amend/vault/setup/audit review/expire
-- [ ] #3 The guide states the agent-facing invariants plainly (declare before execute; never author the clock; never touch APPROVAL.md or the log; refusals are final until a human acts)
+- [x] #1 approval instructions prints the agent guide; approval instructions --schemas prints a JSON registry with name, purpose, input schema, output schema, exit codes, human_only flag for every verb
+- [x] #2 Every existing --json output shape validates against its declared output schema in a test (both directions pinned); human-only verbs are marked and the marking is asserted for grant/reject/revoke/attest/amend/vault/setup/audit review/expire
+- [x] #3 The guide states the agent-facing invariants plainly (declare before execute; never author the clock; never touch APPROVAL.md or the log; refusals are final until a human acts)
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+approval instructions + --schemas over a 47-verb registry with live-output validation both directions and human_only judgments recorded. PR #67.
+<!-- SECTION:FINAL_SUMMARY:END -->
