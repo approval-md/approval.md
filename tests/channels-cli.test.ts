@@ -642,7 +642,11 @@ test("the verb's usage surface: help, unknown subcommand, unknown flag", () => {
   assert.match(help.stdout, /\[computed\]/u);
   assert.match(help.stdout, /\[claimed\]/u);
   assert.match(help.stdout, /BEGIN FULL PAYLOAD/u);
-  assert.match(help.stdout, /IDENTITY IS DECLARED, NOT PROVED/u);
+  // APRV-91: "identity is declared, not proved" is a cross-cutting stance and
+  // is stated once, in `approval --help`; the channel's own paragraph is in
+  // docs/cli-reference.md#channel-cli.
+  assert.match(help.stdout, /docs\/cli-reference\.md#channel-cli/u);
+  assert.match(runCli(["--help"], world.dir).stdout, /IDENTITY IS CONFIG-DECLARED/u);
   assert.match(help.stdout, /EXITS 0 WITHOUT READING STDIN/u);
 
   assert.equal(runCli(["channel"], world.dir).code, 2);

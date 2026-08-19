@@ -630,7 +630,9 @@ for (const [name, args] of [
     assert.equal(run.code, 0);
     assert.equal(run.stderr, "");
     assert.match(run.stdout, /Usage:/u);
-    assert.match(run.stdout, /Exit codes \(frozen public API\)/u);
+    // APRV-91: the frozen table is the root help's; the verb-specific code
+    // (5 for run, 6 for wait) is still named here — see the next test.
+    assert.match(run.stdout, /exit codes: approval --help/u);
     assert.match(run.stdout, /JSON shape/u);
   });
 }

@@ -83,6 +83,7 @@ import {
   resolvePath,
 } from "./paths.js";
 import { parseLines, readCompleteLines } from "./records.js";
+import { usageErrorText } from "./usage.js";
 
 /** Output sinks, injectable so the command layer stays testable in-process. */
 export interface Streams {
@@ -125,7 +126,7 @@ function usageError(
   helpText: string,
 ): number {
   if (json) emitJsonError(streams, "usage", message);
-  else streams.err(`approval: ${message}\n\n${helpText}\n`);
+  else streams.err(usageErrorText(message, helpText));
   return EXIT_USAGE;
 }
 
@@ -218,7 +219,7 @@ function anomalyField(anomalies: ChainAnomaly[]): Record<string, unknown> {
 function reportAnomalies(streams: Streams, anomalies: ChainAnomaly[]): void {
   if (anomalies.length === 0) return;
   streams.err(
-    `approval: ${anomalies.length} timestamp anomaly(ies) — the chain verifies and NOTHING is refused; these are reported for a human to weigh (SPEC.md §8)\n`,
+    `approval: ${anomalies.length} timestamp anomaly(ies) — the chain verifies and NOTHING is refused; these are reported for a human to weigh\n`,
   );
   for (const anomaly of anomalies) {
     streams.err(`approval: ${anomaly.kind}: ${anomaly.message}\n`);

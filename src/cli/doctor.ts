@@ -94,6 +94,7 @@ import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { DOCTOR_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { usageErrorText } from "./usage.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--log": "string",
@@ -169,7 +170,7 @@ function absolute(value: string, cwd: string): string {
 
 function usageError(streams: Streams, json: boolean, message: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${DOCTOR_HELP}\n`);
+  else streams.err(usageErrorText(message, DOCTOR_HELP));
   return EXIT_USAGE;
 }
 

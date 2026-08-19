@@ -77,6 +77,7 @@ import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
 import { commandTelegram } from "./channel-telegram.js";
 import { commandWeb } from "./channel-web.js";
+import { usageErrorText } from "./usage.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--log": "string",
@@ -96,7 +97,7 @@ function absolute(value: string, cwd: string): string {
 
 function usageError(streams: Streams, json: boolean, message: string, help: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${help}\n`);
+  else streams.err(usageErrorText(message, help));
   return EXIT_USAGE;
 }
 

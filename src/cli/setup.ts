@@ -400,7 +400,7 @@ export function commandSetupIdentity(
   }
 
   streams.out(
-    `approval setup identity — declares WHO the human is, in ${HUMAN_ACTOR_ENV}.\n\nThis is config-declared identity (SPEC.md §11): the trust boundary is this\nmachine, and anyone who can set this variable and write to the log is inside it.\nNothing is proved by it and nothing is appended to the log by this verb.\n\n`,
+    `approval setup identity — declares WHO the human is, in ${HUMAN_ACTOR_ENV}.\n\nIdentity here is declared, not proved: anyone who can set this variable and\nwrite to the log can act as this human. Nothing is appended to the log by this\nverb.\n\n`,
   );
 
   const plan = planReplacements(streams, context.prompter, context.envPath, [HUMAN_ACTOR_ENV]);
@@ -438,7 +438,7 @@ export function commandSetupIdentity(
   reportSkipped(streams, context.envPath, plan.skipped);
 
   streams.out(
-    `\nThat line is INERT until you evaluate it: no verb reads ${context.envPath} on its\nown (SPEC.md §11.1 invariant 7). Establish it in this shell with:\n\n  eval "$(approval env)"\n`,
+    `\nThat line is INERT until you evaluate it: no verb reads ${context.envPath} on its\nown. Establish it in this shell with:\n\n  eval "$(approval env)"\n`,
   );
   return EXIT_OK;
 }
@@ -538,7 +538,7 @@ export function commandSetupSampling(
   const variable = declared ?? DEFAULT_SAMPLING_ENV;
 
   streams.out(
-    `approval setup sampling — mints the operator-held secret that selects which\nsupervised actions are sampled for retrospective review (SPEC.md §5.2).\n\nSelection is HMAC-SHA-256 over the event hash under this secret. Seeding from\nevent content alone is forbidden: the agent authoring the event controls that\ncontent and could search it until its action falls outside the sample.\n\n`,
+    `approval setup sampling — mints the operator-held secret that selects which\nsupervised actions are sampled for retrospective review.\n\nSelection is HMAC-SHA-256 over the event hash under this secret. Seeding from\nevent content alone is forbidden: the agent authoring the event controls that\ncontent and could search it until its action falls outside the sample.\n\n`,
   );
 
   const plan = planReplacements(streams, context.prompter, context.envPath, [variable]);
@@ -571,7 +571,7 @@ export function commandSetupSampling(
     // report: §5.2 turns sampling on from the POLICY, and this verb does not
     // edit a policy file. What it can do is hand over the exact ceremony.
     streams.out(
-      `\nYour policy names no audit.sampling_secret_env, so the secret was recorded under\nthe conventional name ${variable} and SAMPLING IS STILL OFF. It stays off until\nthe policy names the variable — a policy that fails to name one disables\nsampling by SPEC.md §5.2, and this verb does not edit an attested policy file.\n\nAdd this block, through the ceremony that attests it:\n\n  audit:\n    sampling_secret_env: ${variable}\n\n  approval policy amend\n`,
+      `\nYour policy names no audit.sampling_secret_env, so the secret was recorded under\nthe conventional name ${variable} and SAMPLING IS STILL OFF. It stays off until\nthe policy names the variable — a policy that names none disables sampling, and\nthis verb does not edit an attested policy file.\n\nAdd this block, through the ceremony that attests it:\n\n  audit:\n    sampling_secret_env: ${variable}\n\n  approval policy amend\n`,
     );
   } else {
     streams.out(

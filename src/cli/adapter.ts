@@ -64,6 +64,7 @@ import { executeRefusalExitCode } from "./execute.js";
 import { ADAPTER_EMAIL_HELP, ADAPTER_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { usageErrorText } from "./usage.js";
 
 /** Identity accepted here: a person or an agent, never the runtime. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
@@ -88,7 +89,7 @@ function absolute(value: string, cwd: string): string {
 
 function usageError(streams: Streams, json: boolean, message: string, helpText: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${helpText}\n`);
+  else streams.err(usageErrorText(message, helpText));
   return EXIT_USAGE;
 }
 
@@ -148,7 +149,7 @@ export async function commandAdapterEmail(
     return usageError(
       streams,
       json,
-      "missing --token <t>: an adapter executes only against the single-use token `approval grant` printed (SPEC.md §10.4)",
+      "missing --token <t>: an adapter executes only against the single-use token `approval grant` printed",
       ADAPTER_EMAIL_HELP,
     );
   }
@@ -210,7 +211,7 @@ export async function commandAdapterEmail(
     return usageError(
       streams,
       json,
-      `${where} is not valid JSON: ${detail(cause)}. payload_hash is defined over the RFC 8785 canonical serialization of the payload VALUE (SPEC.md §6.2), so bytes that do not parse cannot be the bytes a grant bound to`,
+      `${where} is not valid JSON: ${detail(cause)}. payload_hash is defined over the RFC 8785 canonical serialization of the payload VALUE, so bytes that do not parse cannot be the bytes a grant bound to`,
       ADAPTER_EMAIL_HELP,
     );
   }

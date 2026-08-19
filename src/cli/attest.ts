@@ -42,6 +42,7 @@ import { EXIT_IO, EXIT_OK, EXIT_TORN_TAIL, EXIT_USAGE } from "./exit-codes.js";
 import { POLICY_ATTEST_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { usageErrorText } from "./usage.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--policy": "string",
@@ -63,7 +64,7 @@ function absolute(value: string, cwd: string): string {
 
 function usageError(streams: Streams, json: boolean, message: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${POLICY_ATTEST_HELP}\n`);
+  else streams.err(usageErrorText(message, POLICY_ATTEST_HELP));
   return EXIT_USAGE;
 }
 

@@ -289,7 +289,8 @@ test("--help names the three places a payload_hash goes, and the exit table", ()
   // Destination 3: the spend.
   assert.match(run.stdout, /approval run --payload-hash/u);
   assert.match(run.stdout, /MOST FLOWS NEVER NEED THIS VERB/u);
-  assert.match(run.stdout, /Exit codes \(frozen public API\)/u);
+  // APRV-91: the frozen table is printed by `approval --help` alone.
+  assert.match(run.stdout, /exit codes: approval --help/u);
 });
 
 test("approval run --help promotes --payload-hash for content-shaped payloads", () => {

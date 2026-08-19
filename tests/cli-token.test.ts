@@ -528,9 +528,10 @@ test("--help documents the exit codes, the JSON shape, and the shown-once rule",
   for (const verb of ["token", "consume"]) {
     const help = runCli([verb, "--help"], dir);
     assert.equal(help.code, 0, `${verb} --help failed`);
-    for (const code of ["0", "1", "2", "3", "4"]) {
-      assert.ok(help.stdout.includes(`  ${code}  `), `${verb} --help is missing exit ${code}`);
-    }
+    // APRV-91: the frozen table moved to `approval --help`; what these verbs
+    // must still carry is the pointer and their own refusal vocabulary.
+    assert.match(help.stdout, /exit codes: approval --help/u);
+    assert.doesNotMatch(help.stdout, /Exit codes \(frozen public API\)/u);
     assert.match(help.stdout, /SHOWN ONCE/u);
     assert.match(help.stdout, /token-consumed/u);
     assert.match(help.stdout, /JSON shape/u);

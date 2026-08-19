@@ -111,5 +111,9 @@ test("the exemption exists, is one line, and says what changed", () => {
   // And the constant itself is the refusal an operator reads, not a leftover.
   assert.match(RENAMED_NOTICE, /is now `approval setup channel telegram`/u);
   assert.match(RENAMED_NOTICE, /there is no alias/u);
-  assert.match(RENAMED_NOTICE, /SPEC\.md §4/u);
+  // APRV-91: the notice states the channel/adapter distinction in operator
+  // language. The §4 citation behind it is in `approval setup channel --help`
+  // and docs/cli-reference.md#setup, not on a line an operator hits by typo.
+  assert.match(RENAMED_NOTICE, /A channel surfaces requests/u);
+  assert.doesNotMatch(RENAMED_NOTICE, /SPEC\.md §/u);
 });

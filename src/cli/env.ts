@@ -49,6 +49,7 @@ import { ENV_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
+import { usageErrorText } from "./usage.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--check": "boolean",
@@ -66,7 +67,7 @@ function absolute(value: string, cwd: string): string {
 
 function usageError(streams: Streams, json: boolean, message: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${ENV_HELP}\n`);
+  else streams.err(usageErrorText(message, ENV_HELP));
   return EXIT_USAGE;
 }
 
@@ -259,7 +260,7 @@ function emitExports(
     `# THIS OUTPUT CARRIES SECRETS, deliberately: its job is to put them in your\n# shell. Read it (or run \`approval env --check\`, which prints no values) and\n# then evaluate it yourself:\n#\n#     eval "$(approval env)"\n#\n`,
   );
   streams.out(
-    `# No other command reads that file. Human identity lives in one of these\n# variables, so a file a process loaded on its own would let anything able to\n# write it act as you (SPEC.md §11, §11.1 invariant 7).\n`,
+    `# No other command reads that file. Human identity lives in one of these\n# variables, so a file a process loaded on its own would let anything able to\n# write it act as you.\n`,
   );
   const unresolved = variables.filter((entry) => entry.status === "unset");
   if (unresolved.length > 0) {

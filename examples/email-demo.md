@@ -284,9 +284,9 @@ vault. What the conversation looks like:
 
 ```
 approval setup adapter email — the SMTP settings `approval adapter email` reads inside the verified-token window.
-The values go into the VAULT (SPEC.md §10.4), not into the OS keystore and not
-into .approval/env: what this verb stores is what a gated adapter spends inside
-a verified-token window. Nothing here appends to the log or attests anything.
+The values go into the VAULT, not into the OS keystore and not into
+.approval/env: what this verb stores is what a gated adapter spends inside a
+verified-token window. Nothing here appends to the log or attests anything.
 
 It will ask for 5 value(s), all of them into /tmp/approval-email-demo/.approval/vault.enc:
   smtp.host (config) — the submission server this runtime connects to

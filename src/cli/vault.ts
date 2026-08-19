@@ -67,6 +67,7 @@ import {
 } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { usageErrorText } from "./usage.js";
 
 const COMMON_FLAGS: Record<string, FlagKind> = {
   "--log": "string",
@@ -85,7 +86,7 @@ function absolute(value: string, cwd: string): string {
 
 function usageError(streams: Streams, json: boolean, message: string, helpText: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${helpText}\n`);
+  else streams.err(usageErrorText(message, helpText));
   return EXIT_USAGE;
 }
 
@@ -475,7 +476,7 @@ export function commandVault(argv: string[], streams: Streams, cwd: string): num
     return usageError(
       streams,
       json,
-      "there is no `approval vault get`, and it is not an oversight: a verb that printed a credential would put it in a terminal, a scrollback buffer, a CI log and a shell history. A credential's only sanctioned journey is from the vault into an adapter, inside the verified-token window (SPEC.md §10.4). Use `approval vault list` to see the names.",
+      "there is no `approval vault get`, and it is not an oversight: a verb that printed a credential would put it in a terminal, a scrollback buffer, a CI log and a shell history. A credential's only sanctioned journey is from the vault into an adapter, inside the verified-token window. Use `approval vault list` to see the names.",
       VAULT_HELP,
     );
   }

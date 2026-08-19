@@ -35,6 +35,7 @@ import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { IMPORT_AGENTS_MD_HELP, IMPORT_HELP } from "./help.js";
 import type { Streams } from "./main.js";
+import { usageErrorText } from "./usage.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--out": "string",
@@ -49,7 +50,7 @@ function wantsJson(argv: string[]): boolean {
 
 function usageError(streams: Streams, json: boolean, message: string, helpText: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${helpText}\n`);
+  else streams.err(usageErrorText(message, helpText));
   return EXIT_USAGE;
 }
 

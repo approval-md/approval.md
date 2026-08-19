@@ -450,7 +450,8 @@ test("help: every vault help documents exit codes, the JSON shape, and the threa
   ]) {
     const run = runCli(argv, home, GREEN);
     assert.equal(run.code, 0, run.stderr);
-    for (const claim of ["Exit codes (frozen public API)", "JSON", "HUMAN-ONLY"]) {
+    // APRV-91: the frozen table is the root help's.
+    for (const claim of ["exit codes: approval --help", "JSON", "HUMAN-ONLY"]) {
       assert.ok(run.stdout.includes(claim), `${argv.join(" ")} --help is missing "${claim}"`);
     }
     // -h is accepted wherever --help is.
@@ -460,10 +461,10 @@ test("help: every vault help documents exit codes, the JSON shape, and the threa
 
   const family = runCli(["vault", "--help"], home, GREEN);
   assert.match(family.stdout, /THERE IS NO "approval vault get"/u);
-  assert.match(family.stdout, /What the vault DEFENDS/u);
-  assert.match(family.stdout, /does NOT defend/u);
-  assert.match(family.stdout, /compromised host/u);
-  assert.match(family.stdout, /read the passphrase variable/u);
+  // APRV-91: the threat model itself moved to docs/cli-reference.md#vault, and
+  // the help names it rather than restating it. tests/cli-help.test.ts asserts
+  // that the paragraph is actually there.
+  assert.match(family.stdout, /docs\/cli-reference\.md#vault/u);
 
   // And the root help names the verb.
   const root = runCli(["--help"], home, GREEN);

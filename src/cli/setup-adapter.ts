@@ -391,7 +391,7 @@ export async function commandSetupAdapter(
     destination: vaultDestination(vaultPath, passphrase),
     labels: {
       title: `approval setup adapter ${name} — ${entry.summary}.`,
-      prereq: `The values go into the VAULT (SPEC.md §10.4), not into the OS keystore and not\ninto .approval/env: what this verb stores is what a gated adapter spends inside\na verified-token window. Nothing here appends to the log or attests anything.`,
+      prereq: `The values go into the VAULT, not into the OS keystore and not into\n.approval/env: what this verb stores is what a gated adapter spends inside a\nverified-token window. Nothing here appends to the log or attests anything.`,
       nextSteps: entry.nextSteps,
     },
     hooks: {
