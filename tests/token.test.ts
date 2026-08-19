@@ -260,6 +260,11 @@ test("the refusal unions are frozen and the verify codes are a prefix of them", 
     // APRV-20 pass two, amendment A1: a grant approves specific bytes, so a
     // spend that presents different ones (or none) is refused on its own code.
     "payload-mismatch",
+    // APRV-106: a grant for a harness-executed request minted no token, on
+    // purpose. Its own code because the repair is "nothing to repair" — an
+    // agent told `token-mismatch` here would hunt for a token that was
+    // deliberately never created.
+    "harness-executed",
   ]);
   assert.deepEqual([...TOKEN_REFUSAL_CODES], [
     ...TOKEN_VERIFY_REFUSAL_CODES,
@@ -269,6 +274,43 @@ test("the refusal unions are frozen and the verify codes are a prefix of them", 
     "log-corrupt",
     "append-failed",
   ]);
+});
+
+test("a harness-executed grant refuses the token path with its own code", () => {
+  // APRV-106. The grant is complete and the human decided; there is simply no
+  // key, because the requesting process runs the command itself. An agent told
+  // `token-mismatch` here would hunt for a token that never existed.
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  const requested = request(
+    unit.logPath,
+    {
+      task: "task-042",
+      actionKey: "task-042:chaser",
+      cls: "communicate.email.external",
+      est_cost_usd: 0.02,
+      reversible: false,
+      summary: "Send deposit chaser",
+      payload_hash: bindingFor("task-042:chaser"),
+      execution: "harness",
+    },
+    at(1),
+    "agent:claude",
+    unit.options,
+  );
+  assert.equal(requested.ok, true, requested.ok ? "" : requested.message);
+  assert.equal(
+    decide(unit.logPath, "task-042:chaser", "grant", "human:carter", at(2), unit.options).ok,
+    true,
+  );
+
+  const status = tokenStatus(records(unit), "task-042:chaser", at(3), 3_600_000);
+  assert.equal(status.ok, false);
+  if (status.ok) throw new Error("unreachable");
+  assert.equal(status.code, "harness-executed");
+  assert.match(status.message, /runs the command itself/u);
+  assertClean(unit);
 });
 
 // ===========================================================================

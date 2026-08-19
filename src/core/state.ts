@@ -520,10 +520,38 @@ export type RequestState =
   | "rejected"
   | "revoked"
   /** TTL lapsed, by event or by arithmetic. */
-  | "expired";
+  | "expired"
+  /**
+   * The requester took the question back while it was still pending (APRV-106,
+   * amended SPEC.md §6.3).
+   *
+   * Terminal, and terminal in the same sense `rejected` is: the gate refuses a
+   * grant, a rejection, a revocation or a second withdrawal afterwards. It is
+   * NOT a decision — nobody answered — which is why the projection layer reads
+   * it as "back to proposed" rather than as a refusal, and why no authorization
+   * is implied in either direction.
+   */
+  | "withdrawn";
 
 /** The three terminal decisions a human can record, plus runtime expiry. */
 export type Decision = "grant" | "reject" | "revoke";
+
+/**
+ * Why a requester retracted a pending request (amended SPEC.md §6.3, APRV-106).
+ *
+ * Closed, and mirrored by `event.schema.json`: a withdrawal that does not say
+ * why is a fact audit cannot use. `timeout` is the one the hook writes — the
+ * requester stopped waiting, so a decision on this request can no longer be
+ * consumed by anyone.
+ */
+export const WITHDRAW_REASONS = ["timeout", "cancelled", "superseded"] as const;
+
+export type WithdrawReason = (typeof WITHDRAW_REASONS)[number];
+
+/** Is `value` one of the closed withdrawal reasons? */
+export function isWithdrawReason(value: unknown): value is WithdrawReason {
+  return typeof value === "string" && (WITHDRAW_REASONS as readonly string[]).includes(value);
+}
 
 /**
  * What the request declared, copied out of the `approval.requested` payload.
@@ -557,6 +585,30 @@ export interface DeclaredAction {
    * the manual path.
    */
   payload_hash: string | null;
+  /**
+   * `"harness"` when the requester declared that it will never run this action
+   * through `approval run` (APRV-106, the Claude Code hook): the harness
+   * executes the command itself and the gate's answer is a permission decision,
+   * not a key. A grant on such a request mints no execution token.
+   *
+   * On the ratchet's safe side (SPEC.md §11.1), and deliberately so. It is a
+   * self-reported field, and every effect it has REMOVES capability from the
+   * party that reported it: no token is minted, so `approval run` and
+   * `approval consume` refuse the key outright. There is no reading of a false
+   * `harness` claim that authorizes anything the truthful claim would not.
+   */
+  execution: "harness" | null;
+  /**
+   * The deadline the requester says it will wait until, ISO-8601, or `null`.
+   *
+   * Display only, and claimed: channels render it so an approver can see that
+   * an answer after this instant reaches nobody (APRV-106). Nothing in the
+   * gate, the token module, the budgets or the TTL reads it — the TTL is the
+   * policy's and is the only deadline that governs anything — so a requester
+   * that lies about it can only make its own request look MORE urgent than it
+   * is, never less.
+   */
+  wait_until: string | null;
 }
 
 /** Execution facts for the action key: the seq of each event, or `null`. */
@@ -573,7 +625,13 @@ export interface RequestDerivation {
   task: string | null;
   requestSeq: number | null;
   requestTs: string | null;
-  decision: "granted" | "rejected" | "revoked" | "expired" | null;
+  /**
+   * The actor of the `approval.requested` record that opened the current cycle
+   * (APRV-106). The gate compares a withdrawal's actor against it: only the
+   * party that asked may take the question back.
+   */
+  requestActor: string | null;
+  decision: "granted" | "rejected" | "revoked" | "expired" | "withdrawn" | null;
   decisionSeq: number | null;
   decisionTs: string | null;
   /** An `approval.expired` record exists for the current request. */
@@ -597,12 +655,20 @@ function declaredFrom(record: EventRecord): DeclaredAction {
   const reversible = payload["reversible"];
   const summary = payload["summary"];
   const hash = payload["payload_hash"];
+  const execution = payload["execution"];
+  const waitUntil = payload["wait_until"];
   return {
     class: typeof cls === "string" ? cls : null,
     est_cost_usd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
     reversible: typeof reversible === "boolean" ? reversible : null,
     summary: typeof summary === "string" ? summary : null,
     payload_hash: isPayloadHash(hash) ? hash : null,
+    // Recognized values only. An unrecognized `execution` reads as `null`,
+    // which is the ordinary token-minting path: a claim the runtime does not
+    // understand must not change what the runtime does.
+    execution: execution === "harness" ? "harness" : null,
+    wait_until:
+      typeof waitUntil === "string" && !Number.isNaN(Date.parse(waitUntil)) ? waitUntil : null,
   };
 }
 
@@ -627,6 +693,11 @@ function declaredFrom(record: EventRecord): DeclaredAction {
  * - Execution facts accumulate across the whole log for the key, independent of
  *   the request cycle: an action that has executed has executed, and no
  *   subsequent request un-executes it.
+ * - Withdrawal (APRV-106): an `approval.withdrawn` settles the request like any
+ *   other terminal event, and is the only one of them that records no decision.
+ *   It participates in the "first settlement wins" rule above, so a withdrawal
+ *   appended after a human's answer does not erase the answer; the gate refuses
+ *   to append one at all in that case.
  * - Expiry: an `approval.expired` record sets `expiredByEvent`. With no such
  *   record, `ttlMs !== null` and `ts > requestTs + ttlMs` sets `expiredLazily`.
  *   Both yield `state: "expired"`. An unparseable `requestTs` or `ts` also
@@ -643,6 +714,7 @@ export function requestState(
   let task: string | null = null;
   let requestSeq: number | null = null;
   let requestTs: string | null = null;
+  let requestActor: string | null = null;
   let decision: RequestDerivation["decision"] = null;
   let decisionSeq: number | null = null;
   let decisionTs: string | null = null;
@@ -653,6 +725,8 @@ export function requestState(
     reversible: null,
     summary: null,
     payload_hash: null,
+    execution: null,
+    wait_until: null,
   };
   const execution: ExecutionFacts = { started: null, completed: null, failed: null };
 
@@ -681,6 +755,7 @@ export function requestState(
         task = record.task ?? task;
         requestSeq = record.seq;
         requestTs = record.ts;
+        requestActor = record.actor;
         decision = null;
         decisionSeq = null;
         decisionTs = null;
@@ -698,6 +773,9 @@ export function requestState(
         break;
       case "approval.expired":
         settle(record, "expired");
+        break;
+      case "approval.withdrawn":
+        settle(record, "withdrawn");
         break;
       case "execution.started":
         execution.started = record.seq;
@@ -745,6 +823,7 @@ export function requestState(
     task,
     requestSeq,
     requestTs,
+    requestActor,
     decision,
     decisionSeq,
     decisionTs,

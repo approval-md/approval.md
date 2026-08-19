@@ -36,6 +36,7 @@
         "approval.rejected",
         "approval.expired",
         "approval.revoked",
+        "approval.withdrawn",
         "execution.started",
         "execution.completed",
         "execution.failed",
@@ -46,7 +47,7 @@
         "audit.reviewed",
         "payload.pruned"
       ],
-      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of seventeen event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen: a reader of a v0.1 log may encounter it, and a verifier written against the draft enum must be updated to accept it."
+      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of eighteen event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen and `approval.withdrawn` (APRV-106) the second: a reader of a v0.1 log may encounter either, and a verifier written against the draft enum must be updated to accept both."
     },
     "actor": {
       "type": "string",
@@ -106,7 +107,8 @@
               "approval.granted",
               "approval.rejected",
               "approval.expired",
-              "approval.revoked"
+              "approval.revoked",
+              "approval.withdrawn"
             ]
           }
         },
@@ -183,6 +185,61 @@
         "required": [
           "actor"
         ]
+      }
+    },
+    {
+      "$comment": "SPEC.md §6.3/§8 (APRV-106): a withdrawal is the requester retracting their own pending request, so the actor is the party that opened it — `agent:` for an agent-originated request, `human:` for a person's. Never `system:`: the runtime already has a way to end a request it was not asked to end, and that is `approval.expired` on TTL lapse. A `system:` withdrawal would let the runtime cancel a question a human was about to answer, with no clock to justify it. That the actor is the SAME party that appended the matching `approval.requested` is not expressible here (a schema sees one record), and is enforced by the gate as `not-requester`; what the schema can rule out is the actor kind that must never appear. `reason` is required and closed: a withdrawal that does not say why is a decision nobody can audit, and the three values are the three things that actually happen — the requester's wait elapsed, the requester changed its mind, or a newer request replaced this one.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "approval.withdrawn"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^(human|agent):",
+            "description": "SPEC.md §6.3: the requester. `system:` is refused — expiry, not withdrawal, is the runtime's way to end a request."
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "action_key",
+              "reason"
+            ],
+            "properties": {
+              "action_key": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The withdrawn request's idempotency key, restated in the payload so the reason and the key it applies to travel together for a reader who has only the payload."
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "timeout",
+                  "cancelled",
+                  "superseded"
+                ],
+                "description": "Why the requester retracted. `timeout`: the requester stopped waiting and can no longer consume a decision. `cancelled`: the requester no longer wants the action. `superseded`: a newer request covers the same effect."
+              },
+              "note": {
+                "type": "string",
+                "description": "The requester's free-text elaboration. Claimed, never a control."
+              }
+            }
+          }
+        }
       }
     },
     {

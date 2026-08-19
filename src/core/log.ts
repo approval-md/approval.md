@@ -73,6 +73,8 @@ export const GENESIS_PREV = null;
  * `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of
  * sixteen: the daemon appends one per payload file it removes under
  * `payload_retention`, so a log states what its payload store no longer holds.
+ * `approval.withdrawn` (APRV-106) is the second: the requester's retraction of
+ * a request nobody has answered yet (amended SPEC.md §6.3).
  */
 export type EventType =
   | "task.registered"
@@ -83,6 +85,7 @@ export type EventType =
   | "approval.rejected"
   | "approval.expired"
   | "approval.revoked"
+  | "approval.withdrawn"
   | "execution.started"
   | "execution.completed"
   | "execution.failed"

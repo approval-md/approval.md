@@ -133,6 +133,7 @@ import {
   type LogReadRefusal,
   type RequestDerivation,
   type RequestState,
+  type WithdrawReason,
 } from "./state.js";
 import { mintToken, tokenHash, TOKEN_HASH_FIELD } from "./token.js";
 import { validate, type ValidationError } from "./validate.js";
@@ -150,6 +151,9 @@ export {
   type ExecutionFacts,
   type RequestDerivation,
   type RequestState,
+  WITHDRAW_REASONS,
+  isWithdrawReason,
+  type WithdrawReason,
 } from "./state.js";
 
 /** Actor stamped on runtime-originated expiry events (SPEC.md §8 `system:`). */
@@ -254,6 +258,29 @@ export const GATE_REFUSAL_CODES = [
   "already-decided",
   /** Revoke was attempted on a request that is not granted. */
   "not-granted",
+  /**
+   * A decision was attempted on a request the requester had already withdrawn
+   * (APRV-106, amended SPEC.md §6.3).
+   *
+   * Distinct from `already-decided` because the facts and the repairs are
+   * distinct. `already-decided` says a human answered and the answer stands;
+   * this one says nobody answered and nobody can — the party that asked has
+   * stopped listening, so a grant here would authorize an action no process is
+   * waiting to perform. The repair is to request the action again, which is a
+   * new request with a new decision, not to try the decision a second time.
+   */
+  "request-withdrawn",
+  /**
+   * A withdrawal was attempted by an actor other than the one that appended the
+   * matching `approval.requested` (APRV-106).
+   *
+   * Withdrawal is the requester's own retraction, and nothing more. If any
+   * actor could withdraw, then any actor could clear an approver's queue — the
+   * queue would become deniable by whoever reached the log first, which is the
+   * one property the gate exists to deny. A human who wants a pending request
+   * gone rejects it, on the record, as themselves.
+   */
+  "not-requester",
   /** The TTL lapsed — judged from the request's own ts, event or no event. */
   "expired",
   /** `expire` was called on a request whose TTL has not lapsed. */
@@ -817,6 +844,27 @@ export interface RequestInput {
    * request, so there is no binding a stored payload could belong to.
    */
   payload?: { value: unknown };
+  /**
+   * `"harness"` when this request will never be executed through
+   * `approval run` (APRV-106).
+   *
+   * The Claude Code hook is the case it exists for: the hook asks the gate a
+   * permission question and the *harness* runs the command, so a grant here has
+   * nothing to hand a token to. Recorded on `approval.requested` and copied by
+   * {@link decide} onto the grant, where it suppresses the mint. See
+   * `DeclaredAction.execution` in `core/state.ts` for why a false claim can
+   * only remove the claimant's own capability.
+   */
+  execution?: "harness";
+  /**
+   * ISO-8601 instant after which the requester stops waiting (APRV-106).
+   *
+   * Recorded for CHANNELS TO DISPLAY and for nothing else: an approver seeing
+   * "requester waits until 09:23 UTC" knows that an answer at 09:40 reaches
+   * nobody. It bounds no TTL, charges no budget, and gates nothing — the
+   * policy's `defaults.approval_ttl` remains the only deadline with authority.
+   */
+  wait_until?: string;
 }
 
 /**
@@ -1071,6 +1119,12 @@ export function request(
   };
   if (input.summary !== undefined) payload["summary"] = input.summary;
   if (input.reversible !== undefined) payload["reversible"] = input.reversible;
+  // APRV-106. Both are recorded here rather than derived later because the log
+  // is the only place a channel or a grant can read them from, and neither
+  // reduces scrutiny: `execution: "harness"` removes the requester's own
+  // ability to spend a token, and `wait_until` is display text.
+  if (input.execution !== undefined) payload["execution"] = input.execution;
+  if (input.wait_until !== undefined) payload["wait_until"] = input.wait_until;
 
   const appended = append(
     logPath,
@@ -1233,6 +1287,18 @@ export function decide(
     );
   }
 
+  if (derivation.state === "withdrawn") {
+    // APRV-106. Its own code, not `already-decided`: nobody decided. The
+    // requester stopped waiting, so a grant recorded here would be an
+    // authorization with no process left to consume it — which is precisely the
+    // decision SPEC.md §11 says must not be solicited, arriving too late.
+    return refuse(
+      "request-withdrawn",
+      `action ${actionKey} was withdrawn by its requester at seq ${String(derivation.decisionSeq)}; a withdrawn request is terminal and nothing can be decided about it. If the action is still wanted, request it again — that is a new request, and it gets its own decision.`,
+      { state: derivation.state },
+    );
+  }
+
   if (derivation.state === "rejected" || derivation.state === "revoked") {
     return refuse(
       "already-decided",
@@ -1352,10 +1418,24 @@ export function decide(
   // APRV-17, the token seam. Minted here — after every check has passed and
   // immediately before the append — so a refused grant mints nothing. Only the
   // digest enters the payload; the raw token is returned to this caller alone.
+  //
+  // APRV-106 adds the one grant that mints nothing: a request the requester
+  // declared `execution: "harness"`. Such a request is a permission question
+  // asked by a process that will run the command itself, so there is no
+  // `approval run` to hold a key and a minted token would be a live credential
+  // with no owner and no spender. The grant is still a complete grant — class,
+  // cost and payload binding are all recorded — and the marker is copied onto
+  // it so a reader of the grant alone can see why there is no digest, rather
+  // than reading the absence as a grant minted by something that predates
+  // tokens. `core/token.ts` refuses the key as `harness-executed`.
   let token: string | undefined;
   if (decision === "grant") {
-    token = mintToken();
-    payload[TOKEN_HASH_FIELD] = tokenHash(token);
+    if (derivation.declared.execution === "harness") {
+      payload["execution"] = "harness";
+    } else {
+      token = mintToken();
+      payload[TOKEN_HASH_FIELD] = tokenHash(token);
+    }
   }
 
   const appended = append(
@@ -1382,6 +1462,160 @@ export function decide(
     record: appended.record,
     ...(token === undefined ? {} : { token }),
   };
+}
+
+// ---------------------------------------------------------------------------
+// withdraw
+// ---------------------------------------------------------------------------
+
+export interface WithdrawOptions extends GateOptions {
+  /** Why the requester is retracting. Defaults to `cancelled`. */
+  reason?: WithdrawReason;
+  /** The requester's free-text elaboration, recorded in the payload. */
+  note?: string;
+}
+
+export type WithdrawResult =
+  | { ok: true; state: RequestState; record: EventRecord }
+  | GateRefusal;
+
+/**
+ * Retract a pending request, as the party that opened it (amended SPEC.md §6.3,
+ * APRV-106).
+ *
+ * ## Why the verb exists
+ *
+ * Observed live on 2026-08-19. A builder's `git commit --amend` went through the
+ * Claude Code hook, which classified it manual and appended
+ * `approval.requested`. The hook waited nine minutes, got nothing, denied the
+ * tool call and moved on — but the request stayed pending for the policy's 24h
+ * TTL. Half an hour later the human was pinged on their phone and approved it,
+ * and the grant authorized nothing at all: the hook had long since answered,
+ * and a retried tool call is a new request with a new key. A person spent
+ * attention on a question whose asker had left. SPEC.md §11 makes human
+ * attention the audit budget, and a decision nobody can consume must not be
+ * solicited; so the asker takes the question back.
+ *
+ * ## The four rules
+ *
+ * 1. **Requester-only.** The actor MUST equal the actor of the
+ *    `approval.requested` that opened the current cycle, else `not-requester`.
+ *    Anything looser would make the approver's queue clearable by whoever
+ *    reached the log first. A human who wants a pending request gone rejects
+ *    it, on the record, as themselves.
+ * 2. **Pending-only.** `not-requested` when there is nothing to withdraw,
+ *    `already-decided` when a human has answered, `request-withdrawn` for a
+ *    second withdrawal, `expired` when the TTL has lapsed — and expiry is
+ *    judged here exactly as {@link decide} judges it, from the request's own
+ *    timestamp, with the same lazy materialisation of the `approval.expired`
+ *    record. A lapse is a lapse whether or not an event says so, and a
+ *    withdrawal that pretended otherwise would rewrite the reason a request
+ *    ended.
+ * 3. **No attestation, no budget.** Withdrawal removes a question; it authorizes
+ *    nothing and commits nothing. Refusing it on an unattested policy would
+ *    leave requests standing in a human's queue because a file changed, which
+ *    is the strict direction pointing the wrong way.
+ * 4. **Compare-and-append, like everything else here.** The legality check and
+ *    the write are made against the same head (SPEC.md §11.1(5)), so a grant
+ *    that lands in between wins and this withdrawal is refused `head-moved`
+ *    rather than overwriting it. `tests/concurrency.test.ts` races the two.
+ *
+ * `ts` is assigned at the write boundary from the injected clock, like every
+ * other gate-typed event (SPEC.md §8, A2): there is no parameter to pass one.
+ */
+export function withdraw(
+  logPath: string,
+  actionKey: string,
+  actor: string,
+  options: WithdrawOptions = {},
+): WithdrawResult {
+  const ts = tick(options);
+  if (!PRINCIPAL_ACTOR.test(actor)) {
+    return refuse(
+      "actor-invalid",
+      `withdraw requires a human: or agent: actor, got ${JSON.stringify(actor)}; system: is refused because the runtime's way of ending a request it was not asked to end is the TTL, not a withdrawal`,
+    );
+  }
+
+  const read = readGateRecords(logPath);
+  if (!read.ok) return read;
+
+  const load = loadPolicy(loadOptionsOf(options));
+  const ttlMs = ttlOf(load);
+  const derivation = requestState(read.records, actionKey, ts, ttlMs);
+
+  if (derivation.state === "none") {
+    return refuse(
+      "not-requested",
+      `action ${actionKey} has no approval.requested record to withdraw`,
+      { state: derivation.state },
+    );
+  }
+
+  if (derivation.state === "withdrawn") {
+    return refuse(
+      "request-withdrawn",
+      `action ${actionKey} was already withdrawn at seq ${String(derivation.decisionSeq)}; a withdrawn request is terminal`,
+      { state: derivation.state },
+    );
+  }
+
+  if (derivation.state === "expired") {
+    // The same lazy materialisation `decide` performs, for the same reason: the
+    // log must carry the state a reader can already derive from it.
+    let materialised: EventRecord | undefined;
+    if (derivation.expiredLazily) {
+      const logged = appendExpiry(logPath, derivation, load, ts, options, read.head);
+      if (logged.ok) materialised = logged.record;
+    }
+    return refuse(
+      "expired",
+      `action ${actionKey} expired: the request at ${String(derivation.requestTs)} lapsed its ${String(ttlMs)}ms TTL before ${ts}. A lapsed request has already ended; there is nothing left to withdraw.`,
+      materialised === undefined
+        ? { state: derivation.state }
+        : { state: derivation.state, record: materialised },
+    );
+  }
+
+  if (derivation.state !== "requested") {
+    return refuse(
+      "already-decided",
+      `action ${actionKey} was already ${derivation.state} at seq ${String(derivation.decisionSeq)}; a human's answer stands, and withdrawing a question that has been answered would erase the answer`,
+      { state: derivation.state },
+    );
+  }
+
+  if (derivation.requestActor !== actor) {
+    return refuse(
+      "not-requester",
+      `action ${actionKey} was requested by ${JSON.stringify(derivation.requestActor)} and cannot be withdrawn by ${JSON.stringify(actor)}; only the party that asked may take the question back. To end a pending request as someone else, reject it — that is a decision, and it is recorded as one.`,
+      { state: derivation.state },
+    );
+  }
+
+  const reason: WithdrawReason = options.reason ?? "cancelled";
+  const payload: Record<string, unknown> = { action_key: actionKey, reason };
+  if (options.note !== undefined) payload["note"] = options.note;
+
+  const appended = append(
+    logPath,
+    {
+      ts,
+      event: "approval.withdrawn",
+      actor,
+      ...(derivation.task === null ? {} : { task: derivation.task }),
+      action_key: actionKey,
+      payload,
+    },
+    options,
+    // The head read at the top: requester identity and pending-ness were both
+    // judged against exactly that log, so a decision appended since refuses
+    // this write rather than being overwritten by it.
+    read.head,
+  );
+  if (!appended.ok) return appended;
+
+  return { ok: true, state: "withdrawn", record: appended.record };
 }
 
 // ---------------------------------------------------------------------------

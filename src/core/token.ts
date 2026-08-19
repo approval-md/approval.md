@@ -189,6 +189,16 @@ export const TOKEN_VERIFY_REFUSAL_CODES = [
    * hunt for a lost token.
    */
   "payload-mismatch",
+  /**
+   * The grant was for a harness-executed request and minted no token
+   * (APRV-106). Nothing is wrong: the requesting process runs the command
+   * itself and never had a token to spend, so there is nothing to present here
+   * and nothing to recover. Distinct from `token-mismatch`, which says a
+   * digest exists and does not match, and from `not-granted`, which says no
+   * authorization exists at all — this one says the authorization exists, is
+   * complete, and is not the kind that is spent.
+   */
+  "harness-executed",
 ] as const;
 
 export type TokenVerifyRefusalCode = (typeof TOKEN_VERIFY_REFUSAL_CODES)[number];
@@ -374,6 +384,21 @@ export function tokenStatus(
       "not-granted",
       `action ${actionKey} derives as granted but carries no approval.granted record`,
       { state: derivation.state },
+    );
+  }
+
+  // APRV-106. Checked BEFORE the digest check, because "no digest was minted,
+  // on purpose, and the record says so" and "no digest is usable" are different
+  // facts with different repairs. A harness-executed grant is a complete grant:
+  // the human decided, and the decision was a permission answer to a process
+  // that runs the command itself. There is no key because there was never a
+  // door for one. Telling an agent `token-mismatch` here would send it hunting
+  // for a token that was deliberately never created.
+  if (payloadOf(grant)["execution"] === "harness") {
+    return refuse(
+      "harness-executed",
+      `action ${actionKey} was granted at seq ${grant.seq} as a harness-executed request: no execution token was minted, because the requesting process runs the command itself and never spends one. There is nothing to present to \`approval run\` or \`approval consume\`. The grant is complete and the authorization it records is the harness's permission to proceed.`,
+      { state: derivation.state, seq: grant.seq },
     );
   }
 

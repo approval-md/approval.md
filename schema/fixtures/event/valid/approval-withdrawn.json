@@ -1,0 +1,16 @@
+{
+  "seq": 19,
+  "ts": "2026-08-19T09:23:11Z",
+  "event": "approval.withdrawn",
+  "task": "hook:session-7:tool-3",
+  "action_key": "hook:session-7:tool-3:vcs.commit.amend",
+  "actor": "agent:claude-code",
+  "payload": {
+    "action_key": "hook:session-7:tool-3:vcs.commit.amend",
+    "reason": "timeout",
+    "note": "the hook's wait elapsed; a decision on this request can no longer authorize anything"
+  },
+  "alg": "sha256/jcs",
+  "prev": "92f55b985ad964c052e5e7b500f56ede98efa49473bb32bca236896317fa5da7",
+  "hash": "1c0a4f1d21b57d0f7cd5b1e2a03b9c4d8e7f6051a2b3c4d5e6f708192a3b4c5d"
+}
