@@ -398,6 +398,11 @@ const AGENT_FACING: readonly string[] = [
   "instructions",
   "register",
   "request",
+  // APRV-106. The one terminal gate verb an agent may run, because it is the
+  // requester retracting its OWN question rather than deciding anything. The
+  // gate checks the actor against the approval.requested record, so publishing
+  // it to agents cannot let one clear someone else's queue.
+  "withdraw",
   "wait",
   "run",
   "consume",

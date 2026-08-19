@@ -463,6 +463,59 @@ refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"...",
           "detail"?:"...","seq"?:N}}  on stderr
 ```
 
+## withdraw
+
+The requester takes its own pending question back (SPEC.md §6.3, amended
+APRV-106). It is the only terminal gate verb that is not human-only, because the
+party that asked is usually an agent and the whole point is that the asker can
+stop asking.
+
+**Why it exists.** On 2026-08-19 a builder ran `git commit --amend` through the
+Claude Code hook. The hook classified it manual, appended `approval.requested`,
+waited its nine minutes, got nothing, denied the tool call and moved on. The
+request stayed pending for the policy's 24-hour TTL. Half an hour later the
+human was pinged on their phone and approved it, and the grant authorized
+nothing at all: the hook had answered long before, and a retried tool call is a
+new request with a new key. A person spent attention on a question whose asker
+had left. SPEC.md §11 makes human attention the audit budget, and a decision
+nobody can consume must not be solicited.
+
+**Requester-only.** The actor must equal the actor on the matching
+`approval.requested`; anything else is `not-requester`. If any actor could
+withdraw, the approver's queue would be clearable by whoever reached the log
+first — which is the one property the gate exists to deny. A human who wants a
+pending request gone **rejects** it, on the record, as themselves.
+
+**Pending-only, and terminal.** `not-requested` when there is nothing to
+withdraw, `already-decided` when a human has answered, `request-withdrawn` for a
+second withdrawal, `expired` when the TTL has lapsed — judged from the request's
+own timestamp exactly as a decision is judged, with the same lazy materialisation
+of the `approval.expired` record. Once appended, a grant, rejection or revocation
+is refused `request-withdrawn`. A withdrawn action that is still wanted is
+requested again; that is a new request, and it gets its own decision.
+
+**No attestation, no budget.** Withdrawal removes a question. It authorizes
+nothing and commits nothing, so refusing it on an unattested policy would leave
+requests standing in a human's queue because a file changed.
+
+`--reason` is closed to `timeout`, `cancelled` and `superseded`, and an
+unrecognized value is exit 2 rather than a silent default: an append-only log
+should not put a word in the requester's mouth. `timeout` is what
+`approval wait --withdraw-on-timeout` and the Claude Code hook write.
+
+Channels drop a withdrawn request from the queue immediately (it is no longer
+`requested`, and every channel derives its queue from that one predicate), and
+the Telegram listener edits the message it already sent to say so and removes
+the buttons.
+
+**`--json`** (one object on stdout):
+
+```
+success  {"ok":true,"task":"...","action_key":"...","state":"withdrawn",
+          "reason":"timeout","seq":7}
+refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"..."}}
+```
+
 ## expire
 
 No identity is accepted or resolved: no human decides an expiry, the clock does,
@@ -491,8 +544,8 @@ refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"..."}}
 
 ## gate refusal codes
 
-The vocabulary every gate verb (register, request, grant, reject, revoke, expire)
-returns in `error.code` with `--json`. Frozen public API: an agent branches on it
+The vocabulary every gate verb (register, request, grant, reject, revoke,
+withdraw, expire) returns in `error.code` with `--json`. Frozen public API: an agent branches on it
 to decide whether to fix itself, stop retrying, or ask a human.
 
 - `policy-not-attested` — policy unattested or its bytes changed since
@@ -518,6 +571,12 @@ to decide whether to fix itself, stop retrying, or ask a human.
 - `already-decided` — the request is already granted, rejected, revoked or
   expired.
 - `not-granted` — revoke was attempted on a request that is not granted.
+- `request-withdrawn` — the requester withdrew the request before anyone decided
+  it, or is withdrawing one it already withdrew. Distinct from `already-decided`:
+  nobody answered, and nobody can now. Request the action again.
+- `not-requester` — a withdrawal was attempted by an actor other than the one
+  that opened the request. Only the party that asked may take the question back;
+  anyone else who wants it gone rejects it.
 - `expired` — the TTL lapsed, judged from the request's own `ts`.
 - `not-expired` — expire was called before the TTL lapsed, or the policy declares
   no `defaults.approval_ttl`.
@@ -574,6 +633,12 @@ Frozen public API in the same sense the gate's codes are.
 - `token-expired` — the PARENT REQUEST's TTL lapsed. There is no separate token
   TTL; re-request the action.
 - `token-revoked` — a human withdrew the grant (`approval.revoked`).
+- `harness-executed` — the grant was for a request the requester declared
+  `execution: "harness"` (the Claude Code hook), so no token was minted. Nothing
+  is wrong and nothing is recoverable: the grant is complete, and it authorized
+  a process that runs the command itself rather than through `approval run`.
+  Distinct from `token-mismatch`, which would send an agent hunting for a token
+  that deliberately never existed.
 - `log-unreadable` (exit 4) / `log-torn-tail` (exit 3) / `log-corrupt` (exit 1):
   no token is spendable from a log that does not verify.
 - `append-failed` — the append itself failed; the exit code follows the cause.
@@ -705,31 +770,55 @@ refusal  {"ok":false,"error":{"code":"...","message":"...","detail"?:"...",
 
 Polls the log and writes nothing — not even the `approval.expired` event it may
 derive: expiry is judged lazily from the request's own timestamp, and
-materialising it is `approval expire`'s job, not a reader's.
+materialising it is `approval expire`'s job, not a reader's. The one exception is
+`--withdraw-on-timeout`, below.
 
 For `approval wait` the exit code IS the decision (SPEC.md §10.1). The
 overloading of 1 (integrity / rejected) and 3 (torn tail / expired) is
 deliberate: wait appends nothing and cannot fail a chain verification of its
-own, and `--json` names the outcome exactly (`granted | rejected | expired |
-timeout`) for callers that need more than a number. Flagged for human review.
+own, and `--json` names the outcome exactly (`granted | rejected | withdrawn |
+expired | timeout`) for callers that need more than a number. Flagged for human
+review.
+
+`withdrawn` (APRV-106) reuses exit **1** rather than claiming a new number. The
+exit table in `src/cli/exit-codes.ts` is frozen public API and agents already
+branch on its seven values; the fact a caller needs — this action is not
+authorized and no retry of this request will change that — is exactly what 1
+already carries. The distinction lives where one can be added without breaking
+anyone: `status` in the `--json` object, and the state printed beside the action
+in the human render.
 
 Exit 6 is an addition to the frozen table, emitted by this verb alone: the wait
 elapsed with request(s) still undecided, nothing was appended, the requests are
 still live, and waiting again is legitimate.
 
+**`--withdraw-on-timeout`** (APRV-106) changes only that last sentence. On
+timeout, every request this actor opened and that is still pending is withdrawn
+(`reason: "timeout"`), so nobody is asked a question the waiting process can no
+longer answer to. It is OFF by default, because a caller that stopped waiting
+has not necessarily stopped wanting an answer — a supervisor may wait again. It
+needs `--as` (or `APPROVAL_HUMAN`), checked up front rather than after the wait,
+since only the actor that opened a request may withdraw it. A withdrawal that
+itself fails is reported on stderr and leaves the request live; the exit code is
+6 either way.
+
 **`--json`** (one object on stdout; a timeout goes to stderr):
 
 ```
-decided  {"ok":true,"task":"task-042","status":"granted"|"rejected"|"expired",
+decided  {"ok":true,"task":"task-042",
+          "status":"granted"|"rejected"|"withdrawn"|"expired",
           "actions":[{"action_key":"...","state":"granted","seq":4}]}
 timeout  {"ok":false,"task":"task-042","status":"timeout",
           "actions":[{"action_key":"...","state":"requested","seq":3}]}
 ```
 
+`withdrawn` is added to the timeout object only when `--withdraw-on-timeout` was
+passed, listing the keys actually retracted; the default shape is unchanged.
+
 `state` is the per-action derived state; `status` is the whole task's outcome,
-with rejected/revoked outranking expired and expired outranking granted.
-`--timeout` and `--interval` take the SPEC.md §5.2 duration grammar,
-`<positive integer><ms|s|m|h|d|w>`.
+with rejected/revoked outranking withdrawn, withdrawn outranking expired, and
+expired outranking granted. `--timeout` and `--interval` take the SPEC.md §5.2
+duration grammar, `<positive integer><ms|s|m|h|d|w>`.
 
 ## queue
 

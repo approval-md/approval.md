@@ -55,7 +55,7 @@ import {
   isProtectedPath,
   type CommandClassification,
 } from "../core/command-class.js";
-import { register, request, type GateOptions } from "../core/gate.js";
+import { register, request, withdraw, type GateOptions } from "../core/gate.js";
 import { payloadHash } from "../core/payload.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
 import { resolve as resolvePolicy } from "../core/policy-match.js";
@@ -402,8 +402,61 @@ interface HookRun {
 }
 
 /**
+ * Withdraw every still-pending key this invocation opened (APRV-106).
+ *
+ * BEST EFFORT, always. The caller has already decided what verdict it is
+ * printing; this only decides whether a human is still going to be asked about
+ * it. A withdrawal that refuses is reported on stderr and changes nothing —
+ * including the case that matters most, `already-decided`, which means a human
+ * answered while this was running and their answer must not be touched.
+ *
+ * The `requested` filter is not an optimization. `withdraw` refuses a decided
+ * request anyway, so re-checking here is belt and braces; what it buys is a
+ * quiet stderr in the ordinary "the human already answered" race.
+ *
+ * Returns the keys actually withdrawn, for the deny reason.
+ */
+function withdrawPending(run: HookRun, streams: Streams, keys: readonly string[], why: string): string[] {
+  const withdrawn: string[] = [];
+  for (const key of keys) {
+    const result = withdraw(run.logPath, key, run.actor, {
+      ...run.options,
+      reason: "timeout",
+      note: why,
+    });
+    if (result.ok) {
+      withdrawn.push(key);
+      continue;
+    }
+    if (result.code === "already-decided" || result.code === "request-withdrawn") continue;
+    streams.err(
+      `approval: the hook could not withdraw ${key} (${result.code}): ${result.message}\n`,
+    );
+  }
+  return withdrawn;
+}
+
+/**
  * The gated half: register one envelope, request every class, wait for the
  * decisions. Returns the exit code of whatever verdict it printed.
+ *
+ * ## Why the wait ends in a withdrawal (APRV-106)
+ *
+ * Before this, a wait that elapsed left the request pending for the policy's
+ * whole TTL. That is what produced the 2026-08-19 incident: the hook denied a
+ * `git commit --amend` after nine minutes, the request sat in the queue for
+ * twenty-four hours, the human was pinged half an hour later and approved it,
+ * and the grant authorized nothing at all — a retried tool call is a new
+ * request with a new key, so there was no longer any process that could consume
+ * the answer. Human attention is the audit budget (SPEC.md §11), and it was
+ * spent on a question whose asker had left.
+ *
+ * So every path out of the wait that is not a decision retracts the request
+ * first: the timeout, the thrown error, and a SIGTERM or SIGINT arriving
+ * mid-wait. The signal handlers are installed for the duration of the wait
+ * ONLY, and removed in `finally`: a hook process is short-lived and borrowing
+ * the harness's signal disposition for longer than the loop would be a
+ * side effect nobody asked for.
  */
 function gateAndWait(
   streams: Streams,
@@ -439,6 +492,18 @@ function gateAndWait(
     return deny(streams, `hook-gate-refused:${registered.code}`, registered.message);
   }
 
+  // APRV-106. Both fields are recorded on every request this verb opens, and
+  // both are about what happens AFTER the human looks at their phone.
+  //
+  // `wait_until` is the deadline a channel shows the approver: "requester waits
+  // until 09:23 UTC". It is claimed, display-only, and gates nothing.
+  //
+  // `execution: "harness"` says a grant here mints no execution token. The hook
+  // answers allow/deny and Claude Code runs the command; nothing ever calls
+  // `approval run`, so a minted token would be a live credential with no
+  // spender. It removes capability from the requester and grants none.
+  const waitUntil = new Date(Date.now() + run.timeoutMs).toISOString();
+
   const pendingKeys: string[] = [];
   for (const action of actions) {
     const result = request(
@@ -450,11 +515,17 @@ function gateAndWait(
         summary,
         payload_hash: hash,
         payload: { value: payload },
+        execution: "harness",
+        wait_until: waitUntil,
       },
       run.actor,
       run.options,
     );
     if (!result.ok) {
+      // Whatever was already opened is retracted before the deny: a refusal on
+      // the third class must not leave the first two standing in a queue that
+      // no process is waiting on any more.
+      withdrawPending(run, streams, pendingKeys, `intake refused ${action.actionKey}; this invocation is not waiting for a decision`);
       return deny(streams, `hook-gate-refused:${result.code}`, result.message);
     }
     if (result.record !== null) pendingKeys.push(action.actionKey);
@@ -468,49 +539,111 @@ function gateAndWait(
 
   const deadline = Date.now() + run.timeoutMs;
 
-  for (;;) {
-    const read = readVerifiedRecords(run.logPath);
-    if (!read.ok) return deny(streams, "hook-io", read.message);
-
-    const ts = new Date().toISOString();
-    // Only the keys this invocation requested count. Deriving the set from
-    // the log again would let an empty or foreign result read as "nothing
-    // pending" and fall through to allow; the verified log must show every
-    // one of our keys granted before the hook says yes.
-    const states = pendingKeys.map(
-      (key) => requestState(read.records, key, ts, run.ttlMs).state,
+  // A signal arriving mid-wait is the same fact as the timeout — this process
+  // is going away and will consume no decision — so it is answered the same
+  // way. `process.exit` is deliberate and immediate: the default disposition
+  // for these signals is to die, and a handler that only withdrew would leave
+  // the hook wedged in its poll loop with the harness waiting on it.
+  const onSignal = (signal: NodeJS.Signals): void => {
+    withdrawPending(
+      run,
+      streams,
+      pendingKeys,
+      `the requesting hook process received ${signal} while waiting; it can no longer consume a decision`,
     );
+    process.exit(EXIT_USAGE);
+  };
+  const onTerm = (): void => onSignal("SIGTERM");
+  const onInt = (): void => onSignal("SIGINT");
+  process.on("SIGTERM", onTerm);
+  process.on("SIGINT", onInt);
 
-    if (!states.includes("requested")) {
-      // Precedence, as `approval wait` fixes it: a human's "no" outranks a
-      // lapse, and both outrank "everything was granted".
-      if (states.includes("rejected")) {
-        return deny(streams, "hook-rejected", `a human rejected ${task}`);
+  try {
+    for (;;) {
+      const read = readVerifiedRecords(run.logPath);
+      if (!read.ok) {
+        withdrawPending(run, streams, pendingKeys, `the hook could not read the log while waiting on ${task}`);
+        return deny(streams, "hook-io", read.message);
       }
-      if (states.includes("revoked")) {
-        return deny(streams, "hook-revoked", `approval for ${task} was withdrawn`);
-      }
-      if (states.includes("expired")) {
-        return deny(streams, "hook-expired", `the request for ${task} lapsed before a decision`);
-      }
-      if (states.every((state) => state === "granted")) {
-        return allow(streams, `granted: ${task} (${classes.join(", ")})`);
-      }
-      return deny(
-        streams,
-        "hook-io",
-        `the verified log does not show every request for ${task} as granted (states: ${states.join(", ")})`,
-      );
-    }
 
-    if (Date.now() >= deadline) {
-      return deny(
-        streams,
-        "hook-timeout",
-        `no decision on ${task} within the hook's wait; the request stays live until its TTL, but a retried tool call is a new request, so a late grant on this one authorizes nothing`,
+      const ts = new Date().toISOString();
+      // Only the keys this invocation requested count. Deriving the set from
+      // the log again would let an empty or foreign result read as "nothing
+      // pending" and fall through to allow; the verified log must show every
+      // one of our keys granted before the hook says yes.
+      const states = pendingKeys.map(
+        (key) => requestState(read.records, key, ts, run.ttlMs).state,
       );
+
+      if (!states.includes("requested")) {
+        // Precedence, as `approval wait` fixes it: a human's "no" outranks a
+        // lapse, and both outrank "everything was granted". A withdrawal sits
+        // with the refusals: it is not a decision, but it is terminal, and it
+        // means this key will never be granted.
+        if (states.includes("rejected")) {
+          return deny(streams, "hook-rejected", `a human rejected ${task}`);
+        }
+        if (states.includes("revoked")) {
+          return deny(streams, "hook-revoked", `approval for ${task} was withdrawn`);
+        }
+        if (states.includes("withdrawn")) {
+          return deny(
+            streams,
+            "hook-withdrawn",
+            `the request for ${task} was withdrawn before a decision; nothing is pending and nothing was authorized`,
+          );
+        }
+        if (states.includes("expired")) {
+          return deny(streams, "hook-expired", `the request for ${task} lapsed before a decision`);
+        }
+        if (states.every((state) => state === "granted")) {
+          return allow(streams, `granted: ${task} (${classes.join(", ")})`);
+        }
+        // Not a wait outcome: the log disagrees with itself about keys this
+        // process opened. Nothing is retracted, because the state that would
+        // justify retracting is the state that could not be established.
+        return deny(
+          streams,
+          "hook-io",
+          `the verified log does not show every request for ${task} as granted (states: ${states.join(", ")})`,
+        );
+      }
+
+      if (Date.now() >= deadline) {
+        // APRV-106, the whole point of the task. The deny is returned either
+        // way; what changes is whether a human is woken up for a question this
+        // process has already answered for itself.
+        const withdrawn = withdrawPending(
+          run,
+          streams,
+          pendingKeys,
+          `the hook's ${String(run.timeoutMs)}ms wait elapsed; this tool call was denied and a retried one is a new request, so a decision here can no longer authorize anything`,
+        );
+        return deny(
+          streams,
+          "hook-timeout",
+          withdrawn.length === pendingKeys.length
+            ? `no decision on ${task} within the hook's wait. The request(s) were WITHDRAWN, so nobody will be asked about a tool call this hook has already denied; a retried tool call is a new request and gets a fresh one.`
+            : `no decision on ${task} within the hook's wait, and ${String(pendingKeys.length - withdrawn.length)} request(s) could not be withdrawn — they stay live until their TTL, and a late grant on one authorizes nothing, because a retried tool call is a new request`,
+        );
+      }
+      sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
     }
-    sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
+  } catch (cause) {
+    // The thrown path. `commandHookClaudeCode` turns this into an ordinary
+    // deny, so from the human's side it is the timeout case with a different
+    // reason: this process is not going to consume a decision, and it says so
+    // before it stops.
+    withdrawPending(
+      run,
+      streams,
+      pendingKeys,
+      `the requesting hook process failed while waiting (${cause instanceof Error ? cause.message : String(cause)})`,
+    );
+    throw cause;
+  } finally {
+    process.off("SIGTERM", onTerm);
+    process.off("SIGINT", onInt);
   }
 }
 
