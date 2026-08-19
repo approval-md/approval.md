@@ -1533,6 +1533,26 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "mcp",
+    subcommand: "serve",
+    purpose:
+      "Serve the verbs of this registry as MCP tools over stdio, in the foreground, sharing the CLI's code paths (SPEC.md §10.5). The published tool list is this registry filtered by human_only false, less `consume` (internal plumbing) and `hook claude-code` (it reads a stdin this transport owns), and every tool's input schema is the verb's own with `--as` removed. It runs as ONE agent identity, fixed at startup, that no tool call can supply or change.",
+    human_only: true,
+    human_only_note:
+      "An OPERATOR process, like `daemon run`: long-lived, launched by a person, and holding the agent identity every tool call is recorded under. It publishes no human-only verb, so an agent that could start one would gain no authority it lacked; what it would gain is a second writer against the log nobody supervises, and a choice of identity that belongs to the human who launched the process. Marked human_only so no wrapper offers a wrapper.",
+    input: input({
+      flags: { ...AS_FLAG, ...POLICY_FLAGS, ...LOG_FLAG, ...JSON_FLAG, ...HELP_FLAGS },
+    }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      { code: 0, meaning: "the server was interrupted and closed cleanly" },
+      USAGE,
+      { code: 4, meaning: "the transport did not close cleanly" },
+    ],
+  },
+
+  {
     name: "reindex",
     purpose:
       "Rebuild the SQLite index projection from the log. The database is a cache and the log is the truth: the index is rebuilt from scratch at a temporary path and renamed into place. A corrupt log is refused outright and a torn tail is refused without --force. The log is never written to.",

@@ -113,6 +113,76 @@ test("setup-common.ts imports from neither the dispatcher nor the dispatched (AP
   );
 });
 
+/**
+ * The MCP wrapper's direction (APRV-87).
+ *
+ * `src/mcp/` is a *caller* of the CLI, the way `src/daemon/` is a caller of the
+ * core: SPEC.md §10.5 says the wrapper "shares the CLI's code paths", so it
+ * imports them and the CLI does not import it back — except from `cli/mcp.ts`,
+ * whose whole subject is the server, and which reaches it through a DYNAMIC
+ * import so the circle `main.ts -> cli/mcp.ts -> mcp/server.ts -> main.ts` is
+ * never closed statically. An ESM cycle is not a compile error; it is a binding
+ * that is `undefined` in one direction on the day initialisation order changes.
+ *
+ * The wrapper is also held to the same daemon rule as the CLI: it publishes
+ * verbs, and a verb that needed the pruner's module graph would be the APRV-59
+ * mistake in a new directory.
+ */
+const MCP_DIR = join(REPO_ROOT, "src", "mcp");
+
+const MCP_FILES = readdirSync(MCP_DIR)
+  .filter((entry) => entry.endsWith(".ts"))
+  .sort();
+
+test("src/mcp/ exists and holds modules to check (APRV-87)", () => {
+  assert.ok(MCP_FILES.length > 0, `no *.ts files found in ${MCP_DIR}`);
+});
+
+test("no CLI module statically imports src/mcp/ (APRV-87)", () => {
+  const offenders: string[] = [];
+  for (const file of CLI_FILES) {
+    const source = readFileSync(join(CLI_DIR, file), "utf8");
+    for (const specifier of specifiersOf(source)) {
+      if (specifier.startsWith("../mcp/")) {
+        offenders.push(`src/cli/${file} imports "${specifier}"`);
+      }
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `src/mcp/ imports the CLI, so a static import back is a cycle. cli/mcp.ts is the one file allowed to reach the server and it must do so with a dynamic import():\n${offenders.join("\n")}`,
+  );
+});
+
+test("cli/mcp.ts is the only CLI module that reaches the server at all (APRV-87)", () => {
+  const reaching = CLI_FILES.filter((file) =>
+    readFileSync(join(CLI_DIR, file), "utf8").includes("../mcp/server.js"),
+  );
+  assert.deepEqual(
+    reaching,
+    ["mcp.ts"],
+    "only src/cli/mcp.ts may reach src/mcp/server.ts; every other verb is reached BY it",
+  );
+});
+
+test("src/mcp/ imports neither src/daemon/ nor a test helper (APRV-87)", () => {
+  const offenders: string[] = [];
+  for (const file of MCP_FILES) {
+    const source = readFileSync(join(MCP_DIR, file), "utf8");
+    for (const specifier of specifiersOf(source)) {
+      if (specifier.startsWith("../daemon/") || specifier.includes("../../tests/")) {
+        offenders.push(`src/mcp/${file} imports "${specifier}"`);
+      }
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `src/mcp/ may import src/cli/ and src/core/ and nothing else in this repository:\n${offenders.join("\n")}`,
+  );
+});
+
 test("the exception list names only files that exist and do import the daemon", () => {
   for (const file of DAEMON_IMPORTERS_ALLOWED) {
     assert.ok(

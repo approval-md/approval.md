@@ -69,6 +69,7 @@ import { commandHook } from "./hook.js";
 import { commandImport } from "./import.js";
 import { commandInstructions } from "./instructions.js";
 import { commandInit } from "./init.js";
+import { commandMcp } from "./mcp.js";
 import { commandPayload } from "./payload.js";
 import { commandPolicy } from "./policy.js";
 import { commandRender } from "./render.js";
@@ -722,6 +723,30 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // the human's `policy amend` is what puts any of it in force.
     case "import":
       return commandImport(rest, streams, cwd);
+    // The wrapper verb (APRV-87). `mcp serve` publishes the agent-facing verbs
+    // as MCP tools over stdio (SPEC.md §10.5) and is the third LONG-LIVED
+    // command here, unwrapped exactly as `channel` and `daemon` are. It is
+    // AGENT-FACING BY CONSTRUCTION: its tool list is the verb registry filtered
+    // by human_only, so nothing that records a human's authority is reachable
+    // through it, and the identity it runs as is fixed before the transport
+    // exists. The verb itself is human-only, because starting one is an
+    // operator's act.
+    case "mcp": {
+      const outcome = commandMcp(rest, streams, cwd);
+      if (typeof outcome === "number") return outcome;
+      void outcome.then(
+        (code) => {
+          process.exitCode = code;
+        },
+        (cause: unknown) => {
+          streams.err(
+            `approval: MCP server failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+          );
+          process.exitCode = EXIT_IO;
+        },
+      );
+      return EXIT_OK;
+    }
     case "reindex":
       return commandReindex(rest, streams, cwd);
     // The projection verb (APRV-24). `render` writes .approval/QUEUE.md and
