@@ -109,9 +109,9 @@ an addition).
 | rule | binaries | subcommands | classes |
 |---|---|---|---|
 | `git-push` | git | push | vcs.push.main, vcs.push.branch, vcs.history.rewrite |
-| `git-rewrite` | git | rebase \| filter-branch \| filter-repo | vcs.history.rewrite |
-| `git-reset` | git | reset | vcs.commit.branch, vcs.history.rewrite |
-| `git-commit` | git | commit | vcs.commit.branch, vcs.history.rewrite |
+| `git-rewrite` | git | rebase \| filter-branch \| filter-repo | vcs.history.rewrite † |
+| `git-reset` | git | reset | vcs.commit.branch, vcs.history.rewrite † |
+| `git-commit` | git | commit | vcs.commit.branch, vcs.history.rewrite † |
 | `git-branch` | git | branch | read.shell, vcs.commit.branch |
 | `git-tag` | git | tag | release.publish |
 | `git-clone` | git | clone | network.call |
@@ -142,7 +142,11 @@ an addition).
 | `network` | curl, wget, ssh, scp, sftp, rsync, nc, telnet, ftp, http, httpie | (any) | network.call |
 | `read-shell` | basename, cat, cd, cksum, cut, diff, dirname, du, echo, false, file, find, grep, head, jq, ls, md5sum, printf, pwd, readlink, realpath, rg, shasum, sha256sum, sort, stat, tail, test, tr, tree, true, type, uniq, wc, which | (any) | read.shell |
 
-Three overrides sit on top of the table:
+† These rewrites are LOCAL, and the hook refines them against the checkout it
+runs in: see [Rewriting unpublished history](#rewriting-unpublished-history).
+`git push --force` is not marked, and never refines.
+
+Four overrides sit on top of the table:
 
 - **`redirect-protected` / `protected-path` → `policy.edit`.** Any effectful
   segment naming a protected path is `policy.edit`, redirect targets included.
@@ -162,10 +166,49 @@ Three overrides sit on top of the table:
 - **`gate.self`.** The `approval` CLI (and `node …/dist/src/cli/main.js`) is the
   enforcement path; gating it with itself would deadlock. It is allowed and
   nothing is logged.
+- **`rewrite-unpublished` → `vcs.commit.branch`.** A local rewrite of history
+  this checkout never published is a commit. See below.
 
 Stricter-when-unsure, throughout: `git push` with no refspec is `vcs.push.main`,
 an `rm` path holding an unexpanded `$VAR` is `files.delete.out_of_scope`, and a
 remote-branch deletion takes the trunk class rather than the branch one.
+
+### Rewriting unpublished history
+
+`vcs.history.rewrite` guards SHARED history: a force push, a rebase of a branch
+someone else has pulled, an amend of a commit that is already on the remote. An
+agent amending its own unpushed worktree branch destroys nothing anyone can
+observe, so pricing that at a human's attention spends the audit budget on a
+non-event.
+
+The classifier stays pure and keeps answering `vcs.history.rewrite` from the
+text alone. The hook then applies one impure refinement, in the directory it
+runs in, to any segment classified `vcs.history.rewrite` by a marked (†) rule:
+
+| git state | `git commit --amend` | `git rebase` / `reset --hard` / `filter-branch` |
+|---|---|---|
+| branch has no upstream | `vcs.commit.branch`, rule `rewrite-unpublished` | `vcs.commit.branch`, rule `rewrite-unpublished` |
+| upstream set, HEAD not reachable from it | `vcs.commit.branch`, rule `rewrite-unpublished` | `vcs.history.rewrite` |
+| upstream set, HEAD reachable from it | `vcs.history.rewrite` | `vcs.history.rewrite` |
+| the default branch (`main`, `master`, or whatever `refs/remotes/origin/HEAD` names) | `vcs.history.rewrite` | `vcs.history.rewrite` |
+| detached HEAD, not a repository, no git, any git failure | `vcs.history.rewrite` | `vcs.history.rewrite` |
+
+Only two cases downgrade, then: a branch with **no upstream at all**, and an
+**amend whose HEAD is not yet on the upstream**. A rebase or reset names a base
+the text cannot resolve, so on a branch that has published anything it may be
+rewriting published commits and stays a rewrite. Everything push-side
+(`git push --force`, `--force-with-lease`, a `+refspec`) stays
+`vcs.history.rewrite` whatever the branch state is.
+
+The queries are `git rev-parse --abbrev-ref HEAD`, `git symbolic-ref
+refs/remotes/origin/HEAD`, `git for-each-ref --format=%(upstream:short)
+refs/heads/<branch>`, and `git merge-base --is-ancestor HEAD <upstream>`. Every
+one of them failing, or answering ambiguously, leaves the class alone.
+
+`approval hook classify` runs the same refinement in the same directory, so what
+it prints is what the hook decides, and a refined segment shows the rule name
+`rewrite-unpublished`. When the hook refines, its
+`permissionDecisionReason` says so.
 
 ## Deny reasons
 

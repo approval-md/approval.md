@@ -300,6 +300,197 @@ function parseHookInput(raw: string): ParsedInput {
 }
 
 // ===========================================================================
+// History-rewrite refinement (APRV-108)
+// ===========================================================================
+
+/*
+ * Rewriting history nobody else holds is a commit.
+ *
+ * `vcs.history.rewrite` exists to guard SHARED history: a force push, a rebase
+ * of a branch other people have pulled, an amend of a commit that is already on
+ * the remote. An agent amending its own unpublished worktree branch destroys
+ * nothing anyone can observe, and pricing that at a human's attention spends the
+ * audit budget SPEC.md §11 asks to protect on a non-event.
+ *
+ * The classifier cannot answer this, and deliberately does not try: it is pure,
+ * and "is this branch published" is a fact about a checkout, not about a string.
+ * So the refinement lives HERE, in the impure layer that already runs git
+ * (`primaryRoot`, APRV-101), and is applied to the classifier's output rather
+ * than folded into it. `classifyCommand` keeps returning `vcs.history.rewrite`
+ * for these verbs, its fixture table keeps meaning what it says, and everything
+ * environment-dependent is in one named step a reader can audit.
+ *
+ * What downgrades, and only this:
+ *
+ *  - the branch has NO upstream at all — nothing was ever published from it, so
+ *    no rewrite of it can reach anyone else; or
+ *  - the command is `git commit --amend` and HEAD is not reachable from the
+ *    upstream — the one commit an amend rewrites has not been pushed.
+ *
+ * What never downgrades: anything push-side (`git push --force` and friends),
+ * a detached HEAD, the repository's default branch, a rebase or reset whose
+ * target the text does not name (a `git reset --hard HEAD~5` on a branch with an
+ * upstream may well be rewriting published commits, and the text cannot say), and
+ * every case where git declines to answer. Fail closed on each: a wrong
+ * downgrade removes a human from a decision that needed one, and a wrong
+ * `rewrite` costs one approval prompt.
+ */
+
+/**
+ * Classifier rules whose rewrite is LOCAL, and so can be refined.
+ *
+ * `git-push-force` is deliberately absent: a push is a rewrite of the remote by
+ * construction, whatever this checkout's branch state is.
+ */
+const LOCAL_REWRITE_RULES: readonly string[] = [
+  /** `git commit --amend`. */
+  "git-commit-amend",
+  /** `git reset --hard`. */
+  "git-reset-hard",
+  /** `git rebase` / `filter-branch` / `filter-repo` (the table row's own id). */
+  "git-rewrite",
+];
+
+/** The one rule whose rewritten commit is exactly HEAD. */
+const AMEND_RULE = "git-commit-amend";
+
+/** The rule name a refined segment reports, in `hook classify` and in tests. */
+const REWRITE_UNPUBLISHED_RULE = "rewrite-unpublished";
+
+const REWRITE_CLASS = "vcs.history.rewrite";
+const UNPUBLISHED_CLASS = "vcs.commit.branch";
+
+/** Trimmed stdout of a successful git command, or `null` for any failure. */
+function gitOutput(cwd: string, args: readonly string[]): string | null {
+  const result = spawnSync("git", [...args], { cwd, encoding: "utf8" });
+  if (result.error !== undefined || result.status !== 0) return null;
+  return result.stdout.trim();
+}
+
+/**
+ * `git merge-base --is-ancestor` as three values, not two.
+ *
+ * Exit 0 is yes and exit 1 is no; every other exit (a missing ref, a broken
+ * repository, no git at all) is `null`, which the caller reads as "stay a
+ * rewrite" rather than as "no".
+ */
+function isAncestor(cwd: string, ancestor: string, descendant: string): boolean | null {
+  const result = spawnSync("git", ["merge-base", "--is-ancestor", ancestor, descendant], {
+    cwd,
+    encoding: "utf8",
+  });
+  if (result.error !== undefined) return null;
+  if (result.status === 0) return true;
+  if (result.status === 1) return false;
+  return null;
+}
+
+/**
+ * Is this the branch a rewrite must never be quiet about?
+ *
+ * `main` and `master` always count, whatever the remote says, so a local-only
+ * repository (and a branch someone named `main` in a scratch checkout) is
+ * covered. `refs/remotes/origin/HEAD` adds the remote's own answer when it is
+ * set, which is how a repository whose trunk is `develop` or `trunk` is read.
+ */
+function isDefaultBranch(cwd: string, branch: string): boolean {
+  if (branch === "main" || branch === "master") return true;
+  const head = gitOutput(cwd, ["symbolic-ref", "refs/remotes/origin/HEAD"]);
+  if (head === null || head.length === 0) return false;
+  return head.replace(/^refs\/remotes\/origin\//u, "") === branch;
+}
+
+/** How far the current branch has been published. */
+type RewriteReach =
+  /** Published, unreadable, default, or detached: no refinement. */
+  | { kind: "shared" }
+  /** The branch tracks nothing; nothing on it was ever published. */
+  | { kind: "no-upstream"; branch: string }
+  /** The branch tracks `upstream`, but HEAD has not reached it. */
+  | { kind: "head-unpushed"; branch: string; upstream: string };
+
+/**
+ * Ask git how far the checkout at `cwd` has been published.
+ *
+ * Every step that cannot be answered returns `shared`, which refines nothing.
+ * `for-each-ref` rather than `@{u}` on purpose: `rev-parse @{u}` exits non-zero
+ * both when there is no upstream and when the repository cannot be read, and
+ * those two must not collapse — one downgrades, the other must not.
+ */
+function rewriteReach(cwd: string): RewriteReach {
+  const branch = gitOutput(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  // No git, not a repository, or a detached HEAD (which prints `HEAD`): a
+  // detached rewrite has no branch whose publication could be checked.
+  if (branch === null || branch.length === 0 || branch === "HEAD") return { kind: "shared" };
+  if (isDefaultBranch(cwd, branch)) return { kind: "shared" };
+
+  // Exits 0 and prints an empty line when the branch tracks nothing, so an
+  // empty result is a real answer and a failure is not.
+  const upstream = gitOutput(cwd, [
+    "for-each-ref",
+    "--format=%(upstream:short)",
+    `refs/heads/${branch}`,
+  ]);
+  if (upstream === null) return { kind: "shared" };
+  if (upstream.length === 0) return { kind: "no-upstream", branch };
+
+  // An upstream is configured. HEAD reachable from it (or unanswerable, e.g. a
+  // tracking ref that was never fetched) stays a rewrite.
+  return isAncestor(cwd, "HEAD", upstream) === false
+    ? { kind: "head-unpushed", branch, upstream }
+    : { kind: "shared" };
+}
+
+/** A classification plus a human-readable note for every segment refined. */
+export interface RefinedClassification {
+  result: CommandClassification;
+  /** One line per downgraded segment; empty when nothing was refined. */
+  notes: string[];
+}
+
+/**
+ * Downgrade local rewrites of unpublished history to `vcs.commit.branch`.
+ *
+ * IMPURE by design and by contract: it runs git in `cwd`. Both callers pass the
+ * same directory the hook itself resolves from, so what `hook classify` prints
+ * is what `hook claude-code` decides.
+ */
+export function refineRewrite(result: CommandClassification, cwd: string): RefinedClassification {
+  if (!result.ok) return { result, notes: [] };
+  const refinable = result.segments.some(
+    (segment) => segment.class === REWRITE_CLASS && LOCAL_REWRITE_RULES.includes(segment.rule),
+  );
+  if (!refinable) return { result, notes: [] };
+
+  const reach = rewriteReach(cwd);
+  if (reach.kind === "shared") return { result, notes: [] };
+
+  const notes: string[] = [];
+  const segments = result.segments.map((segment) => {
+    if (segment.class !== REWRITE_CLASS || !LOCAL_REWRITE_RULES.includes(segment.rule)) {
+      return segment;
+    }
+    // With an upstream, only an amend is narrow enough to be sure: it rewrites
+    // HEAD and nothing else. A rebase or reset names a base the text cannot
+    // resolve, so it may reach commits that ARE on the upstream.
+    if (reach.kind === "head-unpushed" && segment.rule !== AMEND_RULE) return segment;
+    notes.push(
+      reach.kind === "no-upstream"
+        ? `${REWRITE_UNPUBLISHED_RULE}: branch ${reach.branch} has no upstream, so \`${segment.text}\` rewrites only unpublished history`
+        : `${REWRITE_UNPUBLISHED_RULE}: HEAD is not yet on ${reach.upstream}, so \`${segment.text}\` amends only unpublished history`,
+    );
+    return { ...segment, class: UNPUBLISHED_CLASS, rule: REWRITE_UNPUBLISHED_RULE };
+  });
+  if (notes.length === 0) return { result, notes };
+
+  const classes: string[] = [];
+  for (const segment of segments) {
+    if (!classes.includes(segment.class)) classes.push(segment.class);
+  }
+  return { result: { ok: true, segments, classes }, notes };
+}
+
+// ===========================================================================
 // hook classify
 // ===========================================================================
 
@@ -379,9 +570,12 @@ function commandClassify(argv: string[], streams: Streams, cwd: string): number 
   }
   const protectedPaths = load.ok ? (load.policy.protected_paths ?? []) : [];
 
+  // The same impure refinement `hook claude-code` applies (APRV-108), run
+  // against the same directory: an explainer that printed the pure class where
+  // the hook decides a refined one would be explaining a different program.
   streams.out(
     renderClassification(
-      classifyCommand(command, protectedPaths),
+      refineRewrite(classifyCommand(command, protectedPaths), cwd).result,
       boolFlag(parsed.flags, "--json"),
     ),
   );
@@ -499,6 +693,8 @@ function gateAndWait(
   input: HookInput,
   classes: string[],
   command: string,
+  /** The history-rewrite refinement's own words, or `""` (APRV-108). */
+  note = "",
 ): number {
   const nonce = input.toolUseId ?? randomBytes(8).toString("hex");
   const task = `hook:${input.sessionId}:${nonce}`;
@@ -569,7 +765,7 @@ function gateAndWait(
   if (pendingKeys.length === 0) {
     // Every class resolved supervised: intake recorded no request (amended
     // SPEC.md §6.3), so there is nothing to wait for.
-    return allow(streams, `granted: ${classes.join(", ")} needs no approval under this policy`);
+    return allow(streams, `granted: ${classes.join(", ")} needs no approval under this policy${note}`);
   }
 
   const deadline = Date.now() + run.timeoutMs;
@@ -632,7 +828,7 @@ function gateAndWait(
           return deny(streams, "hook-expired", `the request for ${task} lapsed before a decision`);
         }
         if (states.every((state) => state === "granted")) {
-          return allow(streams, `granted: ${task} (${classes.join(", ")})`);
+          return allow(streams, `granted: ${task} (${classes.join(", ")})${note}`);
         }
         // Not a wait outcome: the log disagrees with itself about keys this
         // process opened. Nothing is retracted, because the state that would
@@ -768,6 +964,8 @@ function runClaudeCodeHook(
   // What is being asked for, as one or more classes.
   let classes: string[];
   let command: string;
+  /** What the history-rewrite refinement did, for the decision reason. */
+  let notes: string[] = [];
   if (input.toolName === "Bash") {
     const raw = readString(input.toolInput, "command");
     if (raw === null) {
@@ -782,7 +980,13 @@ function runClaudeCodeHook(
         `${classified.detail} (segment: ${classified.segment}). Rewrite it as a command the classifier can read, or run the effect through \`approval run\` with a granted token.`,
       );
     }
-    classes = classified.classes.filter((cls) => cls !== GATE_SELF_CLASS);
+    // APRV-108: a local rewrite of history this checkout never published is a
+    // commit. Runs in the hook's own cwd, after classification and never inside
+    // it, and downgrades nothing it cannot establish from git.
+    const refined = refineRewrite(classified, cwd);
+    notes = refined.notes;
+    const answer = refined.result.ok ? refined.result : classified;
+    classes = answer.classes.filter((cls) => cls !== GATE_SELF_CLASS);
   } else {
     const cls = fileToolClass(input.toolInput, protectedPaths);
     if (cls === null) return allow(streams, `${input.toolName} is not a gated edit`);
@@ -794,6 +998,9 @@ function runClaudeCodeHook(
     return allow(streams, "the approval CLI is the gate itself and is not gated by it");
   }
 
+  /** Appended to every verdict this invocation prints, when it refined one. */
+  const note = notes.length === 0 ? "" : ` (${notes.join("; ")})`;
+
   const autonomous = classes.every(
     (cls) => resolvePolicy(load, cls).autonomy === "autonomous",
   );
@@ -801,7 +1008,7 @@ function runClaudeCodeHook(
     // Nothing is appended: an autonomous action has no approval lifecycle
     // (amended SPEC.md §6.3), and writing one here would fill the log with the
     // agent's every `ls`.
-    return allow(streams, `autonomous: ${classes.join(", ")}`);
+    return allow(streams, `autonomous: ${classes.join(", ")}${note}`);
   }
 
   // Past here the hook appends. It writes to a log that already exists and
@@ -824,6 +1031,7 @@ function runClaudeCodeHook(
     input,
     classes,
     command,
+    note,
   );
 }
 
