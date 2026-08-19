@@ -49,6 +49,7 @@ import { ENV_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
+import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 const FLAGS: Record<string, FlagKind> = {
@@ -88,7 +89,7 @@ function emitRefusal(streams: Streams, json: boolean, refusal: EnvFileRefusal): 
       `${JSON.stringify({ ok: false, error: { code: refusal.code, message: refusal.message, path: refusal.path, ...(refusal.line === undefined ? {} : { line: refusal.line }) } })}\n`,
     );
   } else {
-    streams.err(`approval: ${refusal.code}: ${refusal.message}\n`);
+    streams.err(`${renderRefusal(style({ json }), refusal.code, refusal.message)}\n`);
   }
   return refusalExitCode(refusal);
 }

@@ -127,6 +127,7 @@ import {
 } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
+import { style, tokenPanel, TOKEN_NOTICE_TELEGRAM } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 const LISTEN_FLAGS: Record<string, FlagKind> = {
@@ -519,9 +520,11 @@ function handlerFor(setup: ListenSetup, streams: Streams): (d: ChannelDecision) 
     // channel), not written to the log (which holds only its sha256), and not
     // handed back to the channel. Once this line scrolls away it is gone.
     if (result.token !== undefined) {
-      streams.out(`execution token for ${decision.action_key}: ${result.token}\n`);
+      // APRV-102: the shared rule-boxed panel, with the Telegram clause of the
+      // notice — the one surface where "not sent to Telegram" is a fact the
+      // reader might otherwise doubt, having just decided in a chat window.
       streams.out(
-        "approval: that token is single-use, stored nowhere, and was NOT sent to Telegram — copy it now\n",
+        `${tokenPanel(style(), decision.action_key, result.token, TOKEN_NOTICE_TELEGRAM)}\n`,
       );
     }
 

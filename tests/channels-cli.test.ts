@@ -520,7 +520,7 @@ test("a manual request with no payload material is skipped, visibly", () => {
   const world = repo();
   const run = runCli(["channel", "cli"], world.dir, { input: "" });
   assert.equal(run.code, 0);
-  assert.match(run.stderr, /skipped task-042:chaser \(payload-unavailable\)/u);
+  assert.match(run.stderr, /✗ payload-unavailable {2}skipped task-042:chaser:/u);
   assert.match(run.stdout, /queue: empty/u);
 });
 
@@ -534,9 +534,9 @@ test("a scripted grant records one event and prints the token exactly once", () 
 
   assert.equal(run.code, 0, run.stderr);
   assert.match(run.stdout, /granted task-042:chaser -> granted at seq 4/u);
-  const tokens = run.stdout.match(/^token: [0-9a-f]+$/gmu) ?? [];
+  const tokens = run.stdout.match(/^ {2}[0-9a-f]{64}$/gmu) ?? [];
   assert.equal(tokens.length, 1, `the token must be printed exactly once, saw ${tokens.length}`);
-  assert.match(run.stdout, /shown ONCE/u);
+  assert.match(run.stdout, /single-use · stored nowhere · copy it now/u);
 
   const events = logEvents(world.dir);
   assert.deepEqual(events.map((record) => record["event"]), [
@@ -550,7 +550,7 @@ test("a scripted grant records one event and prints the token exactly once", () 
   assert.equal((granted["payload"] as Record<string, unknown>)["note"], "looks right");
   // The raw token is nowhere in the log.
   const raw = readFileSync(join(world.dir, ".approval", "log", "events.jsonl"), "utf8");
-  const token = (run.stdout.match(/^token: ([0-9a-f]+)$/mu) ?? [])[1] as string;
+  const token = (run.stdout.match(/^ {2}([0-9a-f]{64})$/mu) ?? [])[1] as string;
   assert.ok(token.length > 0);
   assert.equal(raw.includes(token), false, "the raw token must never reach the log");
   assert.equal(runCli(["log", "verify"], world.dir).code, 0);

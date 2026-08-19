@@ -58,6 +58,7 @@ import {
 import { CONSUME_HELP, TOKEN_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 /** Identity accepted by `consume`: a person or an agent, never the runtime. */
@@ -111,7 +112,7 @@ function emitRefusal(streams: Streams, json: boolean, refusal: TokenRefusal): nu
     if (refusal.seq !== undefined) error["seq"] = refusal.seq;
     streams.err(`${JSON.stringify({ ok: false, error })}\n`);
   } else {
-    streams.err(`approval: ${refusal.code}: ${refusal.message}\n`);
+    streams.err(`${renderRefusal(style({ json }), refusal.code, refusal.message)}\n`);
   }
   return refusalExitCode(refusal);
 }

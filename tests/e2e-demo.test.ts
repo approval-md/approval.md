@@ -473,11 +473,11 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
     assert.match(stdout, new RegExp(`granted ${ACTION} .*by ${HUMAN} via telegram`, "u"));
 
     // The token is printed exactly once, on this terminal, and nowhere else.
-    const printed = /execution token for \S+: (\S+)/u.exec(stdout);
+    const printed = /execution token +\S+\n {2}(\S+)/u.exec(stdout);
     assert.ok(printed !== null, `no execution token on the listener's stdout: ${stdout}`);
     executionToken = printed[1] as string;
     assert.match(executionToken, /^[a-f0-9]{64}$/u);
-    assert.match(stdout, /NOT sent to Telegram/u);
+    assert.match(stdout, /not sent to Telegram/u);
 
     assert.deepEqual(events(), [
       "policy.updated",

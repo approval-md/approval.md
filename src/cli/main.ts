@@ -85,7 +85,14 @@ import {
 } from "./paths.js";
 import { parseLines, readCompleteLines } from "./records.js";
 import { helpFor, longHelp } from "./long-help.js";
-import { resetStyle, style } from "./style.js";
+import {
+  refusal as renderRefusal,
+  resetStyle,
+  style,
+  table,
+  type Role,
+  type Style,
+} from "./style.js";
 import { usageErrorText } from "./usage.js";
 import { wordmark } from "./wordmark.js";
 
@@ -163,6 +170,64 @@ function formatRecord(record: unknown): string {
     cell(fields["actor"]),
     cell(fields["task"]),
   ].join("\t");
+}
+
+/** The role an actor wears in `log tail`: a human decided, a robot did not. */
+function actorRole(actor: string): Role | undefined {
+  if (actor.startsWith("human:")) return "ok";
+  if (actor.startsWith("system:")) return "muted";
+  return undefined;
+}
+
+/**
+ * `approval log tail`'s human rendering (APRV-91 #9, APRV-102).
+ *
+ * TWO SHAPES, DELIBERATELY, and the piped one is unchanged.
+ *
+ * In a pipe (and under `NO_COLOR`) this is exactly what it always was:
+ * tab-separated fields, one record per line. That shape is pinned by
+ * `tests/cli.test.ts`, printed in three `examples/*.md` transcripts, and — the
+ * reason that matters more than either — it is what `cut -f2` reads. An aligned
+ * table is a nicer thing to look at and a worse thing to pipe, because the
+ * separator stops being a character and starts being "however many spaces this
+ * particular log needed". A log tail is the surface most likely to be on the
+ * left of a pipe, so the plain bytes win there.
+ *
+ * On a terminal, where nothing is parsing the output, the columns are aligned
+ * and the brief's roles apply: the seq right-aligned so the digits line up,
+ * the event name in `key`, and the actor coloured by kind (human `ok`, agent
+ * undressed, system `muted`). Colour is redundant with the actor prefix printed
+ * beside it, as everywhere. The TIMESTAMP is left undressed against the brief's
+ * `muted`: APRV-102's rule that a copyable value is never painted outranks it,
+ * and this is the surface an operator lifts timestamps out of.
+ *
+ * Both shapes carry the same fields in the same order, so this is a change of
+ * spacing and dressing, never of content.
+ */
+export function renderTailHuman(records: readonly unknown[], st: Style = style()): string {
+  if (!st.enabled) return records.map((record) => `${formatRecord(record)}\n`).join("");
+
+  const cellOf = (value: unknown): string =>
+    value === undefined || value === null ? "-" : String(value);
+  const rows = records.map((record) => {
+    const fields = (record ?? {}) as Record<string, unknown>;
+    const actor = cellOf(fields["actor"]);
+    const role = actorRole(actor);
+    return [
+      // Not `value`-roled but genuinely undressed: a seq is the thing an
+      // operator retypes into `approval audit review`.
+      cellOf(fields["seq"]),
+      // The brief marks a timestamp `muted`, and APRV-102's later rule — no
+      // colour inside a value a human copies — outranks it. A dim timestamp is
+      // exactly as unpasteable as a bold one, and this is the surface an
+      // operator lifts timestamps out of. The alignment does the separating.
+      cellOf(fields["ts"]),
+      { text: cellOf(fields["event"]), role: "key" as Role },
+      role === undefined ? actor : { text: actor, role },
+      cellOf(fields["task"]),
+    ];
+  });
+  return `${table(st, rows, { align: ["right"] })}\n`;
 }
 
 /** Shared front half of every command: flags, --help, and the log path. */
@@ -294,7 +359,12 @@ function commandVerify(argv: string[], streams: Streams, cwd: string): number {
     });
   } else {
     const where = result.firstBadSeq === null ? "unknown seq" : `seq ${result.firstBadSeq}`;
-    streams.err(`approval: corrupt: ${result.reason} at ${where}\n`);
+    // APRV-102: the shared refusal shape. `corrupt` is the machine-readable word
+    // here (it is `status` in `--json`, which is unchanged), and the reason and
+    // the seq are the message.
+    streams.err(
+      `${renderRefusal(style({ json }), "corrupt", `${result.reason} at ${where}`)}\n`,
+    );
     streams.err(`approval: ${result.message}\n`);
   }
   return EXIT_INTEGRITY;
@@ -367,7 +437,7 @@ function commandTail(argv: string[], streams: Streams, cwd: string): number {
         : { status, records: parsed.records, warning: outcome.warning },
     );
   } else {
-    for (const record of parsed.records) streams.out(`${formatRecord(record)}\n`);
+    streams.out(renderTailHuman(parsed.records, style({ json })));
   }
   if (outcome.warning !== null && !json) streams.err(`approval: ${outcome.warning}\n`);
   return EXIT_OK;

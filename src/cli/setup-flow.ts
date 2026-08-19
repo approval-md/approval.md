@@ -62,6 +62,7 @@ import {
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import type { Streams } from "./main.js";
 import { askUntil, type AnswerVerdict, type Prompter } from "./prompt.js";
+import { refusal as renderRefusal, style } from "./style.js";
 
 // ---------------------------------------------------------------------------
 // Destinations
@@ -602,7 +603,7 @@ export async function runCredentialFlow(flow: CredentialFlow): Promise<FlowResul
   //     before a password has been typed.
   const present = destination.present();
   if (!present.ok) {
-    streams.err(`approval: ${present.code}: ${present.message}\n`);
+    streams.err(`${renderRefusal(style(), present.code, present.message)}\n`);
     streams.err(`  nothing was collected and nothing was written to ${where}\n`);
     return { ...nothing, code: present.exitCode };
   }
@@ -686,7 +687,7 @@ export async function runCredentialFlow(flow: CredentialFlow): Promise<FlowResul
     if (value === undefined) continue;
     const stored = destination.write(spec.name, value);
     if (!stored.ok) {
-      streams.err(`approval: ${stored.code}: ${stored.message}\n`);
+      streams.err(`${renderRefusal(style(), stored.code, stored.message)}\n`);
       streams.err(
         written.length === 0
           ? `  nothing was written to ${where}\n`
