@@ -56,6 +56,7 @@ import { probeSmtp, type SmtpTransportOptions } from "../src/adapters/smtp.js";
 import { envFileDestination } from "../src/cli/setup-flow.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "../src/cli/exit-codes.js";
 import { commandSetup } from "../src/cli/setup.js";
+import type { ChannelSetupDeps } from "../src/cli/setup-channel.js";
 import {
   DEFAULT_SAMPLING_ENV,
   SERVICE_SAMPLING_SECRET,
@@ -295,7 +296,7 @@ interface Captured {
 async function run(
   argv: string[],
   home: Home,
-  deps: SetupDeps,
+  deps: ChannelSetupDeps,
   options: { emitsValues?: boolean } = {},
 ): Promise<Captured> {
   const out: string[] = [];
@@ -768,7 +769,7 @@ test("setup channel telegram: token, getMe, chat discovery, both lines — and n
     assert.equal(mock.pendingUpdateCount(), 2);
 
     const prompter = scriptedPrompter([
-      "", // Enter, after "send the bot a message"
+      // No Enter: since APRV-96 the verb long-polls until the message lands.
       true, // use chat <id>?
       false, // send a test message? — default no, and taken
     ]);
@@ -843,7 +844,7 @@ test("setup channel telegram: several candidates are numbered and picked", async
     mock.queueUpdate(messageUpdate({ chatId: "222", type: "group", title: "Ops" }));
     mock.queueUpdate(messageUpdate({ chatId: "333", firstName: "Nameless" }));
 
-    const prompter = scriptedPrompter(["", "2", false]);
+    const prompter = scriptedPrompter(["2", false]);
     const result = await run(["channel", "telegram", "--as", HUMAN], home, {
       prompter,
       keystore: fakeKeystore("keychain", { prompted: TOKEN }),
@@ -867,13 +868,17 @@ test("setup channel telegram: zero candidates exits 1 with the manual curl, and 
   const mock = await startMockBotApi(TOKEN);
   try {
     const home = makeHome();
-    const prompter = scriptedPrompter(["", "", ""]);
+    // Nothing is asked while it waits: the script is empty, and an unscripted
+    // question is an error in this prompter, so "no Enter is required" is an
+    // assertion here rather than a claim.
+    const prompter = scriptedPrompter([]);
     const result = await run(["channel", "telegram", "--as", HUMAN], home, {
       prompter,
       keystore: fakeKeystore("keychain", { prompted: TOKEN }),
       fetch: mockFetch(),
       apiBase: assertLocal(mock.url),
       pollTimeoutSeconds: 0,
+      discoveryDeadlineMs: 150,
     });
 
     assert.equal(result.code, EXIT_INTEGRITY, result.out);
@@ -884,7 +889,154 @@ test("setup channel telegram: zero candidates exits 1 with the manual curl, and 
     // The curl carries a PLACEHOLDER, never the token it is holding.
     assert.match(result.err, /bot<token>/u);
     assert.equal(existsSync(home.envPath), false);
-    assert.equal(getUpdatesBodies(mock.requests).length, 3, "it did not retry three times");
+    assert.ok(
+      getUpdatesBodies(mock.requests).length >= 1,
+      "it gave up without reading the update queue even once",
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// APRV-96: the wait, and what the give-up says
+// ---------------------------------------------------------------------------
+
+/**
+ * The observation this group exists for (2026-08-18, running
+ * `examples/email-demo.md`): the operator sent the bot a message, pressed
+ * Enter, and got "No message seen yet" — with no way to tell whether the
+ * message went to a different bot, arrived after the 10s long poll had
+ * expired, or had been consumed by another poller with an offset. A later curl
+ * of `getWebhookInfo` showed `pending_update_count: 1`.
+ */
+test("setup channel telegram: a message already waiting is found on the first poll, with no Enter", async () => {
+  const mock = await startMockBotApi(TOKEN);
+  try {
+    const home = makeHome();
+    mock.queueUpdate(messageUpdate({ chatId: CHAT, username: "carter" }));
+
+    const prompter = scriptedPrompter([true, false]);
+    const result = await run(["channel", "telegram", "--as", HUMAN], home, {
+      prompter,
+      keystore: fakeKeystore("keychain", { prompted: TOKEN }),
+      fetch: mockFetch(),
+      apiBase: assertLocal(mock.url),
+      pollTimeoutSeconds: 1,
+      discoveryDeadlineMs: 5_000,
+    });
+
+    assert.equal(result.code, EXIT_OK, result.err);
+    assert.equal(getUpdatesBodies(mock.requests).length, 1, "one poll should have sufficed");
+    assert.match(result.out, /waiting for a message to @approval_md_test_bot \(up to 5s, Ctrl-C to stop\)/u);
+    assert.match(result.out, /No Enter is needed/u);
+    assert.ok(readEnvLines(home).includes(`APPROVAL_TG_CHAT=${CHAT}`));
+    assert.deepEqual(prompter.remaining, []);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("setup channel telegram: a message sent AFTER the first poll came back empty is still found", async () => {
+  const mock = await startMockBotApi(TOKEN);
+  try {
+    const home = makeHome();
+    // The field case, exactly: the human is slow. The update is queued only
+    // once the verb has already polled and found nothing, so the run can only
+    // succeed by polling again on its own — which is the whole change.
+    const timer = setTimeout(() => {
+      mock.queueUpdate(messageUpdate({ chatId: CHAT, username: "carter" }));
+    }, 120);
+
+    const prompter = scriptedPrompter([true, false]);
+    const result = await run(["channel", "telegram", "--as", HUMAN], home, {
+      prompter,
+      keystore: fakeKeystore("keychain", { prompted: TOKEN }),
+      fetch: mockFetch(),
+      apiBase: assertLocal(mock.url),
+      // A poll far shorter than the wait, so the first read expires empty.
+      pollTimeoutSeconds: 0,
+      discoveryDeadlineMs: 10_000,
+    });
+    clearTimeout(timer);
+
+    assert.equal(result.code, EXIT_OK, result.err);
+    assert.ok(readEnvLines(home).includes(`APPROVAL_TG_CHAT=${CHAT}`));
+    const polls = getUpdatesBodies(mock.requests);
+    assert.ok(polls.length > 1, "it polled once and gave up on the human's timing");
+    for (const body of polls) {
+      assert.equal(Object.hasOwn(body, "offset"), false, "a re-poll carried an offset");
+      assert.deepEqual(body["allowed_updates"], ["message"]);
+    }
+    // Not one question while it waited: only the two after a chat was found.
+    assert.equal(
+      prompter.asked.some((question) => /Enter/u.test(question)),
+      false,
+      "the wait asked the operator to press Enter",
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("setup channel telegram: the deadline report names the bot, the pending count, and the webhook", async () => {
+  const mock = await startMockBotApi(TOKEN);
+  try {
+    const home = makeHome();
+    // What curl showed in the field: one update Telegram is holding that no
+    // poller has consumed. `allowed_updates` keeps this callback out of the
+    // verb's own reads, so it can only learn the count from getWebhookInfo.
+    mock.queueUpdate(callbackUpdate({ data: "g:nonce:task-1:act", chatId: CHAT }));
+
+    const result = await run(["channel", "telegram", "--as", HUMAN], home, {
+      prompter: scriptedPrompter([]),
+      keystore: fakeKeystore("keychain", { prompted: TOKEN }),
+      fetch: mockFetch(),
+      apiBase: assertLocal(mock.url),
+      pollTimeoutSeconds: 0,
+      discoveryDeadlineMs: 150,
+    });
+
+    assert.equal(result.code, EXIT_INTEGRITY, result.out);
+    assert.match(result.err, /no message reached @approval_md_test_bot in 1s/u);
+    assert.match(result.err, /did you message @approval_md_test_bot\?/u);
+    assert.match(result.err, /Telegram holds 1 update\(s\) for this bot that no poller has consumed/u);
+    assert.match(result.err, /stop `approval channel telegram listen`/u);
+    assert.match(result.err, /no webhook is registered/u);
+    // It asked, and it asked without acknowledging anything.
+    assert.equal(
+      mock.requests.filter((entry) => entry.method === "getWebhookInfo").length,
+      1,
+    );
+    assert.equal(mock.pendingUpdateCount(), 1, "the diagnosis consumed the listener's callback");
+    assert.equal(existsSync(home.envPath), false);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("setup channel telegram: a registered webhook is named as the reason nothing arrives", async () => {
+  const mock = await startMockBotApi(TOKEN);
+  try {
+    const home = makeHome();
+    mock.setWebhookInfo({ url: "https://hooks.example.test/tg", pendingUpdateCount: 0 });
+
+    const result = await run(["channel", "telegram", "--as", HUMAN], home, {
+      prompter: scriptedPrompter([]),
+      keystore: fakeKeystore("keychain", { prompted: TOKEN }),
+      fetch: mockFetch(),
+      apiBase: assertLocal(mock.url),
+      pollTimeoutSeconds: 0,
+      discoveryDeadlineMs: 150,
+    });
+
+    assert.equal(result.code, EXIT_INTEGRITY, result.out);
+    assert.match(result.err, /a webhook is registered at https:\/\/hooks\.example\.test\/tg/u);
+    assert.match(result.err, /getUpdates returns nothing while a webhook is set/u);
+    assert.match(result.err, /deleteWebhook/u);
+    // Zero pending is its own diagnosis: something else acknowledged them.
+    assert.match(result.err, /Telegram holds no pending updates for this bot/u);
+    assert.equal(existsSync(home.envPath), false);
   } finally {
     await mock.close();
   }
@@ -946,7 +1098,7 @@ test("setup channel telegram: the optional proof sends exactly one message when 
     const home = makeHome();
     mock.queueUpdate(messageUpdate({ chatId: CHAT, username: "carter" }));
     const result = await run(["channel", "telegram", "--as", HUMAN], home, {
-      prompter: scriptedPrompter(["", true, true]),
+      prompter: scriptedPrompter([true, true]),
       keystore: fakeKeystore("keychain", { prompted: TOKEN }),
       fetch: mockFetch(),
       apiBase: assertLocal(mock.url),
@@ -967,7 +1119,7 @@ test("setup channel telegram: a declined chat writes nothing", async () => {
     const home = makeHome();
     mock.queueUpdate(messageUpdate({ chatId: CHAT, username: "carter" }));
     const result = await run(["channel", "telegram", "--as", HUMAN], home, {
-      prompter: scriptedPrompter(["", false]),
+      prompter: scriptedPrompter([false]),
       keystore: fakeKeystore("keychain", { prompted: TOKEN }),
       fetch: mockFetch(),
       apiBase: assertLocal(mock.url),
@@ -1047,7 +1199,7 @@ test("setup channel telegram and setup adapter email print the same conversation
     mock.queueUpdate(messageUpdate({ chatId: CHAT, username: "carter" }));
     const telegram = await run(["channel", "telegram", "--as", HUMAN], tgHome, {
       ...tgDeps,
-      prompter: scriptedPrompter(["", true, false]),
+      prompter: scriptedPrompter([true, false]),
     });
     assert.equal(telegram.code, EXIT_OK, telegram.err);
     // Replace the token, leave the chat alone: the partial re-run is where the
@@ -1130,7 +1282,7 @@ test("a complete run of all five subcommands leaves the log byte-identical", asy
     await run(["sampling", "--as", HUMAN], home, { ...deps, prompter: scriptedPrompter([]) });
     await run(["channel", "telegram", "--as", HUMAN], home, {
       ...deps,
-      prompter: scriptedPrompter(["", true, false]),
+      prompter: scriptedPrompter([true, false]),
     });
     // The fifth, and the only one whose values go somewhere else: an adapter's
     // credentials land in the VAULT and add no line to .approval/env at all

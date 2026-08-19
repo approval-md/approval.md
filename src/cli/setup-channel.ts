@@ -36,9 +36,11 @@
  *   keystore: the helper's own no-echo prompt collects it and this runtime
  *   learns it by reading the item back on stdout.
  * - **The chat id is a literal.** A chat id is not a secret; the token is.
- * - Three attempts at "send the bot a message", the 409 hint, the manual-curl
- *   refusal when nothing arrives, and the optional send-a-test-message proof
- *   that defaults to NO.
+ * - "send the bot a message", the 409 hint, the manual-curl refusal when nothing
+ *   arrives, and the optional send-a-test-message proof that defaults to NO.
+ *   What changed in APRV-96 is only WHEN the read happens: the verb long-polls
+ *   continuously until a message arrives or {@link DISCOVERY_DEADLINE_MS}
+ *   passes, instead of asking the operator to press Enter between reads.
  *
  * ## Where the two hooks sit, and why
  *
@@ -87,8 +89,35 @@ import {
   type VerifyOutcome,
 } from "./setup-flow.js";
 
-/** How many times the human is asked to send a message before we give up. */
-const CHAT_DISCOVERY_ATTEMPTS = 3;
+/**
+ * How long the verb waits for a message before it gives up (APRV-96).
+ *
+ * It replaces the three "send one and press Enter" attempts, which made the
+ * operator's TIMING part of whether the verb worked: a message sent while the
+ * 10s long poll was not running was simply not seen, and the verb had no way to
+ * say so. Ninety seconds is long enough to unlock a phone and find the chat,
+ * and short enough that a run left in a forgotten terminal ends by itself.
+ */
+const DISCOVERY_DEADLINE_MS = 90_000;
+
+/** A deadline in whole seconds, for the two lines that state it. Never "0s". */
+function statedSeconds(ms: number): string {
+  return `${String(Math.max(1, Math.round(ms / 1000)))}s`;
+}
+
+/**
+ * The Telegram-only dependency, kept local to this file ON PURPOSE.
+ *
+ * `SetupDeps` is `setup-common.ts`'s, shared by every subcommand, and a
+ * discovery deadline is not something `setup vault` or `setup adapter email`
+ * has any meaning for. Tests inject a short one so the deadline path costs the
+ * suite milliseconds rather than a minute and a half; no operator has a reason
+ * to change it, so it is not a flag either.
+ */
+export interface ChannelSetupDeps extends SetupDeps {
+  /** The chat-discovery deadline in ms. {@link DISCOVERY_DEADLINE_MS} default. */
+  discoveryDeadlineMs?: number;
+}
 
 /**
  * The refusal for the OLD spelling, as one constant on one line.
@@ -387,9 +416,66 @@ function telegramHooks(
   }
 
   /**
+   * What Telegram itself says about this bot's update stream (APRV-96).
+   *
+   * Read ONLY on the give-up path, and read for one reason: when no message
+   * arrives, the three explanations an operator cannot tell apart are "you
+   * messaged a different bot", "a webhook is set, so getUpdates returns nothing
+   * ever", and "another poller acknowledged it with an offset". `getWebhookInfo`
+   * answers the last two directly and `getMe`'s username answers the first, so
+   * the refusal prints all three rather than "no message seen yet".
+   *
+   * It mutates nothing and acknowledges nothing, exactly like `getMe`.
+   */
+  async function webhookReport(held: string): Promise<string[]> {
+    const info = await call(fetchImpl, apiBase, held, "getWebhookInfo", {}, PROBE_TIMEOUT_MS);
+    if ("failed" in info) {
+      return [`  getWebhookInfo could not be reached (${info.failed}), so Telegram's own view of this bot is unknown\n`];
+    }
+    if (!info.ok || info.envelope["ok"] !== true) {
+      const description = redact(String(info.envelope["description"] ?? "no description"), held);
+      return [`  getWebhookInfo was refused: HTTP ${String(info.status)} (${description})\n`];
+    }
+    const result = (info.envelope["result"] ?? {}) as Record<string, unknown>;
+    const pending = typeof result["pending_update_count"] === "number" ? result["pending_update_count"] : 0;
+    const hook = typeof result["url"] === "string" ? redact(result["url"], held) : "";
+    const lines: string[] = [];
+    lines.push(
+      pending > 0
+        ? `  Telegram holds ${String(pending)} update(s) for this bot that no poller has consumed; another\n  process may be long-polling with an offset — stop \`approval channel telegram listen\`\n  (here and on any other machine) and retry.\n`
+        : `  Telegram holds no pending updates for this bot. If you did send one, something else\n  acknowledged it with an offset (a listener or daemon, possibly on another machine); that\n  process will also fight \`approval channel telegram listen\` with 409s.\n`,
+    );
+    lines.push(
+      hook.length > 0
+        ? `  a webhook is registered at ${hook}; getUpdates returns nothing while a webhook is set —\n  remove it with deleteWebhook, or read the chat id off the webhook instead.\n`
+        : `  no webhook is registered, so getUpdates is the right way to read this bot.\n`,
+    );
+    return lines;
+  }
+
+  /**
    * The chat, discovered from the bot's own updates.
    *
    * THE getUpdates BELOW CARRIES NO OFFSET, EVER. See this file's module doc.
+   *
+   * ## Waiting, rather than asking (APRV-96)
+   *
+   * The loop re-issues the same offset-less read back to back until a message
+   * turns up or the deadline passes, and asks the operator for nothing while it
+   * does. The old shape asked for Enter between reads, which made the OPERATOR
+   * responsible for overlapping their message with a 10s window: a message sent
+   * a second late was consumed by nothing, seen by nothing, and reported as "no
+   * message seen yet" (observed 2026-08-18 running `examples/email-demo.md`).
+   *
+   * **Ctrl-C is the abort, and it is the terminal's own.** Nothing here reads
+   * the keyboard, so stdin is not in raw mode and this process installs no
+   * SIGINT handler: the signal reaches Node's default disposition and the
+   * process dies between two HTTP calls. That is safe precisely because of
+   * where this hook sits — `.approval/env` is written by the flow only after
+   * every hook has returned, so an interrupted wait leaves the file exactly as
+   * it found it. (The keystore item the token step created stays, as it does on
+   * the give-up path below; it is a stored credential, not a half-written
+   * record.) A handler would add a way to be wrong about that and no capability.
    */
   async function discoverChat(): Promise<HookOutcome> {
     const recovered = recoverToken();
@@ -399,14 +485,14 @@ function telegramHooks(
     const bot = username ?? "the bot";
     const held = token ?? "";
 
-    let candidates: Candidate[] = [];
-    for (let attempt = 1; attempt <= CHAT_DISCOVERY_ATTEMPTS; attempt += 1) {
-      context.prompter.readLine(
-        attempt === 1
-          ? `\nOpen Telegram and send any message to ${bot} now, then press Enter: `
-          : `\nNo message seen yet. Send one to ${bot} and press Enter (attempt ${String(attempt)} of ${String(CHAT_DISCOVERY_ATTEMPTS)}): `,
-      );
+    const deadlineMs = (deps as ChannelSetupDeps).discoveryDeadlineMs ?? DISCOVERY_DEADLINE_MS;
+    const giveUpAt = Date.now() + deadlineMs;
+    streams.out(
+      `\nwaiting for a message to ${bot} (up to ${statedSeconds(deadlineMs)}, Ctrl-C to stop):\nopen Telegram and send it anything. No Enter is needed here — this keeps reading\nuntil your message lands, so it does not matter when you send it.\n`,
+    );
 
+    let candidates: Candidate[] = [];
+    for (;;) {
       // NO OFFSET, EVER. An `offset` is an ACKNOWLEDGEMENT: it tells the Bot API
       // that everything below it may be discarded. A running
       // `approval channel telegram listen` owns that acknowledgement, and a
@@ -442,11 +528,13 @@ function telegramHooks(
       }
       candidates = candidatesFrom(updates.envelope["result"]);
       if (candidates.length > 0) break;
+      if (Date.now() >= giveUpAt) break;
     }
 
     if (candidates.length === 0) {
+      const said = await webhookReport(held);
       streams.err(
-        `approval: no message reached ${bot} after ${String(CHAT_DISCOVERY_ATTEMPTS)} attempts, so there is no chat id to record.\n\nThe token is stored; only the two ${context.envPath} lines are missing. Find the id\nby hand — send the bot a message, then:\n\n  curl -s "${apiBase}/bot<token>/getUpdates" | grep -o '"chat":{"id":[-0-9]*'\n\n(the <token> is yours to substitute; it is deliberately not printed here). Then:\n\n  printf '%s\\n' '${telegramChatEnvFor(context.load)}=<id>' >> ${context.envPath}\n\nIf the bot is in a GROUP, check that privacy mode is off in @BotFather, or the\nbot never sees plain group messages at all.\n`,
+        `approval: no message reached ${bot} in ${statedSeconds(deadlineMs)}, so there is no chat id to record.\n\nWhat to check first, and what Telegram says about this bot right now:\n\n  did you message ${bot}? That is the bot getMe answered for, and the chat header on\n  your phone must read exactly that — a message to a different bot lands nowhere here.\n${said.join("")}\nThe token is stored; only the two ${context.envPath} lines are missing. Find the id\nby hand — send the bot a message, then:\n\n  curl -s "${apiBase}/bot<token>/getUpdates" | grep -o '"chat":{"id":[-0-9]*'\n\n(the <token> is yours to substitute; it is deliberately not printed here). Then:\n\n  printf '%s\\n' '${telegramChatEnvFor(context.load)}=<id>' >> ${context.envPath}\n\nIf the bot is in a GROUP, check that privacy mode is off in @BotFather, or the\nbot never sees plain group messages at all.\n`,
       );
       return { kind: "refused", code: EXIT_INTEGRITY };
     }
