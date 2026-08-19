@@ -22,6 +22,10 @@ import {
   resetStyle,
   shortHash,
   style,
+  table,
+  tokenPanel,
+  TOKEN_NOTICE,
+  TOKEN_NOTICE_TELEGRAM,
   type Glyph,
   type Role,
 } from "../src/cli/style.js";
@@ -61,6 +65,22 @@ test("colour is enabled only by the documented combination", () => {
     ["FORCE_COLOR beats TERM=dumb", { tty: false, env: { FORCE_COLOR: "1", TERM: "dumb" } }, true],
     // --no-color is the operator's explicit word and outranks the escape hatch.
     ["--no-color beats FORCE_COLOR", { tty: true, env: { FORCE_COLOR: "1" }, noColor: true }, false],
+    // APRV-102. FORCE_COLOR is a LEVEL everywhere else it is honoured: every
+    // non-empty value except 0/false is a yes, and `=== "1"` silently ignored
+    // the CI configurations that set 2, 3 or `true`.
+    ["FORCE_COLOR=2 in a pipe", { tty: false, env: { FORCE_COLOR: "2" } }, true],
+    ["FORCE_COLOR=3 in a pipe", { tty: false, env: { FORCE_COLOR: "3" } }, true],
+    ["FORCE_COLOR=true in a pipe", { tty: false, env: { FORCE_COLOR: "true" } }, true],
+    ["FORCE_COLOR=TRUE in a pipe", { tty: false, env: { FORCE_COLOR: "TRUE" } }, true],
+    ["FORCE_COLOR=0 is not a yes", { tty: false, env: { FORCE_COLOR: "0" } }, false],
+    ["FORCE_COLOR=false is not a yes", { tty: false, env: { FORCE_COLOR: "false" } }, false],
+    ["FORCE_COLOR=False is not a yes", { tty: false, env: { FORCE_COLOR: "False" } }, false],
+    // An EMPTY FORCE_COLOR is an unset variable spelled badly, exactly as with
+    // NO_COLOR above: it decides nothing, and the TTY question is asked.
+    ["FORCE_COLOR empty in a pipe", { tty: false, env: { FORCE_COLOR: "" } }, false],
+    ["FORCE_COLOR empty on a TTY", { tty: true, env: { FORCE_COLOR: "" } }, true],
+    // …and FORCE_COLOR=0 does not become a NO_COLOR: it declines to force.
+    ["FORCE_COLOR=0 on a TTY", { tty: true, env: { FORCE_COLOR: "0" } }, true],
   ];
   for (const [label, input, expected] of cases) {
     assert.equal(makeStyle(input).enabled, expected, `${label} should be ${expected}`);
@@ -236,6 +256,76 @@ test("a row with no right cell prints no trailing whitespace", () => {
   // pinned transcript, so the table trims every line it emits.
   const rendered = plain.table([{ left: "alone" }, { left: "pair", right: "value" }]);
   for (const line of rendered.split("\n")) assert.equal(line, line.trimEnd());
+});
+
+// ---------------------------------------------------------------------------
+// 4b. The n-column table and the token panel (APRV-102)
+// ---------------------------------------------------------------------------
+
+test("the n-column table aligns every column, header included", () => {
+  const rows = [
+    ["1", "2026-08-04T09:01:00Z", "task.registered", "agent:planner"],
+    ["10", "2026-08-04T09:02:00Z", "approval.granted", "human:alice"],
+  ];
+  assert.equal(
+    table(plain, rows, { header: ["seq", "ts", "event", "actor"] }),
+    [
+      "seq  ts                    event             actor",
+      "1    2026-08-04T09:01:00Z  task.registered   agent:planner",
+      "10   2026-08-04T09:02:00Z  approval.granted  human:alice",
+    ].join("\n"),
+  );
+});
+
+test("a right-aligned column pads on the left, so digits line up", () => {
+  const rendered = table(plain, [["1", "a"], ["100", "b"]], { align: ["right"] });
+  assert.equal(rendered, ["  1  a", "100  b"].join("\n"));
+});
+
+test("the n-column table dresses only the cells that asked for a role", () => {
+  const rows = [[{ text: "granted", role: "ok" as const }, "task-042:chaser"]];
+  const dressed = table(coloured, rows);
+  assert.equal(strip(dressed), table(plain, rows));
+  // The action key is a value: it must survive as one unbroken run.
+  assert.ok(dressed.endsWith("task-042:chaser"));
+});
+
+test("width is measured undressed, so colour cannot skew an n-column table", () => {
+  const rows = [
+    [{ text: "a", role: "fail" as const }, "one"],
+    ["bbbb", "two"],
+  ];
+  assert.equal(strip(table(coloured, rows)), table(plain, rows));
+});
+
+test("the token panel puts the token alone on an undressed line", () => {
+  const token = "729a25b06567ccc0aed356f3423e39bf12b6252056b7890acde455603010fb11";
+  const panel = tokenPanel(coloured, "task-042:chaser", token);
+  const lines = panel.split("\n");
+
+  // Five lines: rule, label row, the token, the notice, rule.
+  assert.equal(lines.length, 5);
+  assert.equal(strip(lines[0] as string), "─".repeat(61));
+  assert.equal(strip(lines[4] as string), "─".repeat(61));
+  assert.equal(strip(lines[1] as string), "  execution token   task-042:chaser");
+  // THE LOAD-BEARING ONE: the token line is exactly two spaces and the token.
+  // A triple-click on a coloured terminal must yield something spendable.
+  assert.equal(lines[2], `  ${token}`);
+  assert.equal(hasEscape(lines[2] as string), false, "an escape byte landed on the token line");
+  assert.equal(strip(lines[3] as string), `  ${TOKEN_NOTICE}`);
+  assert.ok(hasEscape(lines[3] as string), "the notice must be dressed on a terminal");
+
+  // And in a pipe the same panel is the same layout with no escapes at all.
+  assert.equal(strip(panel), tokenPanel(plain, "task-042:chaser", token));
+});
+
+test("the Telegram notice is the plain one plus the clause that surface needs", () => {
+  assert.ok(TOKEN_NOTICE_TELEGRAM.includes("not sent to Telegram"));
+  assert.equal(TOKEN_NOTICE.includes("Telegram"), false);
+  for (const notice of [TOKEN_NOTICE, TOKEN_NOTICE_TELEGRAM]) {
+    assert.ok(notice.startsWith("single-use · stored nowhere"));
+    assert.ok(notice.endsWith("copy it now"));
+  }
 });
 
 test("plainLeft keeps a copyable left cell undressed", () => {

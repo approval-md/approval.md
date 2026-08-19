@@ -35,6 +35,7 @@ import {
 import { RENDER_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
+import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 /** SPEC.md §9.1: where the queue projection lives. */
@@ -130,7 +131,7 @@ export function commandRender(argv: string[], streams: Streams, cwd: string): nu
         `${JSON.stringify({ ok: false, error: { code: result.code, message: result.message } })}\n`,
       );
     } else {
-      streams.err(`approval: ${result.code}: ${result.message}\n`);
+      streams.err(`${renderRefusal(style({ json }), result.code, result.message)}\n`);
     }
     return refusalExit(result.code);
   }

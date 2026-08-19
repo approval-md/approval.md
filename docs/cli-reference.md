@@ -84,6 +84,14 @@ The chain is verified first. On a torn tail the intact records are printed and t
 tear is a warning on stderr; on a corrupt log no records are printed at all. An
 empty or absent log prints nothing and succeeds, and nothing is repaired.
 
+Two human shapes, by whether colour is on. **In a pipe (and under `NO_COLOR`) the
+fields are tab-separated**, one record per line — `seq`, `ts`, `event`, `actor`,
+`task` — which is the shape `cut -f2` and every script that reads this verb rely
+on, and it is not going to change. On a terminal the same fields are printed as
+an aligned table, the seq right-aligned and the actor coloured by kind (human,
+agent, system); the timestamp and the seq stay undressed because they are values
+an operator copies.
+
 ```
 {"status":"ok","records":[<event objects, oldest first>]}
 {"status":"torn-tail","records":[...],"warning":"..."}
@@ -406,9 +414,10 @@ TTL: a decision after the request's TTL is refused with `expired`, judged from t
 request's OWN timestamp plus `defaults.approval_ttl`. When the gate discovers a
 lapse it appends `approval.expired` (actor `system:gate`) and then refuses.
 
-The raw token is printed once, on stdout as `token: <64 hex>`, or as the `token`
-key with `--json`. Capture it, or revoke and request again. Spend it with
-`approval run`.
+The raw token is printed once, on stdout, in a rule-boxed panel whose middle
+line is the 64-hex value alone and undressed (so a triple-click copies exactly
+the token), or as the `token` key with `--json`. Capture it, or revoke and
+request again. Spend it with `approval run`.
 
 **`--json`** (one object on stdout):
 
@@ -785,6 +794,12 @@ store is the normal state of a repo that has never made a request carrying
 **anomalies** are informational for the same reason `approval log verify`
 declined to refuse on them: status does not get to overrule that.
 
+**`--verbose`** prints the rationale sentences under the rows they explain — at
+v0.1 that is the payload-store paragraph above, which is the one row whose three
+numbers a first-time reader cannot interpret unaided. It adds lines and moves
+none: the rows themselves are byte-identical with and without it, and `--json`
+does not know the flag exists.
+
 **What it reports**, in one object:
 
 - `attestation` — attested | hash-mismatch | not-attested | unreadable, with the
@@ -825,6 +840,13 @@ status reports the health of the SYSTEM recorded in the log — attestation,
 dangling executions, budgets, escalations. doctor reports whether this MACHINE
 can run the system: the right build, a declared identity, a reachable channel. A
 stale binary is invisible to status and is exactly what doctor exists to name.
+
+**One line per check**, with its `fix` on one indented line under it, so a failed
+run is counted rather than read. A detail is abbreviated with `…` only when a
+terminal width is known and the row would overflow it; a pipe has no width and is
+never abbreviated, `--verbose` turns the abbreviation off everywhere, and a
+`fix:` line is never abbreviated on any path — repair instructions cut off
+mid-command are worse than a wide line.
 
 **Every fix begins with a command.** A `fix:` line opens with something you can
 paste — `approval …`, `chmod …`, `echo …`, `export …`, `mv …`, `node …`,

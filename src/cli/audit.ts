@@ -41,6 +41,7 @@ import {
 import { AUDIT_HELP, AUDIT_LIST_HELP, AUDIT_REVIEW_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
+import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 const COMMON_FLAGS: Record<string, FlagKind> = {
@@ -102,7 +103,9 @@ function emitRefusal(streams: Streams, json: boolean, refusal: AuditRefusal): nu
     if (refusal.seq !== undefined) error["seq"] = refusal.seq;
     streams.err(`${JSON.stringify({ ok: false, error })}\n`);
   } else {
-    streams.err(`approval: ${refusal.code}: ${refusal.message}\n`);
+    // APRV-102: the one refusal shape, and no `fix:` — an audit refusal names a
+    // state of the log or of the backlog, not a command that repairs it.
+    streams.err(`${renderRefusal(style({ json }), refusal.code, refusal.message)}\n`);
   }
   return refusalExitCode(refusal);
 }

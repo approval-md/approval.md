@@ -78,7 +78,7 @@ import {
 } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
-import { refusal as renderRefusal, style } from "./style.js";
+import { refusal as renderRefusal, style, tokenPanel } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 /** Identity accepted by the proposing verbs: a person or an agent. */
@@ -515,10 +515,11 @@ export function commandDecide(
   } else {
     streams.out(`${result.state} ${actionKey} at seq ${result.record.seq} by ${actor}\n`);
     if (result.token !== undefined) {
-      streams.out(
-        `token: ${result.token}\n` +
-          `(single-use execution token, shown ONCE: the log records only its SHA-256 and nothing can recover it. Spend it with \`approval run\`; if lost, revoke and request again.)\n`,
-      );
+      // APRV-102: the rule-boxed panel of APRV-91's brief. The prose that used
+      // to follow the token said what the notice says in one line; what it also
+      // did was put the one unrecoverable value in this CLI on a line with a
+      // label in front of it, where a triple-click takes the label too.
+      streams.out(`${tokenPanel(style({ json }), actionKey, result.token)}\n`);
     }
   }
   return EXIT_OK;

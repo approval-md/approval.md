@@ -93,7 +93,15 @@ import {
 } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
-import { relPath, style, type Role, type Style, type TableRow } from "./style.js";
+import {
+  refusal as renderRefusal,
+  relPath,
+  style,
+  table,
+  type Role,
+  type Style,
+  type TableRow,
+} from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 /** Identity accepted by `run`: a person or an agent, never the runtime. */
@@ -187,7 +195,13 @@ function emitRefusal(streams: Streams, json: boolean, refusal: ExecuteRefusal): 
     if (refusal.record !== undefined) error["event_seq"] = refusal.record.seq;
     streams.err(`${JSON.stringify({ ok: false, error })}\n`);
   } else {
-    streams.err(`approval: ${refusal.code}: ${refusal.message}\n`);
+    // APRV-102: the one refusal shape — glyph, machine-readable code, message,
+    // and never a help page after it. No `fix:` line is invented: an execution
+    // refusal names a STATE (no token, already started, budget exhausted) and
+    // the repair depends on which, so a guessed command would be wrong more
+    // often than right. Argument and payload refusals, which DO have one
+    // command each, keep theirs.
+    streams.err(`${renderRefusal(style({ json }), refusal.code, refusal.message)}\n`);
   }
   return executeRefusalExitCode(refusal);
 }
@@ -690,51 +704,32 @@ function ttlRole(remainingMs: number | null, ttlMs: number | null): Role {
  * The live inbox as an aligned table (APRV-91 #9).
  *
  * The old shape was tab-separated, which lines up only when every field happens
- * to be the same width, and a queue's fields never are. Widths are measured on
- * the UNDRESSED cells for the same reason `style.table` does it: escapes occupy
- * no columns. Nothing in the row is dressed except the TTL, and the request
- * timestamp, which the brief marks `muted`; the action key and the class are
- * copyable and stay clean.
+ * to be the same width, and a queue's fields never are. The alignment is
+ * `style.table`'s (APRV-102 replaced a hand-rolled copy of it here), so widths
+ * are measured on the UNDRESSED cells and the coloured render is the plain one
+ * with escapes inserted.
+ *
+ * The TTL is the only dressed cell. The request timestamp was `muted` until
+ * APRV-102 and is not any more: a timestamp is a value an operator copies into
+ * a `grep` or a bug report, and rule 3 of `style.ts` does not have a "but this
+ * one is only dim" exception.
  */
 export function renderQueueHuman(
   pending: readonly QueueEntry[],
   ttlMs: number | null,
   st: Style = style(),
 ): string {
-  const header = ["action", "task", "class", "cost", "requested", "ttl"];
-  const cells = pending.map((entry) => [
+  const rows = pending.map((entry) => [
     entry.action_key,
     entry.task ?? "-",
     entry.class ?? "-",
     `$${String(entry.est_cost_usd ?? 0)}`,
     entry.requested_ts ?? "-",
-    ttlText(entry.ttl_remaining_ms),
+    { text: ttlText(entry.ttl_remaining_ms), role: ttlRole(entry.ttl_remaining_ms, ttlMs) },
   ]);
-  const widths = header.map((label, column) =>
-    Math.max(label.length, ...cells.map((row) => (row[column] ?? "").length)),
-  );
-  const pad = (text: string, column: number): string =>
-    text + " ".repeat(Math.max(0, (widths[column] ?? 0) - text.length));
-
-  const lines = [
-    header.map((label, column) => st.key(pad(label, column))).join("  ").trimEnd(),
-  ];
-  pending.forEach((entry, index) => {
-    const row = cells[index] ?? [];
-    lines.push(
-      [
-        pad(row[0] ?? "", 0),
-        pad(row[1] ?? "", 1),
-        pad(row[2] ?? "", 2),
-        pad(row[3] ?? "", 3),
-        st.muted(pad(row[4] ?? "", 4)),
-        st.paint(ttlRole(entry.ttl_remaining_ms, ttlMs), pad(row[5] ?? "", 5)),
-      ]
-        .join("  ")
-        .trimEnd(),
-    );
-  });
-  return `${lines.join("\n")}\n`;
+  return `${table(st, rows, {
+    header: ["action", "task", "class", "cost", "requested", "ttl"],
+  })}\n`;
 }
 
 export function commandQueue(argv: string[], streams: Streams, cwd: string): number {
@@ -762,14 +757,18 @@ export function commandQueue(argv: string[], streams: Streams, cwd: string): num
     });
   }
 
-  const pending = pendingRequests(read.records, now(), ttlOf(flags, cwd));
+  // ONE read of the policy: `ttlOf` loads and parses it, and calling it twice
+  // (as this did before APRV-102) risks the two halves of one render disagreeing
+  // about the TTL if the file changes underneath, on top of the wasted work.
+  const ttlMs = ttlOf(flags, cwd);
+  const pending = pendingRequests(read.records, now(), ttlMs);
 
   if (json) {
     emitJson(streams, { ok: true, pending });
   } else if (pending.length === 0) {
     streams.out("queue: empty — no requests awaiting a decision\n");
   } else {
-    streams.out(renderQueueHuman(pending, ttlOf(flags, cwd), style({ json })));
+    streams.out(renderQueueHuman(pending, ttlMs, style({ json })));
   }
   // An empty inbox is a healthy inbox: queue never exits non-zero for having
   // nothing (or something) in it. Only the filesystem and a torn log can.
@@ -883,7 +882,13 @@ function payloadStoreSummary(
 }
 
 export function commandStatus(argv: string[], streams: Streams, cwd: string): number {
-  const outcome = front(argv, { ...COMMON_FLAGS, ...POLICY_FLAGS }, STATUS_HELP, streams, cwd);
+  const outcome = front(
+    argv,
+    { ...COMMON_FLAGS, ...POLICY_FLAGS, "--verbose": "boolean" },
+    STATUS_HELP,
+    streams,
+    cwd,
+  );
   if (outcome.kind === "handled") return outcome.code;
   const { flags, positionals, json, logPath } = outcome;
 
@@ -979,6 +984,7 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
     });
   } else {
     const st = style({ json });
+    const verbose = boolFlag(flags, "--verbose");
     const rows: TableRow[] = [
       {
         left: "health",
@@ -986,9 +992,12 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       },
       {
         left: "attestation",
+        // The seq is a value: an operator pastes it into `approval log tail` or
+        // a bug report, so APRV-102 took the `muted` dressing off it. The state
+        // beside it still carries the colour.
         right: `${st.paint(attestation.status === "attested" ? "ok" : "warn", attestation.status)}${
           attestation.status === "attested" || attestation.status === "hash-mismatch"
-            ? ` ${st.muted(`(seq ${attestation.seq})`)}`
+            ? ` (seq ${attestation.seq})`
             : ""
         }`,
       },
@@ -1043,6 +1052,10 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
         right: `${
           payloadStore.present ? `${payloadStore.files} file(s)` : "not created yet"
         }, ${payloadStore.pruned} pruned, ${payloadStore.orphans} unbound`,
+        // …and `--verbose` puts it back (APRV-102). The sentence is the one
+        // thing here a first-time reader cannot reconstruct from the numbers,
+        // so it is one flag away rather than gone.
+        ...(verbose ? { under: [st.muted(payloadStore.note)] } : {}),
       },
       {
         left: "loop escalations",

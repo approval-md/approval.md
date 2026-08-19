@@ -109,6 +109,10 @@ const FLAGS: Record<string, FlagKind> = {
   // check at a fixture tree. It moves no other check, and a wrong value can
   // only make check 1 wrong — never the log, the policy, or the network.
   "--root": "string",
+  // APRV-102. The brief's `--verbose`: never abbreviate a detail, whatever the
+  // terminal is doing. See `renderDoctorHuman` for why the default is not the
+  // aggressive truncation the brief first proposed.
+  "--verbose": "boolean",
   "--json": "boolean",
   "--help": "boolean",
   "-h": "boolean",
@@ -1269,15 +1273,32 @@ const GLYPH_OF: Record<DoctorCheck["status"], Glyph> = {
  * it, so an operator scanning a failed run counts rows rather than paragraphs.
  * What the table changed is alignment and colour, never that arithmetic.
  *
- * Details are printed IN FULL. The brief asked for truncation to terminal width
- * with `--verbose` restoring the sentence, and this deliberately does not do
- * that: `--verbose` would have to be declared in `DOCTOR_HELP`, and a check
- * whose repair instructions are cut off mid-command is worse than a wide line.
+ * A detail is abbreviated only when a TERMINAL WIDTH IS KNOWN and the row would
+ * not fit it, and `--verbose` (APRV-102) turns even that off. The brief asked
+ * for truncation outright; this is the narrowed version of it, for two reasons.
+ * A pipe has no width, so piped output — which every other suite pins, and
+ * which is what a bug report contains — is never abbreviated at all. And a
+ * `fix:` line is never touched on any path: repair instructions cut off
+ * mid-command are worse than a wide line, which is what the truncation was
+ * supposed to prevent.
  */
-export function renderDoctorHuman(checks: readonly DoctorCheck[], st: Style = style()): string {
+export function renderDoctorHuman(
+  checks: readonly DoctorCheck[],
+  st: Style = style(),
+  options: { verbose?: boolean; width?: number | null } = {},
+): string {
+  const labelWidth = Math.max(0, ...checks.map((entry) => entry.check.length));
+  // glyph (1) + space + label + gap (2), the columns the detail starts after.
+  const room =
+    options.verbose === true || options.width === null || options.width === undefined
+      ? null
+      : Math.max(20, options.width - labelWidth - 4);
+  const fit = (detail: string): string =>
+    room === null || detail.length <= room ? detail : `${detail.slice(0, room - 1)}…`;
+
   const rows: TableRow[] = checks.map((entry) => ({
     left: entry.check,
-    right: entry.detail,
+    right: fit(entry.detail),
     glyph: GLYPH_OF[entry.status],
     ...(entry.fix === undefined ? {} : { under: [`fix: ${entry.fix}`] }),
   }));
@@ -1382,7 +1403,15 @@ export function commandDoctor(
     const ok = checks.every((entry) => entry.status !== "fail");
 
     if (json) streams.out(`${JSON.stringify({ ok, checks })}\n`);
-    else streams.out(renderDoctorHuman(checks, style({ json })));
+    else {
+      streams.out(
+        renderDoctorHuman(checks, style({ json }), {
+          verbose: boolFlag(parsed.flags, "--verbose"),
+          // `undefined` in a pipe, which is exactly when nothing is abbreviated.
+          width: process.stdout.columns ?? null,
+        }),
+      );
+    }
 
     return ok ? EXIT_OK : EXIT_INTEGRITY;
   })();

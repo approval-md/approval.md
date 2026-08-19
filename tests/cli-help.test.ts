@@ -29,6 +29,7 @@ import { test } from "node:test";
 
 import * as help from "../src/cli/help.js";
 import { isShapeError, synopsis, usageErrorText, verbOf } from "../src/cli/usage.js";
+import { commandMcp } from "../src/cli/mcp.js";
 import { main } from "../src/cli/main.js";
 
 /** The repository root, from `dist/tests/` at runtime. */
@@ -213,6 +214,13 @@ test("the CLI's own usage and refusal lines cite no SPEC section", () => {
     ["vault", "get", "smtp.password"],
     ["payload", "hash"],
     ["run", "task-042:chaser"],
+    // APRV-102. `mcp` was the one verb family missing from this sweep, and it
+    // was the one still printing its whole help page under a usage error —
+    // which put that page's SPEC citations on an error screen.
+    // (`mcp serve` itself is asynchronous, so `main` reports its code through
+    // `process.exitCode`; its refusals get the awaited test below instead.)
+    ["mcp"],
+    ["mcp", "frobnicate"],
   ];
   for (const argv of runs) {
     const result = capture(argv, dir);
@@ -222,6 +230,39 @@ test("the CLI's own usage and refusal lines cite no SPEC section", () => {
       `\`approval ${argv.join(" ")}\` printed a SPEC citation:\n${result.err}${result.out}`,
     );
   }
+});
+
+test("mcp serve's startup identity refusal cites no SPEC section", async () => {
+  // Asynchronous, so it cannot ride the sweep above: the identity check happens
+  // after the server module is imported. It is the refusal an operator meets
+  // first (`--as human:x` on a server that is agent-facing by construction),
+  // and until APRV-102 it carried a SPEC.md §11 citation in the error line.
+  let err = "";
+  const code = await commandMcp(["serve", "--as", "human:x"], {
+    out: () => undefined,
+    err: (text) => {
+      err += text;
+    },
+  }, scratch());
+
+  assert.equal(code, 2);
+  assert.match(err, /--as expects agent:<id>/u);
+  assert.doesNotMatch(err, /SPEC\.md §/u);
+  // …and it is a pointer, not the page.
+  assert.match(err, /see: approval mcp serve --help/u);
+  assert.doesNotMatch(err, /exit codes: approval --help/u);
+
+  // The same for the argument-shape refusal on the same verb.
+  let flagErr = "";
+  const flagCode = await commandMcp(["serve", "--nope"], {
+    out: () => undefined,
+    err: (text) => {
+      flagErr += text;
+    },
+  }, scratch());
+  assert.equal(flagCode, 2);
+  assert.doesNotMatch(flagErr, /SPEC\.md §/u);
+  assert.match(flagErr, /see: approval mcp serve --help/u);
 });
 
 // ---------------------------------------------------------------------------

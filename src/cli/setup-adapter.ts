@@ -84,6 +84,7 @@ import { vaultCredentialProvider } from "../adapters/vault-provider.js";
 import { isSmtpSecurity, probeSmtp, type SmtpSecurity } from "../adapters/smtp.js";
 import { EXIT_OK } from "./exit-codes.js";
 import { SETUP_ADAPTER_EMAIL_HELP, SETUP_ADAPTER_HELP } from "./help.js";
+import { refusal as renderRefusal, style } from "./style.js";
 import type { Streams } from "./main.js";
 import { confirmUntil, type Prompter } from "./prompt.js";
 import {
@@ -239,7 +240,9 @@ async function probeAndReport(
   const lines = undo.map((name) => `  approval vault remove ${name} --as human:<id>`).join("\n");
   return {
     ok: false,
-    detail: `approval: ${result.code}: ${scrub(result.message)}\n\nThe values ARE stored — a probe that failed because a laptop is behind a captive\nportal is not a reason to make you type five things again. Fix the server or the\nsetting and re-run this verb, or undo it by hand:\n\n${lines}\n`,
+    // APRV-102: the one refusal shape, here too. A probe failure is the last
+    // thing this verb prints before the operator decides what to fix.
+    detail: `${renderRefusal(style(), result.code, scrub(result.message))}\n\nThe values ARE stored — a probe that failed because a laptop is behind a captive\nportal is not a reason to make you type five things again. Fix the server or the\nsetting and re-run this verb, or undo it by hand:\n\n${lines}\n`,
   };
 }
 

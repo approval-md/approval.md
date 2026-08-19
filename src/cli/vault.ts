@@ -67,6 +67,7 @@ import {
 } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 const COMMON_FLAGS: Record<string, FlagKind> = {
@@ -116,7 +117,7 @@ function emitRefusal(streams: Streams, json: boolean, refusal: VaultRefusal): nu
       `${JSON.stringify({ ok: false, error: { code: refusal.code, message: refusal.message, path: refusal.path } })}\n`,
     );
   } else {
-    streams.err(`approval: ${refusal.code}: ${refusal.message}\n`);
+    streams.err(`${renderRefusal(style({ json }), refusal.code, refusal.message)}\n`);
   }
   return refusalExitCode(refusal);
 }

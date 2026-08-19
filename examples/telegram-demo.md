@@ -378,8 +378,11 @@ The listener's terminal prints:
 
 ```
 granted task-demo:chaser (seq 4) by human:alice via telegram
-execution token for task-demo:chaser: 9c92f89a81cbfc4e6c2f1ebc48f8539dc904dd894cff5b665aaabce0f1fee629
-approval: that token is single-use, stored nowhere, and was NOT sent to Telegram — copy it now
+─────────────────────────────────────────────────────────────
+  execution token   task-demo:chaser
+  9c92f89a81cbfc4e6c2f1ebc48f8539dc904dd894cff5b665aaabce0f1fee629
+  single-use · stored nowhere · not sent to Telegram · copy it now
+─────────────────────────────────────────────────────────────
 ```
 
 Copy the token. It was never sent to Telegram (a chat transcript is not a secrets

@@ -83,7 +83,13 @@ import { POLICY_AMEND_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
 import { readLineFromStdin } from "./prompt.js";
-import { relPath, shortHash, style, type TableRow } from "./style.js";
+import {
+  refusal as renderRefusal,
+  relPath,
+  shortHash,
+  style,
+  type TableRow,
+} from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 const FLAGS: Record<string, FlagKind> = {
@@ -737,7 +743,11 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       liveLoad.ok
         ? [`${st.glyph("ok")} loads clean`]
         : [
-            `${st.glyph("fail")} ${st.fail("DOES NOT LOAD")} (${liveLoad.code}): ${liveLoad.message}`,
+            // APRV-102: glyph, CODE, message — the order every other refusal in
+            // this CLI uses. `DOES NOT LOAD` sat where the machine-readable code
+            // belongs and pushed the code into a parenthesis, so the one token a
+            // reader greps for was the one thing not in the scannable column.
+            renderRefusal(st, liveLoad.code, `the policy does not load: ${liveLoad.message}`),
             st.muted(
               "Attesting it is allowed (attestation records bytes, not correctness) but it will FAIL CLOSED to all-manual for every class. This is the shape of the seq 2 incident.",
             ),
