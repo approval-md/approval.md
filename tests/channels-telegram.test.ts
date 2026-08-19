@@ -38,6 +38,14 @@ import {
   type ConformanceCase,
   type ConformanceHarness,
 } from "../src/channels/conformance.js";
+import {
+  emailPayloadFields,
+  payloadRegionText,
+  BODY_BEGIN,
+  BODY_END,
+  CANONICAL_JSON_HEADING,
+  EMAIL_VIEW_HEADING,
+} from "../src/channels/payload-view.js";
 import { buildPendingQueue, type TagOptions } from "../src/channels/tagging.js";
 import {
   callbackData,
@@ -121,11 +129,28 @@ after(async () => {
 // Fixtures
 // ---------------------------------------------------------------------------
 
+/**
+ * An email-shaped payload, in the shape `adapters/email.ts` executes.
+ *
+ * Deliberately awkward, because this is the value the approver reads: the
+ * subject carries markup that must never become markup, the body is multi-line
+ * (the APRV-100 complaint: a JSON rendering shows those breaks as literal `\n`)
+ * and carries a `£`, which must survive byte for byte through escaping,
+ * chunking and the mock transport.
+ */
 function payloadFor(index: number): Record<string, unknown> {
   return {
+    from: "ap@approval.example",
     to: [`ap-${index}@vendor.example`],
     subject: `Invoice ${41 + index} chaser <urgent> & overdue`,
-    body: `Following up on invoice ${41 + index}, now ${14 + index} days overdue.`,
+    body: [
+      `Following up on invoice ${41 + index}, now ${14 + index} days overdue.`,
+      "",
+      `The balance is £1,200 <b>including</b> VAT & late fees.`,
+      "",
+      "Thanks,",
+      "Accounts",
+    ].join("\n"),
   };
 }
 
@@ -359,6 +384,125 @@ test("computed and claimed are separated, and the payload is sent verbatim", asy
   // And nothing was written to the log by rendering it.
   assert.equal(recordsOf(world.unit.logPath).length, 3);
   assert.ok(key.length > 0);
+});
+
+test("an email-shaped payload is rendered field by field, body as the human reads it", async () => {
+  const world = live(1);
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = mock.sentTexts().length;
+  await channel.notify(request_);
+  const whole = mock.sentTexts().slice(before).join("\n");
+
+  // The labelled fields, in order, escaped exactly as everything else is.
+  assert.match(whole, /\nfrom: ap@approval\.example\n/u);
+  assert.match(whole, /\nto: ap-0@vendor\.example\n/u);
+  assert.match(whole, /\nsubject: Invoice 41 chaser &lt;urgent&gt; &amp; overdue\n/u);
+  assert.equal(whole.includes("<urgent>"), false, "raw markup reached the message");
+  assert.equal(whole.includes("<b>including</b>"), false, "raw markup reached the message");
+
+  // The body region: real line breaks, escaped markup, non-ASCII untouched.
+  const start = whole.indexOf(BODY_BEGIN);
+  const end = whole.indexOf(BODY_END);
+  assert.ok(start > 0 && end > start, "the body block delimiters are missing");
+  const body = whole.slice(start + BODY_BEGIN.length + 1, end);
+  assert.equal(
+    body,
+    [
+      "Following up on invoice 41, now 14 days overdue.",
+      "",
+      "The balance is £1,200 &lt;b&gt;including&lt;/b&gt; VAT &amp; late fees.",
+      "",
+      "Thanks,",
+      "Accounts",
+      "",
+    ].join("\n"),
+    "the body is not rendered as the human will read it",
+  );
+  assert.equal(body.includes("\\n"), false, "the body still carries literal \\n escapes");
+  assert.ok(whole.includes("£1,200"), "the non-ASCII amount did not survive verbatim");
+
+  // The exact bytes are still on screen, underneath, JSON escapes and all.
+  assert.ok(whole.includes(CANONICAL_JSON_HEADING), "the canonical JSON was dropped");
+  assert.match(whole, /"body": "Following up on invoice 41[^"]*\\n/u);
+
+  // And the binding line — the one computed thing in this region — is intact.
+  assert.match(
+    whole,
+    new RegExp(`payload sha256:</b> ${request_.payload_hash.value}`, "u"),
+    "the computed binding line changed",
+  );
+  assert.ok(
+    whole.includes(`--- full payload (sha256 ${request_.payload_hash.value}) ---`),
+    "the payload region lost its hash label",
+  );
+
+  // The reading aid announces itself as claimed, so legible never reads as verified.
+  assert.ok(whole.includes(EMAIL_VIEW_HEADING.replace(/&/gu, "&amp;")));
+
+  assert.equal(recordsOf(world.unit.logPath).length, 3);
+});
+
+test("only structurally email-shaped payloads leave the JSON rendering", () => {
+  const json = (value: unknown): string => JSON.stringify(value, null, 2);
+  const view = (value: unknown, truncated = false): string =>
+    payloadRegionText({ value, text: json(value), hash: "h", truncated });
+
+  // Recognised: the adapter's shape, with `to` as a list or as a bare string.
+  assert.notEqual(emailPayloadFields({ to: ["a@b.example"], subject: "s", body: "b" }), null);
+  assert.notEqual(emailPayloadFields({ to: "a@b.example", subject: "s", body: "b" }), null);
+
+  // A self-declared kind buys nothing: it is simply a key this view cannot
+  // show, so the payload falls back to JSON rather than being half-rendered.
+  const declared = { kind: "email", to: ["a@b.example"], subject: "s", body: "b" };
+  assert.equal(emailPayloadFields(declared), null);
+  assert.equal(view(declared), json(declared), "a self-declared field changed the rendering");
+
+  // Wrong types, missing required fields, and non-objects all stay JSON.
+  for (const value of [
+    { to: [1], subject: "s", body: "b" },
+    { to: ["a@b.example"], subject: "s" },
+    { from: "a@b.example", subject: "s", body: "b" },
+    { to: ["a@b.example"], subject: "s", body: 3 },
+    ["a@b.example"],
+    "just a string",
+    null,
+    42,
+  ]) {
+    assert.equal(emailPayloadFields(value), null, `wrongly recognised ${json(value)}`);
+    assert.equal(view(value), json(value), `rendering changed for ${json(value)}`);
+  }
+
+  // A truncated rendering keeps today's text: `value` holds more than `text`
+  // admits to showing, and expanding it here would silently un-truncate it.
+  const whole = { to: ["a@b.example"], subject: "s", body: "b" };
+  assert.equal(view(whole, true), json(whole));
+
+  // `bcc` and `content_type` are shown, never dropped: a field the reader
+  // cannot see is a hidden payload wearing a friendlier face.
+  const full = emailPayloadFields({
+    from: "a@b.example",
+    to: ["c@d.example"],
+    cc: ["e@f.example"],
+    bcc: ["g@h.example"],
+    subject: "s",
+    content_type: "text/plain",
+    body: "b",
+  });
+  assert.deepEqual(
+    full?.map((field) => field.label),
+    ["from", "to", "cc", "bcc", "subject", "content_type", "body"],
+  );
+
+  // `cc` is omitted when absent rather than rendered empty.
+  const noCc = emailPayloadFields({ to: ["c@d.example"], subject: "s", body: "b" });
+  assert.equal(
+    noCc?.some((field) => field.label === "cc"),
+    false,
+  );
 });
 
 test("callback_data is bounded, and the nonce — not the wire's key — is authoritative", () => {
