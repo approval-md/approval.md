@@ -1582,7 +1582,9 @@ Known adapters:
 
 Asks for each credential the named adapter DECLARES, validates every answer with
 the adapter's own rules, stores them in .approval/vault.enc, and offers to prove
-the result against the service. THE PASSPHRASE IS READ, NEVER ESTABLISHED: it
+the result against the service. A RE-RUN THAT REPLACED ONLY SOME NAMES offers the
+same proof over the STORED set, read the way the adapter reads it at send time.
+THE PASSPHRASE IS READ, NEVER ESTABLISHED: it
 comes from the variable your policy names in vault.passphrase_env. WHAT IT
 REPORTS is the path, the count and the names, never a value.
 
