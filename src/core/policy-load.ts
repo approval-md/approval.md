@@ -131,6 +131,14 @@ export interface Policy {
      * path, because an agent that can read it can predict the sample.
      */
     sampling_secret_env?: string;
+    /**
+     * Amended SPEC.md §8 (APRV-58): how far a gate-typed `ts` may step backwards
+     * from its gate-typed predecessor before `core/verify.ts` reports a
+     * `gate-ts-regression`. Absent means the reference runtime's 2 seconds.
+     * Report-only in every direction: it decides what a human is shown about a
+     * log that already verified, and no verdict reads it.
+     */
+    skew_tolerance?: string;
   };
   channels?: Record<string, Record<string, unknown>>;
   /**
@@ -154,6 +162,12 @@ export interface Policy {
 export interface PolicyDurations {
   /** `defaults.approval_ttl` in milliseconds, or `null` when unset. */
   approvalTtlMs: number | null;
+  /**
+   * `audit.skew_tolerance` in milliseconds, or `null` when unset (APRV-58).
+   * `null` means the verifier's own default, never "no tolerance": a zero
+   * allowance would report every healthy fleet's ordinary clock disagreement.
+   */
+  skewToleranceMs: number | null;
 }
 
 /** Where the loaded policy came from. */
@@ -502,10 +516,32 @@ export function loadPolicy(options: LoadPolicyOptions = {}): PolicyLoadResult {
     }
   }
 
+  // The same treatment, for the same reason: one parse of the grammar, one
+  // number every reader shares, and an unparseable duration fails the whole
+  // policy rather than leaving one key quietly unread (APRV-58).
+  const skewText = policy.audit?.skew_tolerance;
+  let skewToleranceMs: number | null = null;
+  if (skewText !== undefined) {
+    skewToleranceMs = parseDuration(skewText);
+    if (skewToleranceMs === null) {
+      return failure(
+        "schema-invalid",
+        `${resolved.path}: audit.skew_tolerance "${skewText}" is not a valid duration`,
+        [
+          {
+            path: "/audit/skew_tolerance",
+            keyword: "duration",
+            message: "expected <positive integer><unit> with unit in ms|s|m|h|d|w",
+          },
+        ],
+      );
+    }
+  }
+
   return {
     ok: true,
     policy,
     source: { path: resolved.path, filename: basename(resolved.path) },
-    durations: { approvalTtlMs },
+    durations: { approvalTtlMs, skewToleranceMs },
   };
 }

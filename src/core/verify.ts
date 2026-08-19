@@ -54,6 +54,7 @@
 import { readFileSync } from "node:fs";
 
 import { ALG, computeRecordHash, type EventRecord, type LogHead } from "./log.js";
+import { loadPolicy, type LoadPolicyOptions } from "./policy-load.js";
 import { validate, type ValidateOptions } from "./validate.js";
 
 /**
@@ -112,15 +113,41 @@ function isGateTyped(event: string): boolean {
  * (minutes to hours), or one moved outside a rolling budget window (hours). No
  * attack is bought by 1.9 seconds, and no healthy fleet needs 2.1.
  *
- * HUMAN REVIEW: this constant is a drafted default, not a spec-derived one.
- * SPEC.md §8 requires "implausible skew" to be reported and deliberately does
- * not fix the number. An operator running a single host could tighten it to
- * 250 ms; one running across a WAN with poor time discipline might want 5 s.
- * Making it configurable is a policy-vocabulary change and therefore its own
- * task; it is a constant here so that today it has exactly one value and every
- * reader can see it.
+ * It is the DEFAULT rather than the only value since APRV-58: an operator
+ * running a single host may tighten it to 250 ms, one running across a WAN with
+ * poor time discipline may loosen it to 5 s, and `audit.skew_tolerance` in the
+ * policy is where they say so. A policy that declares nothing (or that fails to
+ * load at all) leaves this number in force, so the reference runtime still has
+ * exactly one value that every reader can see.
+ *
+ * Widening the tolerance permits nothing: the threshold is report-only in both
+ * directions, so a loosened value hides evidence from a human and cannot make
+ * any action allowed that was refused before.
  */
 export const GATE_TS_SKEW_TOLERANCE_MS = 2_000;
+
+/**
+ * `audit.skew_tolerance` in milliseconds, or the default when it says nothing.
+ *
+ * Fails closed to the default exactly as `daemon/prune.ts`'s retention read
+ * does: a policy that cannot be loaded configures nothing, and for THIS key the
+ * safe fallback is the shipped number rather than zero — a zero allowance would
+ * report every ordinary clock disagreement as an anomaly, and an anomaly channel
+ * that cries wolf is one operators stop reading. An unparseable duration never
+ * reaches here: the schema's duration pattern rejects it and `loadPolicy` fails
+ * the whole policy, precisely as a bad `defaults.approval_ttl` does.
+ */
+export function skewToleranceMsOf(
+  policy: { dir?: string; file?: string },
+  schemaDir?: string,
+): number {
+  const where: LoadPolicyOptions =
+    policy.file !== undefined ? { file: policy.file } : { dir: policy.dir ?? process.cwd() };
+  if (schemaDir !== undefined) where.schemaDir = schemaDir;
+  const load = loadPolicy(where);
+  if (!load.ok) return GATE_TS_SKEW_TOLERANCE_MS;
+  return load.durations.skewToleranceMs ?? GATE_TS_SKEW_TOLERANCE_MS;
+}
 
 /**
  * Machine-readable anomaly kinds. Closed union, additive-only, each pinned by a
@@ -169,7 +196,10 @@ export interface ChainAnomaly {
  * it would be refusing on a heuristic — which is how a tamper-evidence tool
  * starts being run with a flag that turns it off.
  */
-export function chainAnomalies(records: readonly EventRecord[]): ChainAnomaly[] {
+export function chainAnomalies(
+  records: readonly EventRecord[],
+  toleranceMs: number = GATE_TS_SKEW_TOLERANCE_MS,
+): ChainAnomaly[] {
   const anomalies: ChainAnomaly[] = [];
   let previous: { seq: number; ts: string; millis: number } | null = null;
 
@@ -180,7 +210,7 @@ export function chainAnomalies(records: readonly EventRecord[]): ChainAnomaly[] 
 
     if (previous !== null) {
       const skewMs = previous.millis - millis;
-      if (skewMs > GATE_TS_SKEW_TOLERANCE_MS) {
+      if (skewMs > toleranceMs) {
         anomalies.push({
           kind: "gate-ts-regression",
           seq: record.seq,
@@ -192,7 +222,7 @@ export function chainAnomalies(records: readonly EventRecord[]): ChainAnomaly[] 
           message: `record ${record.seq} (${record.event}) is timestamped ${record.ts}, ${String(
             skewMs,
           )}ms BEFORE the previous gate-typed record ${previous.seq} at ${previous.ts}. Gate-typed timestamps are stamped by the runtime at the write boundary (SPEC.md §8), so a backwards step larger than ${String(
-            GATE_TS_SKEW_TOLERANCE_MS,
+            toleranceMs,
           )}ms means either a clock that stepped backwards or a timestamp that was authored rather than stamped. The chain still verifies and nothing is refused: this is reported for a human to weigh, because TTL judgment and budget windows read ts.`,
         });
       }
@@ -251,6 +281,30 @@ export interface VerifyOptions extends ValidateOptions {
    * suffix; see the detection boundary in the module header.
    */
   expectedHead?: LogHead;
+  /**
+   * Where the policy carrying `audit.skew_tolerance` lives (APRV-58), with
+   * `loadPolicy`'s semantics. Supplied by a caller that has a policy to hand;
+   * absent means {@link GATE_TS_SKEW_TOLERANCE_MS}.
+   *
+   * It reaches exactly one thing, the anomaly threshold, and anomalies change no
+   * verdict. Verification's answer to "does this chain hold" is a function of
+   * the log bytes and the schemas, and no policy — loadable, absent, hostile, or
+   * edited — can move it.
+   */
+  policy?: { dir?: string; file?: string };
+  /**
+   * The tolerance, already resolved, in milliseconds. Overrides
+   * {@link VerifyOptions.policy} when both are given, and exists so the pure
+   * paths and the tests can state a threshold without a file on disk.
+   */
+  skewToleranceMs?: number;
+}
+
+/** The tolerance a verification run should apply, from its options alone. */
+function toleranceOf(options: VerifyOptions): number {
+  if (options.skewToleranceMs !== undefined) return options.skewToleranceMs;
+  if (options.policy === undefined) return GATE_TS_SKEW_TOLERANCE_MS;
+  return skewToleranceMsOf(options.policy, options.schemaDir);
 }
 
 function corrupt(
@@ -612,7 +666,7 @@ export function verifyText(
   // Computed once over the records the walk vouched for, and attached to every
   // non-corrupt verdict. Additive: it changes no status, no exit code, and no
   // authorization. Clean with anomalies is clean.
-  const anomalies = chainAnomalies(records);
+  const anomalies = chainAnomalies(records, toleranceOf(options));
 
   if (torn !== null) {
     return {

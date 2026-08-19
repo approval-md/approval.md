@@ -895,7 +895,10 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
   const check = preflightLog(logPath);
   if (!check.ok) return ioError(streams, json, check.message);
 
-  const verification = verify(logPath);
+  // The policy is read here for one number, the skew tolerance of amended
+  // SPEC.md §8 (APRV-58), and it reaches only which anomalies are reported. The
+  // verdict, the health line and the exit code below are unmoved by it.
+  const verification = verify(logPath, { policy: policyLocation(flags, cwd) });
   const read = readVerifiedRecords(logPath);
   // A log that cannot be read at all is an I/O fact, not a health report.
   if (!read.ok && read.code === "log-unreadable") {

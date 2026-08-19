@@ -1479,6 +1479,10 @@ exit 4; `log-dir-not-repo` and `log-dir-nested` exit 2.
 {"event":"drift","task":"task-042","file":"backlog/tasks/task-042.md",
  "declared_state":"approved","derived_state":"awaiting","seq":9}
 {"event":"expired","action_key":"task-042:chaser","task":"task-042","seq":10}
+{"event":"sampled","action_key":"task-042:draft","task":"task-042","seq":11,
+ "subject_seq":8}
+{"event":"pruned","payload_hash":"<sha256 of the payload>","reason":
+ "payload_retention","action_key":"task-042:chaser","task":"task-042","seq":12}
 {"event":"rendered","path":".approval/QUEUE.md","bytes":2481,"pending":1,
  "skipped":0,"audit_backlog":0}
 {"event":"escalated","task":"task-042","consecutive_failures":3}
@@ -1499,7 +1503,11 @@ loop, and neither does `{"event":"git_evidence_failed","step":"commit",…}`.
 Payload retention: with `payload_retention` set in policy, each tick appends
 `payload.pruned` and THEN removes the payload file for every payload whose action
 has been terminal longer than the duration, and for orphaned store files. With the
-key absent nothing is ever pruned. `rendered` is emitted when the queue's summary
+key absent nothing is ever pruned. One `pruned` line is emitted per removal that
+both appended its event and unlinked its file; a prune whose unlink failed is a
+`prune-refused` warning instead. One `sampled` line is emitted per `audit.sampled`
+the tick appended, so a supervised action drawn for retrospective review is named
+rather than inferred from the queue's backlog. `rendered` is emitted when the queue's summary
 CHANGES; the file itself is rewritten every tick, because TTL countdowns move even
 when the log does not.
 

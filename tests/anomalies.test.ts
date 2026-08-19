@@ -25,10 +25,12 @@ import { after, test } from "node:test";
 
 import { main } from "../src/cli/main.js";
 import { appendEvent, type EventRecord } from "../src/core/log.js";
+import { loadPolicy } from "../src/core/policy-load.js";
 import {
   chainAnomalies,
   CHAIN_ANOMALY_KINDS,
   GATE_TS_SKEW_TOLERANCE_MS,
+  skewToleranceMsOf,
   verify,
 } from "../src/core/verify.js";
 import { appendAttestation, decide, register, request } from "./clock-adapters.js";
@@ -65,6 +67,14 @@ const POLICY = [
   "```",
   "",
 ].join("\n");
+
+/** The same policy with an `audit.skew_tolerance` (APRV-58). */
+function policyWithSkew(tolerance: string): string {
+  return POLICY.replace(
+    "```\n",
+    ["audit:", `  skew_tolerance: "${tolerance}"`, "```\n"].join("\n"),
+  );
+}
 
 interface Case {
   dir: string;
@@ -174,10 +184,107 @@ test("the anomaly-kind union is frozen public API", () => {
 });
 
 test("the skew tolerance is pinned at 2 seconds", () => {
-  // Drafted rather than spec-derived: SPEC.md §8 requires "implausible skew" to
-  // be reported and deliberately fixes no number. Pinned here so a change to it
-  // is a deliberate edit with a test in the diff, never a quiet retune.
+  // The DEFAULT since APRV-58, and still drafted rather than spec-derived:
+  // amended SPEC.md §8 names `audit.skew_tolerance` and leaves the absent case
+  // to the implementation. Pinned here so a change to it is a deliberate edit
+  // with a test in the diff, never a quiet retune.
   assert.equal(GATE_TS_SKEW_TOLERANCE_MS, 2_000);
+});
+
+// ===========================================================================
+// The policy knob (amended SPEC.md §8, APRV-58)
+// ===========================================================================
+
+test("audit.skew_tolerance tightens the threshold; absent means the default", () => {
+  // 3s of backwards step: inside no policy's business at 2s? No — past the
+  // default, so the shipped behavior reports it, and a policy declaring 5s
+  // must not.
+  const unit = scenario(600_000, 600_000 - 3_000);
+  assert.equal(verify(unit.logPath).anomalies.length, 1, "the default reports a 3s step");
+
+  writeFileSync(unit.policyPath, policyWithSkew("5s"), "utf8");
+  assert.deepEqual(
+    verify(unit.logPath, { policy: { file: unit.policyPath } }).anomalies,
+    [],
+    "a policy that widens the allowance must be read",
+  );
+
+  // And the other direction: a tighter allowance reports a step the default
+  // would have called ordinary clock disagreement.
+  const small = scenario(600_000, 600_000 - 500);
+  assert.deepEqual(verify(small.logPath).anomalies, [], "500ms is inside the default");
+  writeFileSync(small.policyPath, policyWithSkew("250ms"), "utf8");
+  const tightened = verify(small.logPath, { policy: { file: small.policyPath } });
+  assert.equal(tightened.status, "clean", "a threshold never moves the verdict");
+  assert.equal(tightened.anomalies.length, 1);
+  assert.match(tightened.anomalies[0]?.message ?? "", /larger than 250ms/u);
+  assert.match(tightened.anomalies[0]?.message ?? "", /nothing is refused/u);
+});
+
+test("a policy declaring no tolerance, and one that will not load, leave the default in force", () => {
+  const unit = scenario(600_000, 600_000 - 3_000);
+  const withPolicy = verify(unit.logPath, { policy: { file: unit.policyPath } });
+  assert.equal(withPolicy.anomalies.length, 1, "the fixture policy declares no tolerance");
+
+  // Fail closed to the SHIPPED number, not to zero: a zero allowance would
+  // report every healthy fleet's ordinary clock disagreement, and an anomaly
+  // channel that cries wolf is one operators stop reading.
+  writeFileSync(unit.policyPath, "# Policy\n\nno block at all\n", "utf8");
+  const unloadable = verify(unit.logPath, { policy: { file: unit.policyPath } });
+  assert.equal(unloadable.status, "clean");
+  assert.deepEqual(
+    unloadable.anomalies.map((anomaly) => anomaly.skewMs),
+    withPolicy.anomalies.map((anomaly) => anomaly.skewMs),
+  );
+  assert.equal(skewToleranceMsOf({ file: unit.policyPath }), GATE_TS_SKEW_TOLERANCE_MS);
+  assert.equal(skewToleranceMsOf({ file: join(unit.dir, "nowhere.md") }), GATE_TS_SKEW_TOLERANCE_MS);
+});
+
+test("an unparseable tolerance fails the whole policy, exactly as a bad approval_ttl does", () => {
+  const unit = newCase();
+  writeFileSync(unit.policyPath, policyWithSkew("1h30m"), "utf8");
+  const load = loadPolicy({ file: unit.policyPath });
+  assert.equal(load.ok, false, "the schema's duration pattern must reject a compound form");
+  if (!load.ok) assert.equal(load.code, "schema-invalid");
+  // Fail closed: an unreadable policy is every class manual AND the shipped
+  // tolerance, so the operator loses nothing they were being shown.
+  assert.equal(skewToleranceMsOf({ file: unit.policyPath }), GATE_TS_SKEW_TOLERANCE_MS);
+});
+
+test("the configured tolerance is report-only: it moves no verdict and no exit code", () => {
+  const unit = scenario(600_000, 600_000 - 500);
+  writeFileSync(unit.policyPath, policyWithSkew("250ms"), "utf8");
+  // An edited policy is inoperative until a human re-attests it (SPEC.md §5.2),
+  // and an unattested policy would make `status` unhealthy for a reason that has
+  // nothing to do with this threshold. The re-attestation is forward in time, so
+  // it adds no anomaly of its own.
+  assert.equal(
+    appendAttestation(unit.logPath, unit.policyPath, "human:carter", at(900_000)).ok,
+    true,
+  );
+
+  // `log verify` resolves the policy from its working directory, where the
+  // fixture wrote APPROVAL.md.
+  const run = runCli(unit, ["log", "verify", "--json"]);
+  assert.equal(run.code, 0, "an anomaly the policy asked for still exits 0");
+  const body = JSON.parse(run.out) as Record<string, unknown>;
+  assert.equal(body["status"], "clean");
+  assert.equal((body["anomalies"] as unknown[]).length, 1);
+
+  const status = runCli(unit, ["status", "--policy", unit.policyPath, "--json"]);
+  assert.equal(status.code, 0);
+  const health = JSON.parse(status.out) as Record<string, unknown>;
+  assert.equal(health["healthy"], true, "a tightened threshold must not move health");
+  assert.equal((health["anomalies"] as unknown[]).length, 1);
+});
+
+test("chainAnomalies takes the threshold as an argument and stays pure", () => {
+  const unit = scenario(600_000, 600_000 - 500);
+  const all = records(unit);
+  assert.deepEqual(chainAnomalies(all), [], "the default is the parameter's default");
+  const tight = chainAnomalies(all, 250);
+  assert.equal(tight.length, 1);
+  assert.deepEqual(chainAnomalies(all, 250), tight, "same records and threshold, same answer");
 });
 
 // ===========================================================================
