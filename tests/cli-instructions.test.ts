@@ -378,6 +378,11 @@ const HUMAN_ONLY: readonly string[] = [
   "channel web",
   "channel telegram listen",
   "daemon run",
+  // APRV-87. The MCP wrapper publishes no human-only verb, so an agent that
+  // could start one would gain no authority; what it would gain is a second
+  // long-lived writer and a choice of the identity every tool call is recorded
+  // under, both of which belong to the operator who launches the process.
+  "mcp serve",
   "env",
   "setup identity",
   "setup vault",

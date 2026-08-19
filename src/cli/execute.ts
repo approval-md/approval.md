@@ -277,7 +277,36 @@ function childExitCode(status: number | null, signal: NodeJS.Signals | null): nu
   return status ?? EXIT_COMMAND_NOT_RUN;
 }
 
-export function commandRun(argv: string[], streams: Streams, cwd: string): number {
+/**
+ * Where the child's stdio goes.
+ *
+ * The default is the CLI's own behaviour and the one the module header
+ * describes: `inherit`, so the child owns the terminal and `run` is transparent.
+ * It is an option only because a caller can exist whose own stdout is not a
+ * terminal but a protocol — the MCP wrapper of SPEC.md §10.5 speaks JSON-RPC on
+ * fd 1, and a child that inherited it would write into the wire. Such a caller
+ * pipes instead and receives what the child said through {@link onOutput}.
+ *
+ * This is a seam, not a second implementation: everything before and after the
+ * spawn — the identity check, the payload binding, `execution.started`, the exit
+ * code, `execution.completed` / `execution.failed` — is the one path, and no
+ * caller can reach it without going through all of it.
+ */
+export interface RunChildIo {
+  /** Passed straight to `spawnSync`. Default `"inherit"`. */
+  readonly stdio: "inherit" | ["ignore", "pipe", "pipe"];
+  /** Called with the child's captured output when {@link stdio} pipes it. */
+  readonly onOutput?: (captured: { stdout: string; stderr: string }) => void;
+}
+
+const INHERIT_CHILD_IO: RunChildIo = { stdio: "inherit" };
+
+export function commandRun(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  childIo: RunChildIo = INHERIT_CHILD_IO,
+): number {
   // `--` separates our flags from the child's argv, and the child's argv may
   // legitimately contain anything at all — including flags this CLI knows. So
   // the split happens on the RAW argv, before any parsing, and everything to the
@@ -375,7 +404,14 @@ export function commandRun(argv: string[], streams: Streams, cwd: string): numbe
   );
   if (!started.ok) return emitRefusal(streams, json, started);
 
-  const child = spawnSync(command, childArgv.slice(1), { cwd, stdio: "inherit" });
+  const child = spawnSync(command, childArgv.slice(1), {
+    cwd,
+    stdio: childIo.stdio,
+    encoding: "utf8",
+  });
+  if (childIo.onOutput !== undefined) {
+    childIo.onOutput({ stdout: child.stdout ?? "", stderr: child.stderr ?? "" });
+  }
   const exitCode =
     child.error === undefined
       ? childExitCode(child.status, child.signal)

@@ -89,6 +89,8 @@ Usage:
                       [--log <path>]                    (reads PreToolUse JSON)
   approval hook classify [--json] -- <command…>
   approval import agents-md <file> [--out <path>] [--json]
+  approval mcp serve  --as agent:<id> [--dir <path>] [--log <path>]
+                      [--policy <path>]              (MCP over stdio; foreground)
   approval reindex    [--log <path>] [--index <path>] [--force] [--json]
   approval render     [--log <path>] [--out <path>] [--policy <path>]
                       [--dir <path>] [--json]
@@ -214,6 +216,13 @@ Commands:
   import    "import agents-md" parses an AGENTS.md-style permissions section
             into DRAFT policy classes for a human to confirm (SPEC.md §12). It
             prints; it never writes APPROVAL.md, never logs, never attests
+  mcp       "mcp serve" is the optional MCP wrapper of SPEC.md §10.5: the same
+            verbs as tools, over stdio, sharing the CLI's code paths. It is
+            AGENT-FACING ONLY — grant, reject, revoke, attest, amend, vault,
+            setup, audit review, expire, execution resolve and the channels are
+            not published, because an MCP client is an agent's harness and
+            SPEC.md §11 makes the agent the untrusted policy. It runs as ONE
+            agent identity, fixed at startup, that no tool call can change
   reindex   rebuild the SQLite index projection from the log
   render    regenerate .approval/QUEUE.md, the READ-ONLY markdown queue
             projection (SPEC.md §9.1): pending requests and the sampled-audit
@@ -2656,3 +2665,70 @@ ${EXIT_CODES_POINTER} (1 means the far end refused: an invalid token, a 409 from
 a running listener, or no message reaching the bot before the deadline)
 ${JSON_ERRORS}
 ${why("setup-channel-telegram")}`;
+
+// ---------------------------------------------------------------------------
+// The MCP wrapper (APRV-87)
+// ---------------------------------------------------------------------------
+
+export const MCP_HELP = `approval mcp serve — the MCP wrapper of SPEC.md §10.5 (stdio, FOREGROUND)
+
+Usage:
+  approval mcp serve --as agent:<id> [--dir <path>] [--log <path>]
+                     [--policy <path>]
+
+Flags:
+  --as agent:<id>  the identity EVERY tool call is recorded under. Required,
+                   unless APPROVAL_AGENT names one. agent: only — a human: or
+                   system: value is refused at exit 2, before the transport
+                   exists
+  --dir <path>     the working directory tools resolve every relative path
+                   against (default: this process's working directory)
+  --log <path>     pin the log file for every tool call
+  --policy <path>  pin the policy file for every tool call
+  -h, --help       this text
+
+Speaks MCP over stdin/stdout and runs until interrupted. SIGINT and SIGTERM
+close the transport and exit 0. STDOUT IS THE JSON-RPC STREAM: this verb's own
+messages go to stderr, and a child spawned by the run tool is piped rather than
+inheriting the terminal, so nothing can write into the wire.
+
+THE TOOLS ARE THE AGENT SURFACE, AND ONLY THAT. The tool list is the verb
+registry (\`approval instructions --schemas\`) filtered by human_only false, and
+every tool's inputSchema is that verb's registry input schema. Two agent-facing
+verbs are still withheld: \`consume\`, which is internal plumbing that \`run\`
+wraps, and \`hook claude-code\`, which reads a PreToolUse event from a stdin this
+transport already owns.
+
+NOT PUBLISHED, and this is the design rather than an omission: grant, reject,
+revoke, policy attest, policy amend, execution resolve, audit review, expire,
+env, init, setup, vault, the channels, the daemon, and this verb itself. SPEC.md
+§11 names the agent the untrusted policy and the human the trusted, expensive
+overseer. An MCP client is an agent's harness, so offering it grant would hand
+the untrusted policy the overseer's pen. A human decides at a human's surface:
+\`approval channel cli\`, the local web page, or Telegram.
+
+IDENTITY CANNOT BE ESCALATED BY A CALLER. --as is removed from every published
+input schema, so a client sending one is refused by the schema; the server's own
+identity is appended last to every argv, so it wins even if one arrives another
+way. There is no tool that takes an actor.
+
+Tool calls run SERIALLY in this process, and appends go through the same
+lockfile and compare-and-append every \`approval\` process uses, so a CLI running
+beside this server is safe. A refusal comes back as a tool result with
+isError true carrying the CLI's own {"error":{"code","message"}} object, never
+as a thrown JSON-RPC error: the command was well-formed and the answer was no,
+which the caller must be able to read as data. A JSON-RPC error means something
+else — an unknown tool, or arguments that do not match the schema. The exit code
+travels in _meta as "approval.md/exit_code".
+
+THIS SERVER READS NO .approval/env (SPEC.md §11.1 invariant 7). It runs under
+whatever environment the operator launched it with, exactly as every other
+\`approval\` invocation does.
+
+POST-V1: mapping the MCP tasks/elicitation extension onto \`awaiting\`. SPEC.md
+§10.5 says that MAY happen "when client support stabilizes"; until then the
+wait tool blocks and answers, and its timeout is an answer of its own.
+
+${EXIT_CODES_POINTER} (2 here is a startup refusal: no agent identity, a human:/system: identity, an
+  unknown flag, or an unknown subcommand; 0 is a clean shutdown)
+${JSON_ERRORS}`;
