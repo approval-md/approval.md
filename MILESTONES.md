@@ -16,7 +16,7 @@ here with a matching display name, so drift fails CI.
 | M4.1 | `m-6` | M4.1 - Human ergonomics | done | Payload store, amend/doctor/payload verbs, README, tiering, CI |
 | M5 | `m-7` | M5 - Daemon | done | approvald: watch, sampling, retention pruning, git commits, head caching, dogfood cutover |
 | M6 | `m-8` | M6 - Backlog.md round-trip and AGENTS.md import | done |
-| M7 | `m-9` | M7 - First adapter (email) and vault | active (demo run pending) |
+| M7 | `m-9` | M7 - First adapter (email) and vault | done |
 | M7.1 | `m-10` | M7.1 - Setup ergonomics | done |
 | M8 | `m-11` | M8 - MCP wrapper and harness hooks | active | approval instructions + schemas registry, Claude Code PreToolUse hook (APRV-82), gated SDK dep-add, agent-only MCP server over CLI code paths, e2e demo, README holistic pass | Policy-honoured env names, .approval/env source map + approval env, approval setup verbs, doctor fixes + environment check, docs cutover | Adapter contract + conformance, vault, SMTP email adapter, live channel dispatch, approval init, end-to-end SPEC demo | Round-trip writer, envelope write-back, envelope-loss detection, AGENTS.md import, format-fixture drift guard |
 
