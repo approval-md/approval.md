@@ -19,16 +19,18 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -48,9 +50,15 @@ interface Run {
   stderr: string;
 }
 
-function runCli(args: string[], cwd: string, env: Record<string, string> = {}): Run {
+function runCli(
+  args: string[],
+  cwd: string,
+  env: Record<string, string> = {},
+  path: string = DEFAULT_PATH,
+): Run {
   const childEnv = { ...process.env, ...env };
   if (env["APPROVAL_HUMAN"] === undefined) delete childEnv["APPROVAL_HUMAN"];
+  childEnv["PATH"] = path;
   const result = spawnSync(process.execPath, [CLI_ENTRY, ...args], {
     cwd,
     encoding: "utf8",
@@ -58,6 +66,101 @@ function runCli(args: string[], cwd: string, env: Record<string, string> = {}): 
   });
   assert.equal(result.error, undefined, `spawn failed: ${String(result.error)}`);
   return { code: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+}
+
+// ---------------------------------------------------------------------------
+// The `gh` fake (APRV-92)
+//
+// Branch-protection detection shells out to `gh` by bare command name, so the
+// tests drive it the way production does: a PATH whose first entry holds a stub
+// script called `gh`. No test here reaches GitHub, and no test-only flag was
+// added to the runtime to arrange that. The stub records every invocation, one
+// argument per line, so the `gh pr create` argv can be asserted on.
+//
+// EVERY case runs with a stubbed PATH, including the ones written before this
+// existed: a real `gh` on the developer's machine would otherwise answer for
+// the temp repository and make the suite's behaviour depend on the box.
+// ---------------------------------------------------------------------------
+
+interface GhBehaviour {
+  /** What `gh api …/protection` answers. */
+  protection?: "protected" | "unprotected" | "error";
+  /** What `gh repo view --json defaultBranchRef` answers; absent means it fails. */
+  defaultBranch?: string;
+  /** What `gh pr create` prints; absent means it fails. */
+  prUrl?: string;
+}
+
+/** A directory holding the `gh` stub, plus the path of its invocation log. */
+function ghStub(behaviour: GhBehaviour): { dir: string; log: string } {
+  counter += 1;
+  const dir = join(scratch, `bin-${String(counter)}`);
+  mkdirSync(dir, { recursive: true });
+  const log = join(dir, "gh-invocations.txt");
+
+  const api =
+    behaviour.protection === "protected"
+      ? "exit 0"
+      : behaviour.protection === "unprotected"
+        ? 'echo "gh: Branch not protected (HTTP 404)" >&2; exit 1'
+        : 'echo "gh: could not read protection" >&2; exit 1';
+  const repo =
+    behaviour.defaultBranch === undefined
+      ? 'echo "gh: no GitHub remote" >&2; exit 1'
+      : `echo ${behaviour.defaultBranch}; exit 0`;
+  const pr =
+    behaviour.prUrl === undefined
+      ? 'echo "gh: pr create failed" >&2; exit 1'
+      : `echo ${behaviour.prUrl}; exit 0`;
+
+  const script = [
+    "#!/bin/sh",
+    `printf -- '--- %s\\n' "$1" >> ${JSON.stringify(log)}`,
+    `for arg in "$@"; do printf '%s\\n' "$arg" >> ${JSON.stringify(log)}; done`,
+    'case "$1" in',
+    '  --version) echo "gh version 2.0.0 (stub)"; exit 0 ;;',
+    `  api) ${api} ;;`,
+    `  repo) ${repo} ;;`,
+    `  pr) ${pr} ;;`,
+    "esac",
+    "exit 1",
+    "",
+  ].join("\n");
+  const path = join(dir, "gh");
+  writeFileSync(path, script, "utf8");
+  chmodSync(path, 0o755);
+  return { dir, log };
+}
+
+/** PATH with the stub directory first, so a real `gh` can never win. */
+function pathWith(dir: string): string {
+  return `${dir}${delimiter}${process.env["PATH"] ?? ""}`;
+}
+
+/**
+ * A PATH holding a real `git` and no `gh` at all: the "gh absent" case, honest
+ * on a box that has gh installed and on one that does not.
+ */
+function pathWithoutGh(): string {
+  counter += 1;
+  const dir = join(scratch, `nogh-bin-${String(counter)}`);
+  mkdirSync(dir, { recursive: true });
+  const gitPath = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+  assert.notEqual(gitPath, "", "no git on PATH to link into the gh-less PATH");
+  symlinkSync(gitPath, join(dir, "git"));
+  return dir;
+}
+
+/**
+ * The PATH every case gets unless it asks for another: a `gh` that answers
+ * nothing useful, so detection resolves to `unknown` and the verb behaves as it
+ * did before protection was detected at all.
+ */
+const DEFAULT_PATH = pathWith(ghStub({}).dir);
+
+/** Every argument the `gh` stub was called with, in order, one per line. */
+function ghCalls(log: string): string[] {
+  return existsSync(log) ? readFileSync(log, "utf8").split("\n").filter((l) => l.length > 0) : [];
 }
 
 function git(args: string[], cwd: string): Run {
@@ -137,6 +240,35 @@ function repoDir(text: string = BEFORE): string {
   git(["add", "-A"], dir);
   git(["commit", "-qm", "policy"], dir);
   return dir;
+}
+
+/**
+ * A repository on `main` with a temp BARE remote as its origin, and
+ * `refs/remotes/origin/HEAD` set, which is where the default branch is read
+ * from. Real git all the way down; the remote is a directory on disk.
+ */
+function repoWithRemote(text: string = BEFORE): { dir: string; remote: string } {
+  const dir = caseDir(text);
+  const remote = join(scratch, `remote-${String(counter)}.git`);
+  git(["init", "-q", "--bare", "-b", "main", remote], scratch);
+  git(["init", "-q", "-b", "main", "."], dir);
+  git(["config", "user.email", "test@example.invalid"], dir);
+  git(["config", "user.name", "Test"], dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "policy"], dir);
+  git(["remote", "add", "origin", remote], dir);
+  git(["push", "-q", "-u", "origin", "main"], dir);
+  git(["remote", "set-head", "origin", "main"], dir);
+  return { dir, remote };
+}
+
+/** The files a commit on `branch` in the bare remote carries, sorted. */
+function remoteFiles(remote: string, branch: string): string[] {
+  return git(["show", "--name-only", "--pretty=format:", branch], remote)
+    .stdout.split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .sort();
 }
 
 function logPathIn(dir: string): string {
@@ -506,7 +638,9 @@ test("--dry-run --json reports the diff with a null attestation", () => {
   assert.notEqual(parsed["diff"], null);
   const gitPlan = parsed["git"] as Record<string, unknown>;
   assert.equal(gitPlan["committed"], false);
-  assert.equal((gitPlan["commands"] as string[]).length, 2);
+  assert.equal(gitPlan["flow"], "direct");
+  // add, commit, push: the whole direct ceremony, in order.
+  assert.equal((gitPlan["commands"] as string[]).length, 3);
   assert.match((gitPlan["commands"] as string[])[1] as string, /attested seq <seq>/u);
 });
 
@@ -637,6 +771,316 @@ test("without --commit the two commands are printed for the human to run", () =>
 });
 
 // ---------------------------------------------------------------------------
+// (h) A protected main: the branch flow (APRV-92)
+// ---------------------------------------------------------------------------
+
+test("a protected default branch turns --commit into branch, push, and a PR of one commit", () => {
+  const { dir, remote } = repoWithRemote();
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/7" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  // A branch, created fresh, named for the seq the attestation got.
+  assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "policy-amend-2");
+  // One commit on top of main, carrying exactly the two files.
+  assert.equal(
+    git(["rev-list", "--count", "main..policy-amend-2"], dir).stdout.trim(),
+    "1",
+    "the amendment branch must carry exactly one commit",
+  );
+  assert.deepEqual(remoteFiles(remote, "policy-amend-2"), [
+    ".approval/log/events.jsonl",
+    "APPROVAL.md",
+  ]);
+  assert.match(
+    git(["log", "-1", "--pretty=%s", "policy-amend-2"], remote).stdout.trim(),
+    /^Policy: amend APPROVAL\.md.*\(attested seq 2\)$/u,
+  );
+
+  // And the PR, opened through the fake gh, with the seq in the title and the
+  // one-commit rule plus the merge instruction in the body.
+  const calls = ghCalls(stub.log);
+  assert.equal(calls.includes("pr"), true, "gh pr create was never called");
+  const title = calls[calls.indexOf("--title") + 1] ?? "";
+  const body = calls[calls.indexOf("--body") + 1] ?? "";
+  assert.match(title, /^Policy: .*\(attested seq 2\)$/u);
+  assert.match(body, /exactly one commit/u);
+  assert.match(body, /MERGE COMMIT/u);
+  assert.equal(calls[calls.indexOf("--head") + 1], "policy-amend-2");
+  assert.equal(calls[calls.indexOf("--base") + 1], "main");
+  assert.match(run.stdout, /pull request: https:\/\/github\.test\/o\/r\/pull\/7/u);
+  assert.match(run.stdout, /MERGE COMMIT/u);
+});
+
+test("the branch flow reports its protection, branch, push and PR in JSON", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/8" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  const gitPlan = report(run)["git"] as Record<string, unknown>;
+  assert.equal(gitPlan["protection"], "protected");
+  assert.equal(gitPlan["flow"], "branch");
+  assert.equal(gitPlan["defaultBranch"], "main");
+  assert.equal(gitPlan["branch"], "policy-amend-2");
+  assert.equal(gitPlan["committed"], true);
+  assert.equal(gitPlan["pushed"], true);
+  assert.equal(gitPlan["prUrl"], "https://github.test/o/r/pull/8");
+  assert.equal(gitPlan["warning"], null);
+  const commands = gitPlan["commands"] as string[];
+  assert.match(commands[0] as string, /^git checkout -b policy-amend-2$/u);
+  assert.match(commands[3] as string, /^git push -u origin policy-amend-2$/u);
+  assert.match(commands[4] as string, /^gh pr create --title/u);
+});
+
+test("--branch forces the branch flow even where nothing is protected", () => {
+  const { dir, remote } = repoWithRemote();
+  const stub = ghStub({ protection: "unprotected", prUrl: "https://github.test/o/r/pull/9" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--branch", "policy-tuesday"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "policy-tuesday");
+  assert.deepEqual(remoteFiles(remote, "policy-tuesday"), [
+    ".approval/log/events.jsonl",
+    "APPROVAL.md",
+  ]);
+});
+
+test("an unprotected default branch keeps the direct flow, with no warning", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "unprotected" });
+  attest(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  const gitPlan = report(run)["git"] as Record<string, unknown>;
+  assert.equal(gitPlan["protection"], "unprotected");
+  assert.equal(gitPlan["flow"], "direct");
+  assert.equal(gitPlan["branch"], null);
+  assert.equal(gitPlan["warning"], null);
+  assert.equal(gitPlan["committed"], false);
+  assert.equal((gitPlan["commands"] as string[])[2], "git push origin main");
+  assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "main");
+});
+
+test("--direct on a protected main warns before the push line it is about to print", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "protected" });
+  attest(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--direct"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  const warning = run.stdout.indexOf("main is protected: this push will be rejected; use --branch");
+  const push = run.stdout.indexOf("git push origin main");
+  assert.notEqual(warning, -1, "the pre-push warning was not printed");
+  assert.equal(warning < push, true, "the warning must come BEFORE the push command");
+});
+
+test("gh absent is 'unknown', which is the direct flow and no warning", () => {
+  const { dir } = repoWithRemote();
+  attest(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--json"],
+    dir,
+    {},
+    pathWithoutGh(),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  const gitPlan = report(run)["git"] as Record<string, unknown>;
+  assert.equal(gitPlan["protection"], "unknown");
+  assert.equal(gitPlan["flow"], "direct");
+  assert.equal(gitPlan["warning"], null);
+  assert.match(gitPlan["protectionReason"] as string, /gh is not on PATH/u);
+});
+
+test("with gh absent the branch flow still branches, commits and pushes, and prints the PR line", () => {
+  const { dir, remote } = repoWithRemote();
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--branch", "policy-solo"],
+    dir,
+    {},
+    pathWithoutGh(),
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  assert.deepEqual(remoteFiles(remote, "policy-solo"), [
+    ".approval/log/events.jsonl",
+    "APPROVAL.md",
+  ]);
+  assert.match(run.stdout, /gh is not available, so the pull request was not opened/u);
+  assert.match(run.stdout, /gh pr create --title/u);
+});
+
+test("--dry-run on a protected main shows the whole branch ceremony and creates nothing", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "protected" });
+  attest(dir);
+  const before = rawLog(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--dry-run"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stdout, /--dry-run: nothing was attested, nothing was written/u);
+  assert.match(run.stdout, /git checkout -b policy-amend-<seq>/u);
+  assert.match(run.stdout, /git push -u origin policy-amend-<seq>/u);
+  assert.match(run.stdout, /gh pr create --title/u);
+  assert.match(run.stdout, /MERGE COMMIT/u);
+  assert.equal(rawLog(dir), before);
+  assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "main");
+  assert.equal(git(["branch", "--list"], dir).stdout.includes("policy-amend"), false);
+});
+
+test("--dry-run --direct on a protected main shows the direct block, warning first", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "protected" });
+  attest(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--dry-run", "--direct", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  const gitPlan = report(run)["git"] as Record<string, unknown>;
+  assert.equal(gitPlan["flow"], "direct");
+  assert.equal(gitPlan["protection"], "protected");
+  assert.equal(
+    gitPlan["warning"],
+    "main is protected: this push will be rejected; use --branch",
+  );
+  assert.equal((gitPlan["commands"] as string[]).length, 3);
+});
+
+test("the rewritten paragraph says WHY the two files travel together", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "unprotected" });
+  attest(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stdout, /have to land in the same commit/u);
+  assert.match(run.stdout, /a policy no attestation covers/u);
+  assert.match(run.stdout, /every gate operation refuses/u);
+  assert.match(run.stdout, /Run these, in order:/u);
+});
+
+test("--branch and --direct together are a usage error, and nothing is attested", () => {
+  const { dir } = repoWithRemote();
+  attest(dir);
+  const before = rawLog(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--branch", "x", "--direct", "--json"],
+    dir,
+  );
+  assert.equal(run.code, 2);
+  assert.equal(errorOf(run).code, "usage");
+  assert.match(errorOf(run).message, /opposite ceremonies/u);
+  assert.equal(rawLog(dir), before);
+});
+
+test("--branch onto an existing branch refuses BEFORE attesting", () => {
+  const { dir } = repoWithRemote();
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["branch", "policy-taken"], dir);
+  const before = rawLog(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--branch", "policy-taken", "--json"],
+    dir,
+  );
+  assert.equal(run.code, 2);
+  assert.equal(errorOf(run).code, "commit-preconditions");
+  assert.match(errorOf(run).message, /already exists/u);
+  assert.equal(rawLog(dir), before);
+  assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "main");
+});
+
+test("the branch flow with no origin remote refuses BEFORE attesting", () => {
+  const dir = repoDir();
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  const before = rawLog(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--branch", "policy-nowhere", "--json"],
+    dir,
+  );
+  assert.equal(run.code, 2);
+  assert.equal(errorOf(run).code, "commit-preconditions");
+  assert.match(errorOf(run).message, /needs an "origin" remote/u);
+  assert.equal(rawLog(dir), before);
+});
+
+// ---------------------------------------------------------------------------
 // Identity (exit 2) and other usage
 // ---------------------------------------------------------------------------
 
@@ -722,6 +1166,12 @@ test("the help states the baseline limitation, the flags, and the refusal codes"
   assert.match(run.stdout, /--require-load/u);
   assert.match(run.stdout, /commit-preconditions/u);
   assert.match(run.stdout, /EXACTLY two files/u);
+  // The two flows, the detection, and the precedence between them.
+  assert.match(run.stdout, /--branch <name>/u);
+  assert.match(run.stdout, /--direct/u);
+  assert.match(run.stdout, /PRECEDENCE, highest first/u);
+  assert.match(run.stdout, /MERGE COMMIT/u);
+  assert.match(run.stdout, /pr-failed/u);
   assert.deepEqual(logRecords(dir), []);
 });
 
