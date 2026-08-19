@@ -464,7 +464,15 @@ test("the human diff renders each section, and a budget change is a limit line",
   assert.match(run.stdout, /carter: channels-changed \[cli\] -> \[cli, telegram\]/u);
   assert.match(run.stdout, /approval_ttl: 24h -> 1h/u);
   assert.match(run.stdout, /global\.daily_usd: 10 -> 25/u);
-  assert.match(run.stdout, /load advisory: loads clean/u);
+  // APRV-93: the report is sectioned now (`Policy` / `Changes` / `Load`), so
+  // the advisory is a `Load` heading with the verdict under it rather than a
+  // line beginning "load advisory:".
+  assert.match(run.stdout, /^Changes$/mu);
+  assert.match(run.stdout, /^Load\n {2}✓ loads clean$/mu);
+  // Short hashes and a cwd-relative path, and nothing dressed in a pipe.
+  assert.match(run.stdout, /^ {2}file {2,}APPROVAL\.md$/mu);
+  assert.match(run.stdout, /^ {2}live {2,}[0-9a-f]{12}$/mu);
+  assert.ok(!run.stdout.includes("\u001b"));
 });
 
 test("an approver deleted while a rule still names them is reported unreachable", () => {
@@ -546,7 +554,9 @@ test("the seq-2 shape: the advisory names the failure and a plain amend still at
   const run = runCli(["policy", "amend", "--as", "human:carter", "--yes"], dir);
 
   assert.equal(run.code, 0, run.stderr);
-  assert.match(run.stdout, /LOAD ADVISORY — THIS POLICY DOES NOT LOAD \(schema-invalid\)/u);
+  // APRV-93: the shouted banner became the `Load` section's verdict line.
+  assert.match(run.stdout, /^Load$/mu);
+  assert.match(run.stdout, /✗ DOES NOT LOAD \(schema-invalid\)/u);
   assert.match(run.stdout, /FAIL CLOSED to all-manual/u);
   // The diff is honest about what the broken side means for every class.
   assert.match(run.stdout, /after: everything manual \(fail-closed: schema-invalid\)/u);

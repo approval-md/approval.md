@@ -78,6 +78,7 @@ import {
 } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 /** Identity accepted by the proposing verbs: a person or an agent. */
@@ -161,7 +162,11 @@ function emitRefusal(streams: Streams, json: boolean, refusal: GateRefusal): num
     if (refusal.record !== undefined) error["seq"] = refusal.record.seq;
     streams.err(`${JSON.stringify({ ok: false, error })}\n`);
   } else {
-    streams.err(`approval: ${refusal.code}: ${refusal.message}\n`);
+    // APRV-91 #8/#13: glyph, machine-readable code, message. No help page
+    // follows a refusal, and no `fix:` line is invented here — the gate's
+    // refusals name a state (`not-granted`, `already-decided`) rather than a
+    // single command that repairs it, and a wrong fix is worse than none.
+    streams.err(`${renderRefusal(style({ json }), refusal.code, refusal.message)}\n`);
   }
   return refusalExitCode(refusal);
 }

@@ -643,10 +643,14 @@ test("the verb's usage surface: help, unknown subcommand, unknown flag", () => {
   assert.match(help.stdout, /\[claimed\]/u);
   assert.match(help.stdout, /BEGIN FULL PAYLOAD/u);
   // APRV-91: "identity is declared, not proved" is a cross-cutting stance and
-  // is stated once, in `approval --help`; the channel's own paragraph is in
-  // docs/cli-reference.md#channel-cli.
+  // is stated once, in `approval --help`; the channel's own paragraph moved to
+  // docs/cli-reference.md#channel-cli, which `--help --long` prints, so the
+  // caveat is still one command away from the operator who needs it.
   assert.match(help.stdout, /docs\/cli-reference\.md#channel-cli/u);
   assert.match(runCli(["--help"], world.dir).stdout, /IDENTITY IS CONFIG-DECLARED/u);
+  const long = runCli(["channel", "cli", "--help", "--long"], world.dir);
+  assert.equal(long.code, 0);
+  assert.match(long.stdout, /Identity is declared, not proved/u);
   assert.match(help.stdout, /EXITS 0 WITHOUT READING STDIN/u);
 
   assert.equal(runCli(["channel"], world.dir).code, 2);

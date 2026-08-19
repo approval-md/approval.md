@@ -30,6 +30,17 @@ in the guide is a test failure rather than a documentation lapse. Verbs marked
 `[HUMAN-ONLY]` record or establish a human's authority: an agent must not call
 them, and a wrapper must not publish them as tools.
 
+The output is a pure function of this build: no log is read, no policy is
+resolved, and nothing is written.
+
+## log
+
+The three subcommands open the log for reading only. `verify` walks the hash chain
+end to end and reports clean | torn-tail | corrupt, `tail` prints the last N
+records (default 10), and `export` streams every stored line to stdout, byte for
+byte. The default log path is `.approval/log/events.jsonl`, relative to the
+working directory.
+
 ## log verify
 
 Anomalies do not change the verdict. SPEC.md §8 stamps the timestamps of
@@ -44,6 +55,52 @@ flag to silence.
 An unreadable log is exit 4, not 1: a permission bit is not evidence of
 tampering.
 
+**`--json`** (one object on stdout):
+
+```
+clean      {"status":"clean","records":3,"head":{"seq":3,"hash":"<64 hex>"}}
+torn-tail  {"status":"torn-tail","records":3,"head":null,
+            "intactThroughSeq":3,"message":"..."}
+corrupt    {"status":"corrupt","records":null,"head":null,
+            "firstBadSeq":2,"reason":"hash-mismatch","message":"..."}
+```
+
+`head` is null for an empty log. `reason` is one of `malformed-line`,
+`schema-invalid`, `bad-alg`, `hash-mismatch`, `prev-mismatch`, `seq-gap`,
+`seq-duplicate`, `not-genesis`, `head-mismatch`. `anomalies` is ADDITIVE and
+appears only when there is something to report:
+
+```
+[{"kind":"gate-ts-regression","seq":9,"ts":"...","event":"execution.started",
+  "previousSeq":8,"previousTs":"...","skewMs":45000,"message":"..."}]
+```
+
+Human output: the status and head on stdout; reason, first bad seq, anomalies,
+and the full message on stderr.
+
+## log tail
+
+The chain is verified first. On a torn tail the intact records are printed and the
+tear is a warning on stderr; on a corrupt log no records are printed at all. An
+empty or absent log prints nothing and succeeds, and nothing is repaired.
+
+```
+{"status":"ok","records":[<event objects, oldest first>]}
+{"status":"torn-tail","records":[...],"warning":"..."}
+```
+
+## log export
+
+Without `--json` the stored lines are written verbatim, byte for byte: piping
+export to a file yields a copy of the log. The chain is verified first; a torn
+tail prints the intact lines with a stderr warning and exits 0, a corrupt log
+prints nothing and fails. The log is never modified.
+
+```
+{"records":[<every event object, oldest first>]}
+{"records":[...],"warning":"..."}   on a torn tail
+```
+
 ## policy
 
 `policy check` answers the question "what would policy do with this class", and
@@ -51,6 +108,31 @@ a policy too broken to load has a perfectly good answer — manual, everything,
 always. That is why a load failure is exit 0 with a `manualBecause` of
 `load-failure`, and why callers branch on `manualBecause` / `provenance` rather
 than on the exit code.
+
+`manualBecause` says why a manual answer is manual, and is null when the answer
+is not manual:
+
+- `matched-rule` — a classes rule, or `defaults.autonomy`, says manual. The
+  policy was read and understood, and it says ask.
+- `irreversibility-floor` — policy granted autonomous or supervised and SPEC §7's
+  floor overrode it because `--reversible false` was given. `overridden` records
+  what policy actually said.
+- `load-failure` — the policy could not be loaded at all, so every class is
+  manual. `loadFailure` carries a code and a message.
+
+The exit codes, at length. `policy check|test` uses only 0, 2 and 4:
+
+- **0** the question was answered, INCLUDING the fail-closed answer. A missing,
+  unparseable or schema-invalid policy is not an error here: a broken policy IS a
+  manual-everything policy, and "manual, because the policy failed to load:
+  `<code>`" is the answer, delivered on stdout with exit 0.
+- **2** usage: a missing `<class>`, an unknown flag, or a class that is not a
+  valid action class (lowercase dotted segments; wildcards are patterns, not
+  actions, and are rejected).
+- **4** I/O: a policy path that exists but cannot be read (a permission bit).
+  Never used for a parse or schema failure; those are the answer above.
+
+1 and 3 are never returned by this command.
 
 ## policy check
 
@@ -61,6 +143,32 @@ key may contain, never something an agent can do.
 `--reversible` takes an explicit value because "unstated", "reversible" and
 "irreversible" are three different questions. Only the explicit `false` engages
 SPEC §7's irreversibility floor.
+
+**`--json`** (one object on stdout):
+
+```
+{"class":"vcs.push.main","reversible":null,
+ "outcome":{"autonomy":"supervised","approvers":null,"limits":null},
+ "provenance":"rule"|"default"|"fail-closed"|"floor",
+ "manualBecause":null|"matched-rule"|"irreversibility-floor"|"load-failure",
+ "loadFailure":null|{"code":"file-missing"|"no-block"|"multiple-blocks"|
+                     "yaml-error"|"schema-invalid","message":"..."},
+ "matched":null|{"pattern":"vcs.push.main","rule":{"autonomy":"supervised"}},
+ "overridden":null|{"pattern":"read.web"|null,"autonomy":"autonomous"},
+ "candidates":[{"pattern":"read.*","specificity":[1,1,2],
+                "autonomy":"autonomous","winner":true,
+                "tieBreak":"specificity"|"strictest-autonomy"|
+                           "lexicographic"|"tied-specificity"}],
+ "decisionPath":["...","..."]}
+```
+
+`specificity` is [literalSegments, wildcardSegments, totalSegments] (SPEC §5.2).
+`overridden.pattern` is null when the floor overrode `defaults.autonomy` rather
+than a rule.
+
+Human output: the `decisionPath` lines, then a final line `-> <autonomy>`
+carrying "(fail-closed: `<code>`)" or "(floor applied over `<pattern>`:
+`<autonomy>`)" when either applies. stderr stays empty on a successful answer.
 
 ## policy attest
 
@@ -80,6 +188,17 @@ Bytes, not parse: the file is hashed as it sits on disk and does not have to be
 loadable. Attesting a schema-invalid policy is allowed and records exactly what
 it says — a human saw these bytes. It does not make a broken policy work; a
 policy that fails to load is still manual-everything.
+
+**`--json`** (one object on stdout):
+
+```
+success  {"ok":true,"seq":7,"sha256":"<64 hex>","path":"/abs/APPROVAL.md"}
+refusal  {"ok":false,"error":{"code":"...","message":"..."}}  on stderr
+```
+
+`path` is the file that was hashed; the logged payload carries its basename only,
+so an exported log leaks no home directory. The event's payload is
+`{"policy_path":"APPROVAL.md","sha256":"<64 hex>"}`.
 
 ## policy amend
 
@@ -117,6 +236,87 @@ is the amendment" false. On the branch flow it also refuses when there is no
 refusals happens BEFORE the attestation, so a refused `--commit` never leaves an
 attested policy without its commit.
 
+**What it does, in this order.**
+
+1. resolves the live policy file and hashes its bytes;
+2. compares that hash to the latest attestation. EQUAL means nothing to amend,
+   reported on stdout at exit 0;
+3. recovers the last-attested policy TEXT if it can (see Baseline above) and
+   prints the SEMANTIC diff, computed by the real engine on both versions;
+4. runs the load advisory;
+5. asks for confirmation (skipped by `--yes` and `--dry-run`);
+6. attests: one `policy.updated` event, identical to `approval policy attest`;
+7. prints, or with `--commit` runs, the git ceremony — `git add <policy> <log>`,
+   a `git commit` citing the attestation seq, and the push (and, on the branch
+   flow, the branch and the pull request).
+
+**Flow precedence, highest first:** `--branch <name>` (with `--direct` it is a
+usage error), then `--direct`, then detection — the branch flow when the default
+branch is protected and checked out, the direct flow otherwise and when detection
+is UNKNOWN.
+
+**Confirmation** is interactive y/N by default. With stdin not a terminal (or
+`--json`) and no `--yes` it refuses at exit 2 rather than assuming an answer.
+
+**`--require-load`** refuses to attest a policy that does not load (exit 1,
+nothing appended). Without it a load failure is a loud advisory and the
+attestation may still proceed.
+
+**`--json`** (one object on stdout; keys always present):
+
+```
+{"ok":true,"noop":false,"dryRun":false,"aborted":false,
+ "policy":"/abs/APPROVAL.md","liveSha256":"<64 hex>",
+ "attested":null|{"sha256":"<64 hex>","seq":2},
+ "baseline":{"mode":"git-head"|"unavailable","reason":null|"..."},
+ "diff":null|{"beforeFailure":null|{"code","message"},
+              "afterFailure":null|{"code","message"},
+              "structuralComparable":true,"probes":["..."],
+              "classes":[{"class":"...","before":{"autonomy","provenance",
+                "pattern"},"after":{...}}],
+              "approvers":[{"approver":"...","change":"added"|"removed"|
+                "channels-changed","beforeChannels":[...]|null,
+                "afterChannels":[...]|null,"danglingRules":["..."]}],
+              "defaults":[{"field":"autonomy"|"channel"|"approval_ttl"|
+                "on_expiry","before":null|"...","after":null|"..."}],
+              "budgets":[{"scope":"global"|"classes.<pattern>",
+                "limit":"daily_usd","before":null|N,"after":null|N}],
+              "unchanged":false},
+ "load":null|{"ok":true|false,"code":null|"...","message":null|"..."},
+ "attestation":null|{"seq":3,"sha256":"<64 hex>"},
+ "git":null|{"repo":true,
+             "protection":"protected"|"unprotected"|"unknown",
+             "protectionReason":"...","defaultBranch":null|"main",
+             "currentBranch":null|"main","flow":"direct"|"branch",
+             "branch":null|"policy-amend-7","warning":null|"...",
+             "commands":["git add ...","git commit -m ...","git push ..."],
+             "committed":false,"pushed":false,"prUrl":null|"https://...",
+             "output":null|"..."}}
+```
+
+`diff` is null in hash-only mode; `attestation` is null for a no-op, a dry run,
+and an abort. In a dry run the commands carry the literal placeholder `<seq>`.
+A refusal is `{"ok":false,"error":{"code":"...","message":"..."}}` on stderr.
+
+**Refusal codes** (`error.code` with `--json`; frozen public API):
+
+- `usage` — no identity, a non-human `--as`, an unknown flag, or a confirmation
+  that could not be asked for.
+- `io` — the policy file or the log could not be read or written.
+- `load-failed` — `--require-load` and the policy does not load. Nothing was
+  appended.
+- `commit-preconditions` — `--commit` outside a git repository, with staged
+  changes beyond the policy and the log, or (branch flow) with no origin remote
+  or a `--branch` name already taken. Checked before the attestation; nothing was
+  appended.
+- `git-failed` — the attestation WAS appended and git then failed; the message
+  names the seq and what to run by hand.
+- `pr-failed` — the attestation was appended, committed and pushed, and
+  `gh pr create` then failed.
+- `append-failed` — the attestation append itself failed.
+- `log-unreadable` / `log-torn-tail` / `log-corrupt` — nothing is amended from a
+  log that does not verify.
+
 ## register
 
 The task file is read only. Nothing is rewritten, so unknown frontmatter keys
@@ -129,6 +329,15 @@ changed after registration is `envelope.drift`, not a second registration. An
 envelope that vanished after registration is `envelope-missing`: re-registering
 a stripped file would narrow the record to what survives in it, so the runtime
 refuses and a human restores the block from the log.
+
+**`--json`** (one object on stdout):
+
+```
+success  {"ok":true,"seq":1,"task":"task-042","actions":1}
+refusal  {"ok":false,"error":{"code":"...","message":"...","errors"?:[...]}}
+```
+
+The refusal goes to stderr, and `errors` carries the schema failures.
 
 ## request
 
@@ -145,6 +354,32 @@ action whose class resolves to supervised or autonomous emits no
 nothing and reports `proceed:true`. Its authorization is the `execution.started`
 event, which is also where its budget is charged. Do not wait for a grant that
 will never come.
+
+**Order of checks**, each with its own refusal code: identity, attestation, class
+resolution (including SPEC §7's irreversibility floor), then, on the manual path
+only, the content binding (`payload-hash-required`, `payload-mismatch`), request
+legality, budgets, the payload store write, and the append of
+`approval.requested`. A refused request stores nothing.
+
+`--payload` takes the action's concrete payload as JSON, and `-` reads stdin. Its
+hash must equal the declared `payload_hash` and it is filed in
+`.approval/payloads/<hash>.json`, which is where render and every channel read the
+bytes from. Supply it here once and no channel needs `--payload-dir` or
+`--payloads` at all.
+
+**`--json`** (one object on stdout):
+
+```
+manual      {"ok":true,"task":"task-042","action_key":"...","class":"...",
+             "autonomy":"manual","proceed":false,"requested":true,"seq":3}
+non-manual  {"ok":true,...,"autonomy":"autonomous","proceed":true,
+             "requested":false,"seq":null}
+refusal     {"ok":false,"error":{"code":"...","message":"...",
+             "verdicts"?:[...],"detail"?:"...","state"?:"...","seq"?:N}}
+```
+
+The refusal goes to stderr, and `seq` is the `budget.exceeded` record that WAS
+appended.
 
 ## grant
 
@@ -167,6 +402,23 @@ it once. The log records only its SHA-256 (payload `token_sha256`), so this
 print is the only time the raw value exists outside the caller's memory and
 nothing can recover it: not `approval token`, not the log, not the index.
 
+TTL: a decision after the request's TTL is refused with `expired`, judged from the
+request's OWN timestamp plus `defaults.approval_ttl`. When the gate discovers a
+lapse it appends `approval.expired` (actor `system:gate`) and then refuses.
+
+The raw token is printed once, on stdout as `token: <64 hex>`, or as the `token`
+key with `--json`. Capture it, or revoke and request again. Spend it with
+`approval run`.
+
+**`--json`** (one object on stdout):
+
+```
+success  {"ok":true,"decision":"grant","state":"granted","action_key":"...",
+          "seq":5,"token":"<64 hex>"}   (the token is shown once)
+refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"...",
+          "verdicts"?:[...],"detail"?:"...","seq"?:N}}  on stderr
+```
+
 ## reject
 
 Legal only on a request that is awaiting a decision. Attestation is NOT required
@@ -174,12 +426,33 @@ for this verb: it withdraws authority rather than granting it, and refusing it
 because a policy file changed would leave a live authorization standing. No
 budget is charged — an authorization that was refused was never a commitment.
 
+TTL applies exactly as it does to [grant](#grant): a decision after the request's
+TTL is refused with `expired`.
+
+**`--json`** (one object on stdout):
+
+```
+success  {"ok":true,"decision":"reject","state":"rejected","action_key":"...",
+          "seq":5}
+refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"...",
+          "detail"?:"...","seq"?:N}}  on stderr
+```
+
 ## revoke
 
 Legal only on a granted request that has not executed: an unexecuted grant can
 be withdrawn, an executed one cannot be un-sent (`not-granted` /
 `already-executed`). Attestation is not required, and no budget is charged, for
 the reasons under [reject](#reject).
+
+**`--json`** (one object on stdout):
+
+```
+success  {"ok":true,"decision":"revoke","state":"revoked","action_key":"...",
+          "seq":5}
+refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"...",
+          "detail"?:"...","seq"?:N}}  on stderr
+```
 
 ## expire
 
@@ -195,6 +468,57 @@ decisions are refused with `expired` whether or not this verb has ever run, and
 `not-expired` also covers a policy that declares no `defaults.approval_ttl`: no
 TTL means no lapse, and expiring a request the policy never bounded would be the
 runtime inventing a deadline.
+
+Refused when the request is not live (`not-requested`, `already-decided`) or when
+the TTL has not lapsed (`not-expired`, which also covers a policy declaring no
+`defaults.approval_ttl`).
+
+**`--json`** (one object on stdout):
+
+```
+success  {"ok":true,"action_key":"...","actor":"system:gate","seq":6}
+refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"..."}}
+```
+
+## gate refusal codes
+
+The vocabulary every gate verb (register, request, grant, reject, revoke, expire)
+returns in `error.code` with `--json`. Frozen public API: an agent branches on it
+to decide whether to fix itself, stop retrying, or ask a human.
+
+- `policy-not-attested` — policy unattested or its bytes changed since
+  attestation (detail: `not-attested` | `hash-mismatch` | `unreadable`). Run
+  `approval policy attest`.
+- `envelope-invalid` — the envelope failed `envelope.schema.json`, or the task
+  file has no frontmatter or no `approval:` key.
+- `task-file-unreadable` — the task file could not be read (exit 4).
+- `task-already-registered` — this task id already has a `task.registered` record.
+- `envelope-missing` — the file carries no `approval:` envelope AND the log holds
+  a `task.registered` for its task: the envelope was LOST after registration.
+  Nothing is appended; restore the block by hand from the log.
+- `not-registered` — the task has no `task.registered` record.
+- `action-not-registered` — the task declares no action with that idempotency key.
+- `duplicate-request` — a live `approval.requested` already awaits a decision.
+- `already-executed` — the action key already has an `execution.started`.
+- `budget-exceeded` — budget verdicts failed; a `budget.exceeded` event WAS
+  appended and `error.verdicts` lists the failures.
+- `loop-escalated` — three consecutive `execution.failed` events escalated the
+  task to manual (SPEC.md §10.2). Its MANUAL actions are unaffected; the streak
+  clears on a completion.
+- `not-requested` — there is no request to decide or expire.
+- `already-decided` — the request is already granted, rejected, revoked or
+  expired.
+- `not-granted` — revoke was attempted on a request that is not granted.
+- `expired` — the TTL lapsed, judged from the request's own `ts`.
+- `not-expired` — expire was called before the TTL lapsed, or the policy declares
+  no `defaults.approval_ttl`.
+- `actor-invalid` — the actor is not a well-formed `human:` / `agent:` identity.
+- `actor-not-human` — a human-only verb was attempted by another actor.
+- `log-unreadable` (exit 4) / `log-torn-tail` (exit 3) / `log-corrupt` (exit 1):
+  nothing is authorized from a log that does not verify.
+- `append-failed` — the append itself failed; the exit code follows the cause.
+  `head-moved` means the log grew between this command's read and its write, so
+  nothing was written.
 
 ## token
 
@@ -213,6 +537,40 @@ Exit 0 means granted, unrevoked, unexpired, unconsumed. Every other answer names
 which of the three deaths applied: execution (`token-consumed`), revocation
 (`token-revoked`), or the parent request's TTL (`token-expired`).
 
+**`--json`** (one object on stdout):
+
+```
+live     {"ok":true,"action_key":"...","state":"granted","live":true,
+          "token_sha256":"<64 hex>","grant_seq":4,"class":"...",
+          "est_cost_usd":0.02,"payload_hash":"<64 hex>"|null,
+          "task":"task-042"}
+refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"...",
+          "seq"?:N}}  on stderr
+```
+
+`payload_hash` is the binding the grant carried, or null for a grant that bound to
+no bytes.
+
+## token refusal codes
+
+The vocabulary `approval token` and `approval consume` return in `error.code`.
+Frozen public API in the same sense the gate's codes are.
+
+- `not-granted` — no grant governs this action key: never requested, still
+  awaiting a decision, or rejected. Ask a human, do not retry.
+- `token-mismatch` — a grant exists but the presented token is not its preimage,
+  or the grant predates tokens and carries no hash.
+- `token-consumed` — already spent: an `execution.started` for this action key is
+  in the log. A token is single-use; retrying cannot help.
+- `token-expired` — the PARENT REQUEST's TTL lapsed. There is no separate token
+  TTL; re-request the action.
+- `token-revoked` — a human withdrew the grant (`approval.revoked`).
+- `log-unreadable` (exit 4) / `log-torn-tail` (exit 3) / `log-corrupt` (exit 1):
+  no token is spendable from a log that does not verify.
+- `append-failed` — the append itself failed; the exit code follows the cause.
+  `head-moved` means another writer got there first, which with one token is a
+  refused double-spend, and nothing was written.
+
 ## consume
 
 Internal. This is the plumbing verb `approval run` wraps; it exists in the CLI
@@ -228,6 +586,25 @@ manual action costs its window exactly one charge — the grant.
 Supervised and autonomous actions have no grant and therefore no token (amended
 SPEC.md §6.3); this verb correctly refuses them with `not-granted`. Their
 `execution.started` belongs to `approval run`.
+
+`--payload-hash` is SHA-256 over the RFC 8785 canonical serialization of the
+payload about to be executed. It is REQUIRED whenever the grant bound to bytes,
+which under amended SPEC.md §6.2 is every manual grant this runtime mints. A
+different hash, or none, is refused `payload-mismatch`, nothing is appended, and
+the token stays live.
+
+The appended `execution.started` carries
+`{"class","est_cost_usd","token_sha256"}`.
+
+**`--json`** (one object on stdout):
+
+```
+success  {"ok":true,"action_key":"...","event":"execution.started","seq":5,
+          "token_sha256":"<64 hex>","grant_seq":4,"class":"...",
+          "est_cost_usd":0.02}
+refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"...",
+          "seq"?:N}}  on stderr
+```
 
 ## run
 
@@ -262,6 +639,59 @@ Exit 5 is an addition to the frozen table, emitted by this verb alone, and it is
 distinct from 1 because the repair is distinct: request the action, have a human
 grant it, and pass the token that grant printed once.
 
+**What it does, in this order.**
+
+1. appends `execution.started` BEFORE the child is spawned, never after;
+2. spawns the command with inherited stdio (the child owns the terminal);
+3. appends `execution.completed` (child exit 0) or `execution.failed` (anything
+   else), carrying `payload.exit_code`, the real number, unmapped;
+4. exits with THE CHILD'S EXIT CODE.
+
+Everything after the first `--` is the child's argv, passed through untouched.
+Authorization: manual actions spend a token; supervised and autonomous actions
+have no grant and no token, and for them run enforces attestation, loop
+escalation, single-use idempotency, and budgets, which are charged here.
+
+Recovery from a dangling execution:
+
+```
+approval execution resolve <action-key> --outcome completed|failed \
+                           --note "<what you saw>" [--as human:<id>]
+```
+
+**`--json`** goes ON STDERR, because stdout belongs to the child:
+
+```
+success  {"ok":true,"action_key":"...","task":"...","class":"...",
+          "autonomy":"manual","started_seq":5,"outcome":"execution.completed",
+          "outcome_seq":6,"exit_code":0}
+refusal  {"ok":false,"error":{"code":"...","message":"...","detail"?:"...",
+          "verdicts"?:[...],"seq"?:N,"event_seq"?:N}}
+```
+
+**Refusal codes** (`error.code` with `--json`; frozen public API):
+
+- `token-required` — the class resolves to manual and no token was given. Nothing
+  was appended. EXIT 5.
+- `action-not-registered` — no `task.registered` record declares this action key.
+- `loop-escalated` — three consecutive `execution.failed` events escalated the
+  task to manual; route it through a human grant instead.
+- `policy-not-attested` — policy unattested or its bytes changed (detail:
+  `not-attested` | `hash-mismatch` | `unreadable`).
+- `already-executed` — an `execution.started` already exists for this key.
+- `budget-exceeded` — budgets refused the start; a `budget.exceeded` event WAS
+  appended and `error.verdicts` lists the failures.
+- `not-granted` — manual action with a token but no grant behind it.
+- `token-mismatch` — the presented token is not the grant's preimage.
+- `token-consumed` — the token was already spent, including by a dangling
+  execution, which run will NOT reconcile.
+- `token-expired` — the parent request's TTL lapsed.
+- `token-revoked` — a human withdrew the grant.
+- `not-started` / `already-finished` — (finish path) no `execution.started` to
+  close, or that execution already has an outcome.
+- `log-unreadable` (exit 4) / `log-torn-tail` (exit 3) / `log-corrupt` (exit 1).
+- `append-failed` — the append itself failed; the exit code follows the cause.
+
 ## wait
 
 Polls the log and writes nothing — not even the `approval.expired` event it may
@@ -278,6 +708,20 @@ Exit 6 is an addition to the frozen table, emitted by this verb alone: the wait
 elapsed with request(s) still undecided, nothing was appended, the requests are
 still live, and waiting again is legitimate.
 
+**`--json`** (one object on stdout; a timeout goes to stderr):
+
+```
+decided  {"ok":true,"task":"task-042","status":"granted"|"rejected"|"expired",
+          "actions":[{"action_key":"...","state":"granted","seq":4}]}
+timeout  {"ok":false,"task":"task-042","status":"timeout",
+          "actions":[{"action_key":"...","state":"requested","seq":3}]}
+```
+
+`state` is the per-action derived state; `status` is the whole task's outcome,
+with rejected/revoked outranking expired and expired outranking granted.
+`--timeout` and `--interval` take the SPEC.md §5.2 duration grammar,
+`<positive integer><ms|s|m|h|d|w>`.
+
 ## queue
 
 What it deliberately does not show — all of it lives in `approval status`:
@@ -289,6 +733,21 @@ one is the whole mechanism by which a human's attention is spent.
 
 Exit 0 always when the log could be read: an empty inbox is a healthy inbox, not
 an error.
+
+What it lists: the action key, the task, the class, the declared cost, when it was
+requested, and how much of the TTL is left.
+
+**`--json`** (one object on stdout):
+
+```
+{"ok":true,"pending":[{"action_key":"task-042:chaser","task":"task-042",
+ "class":"communicate.email.external","est_cost_usd":0.02,
+ "requested_ts":"2026-08-06T10:00:00.000Z","seq":3,
+ "ttl_remaining_ms":3599000}]}
+```
+
+`pending` is `[]` for an empty inbox. `ttl_remaining_ms` is null when the policy
+declares no `defaults.approval_ttl` (no TTL means no lapse).
 
 ## status
 
@@ -325,6 +784,40 @@ store is the normal state of a repo that has never made a request carrying
 
 **anomalies** are informational for the same reason `approval log verify`
 declined to refuse on them: status does not get to overrule that.
+
+**What it reports**, in one object:
+
+- `attestation` — attested | hash-mismatch | not-attested | unreadable, with the
+  seq of the governing `policy.updated` record.
+- `verification` — the latest chain verdict, and the record count (null when
+  corrupt).
+- `dangling` — executions that started and never finished.
+- `budgets` — headroom per configured GLOBAL limit, from a zero-cost probe.
+- `loop_escalations` — tasks with three consecutive `execution.failed` events.
+- `payload_store` — whether `.approval/payloads/` exists, how many files it holds,
+  how many the log records as pruned, and how many are unbound. Informational.
+- `anomalies` — additive and present only when non-empty: gate-typed events whose
+  `ts` steps backwards by more than 2s. Informational.
+
+**`--json`** (one object on stdout):
+
+```
+{"ok":true,"healthy":false,
+ "attestation":{"state":"attested","seq":1},
+ "verification":{"status":"clean","records":6},
+ "dangling":[{"action_key":"...","task":"...","ts":"...","seq":5}],
+ "budgets":[{"limit":"global.daily_usd","scope":"global",
+   "window":"rolling-24h","consumed":0.02,"requested":0,"remaining":9.98,
+   "pass":true}],
+ "loop_escalations":[{"task":"task-042","consecutive_failures":3,
+   "escalated":true}],
+ "payload_store":{"present":true,"files":2,"pruned":0,"orphans":0,
+   "note":"..."}}
+```
+
+`ok` is true whenever status ran; `healthy` is the verdict. `attestation.seq` is
+null for not-attested and unreadable. `note` carries the unrebuildable warning
+verbatim.
 
 ## doctor
 
@@ -399,6 +892,24 @@ The checks, at length:
   Value-free by construction: it reads each variable's status and source and
   never its value, on any path.
 
+**`--json`** (one object on stdout):
+
+```
+{"ok":false,"checks":[
+  {"check":"build-freshness","status":"pass","detail":"..."},
+  {"check":"identity","status":"fail","detail":"...","fix":"..."}, …]}
+```
+
+`status` is `pass` | `fail` | `skip`. `fix` is present only when there is
+something to do, and it always begins with a runnable command. `ok` is true when
+no check failed; a skip does not make it false. The eleven checks always appear,
+in the order listed above.
+
+`--root <path>` is TEST-ONLY: it points the build-freshness check at another tree
+and moves no other check. Real invocations never pass it, because freshness is
+judged against the installation this binary was loaded from, not against the
+working directory.
+
 ## audit
 
 Supervised actions execute immediately and are audited afterwards. The daemon
@@ -430,6 +941,21 @@ The secret itself is never printed, never logged, and never returned by any code
 path; `sampling.secret_env` is the variable's NAME, which the policy file already
 carries in the open.
 
+**`--json`** (one object on stdout):
+
+```
+{"ok":true,
+ "sampling":{"enabled":false,"rate":0.1,"secret_env":"APPROVAL_SAMPLE_SECRET",
+             "reason":"secret-unset"},
+ "open":2,
+ "samples":[{"seq":9,"ts":"...","action_key":"...","task":"...",
+             "subject_seq":7,"reviewed_seq":null}]}
+```
+
+`sampling.reason` is null when sampling is running, and otherwise one of
+`policy-unreadable`, `rate-absent`, `rate-zero`, `rate-invalid`,
+`secret-env-unnamed`, `secret-unset`.
+
 ## audit review
 
 `--note` is optional — unlike `execution resolve`, this event records only that a
@@ -441,6 +967,18 @@ No attestation is required, for the reason `execution resolve` states: review
 records an observation, exercises no policy authority, authorizes nothing, and
 spends no budget. A review blocked because a policy file was edited afterwards
 would be a supervision backlog held open by an unrelated fact.
+
+What it appends is `audit.reviewed`, naming the sample's action key and task, with
+payload `{"subject_seq":<seq of the audit.sampled>,"reviewed":true,"note"?:"..."}`.
+An action key with several open samples refuses `ambiguous-subject`.
+
+**`--json`** (one object on stdout):
+
+```
+success  {"ok":true,"seq":11,"sample_seq":9,"action_key":"...","task":"...",
+          "actor":"human:alice"}
+refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
+```
 
 ## execution
 
@@ -466,6 +1004,15 @@ policy authority, authorizes nothing, spends no budget, mints no token and
 consumes nothing — the commitment was charged at authorization time, long before
 the crash. A dangling execution left unclosable because a policy file was edited
 afterwards would be a repair blocked by an unrelated fact.
+
+**`--json`** (one object on stdout):
+
+```
+success  {"ok":true,"action_key":"...","task":"...",
+          "event":"execution.completed","outcome":"completed","seq":7,
+          "attested_by_human":true,"actor":"human:alice"}
+refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
+```
 
 ## channel
 
@@ -510,6 +1057,36 @@ path is a usage error, refused before anything is rendered.
 Without a TTY, and always with `--json`, the queue is printed and the command
 exits 0 without reading stdin. It cannot hang a pipeline, and it records nothing.
 
+The full payload is printed verbatim inside delimiters:
+
+```
+--- BEGIN FULL PAYLOAD (bound sha256 <64hex>) ---
+{ … }
+--- END FULL PAYLOAD ---
+```
+
+A manual request whose material nobody holds is SKIPPED and reported on stderr. A
+reject demands a note, and a grant prints its single-use execution token once.
+`--payload-dir` takes one JSON file per action key, `<key>.json` or its
+percent-encoded name; unset, the bytes come from `.approval/payloads/`. Either way
+they are hashed and checked against the request's recorded `payload_hash`, and
+material that does not match is refused rather than rendered.
+
+**`--json`** (one object on stdout):
+
+```
+{"ok":true,"channel":"cli","interactive":false,
+ "pending":[{"action_key":{"kind":"computed","value":"task-042:chaser",
+   "source":"log"},
+   "summary":{"kind":"claimed","value":"chase invoice 41",
+     "author":"agent:drafter"}, …}],
+ "skipped":[{"action_key":"...","code":"payload-unavailable",
+   "message":"..."}]}
+```
+
+`pending` holds the TAGGED requests verbatim, so a machine reader sees the same
+computed/claimed split a human does, and is `[]` for an empty queue.
+
 ## channel web
 
 **Binds 127.0.0.1 and nothing else.** The loopback host is hard-coded, and there
@@ -543,6 +1120,20 @@ log (which holds only its SHA-256), never put in a URL, and never shown again.
 This differs from the Telegram channel, which refuses to put a token in a chat:
 that transcript lives on someone else's servers, this page is served over
 loopback to the person deciding, right now, and is persisted nowhere.
+
+`--port` precedence is `--port`, then `channels.web.port` in the policy, then
+4680. `--as` is required at startup: this page exists to record decisions, so a
+server whose buttons could not record one is refused before the socket is bound
+(exit 2). No JavaScript is required, and batching is one gesture over a ticked
+set while the log still records one event per member.
+
+**`--json`** (one object per line on stdout):
+
+```
+{"event":"listening","channel":"web","url":"http://127.0.0.1:4680/",
+ "host":"127.0.0.1","port":4680,"actor":"human:alice"}
+{"event":"stopped","notified":3,"views":7,"decisions":2,"refused":1}
+```
 
 ## channel telegram
 
@@ -600,6 +1191,30 @@ still accepts a batch and sends one message per member sharing one batch deliver
 id, so every event carries it — the semantics are there, the one-tap ergonomics
 are not.
 
+The bot token and chat id come from the environment and the policy names the
+variables (`channels.telegram.token_env` / `chat_id_env`, defaulting to
+`APPROVAL_TG_TOKEN` and `APPROVAL_TG_CHAT`). There is no flag for either value.
+Each message carries the computed fields, the agent's claimed fields under their
+own heading, the full payload verbatim, and an inline Approve/Reject keyboard. The
+loop survives the network: timeouts, dropped sockets and 5xx are counted,
+complained about on stderr, and retried with a doubling backoff.
+
+**`--json`** is one object per line on stdout, because a listener is a stream
+rather than a query:
+
+```
+{"event":"notified","action_key":"task-042:chaser","delivery_id":"41"}
+{"event":"decision","action_key":"task-042:chaser","decision":"grant",
+ "ok":true,"seq":7,"state":"granted","token_issued":true}
+{"event":"decision","action_key":"...","decision":"grant","ok":false,
+ "code":"already-decided","token_issued":false}
+{"event":"stopped","notified":1,"updates":1,"decisions":1,"pollErrors":0,
+ "anomalies":{"foreign-chat":0,"malformed-callback":0,"unknown-callback":0,
+ "key-mismatch":0}}
+```
+
+The raw execution token is never in the JSON stream.
+
 ## channel telegram health
 
 Makes no network call. A health check that contacted the Bot API would announce
@@ -631,6 +1246,13 @@ bytes are what each approval bound to, and evidence belongs in the history. To
 ignore them instead, add `.approval/payloads/` yourself — the log keeps every
 `payload_hash`, but the bytes behind them stop being rebuildable.
 
+The per-file codes reported in `existing` are `policy-exists`, `log-dir-exists`,
+`queue-exists` and `gitignore-entries-present`. `.gitignore` is the one file that
+is merged, and no existing line is rewritten. A path of the wrong kind is a
+refusal rather than a report: a directory named `APPROVAL.md`, or a regular file
+where `.approval/` belongs, exits 4 with `error.code` `path-conflict` and nothing
+is written. `approval policy attest` is what creates `events.jsonl`.
+
 ## hook
 
 Exit 0 carries the verdict. Claude Code reads stdout as a decision only on exit
@@ -648,6 +1270,42 @@ which is self-reported. The hard boundary remains the vault and the execution
 token (SPEC.md §10.4). See `docs/claude-code-hook.md` for the settings.json
 entry, which a HUMAN commits: it is `policy.edit`.
 
+**What it decides.**
+
+```
+autonomous class   allow, and NOTHING is appended
+supervised class   allow, after registering the task; no approval event exists
+manual class       register + request, then WAIT for a human decision. Allow
+                   on granted; deny on rejected, revoked, expired or timeout
+gate.self          the "approval" CLI itself is pass-through
+```
+
+Bash commands are classified into SPEC.md §7 action classes; Edit, Write,
+MultiEdit and NotebookEdit are gated only when the file is policy-protected
+(`APPROVAL.md`, `.approval/`, `CLAUDE.md`, `AGENTS.md`, `.claude/settings*`,
+`.github/workflows/`, `.npmrc`); every other tool passes through. `hook classify`
+reads no log, resolves no policy and writes nothing; put the command after `--` so
+its own flags are not parsed as this verb's.
+
+**Deny reasons** (the reason string is `<code>: <detail>`):
+
+- `hook-unclassified` — no rule covers some segment of the command.
+- `hook-opaque` — a construct whose effect cannot be read from the text
+  (`bash -c`, `eval`, backticks, a non-read substitution).
+- `hook-unparseable` — the command line could not be tokenized.
+- `hook-rejected` — a human said no.
+- `hook-revoked` — a granted approval was withdrawn.
+- `hook-expired` — the TTL lapsed before a decision.
+- `hook-timeout` — no decision inside `--timeout`; the request stays live.
+- `hook-gate-refused:<c>` — the gate refused intake; `<c>` is its own frozen code
+  (`policy-not-attested`, `budget-exceeded`, …).
+- `hook-policy-unavailable` — `APPROVAL.md` could not be loaded.
+- `hook-io` — malformed hook input, or an unreadable log.
+
+Set `--timeout` (default 55s) BELOW the hook timeout configured in
+`.claude/settings.json`, and point `--dir` at the PRIMARY checkout, whose log the
+daemon writes.
+
 ## import agents-md
 
 SPEC.md §2: AGENTS.md permissions lists are instructions an agent is trusted to
@@ -662,6 +1320,34 @@ rendered manual with a `# never:` comment — manual is not never; read those
 lines. A class claimed by two sections resolves to the stricter autonomy (SPEC.md
 §5.2, deny beats allow). No approvers and no channels are generated: a machine
 must not name who may approve.
+
+**What it recognises.**
+
+```
+region         a heading containing "permissions", at any level (or the three
+               sub-headings on their own, the bare AGENTS.md layout)
+allowed        "allowed without prompting" / "allowed" / "autonomous"
+approval-first "require approval first" / "requires approval" / "ask first" /
+               "approval required"
+never          "never" / "forbidden" / "prohibited"
+bullets        "- " / "* " list items under those headings; a wrapped
+               continuation line is joined to its bullet
+```
+
+**How bullets become classes.** A fixed, ordered keyword table, first match wins.
+The precedence order is `account.credential`, `vcs.history.rewrite`,
+`policy.edit`, `vcs.push`, `vcs.push.main`, `release.publish`, `network.call`,
+`deps.add`, `data.delete`, `vcs.commit.branch`, `exec.local`,
+`files.write.workspace`, `read.*`. Every mapping carries its source bullet as a
+`# from:` comment so the human can check the guess, and `from` in the JSON is the
+bullet that DECIDED the autonomy (the stricter one on a conflict).
+
+A bullet the table cannot place is preserved verbatim as a comment and listed
+under UNMAPPED; a class claimed by two sections resolves to the stricter autonomy
+and both bullets are named in a warning; unrecognised headings are reported, never
+silently skipped; a file with no permissions section is exit 0 with an empty draft
+and a warning. `--out` writes the draft YAML without the fence and refuses to
+overwrite an existing file.
 
 ## payload hash
 
@@ -687,6 +1373,28 @@ SPEC.md §10.4 requires. Deterministic: the evaluation instant is read once and
 handed to the pure renderer, so the same log rendered at the same instant
 produces the same bytes. TTL countdowns are the only thing that moves between
 renders of an unchanged log.
+
+**`--json`** (one object on stdout):
+
+```
+{"ok":true,"out":"/abs/.approval/QUEUE.md","bytes":2481,
+ "head":{"seq":7,"hash":"<64hex>"},"pending":2,"skipped":0,
+ "audit_backlog":0,"now":"2026-08-06T10:00:00.000Z"}
+refusal  {"ok":false,"error":{"code":"log-corrupt|log-torn-tail|
+          log-unreadable|write-failed","message":"..."}}  on stderr
+```
+
+`head` is null for an empty log. `skipped` counts live requests the renderer could
+not summarize; they are listed in the file with their reason, never dropped.
+
+## reindex
+
+The database is a cache; the log is the truth. The index is rebuilt from scratch
+at a temporary path and renamed into place, so a crashed rebuild leaves the
+previous index intact. A corrupt log is refused outright and a torn tail is
+refused unless `--force` is given, which indexes the intact prefix and reports
+`truncated: true`. The log itself is never written to, and `head` is null for an
+empty log.
 
 ## daemon run
 
@@ -728,6 +1436,58 @@ repository root and must not sit inside any outer working tree: a hash chain doe
 not survive a merge, and an outer repository's rebases, amends and force-pushes
 rewrite the bytes the evidence is made of. The nested layout stays fully valid
 WITHOUT the flag; the two patterns do not mix. See `docs/git-evidence.md`.
+
+**Each tick, in order.**
+
+- ENVELOPE DRIFT — a task file whose `state:` contradicts the log gets an
+  `envelope.drift` event (actor `system:daemon`), once per claim.
+- TTL SWEEP — every live request whose TTL lapsed gets an `approval.expired`
+  through the same `approval expire` the CLI calls; idempotent.
+- WRITE-BACK — every task file whose `state:` still disagrees is rewritten to
+  match the log, after those appends. A file the writer cannot round-trip safely
+  is left alone with a `write-back-refused` warning.
+- LOOP ESCALATION — tasks with three consecutive `execution.failed` are reported
+  when they escalate and when they clear.
+- QUEUE — `.approval/QUEUE.md` is regenerated through the same renderer
+  `approval render` uses, temp-then-renamed.
+
+`--tasks` named explicitly and missing is an error; absent by default is a warning
+and the daemon runs log-only. `--interval` defaults to 30s and `--debounce` to
+250ms. Git-evidence refusals at startup: `git-unavailable` and `log-dir-missing`
+exit 4; `log-dir-not-repo` and `log-dir-nested` exit 2.
+
+**`--json`** is one object per line on stdout:
+
+```
+{"event":"started","log":".approval/log/events.jsonl","tasks":"backlog/tasks",
+ "queue":".approval/QUEUE.md","interval_ms":30000,"debounce_ms":250,
+ "watching":true}
+{"event":"drift","task":"task-042","file":"backlog/tasks/task-042.md",
+ "declared_state":"approved","derived_state":"awaiting","seq":9}
+{"event":"expired","action_key":"task-042:chaser","task":"task-042","seq":10}
+{"event":"rendered","path":".approval/QUEUE.md","bytes":2481,"pending":1,
+ "skipped":0,"audit_backlog":0}
+{"event":"escalated","task":"task-042","consecutive_failures":3}
+{"event":"escalation_cleared","task":"task-042"}
+{"event":"tick","n":1,"head":10,"drift":1,"expired":1,"escalated":0}
+{"event":"stopped","reason":"SIGINT","ticks":3,"drift":1,"expired":1,
+ "renders":3}
+{"event":"git_evidence","commit":"a1b2c3d","seq":10,
+ "hash":"<sha256 of the head record>","records":2}
+```
+
+Warnings go to stderr as `{"event":"warning","code":"...","message":"..."}`, with
+`code` one of `task-unreadable`, `frontmatter-invalid`, `envelope-invalid`,
+`task-id-missing`, `tasks-dir-unreadable`, `append-refused`, `expire-refused`,
+`render-failed`, `watch-unavailable`, `prune-refused`. A warning never stops the
+loop, and neither does `{"event":"git_evidence_failed","step":"commit",…}`.
+
+Payload retention: with `payload_retention` set in policy, each tick appends
+`payload.pruned` and THEN removes the payload file for every payload whose action
+has been terminal longer than the duration, and for orphaned store files. With the
+key absent nothing is ever pruned. `rendered` is emitted when the queue's summary
+CHANGES; the file itself is rewritten every tick, because TTL countdowns move even
+when the log does not.
 
 ## vault
 
@@ -777,6 +1537,32 @@ Every write re-encrypts the whole map under a fresh nonce and lands atomically
 previous vault intact and two writes of the same value never produce the same
 bytes on disk.
 
+The value comes from stdin:
+
+```
+pass show smtp/app | approval vault set smtp-password
+approval vault set api-key <<'EOF'
+sk-live-…
+EOF
+```
+
+or from a variable named with `--value-env`:
+
+```
+APPROVAL_TMP_SECRET="$(op read op://vault/item/field)" \
+  approval vault set api-key --value-env APPROVAL_TMP_SECRET
+```
+
+**`--json`** (one object on stdout):
+
+```
+{"ok":true,"name":"smtp-password","created":true,"count":2,
+ "path":"/…/.approval/vault.enc"}
+```
+
+`created` is false when the name was already present and has been replaced. The
+VALUE appears in no field, on either the success or the failure path.
+
 ## vault list
 
 A vault nobody created is a state, not a fault: when the file does not exist this
@@ -789,6 +1575,16 @@ A wrong passphrase and an altered file both refuse `vault-unreadable` and are no
 distinguished: a runtime that told you which would let someone confirm a guessed
 passphrase against a file they had modified.
 
+**`--json`** (one object on stdout):
+
+```
+{"ok":true,"present":true,"path":"/…/.approval/vault.enc","count":2,
+ "names":["api-key","smtp-password"]}
+{"ok":true,"present":false,"path":"…","count":0,"names":[]}
+```
+
+The second form is a vault that does not exist.
+
 ## vault remove
 
 A name the vault does not hold refuses `credential-absent` rather than reporting
@@ -798,6 +1594,12 @@ one they meant.
 Removing a credential an adapter still needs makes that adapter refuse
 `credential-unavailable` at execution time. Nothing here checks for that, because
 the check would require this verb to know every adapter a machine might run.
+
+**`--json`** (one object on stdout):
+
+```
+{"ok":true,"name":"api-key","count":1,"path":"/…/.approval/vault.enc"}
+```
 
 ## adapter
 
@@ -836,6 +1638,50 @@ No credential value reaches the log, this command's output, or an error message:
 the adapter scrubs every diagnostic it builds, and the contract scans everything
 the adapter returns for the values it handed out and redacts them again.
 
+The payload, whose RFC 8785 canonical hash is what the grant approved:
+
+```
+{"from":"a@example.com","to":["b@example.com"],"cc":[…],"bcc":[…],
+ "subject":"…","body":"…","content_type":"text/plain"|"text/html"}
+```
+
+There is deliberately no flag that takes the message inline: a body on a command
+line is a body in the shell history. `--timeout` is the whole-SMTP-session budget
+in milliseconds (default 30000), and exceeding it is recorded as
+`execution.failed` with `smtp-timeout`. A non-ASCII body is sent
+quoted-printable and a non-ASCII subject as RFC 2047 encoded-words; an all-ASCII
+body is sent 8bit, byte for byte as approved.
+
+**Failure codes** (in `adapter_code`):
+
+- `email-payload-invalid` — the approved bytes are not a well-formed email.
+- `email-config-invalid` — the vault holds unusable SMTP configuration.
+- `credential-unavailable` / `credential-refused` — the vault could not supply a
+  name. Nothing was sent.
+- `smtp-connect-failed` / `smtp-tls-failed` / `smtp-timeout` /
+  `smtp-protocol-error`.
+- `smtp-<NNN>` — the server refused a verb; NNN is its own reply code
+  (`smtp-535` authentication, `smtp-550` mailbox, …).
+
+**`--json`** carries the adapter contract's own result, unmodified. On a completed
+send, on stdout:
+
+```
+{"ok":true,"adapter":"email","action_key":"…","task":"…","class":"…",
+ "autonomy":"manual","payload_hash":"<64hex>","started_seq":N,
+ "outcome":"execution.completed","outcome_seq":N,"exit_code":0,
+ "detail":{"message_id":"<…>","recipients":N,"bytes":N,"secure":true,
+           "auth":"PLAIN","smtp_code":250,"transcript":[…]},"redactions":0}
+```
+
+On a refusal, on stderr:
+
+```
+{"ok":false,"code":"…","message":"…","adapter":"email","action_key":"…",
+ "acted":true|false,"started_seq":N,"outcome":"execution.failed",
+ "outcome_seq":N,"exit_code":1,"adapter_code":"smtp-550","redactions":0}
+```
+
 ## env
 
 This command is the only thing that reads `.approval/env`, and its default output
@@ -865,6 +1711,42 @@ Exit 0 even when variables are unresolved, because the output is destined for
 `eval` and a shell function that failed on an unconfigured channel is one nobody
 keeps in their profile. `--check` is the path with an opinion. A defaulted
 variable nobody mentioned is an offer, not a promise.
+
+**The file.** One `KEY=VALUE` per line, `#` comments and blank lines ignored, no
+quoting and no interpolation, mode 0600 (anything else is refused with the chmod
+to run), and gitignored by `approval init`. VALUE says WHERE the value lives:
+
+```
+KEY=keychain:<service>       macOS: security find-generic-password -a "$USER"
+                             -s <service> -w
+KEY=secret-service:<label>   Linux: secret-tool lookup approval <label>
+KEY=env:                     inherited from the shell that launched you
+KEY=<value>                  a plaintext literal
+KEY=literal:<value>          the same, spelled out, for a value that begins
+                             with something that looks like a scheme
+```
+
+A value with some other `word:` prefix is a literal, not an error.
+
+**Which variables are answered for:** `APPROVAL_HUMAN`, the Telegram token and
+chat id, the vault passphrase, the sampling secret when one is named, and any
+other string-valued key ending in `_env` anywhere in the loaded policy. An absent
+file is not an error. Unresolved variables are printed as `#` comments naming the
+repair.
+
+**`--json`** (one object on stdout):
+
+```
+{"ok":true,"path":"/…/.approval/env","present":true,
+ "variables":[{"name":"APPROVAL_TG_TOKEN","status":"resolved-from-keychain",
+               "source":"keychain:approval-tg","plaintext":false,
+               "declared":true,"value":"…","fix"?:"…","refusal"?:{…}}]}
+```
+
+`status` is one of `set-in-environment` | `resolved-from-keychain` |
+`resolved-from-secret-service` | `resolved-literal` | `unset`. `value` is present
+only when there is one AND `--check` was not passed. `ok` is the `--check` verdict
+on every path.
 
 ## setup
 
@@ -897,6 +1779,36 @@ runtime only by being read back on stdout. Values this runtime GENERATES (the
 passphrase, the sampling secret) go to the helper on its stdin; if a helper will
 not take stdin, the fallback puts a just-minted value in an argv and says so.
 
+**What each subcommand is for.**
+
+- `identity` — declare who the human is (`APPROVAL_HUMAN`).
+- `vault` — mint a vault passphrase, store it, and record where it lives.
+- `sampling` — mint the audit sampling secret, store it, and print the policy
+  line that turns sampling on.
+- `channel <name>` — configure one channel's transport credential. For telegram
+  that is collecting the bot token, proving it with getMe, discovering the
+  approver chat, and recording both variables.
+- `adapter <name>` — fill the vault with one adapter's credentials, asked for
+  from the manifest that adapter declares, and prove them against the service
+  without sending anything.
+
+**Where secrets go.**
+
+```
+macOS (security on PATH)     keychain:<service>
+Linux (secret-tool on PATH)  secret-service:<service>
+neither                      offered as a PLAINTEXT literal in .approval/env,
+                             taken only on a typed `yes`, and reported as
+                             plaintext by `approval env --check` ever after
+
+approval-tg-token            the bot token
+approval-vault-passphrase    the vault passphrase
+approval-sampling-secret     the audit sampling secret
+```
+
+What it writes is `.approval/env` (one `KEY=VALUE` line per variable, mode 0600,
+every other line and comment preserved) and items in the OS keystore.
+
 ## setup identity
 
 Not human-only, unlike every other setup subcommand, and that is not a hole: a
@@ -916,6 +1828,10 @@ question again.
 
 The line it writes is inert. No verb reads `.approval/env` on its own (SPEC.md
 §11.1 invariant 7); `eval "$(approval env)"` is what puts it in your shell.
+
+An answer that does not fit gets one line saying why and the same question again;
+Ctrl-C or Ctrl-D writes nothing. Refusing a non-terminal stdin, it prints the
+export line to use instead.
 
 ## setup vault
 
@@ -956,6 +1872,11 @@ The values go into the vault, not into the OS keystore and not into
 `.approval/env`: what this verb stores is what a gated adapter spends inside a
 verified-token window.
 
+What it reports: the path, the count, the names written and the names left alone.
+Never a value, on any path, including a failed probe. Exit 1 means the service
+refused the stored configuration, or the vault would not open; the values are kept
+either way and the undo is printed.
+
 ## setup adapter email
 
 A port that is not a port and a security setting that is not one of the three
@@ -972,6 +1893,19 @@ delivery, and it puts no message on the wire.
 A failed probe keeps the values. A laptop behind a captive portal is not a reason
 to make you type five things again. The refusal prints the SMTP code and the
 server's first line, with the credential redacted, and the undo.
+
+The five names, and what each answer is checked against:
+
+```
+smtp.host      the submission server
+smtp.port      587 for STARTTLS submission, 465 for implicit TLS
+smtp.security  implicit | starttls | none, picked from a numbered list
+smtp.user      optional, and both-or-neither with the password
+smtp.password  optional, read with no echo, written last
+```
+
+The probe defaults to yes and can be declined; declining stores the values and
+says they are unverified.
 
 ## setup channel
 
@@ -1004,3 +1938,53 @@ The wait is a continuous long poll of up to 90 seconds, so when you send the
 message does not matter and no Enter is asked for. If nothing arrives it asks
 `getWebhookInfo` and prints what Telegram says about this bot — how many updates
 are pending, and whether a webhook is swallowing them.
+
+The chat id is written as a literal because a chat id is not a secret. Human-only
+and enforced: it stores a credential and writes `.approval/env`, so `--as` expects
+a `human:<id>` and an `agent:` or `system:` actor is refused at exit 2. Exit 1
+means the far end refused: an invalid token, a 409 from a running listener, or no
+message reaching the bot before the deadline.
+
+## mcp serve
+
+STDOUT IS THE JSON-RPC STREAM: this verb's own messages go to stderr, and a child
+spawned by the run tool is piped rather than inheriting the terminal, so nothing
+can write into the wire. SIGINT and SIGTERM close the transport and exit 0.
+
+**The tools are the agent surface, and only that.** The tool list is the verb
+registry (`approval instructions --schemas`) filtered by `human_only` false, and
+every tool's `inputSchema` is that verb's registry input schema. Two agent-facing
+verbs are still withheld: `consume`, which is internal plumbing that `run` wraps,
+and `hook claude-code`, which reads a PreToolUse event from a stdin this transport
+already owns.
+
+**Not published**, and this is the design rather than an omission: grant, reject,
+revoke, policy attest, policy amend, execution resolve, audit review, expire, env,
+init, setup, vault, the channels, the daemon, and this verb itself. SPEC.md §11
+names the agent the untrusted policy and the human the trusted, expensive
+overseer. An MCP client is an agent's harness, so offering it grant would hand the
+untrusted policy the overseer's pen. A human decides at a human's surface:
+`approval channel cli`, the local web page, or Telegram.
+
+**Identity cannot be escalated by a caller.** `--as` is removed from every
+published input schema, so a client sending one is refused by the schema; the
+server's own identity is appended last to every argv, so it wins even if one
+arrives another way. There is no tool that takes an actor. A `human:` or
+`system:` value for `--as` is refused at exit 2, before the transport exists.
+
+Tool calls run serially in this process, and appends go through the same lockfile
+and compare-and-append every `approval` process uses, so a CLI running beside this
+server is safe. A refusal comes back as a tool result with `isError` true carrying
+the CLI's own `{"error":{"code","message"}}` object, never as a thrown JSON-RPC
+error: the command was well-formed and the answer was no, which the caller must be
+able to read as data. A JSON-RPC error means something else, an unknown tool or
+arguments that do not match the schema. The exit code travels in `_meta` as
+`approval.md/exit_code`.
+
+**This server reads no `.approval/env`** (SPEC.md §11.1 invariant 7). It runs
+under whatever environment the operator launched it with, exactly as every other
+`approval` invocation does.
+
+POST-V1: mapping the MCP tasks/elicitation extension onto `awaiting`. SPEC.md
+§10.5 says that MAY happen "when client support stabilizes"; until then the wait
+tool blocks and answers, and its timeout is an answer of its own.

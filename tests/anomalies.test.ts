@@ -368,8 +368,11 @@ test("status's human output names anomalies and still says health: ok", () => {
   const unit = scenario(600_000, 100_000);
   const run = runCli(unit, ["status", "--policy", unit.policyPath]);
   assert.equal(run.code, 0);
-  assert.match(run.out, /health: ok/u);
-  assert.match(run.out, /timestamp anomalies: 1 \(reported, NOT refused/u);
+  // APRV-91 #14 turned status into an aligned table: the colon after each key
+  // became a column of spaces. The claim under test is unchanged — an anomaly
+  // is reported and health still says ok.
+  assert.match(run.out, /^health {2,}ok$/mu);
+  assert.match(run.out, /^timestamp anomalies {2,}1 \(reported, NOT refused/mu);
 });
 
 test("verification is unchanged by anomalies: the records still verify one by one", () => {

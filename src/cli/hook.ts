@@ -64,6 +64,7 @@ import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { HOOK_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { style, type Style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 /** Identity accepted for the proposing side: a person or an agent. */
@@ -241,15 +242,39 @@ function parseHookInput(raw: string): ParsedInput {
 // hook classify
 // ===========================================================================
 
-function renderClassification(result: CommandClassification, json: boolean): string {
+/**
+ * What the classifier made of a command (APRV-91 #9).
+ *
+ * Human output is an aligned three-column table under a `key` header row; the
+ * command text and the rule name are copyable and stay undressed. `--json`
+ * emits the classification object unchanged, and asks for the style FIRST so
+ * that the `json` veto on colour is the answer this process memoizes.
+ */
+export function renderClassification(
+  result: CommandClassification,
+  json: boolean,
+  st: Style = style({ json }),
+): string {
   if (json) return `${JSON.stringify(result)}\n`;
   if (!result.ok) {
-    return `${result.code}: ${result.detail}\n  segment: ${result.segment}\n`;
+    return `${st.glyph("fail")} ${st.fail(result.code)}  ${result.detail}\n  ${st.key("segment:")} ${st.value(result.segment)}\n`;
   }
-  const lines = result.segments.map(
-    (segment) => `${segment.class}\t${segment.rule}\t${segment.text}`,
-  );
-  lines.push(`classes: ${result.classes.join(", ")}`);
+
+  const widths = [
+    Math.max("class".length, ...result.segments.map((segment) => segment.class.length)),
+    Math.max("rule".length, ...result.segments.map((segment) => segment.rule.length)),
+  ];
+  const pad = (text: string, column: number): string =>
+    text + " ".repeat(Math.max(0, (widths[column] ?? 0) - text.length));
+
+  const lines = [
+    [st.key(pad("class", 0)), st.key(pad("rule", 1)), st.key("command")].join("  "),
+    ...result.segments.map((segment) =>
+      [pad(segment.class, 0), pad(segment.rule, 1), st.value(segment.text)].join("  ").trimEnd(),
+    ),
+    "",
+    `${st.key("classes:")} ${st.value(result.classes.join(", "))}`,
+  ];
   return `${lines.join("\n")}\n`;
 }
 

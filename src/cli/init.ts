@@ -58,6 +58,7 @@ import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
 import { CANONICAL_POLICY, GITIGNORE_ENTRIES, GITIGNORE_MARKER } from "./scaffold.js";
 import { usageErrorText } from "./usage.js";
+import { wordmark } from "./wordmark.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--dir": "string",
@@ -338,6 +339,11 @@ export function commandInit(argv: string[], streams: Streams, cwd: string): numb
     return EXIT_OK;
   }
 
+  // One of the three places the wordmark appears (APRV-91 #7/#12): scaffolding
+  // a directory is the moment a person meets this tool. In a pipe it degrades
+  // to the one-line `approval.md v0.0.1`, so a log gains a version stamp rather
+  // than six lines of art.
+  streams.out(`${wordmark()}\n\n`);
   streams.out(`approval: scaffolded ${dir}\n`);
   if (written.length === 0) {
     streams.out("  nothing written — every target already exists\n");
