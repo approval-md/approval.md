@@ -284,9 +284,9 @@ vault. What the conversation looks like:
 
 ```
 approval setup adapter email — the SMTP settings `approval adapter email` reads inside the verified-token window.
-The values go into the VAULT (SPEC.md §10.4), not into the OS keystore and not
-into .approval/env: what this verb stores is what a gated adapter spends inside
-a verified-token window. Nothing here appends to the log or attests anything.
+The values go into the VAULT, not into the OS keystore and not into
+.approval/env: what this verb stores is what a gated adapter spends inside a
+verified-token window. Nothing here appends to the log or attests anything.
 
 It will ask for 5 value(s), all of them into /tmp/approval-email-demo/.approval/vault.enc:
   smtp.host (config) — the submission server this runtime connects to
@@ -469,16 +469,21 @@ approval doctor
 ```
 
 ```
-✓ build-freshness: …/dist/src/cli/main.js built …, not older than the source tree
-✓ identity: APPROVAL_HUMAN=human:alice (config-declared: the trust boundary is this machine, not cryptography)
-✓ attestation: /tmp/approval-email-demo/APPROVAL.md is attested at seq 1 (sha256 f29bac7b373e…)
-✓ log: …/events.jsonl verifies: 1 record(s), head seq 1 c5250281dd91…
-✓ telegram: getMe on https://api.telegram.org succeeded …
-✓ web-port: 127.0.0.1:4680 is free (bound and released; nothing was left listening)
-✓ payload-store: …
-✓ vault: /tmp/approval-email-demo/.approval/vault.enc opens with the passphrase in $APPROVAL_DEMO_VAULT_PASSPHRASE and holds 5 credential(s) … No credential name or value is printed by this check
-✓ environment: /tmp/approval-email-demo/.approval/env (mode 0600, and no verb loads it implicitly: `eval "$(approval env)"` is how a human puts these in a shell) … Every variable your policy names is available to the verbs run from this shell
+✓ build-freshness     …/dist/src/cli/main.js built …, not older than the source tree
+✓ identity            APPROVAL_HUMAN=human:alice (config-declared: the trust boundary is this machine, not cryptography)
+✓ attestation         /tmp/approval-email-demo/APPROVAL.md is attested at seq 1 (sha256 f29bac7b373e…)
+✓ log                 …/events.jsonl verifies: 1 record(s), head seq 1 c5250281dd91…
+✓ telegram            getMe on https://api.telegram.org succeeded …
+✓ web-port            127.0.0.1:4680 is free (bound and released; nothing was left listening)
+✓ payload-store       …
+✓ vault               /tmp/approval-email-demo/.approval/vault.enc opens with the passphrase in $APPROVAL_DEMO_VAULT_PASSPHRASE and holds 5 credential(s) … No credential name or value is printed by this check
+✓ environment         /tmp/approval-email-demo/.approval/env (mode 0600, and no verb loads it implicitly: `eval "$(approval env)"` is how a human puts these in a shell) … Every variable your policy names is available to the verbs run from this shell
+11 ok · 0 not applicable · 0 failed
 ```
+
+The glyph column is the whole report at a glance, and the summary line under it
+is the count. On a terminal the glyph and the counts carry their role colour;
+piped into a file, as here, the words alone say the same thing.
 
 The `environment` check is the one that reads the work of the setup verbs back.
 It passes when every variable the policy names is set here or declared against a
@@ -631,7 +636,7 @@ approval status
 5	2026-08-18T00:55:21.431Z	execution.started	agent:claude-admin	task-042
 6	2026-08-18T00:55:21.679Z	execution.completed	agent:claude-admin	task-042
 clean: 6 record(s), head seq 6 835ebcb576f1…
-health: ok
+health                   ok
 ```
 
 Six records: policy attested, task registered, action requested by an agent,

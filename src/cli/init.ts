@@ -57,6 +57,8 @@ import { INIT_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
 import { CANONICAL_POLICY, GITIGNORE_ENTRIES, GITIGNORE_MARKER } from "./scaffold.js";
+import { usageErrorText } from "./usage.js";
+import { wordmark } from "./wordmark.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--dir": "string",
@@ -96,7 +98,7 @@ function wantsJson(argv: string[]): boolean {
 
 function usageError(streams: Streams, json: boolean, message: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${INIT_HELP}\n`);
+  else streams.err(usageErrorText(message, INIT_HELP));
   return EXIT_USAGE;
 }
 
@@ -156,7 +158,7 @@ function kindOf(path: string): Kind {
  */
 function nextSteps(): string[] {
   return [
-    "Edit APPROVAL.md. What was scaffolded is SPEC.md §5.1's canonical example, not your policy: it names an approver you are probably not and declares classes you have not agreed to. Read every class before you sign for it.",
+    "Edit APPROVAL.md. What was scaffolded is the canonical example policy, not your policy: it names an approver you are probably not and declares classes you have not agreed to. Read every class before you sign for it.",
     "Run `approval policy attest` (as a human: APPROVAL_HUMAN=human:<id>, or --as human:<id>). Attestation is what makes a policy operative, and it is what creates .approval/log/events.jsonl — init made the directory and deliberately put nothing in it, because a log entry nobody signed is not evidence of anything.",
     "Run `approval doctor` to check that this machine can run the system at all: build freshness, identity, attestation, chain health, channels.",
     "Run `approval env --check` to see which environment variables your policy names and where each one would come from (it prints no values). To record where they live, write `.approval/env` — one KEY=VALUE per line, where VALUE is `keychain:<service>`, `secret-service:<label>`, `env:`, or a plaintext literal — `chmod 600` it, and put `eval \"$(approval env)\"` in your shell. No other command reads that file, deliberately: human identity is one of the variables it can carry, so a file the runtime loaded on its own would let anything able to write it act as you.",
@@ -337,6 +339,11 @@ export function commandInit(argv: string[], streams: Streams, cwd: string): numb
     return EXIT_OK;
   }
 
+  // One of the three places the wordmark appears (APRV-91 #7/#12): scaffolding
+  // a directory is the moment a person meets this tool. In a pipe it degrades
+  // to the one-line `approval.md v0.0.1`, so a log gains a version stamp rather
+  // than six lines of art.
+  streams.out(`${wordmark()}\n\n`);
   streams.out(`approval: scaffolded ${dir}\n`);
   if (written.length === 0) {
     streams.out("  nothing written — every target already exists\n");

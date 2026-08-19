@@ -805,14 +805,17 @@ test("usage: daemon --help documents the exit codes, the JSON shape and the fore
   for (const args of [["daemon", "--help"], ["daemon", "run", "--help"]]) {
     const run = runCli(args, dir);
     assert.equal(run.code, 0, run.stderr);
-    assert.match(run.stdout, /Exit codes \(frozen public API\)/u);
+    // APRV-91: the frozen table is printed by `approval --help` alone.
+    assert.match(run.stdout, /exit codes: approval --help/u);
     assert.match(run.stdout, /Usage:/u);
     assert.match(run.stdout, /--json/u);
   }
   const help = runCli(["daemon", "run", "-h"], dir);
   assert.match(help.stdout, /FOREGROUND/u);
   assert.match(help.stdout, /backgrounding is the operator's/u);
-  assert.match(help.stdout, /SINGLE WRITER, IN INTENT ONLY/u);
+  // APRV-91: the single-writer reasoning moved to
+  // docs/cli-reference.md#daemon-run, which the help points at.
+  assert.match(help.stdout, /docs\/cli-reference\.md#daemon-run/u);
 
   const root = runCli(["--help"], dir);
   assert.match(root.stdout, /approval daemon run/u);

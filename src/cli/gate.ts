@@ -78,6 +78,8 @@ import {
 } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { refusal as renderRefusal, style } from "./style.js";
+import { usageErrorText } from "./usage.js";
 
 /** Identity accepted by the proposing verbs: a person or an agent. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
@@ -104,7 +106,7 @@ function absolute(value: string, cwd: string): string {
 
 function usageError(streams: Streams, json: boolean, message: string, helpText: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${helpText}\n`);
+  else streams.err(usageErrorText(message, helpText));
   return EXIT_USAGE;
 }
 
@@ -160,7 +162,11 @@ function emitRefusal(streams: Streams, json: boolean, refusal: GateRefusal): num
     if (refusal.record !== undefined) error["seq"] = refusal.record.seq;
     streams.err(`${JSON.stringify({ ok: false, error })}\n`);
   } else {
-    streams.err(`approval: ${refusal.code}: ${refusal.message}\n`);
+    // APRV-91 #8/#13: glyph, machine-readable code, message. No help page
+    // follows a refusal, and no `fix:` line is invented here — the gate's
+    // refusals name a state (`not-granted`, `already-decided`) rather than a
+    // single command that repairs it, and a wrong fix is worse than none.
+    streams.err(`${renderRefusal(style({ json }), refusal.code, refusal.message)}\n`);
   }
   return refusalExitCode(refusal);
 }
@@ -424,7 +430,7 @@ export function commandRequest(argv: string[], streams: Streams, cwd: string): n
     });
   } else if (result.record === null) {
     streams.out(
-      `${actionKey}: ${result.autonomy} — no approval required, proceed to execution (no approval.* event, per SPEC.md §6.3)\n`,
+      `${actionKey}: ${result.autonomy} — no approval required, proceed to execution (no approval.* event is appended on this path)\n`,
     );
   } else {
     streams.out(`requested ${task} ${actionKey} at seq ${result.record.seq} (manual)\n`);

@@ -84,6 +84,10 @@ import {
   resolvePath,
 } from "./paths.js";
 import { parseLines, readCompleteLines } from "./records.js";
+import { helpFor, longHelp } from "./long-help.js";
+import { resetStyle, style } from "./style.js";
+import { usageErrorText } from "./usage.js";
+import { wordmark } from "./wordmark.js";
 
 /** Output sinks, injectable so the command layer stays testable in-process. */
 export interface Streams {
@@ -126,7 +130,7 @@ function usageError(
   helpText: string,
 ): number {
   if (json) emitJsonError(streams, "usage", message);
-  else streams.err(`approval: ${message}\n\n${helpText}\n`);
+  else streams.err(usageErrorText(message, helpText));
   return EXIT_USAGE;
 }
 
@@ -219,7 +223,7 @@ function anomalyField(anomalies: ChainAnomaly[]): Record<string, unknown> {
 function reportAnomalies(streams: Streams, anomalies: ChainAnomaly[]): void {
   if (anomalies.length === 0) return;
   streams.err(
-    `approval: ${anomalies.length} timestamp anomaly(ies) — the chain verifies and NOTHING is refused; these are reported for a human to weigh (SPEC.md §8)\n`,
+    `approval: ${anomalies.length} timestamp anomaly(ies) — the chain verifies and NOTHING is refused; these are reported for a human to weigh\n`,
   );
   for (const anomaly of anomalies) {
     streams.err(`approval: ${anomaly.kind}: ${anomaly.message}\n`);
@@ -493,6 +497,60 @@ function commandLog(argv: string[], streams: Streams, cwd: string): number {
 }
 
 /**
+ * The part of a command line that belongs to `approval` itself.
+ *
+ * `approval run … -- git push` and `hook classify -- <command…>` hand the tail
+ * to a child, and a `--no-color` in THAT half is the child's business. Reading
+ * presentation flags only from the near side is what keeps this CLI from
+ * quietly editing the command it was asked to run.
+ */
+function beforeSeparator(argv: readonly string[]): string[] {
+  const separator = argv.indexOf("--");
+  return separator === -1 ? [...argv] : argv.slice(0, separator);
+}
+
+/** Remove `--no-color`, near side only, so no verb needs it in its flag spec. */
+function stripNoColor(argv: readonly string[]): string[] {
+  const separator = argv.indexOf("--");
+  const near = (separator === -1 ? argv : argv.slice(0, separator)).filter(
+    (word) => word !== "--no-color",
+  );
+  return separator === -1 ? near : [...near, ...argv.slice(separator)];
+}
+
+/** The five verbs a new operator needs, under the wordmark, and nothing else. */
+function splash(theme: ReturnType<typeof style>): string {
+  const rows = [
+    { left: "init", right: "scaffold APPROVAL.md and .approval/ here" },
+    { left: "setup", right: "declare who you are and store credentials" },
+    { left: "doctor", right: "can this machine run the system?" },
+    { left: "queue", right: "what is waiting for your decision" },
+    { left: "--help", right: "every verb, and the exit codes" },
+  ];
+  return `${wordmark(theme)}\n\n${theme.table(rows, { indent: 2, gap: 3 })}`;
+}
+
+/**
+ * The help text `--long` was asked for, or null when it was not asked for.
+ *
+ * `--long` means nothing on its own: it is a modifier on a help request, so it
+ * is honoured only alongside `--help`/`-h` or the `help` verb. Anywhere else it
+ * falls through to the verb, which will call it an unknown flag, which is the
+ * right answer.
+ */
+function longHelpRequest(argv: readonly string[]): string | null {
+  const near = beforeSeparator(argv);
+  if (!near.includes("--long")) return null;
+  const asking =
+    near[0] === "help" || near.includes("--help") || near.includes("-h");
+  if (!asking) return null;
+  const words = (near[0] === "help" ? near.slice(1) : near).filter(
+    (word) => !word.startsWith("-"),
+  );
+  return (words.length === 0 ? null : helpFor(words)) ?? ROOT_HELP;
+}
+
+/**
  * Run the CLI. Returns the process exit code rather than calling
  * `process.exit`, so buffered stdout is flushed by the normal exit path — a
  * truncated JSON object would be worse than no output at all.
@@ -501,14 +559,47 @@ export function main(argv: string[], options: MainOptions = {}): number {
   const streams = options.streams ?? defaultStreams();
   const cwd = options.cwd ?? process.cwd();
 
-  const command = argv[0];
-  const rest = argv.slice(1);
+  // Presentation is decided ONCE per invocation, before any verb can print
+  // (APRV-91). `--no-color` is answered here and stripped, so no verb has to
+  // carry it in its flag spec and none can disagree about it; `--json` is a
+  // veto on colour, which is why it is read before the verb parses anything.
+  const argvForStyle = beforeSeparator(argv);
+  const noColor = argvForStyle.includes("--no-color");
+  resetStyle();
+  const theme = style({ json: wantsJson(argvForStyle), noColor });
+  const cleanArgv = noColor ? stripNoColor(argv) : argv;
+
+  const command = cleanArgv[0];
+  const rest = cleanArgv.slice(1);
+
+  // `--help --long` and `approval help <verb> --long` (APRV-91 #16): the short
+  // help verbatim, then the reference section its `why:` footer points at.
+  // Intercepted HERE rather than in each verb, because the alternative is the
+  // same three lines in sixty places and one of them getting it wrong.
+  const longRequest = longHelpRequest(cleanArgv);
+  if (longRequest !== null) {
+    streams.out(`${longHelp(longRequest, { style: theme })}\n`);
+    return EXIT_OK;
+  }
 
   if (command === undefined) {
+    // The orientation screen (APRV-91 #7/#12). It goes to STDOUT while the
+    // refusal stays on stderr with today's exit 2: a bare invocation is still a
+    // usage error for anything scripting this CLI, and the human staring at a
+    // terminal still gets the wordmark and the five verbs they need.
+    streams.out(`${splash(theme)}\n`);
     return usageError(streams, false, "no command given", ROOT_HELP);
   }
   if (command === "--help" || command === "-h" || command === "help") {
-    streams.out(`${ROOT_HELP}\n`);
+    // `approval help <verb>` is the third spelling of `approval <verb> --help`,
+    // and the one a person guesses first.
+    const words = rest.filter((word) => !word.startsWith("-"));
+    const target = words.length === 0 ? null : helpFor(words);
+    if (target !== null) {
+      streams.out(`${target}\n`);
+      return EXIT_OK;
+    }
+    streams.out(`${wordmark(theme)}\n\n${ROOT_HELP}\n`);
     return EXIT_OK;
   }
 

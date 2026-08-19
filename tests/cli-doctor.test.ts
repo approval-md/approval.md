@@ -374,14 +374,21 @@ test("doctor: human output is one line per check with indented fixes", async () 
 
   assert.equal(run.code, 1, run.stderr);
   const lines = run.stdout.trimEnd().split("\n");
+  // APRV-91 #9 made this an aligned table, so the check name is padded into a
+  // column instead of being followed by a colon. The line ARITHMETIC is what
+  // the contract was and still is: one line per check, one indented fix under it.
   assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 11);
-  assert.ok(lines.some((line) => line.startsWith("✗ identity:")));
-  assert.ok(lines.some((line) => line.startsWith("– telegram:")));
+  assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
+  assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
   // the command (APRV-75).
-  const identityIndex = lines.findIndex((line) => line.startsWith("✗ identity:"));
+  const identityIndex = lines.findIndex((line) => /^✗ identity {2,}/u.test(line));
   assert.match(lines[identityIndex + 1] as string, /^ {4}fix: approval setup identity\b/u);
   assert.match(lines[identityIndex + 1] as string, /export APPROVAL_HUMAN=human:<id>/u);
+  // And the summary line the table gained, in role order (APRV-91 #9).
+  assert.match(run.stdout, /^\d+ ok · \d+ not applicable · \d+ failed$/mu);
+  // Piped output carries no escape codes at all.
+  assert.ok(!run.stdout.includes("\u001b"));
 });
 
 // ---------------------------------------------------------------------------

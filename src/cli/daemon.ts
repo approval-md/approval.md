@@ -54,6 +54,7 @@ import { DAEMON_HELP, DAEMON_RUN_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
 import { DEFAULT_QUEUE_PATH } from "./render.js";
+import { usageErrorText } from "./usage.js";
 
 const RUN_FLAGS: Record<string, FlagKind> = {
   "--log": "string",
@@ -76,7 +77,7 @@ function absolute(value: string, cwd: string): string {
 
 function usageError(streams: Streams, json: boolean, message: string, help: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${help}\n`);
+  else streams.err(usageErrorText(message, help));
   return EXIT_USAGE;
 }
 
@@ -163,7 +164,7 @@ function describe(event: DaemonEvent): { text: string; stderr: boolean } {
       return {
         text: `loop escalation: ${event.task} has ${String(
           event.consecutive_failures,
-        )} consecutive execution.failed and is escalated to manual (SPEC.md §10.2); its supervised and autonomous actions are refused until an execution.completed lands`,
+        )} consecutive execution.failed and is escalated to manual; its supervised and autonomous actions are refused until an execution.completed lands`,
         stderr: false,
       };
     case "escalation_cleared":

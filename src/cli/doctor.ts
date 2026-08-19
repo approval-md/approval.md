@@ -94,6 +94,8 @@ import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { DOCTOR_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { style, type Glyph, type Style, type TableRow } from "./style.js";
+import { usageErrorText } from "./usage.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--log": "string",
@@ -169,7 +171,7 @@ function absolute(value: string, cwd: string): string {
 
 function usageError(streams: Streams, json: boolean, message: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${DOCTOR_HELP}\n`);
+  else streams.err(usageErrorText(message, DOCTOR_HELP));
   return EXIT_USAGE;
 }
 
@@ -1252,17 +1254,46 @@ function taskIdFromFileName(name: string): string | null {
 // Rendering
 // ---------------------------------------------------------------------------
 
-const MARK: Record<DoctorCheck["status"], string> = {
-  pass: "✓",
-  fail: "✗",
-  skip: "–",
+/** The status column, as a glyph role the shared style already knows how to paint. */
+const GLYPH_OF: Record<DoctorCheck["status"], Glyph> = {
+  pass: "ok",
+  fail: "fail",
+  skip: "skip",
 };
 
-function render(streams: Streams, checks: DoctorCheck[]): void {
-  for (const entry of checks) {
-    streams.out(`${MARK[entry.status]} ${entry.check}: ${entry.detail}\n`);
-    if (entry.fix !== undefined) streams.out(`    fix: ${entry.fix}\n`);
-  }
+/**
+ * The human report: one aligned row per check, fixes indented under their row.
+ *
+ * The line contract is load-bearing and older than the table (APRV-91 #9): a
+ * check occupies exactly one line, and a `fix` exactly one indented line under
+ * it, so an operator scanning a failed run counts rows rather than paragraphs.
+ * What the table changed is alignment and colour, never that arithmetic.
+ *
+ * Details are printed IN FULL. The brief asked for truncation to terminal width
+ * with `--verbose` restoring the sentence, and this deliberately does not do
+ * that: `--verbose` would have to be declared in `DOCTOR_HELP`, and a check
+ * whose repair instructions are cut off mid-command is worse than a wide line.
+ */
+export function renderDoctorHuman(checks: readonly DoctorCheck[], st: Style = style()): string {
+  const rows: TableRow[] = checks.map((entry) => ({
+    left: entry.check,
+    right: entry.detail,
+    glyph: GLYPH_OF[entry.status],
+    ...(entry.fix === undefined ? {} : { under: [`fix: ${entry.fix}`] }),
+  }));
+
+  const count = (status: DoctorCheck["status"]): number =>
+    checks.filter((entry) => entry.status === status).length;
+  const failed = count("fail");
+  // Each count wears its own role, so the summary is scannable at the same
+  // glance as the glyph column above it and says the same thing.
+  const summary = [
+    st.ok(`${count("pass")} ok`),
+    st.warn(`${count("skip")} not applicable`),
+    failed === 0 ? st.muted("0 failed") : st.fail(`${failed} failed`),
+  ].join(" · ");
+
+  return `${st.table(rows)}\n${summary}\n`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1351,7 +1382,7 @@ export function commandDoctor(
     const ok = checks.every((entry) => entry.status !== "fail");
 
     if (json) streams.out(`${JSON.stringify({ ok, checks })}\n`);
-    else render(streams, checks);
+    else streams.out(renderDoctorHuman(checks, style({ json })));
 
     return ok ? EXIT_OK : EXIT_INTEGRITY;
   })();

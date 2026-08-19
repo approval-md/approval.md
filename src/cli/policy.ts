@@ -37,6 +37,8 @@ import { commandPolicyAttest } from "./attest.js";
 import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { POLICY_CHECK_HELP, POLICY_HELP, POLICY_TEST_HELP } from "./help.js";
 import type { Streams } from "./main.js";
+import { relPath, style, type Role, type Style } from "./style.js";
+import { usageErrorText } from "./usage.js";
 
 /**
  * `--reversible` takes an explicit `true|false` rather than being a bare
@@ -63,7 +65,7 @@ function wantsJson(argv: string[]): boolean {
 
 function usageError(streams: Streams, json: boolean, message: string, helpText: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${helpText}\n`);
+  else streams.err(usageErrorText(message, helpText));
   return EXIT_USAGE;
 }
 
@@ -121,6 +123,43 @@ function finalLine(explanation: Explanation): string {
     return `-> ${autonomy} (floor applied over ${source}: ${explanation.overridden.autonomy})`;
   }
   return `-> ${autonomy}`;
+}
+
+/** Autonomy as a role. `manual` is a decision, never a failure, so it is `warn`. */
+function autonomyRole(autonomy: string): Role {
+  if (autonomy === "autonomous") return "ok";
+  if (autonomy === "supervised") return "warn";
+  return "fail";
+}
+
+/**
+ * The decision trace, dressed (APRV-93 #2).
+ *
+ * The trace lines themselves are the SAME STRINGS `--json` publishes in
+ * `decisionPath`, which is a frozen shape, so nothing here rewrites one — the
+ * only edit is `relPath` on the discovery line, because "the same 70-character
+ * absolute path" was half of the original complaint and the human reader has a
+ * cwd to resolve against. The trace is `muted` and the answer is not: an
+ * operator wants the verdict first and the reasoning when they ask for it.
+ */
+export function renderExplainHuman(
+  explanation: Explanation,
+  cwd: string,
+  st: Style = style(),
+): string {
+  const trace = explanation.decisionPath.map((line) =>
+    st.muted(
+      line.startsWith("policy loaded from ")
+        ? `policy loaded from ${relPath(line.slice("policy loaded from ".length), cwd)}`
+        : line,
+    ),
+  );
+  const autonomy = explanation.outcome.autonomy;
+  const final = finalLine(explanation);
+  // The answer word wears the role; everything around it is left plain so the
+  // line still reads as one sentence in a pipe.
+  const painted = final.replace(autonomy, st.paint(autonomyRole(autonomy), autonomy));
+  return `${[...trace, painted].join("\n")}\n`;
 }
 
 /** One verb's worth of work; `check` and `test` differ only in their help text. */
@@ -189,8 +228,7 @@ function runVerb(argv: string[], streams: Streams, cwd: string, helpText: string
   if (json) {
     streams.out(`${JSON.stringify(explanation)}\n`);
   } else {
-    for (const line of explanation.decisionPath) streams.out(`${line}\n`);
-    streams.out(`${finalLine(explanation)}\n`);
+    streams.out(renderExplainHuman(explanation, cwd, style({ json })));
   }
   return EXIT_OK;
 }

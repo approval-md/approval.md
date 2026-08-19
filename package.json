@@ -8,6 +8,8 @@
   },
   "files": [
     "cli.js",
+    "dist",
+    "docs/cli-reference.md",
     "SPEC.md",
     "README.md"
   ],

@@ -35,6 +35,7 @@ import {
 import { RENDER_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
+import { usageErrorText } from "./usage.js";
 
 /** SPEC.md §9.1: where the queue projection lives. */
 export const DEFAULT_QUEUE_PATH = ".approval/QUEUE.md";
@@ -59,7 +60,7 @@ function emitJson(streams: Streams, value: unknown): void {
 
 function usageError(streams: Streams, json: boolean, message: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${RENDER_HELP}\n`);
+  else streams.err(usageErrorText(message, RENDER_HELP));
   return EXIT_USAGE;
 }
 

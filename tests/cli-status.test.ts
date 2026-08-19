@@ -306,13 +306,20 @@ test("status text mode names health, attestation, verification, dangling and bud
   const dir = ready();
   const run = runCli(["status"], dir);
   assert.equal(run.code, 0, run.stderr);
-  assert.match(run.stdout, /health: ok/u);
-  assert.match(run.stdout, /attestation: attested \(seq 1\)/u);
-  assert.match(run.stdout, /verification: clean/u);
-  assert.match(run.stdout, /dangling executions: none/u);
-  assert.match(run.stdout, /budget global\.daily_usd/u);
-  assert.match(run.stdout, /loop escalations: none/u);
-  assert.match(run.stdout, /payload store: not created yet, 0 pruned by the log, 0 unbound; /u);
+  // APRV-91 #9/#14: aligned key/value rows, so the separator is a column of
+  // spaces rather than a colon, and the payload store's rationale paragraph
+  // moved to `--json`'s `payload_store.note` (still asserted above).
+  assert.match(run.stdout, /^health {2,}ok$/mu);
+  assert.match(run.stdout, /^attestation {2,}attested \(seq 1\)$/mu);
+  assert.match(run.stdout, /^verification {2,}clean/mu);
+  assert.match(run.stdout, /^dangling executions {2,}none$/mu);
+  assert.match(run.stdout, /^budget global\.daily_usd {2,}consumed /mu);
+  assert.match(run.stdout, /^loop escalations {2,}none$/mu);
+  assert.match(run.stdout, /^payload store {2,}not created yet, 0 pruned, 0 unbound$/mu);
+  // The log path is written the way the operator would type it, and piped
+  // output carries no escape codes.
+  assert.match(run.stdout, /^log {2,}\.approval\/log\/events\.jsonl$/mu);
+  assert.ok(!run.stdout.includes("\u001b"));
 });
 
 // ---------------------------------------------------------------------------
@@ -364,7 +371,7 @@ test("status counts the payload store once a real request has stored bytes", () 
 
   const text = runCli(["status"], dir);
   assert.equal(text.code, 0, text.stderr);
-  assert.match(text.stdout, /payload store: 1 file\(s\), 0 pruned by the log, 0 unbound; /u);
+  assert.match(text.stdout, /^payload store {2,}1 file\(s\), 0 pruned, 0 unbound$/mu);
   assertClean(dir);
 });
 
@@ -549,7 +556,8 @@ for (const [name, args] of [
     assert.equal(run.code, 0);
     assert.equal(run.stderr, "");
     assert.match(run.stdout, /Usage:/u);
-    assert.match(run.stdout, /Exit codes \(frozen public API\)/u);
+    // APRV-91: the frozen table is printed by `approval --help` alone.
+    assert.match(run.stdout, /exit codes: approval --help/u);
     assert.match(run.stdout, /JSON shape/u);
   });
 }

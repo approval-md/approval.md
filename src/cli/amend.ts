@@ -83,6 +83,8 @@ import { POLICY_AMEND_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
 import { readLineFromStdin } from "./prompt.js";
+import { relPath, shortHash, style, type TableRow } from "./style.js";
+import { usageErrorText } from "./usage.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--policy": "string",
@@ -123,7 +125,7 @@ function absolute(value: string, cwd: string): string {
 
 function usageError(streams: Streams, json: boolean, message: string): number {
   if (json) streams.err(`${JSON.stringify({ ok: false, error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${POLICY_AMEND_HELP}\n`);
+  else streams.err(usageErrorText(message, POLICY_AMEND_HELP));
   return EXIT_USAGE;
 }
 
@@ -464,6 +466,9 @@ function summarize(policyPath: string, diff: PolicyDiff | null): string {
 /** `approval policy amend …` — the whole ceremony, in one verb. */
 export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string): number {
   const json = argv.includes("--json");
+  // Asked BEFORE anything is printed, which is what makes `--json` an absolute
+  // veto on colour for this process (see `style.ts`'s header).
+  const st = style({ json });
   const parsed = parseFlags(argv, FLAGS);
   if (!parsed.ok) return usageError(streams, json, parsed.message);
 
@@ -569,7 +574,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       });
     } else {
       streams.out(
-        `nothing to amend: ${policyPath} already matches its attestation at seq ${status.seq} (sha256 ${liveSha256})\n`,
+        `nothing to amend: ${relPath(policyPath, cwd)} already matches its attestation at seq ${status.seq} (sha256 ${shortHash(liveSha256)})\n`,
       );
     }
     return EXIT_OK;
@@ -629,6 +634,28 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     commitPlan = plan.plan;
   }
 
+  /**
+   * The same command, with the two long absolute paths written the way the
+   * operator would type them.
+   *
+   * This is a HUMAN transform and nothing else: `--json`'s `git.commands` keeps
+   * the absolute forms, because a machine reading that array has no cwd to
+   * resolve against. `git` itself resolves a relative pathspec against the
+   * process's cwd, so the printed line is still the line that works.
+   */
+  const humanCommand = (command: string): string =>
+    command.split(policyPath).join(relPath(policyPath, cwd)).split(logPath).join(relPath(logPath, cwd));
+
+  /** A `Label` heading with its body indented under it, then a blank line. */
+  const section = (label: string, body: readonly string[]): void => {
+    if (body.length === 0) return;
+    streams.out(`${st.heading(label)}\n`);
+    for (const entry of body) {
+      for (const line of entry.split("\n")) streams.out(line === "" ? "\n" : `  ${line}\n`);
+    }
+    streams.out("\n");
+  };
+
   const summary = summarize(policyPath, diff);
   const commitCommands = (seq: string): string[] => [
     `git add ${policyPath} ${logPath}`,
@@ -653,42 +680,69 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
    * commands for their situation. It is printed whenever the verb did not run
    * the commands itself.
    */
-  const whyOneCommit = (): void => {
-    streams.out(
-      "\nThe policy bytes and the attestation that names their hash have to land in the same commit.\n" +
-        "If they land separately, then for as long as the gap lasts the branch carries a policy no attestation covers, and every gate operation refuses until the second commit arrives.\n",
-    );
+  const whyOneCommit = (): string[] => {
+    const lines = [
+      st.muted(
+        "The policy bytes and the attestation that names their hash have to land in the same commit.",
+      ),
+      st.muted(
+        "If they land separately, then for as long as the gap lasts the branch carries a policy no attestation covers, and every gate operation refuses until the second commit arrives.",
+      ),
+      "",
+    ];
     if (useBranch) {
-      streams.out(
-        `${probe.protection === "protected" ? `${probe.defaultBranch ?? "the default branch"} is protected, so the commit goes onto a branch and reaches main through a pull request` : "This amendment goes onto a branch and reaches main through a pull request"}. Run these, in order:\n`,
+      lines.push(
+        `${probe.protection === "protected" ? `${probe.defaultBranch ?? "the default branch"} is protected, so the commit goes onto a branch and reaches main through a pull request` : "This amendment goes onto a branch and reaches main through a pull request"}. Run these, in order:`,
       );
     } else {
-      if (pushWarning !== null) streams.out(`WARNING: ${pushWarning}\n`);
-      streams.out("Run these, in order:\n");
+      if (pushWarning !== null) lines.push(`${st.fail("WARNING:")} ${pushWarning}`);
+      lines.push("Run these, in order:");
     }
+    return lines;
   };
 
   // (c) + (d): the report. Human output only; --json emits one object at the end.
   if (!json) {
-    streams.out(`amending ${policyPath}\n`);
-    streams.out(
-      `live sha256 ${liveSha256}; attested ${attested === null ? "never" : `${attested.sha256} at seq ${attested.seq}`}\n`,
+    // `Policy` / `Changes` / `Load`, with the changed resolutions as the visual
+    // centre (APRV-93). The two 64-hex digests that made the old first screen
+    // unreadable are twelve characters each here; the full values are one
+    // `--json` away, and that is the copy a machine should be comparing anyway.
+    const identity: TableRow[] = [
+      { left: "file", right: relPath(policyPath, cwd) },
+      { left: "live", right: shortHash(liveSha256) },
+      {
+        left: "attested",
+        right:
+          attested === null
+            ? "never"
+            : `${shortHash(attested.sha256)}  ${st.muted(`(seq ${attested.seq})`)}`,
+      },
+    ];
+    section("Policy", [st.table(identity)]);
+
+    section(
+      "Changes",
+      diff === null
+        ? [
+            `${st.warn("HASH-ONLY MODE:")} no semantic diff. ${recovered.baseline.reason ?? ""}`,
+            st.muted(
+              "The load advisory below and the attestation still apply; what changed in MEANING is not shown, so read the file diff yourself.",
+            ),
+          ]
+        : renderDiff(diff),
     );
-    if (diff === null) {
-      streams.out(
-        `HASH-ONLY MODE: no semantic diff. ${recovered.baseline.reason ?? ""}\nThe load advisory below and the attestation still apply; what changed in MEANING is not shown, so read the file diff yourself.\n`,
-      );
-    } else {
-      for (const line of renderDiff(diff)) streams.out(`${line}\n`);
-    }
-    if (liveLoad.ok) {
-      streams.out("load advisory: loads clean\n");
-    } else {
-      streams.out(
-        `LOAD ADVISORY — THIS POLICY DOES NOT LOAD (${liveLoad.code}): ${liveLoad.message}\n` +
-          "Attesting it is allowed (attestation records bytes, not correctness) but it will FAIL CLOSED to all-manual for every class. This is the shape of the seq 2 incident.\n",
-      );
-    }
+
+    section(
+      "Load",
+      liveLoad.ok
+        ? [`${st.glyph("ok")} loads clean`]
+        : [
+            `${st.glyph("fail")} ${st.fail("DOES NOT LOAD")} (${liveLoad.code}): ${liveLoad.message}`,
+            st.muted(
+              "Attesting it is allowed (attestation records bytes, not correctness) but it will FAIL CLOSED to all-manual for every class. This is the shape of the seq 2 incident.",
+            ),
+          ],
+    );
   }
 
   // (d) --require-load: refuse before the confirmation and before the append.
@@ -745,14 +799,19 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
         aborted: false,
       });
     } else {
-      streams.out("--dry-run: nothing was attested, nothing was written. The ceremony would run:\n");
-      whyOneCommit();
-      for (const command of gitCommands("<seq>")) streams.out(`  ${command}\n`);
-      if (useBranch) {
-        streams.out(
-          "Merge that pull request with a MERGE COMMIT, so the policy edit and its attestation stay one commit on main.\n",
-        );
-      }
+      section("Would run", [
+        `${st.warn("--dry-run:")} nothing was attested, nothing was written. The ceremony would run:`,
+        "",
+        ...whyOneCommit(),
+        "",
+        ...gitCommands("<seq>").map((command) => `  ${st.value(humanCommand(command))}`),
+        ...(useBranch
+          ? [
+              "",
+              "Merge that pull request with a MERGE COMMIT, so the policy edit and its attestation stay one commit on main.",
+            ]
+          : []),
+      ]);
     }
     return EXIT_OK;
   }
@@ -887,42 +946,56 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       aborted: false,
     });
   } else {
-    streams.out(`attested ${policyPath} at seq ${seq}: sha256 ${liveSha256}\n`);
+    section("Attested", [
+      st.table([
+        { left: "file", right: relPath(policyPath, cwd) },
+        { left: "seq", right: String(seq) },
+        { left: "sha256", right: shortHash(liveSha256) },
+      ]),
+    ]);
     if (committed) {
-      streams.out(
+      const done: string[] = [
         branch === null
-          ? "committed the policy and the log together:\n"
-          : `committed the policy and the log together on ${branch}:\n`,
-      );
+          ? `${st.glyph("ok")} committed the policy and the log together:`
+          : `${st.glyph("ok")} committed the policy and the log together on ${branch}:`,
+        "",
+      ];
       for (const command of commands) {
         // The PR command is printed as a to-do when gh could not run it.
         if (command.startsWith("gh pr create") && prUrl === null && branch !== null) continue;
-        streams.out(`  ${command}\n`);
+        done.push(`  ${st.value(humanCommand(command))}`);
       }
-      if (output !== null && output.length > 0) streams.out(`${output}\n`);
+      if (output !== null && output.length > 0) done.push("", ...output.split("\n"));
       if (branch !== null) {
+        done.push("");
         if (prUrl !== null) {
-          streams.out(`pull request: ${prUrl}\n`);
-          streams.out(
-            "Merge it with a MERGE COMMIT, so the policy edit and its attestation stay one commit on main.\n",
+          done.push(`${st.key("pull request:")} ${st.value(prUrl)}`);
+          done.push(
+            "Merge it with a MERGE COMMIT, so the policy edit and its attestation stay one commit on main.",
           );
         } else {
-          streams.out(
-            "gh is not available, so the pull request was not opened. Open it yourself, and merge it with a MERGE COMMIT so the policy edit and its attestation stay one commit on main:\n",
+          done.push(
+            "gh is not available, so the pull request was not opened. Open it yourself, and merge it with a MERGE COMMIT so the policy edit and its attestation stay one commit on main:",
+            "",
           );
           for (const command of commands) {
-            if (command.startsWith("gh pr create")) streams.out(`  ${command}\n`);
+            if (command.startsWith("gh pr create")) done.push(`  ${st.value(humanCommand(command))}`);
           }
         }
       }
+      section("Committed", done);
     } else {
-      whyOneCommit();
-      for (const command of commands) streams.out(`  ${command}\n`);
-      if (useBranch) {
-        streams.out(
-          "Then merge that pull request with a MERGE COMMIT, so the policy edit and its attestation stay one commit on main.\n",
-        );
-      }
+      section("Now run", [
+        ...whyOneCommit(),
+        "",
+        ...commands.map((command) => `  ${st.value(humanCommand(command))}`),
+        ...(useBranch
+          ? [
+              "",
+              "Then merge that pull request with a MERGE COMMIT, so the policy edit and its attestation stay one commit on main.",
+            ]
+          : []),
+      ]);
     }
   }
   return EXIT_OK;

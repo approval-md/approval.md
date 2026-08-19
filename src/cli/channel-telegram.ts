@@ -127,6 +127,7 @@ import {
 } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
+import { usageErrorText } from "./usage.js";
 
 const LISTEN_FLAGS: Record<string, FlagKind> = {
   "--log": "string",
@@ -144,7 +145,7 @@ const LISTEN_FLAGS: Record<string, FlagKind> = {
 
 function usageError(streams: Streams, json: boolean, message: string, helpText: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${helpText}\n`);
+  else streams.err(usageErrorText(message, helpText));
   return EXIT_USAGE;
 }
 
@@ -292,7 +293,7 @@ function setUp(
         streams,
         json,
         asFlag === null
-          ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>. Every decision this listener records is recorded against it (SPEC.md §11: identity is config-declared)`
+          ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>. Every decision this listener records is recorded against it, and nothing here authenticates it`
           : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; approvals are human-only`,
         TELEGRAM_LISTEN_HELP,
       ),

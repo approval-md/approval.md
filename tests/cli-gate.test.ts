@@ -612,7 +612,11 @@ test("--help documents the exit codes, the human-only verbs, and amended §6.3",
   for (const verb of ["register", "request", "grant", "reject", "revoke", "expire"]) {
     const help = runCli([verb, "--help"], dir);
     assert.equal(help.code, 0, `${verb} --help failed`);
-    assert.match(help.stdout, /Exit codes \(frozen public API\)/u);
+    // APRV-91: the frozen table lives in `approval --help`; the verb points
+    // at it and states only the code peculiar to the gate (a refusal is 1).
+    assert.doesNotMatch(help.stdout, /Exit codes \(frozen public API\)/u);
+    assert.match(help.stdout, /exit codes: approval --help/u);
+    assert.match(help.stdout, /A GATE REFUSAL IS 1, NOT 2/u);
     assert.match(help.stdout, /Refusal codes/u);
     assert.equal(help.stderr, "");
   }

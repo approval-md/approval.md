@@ -186,8 +186,12 @@ test("hook classify prints the class, the rule and the segment", () => {
   const dir = caseDir();
   const run = runCli(["hook", "classify", "--", "git", "push", "origin", "main"], dir);
   assert.equal(run.code, 0, run.stderr);
-  assert.match(run.stdout, /vcs\.push\.main\tgit-push-main\tgit push origin main/u);
-  assert.match(run.stdout, /classes: vcs\.push\.main/u);
+  // APRV-91 #9: an aligned table under a header row, in place of the tab-
+  // separated line. The three fields, and their order, are unchanged.
+  assert.match(run.stdout, /^class {2,}rule {2,}command$/mu);
+  assert.match(run.stdout, /^vcs\.push\.main {2,}git-push-main {2,}git push origin main$/mu);
+  assert.match(run.stdout, /^classes: vcs\.push\.main$/mu);
+  assert.ok(!run.stdout.includes("\u001b"));
 });
 
 test("hook classify --json is the classifier result verbatim", () => {

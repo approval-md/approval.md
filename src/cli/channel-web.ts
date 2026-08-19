@@ -71,6 +71,7 @@ import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { WEB_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
+import { usageErrorText } from "./usage.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--log": "string",
@@ -86,7 +87,7 @@ const FLAGS: Record<string, FlagKind> = {
 
 function usageError(streams: Streams, json: boolean, message: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${WEB_HELP}\n`);
+  else streams.err(usageErrorText(message, WEB_HELP));
   return EXIT_USAGE;
 }
 
@@ -367,7 +368,7 @@ export function commandWeb(
       streams,
       json,
       asFlag === null
-        ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>. Every decision this page collects is recorded against it (SPEC.md §11: identity is config-declared)`
+        ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>. Every decision this page collects is recorded against it, and nothing here authenticates it`
         : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; approvals are human-only`,
     );
   }
@@ -443,7 +444,7 @@ async function serve(
   } else {
     streams.out(`approval: the pending queue is at ${url} (loopback only; ctrl-c to stop)\n`);
     streams.out(
-      `approval: this page has NO authentication — anyone with access to this machine can decide as ${options.actor} (SPEC.md §11)\n`,
+      `approval: this page has NO authentication — anyone with access to this machine can decide as ${options.actor}\n`,
     );
   }
 
