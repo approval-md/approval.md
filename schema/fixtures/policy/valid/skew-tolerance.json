@@ -1,0 +1,15 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual",
+    "approval_ttl": "24h",
+    "on_expiry": "reject"
+  },
+  "classes": {
+    "record.write.stage": { "autonomy": "supervised" }
+  },
+  "audit": {
+    "supervised_sample_rate": 0.1,
+    "skew_tolerance": "250ms"
+  }
+}

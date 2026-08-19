@@ -18,12 +18,14 @@
  *
  * ## Reporting, and why it goes through `warning`
  *
- * The sweep reports failures through the daemon's existing `warning` channel and
- * emits no event of its own. Successful samples are visible where they matter:
- * `QUEUE.md`'s sampled-audit backlog is regenerated later in the same tick, and
- * the daemon's `rendered` event carries `audit_backlog`, so a sample appended
- * here shows up as a backlog that grew. That keeps `DaemonEvent` — a frozen
- * shape an operator's log pipeline branches on — unchanged by this task.
+ * The sweep reports failures through the daemon's existing `warning` channel.
+ * Successful samples were originally left implicit, visible only as `QUEUE.md`'s
+ * sampled-audit backlog and the `rendered` event's `audit_backlog` growing later
+ * in the same tick, which is what let APRV-40 leave `DaemonEvent` untouched.
+ * APRV-57 grew that union additively, so a sample now also reports through the
+ * optional {@link AuditSweepOptions.sampled} sink, which the daemon renders as
+ * its `sampled` line. Both channels remain the caller's: this module names no
+ * event and writes to no stream.
  *
  * ## A disabled sampler is not a failure
  *
@@ -38,7 +40,7 @@
  * unconfigured sampler disables sampling rather than escalating everything.
  */
 
-import { sampleSupervised, type AuditOptions } from "../core/audit.js";
+import { sampleSupervised, type AuditOptions, type SampleAppended } from "../core/audit.js";
 import type { Clock } from "../core/clock.js";
 import type { SamplerDisabledReason } from "../core/sampler.js";
 
@@ -65,6 +67,12 @@ export interface AuditSweepOptions {
    * reports the same fact standingly, from the same resolver.
    */
   notice?(message: string): void;
+  /**
+   * One SUCCESS line per `audit.sampled` appended (APRV-57). Optional, and
+   * injected exactly as {@link AuditSweepOptions.warn} is, so the sweep still
+   * reports in the caller's vocabulary and owns no output of its own.
+   */
+  sampled?(sample: SampleAppended): void;
 }
 
 export interface AuditSweepSummary {
@@ -120,6 +128,10 @@ export function sweepAuditSampling(options: AuditSweepOptions): AuditSweepSummar
 
   for (const refusal of result.refusals) {
     options.warn(`audit sampling: ${refusal.code}: ${refusal.message}`);
+  }
+  const sampled = options.sampled;
+  if (sampled !== undefined) {
+    for (const entry of result.appended) sampled(entry);
   }
   return { sampled: result.appended.length, disabled: null };
 }

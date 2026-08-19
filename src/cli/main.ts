@@ -309,7 +309,11 @@ function commandVerify(argv: string[], streams: Streams, cwd: string): number {
   const check = preflightLog(logPath);
   if (!check.ok) return ioError(streams, json, check.message);
 
-  const result = verify(logPath);
+  // The policy is consulted for one number, `audit.skew_tolerance` (APRV-58),
+  // and it reaches only which anomalies are reported. The verdict below is a
+  // function of the log bytes and the schemas, so a missing or unloadable
+  // policy leaves this command's answer exactly as it was.
+  const result = verify(logPath, { policy: { dir: cwd } });
 
   if (result.status === "clean") {
     if (json) {
