@@ -51,11 +51,22 @@ hook entry could write itself out of it. The hook classifies edits to it as
 }
 ```
 
-Three things about those numbers and paths:
+A few things about those numbers and paths:
 
-- `--dir <primary checkout>` points policy discovery and the log at the primary
-  checkout, whose committed log the daemon writes. Gate operations never run in
-  an agent worktree (CLAUDE.md), and a hook is a gate operation.
+- `--dir <primary checkout>` points policy discovery AND the log at the primary
+  checkout, whose committed log the daemon writes: the log path is
+  `<dir>/.approval/log/events.jsonl`, never relative to the session's working
+  directory. `--policy` and `--log` override either half; with neither `--dir`
+  nor `--log`, the hook asks git for the primary checkout
+  (`git rev-parse --git-common-dir`, whose parent is the primary root) and uses
+  its policy and its log, so a session inside a linked worktree still writes to
+  the one log. A plain checkout resolves to itself, and outside a repository (or
+  without git) the hook falls back to its working directory.
+- **The hook never creates a log.** If the resolved log is not there, it denies
+  with `hook-log-unreachable` naming the path it looked for, rather than
+  scaffolding a second chain that forks from the real one's tail — hash chains
+  do not survive a merge. Run `approval init` and `approval policy attest` in
+  the primary checkout first.
 - `timeout` is Claude Code's cap on the hook process, in seconds. `--timeout` is
   how long the hook waits for a human, in the SPEC.md §5.2 duration grammar. Keep
   `--timeout` comfortably below `timeout`, so a wait that runs out produces a
@@ -163,6 +174,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-timeout` | no decision inside `--timeout`; the request stays live until TTL, a retry files a new one |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
 | `hook-policy-unavailable` | `APPROVAL.md` could not be loaded |
+| `hook-log-unreachable` | no log where the hook was pointed; it writes to an existing log and creates none |
 | `hook-io` | malformed hook input, or an unreadable log |
 
 `hook-opaque` is the one worth knowing by sight. `bash -c …`, `eval`, `source`,

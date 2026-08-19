@@ -9,6 +9,10 @@ and renders, and the decision arrives from the human's phone.
 Everything here operates on the PRIMARY checkout (`/Users/carter/dev/approval-md`)
 and its committed log. Nothing below ever runs in an agent worktree, and
 log-touching commits never ride feature branches; those two rules are unchanged.
+The one process that a worktree session does start is `approval hook
+claude-code`, and it obeys the same rule from the other side: it resolves the
+primary checkout and appends there, or denies with `hook-log-unreachable`
+(APRV-101), so no worktree ever grows a log of its own.
 Main is protected, so the log commit reaches it through a branch that exists for
 exactly one commit and a pull request merged with a merge commit. See "The proof
 runbook" below for the commands, and `approval policy amend --branch` for the

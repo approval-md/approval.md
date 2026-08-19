@@ -1076,12 +1076,12 @@ Flags (claude-code):
   --as <id>        the proposing identity (default agent:claude-code)
   --timeout <d>    how long to wait for a decision (default 55s)
   --interval <d>   poll interval while waiting (default 1s)
-  --policy <p> / --dir <p> / --log <p>   policy, its discovery dir, and the log
+  --dir/--policy/--log <p>   policy+log root; --dir sets BOTH, default primary
   -h, --help       this text
 
 Deny reasons: hook-unclassified, hook-opaque, hook-unparseable, hook-rejected,
 hook-revoked, hook-expired, hook-timeout, hook-gate-refused:<code>,
-hook-policy-unavailable, hook-io.
+hook-policy-unavailable, hook-log-unreachable, hook-io.
 EXIT 0 CARRIES THE VERDICT, and the verdict is never "ask".
 
 ${EXIT_CODES_POINTER} (claude-code uses only 0 and 2)
