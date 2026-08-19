@@ -367,6 +367,10 @@ export function renderTelegram(request: ChannelRequest): TelegramRendering {
     line("budgets", request.budgets, "budgets", budgetSummary(request)),
     line("attestation", request.attestation, "policy", attestationSummary(request)),
     line("requested_ts", request.requested_ts, "requested", request.requested_ts.value),
+    // APRV-106. Placed immediately after the raw timestamp, because it is the
+    // human-readable form of the same fact plus the one thing the raw
+    // timestamp does not say: whether an answer now still reaches anyone.
+    line("waiting", request.waiting, "waiting", request.waiting.value),
     line(
       "ttl_remaining_ms",
       request.ttl_remaining_ms,
@@ -751,6 +755,51 @@ export class TelegramChannel implements TestableChannel {
     };
   }
 
+  /**
+   * Edit a delivered message to say its question is gone, and remove the
+   * buttons (APRV-106).
+   *
+   * ONE `editMessageText` call, not two. Telegram's `editMessageText` replaces
+   * the reply markup along with the text, and omitting `reply_markup` clears
+   * it — so the annotation and the disarming land together, and there is no
+   * window in which the message reads "withdrawn" and still offers a tap.
+   *
+   * The text is REPLACED rather than appended to, because this class does not
+   * remember what it sent (it remembers a nonce and a message id) and refetching
+   * a message to append to it would be the channel reconstructing state it is
+   * not supposed to hold. What the approver keeps is the action key and the
+   * reason, which is what a chat transcript needs to stay readable.
+   *
+   * Best effort: {@link TelegramApiError} propagates to the caller, which logs
+   * it and carries on. A message that could not be edited is a cosmetic
+   * problem — the request is already withdrawn in the log, so a tap on the
+   * stale buttons is refused by the gate and answered with the refusal toast.
+   */
+  async retract(deliveryId: DeliveryId, reason: string): Promise<void> {
+    let actionKey = "";
+    for (const [nonce, delivery] of this.deliveries) {
+      if (delivery.deliveryId !== deliveryId) continue;
+      actionKey = delivery.actionKey;
+      // The nonce stops resolving, so a tap on a button the edit did not manage
+      // to remove is an `unknown-callback` rather than a decision attempt.
+      this.deliveries.delete(nonce);
+      break;
+    }
+    const text = [
+      "<b>WITHDRAWN — no decision is needed</b>",
+      `<code>${escapeHtml(actionKey)}</code>`,
+      "",
+      escapeHtml(reason),
+    ].join("\n");
+    await this.call("editMessageText", {
+      chat_id: this.chatId,
+      message_id: Number(deliveryId),
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Long polling
   // -------------------------------------------------------------------------
@@ -935,6 +984,13 @@ export class TelegramChannel implements TestableChannel {
     }
     if (outcome.code === "already-decided") {
       return "Already decided — the first answer stands; nothing was recorded.";
+    }
+    // APRV-106. The tap that races the withdrawal, or lands on a message whose
+    // edit did not go through. Nothing is appended and the human is told why
+    // in the terms that matter to them: the asker is gone, so there is nothing
+    // their answer could do.
+    if (outcome.code === "request-withdrawn") {
+      return "Withdrawn — the requester took this back and is no longer waiting; nothing was recorded.";
     }
     if (outcome.code === "expired") return "Expired — the approval window has closed.";
     return `Refused by the runtime: ${outcome.code}.`;

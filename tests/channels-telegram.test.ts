@@ -64,7 +64,7 @@ import { appendAttestation } from "../src/core/attest.js";
 import { register as registerCore, request as requestCore } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
 import { readVerifiedRecords } from "../src/core/state.js";
-import { register, request } from "./clock-adapters.js";
+import { register, request, withdraw } from "./clock-adapters.js";
 import {
   assertLocal,
   callbackUpdate,
@@ -681,6 +681,208 @@ test("a duplicate callback is refused idempotently and appends no second event",
     "the gate's idempotency is what stops the second event; the channel adds no logic",
   );
   assert.match(mock.answerTexts().join("\n"), /Already decided/u);
+  assertClean(world.unit);
+});
+
+// ---------------------------------------------------------------------------
+// Withdrawal (APRV-106)
+// ---------------------------------------------------------------------------
+
+test("the prompt carries the age and the deadline an answer has to beat", async () => {
+  const world = live(1);
+  const [request_] = queueOf(world, at(32));
+  assert.ok(request_ !== undefined);
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(32)));
+  await channel.notify(request_);
+
+  // Requested at at(1), rendered at at(32): 31 minutes of a 1h TTL gone, so an
+  // answer has until 10:01 UTC. A COMPUTED line, under the computed heading.
+  const sent = mock.sentTexts().join("\n");
+  assert.match(sent, /waiting:<\/b> requested 31 min ago · expires 10:01 UTC/u);
+  const rendered = channel.lastRendered()[0];
+  assert.equal(
+    rendered?.fields.find((field) => field.field === "waiting")?.kind,
+    "computed",
+  );
+  assertClean(world.unit);
+});
+
+test("a hook request's declared wait deadline is shown instead of the TTL", async () => {
+  // APRV-106: the hook waits nine minutes, not the policy's hour, and the
+  // approver is told the deadline that actually applies to them. It can only
+  // read as MORE urgent than the TTL, never less, which is why a
+  // requester-authored instant is safe on this line.
+  const world = live(1);
+  const key = hookedRequest(world);
+  const [, hooked] = queueOf(world, at(2));
+  assert.ok(hooked !== undefined, "the hooked request is not in the queue");
+  assert.equal(hooked.action_key.value, key);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(hooked);
+
+  // Requested at at(1), the hook waits until at(10): 10:10 UTC, not the TTL's
+  // 11:01. And the line is still computed.
+  assert.match(
+    mock.sentTexts().join("\n"),
+    /waiting:<\/b> requested 1 min ago · requester waits until 10:10 UTC/u,
+  );
+  assert.equal(
+    channel.lastRendered()[0]?.fields.find((field) => field.field === "waiting")?.kind,
+    "computed",
+  );
+  assertClean(world.unit);
+});
+
+/**
+ * Register and request one harness-executed action carrying a `wait_until`,
+ * the way `approval hook claude-code` does. Returns its action key.
+ */
+function hookedRequest(world: Live): string {
+  const key = "task-101:amend";
+  const payload = { command: "git commit --amend", cwd: "/repo" };
+  const registered = register(
+    world.unit.logPath,
+    {
+      task: "task-101",
+      envelope: {
+        origin: { app: "claude-code-hook", created_by: ACTOR },
+        state: "proposed",
+        actions: [
+          {
+            class: "communicate.email.external",
+            idempotency_key: key,
+            summary: "git commit --amend",
+            reversible: false,
+            est_cost_usd: 0,
+            payload_hash: payloadHash(payload),
+          },
+        ],
+      },
+    },
+    at(1),
+    ACTOR,
+    world.unit.options,
+  );
+  assert.equal(registered.ok, true, JSON.stringify(registered));
+
+  const requested = request(
+    world.unit.logPath,
+    {
+      task: "task-101",
+      actionKey: key,
+      cls: "communicate.email.external",
+      est_cost_usd: 0,
+      reversible: false,
+      summary: "git commit --amend",
+      payload_hash: payloadHash(payload),
+      payload: { value: payload },
+      execution: "harness",
+      wait_until: at(10),
+    },
+    at(1),
+    ACTOR,
+    world.unit.options,
+  );
+  assert.equal(requested.ok, true, JSON.stringify(requested));
+  world.payloads.set(key, payload);
+  return key;
+}
+
+test("a withdrawn request is annotated on the phone and its buttons removed", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const setup = setupFor(world, channelFor());
+  const state = newDispatchState();
+
+  const first = await dispatchPending(setup, capture().streams, state, at(2));
+  assert.equal(first.delivered.length, 1, JSON.stringify(first));
+  const messageId = first.delivered[0]?.delivery_id as string;
+
+  // The requester gives up.
+  const gone = withdraw(world.unit.logPath, key, ACTOR, at(11), {
+    ...world.unit.options,
+    reason: "timeout",
+  });
+  assert.equal(gone.ok, true, gone.ok ? "" : gone.message);
+
+  const second = await dispatchPending(setup, capture().streams, state, at(12));
+  assert.deepEqual(
+    second.retracted.map((entry) => entry.action_key),
+    [key],
+  );
+
+  // ONE editMessageText: the annotation and the disarming land together, so
+  // there is no window in which the message reads "withdrawn" and still offers
+  // a tap.
+  const edits = mock.edits();
+  assert.equal(edits.length, 1, JSON.stringify(edits));
+  assert.equal(edits[0]?.messageId, Number(messageId));
+  assert.match(String(edits[0]?.text), /WITHDRAWN — no decision is needed/u);
+  assert.match(
+    String(edits[0]?.text),
+    /withdrawn by the requester at 10:11 UTC \(timeout\) · nothing to do/u,
+  );
+  assert.equal(edits[0]?.replyMarkup, undefined, "the buttons must be gone");
+
+  // Idempotent: a third cycle edits nothing further.
+  const third = await dispatchPending(setup, capture().streams, state, at(13));
+  assert.deepEqual(third.retracted, []);
+  assert.equal(mock.edits().length, 1);
+  assertClean(world.unit);
+});
+
+test("a tap on a withdrawn request is refused and appends nothing", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(12)));
+  await channel.notify(request_);
+
+  assert.equal(
+    withdraw(world.unit.logPath, key, ACTOR, at(11), {
+      ...world.unit.options,
+      reason: "timeout",
+    }).ok,
+    true,
+  );
+
+  const before = recordsOf(world.unit.logPath).length;
+  const outcome = await press(channel, key, "grant");
+  assert.equal(outcome?.ok, false, "a withdrawn request must not be grantable");
+  if (outcome !== undefined && !outcome.ok) assert.equal(outcome.code, "request-withdrawn");
+  assert.equal(recordsOf(world.unit.logPath).length, before, "nothing was appended");
+  assert.match(
+    mock.answerTexts().join("\n"),
+    /Withdrawn — the requester took this back and is no longer waiting/u,
+  );
+  assertClean(world.unit);
+});
+
+test("a fresh listener never sends a withdrawn request at all", async () => {
+  // The sent-message memory is process-local (APRV-88), so this is the restart
+  // case: the new process re-derives pending from the verified log, and a
+  // withdrawn request is not pending. Nothing to remember, nothing to retract.
+  const world = live(1);
+  const key = world.keys[0] as string;
+  assert.equal(
+    withdraw(world.unit.logPath, key, ACTOR, at(11), {
+      ...world.unit.options,
+      reason: "timeout",
+    }).ok,
+    true,
+  );
+
+  const setup = setupFor(world, channelFor());
+  const result = await dispatchPending(setup, capture().streams, newDispatchState(), at(12));
+  assert.deepEqual(result.delivered, []);
+  assert.deepEqual(result.retracted, []);
+  assert.equal(messagesMentioning(key), 0, "a withdrawn request must never be sent");
   assertClean(world.unit);
 });
 

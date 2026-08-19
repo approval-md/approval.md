@@ -367,7 +367,7 @@ function withStore(options: TagOptions, logPath: string): TagOptions {
  * | `budgets` | `evaluateBudgetsWithTask()` at `now` | `budgets` |
  * | `attestation` | `checkAttestation()` against the live policy file | `attestation` |
  * | `fullPayload` | supplied material, hash-checked | `payload-binding` |
- * | `ttl_remaining_ms` | arithmetic on `now` | `clock` |
+ * | `ttl_remaining_ms`, `waiting` | arithmetic on `now` | `clock` |
  *
  * Claimed, and who authored each: `summary` and `est_cost_usd` carry the actor
  * of the `approval.requested` record — the party that submitted the declaration
@@ -400,6 +400,57 @@ export function buildChannelRequest(
     withStore(options, logPath),
     now,
   );
+}
+
+/** `HH:MM UTC` for an instant, or `null` when it does not parse. */
+function clockText(ms: number): string {
+  const at = new Date(ms);
+  const hh = String(at.getUTCHours()).padStart(2, "0");
+  const mm = String(at.getUTCMinutes()).padStart(2, "0");
+  return `${hh}:${mm} UTC`;
+}
+
+/** `just now`, `4 min ago`, `2h 05m ago` — how long the question has waited. */
+function ageText(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${String(minutes)} min ago`;
+  return `${String(Math.floor(minutes / 60))}h ${String(minutes % 60).padStart(2, "0")}m ago`;
+}
+
+/**
+ * The age/deadline line of APRV-106. See `ChannelRequest.waiting` for why it is
+ * computed and why the requester's own `wait_until` cannot lower scrutiny.
+ *
+ * Determinism: `now` is the parameter every other field here is derived
+ * against, so a queue rendered twice at the same instant produces the same
+ * line. Unparseable instants degrade to the honest half rather than to a
+ * guess — a channel that cannot say when a request was made must not imply it
+ * was made recently.
+ */
+function waitingLine(
+  requestTs: string,
+  waitUntil: string | null,
+  ttlRemainingMs: number | null,
+  now: string,
+): string {
+  const requestedAt = Date.parse(requestTs);
+  const nowMs = Date.parse(now);
+  const age =
+    Number.isNaN(requestedAt) || Number.isNaN(nowMs)
+      ? `requested at ${requestTs}`
+      : `requested ${ageText(Math.max(0, nowMs - requestedAt))}`;
+
+  const waitMs = waitUntil === null ? Number.NaN : Date.parse(waitUntil);
+  if (!Number.isNaN(waitMs)) {
+    return `${age} · requester waits until ${clockText(waitMs)}`;
+  }
+  if (ttlRemainingMs !== null && !Number.isNaN(nowMs)) {
+    return `${age} · expires ${clockText(nowMs + ttlRemainingMs)}`;
+  }
+  // No TTL and no declared wait: the policy bounded nothing, and inventing a
+  // deadline here would be the renderer stating a fact the log does not carry.
+  return `${age} · no deadline (the policy declares no approval_ttl)`;
 }
 
 /** The shared body of {@link buildChannelRequest} and {@link buildPendingQueue}. */
@@ -506,6 +557,10 @@ function tagDerivation(
     attestation: computed(attestation, "attestation"),
     requested_ts: computed(derivation.requestTs, "log"),
     ttl_remaining_ms: computed(ttlRemaining, "clock"),
+    waiting: computed(
+      waitingLine(derivation.requestTs, derivation.declared.wait_until, ttlRemaining, now),
+      "clock",
+    ),
     chain: computed(
       { seq: requestRecord.seq, hash: requestRecord.hash, head_seq: headSeq },
       "log",

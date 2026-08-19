@@ -249,7 +249,11 @@ test("a different `now` moves the countdown lines and nothing else", () => {
   for (const index of differing) {
     const line = early[index] as string;
     assert.ok(
-      line.includes("TTL remaining") || line.includes("Evaluated at"),
+      // APRV-106 added `waiting`, which is a countdown line by the same test:
+      // it states the age of the request against the display instant.
+      line.includes("TTL remaining") ||
+        line.includes("Evaluated at") ||
+        line.includes("**waiting**"),
       `line ${String(index)} changed with the clock but is not a countdown line: ${line}`,
     );
   }

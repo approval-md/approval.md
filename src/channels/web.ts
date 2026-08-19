@@ -282,6 +282,7 @@ const FIELD_ORDER: string[] = [
   "provenance",
   "state",
   "requested_ts",
+  "waiting",
   "ttl_remaining_ms",
   "payload_hash",
   "attestation",

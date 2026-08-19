@@ -99,6 +99,14 @@ export interface MockBotApi {
   sentTexts(): string[];
   /** Every `answerCallbackQuery` text, in order. */
   answerTexts(): string[];
+  /**
+   * Every `editMessageText` the bot has issued, in order (APRV-106).
+   *
+   * `replyMarkup` is what a test asserts on to prove the buttons went away:
+   * the real Bot API replaces the markup with whatever the edit carries, so
+   * `undefined` here means the message no longer offers a decision.
+   */
+  edits(): { messageId: number; text: string; replyMarkup: unknown }[];
   /** Kill the server mid-flight: destroy every socket, then close. */
   kill(): Promise<void>;
   /** Listen again on the same port. */
@@ -231,6 +239,24 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
 
     if (method === "answerCallbackQuery") {
       send(response, { ok: true, result: true });
+      return;
+    }
+
+    // APRV-106: the withdrawal edit. The real Bot API replaces the reply markup
+    // along with the text, so a request that carries no `reply_markup` clears
+    // the buttons — which is exactly the property the channel relies on to
+    // annotate and disarm in one call. The mock answers with the edited message
+    // and CARRIES NO reply_markup back, so a test can assert the buttons are
+    // gone rather than assuming they are.
+    if (method === "editMessageText") {
+      send(response, {
+        ok: true,
+        result: {
+          message_id: Number(body["message_id"]),
+          chat: { id: Number(body["chat_id"]) },
+          text: body["text"],
+        },
+      });
       return;
     }
 
@@ -372,6 +398,15 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
       return requests
         .filter((entry) => entry.method === "answerCallbackQuery")
         .map((entry) => String(entry.body["text"] ?? ""));
+    },
+    edits() {
+      return requests
+        .filter((entry) => entry.method === "editMessageText")
+        .map((entry) => ({
+          messageId: Number(entry.body["message_id"]),
+          text: String(entry.body["text"] ?? ""),
+          replyMarkup: entry.body["reply_markup"],
+        }));
     },
     async kill() {
       wake();
