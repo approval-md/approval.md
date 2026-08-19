@@ -41,6 +41,7 @@ import {
 import { AUDIT_HELP, AUDIT_LIST_HELP, AUDIT_REVIEW_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
+import { usageErrorText } from "./usage.js";
 
 const COMMON_FLAGS: Record<string, FlagKind> = {
   "--log": "string",
@@ -55,7 +56,7 @@ function absolute(value: string, cwd: string): string {
 
 function usageError(streams: Streams, json: boolean, message: string, helpText: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${helpText}\n`);
+  else streams.err(usageErrorText(message, helpText));
   return EXIT_USAGE;
 }
 

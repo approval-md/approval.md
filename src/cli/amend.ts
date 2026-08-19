@@ -83,6 +83,7 @@ import { POLICY_AMEND_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
 import { readLineFromStdin } from "./prompt.js";
+import { usageErrorText } from "./usage.js";
 
 const FLAGS: Record<string, FlagKind> = {
   "--policy": "string",
@@ -123,7 +124,7 @@ function absolute(value: string, cwd: string): string {
 
 function usageError(streams: Streams, json: boolean, message: string): number {
   if (json) streams.err(`${JSON.stringify({ ok: false, error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${POLICY_AMEND_HELP}\n`);
+  else streams.err(usageErrorText(message, POLICY_AMEND_HELP));
   return EXIT_USAGE;
 }
 

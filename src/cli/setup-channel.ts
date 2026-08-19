@@ -128,7 +128,7 @@ export interface ChannelSetupDeps extends SetupDeps {
  * whole exemption mechanism: a future line that reintroduces the old spelling
  * cannot claim the exemption without saying this constant's name out loud.
  */
-export const RENAMED_NOTICE = `\`approval setup telegram\` is now \`approval setup channel telegram\`, and there is no alias. SPEC.md §4 separates channels, which surface requests and collect decisions and hold no state, from adapters, which execute side effects and hold credentials; the two setup verbs fill different stores, so a channel's name belongs under \`channel\` (the OS keystore and .approval/env) and an adapter's under \`adapter\` (the vault)`;
+export const RENAMED_NOTICE = `\`approval setup telegram\` is now \`approval setup channel telegram\`, and there is no alias. A channel surfaces requests and collects decisions and holds no state; an adapter executes side effects and holds credentials. The two setup verbs fill different stores, so a channel's name belongs under \`channel\` (the OS keystore and .approval/env) and an adapter's under \`adapter\` (the vault)`;
 
 // ---------------------------------------------------------------------------
 // The registry
@@ -400,7 +400,7 @@ function telegramHooks(
     if (token !== null) return { ok: true };
     if (context.backend === "none") {
       streams.err(
-        `approval: the ${tokenEnv} line was left alone, and this machine has no keystore to read the token back from — the only copy is the literal in ${context.envPath}, and no verb resolves that file on its own (SPEC.md §11.1 invariant 7). Re-run and replace both lines. Nothing was written\n`,
+        `approval: the ${tokenEnv} line was left alone, and this machine has no keystore to read the token back from — the only copy is the literal in ${context.envPath}, and no verb resolves that file on its own. Re-run and replace both lines. Nothing was written\n`,
       );
       return { ok: false, code: EXIT_IO };
     }
@@ -621,7 +621,7 @@ export const CHANNEL_SETUPS: Record<string, ChannelSetupEntry> = {
   telegram: {
     specs: (load) => telegramCredentialSpecs(load),
     summary: "the bot token and the approver chat, recorded where each of them lives",
-    prereq: `IF \`approval channel telegram listen\` IS RUNNING, STOP IT FIRST. Two processes\nlong-polling one bot is a 409 from the Bot API, and the loser is whichever asked\nsecond. This verb is a configuration verb; it is not meant to run beside the\nlistener.\n\nThe token goes into the OS KEYSTORE and the chat id into .approval/env as a\nliteral: a channel holds no state (SPEC.md §4), and what this file records is\nwhere the transport credential lives. Nothing here appends to the log or\nattests anything.`,
+    prereq: `IF \`approval channel telegram listen\` IS RUNNING, STOP IT FIRST. Two processes\nlong-polling one bot is a 409 from the Bot API, and the loser is whichever asked\nsecond. This verb is a configuration verb; it is not meant to run beside the\nlistener.\n\nThe token goes into the OS KEYSTORE and the chat id into .approval/env as a\nliteral: a channel holds no state, and what this file records is where the\ntransport credential lives. Nothing here appends to the log or\nattests anything.`,
     hint: TELEGRAM_HINT,
     hooks: telegramHooks,
     nextSteps: [

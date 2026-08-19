@@ -93,6 +93,7 @@ import {
 } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
+import { usageErrorText } from "./usage.js";
 
 /** Identity accepted by `run`: a person or an agent, never the runtime. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
@@ -121,7 +122,7 @@ function absolute(value: string, cwd: string): string {
 
 function usageError(streams: Streams, json: boolean, message: string, helpText: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${helpText}\n`);
+  else streams.err(usageErrorText(message, helpText));
   return EXIT_USAGE;
 }
 
@@ -505,7 +506,7 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
     return usageError(
       streams,
       json,
-      `--timeout expects a duration like 30s, 10m, 6h (SPEC.md §5.2 grammar), got ${JSON.stringify(timeoutText)}`,
+      `--timeout expects a duration like 30s, 10m, 6h, got ${JSON.stringify(timeoutText)}`,
       WAIT_HELP,
     );
   }

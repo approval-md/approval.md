@@ -37,6 +37,7 @@ import { commandPolicyAttest } from "./attest.js";
 import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { POLICY_CHECK_HELP, POLICY_HELP, POLICY_TEST_HELP } from "./help.js";
 import type { Streams } from "./main.js";
+import { usageErrorText } from "./usage.js";
 
 /**
  * `--reversible` takes an explicit `true|false` rather than being a bare
@@ -63,7 +64,7 @@ function wantsJson(argv: string[]): boolean {
 
 function usageError(streams: Streams, json: boolean, message: string, helpText: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${helpText}\n`);
+  else streams.err(usageErrorText(message, helpText));
   return EXIT_USAGE;
 }
 

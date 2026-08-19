@@ -44,6 +44,7 @@ import { boolFlag, parseFlags, type FlagKind } from "./args.js";
 import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { PAYLOAD_HASH_HELP, PAYLOAD_HELP } from "./help.js";
 import type { Streams } from "./main.js";
+import { usageErrorText } from "./usage.js";
 
 const HASH_FLAGS: Record<string, FlagKind> = {
   "--json": "boolean",
@@ -57,7 +58,7 @@ function wantsJson(argv: string[]): boolean {
 
 function usageError(streams: Streams, json: boolean, message: string, helpText: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${helpText}\n`);
+  else streams.err(usageErrorText(message, helpText));
   return EXIT_USAGE;
 }
 
@@ -132,7 +133,7 @@ function commandPayloadHash(argv: string[], streams: Streams, cwd: string): numb
       json,
       `${where} is not valid JSON: ${detail(
         cause,
-      )}. payload_hash is defined over the RFC 8785 canonical serialization of the payload VALUE (SPEC.md §6.2), so bytes that do not parse have no defined hash and none was printed`,
+      )}. payload_hash is defined over the RFC 8785 canonical serialization of the payload VALUE, so bytes that do not parse have no defined hash and none was printed`,
       PAYLOAD_HASH_HELP,
     );
   }

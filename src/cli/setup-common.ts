@@ -54,6 +54,7 @@ import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
 import { createPrompter, type Prompter } from "./prompt.js";
+import { usageErrorText } from "./usage.js";
 
 // ---------------------------------------------------------------------------
 // Names
@@ -352,7 +353,7 @@ export function usageError(
   helpText: string,
 ): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${helpText}\n`);
+  else streams.err(usageErrorText(message, helpText));
   return EXIT_USAGE;
 }
 
@@ -360,12 +361,12 @@ export function usageError(
  * A refused PROMPT, as one line and no help page (APRV-90).
  *
  * The distinction this function exists to draw: {@link usageError} answers a
- * mangled command line, so it prints the help for that command line, which is
- * the thing the operator got wrong. A prompt that was aborted or answered
+ * mangled command line, so it names the shape that line should have had, which
+ * is the thing the operator got wrong. A prompt that was aborted or answered
  * wrongly five times is not a command line at all — the operator was in a
- * conversation, the question was on screen, and forty lines of usage under it
- * teach nothing. Same exit code (the frozen table is unchanged), one line of
- * output.
+ * conversation, the question was on screen, and a usage block under it teaches
+ * nothing. Same exit code (the frozen table is unchanged), one line of output,
+ * and not even the `--help` pointer a usage error carries.
  */
 export function promptRefusal(streams: Streams, message: string): number {
   streams.err(`approval: ${message}\n`);
@@ -491,7 +492,7 @@ export function front(
         json
           ? "--json was given"
           : "stdin is not a terminal"
-      }. Nothing was written.\n\nIdentity in v0.1 is config-declared (SPEC.md §11), so establishing it — and the credentials beside it — is an act of the human at the machine, not something a pipe or a CI job can do. The non-interactive path is explicit, and here it is:\n\n${nonInteractiveHint(hintContextFor(load, envPath, kind))}\n\nThen check it with \`approval env --check\`, which prints no values.\n`,
+      }. Nothing was written.\n\nIdentity is declared, not proved, so establishing it — and the credentials beside it — is an act of the human at the machine, not something a pipe or a CI job can do. The non-interactive path is explicit, and here it is:\n\n${nonInteractiveHint(hintContextFor(load, envPath, kind))}\n\nThen check it with \`approval env --check\`, which prints no values.\n`,
     );
     return { kind: "handled", code: EXIT_USAGE };
   }

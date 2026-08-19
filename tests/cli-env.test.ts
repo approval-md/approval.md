@@ -602,7 +602,10 @@ test("unresolved variables are COMMENTS naming a setup verb, and the block still
   }
   assert.equal(run.stdout.includes("\nexport "), false, "nothing resolved, so nothing is exported");
   assert.match(run.stdout, /eval "\$\(approval env\)"/u);
-  assert.match(run.stdout, /invariant 7/u);
+  // APRV-91: the export block's banner says what the rule is, not which
+  // invariant number it is; the citation stays in `approval env --help`.
+  assert.match(run.stdout, /No other command reads that file/u);
+  assert.doesNotMatch(run.stdout, /SPEC\.md §/u);
 });
 
 test("an already-set variable is re-exported, marked, and still correct", () => {
@@ -735,7 +738,8 @@ test("help: the verb documents the exit codes, the JSON shape, and that it emits
   const help = runCli(["env", "--help"], home);
   assert.equal(help.code, EXIT_OK);
   for (const claim of [
-    "Exit codes (frozen public API)",
+    // APRV-91: the frozen table is the root help's; a verb points at it.
+    "exit codes: approval --help",
     "JSON shape",
     "ONLY THING THAT READS",
     "CARRIES SECRETS",

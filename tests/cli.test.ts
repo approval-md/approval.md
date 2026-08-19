@@ -692,15 +692,26 @@ const HELP_INVOCATIONS: Array<[string, string[]]> = [
   ["reindex", ["reindex", "--help"]],
 ];
 
+// APRV-91 moved the frozen table into `approval --help` alone: a per-verb help
+// points at it rather than reprinting it, so the assertion splits in two.
 for (const [name, args] of HELP_INVOCATIONS) {
-  test(`help: ${name} --help documents exit codes and the JSON shape`, () => {
+  test(`help: ${name} --help documents the exit codes and the JSON shape`, () => {
     const dir = caseDir();
     const run = runCli(args, dir);
     assert.equal(run.code, 0);
     assert.equal(run.stderr, "");
-    assert.match(run.stdout, /Exit codes \(frozen public API\)/);
-    for (const code of ["0  success", "1  integrity failure", "2  usage error", "3  torn tail", "4  I/O error"]) {
-      assert.ok(run.stdout.includes(code), `${name} --help is missing "${code}"`);
+    if (name === "root") {
+      assert.match(run.stdout, /Exit codes \(frozen public API\)/);
+      for (const code of ["0  success", "1  integrity failure", "2  usage error", "3  torn tail", "4  I/O error"]) {
+        assert.ok(run.stdout.includes(code), `${name} --help is missing "${code}"`);
+      }
+    } else {
+      assert.doesNotMatch(
+        run.stdout,
+        /Exit codes \(frozen public API\)/,
+        `${name} --help reprints the frozen table; it belongs to "approval --help" alone`,
+      );
+      assert.match(run.stdout, /exit codes: approval --help/);
     }
     assert.match(run.stdout, /--json/);
     assert.match(run.stdout, /JSON|Machine-readable/);

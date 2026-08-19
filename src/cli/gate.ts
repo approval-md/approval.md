@@ -78,6 +78,7 @@ import {
 } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { usageErrorText } from "./usage.js";
 
 /** Identity accepted by the proposing verbs: a person or an agent. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
@@ -104,7 +105,7 @@ function absolute(value: string, cwd: string): string {
 
 function usageError(streams: Streams, json: boolean, message: string, helpText: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
-  else streams.err(`approval: ${message}\n\n${helpText}\n`);
+  else streams.err(usageErrorText(message, helpText));
   return EXIT_USAGE;
 }
 
@@ -424,7 +425,7 @@ export function commandRequest(argv: string[], streams: Streams, cwd: string): n
     });
   } else if (result.record === null) {
     streams.out(
-      `${actionKey}: ${result.autonomy} — no approval required, proceed to execution (no approval.* event, per SPEC.md §6.3)\n`,
+      `${actionKey}: ${result.autonomy} — no approval required, proceed to execution (no approval.* event is appended on this path)\n`,
     );
   } else {
     streams.out(`requested ${task} ${actionKey} at seq ${result.record.seq} (manual)\n`);

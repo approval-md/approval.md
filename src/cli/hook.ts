@@ -64,6 +64,7 @@ import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { HOOK_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { usageErrorText } from "./usage.js";
 
 /** Identity accepted for the proposing side: a person or an agent. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
@@ -129,7 +130,7 @@ function absolute(value: string, cwd: string): string {
 }
 
 function usageError(streams: Streams, message: string): number {
-  streams.err(`approval: ${message}\n\n${HOOK_HELP}\n`);
+  streams.err(usageErrorText(message, HOOK_HELP));
   return EXIT_USAGE;
 }
 
@@ -481,7 +482,7 @@ function runClaudeCodeHook(
   if (timeoutMs === null) {
     return usageError(
       streams,
-      `--timeout expects a duration like 30s, 9m (SPEC.md §5.2 grammar), got ${JSON.stringify(timeoutText)}`,
+      `--timeout expects a duration like 30s, 9m, got ${JSON.stringify(timeoutText)}`,
     );
   }
   const intervalText = stringFlag(parsed.flags, "--interval");

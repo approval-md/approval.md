@@ -423,7 +423,10 @@ test("setup with no subcommand, an unknown one, and --help", () => {
   assert.equal(renamed.code, EXIT_USAGE);
   assert.match(renamed.stderr, /is now `approval setup channel telegram`/u);
   assert.match(renamed.stderr, /there is no alias/u);
-  assert.match(renamed.stderr, /SPEC\.md §4/u);
+  // APRV-91: the distinction is stated in operator language; the section
+  // citation for it lives in `approval setup channel --help` and the reference.
+  assert.match(renamed.stderr, /a channel surfaces requests/iu);
+  assert.doesNotMatch(renamed.stderr, /SPEC\.md §/u);
   // It did not RUN: the refusal is the rename, not the terminal check, and
   // nothing was written.
   assert.doesNotMatch(renamed.stderr, /Nothing was written\./u);
@@ -485,7 +488,10 @@ test("setup identity validates, writes the line, and appends nothing", async () 
   assert.deepEqual(prompter.remaining, []);
   // The identity is not a secret and IS echoed; the inertness note is not
   // optional, because a line nobody evaluates does nothing at all.
-  assert.match(result.out, /invariant 7/u);
+  // APRV-91: no section citation on an interactive line; the written line
+  // is still reported as inert, which is the fact the operator needs.
+  assert.match(result.out, /INERT until you evaluate it/u);
+  assert.doesNotMatch(result.out, /SPEC\.md §/u);
   assert.match(result.out, /eval "\$\(approval env\)"/u);
 });
 
