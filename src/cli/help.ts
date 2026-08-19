@@ -1105,9 +1105,9 @@ Flags (claude-code):
   -h, --help       this text
 
 Deny reasons: hook-unclassified, hook-opaque, hook-unparseable, hook-rejected,
-hook-revoked, hook-expired, hook-timeout, hook-gate-refused:<code>,
-hook-policy-unavailable, hook-log-unreachable, hook-io.
-EXIT 0 CARRIES THE VERDICT, and the verdict is never "ask".
+hook-revoked, hook-expired, hook-withdrawn, hook-timeout (which WITHDRAWS the
+request), hook-gate-refused:<code>, hook-policy-unavailable,
+hook-log-unreachable, hook-io. EXIT 0 CARRIES THE VERDICT, never "ask".
 
 ${EXIT_CODES_POINTER} (claude-code uses only 0 and 2)
 ${why("hook")}`;

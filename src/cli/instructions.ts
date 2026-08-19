@@ -99,9 +99,17 @@ THE SEQUENCE.
      that will never come.
   3. approval wait <task> --timeout <duration>
      Blocks until every request of the task is decided. THE EXIT CODE IS THE
-     DECISION: 0 granted, 1 rejected or revoked, 3 expired, 6 timeout. A
-     timeout is not an answer: the request is still live and waiting again is
-     legitimate.
+     DECISION: 0 granted, 1 rejected, revoked or withdrawn (--json status says
+     which), 3 expired, 6 timeout. A timeout is not an answer: the request is
+     still live and waiting again is legitimate.
+  3b. approval withdraw <task> --action <key> --reason timeout
+     IF YOU STOP WAITING, SAY SO. A pending request you can no longer act on is
+     a question a person will still be asked, and their attention is the scarce
+     thing this system spends. Withdraw the requests you opened when you give
+     up on them; pass --withdraw-on-timeout to wait to do it for you. You may
+     withdraw only your OWN requests, only while they are pending, and a
+     withdrawal is terminal — if you still want the action, request it again,
+     which is a new request and gets its own decision.
   4. approval run <action-key> [--token <t>] -- <cmd…>
      Executes behind the gate: it records the start before spawning, records
      the outcome after, and exits with the child's own exit code. A manual

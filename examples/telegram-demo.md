@@ -366,6 +366,28 @@ derived by the runtime, a **CLAIMED** block naming `agent:drafter` as its author
 and marked unverified, the **FULL PAYLOAD** with the recipients, subject and
 body, and two buttons: Approve and Reject.
 
+One line of the COMPUTED block is worth finding before you tap anything:
+
+```
+• waiting: requested 4 min ago · expires 13:07 UTC (clock)
+```
+
+That is how old the question is and when an answer stops reaching anyone
+(APRV-106). It is computed — arithmetic on the log's own timestamps against the
+moment the message was built — and for a request made by a process that is
+waiting on it (`approval hook claude-code`, `approval wait
+--withdraw-on-timeout`) the second half reads `requester waits until 13:07 UTC`
+instead, naming the deadline that actually applies to you rather than the
+policy's TTL.
+
+If that deadline passes and the requester gives up, it withdraws the request,
+and this message is edited in place: the buttons disappear and the text becomes
+`WITHDRAWN — no decision is needed … withdrawn by the requester at 13:07 UTC
+(timeout) · nothing to do`. Tapping a stale button answers *"Withdrawn — the
+requester took this back and is no longer waiting; nothing was recorded"*, and
+the gate refuses it as `request-withdrawn`. Your attention is the audit budget,
+and a decision nobody can consume is not solicited.
+
 Check that the subject reads `Deposit refund chaser <second> & final`. The
 angle brackets and the ampersand arrived intact and did not become markup: the
 channel sends HTML and escapes agent-authored text, because an agent that could

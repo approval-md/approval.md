@@ -102,7 +102,13 @@ export const HOOK_DENY_CODES = [
   "hook-revoked",
   /** The request's TTL lapsed before a decision. */
   "hook-expired",
-  /** The wait elapsed with the request still undecided. */
+  /**
+   * The request was withdrawn before a decision landed (APRV-106). Usually
+   * this invocation's own retraction on a previous cycle of a resumed wait, or
+   * an operator's `approval withdraw`. Terminal, and not a refusal by anyone.
+   */
+  "hook-withdrawn",
+  /** The wait elapsed with the request still undecided; it is then withdrawn. */
   "hook-timeout",
   /** The gate refused intake; the gate's own code follows a colon. */
   "hook-gate-refused",

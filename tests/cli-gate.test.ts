@@ -510,6 +510,101 @@ test("revoke: refused on an undecided request, accepted on a grant", () => {
   assertClean(dir);
 });
 
+// ---------------------------------------------------------------------------
+// withdraw (APRV-106)
+// ---------------------------------------------------------------------------
+
+test("withdraw: the requester retracts, and every later decision is refused", () => {
+  const dir = readyForDecision();
+  const run = runCli(
+    [
+      "withdraw",
+      "task-042",
+      "--action",
+      "task-042:chaser",
+      "--reason",
+      "timeout",
+      "--as",
+      "agent:claude",
+      "--json",
+    ],
+    dir,
+  );
+  assert.equal(run.code, 0, run.stderr);
+  assert.deepEqual(JSON.parse(run.stdout), {
+    ok: true,
+    task: "task-042",
+    action_key: "task-042:chaser",
+    state: "withdrawn",
+    reason: "timeout",
+    seq: 4,
+  });
+
+  // The inbox is empty: a withdrawn request is not pending, by the same
+  // derivation every surface builds its queue from.
+  const queue = runCli(["queue", "--json"], dir);
+  assert.equal(queue.code, 0, queue.stderr);
+  assert.deepEqual(JSON.parse(queue.stdout), { ok: true, pending: [] });
+
+  const late = runCli(["grant", "task-042:chaser", "--as", "human:carter", "--json"], dir);
+  assert.equal(late.code, 1);
+  assert.equal(jsonErr(late)["code"], "request-withdrawn");
+  assert.equal(events(dir).includes("approval.granted"), false);
+  assertClean(dir);
+});
+
+test("withdraw: anyone but the requester is refused not-requester", () => {
+  const dir = readyForDecision();
+  const run = runCli(
+    ["withdraw", "task-042", "--action", "task-042:chaser", "--as", "human:carter", "--json"],
+    dir,
+  );
+  assert.equal(run.code, 1);
+  assert.equal(jsonErr(run)["code"], "not-requester");
+  assert.equal(events(dir).includes("approval.withdrawn"), false);
+  // Still decidable by the human who could not withdraw it: rejecting is the
+  // on-the-record way to end someone else's pending request.
+  assert.equal(runCli(["reject", "task-042:chaser", "--as", "human:carter"], dir).code, 0);
+  assertClean(dir);
+});
+
+test("withdraw: an unrecognized --reason is a usage error, not a default", () => {
+  const dir = readyForDecision();
+  const run = runCli(
+    [
+      "withdraw",
+      "task-042",
+      "--action",
+      "task-042:chaser",
+      "--reason",
+      "bored",
+      "--as",
+      "agent:claude",
+      "--json",
+    ],
+    dir,
+  );
+  assert.equal(run.code, 2);
+  assert.equal(jsonErr(run)["code"], "usage");
+  assert.equal(events(dir).includes("approval.withdrawn"), false);
+  assertClean(dir);
+});
+
+test("withdraw: --action is required and a decided request is already-decided", () => {
+  const missing = readyForDecision();
+  assert.equal(runCli(["withdraw", "task-042", "--as", "agent:claude"], missing).code, 2);
+
+  const decided = readyForDecision();
+  assert.equal(runCli(["grant", "task-042:chaser", "--as", "human:carter"], decided).code, 0);
+  const run = runCli(
+    ["withdraw", "task-042", "--action", "task-042:chaser", "--as", "agent:claude", "--json"],
+    decided,
+  );
+  assert.equal(run.code, 1);
+  assert.equal(jsonErr(run)["code"], "already-decided");
+  assertClean(decided);
+});
+
 test("decide on an unrequested action is refused", () => {
   const dir = caseDir();
   attest(dir);

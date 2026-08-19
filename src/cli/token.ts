@@ -215,7 +215,17 @@ export function commandToken(argv: string[], streams: Streams, cwd: string): num
 
   const options = tokenOptions(flags, cwd);
   const status = tokenStatus(read.records, key.actionKey, now(), tokenTtlMs(options));
-  if (!status.ok) return emitRefusal(streams, json, status);
+  if (!status.ok) {
+    // APRV-106. `token` is the verb an operator runs to ask "is there a key for
+    // this?", and for a harness-executed grant the answer is a fact rather than
+    // a fault: the human decided, and the decision was a permission answer to a
+    // process that runs the command itself. Said in one line, above the refusal,
+    // so nobody goes looking for a token that was deliberately never minted.
+    if (status.code === "harness-executed" && !json) {
+      streams.out(`${key.actionKey}: none minted: harness-executed\n`);
+    }
+    return emitRefusal(streams, json, status);
+  }
 
   if (json) {
     emitJson(streams, {

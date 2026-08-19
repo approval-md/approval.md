@@ -582,6 +582,78 @@ test("wait exits 6 on timeout, having appended nothing", () => {
   assertClean(dir);
 });
 
+test("wait --withdraw-on-timeout retracts the requests this actor opened", () => {
+  // APRV-106. Still exit 6 — the caller's branch does not change — but the
+  // human's queue no longer holds a question this process stopped waiting on.
+  const dir = ready();
+  assert.equal(
+    runCli(["request", "task-042", "--action", "task-042:chaser", "--as", "agent:claude"], dir).code,
+    0,
+  );
+
+  const run = runCli(
+    [
+      "wait",
+      "task-042",
+      "--timeout",
+      "1s",
+      "--interval",
+      "100ms",
+      "--withdraw-on-timeout",
+      "--as",
+      "agent:claude",
+      "--json",
+    ],
+    dir,
+  );
+  assert.equal(run.code, 6, run.stdout);
+  const payload = JSON.parse(run.stderr.trim()) as Record<string, unknown>;
+  assert.equal(payload["status"], "timeout");
+  assert.deepEqual(payload["withdrawn"], ["task-042:chaser"]);
+  assert.equal(events(dir).includes("approval.withdrawn"), true);
+
+  const queue = runCli(["queue", "--json"], dir);
+  assert.deepEqual(JSON.parse(queue.stdout), { ok: true, pending: [] });
+  assertClean(dir);
+});
+
+test("wait --withdraw-on-timeout refuses without an identity, before it waits", () => {
+  // Resolving identity AFTER a nine-minute wait, and failing then, would leave
+  // exactly the stale request the flag exists to prevent.
+  const dir = ready();
+  const run = runCli(
+    ["wait", "task-042", "--timeout", "1s", "--withdraw-on-timeout", "--json"],
+    dir,
+    { APPROVAL_HUMAN: "" },
+  );
+  assert.equal(run.code, 2);
+  assert.equal(jsonErr(run)["code"], "usage");
+  assert.match(String(jsonErr(run)["message"]), /only the actor that opened a request/iu);
+});
+
+test("wait reports a withdrawn request as terminal, at exit 1", () => {
+  const dir = ready();
+  assert.equal(
+    runCli(["request", "task-042", "--action", "task-042:chaser", "--as", "agent:claude"], dir).code,
+    0,
+  );
+  assert.equal(
+    runCli(
+      ["withdraw", "task-042", "--action", "task-042:chaser", "--as", "agent:claude"],
+      dir,
+    ).code,
+    0,
+  );
+  const run = runCli(["wait", "task-042", "--timeout", "1s", "--json"], dir);
+  // Exit 1 is reused rather than a new code claimed: the frozen table already
+  // carries the fact a caller needs (not authorized, terminal), and `status`
+  // says which of the terminal outcomes it was.
+  assert.equal(run.code, 1, run.stderr);
+  const payload = JSON.parse(run.stdout.trim()) as Record<string, unknown>;
+  assert.equal(payload["status"], "withdrawn");
+  assertClean(dir);
+});
+
 test("wait exits 3 when the TTL lapses, and still writes nothing", () => {
   const dir = ready(POLICY_SHORT_TTL);
   assert.equal(
