@@ -488,14 +488,74 @@ test("setup identity validates, writes the line, and appends nothing", async () 
   assert.match(result.out, /eval "\$\(approval env\)"/u);
 });
 
-test("setup identity refuses an agent: actor and writes nothing", async () => {
+/**
+ * APRV-90 changed what a WRONG ANSWER TO A PROMPT is worth.
+ *
+ * Until this task, `setup identity` answered `agent:claude` — and `carter` —
+ * with exit 2 and the whole help page, which is how a mangled command line is
+ * answered. The four cases below are the replacement, and the three assertions
+ * they all make are the acceptance criteria: the reason is ONE LINE, no help
+ * page is printed on any prompt path, and nothing is written unless an answer
+ * was finally accepted.
+ */
+test("setup identity refuses an agent: actor as a reason, then takes the human: one", async () => {
   const home = makeHome();
-  const prompter = scriptedPrompter(["agent:claude"]);
+  const prompter = scriptedPrompter(["agent:claude", HUMAN]);
+  const result = await run(["identity"], home, { prompter, keystore: fakeKeystore("keychain") });
+
+  // It did NOT exit: the same question came back under one line of reason.
+  assert.equal(result.code, EXIT_OK, result.err);
+  assert.match(result.out, /is not a human identity/u);
+  assert.match(result.out, /\^human:\.\+/u);
+  assert.equal(result.err, "");
+  assert.deepEqual(prompter.remaining, []);
+  assert.deepEqual(prompter.asked, [
+    "human identity (human:<id>, or just <id>): ",
+    "human identity (human:<id>, or just <id>): ",
+  ]);
+  assert.deepEqual(readEnvLines(home), [`APPROVAL_HUMAN=${HUMAN}`]);
+  // The reason is one line, and the help page is not under it.
+  assert.doesNotMatch(result.out, /Usage:\n {2}approval setup identity/u);
+});
+
+test("setup identity accepts a bare id and normalises it to human:<id>", async () => {
+  const home = makeHome();
+  // Exactly what the human typed on 2026-08-18 that cost them forty lines.
+  const prompter = scriptedPrompter(["carter"]);
+  const result = await run(["identity"], home, { prompter, keystore: fakeKeystore("keychain") });
+
+  assert.equal(result.code, EXIT_OK, result.err);
+  assert.deepEqual(readEnvLines(home), ["APPROVAL_HUMAN=human:carter"]);
+  // The prefix is still PRINTED — it is what distinguishes the actor kinds —
+  // and it simply need not be retyped.
+  assert.match(prompter.asked[0] ?? "", /human:<id>/u);
+  assert.equal(result.err, "");
+});
+
+test("setup identity gives up after the attempt bound, in one line and with no help", async () => {
+  const home = makeHome();
+  const prompter = scriptedPrompter(["agent:a", "system:b", "", "agent:c", "system:d"]);
   const result = await run(["identity"], home, { prompter, keystore: fakeKeystore("keychain") });
 
   assert.equal(result.code, EXIT_USAGE);
-  assert.match(result.err, /is not a human identity/u);
-  assert.match(result.err, /\^human:\.\+/u);
+  assert.deepEqual(prompter.remaining, [], "the bound is not 5 answers");
+  assert.match(result.err, /no human identity after 5 attempts; nothing was written/u);
+  // ONE line on stderr, and none of it is a help page.
+  assert.equal(result.err.split("\n").filter((line) => line.length > 0).length, 1);
+  assert.doesNotMatch(result.err, /Usage:/u);
+  assert.doesNotMatch(result.err, /EXIT CODES|Exit codes/u);
+  assert.equal(existsSync(home.envPath), false);
+});
+
+test("setup identity: Ctrl-D mid-reprompt stores nothing and prints no help", async () => {
+  const home = makeHome();
+  // A wrong answer, the reason, and then the human walks away.
+  const prompter = scriptedPrompter(["agent:claude", null]);
+  const result = await run(["identity"], home, { prompter, keystore: fakeKeystore("keychain") });
+
+  assert.equal(result.code, EXIT_USAGE);
+  assert.match(result.err, /no identity was entered; nothing was written/u);
+  assert.doesNotMatch(result.err, /Usage:/u);
   assert.equal(existsSync(home.envPath), false);
 });
 
@@ -1389,29 +1449,88 @@ test("setup adapter email reports the secret's length, and offers to strip a Goo
   }
 });
 
-test("setup adapter email refuses a port that is not a port, in the adapter's own words", async () => {
+/**
+ * APRV-90: these two used to assert exit 2 on a mistyped port and a `9` at a
+ * 1-3 choice. Both sentences survive verbatim — they are the adapter's own
+ * refusals, and the point of printing them at collection time was always that
+ * the operator hears at setup exactly what they would hear at send time — but
+ * they are now REASONS on stdout with the question underneath, not exit codes.
+ */
+test("setup adapter email asks again for a port that is not a port, in the adapter's own words", async () => {
   const home = makeHome();
+  const prompter = scriptedPrompter([
+    "127.0.0.1",
+    "1e6", // not a port: one line, and the same question
+    "587",
+    "",
+    SMTP_USER,
+    SMTP_PASSWORD,
+    false,
+  ]);
   const result = await run(["adapter", "email", "--as", HUMAN], home, {
-    prompter: scriptedPrompter(["127.0.0.1", "1e6"]),
+    prompter,
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+  });
+  assert.equal(result.code, EXIT_OK, result.err);
+  assert.deepEqual(prompter.remaining, []);
+  // The SAME sentence `approval adapter email` would print at send time.
+  assert.match(result.out, /the vault's smtp\.port is not a TCP port number \(1-65535\)/u);
+  assert.equal(prompter.asked.filter((question) => /SMTP port/u.test(question)).length, 2);
+  assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.port), "587");
+  assert.doesNotMatch(result.err, /Usage:/u);
+});
+
+test("setup adapter email asks again for a security setting outside the closed set", async () => {
+  const home = makeHome();
+  const prompter = scriptedPrompter([
+    "127.0.0.1",
+    "587",
+    "9", // not one of 1-3
+    "2", // starttls
+    SMTP_USER,
+    SMTP_PASSWORD,
+    false,
+  ]);
+  const result = await run(["adapter", "email", "--as", HUMAN], home, {
+    prompter,
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+  });
+  assert.equal(result.code, EXIT_OK, result.err);
+  assert.deepEqual(prompter.remaining, []);
+  assert.match(result.out, /"9" is not one of 1-3/u);
+  // The options are printed ONCE; only the question repeats.
+  assert.equal(result.out.split("2. starttls").length - 1, 1);
+  assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.security), "starttls");
+});
+
+test("setup adapter email gives up on a config prompt after the attempt bound, at exit 2 with no help", async () => {
+  const home = makeHome();
+  const prompter = scriptedPrompter(["127.0.0.1", "1e6", "0", "65536", "-1", "http://x"]);
+  const result = await run(["adapter", "email", "--as", HUMAN], home, {
+    prompter,
     keystore: fakeKeystore("keychain"),
     env: WITH_PASSPHRASE,
   });
   assert.equal(result.code, EXIT_USAGE);
-  // The SAME sentence `approval adapter email` would print at send time.
-  assert.match(result.err, /the vault's smtp\.port is not a TCP port number \(1-65535\)/u);
+  assert.deepEqual(prompter.remaining, []);
+  assert.match(result.err, /smtp\.port: no valid value after 5 attempts/u);
   assert.match(result.err, /nothing was written/u);
+  assert.doesNotMatch(result.err, /Usage:/u);
   assert.equal(existsSync(vaultPathFor(home.logPath)), false, "a refused value created a vault");
 });
 
-test("setup adapter email refuses a security setting outside the closed set", async () => {
+test("setup adapter email: Ctrl-D at a config prompt stores nothing", async () => {
   const home = makeHome();
   const result = await run(["adapter", "email", "--as", HUMAN], home, {
-    prompter: scriptedPrompter(["127.0.0.1", "587", "9"]),
+    prompter: scriptedPrompter(["127.0.0.1", "1e6", null]),
     keystore: fakeKeystore("keychain"),
     env: WITH_PASSPHRASE,
   });
   assert.equal(result.code, EXIT_USAGE);
-  assert.match(result.err, /smtp\.security: "9" is not one of 1-3/u);
+  assert.match(result.err, /the entry for smtp\.port was aborted/u);
+  assert.doesNotMatch(result.err, /Usage:/u);
   assert.equal(existsSync(vaultPathFor(home.logPath)), false);
 });
 

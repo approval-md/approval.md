@@ -137,7 +137,12 @@ eval "$(approval env)"
 
 `approval setup identity` asks for a `human:<id>`, validates it against the same
 `^human:.+` pattern the human-only verbs enforce, and records
-`APPROVAL_HUMAN=human:<id>`.
+`APPROVAL_HUMAN=human:<id>`. The prefix is printed because it is what separates
+a human from the `agent:` and `system:` actors those verbs refuse, and it need
+not be retyped: answer `carter` and the line reads `human:carter`. A wrong
+answer to this question, or to any other prompt in `setup`, is one line saying
+what was wrong followed by the same question, never an exit code with a help
+page under it.
 
 `approval setup channel telegram` does five things: it stores the bot token, proves it
 with `getMe`, asks you to send your bot a message, reads the chat id back out of
