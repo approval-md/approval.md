@@ -1,9 +1,10 @@
 ---
 id: APRV-90
 title: 'setup prompts: reprompt on a bad answer, accept a bare id for identity'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-18 12:04'
+updated_date: '2026-08-19 01:32'
 labels:
   - cli
   - ux
@@ -19,9 +20,15 @@ Observed running examples/email-demo.md (2026-08-18): `approval setup identity` 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A wrong interactive answer reprompts with a one-line reason; it does not exit and does not print help (Ctrl-C/Ctrl-D still abort and store nothing)
-- [ ] #2 setup identity accepts a bare id and normalises it to human:<id>; agent:/system: are refused with the existing message
-- [ ] #3 Choice prompts (e.g. smtp.security 1-3) and config prompts reprompt on invalid input the same way
-- [ ] #4 Scripted-prompter tests cover reprompt and normalisation; examples/email-demo.md and telegram-demo.md transcripts updated where they show these prompts
-- [ ] #5 npm test and lint clean
+- [x] #1 A wrong interactive answer reprompts with a one-line reason; it does not exit and does not print help (Ctrl-C/Ctrl-D still abort and store nothing)
+- [x] #2 setup identity accepts a bare id and normalises it to human:<id>; agent:/system: are refused with the existing message
+- [x] #3 Choice prompts (e.g. smtp.security 1-3) and config prompts reprompt on invalid input the same way
+- [x] #4 Scripted-prompter tests cover reprompt and normalisation; examples/email-demo.md and telegram-demo.md transcripts updated where they show these prompts
+- [x] #5 npm test and lint clean
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Setup prompts reprompt with a one-line reason; identity accepts a bare id; exhaustion and Ctrl-D abort without a help page. PR #69. Follow-up: setup-channel residual pick failure still routes through usageError.
+<!-- SECTION:FINAL_SUMMARY:END -->

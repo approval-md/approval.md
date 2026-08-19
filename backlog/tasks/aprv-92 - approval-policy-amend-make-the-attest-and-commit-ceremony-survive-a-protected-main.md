@@ -3,9 +3,10 @@ id: APRV-92
 title: >-
   approval policy amend: make the attest-and-commit ceremony survive a protected
   main
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-18 17:45'
+updated_date: '2026-08-19 01:32'
 labels:
   - cli
   - dogfood
@@ -23,8 +24,14 @@ Observed 2026-08-18 (APRV-83): amend attested cleanly, printed 'now land the edi
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 amend --branch <name> (or an interactive offer) commits policy+log on a branch, pushes, and opens a PR containing that single commit
-- [ ] #2 amend's post-attest text explains the one-commit rule in plain words and names the PR path when main is protected
-- [ ] #3 docs/dogfood-cutover.md describes the protected-main flow
-- [ ] #4 npm test and lint pass
+- [x] #1 amend --branch <name> (or an interactive offer) commits policy+log on a branch, pushes, and opens a PR containing that single commit
+- [x] #2 amend's post-attest text explains the one-commit rule in plain words and names the PR path when main is protected
+- [x] #3 docs/dogfood-cutover.md describes the protected-main flow
+- [x] #4 npm test and lint pass
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+amend detects a protected default branch and lands policy + attestation as one commit through a branch and PR, or warns before a doomed direct push. PR #66.
+<!-- SECTION:FINAL_SUMMARY:END -->
