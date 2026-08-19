@@ -43,6 +43,30 @@
  * Nothing here throws, and nothing here ever writes the value it read to any
  * stream.
  *
+ * ## A bad answer is a question asked again, not a mangled command line (APRV-90)
+ *
+ * {@link askUntil} is the loop every typed question in `setup` runs through. It
+ * exists because the first shipped build treated a wrong answer to a PROMPT the
+ * way it treats a wrong flag on an argv: exit 2 with the whole help page under
+ * it. Observed on 2026-08-18, `setup identity` printed `human identity
+ * (human:<id>):`, the operator typed `carter`, and forty lines of help came
+ * back. A prompt has already told the human what it wants; when the answer does
+ * not fit, the useful reply is one line saying which part did not fit, followed
+ * by the same question.
+ *
+ * Three ends, and they are different on purpose:
+ *
+ * - **accepted** — the validator's parsed value, which may be a NORMALISED form
+ *   of what was typed (`carter` → `human:carter`) rather than the bytes;
+ * - **aborted** — `readLine` returned `null`, which is Ctrl-D (and, for the
+ *   scripted prompter, the modelled Ctrl-C). Nothing is stored, and the caller
+ *   exits with a one-line reason and NO help page, because there was no command
+ *   line for a help page to be about;
+ * - **exhausted** — {@link DEFAULT_MAX_ATTEMPTS} answers in a row failed
+ *   validation. Bounded rather than infinite so that a prompt driven by
+ *   something that is not a person (a stuck script, a terminal replaying bytes)
+ *   terminates instead of looping forever.
+ *
  * ## EAGAIN is "not yet", never "end of input" (APRV-84)
  *
  * Every caller checks `process.stdin.isTTY` before it prompts, and merely
@@ -240,4 +264,61 @@ export function createPrompter(streams: Streams): Prompter | null {
       return answer === "y" || answer === "yes";
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Asking again (APRV-90)
+// ---------------------------------------------------------------------------
+
+/**
+ * How many failed answers to one question before the loop gives up. See the
+ * module doc: bounded so that a prompt nobody is answering terminates.
+ */
+export const DEFAULT_MAX_ATTEMPTS = 5;
+
+/**
+ * A validator's verdict on one typed answer.
+ *
+ * `value` is the PARSED form, not the bytes: a validator is where `carter`
+ * becomes `human:carter` and `"2"` becomes the second choice, so the caller
+ * never re-derives from the string what the validator already decided.
+ * `reason` is the single line the operator is shown before the question comes
+ * back, so it names what was wrong and nothing else.
+ */
+export type AnswerVerdict<T> = { ok: true; value: T } | { ok: false; reason: string };
+
+/** How {@link askUntil} ended. `attempts` is how many answers were read. */
+export type AskOutcome<T> =
+  | { ok: true; value: T }
+  | { ok: false; reason: "aborted" | "exhausted"; attempts: number };
+
+/**
+ * Ask until the answer validates, the human gives up, or the attempts run out.
+ *
+ * The reason line goes to STDOUT, indented, because it is part of the
+ * conversation and not a diagnostic about a command: it is read by the person
+ * at the terminal, in between their answer and the next prompt. A caller turns
+ * an `aborted` or `exhausted` outcome into its own one-line refusal; nothing
+ * here prints a help page (see the module doc).
+ */
+export function askUntil<T>(
+  streams: Streams,
+  prompter: Prompter,
+  question: string,
+  validate: (answer: string) => AnswerVerdict<T>,
+  options: { maxAttempts?: number } = {},
+): AskOutcome<T> {
+  const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+  for (let attempts = 1; ; attempts += 1) {
+    const answer = prompter.readLine(question);
+    // Ctrl-D at the prompt, or the terminal going away. Distinct from an empty
+    // line, which is an ordinary answer a validator may accept or refuse.
+    if (answer === null) return { ok: false, reason: "aborted", attempts };
+    const verdict = validate(answer);
+    if (verdict.ok) return { ok: true, value: verdict.value };
+    // The reason is printed for the LAST attempt too: an operator who has just
+    // run out of tries is owed the same sentence as one who has not.
+    streams.out(`  ${verdict.reason}\n`);
+    if (attempts >= maxAttempts) return { ok: false, reason: "exhausted", attempts };
+  }
 }

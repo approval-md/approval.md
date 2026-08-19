@@ -90,6 +90,18 @@
  * `APPROVAL_HUMAN` could only ever be run by someone who did not need it. The
  * control on this path is the terminal itself.
  *
+ * ## Answers, and answering again (APRV-90)
+ *
+ * Every typed question in this family runs through `prompt.ts`'s `askUntil`: a
+ * wrong answer is one line saying what was wrong and the same question again,
+ * never an exit code with a help page under it. `setup identity` also
+ * NORMALISES what it is given — `carter` is recorded as `human:carter`, and
+ * `human:carter` is taken as it stands ({@link identityFromAnswer}). The prompt
+ * still prints the `human:` prefix, because the prefix is what distinguishes
+ * the actor kinds the human-only verbs refuse, but nobody has to retype a
+ * prefix the question already showed them. `agent:` and `system:` are refused
+ * with the sentence that names why, as a reason to answer again.
+ *
  * ## Where a secret goes, and how it gets there
  *
  * Three service names, one per secret, documented so an operator can find them
@@ -169,6 +181,7 @@ import {
   emitRefusal,
   front,
   offerLiteral,
+  promptRefusal,
   requireHuman,
   retrievalCommand,
   samplingEnvName,
@@ -181,7 +194,7 @@ import {
 } from "./setup-common.js";
 import { PLAN_PHRASES, planWrites, reportLeftAlone } from "./setup-flow.js";
 import type { Streams } from "./main.js";
-import type { Prompter } from "./prompt.js";
+import { askUntil, type Prompter } from "./prompt.js";
 
 // ---------------------------------------------------------------------------
 // Replacing what is already there
@@ -313,6 +326,42 @@ function storeGeneratedSecret(
 // approval setup identity
 // ---------------------------------------------------------------------------
 
+/**
+ * One typed answer to `human identity (human:<id>):`, as an identity (APRV-90).
+ *
+ * **A bare id is accepted and normalised.** The prompt prints the `human:`
+ * prefix because the prefix is load-bearing — actors are `human:`, `agent:` or
+ * `system:`, and the human-only verbs refuse the other two — so an operator who
+ * has never read SPEC.md §11 learns the shape from the question itself. Making
+ * them retype a prefix the prompt just printed adds a failure path and teaches
+ * nothing further, so `carter` becomes `human:carter` and `human:carter` is
+ * taken as it stands.
+ *
+ * An answer with a colon in it is taken as a FULL actor and validated as one,
+ * which is what makes `agent:claude` a refusal rather than `human:agent:claude`.
+ * That refusal is a reason handed back to {@link askUntil}, so the operator is
+ * asked again rather than dropped out of the verb.
+ */
+export function identityFromAnswer(
+  answer: string,
+): { ok: true; value: string } | { ok: false; reason: string } {
+  const typed = answer.trim();
+  if (typed.length === 0) {
+    return {
+      ok: false,
+      reason: `nothing was entered; type your id (for example carter, which is recorded as human:carter)`,
+    };
+  }
+  const candidate = typed.includes(":") ? typed : `human:${typed}`;
+  if (resolveHumanActor({ actor: candidate }) === null) {
+    return {
+      ok: false,
+      reason: `${JSON.stringify(typed)} is not a human identity: it must match ^human:.+ (for example human:alice, or just alice). An agent: or system: actor cannot be declared here — those are what the human-only verbs refuse`,
+    };
+  }
+  return { ok: true, value: candidate };
+}
+
 const IDENTITY_HINT = (where: HintContext): string =>
   `  # in your shell profile, which is where a declared identity belongs:\n  export ${HUMAN_ACTOR_ENV}=human:<id>\n\n  # or, recorded for \`approval env\` to hand back to you:\n  printf '%s\\n' '${HUMAN_ACTOR_ENV}=human:<id>' >> ${where.envPath}\n  chmod 600 ${where.envPath}`;
 
@@ -361,19 +410,23 @@ export function commandSetupIdentity(
     return EXIT_OK;
   }
 
-  const answer = context.prompter.readLine(`human identity (human:<id>): `);
-  if (answer === null) {
-    return usageError(streams, false, "no identity was entered; nothing was written", SETUP_IDENTITY_HELP);
-  }
-  const identity = answer.trim();
-  if (resolveHumanActor({ actor: identity }) === null) {
-    return usageError(
+  const asked = askUntil(
+    streams,
+    context.prompter,
+    `human identity (human:<id>, or just <id>): `,
+    identityFromAnswer,
+  );
+  if (!asked.ok) {
+    // One line, and no help page: the question was on screen and the answer to
+    // it was wrong or withdrawn, which is not a mangled command line (APRV-90).
+    return promptRefusal(
       streams,
-      false,
-      `${JSON.stringify(identity)} is not a human identity: it must match ^human:.+ (for example human:alice). An agent: or system: actor cannot be declared here — those are what the human-only verbs refuse. Nothing was written`,
-      SETUP_IDENTITY_HELP,
+      asked.reason === "aborted"
+        ? "no identity was entered; nothing was written"
+        : `no human identity after ${String(asked.attempts)} attempts; nothing was written`,
     );
   }
+  const identity = asked.value;
 
   const written = writeLines(
     streams,

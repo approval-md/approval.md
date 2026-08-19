@@ -3130,6 +3130,13 @@ Asks for a \`human:<id>\` identity, validates it against the ^human:.+ pattern
 \`policy attest\` enforces, and writes APPROVAL_HUMAN=human:<id> into
 .approval/env. Nothing is appended to the log.
 
+A BARE ID IS ENOUGH: answer \`alice\` and the line reads APPROVAL_HUMAN=human:alice.
+The prompt prints the prefix because it is what separates a human from the
+\`agent:\` and \`system:\` actors the human-only verbs refuse, and those two are
+refused here by name — but a prefix the question already showed you does not
+have to be retyped. An answer that does not fit gets one line saying why and the
+same question again; Ctrl-C or Ctrl-D writes nothing.
+
 NOT HUMAN-ONLY, unlike every other setup subcommand, and that is not a hole: a
 verb that required APPROVAL_HUMAN before it would let you set APPROVAL_HUMAN
 could only be run by someone who did not need it. The terminal is the control on
