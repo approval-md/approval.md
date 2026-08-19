@@ -339,7 +339,9 @@ For `manual` actions, channels MUST present the full payload or a faithful rende
 
 ### 10.5 MCP wrapper (optional)
 
-A thin MCP server exposing the same verbs as tools (`request_approval`, `wait_decision`, `get_queue`, …) for clients where MCP is more ergonomic than shelling out. It shares the CLI's code paths; the [MCP tasks extension](https://modelcontextprotocol.io) MAY be mapped onto `awaiting` when client support stabilizes, and A2A's `input-required` maps cleanly for agent-to-agent deployments.
+A thin MCP server exposing the same verbs as tools for clients where MCP is more ergonomic than shelling out. It shares the CLI's code paths.
+
+What shipped is `approval mcp serve`: a foreground server speaking MCP over stdio, running as one `agent:<id>` the operator fixes when they start it. The tool surface is the agent-facing half of the verb registry, one tool per verb (`register`, `request`, `wait`, `run`, `queue`, `status`, `log_verify`, and the rest). Human-only verbs are absent by design, which is §11's argument applied to a transport: the agent is the untrusted policy and the human is the trusted overseer, an MCP client is an agent's harness, so publishing `grant` on it would hand the untrusted policy the overseer's pen. Tool descriptions and input schemas are derived from the same registry `approval instructions --schemas` prints, with `--as` deleted from every published schema, so a caller cannot name an identity and the server's own is recorded on every append. A tool call builds an argv and invokes the function the CLI dispatches to, so a refusal is the CLI's refusal, returned as a tool result carrying `{"error":{"code","message"}}` rather than as a protocol error. The [MCP tasks extension](https://modelcontextprotocol.io) and elicitation MAY be mapped onto `awaiting` when client support stabilizes; that remains post-v1, and until then `wait` blocks and answers. A2A's `input-required` maps cleanly for agent-to-agent deployments. (Amended APRV-88.)
 
 ## 11. Security and control model
 

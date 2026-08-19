@@ -309,6 +309,32 @@ An email is `reversible: false`, which engages SPEC.md section 7's
 irreversibility floor: the class resolves to `manual` even where a policy says
 `supervised`, because retrospective sampling cannot un-send a message.
 
+## How an agent harness reaches the gate
+
+Two ways, and they are the same gate. A harness that can run commands uses the
+CLI: `approval request`, `approval wait`, `approval run`, which is what every
+ceremony above shows. A harness that speaks MCP instead uses `approval mcp
+serve`, a foreground stdio server that publishes the agent's verbs as tools
+(`register`, `request`, `wait`, `run`, `queue`, `log_verify`, …) built from the
+same verb registry `approval instructions --schemas` prints. A tool call reaches
+the function the CLI dispatches to, so there is no second implementation of any
+verb and no answer the two surfaces can disagree about. For Claude Code there is
+also `approval hook claude-code`, a PreToolUse adapter that classifies the Bash
+command the harness is about to run and returns allow only on a decision the log
+records.
+
+`approval mcp serve --as agent:<id>` fixes the identity at startup, and `--as` is
+deleted from every published input schema, so a tool call cannot name an actor.
+Human-only verbs are not tools: no `grant`, no `policy attest`, no `vault set`.
+SPEC.md section 11 makes the agent the untrusted policy and the human the trusted
+overseer, an MCP client is the agent's harness, and a grant tool on it would hand
+the untrusted policy the overseer's pen. **Grant never travels over MCP**, and
+neither does the execution token a grant mints: the token is printed once at the
+human's own surface and handing it to the agent is the human's step. The full
+walkthrough, with a real client and a real phone, is in
+[examples/mcp-demo.md](examples/mcp-demo.md); the scripted twin is
+`tests/e2e-mcp-demo.test.ts`.
+
 ## Two things stated plainly
 
 ### The token is delivered differently on each channel, on purpose
