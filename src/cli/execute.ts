@@ -93,6 +93,7 @@ import {
 } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
+import { relPath, style, type Role, type Style, type TableRow } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 /** Identity accepted by `run`: a person or an agent, never the runtime. */
@@ -466,6 +467,39 @@ interface WaitedAction {
   seq: number | null;
 }
 
+/**
+ * The role a decision state wears. Colour is redundant here: the word is
+ * printed beside the glyph, so a pipe (or a colour-blind reader) loses nothing.
+ */
+function stateRole(state: string): Role {
+  if (state === "granted") return "ok";
+  if (state === "expired" || state === "requested") return "warn";
+  return "fail";
+}
+
+/**
+ * `approval wait`'s human answer: the verdict, then one aligned row per action.
+ *
+ * Action keys are copyable, so the left column opts out of `key` styling
+ * (`plainLeft`) and the state beside it carries the colour instead.
+ */
+export function renderWaitHuman(
+  task: string,
+  status: string,
+  actions: readonly WaitedAction[],
+  st: Style = style(),
+): string {
+  const glyph = status === "granted" ? "ok" : status === "expired" ? "skip" : "fail";
+  const head = `${st.glyph(glyph)} ${st.key(task)}  ${st.paint(stateRole(status), status)}`;
+  if (actions.length === 0) return `${head}\n`;
+  const rows: TableRow[] = actions.map((action) => ({
+    left: action.action_key,
+    right: st.paint(stateRole(action.state), action.state),
+    plainLeft: true,
+  }));
+  return `${head}\n${st.table(rows, { indent: 2 })}\n`;
+}
+
 /** Every action key of `task` that ever carried an `approval.requested`. */
 function requestedKeysOf(records: EventRecord[], task: string): string[] {
   const keys: string[] = [];
@@ -558,10 +592,7 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
       const status = rejected ? "rejected" : expired ? "expired" : "granted";
       const code = rejected ? EXIT_INTEGRITY : expired ? EXIT_TORN_TAIL : EXIT_OK;
       if (json) emitJson(streams, { ok: true, task, status, actions });
-      else {
-        streams.out(`${task}: ${status}\n`);
-        for (const action of actions) streams.out(`  ${action.action_key}\t${action.state}\n`);
-      }
+      else streams.out(renderWaitHuman(task, status, actions, style({ json })));
       return code;
     }
 
@@ -632,6 +663,80 @@ function pendingRequests(
   return entries.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
 }
 
+/** `23h 58m left`, `45s left`, `lapsed` — the TTL column's text. */
+function ttlText(remainingMs: number | null): string {
+  if (remainingMs === null) return "no TTL";
+  const seconds = Math.max(0, Math.round(remainingMs / 1000));
+  if (seconds === 0) return "lapsed";
+  if (seconds < 60) return `${seconds}s left`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m left`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m left`;
+}
+
+/**
+ * The TTL column's role, by the fraction of the window still standing:
+ * comfortable above half, worth noticing above a tenth, urgent below it.
+ */
+function ttlRole(remainingMs: number | null, ttlMs: number | null): Role {
+  if (remainingMs === null || ttlMs === null || ttlMs <= 0) return "muted";
+  const fraction = remainingMs / ttlMs;
+  if (fraction > 0.5) return "ok";
+  if (fraction > 0.1) return "warn";
+  return "fail";
+}
+
+/**
+ * The live inbox as an aligned table (APRV-91 #9).
+ *
+ * The old shape was tab-separated, which lines up only when every field happens
+ * to be the same width, and a queue's fields never are. Widths are measured on
+ * the UNDRESSED cells for the same reason `style.table` does it: escapes occupy
+ * no columns. Nothing in the row is dressed except the TTL, and the request
+ * timestamp, which the brief marks `muted`; the action key and the class are
+ * copyable and stay clean.
+ */
+export function renderQueueHuman(
+  pending: readonly QueueEntry[],
+  ttlMs: number | null,
+  st: Style = style(),
+): string {
+  const header = ["action", "task", "class", "cost", "requested", "ttl"];
+  const cells = pending.map((entry) => [
+    entry.action_key,
+    entry.task ?? "-",
+    entry.class ?? "-",
+    `$${String(entry.est_cost_usd ?? 0)}`,
+    entry.requested_ts ?? "-",
+    ttlText(entry.ttl_remaining_ms),
+  ]);
+  const widths = header.map((label, column) =>
+    Math.max(label.length, ...cells.map((row) => (row[column] ?? "").length)),
+  );
+  const pad = (text: string, column: number): string =>
+    text + " ".repeat(Math.max(0, (widths[column] ?? 0) - text.length));
+
+  const lines = [
+    header.map((label, column) => st.key(pad(label, column))).join("  ").trimEnd(),
+  ];
+  pending.forEach((entry, index) => {
+    const row = cells[index] ?? [];
+    lines.push(
+      [
+        pad(row[0] ?? "", 0),
+        pad(row[1] ?? "", 1),
+        pad(row[2] ?? "", 2),
+        pad(row[3] ?? "", 3),
+        st.muted(pad(row[4] ?? "", 4)),
+        st.paint(ttlRole(entry.ttl_remaining_ms, ttlMs), pad(row[5] ?? "", 5)),
+      ]
+        .join("  ")
+        .trimEnd(),
+    );
+  });
+  return `${lines.join("\n")}\n`;
+}
+
 export function commandQueue(argv: string[], streams: Streams, cwd: string): number {
   const outcome = front(argv, { ...COMMON_FLAGS, ...POLICY_FLAGS }, QUEUE_HELP, streams, cwd);
   if (outcome.kind === "handled") return outcome.code;
@@ -664,15 +769,7 @@ export function commandQueue(argv: string[], streams: Streams, cwd: string): num
   } else if (pending.length === 0) {
     streams.out("queue: empty — no requests awaiting a decision\n");
   } else {
-    for (const entry of pending) {
-      const ttl =
-        entry.ttl_remaining_ms === null
-          ? "no TTL"
-          : `${Math.max(0, Math.round(entry.ttl_remaining_ms / 1000))}s left`;
-      streams.out(
-        `${entry.action_key}\t${entry.task ?? "-"}\t${entry.class ?? "-"}\t$${String(entry.est_cost_usd ?? 0)}\t${entry.requested_ts ?? "-"}\t${ttl}\n`,
-      );
-    }
+    streams.out(renderQueueHuman(pending, ttlOf(flags, cwd), style({ json })));
   }
   // An empty inbox is a healthy inbox: queue never exits non-zero for having
   // nothing (or something) in it. Only the filesystem and a torn log can.
@@ -878,58 +975,87 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       ...(anomalies.length === 0 ? {} : { anomalies }),
     });
   } else {
-    streams.out(`health: ${healthy ? "ok" : "attention"}\n`);
-    streams.out(
-      `attestation: ${attestation.status}${
-        attestation.status === "attested" || attestation.status === "hash-mismatch"
-          ? ` (seq ${attestation.seq})`
-          : ""
-      }\n`,
-    );
-    streams.out(
-      `verification: ${verificationSummary.status}${
-        verificationSummary.records === null ? "" : ` (${verificationSummary.records} record(s))`
-      }\n`,
-    );
-    if (anomalies.length === 0) streams.out("timestamp anomalies: none\n");
-    else {
-      streams.out(
-        `timestamp anomalies: ${anomalies.length} (reported, NOT refused — the chain verifies and health is unaffected)\n`,
-      );
-      for (const anomaly of anomalies) {
-        streams.out(
-          `  ${anomaly.kind}\tseq ${anomaly.seq}\t${anomaly.skew_ms}ms before seq ${anomaly.previous_seq}\n`,
-        );
-      }
-    }
-    if (dangling.length === 0) streams.out("dangling executions: none\n");
-    else {
-      streams.out(`dangling executions: ${dangling.length}\n`);
-      for (const entry of dangling) {
-        streams.out(`  ${entry.action_key}\tstarted ${entry.ts}\tseq ${entry.seq}\n`);
-      }
-    }
-    if (budgets.length === 0) streams.out("budgets: none configured\n");
-    else {
-      for (const verdict of budgets) {
-        streams.out(
-          `budget ${verdict.limit}: consumed ${verdict.consumed}, remaining ${verdict.remaining}\n`,
-        );
-      }
-    }
-    streams.out(
-      `payload store: ${
-        payloadStore.present ? `${payloadStore.files} file(s)` : "not created yet"
-      }, ${payloadStore.pruned} pruned by the log, ${payloadStore.orphans} unbound; ${PAYLOAD_STORE_NOTE}\n`,
-    );
-    if (escalations.length === 0) streams.out("loop escalations: none\n");
-    else {
-      for (const entry of escalations) {
-        streams.out(
-          `loop escalation: ${entry.task} (${entry.consecutive_failures} consecutive execution.failed) — escalated to manual\n`,
-        );
-      }
-    }
+    const st = style({ json });
+    const rows: TableRow[] = [
+      {
+        left: "health",
+        right: healthy ? st.ok("ok") : st.warn("attention"),
+      },
+      {
+        left: "attestation",
+        right: `${st.paint(attestation.status === "attested" ? "ok" : "warn", attestation.status)}${
+          attestation.status === "attested" || attestation.status === "hash-mismatch"
+            ? ` ${st.muted(`(seq ${attestation.seq})`)}`
+            : ""
+        }`,
+      },
+      {
+        left: "verification",
+        right: `${st.paint(verificationSummary.status === "clean" ? "ok" : "fail", verificationSummary.status)}${
+          verificationSummary.records === null
+            ? ""
+            : ` ${st.muted(`(${verificationSummary.records} record(s))`)}`
+        }`,
+      },
+      {
+        left: "timestamp anomalies",
+        right:
+          anomalies.length === 0
+            ? st.muted("none")
+            : st.warn(
+                `${anomalies.length} (reported, NOT refused — the chain verifies and health is unaffected)`,
+              ),
+        ...(anomalies.length === 0
+          ? {}
+          : {
+              under: anomalies.map(
+                (anomaly) =>
+                  `${anomaly.kind}  seq ${anomaly.seq}  ${anomaly.skew_ms}ms before seq ${anomaly.previous_seq}`,
+              ),
+            }),
+      },
+      {
+        left: "dangling executions",
+        right: dangling.length === 0 ? st.muted("none") : st.fail(String(dangling.length)),
+        ...(dangling.length === 0
+          ? {}
+          : {
+              under: dangling.map(
+                (entry) => `${entry.action_key}  started ${entry.ts}  seq ${entry.seq}`,
+              ),
+            }),
+      },
+      ...(budgets.length === 0
+        ? [{ left: "budgets", right: st.muted("none configured") }]
+        : budgets.map((verdict) => ({
+            left: `budget ${verdict.limit}`,
+            right: `consumed ${verdict.consumed}, remaining ${verdict.remaining}`,
+          }))),
+      {
+        // APRV-91: the two-line sentence that used to live here is the store's
+        // rationale, not its state. The state is three numbers, and the
+        // rationale is one `--json` field (`payload_store.note`) and a
+        // paragraph in `docs/` away.
+        left: "payload store",
+        right: `${
+          payloadStore.present ? `${payloadStore.files} file(s)` : "not created yet"
+        }, ${payloadStore.pruned} pruned, ${payloadStore.orphans} unbound`,
+      },
+      {
+        left: "loop escalations",
+        right: escalations.length === 0 ? st.muted("none") : st.fail(String(escalations.length)),
+        ...(escalations.length === 0
+          ? {}
+          : {
+              under: escalations.map(
+                (entry) =>
+                  `${entry.task} (${entry.consecutive_failures} consecutive execution.failed) — escalated to manual`,
+              ),
+            }),
+      },
+      { left: "log", right: relPath(logPath, cwd) },
+    ];
+    streams.out(`${st.table(rows)}\n`);
   }
 
   return healthy ? EXIT_OK : EXIT_INTEGRITY;

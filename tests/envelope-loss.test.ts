@@ -227,7 +227,10 @@ test("register: the same refusal in human-readable form names the code", () => {
 
   const run = runCli(["register", join("backlog", "tasks", BEFORE.name), "--as", "agent:claude"], dir);
   assert.equal(run.code, 1, run.stdout);
-  assert.match(run.stderr, /^approval: envelope-missing: /u);
+  // APRV-91 #8/#13: refusals are `glyph  code  message`, with the code carrying
+  // the colour when there is any. The claim under test is that the human form
+  // still names the machine-readable code, and it does.
+  assert.match(run.stderr, /^✗ envelope-missing {2}/u);
 });
 
 test("register: a file with no frontmatter at all is still recognised as a loss", () => {
