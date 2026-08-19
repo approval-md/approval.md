@@ -1,0 +1,10 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual"
+  },
+  "protected_paths": ["SPEC.md", "design/"],
+  "classes": {
+    "policy.edit": { "autonomy": "manual" }
+  }
+}

@@ -329,13 +329,21 @@ export function renderClassification(
  *
  * Everything after `--` is the command verbatim, which is how a command with
  * its own flags is passed without this parser claiming them.
+ *
+ * It reads the policy for the same reason `hook claude-code` does (APRV-107):
+ * `policy.protected_paths` widens what counts as `policy.edit`, and an explainer
+ * that answered from the built-ins alone would tell an agent a gated file is
+ * ungated. `--dir` / `--policy` scope it exactly as they scope the hook. This
+ * verb decides nothing and writes nothing, so an unreadable policy is not a
+ * refusal here: it classifies against the built-ins and says on stderr that the
+ * answer is the narrow one.
  */
-function commandClassify(argv: string[], streams: Streams): number {
+function commandClassify(argv: string[], streams: Streams, cwd: string): number {
   const separator = argv.indexOf("--");
   const head = separator === -1 ? argv : argv.slice(0, separator);
   const tail = separator === -1 ? [] : argv.slice(separator + 1);
 
-  const parsed = parseFlags(head, { ...COMMON_FLAGS, "--json": "boolean" });
+  const parsed = parseFlags(head, { ...COMMON_FLAGS, ...POLICY_FLAGS, "--json": "boolean" });
   if (!parsed.ok) {
     return usageError(
       streams,
@@ -352,7 +360,25 @@ function commandClassify(argv: string[], streams: Streams): number {
     return usageError(streams, "missing <command> argument for `approval hook classify`");
   }
 
-  streams.out(renderClassification(classifyCommand(command), boolFlag(parsed.flags, "--json")));
+  const { options } = hookScope(parsed.flags, cwd);
+  const load = loadPolicy(
+    options.policy?.file === undefined
+      ? { dir: options.policy?.dir ?? cwd }
+      : { file: options.policy.file },
+  );
+  if (!load.ok) {
+    streams.err(
+      `note: no policy read (${load.code}: ${load.message}); classifying against the built-in protected paths only\n`,
+    );
+  }
+  const protectedPaths = load.ok ? (load.policy.protected_paths ?? []) : [];
+
+  streams.out(
+    renderClassification(
+      classifyCommand(command, protectedPaths),
+      boolFlag(parsed.flags, "--json"),
+    ),
+  );
   return EXIT_OK;
 }
 
@@ -385,10 +411,13 @@ function truncate(text: string, limit: number): string {
  * routing every keystroke of ordinary editing through a gate check would spend
  * latency to reach a foregone conclusion.
  */
-function fileToolClass(toolInput: Record<string, unknown>): string | null {
+function fileToolClass(
+  toolInput: Record<string, unknown>,
+  protectedPaths: readonly string[],
+): string | null {
   const path = readString(toolInput, "file_path") ?? readString(toolInput, "notebook_path");
   if (path === null) return null;
-  return isProtectedPath(path) ? "policy.edit" : null;
+  return isProtectedPath(path, protectedPaths) ? "policy.edit" : null;
 }
 
 interface HookRun {
@@ -569,39 +598,17 @@ function runClaudeCodeHook(
   if (!parsedInput.ok) return deny(streams, "hook-io", parsedInput.detail);
   const input = parsedInput.input;
 
-  // What is being asked for, as one or more classes.
-  let classes: string[];
-  let command: string;
-  if (input.toolName === "Bash") {
-    const raw = readString(input.toolInput, "command");
-    if (raw === null) {
-      return deny(streams, "hook-io", "Bash tool_input carries no command string");
-    }
-    command = raw;
-    const classified = classifyCommand(raw);
-    if (!classified.ok) {
-      return deny(
-        streams,
-        `hook-${classified.code}`,
-        `${classified.detail} (segment: ${classified.segment}). Rewrite it as a command the classifier can read, or run the effect through \`approval run\` with a granted token.`,
-      );
-    }
-    classes = classified.classes.filter((cls) => cls !== GATE_SELF_CLASS);
-  } else if (FILE_TOOLS.includes(input.toolName)) {
-    const cls = fileToolClass(input.toolInput);
-    if (cls === null) return allow(streams, `${input.toolName} is not a gated edit`);
-    classes = [cls];
-    command = `${input.toolName} ${readString(input.toolInput, "file_path") ?? readString(input.toolInput, "notebook_path") ?? ""}`;
-  } else {
+  if (input.toolName !== "Bash" && !FILE_TOOLS.includes(input.toolName)) {
     return allow(streams, `${input.toolName} is not a gated tool`);
-  }
-
-  if (classes.length === 0) {
-    return allow(streams, "the approval CLI is the gate itself and is not gated by it");
   }
 
   const { logPath, root, options } = hookScope(parsed.flags, cwd);
 
+  // The policy is read BEFORE the command is classified (APRV-107): the
+  // protected-path set is built-ins plus `policy.protected_paths`, so what
+  // counts as `policy.edit` is a policy question and the classifier cannot be
+  // asked it without the answer in hand.
+  //
   // An unloadable policy resolves everything to manual, and a manual request
   // needs a log this hook may not be pointed at. Fail closed and say so, rather
   // than opening a request nobody configured a channel for.
@@ -616,6 +623,36 @@ function runClaudeCodeHook(
       "hook-policy-unavailable",
       `${load.code}: ${load.message}; every class resolves to manual and the hook cannot verify a decision`,
     );
+  }
+  const protectedPaths = load.policy.protected_paths ?? [];
+
+  // What is being asked for, as one or more classes.
+  let classes: string[];
+  let command: string;
+  if (input.toolName === "Bash") {
+    const raw = readString(input.toolInput, "command");
+    if (raw === null) {
+      return deny(streams, "hook-io", "Bash tool_input carries no command string");
+    }
+    command = raw;
+    const classified = classifyCommand(raw, protectedPaths);
+    if (!classified.ok) {
+      return deny(
+        streams,
+        `hook-${classified.code}`,
+        `${classified.detail} (segment: ${classified.segment}). Rewrite it as a command the classifier can read, or run the effect through \`approval run\` with a granted token.`,
+      );
+    }
+    classes = classified.classes.filter((cls) => cls !== GATE_SELF_CLASS);
+  } else {
+    const cls = fileToolClass(input.toolInput, protectedPaths);
+    if (cls === null) return allow(streams, `${input.toolName} is not a gated edit`);
+    classes = [cls];
+    command = `${input.toolName} ${readString(input.toolInput, "file_path") ?? readString(input.toolInput, "notebook_path") ?? ""}`;
+  }
+
+  if (classes.length === 0) {
+    return allow(streams, "the approval CLI is the gate itself and is not gated by it");
   }
 
   const autonomous = classes.every(
@@ -701,7 +738,7 @@ export function commandHook(
     case "claude-code":
       return commandHookClaudeCode(rest, streams, cwd, readStdin);
     case "classify":
-      return commandClassify(rest, streams);
+      return commandClassify(rest, streams, cwd);
     default:
       return usageError(streams, `unknown subcommand ${JSON.stringify(sub)} for \`approval hook\``);
   }

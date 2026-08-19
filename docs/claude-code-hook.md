@@ -145,9 +145,18 @@ an addition).
 Three overrides sit on top of the table:
 
 - **`redirect-protected` / `protected-path` → `policy.edit`.** Any effectful
-  segment naming `APPROVAL.md`, `APPROVALS.md`, `CLAUDE.md`, `AGENTS.md`,
-  `.npmrc`, anything under `.approval/`, `.claude/settings*`, or
-  `.github/workflows/` is `policy.edit`, redirect targets included.
+  segment naming a protected path is `policy.edit`, redirect targets included.
+  The protected set is the built-ins plus `policy.protected_paths`. The
+  built-ins are `APPROVAL.md`, `APPROVALS.md`, `CLAUDE.md`, `AGENTS.md`,
+  `.npmrc`, anything under `.approval/`, `.claude/settings*`, and
+  `.github/workflows/`; they hold whatever the policy says, so a policy can
+  widen the protected surface and never narrow it. `policy.protected_paths`
+  (SPEC.md §5.2, APRV-107) lists repo-relative paths: an exact file (`SPEC.md`,
+  matched against a candidate's trailing segments, so a bare filename matches
+  in any directory as the built-ins do) or a directory prefix ending in `/`
+  (`design/`, matched wherever those segments appear). No globs, no negation.
+  `approval hook classify --dir <checkout>` answers under that checkout's
+  policy, which is how to ask what a path classifies as before touching it.
 - **`redirect-write` → `files.write.workspace`.** A read command with a `>` or
   `>>` writes a file, and the class says so.
 - **`gate.self`.** The `approval` CLI (and `node …/dist/src/cli/main.js`) is the

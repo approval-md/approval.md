@@ -383,3 +383,131 @@ test("isProtectedPath names the policy surface and nothing else", () => {
     assert.equal(isProtectedPath(path), false, `${path} must not be protected`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// policy.protected_paths (APRV-107)
+// ---------------------------------------------------------------------------
+
+const EXTRA: readonly string[] = ["SPEC.md", "docs/constitution.md", "design/"];
+
+test("an exact entry matches the file wherever the candidate is rooted", () => {
+  for (const path of [
+    "SPEC.md",
+    "./SPEC.md",
+    "/abs/repo/SPEC.md",
+    "../sibling/SPEC.md",
+    // A one-segment entry is a FILENAME, matching in any directory exactly as
+    // the built-in `CLAUDE.md` does. Erring wide is the fail-closed direction:
+    // a false positive costs one approval prompt.
+    "docs/SPEC.md",
+  ]) {
+    assert.equal(isProtectedPath(path, EXTRA), true, `${path} must be protected`);
+  }
+});
+
+test("a multi-segment entry matches only that whole trailing path", () => {
+  for (const path of ["docs/constitution.md", "./docs/constitution.md", "/repo/docs/constitution.md"]) {
+    assert.equal(isProtectedPath(path, EXTRA), true, `${path} must be protected`);
+  }
+  for (const path of [
+    // The last segment alone is not the entry: the entry named a path.
+    "constitution.md",
+    "docs/notes/constitution.md",
+    "constitution.md/docs",
+  ]) {
+    assert.equal(isProtectedPath(path, EXTRA), false, `${path} must not be protected`);
+  }
+});
+
+test("a trailing-slash entry protects the subtree at any depth", () => {
+  for (const path of [
+    "design/",
+    "design",
+    "design/notes.md",
+    "design/sub/deep/notes.md",
+    "/abs/repo/design/notes.md",
+    "./design/notes.md",
+  ]) {
+    assert.equal(isProtectedPath(path, EXTRA), true, `${path} must be protected`);
+  }
+  for (const path of ["designs/notes.md", "redesign/notes.md", "src/design.ts"]) {
+    assert.equal(isProtectedPath(path, EXTRA), false, `${path} must not be protected`);
+  }
+});
+
+test("an unlisted path stays unprotected, and no entry at all changes nothing", () => {
+  assert.equal(isProtectedPath("SPEC.md"), false);
+  assert.equal(isProtectedPath("README.md", EXTRA), false);
+  assert.equal(isProtectedPath("src/core/gate.ts", EXTRA), false);
+  assert.equal(isProtectedPath("", EXTRA), false);
+});
+
+test("the built-in set is protected whatever the policy lists (fail closed)", () => {
+  // An empty list, a list of unrelated files, and a list that names the
+  // built-ins' neighbours all leave the built-ins exactly as protected.
+  for (const extra of [[], ["README.md"], ["docs/", "src/"]]) {
+    for (const path of [
+      "APPROVAL.md",
+      "APPROVALS.md",
+      "CLAUDE.md",
+      "AGENTS.md",
+      ".npmrc",
+      ".approval/log/events.jsonl",
+      ".claude/settings.json",
+      ".github/workflows/ci.yml",
+    ]) {
+      assert.equal(
+        isProtectedPath(path, extra),
+        true,
+        `${path} must stay protected with extra ${JSON.stringify(extra)}`,
+      );
+    }
+  }
+});
+
+test("a malformed entry matches nothing rather than matching wildly", () => {
+  // The schema rejects these before they reach the matcher; the matcher is
+  // defensive anyway, because an entry it half-understood would be a
+  // protection an author believes is in force.
+  for (const entry of ["", "   ", "/", "..", "../", "./"]) {
+    assert.equal(
+      isProtectedPath("src/core/gate.ts", [entry]),
+      false,
+      `entry ${JSON.stringify(entry)} must match nothing`,
+    );
+  }
+  // A glob is matched literally: it protects a file actually named `*.md`, and
+  // never every `.md` in the tree.
+  assert.equal(isProtectedPath("docs/notes.md", ["docs/*.md"]), false);
+});
+
+test("classifyCommand routes the policy's paths to policy.edit", () => {
+  const bare = classifyCommand("cp draft.md SPEC.md");
+  assert.ok(bare.ok);
+  assert.equal(bare.classes[0], "files.write.workspace");
+
+  for (const command of [
+    "cp draft.md SPEC.md",
+    "echo hi > SPEC.md",
+    "rm -rf design",
+    "mv old.md design/new.md",
+  ]) {
+    const result = classifyCommand(command, EXTRA);
+    assert.ok(result.ok, `${command} must classify`);
+    assert.deepEqual(result.classes, ["policy.edit"], command);
+  }
+});
+
+test("a policy path inside a command substitution taints the outer segment", () => {
+  const result = classifyCommand("echo $(cp a SPEC.md)", EXTRA);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.code, "opaque");
+  assert.match(result.detail, /policy\.edit/u);
+});
+
+test("reading a protected path is still a read", () => {
+  const result = classifyCommand("cat SPEC.md", EXTRA);
+  assert.ok(result.ok);
+  assert.deepEqual(result.classes, ["read.shell"]);
+});
