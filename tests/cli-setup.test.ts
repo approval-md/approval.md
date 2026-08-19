@@ -1295,6 +1295,7 @@ test("setup channel telegram and setup adapter email print the same conversation
         false,
         false,
         "127.0.0.2",
+        "n", // the partial re-run's probe offer (APRV-99)
       ]),
     });
     assert.equal(emailAgain.code, EXIT_OK, emailAgain.err);
@@ -1805,7 +1806,7 @@ test("setup adapter email: a refused probe exits 1, KEEPS the values, and prints
   }
 });
 
-test("setup adapter email: a partial re-run will not probe, and will not read the vault back", async () => {
+test("setup adapter email: a partial re-run that declines the probe prints today's refusal", async () => {
   const home = makeHome();
   await run(["adapter", "email", "--as", HUMAN], home, {
     prompter: scriptedPrompter(["127.0.0.1", "587", "", SMTP_USER, SMTP_PASSWORD, false]),
@@ -1815,13 +1816,14 @@ test("setup adapter email: a partial re-run will not probe, and will not read th
 
   // Replace the host only. Every confirmation is asked FIRST, before a single
   // value: the other four are left alone, so this run does not hold the whole
-  // configuration — and there is no verb that reads one back.
+  // configuration. It is OFFERED the stored-set probe (APRV-99) and says no,
+  // which is the sentence this verb printed before the offer existed.
   const result = await run(["adapter", "email", "--as", HUMAN], home, {
-    prompter: scriptedPrompter([true, false, false, false, false, "127.0.0.2"]),
+    prompter: scriptedPrompter([true, false, false, false, false, "127.0.0.2", "n"]),
     keystore: fakeKeystore("keychain"),
     env: WITH_PASSPHRASE,
     probe: () => {
-      throw new Error("a partial run probed the server");
+      throw new Error("a declined partial run probed the server");
     },
   });
 
@@ -1830,6 +1832,146 @@ test("setup adapter email: a partial re-run will not probe, and will not read th
   assert.match(result.out, /stored 1 value\(s\)/u);
   assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.host), "127.0.0.2");
   assert.equal(vaultValue(home, DEFAULT_CREDENTIAL_NAMES.password), SMTP_PASSWORD);
+});
+
+test("setup adapter email: a partial re-run probes the MERGED set through the adapter's own vault read (APRV-99)", async () => {
+  const smtp = await startMockSmtp({ tls: "none", user: SMTP_USER, password: "rotated-app-password" });
+  try {
+    const home = makeHome();
+    // First run: the whole set, against the mock, no probe.
+    await run(["adapter", "email", "--as", HUMAN], home, {
+      prompter: scriptedPrompter([
+        assertLoopback(smtp.host),
+        String(smtp.port),
+        "",
+        SMTP_USER,
+        SMTP_PASSWORD,
+        false,
+      ]),
+      keystore: fakeKeystore("keychain"),
+      env: WITH_PASSPHRASE,
+    });
+
+    // Rotate the password only, then take the offer. The probe must open a
+    // session with the KEPT host, port, security and user and the NEW password:
+    // the merged set, read the way `approval adapter email` reads it at send
+    // time, and printed nowhere.
+    const result = await run(["adapter", "email", "--as", HUMAN], home, {
+      prompter: scriptedPrompter([
+        false,
+        false,
+        false,
+        false,
+        true,
+        "rotated-app-password",
+        "", // the offer defaults to yes
+      ]),
+      keystore: fakeKeystore("keychain"),
+      env: WITH_PASSPHRASE,
+      probe: loopbackProbe(),
+    });
+
+    assert.equal(result.code, EXIT_OK, result.err);
+    assert.match(result.out, /verified: 127\.0\.0\.1:\d+ answered over starttls/u);
+    assert.match(result.out, /AUTH PLAIN/u);
+    assert.match(result.out, /No message was sent/u);
+    assert.doesNotMatch(result.out, /not verified/u);
+
+    // The server's view: the kept user authenticated, with the new password.
+    assert.equal(smtp.last()?.authenticated, "PLAIN");
+    assert.deepEqual(smtp.last()?.presented, {
+      user: SMTP_USER,
+      password: "rotated-app-password",
+    });
+    const commands = smtp.last()?.commands ?? [];
+    assert.equal(commands.some((line) => /^(MAIL|RCPT|DATA)/u.test(line)), false);
+  } finally {
+    await smtp.close();
+  }
+});
+
+test("setup adapter email: a vault the probe cannot open falls back to today's refusal plus the reason (APRV-99)", async () => {
+  const home = makeHome();
+  await run(["adapter", "email", "--as", HUMAN], home, {
+    prompter: scriptedPrompter(["127.0.0.1", "587", "", SMTP_USER, SMTP_PASSWORD, false]),
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+  });
+
+  const result = await run(["adapter", "email", "--as", HUMAN], home, {
+    prompter: scriptedPrompter([true, false, false, false, false, "127.0.0.2", "y"]),
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+    // The flow proved the passphrase at its preflight, so the only way to reach
+    // the fallback is a read that refuses. This is what a wrong passphrase, a
+    // missing variable, or an altered file looks like from the probe's side.
+    credentials: {
+      get: () => ({
+        ok: false,
+        code: "credential-refused",
+        message: "the vault at .approval/vault.enc did not decrypt under APPROVAL_VAULT_PASSPHRASE",
+      }),
+    },
+    probe: () => {
+      throw new Error("a probe ran over a vault that would not open");
+    },
+  });
+
+  assert.equal(result.code, EXIT_OK, result.err);
+  assert.match(result.out, /not verified: smtp\.port, smtp\.security, smtp\.user, smtp\.password were left alone/u);
+  assert.match(result.out, /the probe could not run: /u);
+  assert.match(result.out, /did not decrypt under APPROVAL_VAULT_PASSPHRASE/u);
+  assert.match(result.out, /stored 1 value\(s\)/u);
+});
+
+test("setup adapter email: an answer that is neither yes nor no asks the probe offer again (APRV-99)", async () => {
+  const smtp = await startMockSmtp({ tls: "none", user: SMTP_USER, password: SMTP_PASSWORD });
+  try {
+    const home = makeHome();
+    await run(["adapter", "email", "--as", HUMAN], home, {
+      prompter: scriptedPrompter([
+        assertLoopback(smtp.host),
+        String(smtp.port),
+        "",
+        SMTP_USER,
+        SMTP_PASSWORD,
+        false,
+      ]),
+      keystore: fakeKeystore("keychain"),
+      env: WITH_PASSPHRASE,
+    });
+
+    // Replace the host with the same value, keep the rest, then fumble the
+    // offer once. APRV-90's convention is that every question loops.
+    const prompter = scriptedPrompter([
+      true,
+      false,
+      false,
+      false,
+      false,
+      assertLoopback(smtp.host),
+      "sure", // neither yes nor no
+      "y",
+    ]);
+    const result = await run(["adapter", "email", "--as", HUMAN], home, {
+      prompter,
+      keystore: fakeKeystore("keychain"),
+      env: WITH_PASSPHRASE,
+      probe: loopbackProbe(),
+    });
+
+    assert.equal(result.code, EXIT_OK, result.err);
+    assert.match(result.out, /"sure" is not yes or no/u);
+    // Asked twice, and the second answer was the one that decided it.
+    const offers = prompter.asked.filter((prompt) =>
+      prompt.includes("using the stored configuration"),
+    );
+    assert.equal(offers.length, 2);
+    assert.deepEqual(prompter.remaining, []);
+    assert.match(result.out, /verified: 127\.0\.0\.1:\d+ answered over starttls/u);
+  } finally {
+    await smtp.close();
+  }
 });
 
 test("setup adapter email: replacing only the password keeps the pair rule satisfied by the kept user (APRV-98)", async () => {
@@ -1844,7 +1986,7 @@ test("setup adapter email: replacing only the password keeps the pair rule satis
   // must count the KEPT user as present, or every password rotation is refused
   // as "holds smtp.password but not smtp.user".
   const result = await run(["adapter", "email", "--as", HUMAN], home, {
-    prompter: scriptedPrompter([false, false, false, false, true, "rotated-secret"]),
+    prompter: scriptedPrompter([false, false, false, false, true, "rotated-secret", "n"]),
     keystore: fakeKeystore("keychain"),
     env: WITH_PASSPHRASE,
   });

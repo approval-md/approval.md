@@ -1907,6 +1907,34 @@ smtp.password  optional, read with no echo, written last
 The probe defaults to yes and can be declined; declining stores the values and
 says they are unverified.
 
+A partial re-run is probed too (APRV-99). Rotating an app password replaces one
+name and leaves four alone, so the run does not hold the whole configuration, and
+this verb used to stop there: it will not read the missing values back, because
+there is no verb in this CLI that reads a credential out of the vault. That rule
+is about PRINTING, and the inference from it was too wide. The email adapter reads
+all five out of the vault on every send, through `readEmailSmtpConfig` over the
+credential provider `approval adapter email` hands to `act`, and the probe now
+calls the same function over a provider built the same way. The values are read
+into this process, handed to the SMTP session, and dropped: no value, no count, no
+prefix and no length reaches a stream, and the transcript sweep in
+`tests/cli-setup.test.ts` covers this path with the rest. A probe that is no wider
+than the send it proves does not widen the exposure, and rotating a credential
+deserves the proof first setup gets.
+
+So a partial re-run asks one more question, after the replace/keep decisions and
+the write:
+
+```
+open an SMTP session using the stored configuration to check it? [Y/n]
+```
+
+An answer that is neither yes nor no is asked again rather than defaulted, which
+is the convention every other typed question in `setup` follows. Declining prints
+the same "not verified: … were left alone this run" sentence the verb printed
+before the offer existed. So does a vault the probe cannot open — a missing or
+wrong passphrase, an altered file — with one more line naming why the probe could
+not run, and no value in it.
+
 ## setup channel
 
 A channel is not an adapter, and the two setup verbs fill different stores.
