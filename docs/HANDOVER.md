@@ -24,16 +24,15 @@ and should be retired again once M8 closes.
 
 ## Open work, in dependency order
 
-1. **APRV-93 (CLI legibility) is BUILDING in a background subagent** in
-   worktree `.claude/worktrees/agent-a54c99a4dc1f3f925`, branched from 91. It
-   was told: keep multi-line verb descriptions under four group headings;
-   `--json` is an absolute colour veto; splash on stdout, usage error on
-   stderr; ship `docs/cli-reference.md` and `dist` in package.json `files`.
-   It absorbs the visual ACs 6–16 the human added to APRV-91. **Collect it:**
-   `cd` into that worktree, check `git log`, run gates, merge origin/main,
-   push to a branch `aprv-93-legibility`, PR, auto-merge. Then mark 93 Done
-   and check 91's ACs 6–16 and mark 91 Done (91 was left In Progress on
-   purpose: its file carries those unchecked ACs).
+1. **APRV-93 and APRV-91 are closed** (2026-08-19, third session). PR by
+   branch `aprv-93-legibility` landed after a merge of main (one conflict,
+   `MCP_HELP`), a TTY-independent wordmark test, and the ASCII collapse of the
+   banner. 91's ACs 8/13 and 9/14 are partial and left unchecked; the
+   remainder is **APRV-102** (refusal shape beyond the gate, log tail table,
+   `--verbose`, token panel, shared table helper). The review of M8 under the
+   degraded context found SPEC lagging the code in four places: **APRV-103**
+   (human sign-off). **APRV-104** is the close-out hygiene (stale worktrees,
+   retiring this file). APRV-101's evidence is on its notes.
 2. **APRV-88 AC 2 needs the human**: run `examples/mcp-demo.md` once against a
    real MCP client (Claude Code) and the phone; record the seq range on
    APRV-88; then Done.

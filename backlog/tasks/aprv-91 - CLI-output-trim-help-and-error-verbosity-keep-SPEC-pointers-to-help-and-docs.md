@@ -3,10 +3,11 @@ id: APRV-91
 title: >-
   CLI output: readability and design pass (colour, wordmark, help split, refusal
   shape); SPEC pointers to help/docs
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@fable'
 created_date: '2026-08-18 12:04'
-updated_date: '2026-08-18 22:01'
+updated_date: '2026-08-19 12:34'
 labels:
   - cli
   - ux
@@ -127,20 +128,40 @@ Each step is its own PR; the whole thing is one task only in the sense of one de
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Interactive prompt lines and error lines carry no SPEC.md section citations; --help and docs keep them
-- [ ] #2 Per-verb help is usage plus at most a short paragraph of intent; the exit-code table lives only in top-level help
-- [ ] #3 Usage errors print the message plus a one-line pointer to --help instead of the full help text, except for argument-shape errors where the usage line is shown
-- [ ] #4 Every existing test asserting on help/error text updated; examples/*.md transcripts updated to match
-- [ ] #5 npm test and lint clean
-- [ ] #6 style.ts with role palette and the enable matrix (TTY, NO_COLOR, FORCE_COLOR, --json, --no-color, TERM=dumb), no new dependency, tested
-- [ ] #7 Wordmark on approval (no args), --help and init only; degrades to one line under NO_COLOR/ASCII
+- [x] #1 Interactive prompt lines and error lines carry no SPEC.md section citations; --help and docs keep them
+- [x] #2 Per-verb help is usage plus at most a short paragraph of intent; the exit-code table lives only in top-level help
+- [x] #3 Usage errors print the message plus a one-line pointer to --help instead of the full help text, except for argument-shape errors where the usage line is shown
+- [x] #4 Every existing test asserting on help/error text updated; examples/*.md transcripts updated to match
+- [x] #5 npm test and lint clean
+- [x] #6 style.ts with role palette and the enable matrix (TTY, NO_COLOR, FORCE_COLOR, --json, --no-color, TERM=dumb), no new dependency, tested
+- [x] #7 Wordmark on approval (no args), --help and init only; degrades to one line under NO_COLOR/ASCII
 - [ ] #8 Every refusal follows the glyph+code / fix-line shape; never followed by help; --json unchanged
 - [ ] #9 doctor, queue, log tail, status render as aligned tables with role colours; --verbose restores today's sentences
-- [ ] #10 Colour never inside a copyable value (hash, token, command); asserted by test
-- [ ] #11 style.ts with a role palette and the enable matrix (TTY, NO_COLOR, FORCE_COLOR, --json, --no-color, TERM=dumb), no new dependency, tested
-- [ ] #12 Wordmark on approval (no args), --help and init only; degrades to one line under NO_COLOR or ASCII mode
+- [x] #10 Colour never inside a copyable value (hash, token, command); asserted by test
+- [x] #11 style.ts with a role palette and the enable matrix (TTY, NO_COLOR, FORCE_COLOR, --json, --no-color, TERM=dumb), no new dependency, tested
+- [x] #12 Wordmark on approval (no args), --help and init only; degrades to one line under NO_COLOR or ASCII mode
 - [ ] #13 Every refusal follows the glyph+code / fix-line shape and is never followed by help; --json output unchanged
 - [ ] #14 doctor, queue, log tail and status render as aligned tables with role colours; --verbose restores today's sentences
-- [ ] #15 Colour never appears inside a copyable value (hash, token, command); asserted by test
-- [ ] #16 No per-verb short help exceeds 25 lines; the long form is one flag away
+- [x] #15 Colour never appears inside a copyable value (hash, token, command); asserted by test
+- [x] #16 No per-verb short help exceeds 25 lines; the long form is one flag away
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Opus subagent, worktree from main; file boundary help.ts + per-file usageError helpers + prompt/error lines in setup*/vault/env/doctor + tests asserting help text + examples transcripts. 2. Per-verb help = usage + a short intent paragraph; exit-code table only in ROOT_HELP; usageError prints message + one-line --help pointer (usage line for shape errors); prompt/error lines lose SPEC citations (kept in --help and docs). 3. Reconcile the two --help shapes 85 found (status payload_store pruned/orphans; token payload_hash). 4. Every affected test updated deliberately and listed. PR.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Opus subagent build, PR #74. ACs 1-5 delivered; the brief later grew ACs 6-16 (colour, style.ts, wordmark, glyph refusal shape, doctor/queue tables, --help --long) which overlap APRV-93 and land there. Exit-code table only in ROOT_HELP; per-verb helps carry the pointer plus their peculiar codes. Cross-cutting rationale into ROOT_HELP once; long essays verbatim into new docs/cli-reference.md (~50 anchors, why: pointers). Help 2959 -> 2315 lines. src/cli/usage.ts: message + pointer; shape errors get a capped synopsis; 22 helpers delegate; --json byte-identical. No SPEC.md § in prompt/error lines (scripted sweep). status/token help shapes reconciled. 13 pinned assertions changed deliberately: cli.test (root-only table), cli-env x2, cli-gate, cli-payload, cli-run, cli-status, cli-token, cli-vault (threat model -> reference pointer, prose asserted in cli-help.test), daemon, channels-cli, cli-setup x2, setup-rename. New tests/cli-help.test.ts pins the convention. Fable on merge: MCP_HELP from 88 converted to the pointer convention. Deferred per brief: src/channels/* SPEC citations (APRV-100); verb-registry purposes. docs/cli-reference.md is not yet linked from README (89 will). 1733 tests.
+
+ACs 6-16 (the visual layer) were built under APRV-93 (PR by branch aprv-93-legibility) and reviewed 2026-08-19; see its notes for the decisions. Checked here on evidence: 6/11 style.ts palette and enable matrix, tests/style.test.ts sweeps TTY, NO_COLOR (incl. empty), FORCE_COLOR, TERM=dumb, --no-color, --json, no new dependency; 7/12 wordmark on approval, --help and init, spawned tests assert presence there and absence on queue/status/doctor/log verify, collapses under NO_COLOR and APPROVAL_ASCII/non-UTF-8 locale; 10/15 colour never inside hashes, tokens or commands, asserted by tests/cli-style-render.test.ts; 16 every per-verb short help under 25 lines (test-enforced), long form via --help --long from docs/cli-reference.md. LEFT UNCHECKED, deliberately: 8/13 hold for the gate (glyph+code, no help after, --json frozen) but execute (run/token), audit, channel and env refusals still print the old "approval: <code>: <message>" line; 9/14 doctor, queue and status are tables with role colours, but log tail is untouched, no --verbose exists, and the token panel was deferred so the two decision surfaces stay consistent. APRV-102 carries exactly that remainder; this task closes so 93 and the design brief stop being two homes for one list.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Help and errors trimmed to what the operator needs (ACs 1-5, PR #74); the visual layer (style.ts, wordmark, help split, refusal shape for the gate, doctor/queue/status tables) landed under APRV-93 (PR by branch aprv-93-legibility). ACs 8/13 and 9/14 are partial and left unchecked; APRV-102 holds the remainder. Verified by npm test (1784), lint, typecheck, and the spawned TTY/NO_COLOR/ASCII checks in tests/cli-long-help.test.ts.
+<!-- SECTION:FINAL_SUMMARY:END -->
