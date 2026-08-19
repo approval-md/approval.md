@@ -35,12 +35,18 @@ import {
   type ConformanceCase,
   type ConformanceHarness,
 } from "../src/channels/conformance.js";
+import {
+  BODY_BEGIN,
+  BODY_END,
+  CANONICAL_JSON_HEADING,
+} from "../src/channels/payload-view.js";
 import { buildPendingQueue, type TagOptions } from "../src/channels/tagging.js";
 import {
   CLAIMED_MARKER,
   COMPUTED_HEADING,
   COMPUTED_MARKER,
   PAYLOAD_BEGIN,
+  PAYLOAD_END,
   WebChannel,
   WEB_DEFAULT_PORT,
   WEB_LOOPBACK_HOST,
@@ -115,7 +121,13 @@ function payloadFor(index: number): Record<string, unknown> {
   return {
     to: [`ap-${index}@vendor.example`],
     subject: `Invoice ${41 + index} chaser <urgent> & overdue`,
-    body: `Following up on invoice ${41 + index}. ${index === 0 ? FORGERY : ""}`,
+    // Multi-line and non-ASCII on purpose (APRV-100): the page renders these
+    // fields one by one, so this is the text a human actually reads.
+    body: [
+      `Following up on invoice ${41 + index}.`,
+      "",
+      `The balance is £1,200 & rising. ${index === 0 ? FORGERY : ""}`,
+    ].join("\n"),
   };
 }
 
@@ -414,6 +426,34 @@ test("the page carries the full payload, hash-labelled, and the §11 trust banne
   assert.match(page.body, /TRUST BOUNDARY — this page has NO AUTHENTICATION/u);
   assert.match(page.body, /SPEC.md §11/u);
   assert.match(page.body, /human:carter/u, "the page names the actor decisions are recorded as");
+});
+
+test("an email-shaped payload is rendered field by field, escaped, JSON underneath", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const running = await serve(world, at(2));
+  const page = await get(originOf(running));
+
+  // Labelled fields rather than one JSON blob, and `<pre>` keeps the breaks.
+  assert.match(page.body, /\nto: ap-0@vendor\.example\n/u);
+  assert.match(page.body, /\nsubject: Invoice 41 chaser &lt;urgent&gt; &amp; overdue\n/u);
+  const start = page.body.indexOf(BODY_BEGIN);
+  const end = page.body.indexOf(BODY_END);
+  assert.ok(start > 0 && end > start, "the body block delimiters are missing");
+  const body = page.body.slice(start + BODY_BEGIN.length + 1, end);
+  assert.ok(body.startsWith("Following up on invoice 41.\n\nThe balance is £1,200 &amp; rising."));
+  assert.equal(body.includes("\\n"), false, "the body still carries literal \\n escapes");
+  assert.ok(page.body.includes("£1,200"), "the non-ASCII amount did not survive verbatim");
+
+  // The forgery in the body is inert here exactly as it is everywhere else.
+  assert.equal(body.includes("<script>"), false, "raw markup reached the payload region");
+  assert.match(body, /&lt;script&gt;alert\(&quot;pwned&quot;\)&lt;\/script&gt;/u);
+
+  // The exact bytes stay on the page, underneath, inside the same region.
+  assert.ok(page.body.includes(CANONICAL_JSON_HEADING), "the canonical JSON was dropped");
+  const hash = payloadHash(world.payloads.get(key));
+  assert.ok(page.body.includes(`${PAYLOAD_BEGIN} (bound sha256 ${hash}) ---`), "no hash label");
+  assert.ok(page.body.indexOf(CANONICAL_JSON_HEADING) < page.body.indexOf(PAYLOAD_END));
 });
 
 // ---------------------------------------------------------------------------

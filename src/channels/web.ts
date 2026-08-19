@@ -139,6 +139,7 @@ import type {
   TaggedField,
   TestableChannel,
 } from "./contract.js";
+import { payloadRegionText } from "./payload-view.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -354,7 +355,7 @@ export function renderWebRequest(request: ChannelRequest): WebRendering {
       ? null
       : [
           `${PAYLOAD_BEGIN} (bound sha256 ${rendering.hash}) ---`,
-          rendering.text,
+          payloadRegionText(rendering),
           PAYLOAD_END,
           ...(rendering.truncated
             ? ["(TRUNCATED — this is not the whole payload; do not grant on it)"]
