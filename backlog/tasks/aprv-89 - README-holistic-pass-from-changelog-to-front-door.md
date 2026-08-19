@@ -1,9 +1,11 @@
 ---
 id: APRV-89
 title: 'README holistic pass: from changelog to front door'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@fable'
 created_date: '2026-08-18 11:17'
+updated_date: '2026-08-19 19:28'
 labels: []
 milestone: m-11
 dependencies:
@@ -21,6 +23,20 @@ The README grew ceremony by ceremony across eight milestones and is accurate (do
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 README rewritten top to bottom with a quickstart, the ceremonies as spine (MCP as its own path), incident lineage kept, checks section placed; docs-guard green; every command matches --help
+- [x] #1 README rewritten top to bottom with a quickstart, the ceremonies as spine (MCP as its own path), incident lineage kept, checks section placed; docs-guard green; every command matches --help
 - [ ] #2 A newcomer read-through by the human confirms the pitch and ordering; the launch-post thread in private/LAUNCH.md points at the sections it will quote
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Opus subagent, worktree from main (after 106/107/108). 2. Top-to-bottom rewrite: pitch, ten-line quickstart (init, setup, env, doctor), the four ceremonies as spine plus the harness/MCP path as its own section, incident lineage kept (seq 2, token asymmetry, web CSRF), Running the checks and exit codes at the end. 3. Every transcript recaptured from real NO_COLOR=1 runs of the built CLI (refusal glyph shape, token panel, tables, wordmark, --help --long); every command copied from --help. 4. Reflect this session: hook --dir scopes the log, withdrawn on timeout, harness grants mint no token, protected_paths, email payload rendering, audit.skew_tolerance, withdraw verb. 5. docs-guard green (exit table verbatim, seq 2 cited, token asymmetry and CSRF stance, no retired name). 6. AC 2 stays for the human (newcomer read-through; private/LAUNCH.md pointers). 7. PR by branch, auto-merge; records here.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Opus subagent build with fable edits, PR by branch aprv-89-readme-pass (#91). Outline: What this is (AGENTS.md gap as the first paragraph), Quickstart (six commands, real attest and doctor output), four ceremonies as spine (attest incl. protected_paths; amend with the seq 2 incident; deciding from the phone with the bytes-binding, refusal shape, email field rendering, token panel, run, token-consumed, withdraw, log tail piped vs aligned, verify and skew_tolerance; sending mail incl. the partial re-run probe), How an agent harness reaches the gate (CLI, the Claude Code hook with one root / never creates a log / withdraws on timeout with the 2026-08-19 incident / harness grants mint no token / failed launch is an open gate, and the MCP server described as built and scripted-tested, not yet run on a phone), Two things stated plainly kept, Running the checks, Exit codes, Where to look next (verb inventory dropped; --help and --help --long pointers; docs/cli-reference linked). Every transcript recaptured from fresh temp dirs on the current build. FINDING from the quickstart capture: a fresh approval init plus attest fails one doctor check, audit-sampling (secret-env-unnamed), because the SPEC 5.1 canonical policy sets supervised_sample_rate 0.1 and names no sampling_secret_env; the README now shows that line and says why; a cleaner answer (the canonical example naming the variable, or init scaffolding it) is a SPEC 5.1 decision to fold into APRV-103. Also fixed here: ROOT_HELP was missing the withdraw verb (usage and the Ask group), and wait now says 1 rejected/revoked/withdrawn. 582 lines against 443; the extra is requested facts and real transcripts. docs-guard green (exit table verbatim, seq 2 cited, token asymmetry and CSRF stance, no retired name); 1873 tests, lint and typecheck clean. AC 2 remains the human newcomer read and the private/LAUNCH.md pointers.
+
+Merged at 7e2d01e (PR #91). AC 2 (the human newcomer read and the private/LAUNCH.md pointers) stays open; the task stays In Progress for it.
+<!-- SECTION:NOTES:END -->
