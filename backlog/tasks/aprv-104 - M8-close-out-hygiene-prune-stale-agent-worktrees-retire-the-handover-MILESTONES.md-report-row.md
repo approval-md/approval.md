@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-19 12:33'
+updated_date: '2026-08-19 18:48'
 labels:
   - hygiene
 milestone: m-11
@@ -22,6 +23,12 @@ Housekeeping for the M8 close. (1) Fourteen agent-* worktrees under .claude/work
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Stale worktrees removed or explicitly kept, with the decision recorded in the notes
+- [x] #1 Stale worktrees removed or explicitly kept, with the decision recorded in the notes
 - [ ] #2 MILESTONES.md M8 row reads done with the record PR named; docs/HANDOVER.md retired or rewritten for the next session
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Worktrees pruned 2026-08-19 by fable on the human instruction: all 22 agent-* worktrees plus backlog-fork-strategy-ce4e7f and decompose-m0-m1-backlog-effd99 were verified merged into origin/main (git branch --merged) and clean of tracked changes other than hook-written .approval/ files; the one exception, agent-a4756845a04b6d1f1 (APRV-69 era), carried an uncommitted early draft of the README Ceremony four section that main already contains in a later form, superseded; all removed with git worktree remove --force and git worktree prune; the 58 merged local worktree-agent-* branches deleted with git branch -d. Remaining worktrees: the primary and the live session worktree remote-control-f54e71. Remaining for this task: the M8 close (MILESTONES.md row, the M8 report, retiring docs/HANDOVER.md), which waits on APRV-88 AC 2 and APRV-89.
+<!-- SECTION:NOTES:END -->
