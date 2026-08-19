@@ -43,6 +43,8 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import type { DaemonEvent } from "../src/daemon/daemon.js";
+
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-daemon-")));
@@ -92,6 +94,23 @@ function policy(ttl: string): string {
 }
 
 const POLICY = policy("1h");
+
+/**
+ * The sampling secret, passed to each child through an explicitly named
+ * TEST-SCOPED variable and never exported into this process, so no other suite
+ * can be changed by it and no assertion here depends on a developer's shell.
+ */
+const SAMPLING_SECRET_ENV = "APPROVAL_TEST_DAEMON_SAMPLING_SECRET";
+const SAMPLING_SECRET = "operator-held-secret-never-in-the-log";
+
+/** Rate 1: every supervised execution is drawn, so the case tests the daemon's
+ * reporting rather than which subjects a particular secret happens to pick. */
+const POLICY_SAMPLING = POLICY.replace(
+  "```\n",
+  ["audit:", "  supervised_sample_rate: 1", `  sampling_secret_env: ${SAMPLING_SECRET_ENV}`, "```\n"].join(
+    "\n",
+  ),
+);
 
 /** Short enough to lapse inside a test, long enough not to race the setup. */
 const POLICY_SHORT_TTL = policy("2s");
@@ -221,8 +240,12 @@ function request(dir: string, actionKey: string): void {
 }
 
 /** One `--once` daemon pass, as JSON lines. */
-function daemonOnce(dir: string, extra: string[] = []): { run: Run; lines: Record<string, unknown>[] } {
-  const run = runCli(["daemon", "run", "--once", "--json", ...extra], dir);
+function daemonOnce(
+  dir: string,
+  extra: string[] = [],
+  env: Record<string, string> = {},
+): { run: Run; lines: Record<string, unknown>[] } {
+  const run = runCli(["daemon", "run", "--once", "--json", ...extra], dir, env);
   const lines = run.stdout
     .split("\n")
     .filter((line) => line.trim().length > 0)
@@ -843,5 +866,100 @@ test("usage: an absent DEFAULT task folder warns and the daemon still sweeps and
   assert.equal(run.code, 0, run.stderr);
   assert.match(run.stderr, /does not exist/u);
   assert.ok(existsSync(queuePath(dir)), "the queue was not rendered");
+  assertClean(dir);
+});
+
+// ===========================================================================
+// The frozen output union (APRV-57)
+// ===========================================================================
+
+test("the DaemonEvent union is frozen public output: every variant, listed", () => {
+  // The `Record` makes the compiler the first assertion: a variant added to the
+  // union without a key here does not build, and a key here naming no variant
+  // does not build either. The `deepEqual` is the second: growing the union is a
+  // deliberate edit to this list, and repurposing an entry (the one thing a
+  // frozen shape forbids) surfaces in the diff as a rename rather than as a
+  // quietly different meaning behind an unchanged name.
+  const variants: Record<DaemonEvent["event"], true> = {
+    started: true,
+    drift: true,
+    write_back: true,
+    expired: true,
+    sampled: true,
+    pruned: true,
+    rendered: true,
+    escalated: true,
+    escalation_cleared: true,
+    tick: true,
+    warning: true,
+    stopped: true,
+  };
+
+  assert.deepEqual(Object.keys(variants).sort(), [
+    "drift",
+    "escalated",
+    "escalation_cleared",
+    "expired",
+    "pruned",
+    "rendered",
+    "sampled",
+    "started",
+    "stopped",
+    "tick",
+    "warning",
+    "write_back",
+  ]);
+});
+
+// ===========================================================================
+// Audit sampling, end to end through --json (APRV-40 appends, APRV-57 reports)
+// ===========================================================================
+
+test("sampling: a supervised execution drawn by the daemon is one `sampled` JSON line", () => {
+  const dir = caseDir(POLICY_SAMPLING, "proposed");
+  assert.equal(runCli(["policy", "attest", "--as", "human:carter"], dir).code, 0);
+  assert.equal(
+    runCli(["register", join("backlog", "tasks", "task-042.md"), "--as", "agent:claude"], dir).code,
+    0,
+  );
+  // Supervised: it runs without asking and is sampled afterwards, which is the
+  // only kind of execution the sweep can draw.
+  const ran = runCli(
+    ["run", "task-042:draft", "--as", "agent:claude", "--", process.execPath, "--version"],
+    dir,
+    { [SAMPLING_SECRET_ENV]: SAMPLING_SECRET },
+  );
+  assert.equal(ran.code, 0, ran.stderr);
+  const started = eventsOf(dir, "execution.started");
+  assert.equal(started.length, 1, ran.stdout);
+
+  const { run, lines } = daemonOnce(dir, [], { [SAMPLING_SECRET_ENV]: SAMPLING_SECRET });
+  assert.equal(run.code, 0, run.stderr);
+
+  const sampled = lines.filter((line) => line["event"] === "sampled");
+  assert.equal(sampled.length, 1, `one line per appended sample: ${run.stdout}`);
+  const line = sampled[0] as Record<string, unknown>;
+  assert.equal(line["action_key"], "task-042:draft");
+  assert.equal(line["task"], "task-042");
+  assert.equal(line["subject_seq"], started[0]?.["seq"]);
+
+  const appended = eventsOf(dir, "audit.sampled");
+  assert.equal(appended.length, 1);
+  assert.equal(line["seq"], appended[0]?.["seq"], "the line must name the record it reports");
+  assert.equal(
+    run.stdout.includes(SAMPLING_SECRET),
+    false,
+    "the sampling secret reached the output stream",
+  );
+
+  // Idempotence: the second tick samples nothing, so it says nothing. A success
+  // line repeated every tick could not be told apart from a second sample.
+  const again = daemonOnce(dir, [], { [SAMPLING_SECRET_ENV]: SAMPLING_SECRET });
+  assert.equal(
+    again.lines.filter((entry) => entry["event"] === "sampled").length,
+    0,
+    again.run.stdout,
+  );
+  assert.equal(eventsOf(dir, "audit.sampled").length, 1);
   assertClean(dir);
 });

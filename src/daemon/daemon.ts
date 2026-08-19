@@ -103,7 +103,7 @@ import {
 import { validate } from "../core/validate.js";
 import { sweepAuditSampling } from "./audit.js";
 import type { GitEvidenceRecorder } from "./git-evidence.js";
-import { prunePayloads } from "./prune.js";
+import { prunePayloads, type PruneReason } from "./prune.js";
 import {
   driftAlreadyLogged,
   lapsedRequests,
@@ -182,6 +182,44 @@ export type DaemonEvent =
       bytes: number;
     }
   | { event: "expired"; action_key: string; task: string | null; seq: number }
+  | {
+      /**
+       * A supervised execution was drawn for retrospective review (APRV-40,
+       * SPEC.md §5.2). Additive (APRV-57): the union grows and no existing entry
+       * changes meaning. APRV-40 left successful samples visible only as a
+       * `rendered` backlog that grew, which tells an operator that *something*
+       * was sampled without telling them what; this names it.
+       */
+      event: "sampled";
+      action_key: string;
+      task: string | null;
+      /** `seq` of the appended `audit.sampled` record. */
+      seq: number;
+      /** `seq` of the `execution.started` record the sample named. */
+      subject_seq: number;
+    }
+  | {
+      /**
+       * A payload's bytes were removed under `payload_retention` (APRV-41,
+       * amended SPEC.md §5.2). Additive (APRV-57), and emitted only for a prune
+       * that both appended its `payload.pruned` and unlinked the file: a prune
+       * that appended and could not unlink is already a `prune-refused` warning,
+       * and a crash-window completion appends nothing, so it has no `seq` to
+       * name and stays out of this line.
+       *
+       * No byte count: `daemon/prune.ts` unlinks by hash and never stats the
+       * file, and a size read here would be a fresh filesystem question asked
+       * after the answer stopped existing.
+       */
+      event: "pruned";
+      payload_hash: string;
+      reason: PruneReason;
+      /** The action whose terminal state released the bytes; `null` for an orphan. */
+      action_key: string | null;
+      task: string | null;
+      /** `seq` of the appended `payload.pruned` record. */
+      seq: number;
+    }
   | {
       event: "rendered";
       path: string;
@@ -531,6 +569,16 @@ export class Daemon {
         ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
         ...(this.options.clock === undefined ? {} : { clock: this.options.clock }),
         warn: (message) => this.warn("append-refused", message),
+        // One line per sample appended (APRV-57). The sweep names no event; it
+        // hands back what it wrote and the loop says it in the loop's own words.
+        sampled: (sample) =>
+          this.emit({
+            event: "sampled",
+            action_key: sample.candidate.actionKey,
+            task: sample.candidate.task,
+            seq: sample.record.seq,
+            subject_seq: sample.candidate.seq,
+          }),
       });
 
       // Payload retention (APRV-41), after the TTL sweep so a request expired on
@@ -957,7 +1005,21 @@ export class Daemon {
     };
     if (this.options.schemaDir !== undefined) options.schemaDir = this.options.schemaDir;
     if (this.options.clock !== undefined) options.clock = this.options.clock;
-    for (const warning of prunePayloads(options).warnings) {
+    const report = prunePayloads(options);
+    // Successes first, so the narrative reads in the order the pass ran them: a
+    // prune that appended and could not unlink is a warning below, never a line
+    // here (APRV-57).
+    for (const done of report.pruned) {
+      this.emit({
+        event: "pruned",
+        payload_hash: done.candidate.hash,
+        reason: done.candidate.reason,
+        action_key: done.candidate.actionKey,
+        task: done.candidate.task,
+        seq: done.seq,
+      });
+    }
+    for (const warning of report.warnings) {
       this.warn("prune-refused", `${warning.code}: ${warning.message}`);
     }
   }

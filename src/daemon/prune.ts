@@ -294,11 +294,31 @@ export interface PruneWarning {
   message: string;
 }
 
+/**
+ * One prune that completed: the event landed AND the bytes went (APRV-57).
+ *
+ * Reported separately from {@link PruneReport.appended} because only these carry
+ * a `seq` and only these are finished. A candidate whose append landed and whose
+ * unlink FAILED appears in `appended` and in `warnings`, never here: the store
+ * still holds the bytes, and a success line for it would say otherwise.
+ *
+ * Crash-window completions ({@link PrunePlan.completions}) are absent for the
+ * opposite reason: they append nothing, so there is no record for a `seq` to
+ * name, and the log said the file was gone on some earlier tick already.
+ */
+export interface PrunedRecord {
+  candidate: PruneCandidate;
+  /** `seq` of the appended `payload.pruned` record. */
+  seq: number;
+}
+
 export interface PruneReport {
   /** `payload_retention` in milliseconds, or `null` when the subsystem is off. */
   retentionMs: number | null;
   /** Hashes for which a `payload.pruned` was appended this pass. */
   appended: PruneCandidate[];
+  /** Appended-and-unlinked prunes, with the seq of each event (APRV-57). */
+  pruned: PrunedRecord[];
   /** Hashes whose file was removed (appended-then-unlinked, plus completions). */
   removed: string[];
   /** Crash-window files finished without a second event. */
@@ -354,6 +374,7 @@ export function prunePayloads(options: PruneOptions): PruneReport {
   const report: PruneReport = {
     retentionMs,
     appended: [],
+    pruned: [],
     removed: [],
     completed: [],
     warnings: [],
@@ -442,6 +463,7 @@ export function prunePayloads(options: PruneOptions): PruneReport {
       continue;
     }
     report.removed.push(candidate.hash);
+    report.pruned.push({ candidate, seq: appended.record.seq });
   }
 }
 

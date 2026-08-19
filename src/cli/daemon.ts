@@ -151,6 +151,20 @@ function describe(event: DaemonEvent): { text: string; stderr: boolean } {
         text: `approval.expired: ${event.action_key} lapsed its TTL — recorded at seq ${String(event.seq)}`,
         stderr: false,
       };
+    case "sampled":
+      return {
+        text: `audit.sampled: ${event.action_key} drawn for review (execution.started at seq ${String(
+          event.subject_seq,
+        )}) — recorded at seq ${String(event.seq)}`,
+        stderr: false,
+      };
+    case "pruned":
+      return {
+        text: `payload.pruned: ${event.payload_hash} removed (${event.reason}${
+          event.action_key === null ? "" : `, ${event.action_key}`
+        }) — recorded at seq ${String(event.seq)}`,
+        stderr: false,
+      };
     case "rendered":
       return {
         text: `queue: ${event.path} regenerated (${String(event.bytes)} bytes, ${String(

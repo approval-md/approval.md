@@ -498,6 +498,18 @@ test("the daemon prunes on its tick, and the log stays clean", async () => {
     JSON.stringify(emitted.filter((event) => event.event === "warning")),
   );
   assert.equal(stored(unit), false, "the daemon is the pruner");
-  assert.equal(prunedEvents(unit).length, 1);
+  const appended = prunedEvents(unit);
+  assert.equal(appended.length, 1);
+
+  // APRV-57: one line per completed prune, naming the record it reports. The
+  // deletion of approval evidence is exactly the kind of thing an operator's
+  // `--json` pipeline should see happen, not infer from a store that shrank.
+  const lines = emitted.filter((event) => event.event === "pruned");
+  assert.equal(lines.length, 1, JSON.stringify(emitted));
+  const line = lines[0];
+  assert.equal(line?.event === "pruned" && line.payload_hash, HASH);
+  assert.equal(line?.event === "pruned" && line.reason, "payload_retention");
+  assert.equal(line?.event === "pruned" && line.seq, appended[0]?.seq);
+  assert.equal(line?.event === "pruned" && line.action_key, MANUAL_ACTION);
   assertClean(unit);
 });
