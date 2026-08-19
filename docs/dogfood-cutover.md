@@ -9,6 +9,10 @@ and renders, and the decision arrives from the human's phone.
 Everything here operates on the PRIMARY checkout (`/Users/carter/dev/approval-md`)
 and its committed log. Nothing below ever runs in an agent worktree, and
 log-touching commits never ride feature branches; those two rules are unchanged.
+Main is protected, so the log commit reaches it through a branch that exists for
+exactly one commit and a pull request merged with a merge commit. See "The proof
+runbook" below for the commands, and `approval policy amend --branch` for the
+version the CLI runs itself.
 
 ## The session workflow
 
@@ -170,10 +174,36 @@ approval run "aprv-51:deps-refresh:2026-08-05" --token <token> --as agent:fable 
 approval log verify
 ```
 
-Then the human commits the log advance and the lockfile diff to main (log
-commits are the human's, by hand, and never ride feature branches; branch
-protection makes this the one push that uses their bypass, which is fitting,
-because the log records why it was allowed).
+Then the human lands the log advance and the lockfile diff on main. The rule is
+unchanged: log commits are the human's, made by hand in the primary checkout,
+and they never ride a feature branch that carries other work. Main is protected,
+so "by hand on main" now means one commit on a short-lived branch and a pull
+request that carries only it:
+
+```sh
+cd /Users/carter/dev/approval-md
+git checkout -b log-advance-aprv-51
+git add .approval/log/events.jsonl package-lock.json
+git commit -m "APRV-51: log advance + lockfile from the granted deps.add"
+git push -u origin log-advance-aprv-51
+gh pr create --title "APRV-51: log advance" \
+  --body "One commit: the log advance and the lockfile diff it authorized. Merge with a merge commit."
+```
+
+Merge it with a **merge commit**. A branch that exists for one commit and is
+merged the moment CI passes is not a feature branch in the sense the rule
+forbids: nothing else appends to the log while it is open, so no second chain
+is ever created, which is the property the rule protects. What the rule still
+forbids is a branch that accumulates work alongside the log commit, and two
+branches appending to the log at once.
+
+Policy amendments take the same shape and the CLI runs it for you:
+`approval policy amend --commit` detects a protected default branch and switches
+to the branch flow on its own, creating `policy-amend-<seq>`, committing the
+policy edit and its attestation as one commit, pushing, and opening the PR.
+`--branch <name>` forces that flow and names the branch; `--direct` forces the
+old in-place commit, and warns before printing a push that protection will
+reject.
 
 ## If an envelope goes missing
 

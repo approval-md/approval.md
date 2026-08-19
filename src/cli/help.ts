@@ -524,7 +524,7 @@ export const POLICY_AMEND_HELP = `approval policy amend — the whole amendment 
 Usage:
   approval policy amend [--policy <path>] [--dir <path>] [--log <path>]
                         [--as human:<id>] [--require-load] [--dry-run]
-                        [--commit] [--yes] [--json]
+                        [--commit] [--branch <name> | --direct] [--yes] [--json]
 
 Flags:
   --policy <path>  policy file to amend (overrides discovery)
@@ -538,7 +538,12 @@ Flags:
                    advisory and the attestation may still proceed.
   --dry-run        print the whole report and write NOTHING — no attestation,
                    no commit, no prompt
-  --commit         run the two-file git add/commit instead of printing it
+  --commit         run the git ceremony instead of printing it
+  --branch <name>  force the BRANCH flow and name the branch: commit on a new
+                   branch, push it, and open a pull request carrying that one
+                   commit (default name policy-amend-<seq>)
+  --direct         force the DIRECT flow: commit on the branch you are standing
+                   on, as this verb did before protected branches
   --yes            skip the interactive confirmation
   --json           machine-readable output
   -h, --help       this text
@@ -556,8 +561,36 @@ What it does, in this order:
   5. asks for confirmation (skipped by --yes and --dry-run);
   6. attests — one policy.updated event, identical in every respect to
      "approval policy attest";
-  7. prints, or with --commit runs, "git add <policy> <log>" and
-     "git commit" whose message cites the attestation seq.
+  7. prints, or with --commit runs, the git ceremony: "git add <policy> <log>"
+     and a "git commit" whose message cites the attestation seq, plus the push
+     (and, on the branch flow, the branch and the pull request).
+
+BRANCH PROTECTION (the two flows). A protected default branch rejects the push
+that would land the amendment, so this verb detects one and offers the flow that
+works:
+  DIRECT  git add + git commit on the branch you are standing on, then
+          "git push origin <branch>".
+  BRANCH  "git checkout -b <name>", the same one commit, "git push -u origin
+          <name>", then "gh pr create" with a title naming the seq and a body
+          stating the one-commit rule. MERGE THAT PR WITH A MERGE COMMIT, so the
+          policy edit and its attestation stay one commit on main.
+
+DETECTION runs "gh api repos/{owner}/{repo}/branches/<default>/protection":
+exit 0 is protected, 404 is unprotected, and no gh / no GitHub remote / no
+readable answer is UNKNOWN. It is read-only and it never fails the command: a
+probe that could not answer leaves an attestation that already happened exactly
+where it was.
+
+PRECEDENCE, highest first:
+  1. --branch <name>   the branch flow, with that name (--branch with --direct
+                       is a usage error);
+  2. --direct          the direct flow;
+  3. detection         the branch flow when the default branch is protected AND
+                       it is the branch currently checked out; otherwise the
+                       direct flow. UNKNOWN is the direct flow.
+When the direct flow is about to push a protected default branch (you passed
+--direct, or you are standing on it), the report prints a one-line warning
+BEFORE the push command rather than letting GitHub deliver the news.
 
 BASELINE (a stated limitation, FLAGGED FOR HUMAN REVIEW): an attestation
 records only the SHA-256 of the policy bytes, so the attested TEXT is NOT
@@ -582,9 +615,13 @@ nothing.
 --commit carries EXACTLY two files: the policy and the log. It refuses outside a
 git repository, and refuses when the INDEX holds staged changes to anything
 else — a commit that swept in an unrelated staged edit would make "this commit
-is the amendment" false. Both refusals happen BEFORE the attestation, so a
-refused --commit never leaves an attested policy without its commit. Unstaged
-and untracked files elsewhere are not touched.
+is the amendment" false. On the branch flow it also refuses when there is no
+"origin" remote to push to, and when a --branch name already exists (the
+amendment branch is created fresh, so it carries exactly one commit). Every one
+of those refusals happens BEFORE the attestation, so a refused --commit never
+leaves an attested policy without its commit. Unstaged and untracked files
+elsewhere are not touched. With gh absent, --commit on the branch flow still
+branches, commits and pushes, and prints the "gh pr create" line for you.
 
 ${EXIT_CODES}
   policy amend: 0 when the amendment was recorded, when it was a no-op, when
@@ -614,11 +651,18 @@ JSON shape (stdout, one object; keys ALWAYS present):
                 "unchanged":false},
    "load":null|{"ok":true|false,"code":null|"...","message":null|"..."},
    "attestation":null|{"seq":3,"sha256":"<64 hex>"},
-   "git":null|{"repo":true,"commands":["git add ...","git commit -m ..."],
-               "committed":false,"output":null|"..."}}
+   "git":null|{"repo":true,
+               "protection":"protected"|"unprotected"|"unknown",
+               "protectionReason":"...","defaultBranch":null|"main",
+               "currentBranch":null|"main","flow":"direct"|"branch",
+               "branch":null|"policy-amend-7","warning":null|"...",
+               "commands":["git add ...","git commit -m ...","git push ..."],
+               "committed":false,"pushed":false,"prUrl":null|"https://...",
+               "output":null|"..."}}
   diff is null in hash-only mode; attestation is null for a no-op, a dry run,
   and an abort. In a dry run the commands carry the literal placeholder <seq>,
-  since the attestation that would supply the number has not happened.
+  since the attestation that would supply the number has not happened. commands
+  is the WHOLE ceremony for the chosen flow, in order.
   refusal  {"ok":false,"error":{"code":"...","message":"..."}}  on stderr
 
 Refusal codes (error.code with --json; frozen public API):
@@ -627,11 +671,16 @@ Refusal codes (error.code with --json; frozen public API):
   io                    the policy file or the log could not be read/written.
   load-failed           --require-load and the policy does not load. NOTHING
                         was appended.
-  commit-preconditions  --commit outside a git repository, or with staged
-                        changes beyond the policy and the log. Checked BEFORE
-                        the attestation; nothing was appended.
-  git-failed            the attestation WAS appended and git then failed; the
-                        message names the seq and the two commands to run.
+  commit-preconditions  --commit outside a git repository, with staged changes
+                        beyond the policy and the log, or (branch flow) with no
+                        origin remote or a --branch name already taken. Checked
+                        BEFORE the attestation; nothing was appended.
+  git-failed            the attestation WAS appended and git then failed
+                        (checkout, add, commit or push); the message names the
+                        seq and what to run by hand.
+  pr-failed             the attestation was appended, committed and pushed, and
+                        "gh pr create" then failed. Open the PR by hand and
+                        merge it with a merge commit.
   append-failed         the attestation append itself failed.
   log-unreadable / log-torn-tail / log-corrupt
                         the log could not be read, ends in a torn line, or does
