@@ -44,9 +44,10 @@
  * shown to belong to the class) but is still counted by global budgets, which
  * charge every authorization regardless of class.
  *
- * Nothing else consumes. `approval.rejected`, `approval.expired`, and
- * `approval.revoked` consume nothing: an authorization that was refused or
- * lapsed was never a commitment. `execution.completed` and `execution.failed`
+ * Nothing else consumes. `approval.rejected`, `approval.expired`,
+ * `approval.revoked`, and `approval.withdrawn` (APRV-106) consume nothing: an
+ * authorization that was refused, lapsed, or never asked for in the end was
+ * never a commitment. `execution.completed` and `execution.failed`
  * consume nothing either — they report on a commitment already charged at
  * authorization time, and charging them again would double-count.
  *
