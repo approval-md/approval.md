@@ -470,7 +470,55 @@ reads, `approval env`, whose output is an export block a human evaluates.
 
 ## How this compares
 
-*Section forthcoming: grounded comparison in progress.*
+Three kinds of thing already exist in this space, and each solves a different
+part of the problem.
+
+**Harness-native permission prompts** (Claude Code permission rules and hooks,
+Cursor auto-run, Codex CLI approval modes) enforce inside the one harness they
+ship with. That enforcement is real: a Claude Code PreToolUse deny holds even
+under its bypass mode, and Codex backs its gate with an OS-level sandbox, a
+defense layer this project does not attempt. What they lack is a durable record
+and portability. None writes an append-only log of what was asked, who decided,
+and what ran; the decision reaches a human only as a synchronous terminal
+prompt; and the mechanism does not travel to any other harness. approval.md's
+own Claude Code hook is built on top of that PreToolUse mechanism and adds the
+two missing pieces: the decision comes from an attested policy file rather than
+the session, and it lands in a verifiable log.
+
+**AGENTS.md permissions prose** states the policy in English and trusts the
+agent to obey. Nothing parses it, nothing blocks a call against it, and no
+record exists when it is violated. approval.md is the enforcement layer that
+convention is missing, and treats it as an input: the permissions section of
+this repository's own CLAUDE.md is the first import fixture.
+
+**Framework interrupts** (LangGraph `interrupt()`, CrewAI human input, AutoGen
+`UserProxyAgent`, the OpenAI Agents SDK's `needsApproval`, Temporal signal
+approvals) give a developer a pause-and-resume primitive and leave policy,
+audit format, the human channel, and the credential boundary entirely to them.
+They also require adopting the framework. Temporal deserves its credit: its
+event history is a genuine append-only execution record with crash recovery
+this project does not claim, though it lives in Temporal's storage as a replay
+log rather than as policy-attested files in your repo.
+
+**Hosted approval platforms** (HumanLayer, gotoHuman, Permit.io's access
+requests) are the closest relatives: multi-channel human routing, review UIs,
+and in Permit.io's case a real authorization engine richer than autonomy
+classes. Their model is a third-party service in the decision path, with the
+audit trail in the platform's backend, and the agent's own process still
+choosing to honor the returned verdict. They bring things a file convention
+cannot: hosted infrastructure, escalation and team routing, compliance
+certifications.
+
+The differentiation is the combination rather than any single feature: policy
+as a hash-attested markdown file in your repo; an append-only, hash-chained log
+you can verify locally with one command; and an execution boundary where the
+credential is inert until a single-use token is minted at the moment a human
+decides. Every framework primitive and every hosted API above ultimately relies
+on the agent's process honoring a returned decision. Here the thing the agent
+needs (the credential) answers only to the thing it cannot make (the token).
+The tradeoffs are equally plain: you run the daemon and listener yourself,
+there is no OS-level sandbox, no compliance certification, and the reference
+phone channel is one app, Telegram.
 
 ## Can't the agent just go around it?
 
