@@ -32,6 +32,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The merge queue tests candidate merges on temporary branches it creates,
+  # and reports the required checks from runs on THIS event. Without it the
+  # queue waits for a `ci` verdict that never arrives and times entries out
+  # (observed 2026-08-20, first day of the queue).
+  merge_group:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -67,6 +72,13 @@ jobs:
           # Rule 1: push to main is always the full tier.
           if [ "$EVENT_NAME" = "push" ] && [ "$REF" = "refs/heads/main" ]; then
             echo "push to main: tier=full, unconditionally"
+            echo "tier=full" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Rule 1b: a merge-queue candidate is the next main, so it gets what
+          # a push to main gets: the full tier, without consulting anything.
+          if [ "$EVENT_NAME" = "merge_group" ]; then
+            echo "merge queue candidate: tier=full, unconditionally"
             echo "tier=full" >> "$GITHUB_OUTPUT"
             exit 0
           fi
