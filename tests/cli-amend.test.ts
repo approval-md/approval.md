@@ -1482,6 +1482,152 @@ test("with no origin the direct --commit says the push is still to run", () => {
 });
 
 // ---------------------------------------------------------------------------
+// APRV-129 — a recovery refusal reads like a runbook
+//
+// The first live `push-rejected` was correct, complete, and unreadable: one
+// paragraph carrying the remote's error, the local state, four commands and the
+// merge-commit rationale. The human read the word REJECTED and stopped. The
+// facts do not change here; the shape does, and the shape is what these assert.
+// ---------------------------------------------------------------------------
+
+/** A repo whose main the remote refuses, and the refusal it produces. */
+function rejectedDirectPush(env: Record<string, string> = {}): Run {
+  const { dir, remote } = repoWithRemote();
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  protectPushesTo(remote, "refs/heads/main");
+  writePolicy(dir, AFTER);
+  return runCli(["policy", "amend", "--as", "human:carter", "--yes", "--commit"], dir, env);
+}
+
+/** The lines of a section, up to the next blank line. */
+function sectionLines(text: string, heading: string): string[] {
+  const lines = text.split("\n");
+  const start = lines.findIndex((line) => line.trim() === heading);
+  assert.notEqual(start, -1, `no ${heading} section in:\n${text}`);
+  const body: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() === "") break;
+    body.push(line.trim());
+  }
+  return body;
+}
+
+test("push-rejected renders a headline, YOUR STATE, and numbered NEXT STEPS", () => {
+  const run = rejectedDirectPush();
+
+  assert.equal(run.code, 4, run.stdout);
+  // The headline: one short line naming what happened, with the code on it.
+  const headline = run.stderr.split("\n")[0] ?? "";
+  assert.match(headline, /push-rejected/u);
+  assert.match(headline, /the remote REJECTED `git push origin main`/u);
+  assert.ok(headline.length < 90, `headline is a paragraph again: ${headline}`);
+
+  // The remote's own words are indented under the headline, not inside prose.
+  assert.match(run.stderr, /\n {4}.*pre-receive hook declined/u);
+
+  const state = sectionLines(run.stderr, "YOUR STATE");
+  assert.ok(state.length >= 3 && state.length <= 4, `YOUR STATE has ${String(state.length)} lines`);
+  assert.ok(state.every((line) => line.length <= 90), `a YOUR STATE line is a paragraph:\n${state.join("\n")}`);
+  assert.match(state.join("\n"), /seq 2/u);
+  assert.match(state.join("\n"), /committed LOCALLY on main/u);
+  assert.match(state.join("\n"), /NOT on origin/u);
+
+  // ONE runnable command per line, numbered, with at most a trailing comment.
+  const steps = sectionLines(run.stderr, "NEXT STEPS");
+  assert.deepEqual(
+    steps.map((line) => /^(\d+)\. /u.exec(line)?.[1]),
+    steps.map((_line, index) => String(index + 1)),
+  );
+  for (const step of steps) {
+    const [command = "", ...rest] = step.replace(/^\d+\. /u, "").split("  # ");
+    assert.match(command.trim(), /^(git|gh) /u, `not a runnable command: ${step}`);
+    // At most ONE trailing comment, and it is a comment and not a paragraph.
+    assert.ok(rest.length <= 1, `more than a trailing comment: ${step}`);
+    assert.ok((rest[0] ?? "").length <= 60, `the comment is prose: ${step}`);
+  }
+  assert.match(steps[0] ?? "", /^1\. git branch policy-amend-2/u);
+  assert.match(steps.join("\n"), /gh pr create --title/u);
+
+  // The rationale is one line with a pointer, not an inline essay. (The one
+  // other MERGE COMMIT in the output is inside the PR body being quoted into
+  // `gh pr create`, which is a command argument and not prose the reader parses.)
+  const rationale = run.stderr
+    .split("\n")
+    .filter((line) => line.includes("MERGE COMMIT") && !/^ *\d+\. /u.test(line));
+  assert.equal(rationale.length, 1, run.stderr);
+  assert.match(rationale[0] ?? "", /docs\/cli-reference\.md/u);
+  assert.match(run.stderr, /docs\/dogfood-cutover\.md/u);
+});
+
+test("no recovery output anywhere reaches for reset --hard", () => {
+  const run = rejectedDirectPush();
+  assert.doesNotMatch(run.stderr, /reset --hard/u);
+  assert.doesNotMatch(run.stdout, /reset --hard/u);
+  // The log-safe pointer is what stands where the destructive command stood.
+  assert.match(run.stderr, /pull with the log set aside/u);
+});
+
+test("the runbook survives NO_COLOR and ASCII mode with its structure intact", () => {
+  const plain = rejectedDirectPush({ NO_COLOR: "1", APPROVAL_ASCII: "1" });
+
+  assert.equal(plain.code, 4);
+  assert.ok(!plain.stderr.includes("\u001b"), "an escape sequence survived NO_COLOR");
+  assert.match(plain.stderr, /^\[x\] push-rejected {2}the remote REJECTED/u);
+  assert.ok(sectionLines(plain.stderr, "YOUR STATE").length >= 3);
+  assert.match(sectionLines(plain.stderr, "NEXT STEPS")[0] ?? "", /^1\. git branch/u);
+  assert.doesNotMatch(plain.stderr, /reset --hard/u);
+});
+
+test("push-rejected keeps its machine surface: same code, exit, and message facts", () => {
+  const { dir, remote } = repoWithRemote();
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  protectPushesTo(remote, "refs/heads/main");
+  writePolicy(dir, AFTER);
+
+  const run = runCli(["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"], dir);
+
+  assert.equal(run.code, 4);
+  const error = errorOf(run);
+  assert.equal(error.code, "push-rejected");
+  // One line, no runbook indentation, no escapes: the frozen shape.
+  assert.doesNotMatch(error.message, /\n/u);
+  assert.match(error.message, /committed LOCALLY on main and is NOT on origin/u);
+  assert.match(error.message, /git branch policy-amend-2/u);
+  assert.doesNotMatch(error.message, /reset --hard/u);
+  assert.match(error.message, /docs\/dogfood-cutover\.md/u);
+});
+
+test("a rejected BRANCH push renders the same runbook shape", () => {
+  const { dir, remote } = repoWithRemote();
+  const stub = ghStub({ protection: "protected" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  protectPushesTo(remote, "refs/heads/policy-amend-2");
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+
+  assert.equal(run.code, 4, run.stdout);
+  assert.match(run.stderr.split("\n")[0] ?? "", /push-rejected {2}the remote REJECTED/u);
+  assert.match(sectionLines(run.stderr, "YOUR STATE").join("\n"), /nowhere else/u);
+  assert.match(sectionLines(run.stderr, "NEXT STEPS")[0] ?? "", /^1\. git push -u origin policy-amend-2/u);
+  assert.doesNotMatch(run.stderr, /reset --hard/u);
+});
+
+// ---------------------------------------------------------------------------
 // Identity (exit 2) and other usage
 // ---------------------------------------------------------------------------
 

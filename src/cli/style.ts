@@ -553,3 +553,94 @@ export function relPath(path: string, cwd: string): string {
   if (path === cwd) return ".";
   return path.startsWith(base) ? path.slice(base.length) : path;
 }
+
+/** One numbered step of a {@link runbook}: a command, and at most a comment. */
+export interface RunbookStep {
+  /** The runnable command, printed raw so a triple-click yields clean bytes. */
+  command: string;
+  /** A short trailing comment. Rendered after the command as `# …`. */
+  note?: string;
+}
+
+/** The body of a {@link runbook}, in the order a reader needs it. */
+export interface RunbookInput {
+  /**
+   * Verbatim output from whatever refused (git, gh), indented under the
+   * headline. It goes here rather than inline in the headline because a
+   * remote's four-line rejection swallowed into a sentence is the exact
+   * failure APRV-129 exists to undo.
+   */
+  quote?: readonly string[];
+  /** YOUR STATE: three or four short lines, one fact each, no commands. */
+  state: readonly string[];
+  /** NEXT STEPS: numbered, ONE runnable command per line. */
+  steps: readonly RunbookStep[];
+  /** Closing pointers: one line each, rationale compressed, no commands. */
+  footer?: readonly string[];
+}
+
+/** How far the body of a runbook is indented under its headline. */
+const RUNBOOK_INDENT = "    ";
+
+/**
+ * A refusal the operator has to READ AND ACT ON, rendered as a runbook
+ * (APRV-129).
+ *
+ *     ✗ push-rejected  the remote refused the push
+ *         ! [remote rejected] main -> main (protected branch hook declined)
+ *
+ *       YOUR STATE
+ *         attestation appended at seq 2
+ *         committed LOCALLY on main, NOT on origin
+ *
+ *       NEXT STEPS
+ *         1. git branch policy-amend-2
+ *         2. git push -u origin policy-amend-2
+ *
+ *       why a merge commit: … see docs/cli-reference.md
+ *
+ * The shape comes from the first live `push-rejected`, which said all of this
+ * correctly as one paragraph and was read as the single word REJECTED. The
+ * register already existed in this file (the token panel, doctor's
+ * line-per-check), and this is that register applied to recovery.
+ *
+ * ONE RUNNABLE COMMAND PER LINE is the load-bearing rule. A step is a command
+ * and at most a trailing comment, so the reader can copy down the list without
+ * parsing prose for the part that is typed. Rationale is not deleted: it is
+ * compressed into `footer` as one line plus a documentation pointer.
+ *
+ * Structure survives with styling stripped: the headings are their own words,
+ * the numbers are literal digits, and the indentation is spaces. NO_COLOR and
+ * ASCII mode lose the colour and the glyph spelling, nothing else.
+ *
+ * Returned as text with no trailing newline, like {@link refusal}.
+ */
+export function runbook(
+  st: Style,
+  code: string,
+  headline: string,
+  input: RunbookInput,
+): string {
+  const out: string[] = [`${st.glyph("fail")} ${st.fail(code)}  ${headline}`];
+  for (const line of input.quote ?? []) out.push(`${RUNBOOK_INDENT}${st.muted(line)}`);
+  const block = (heading: string, lines: readonly string[]): void => {
+    if (lines.length === 0) return;
+    out.push("", `  ${st.key(heading)}`);
+    for (const line of lines) out.push(`${RUNBOOK_INDENT}${line}`);
+  };
+  block("YOUR STATE", input.state);
+  block(
+    "NEXT STEPS",
+    input.steps.map((step, index) => {
+      // The command is never dressed (rule 3): it is what gets copied.
+      const note = step.note === undefined ? "" : `  ${st.muted(`# ${step.note}`)}`;
+      return `${index + 1}. ${step.command}${note}`;
+    }),
+  );
+  const footer = input.footer ?? [];
+  if (footer.length > 0) {
+    out.push("");
+    for (const line of footer) out.push(`  ${line}`);
+  }
+  return out.join("\n");
+}

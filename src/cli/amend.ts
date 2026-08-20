@@ -86,6 +86,7 @@ import { readLineFromStdin } from "./prompt.js";
 import {
   refusal as renderRefusal,
   relPath,
+  runbook,
   shortHash,
   style,
   type TableRow,
@@ -136,14 +137,24 @@ function usageError(streams: Streams, json: boolean, message: string): number {
   return EXIT_USAGE;
 }
 
+/**
+ * A refusal, on both surfaces.
+ *
+ * `message` is the FROZEN machine surface: it is what `--json` carries and what
+ * the tests pin. `human` (APRV-129) is an alternative rendering of the same
+ * facts for a terminal, the runbook shape, for the refusals a human has to act
+ * on step by step. Passing it changes nothing a machine reads.
+ */
 function refuse(
   streams: Streams,
   json: boolean,
   code: AmendErrorCode,
   message: string,
   exitCode: number,
+  human?: string,
 ): number {
   if (json) streams.err(`${JSON.stringify({ ok: false, error: { code, message } })}\n`);
+  else if (human !== undefined) streams.err(`${human}\n`);
   else streams.err(`approval: ${message}\n`);
   return exitCode;
 }
@@ -376,13 +387,47 @@ function hasOrigin(root: string): boolean {
  * different lines depending on who did the rejecting.
  */
 function pushFailureText(run: GitRun): string {
-  const text = `${run.stderr}\n${run.stdout}`
+  const lines = commandOutputLines(run.stderr, run.stdout);
+  return lines.length === 0 ? "git printed nothing" : lines.join(" | ");
+}
+
+/**
+ * The same output, kept as LINES (APRV-129).
+ *
+ * The joined form above exists because a `--json` message is one string. A
+ * terminal has no such constraint, and the remote's own four lines are exactly
+ * the part the reader needs to see as the remote wrote them, indented under the
+ * headline rather than folded into a sentence.
+ */
+function commandOutputLines(...texts: readonly string[]): string[] {
+  return texts
+    .join("\n")
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .join(" | ");
-  return text.length === 0 ? "git printed nothing" : text;
+    .filter((line) => line.length > 0);
 }
+
+/**
+ * Why the pull request is merged with a merge commit, in one line (APRV-129).
+ *
+ * It used to be an inline essay in the middle of the recovery commands. The
+ * reasoning did not get shorter; it moved to the reference, and what stays here
+ * is the rule and where to read about it.
+ */
+const MERGE_COMMIT_LINE =
+  "why a MERGE COMMIT: the policy edit and its attestation stay one commit on main (docs/cli-reference.md, `policy amend`)";
+
+/**
+ * How a local branch gets back onto its remote, safely (APRV-129).
+ *
+ * This line replaces a `git reset --hard origin/<branch>` that the recovery
+ * used to end on. With an uncommitted working log, a hard reset rewinds
+ * `events.jsonl` underneath the daemon that is appending to it: the fork
+ * mechanism, printed as advice. Until the log sync exists (APRV-125) the safe
+ * sequence is written down rather than automated, so this points at it.
+ */
+const LOG_SAFE_PULL_LINE =
+  "then pull with the log set aside: docs/dogfood-cutover.md shows the safe sequence (a hard reset would rewind the working log under the daemon)";
 
 /** Is `gh` runnable at all? Used to decide whether the PR is opened or printed. */
 function ghAvailable(root: string): boolean {
@@ -882,38 +927,71 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   let pushed = false;
   let prUrl: string | null = null;
   let output: string | null = null;
+
+  /**
+   * A `git-failed` refusal, as a runbook (APRV-129).
+   *
+   * The machine message is unchanged. What the terminal gets instead is the
+   * state (the attestation happened; the commit did not) and the commands that
+   * are STILL OWED, one per line — which is what "run the printed commands by
+   * hand" was asking for without ever printing them next to the failure.
+   */
+  const gitFailed = (
+    what: string,
+    failure: string,
+    message: string,
+    remaining: readonly string[],
+  ): number =>
+    refuse(
+      streams,
+      json,
+      "git-failed",
+      message,
+      EXIT_IO,
+      runbook(st, "git-failed", `\`${what}\` failed; the attestation is already appended`, {
+        quote: commandOutputLines(failure),
+        state: [
+          `attestation appended at seq ${seq}: it is in the log, on disk`,
+          "NOT committed: the policy edit and its attestation are working-tree changes",
+          "NOT on origin: origin still carries the previous policy",
+        ],
+        steps: remaining.map((command) => ({ command: humanCommand(command) })),
+        footer: [
+          "these two files land in ONE commit: a main carrying the policy without its attestation refuses every gate operation",
+        ],
+      }),
+    );
+
   if (commitPlan !== null) {
     if (branch !== null) {
       const checkout = git(["checkout", "-b", branch], commitPlan.root);
       if (!checkout.ok) {
-        return refuse(
-          streams,
-          json,
-          "git-failed",
+        return gitFailed(
+          `git checkout -b ${branch}`,
+          checkout.stderr.trim(),
           `the attestation was appended at seq ${seq}, but \`git checkout -b ${branch}\` failed: ${checkout.stderr.trim()}; run the printed commands by hand`,
-          EXIT_IO,
+          commands,
         );
       }
     }
     const add = git(["add", "--", commitPlan.policyArg, commitPlan.logArg], commitPlan.root);
     if (!add.ok) {
-      return refuse(
-        streams,
-        json,
-        "git-failed",
+      return gitFailed(
+        "git add",
+        add.stderr.trim(),
         `the attestation was appended at seq ${seq}, but \`git add\` failed: ${add.stderr.trim()}; run the two commands by hand`,
-        EXIT_IO,
+        branch === null ? commands : commands.slice(1),
       );
     }
     const message = `Policy: ${summary} (attested seq ${seq})`;
     const commit = git(["commit", "-m", message, "--", commitPlan.policyArg, commitPlan.logArg], commitPlan.root);
     if (!commit.ok) {
-      return refuse(
-        streams,
-        json,
-        "git-failed",
-        `the attestation was appended at seq ${seq}, but \`git commit\` failed: ${commit.stderr.trim() || commit.stdout.trim()}; run the two commands by hand`,
-        EXIT_IO,
+      const failure = commit.stderr.trim() || commit.stdout.trim();
+      return gitFailed(
+        "git commit",
+        failure,
+        `the attestation was appended at seq ${seq}, but \`git commit\` failed: ${failure}; run the two commands by hand`,
+        branch === null ? commands : commands.slice(1),
       );
     }
     committed = true;
@@ -924,12 +1002,27 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     if (branch !== null) {
       const push = git(["push", "-u", "origin", branch], commitPlan.root);
       if (!push.ok) {
+        const prCreate = `gh pr create --title ${JSON.stringify(prTitle(summary, String(seq)))} --body ${JSON.stringify(prBody(String(seq)))}`;
         return refuse(
           streams,
           json,
           "push-rejected",
-          `the attestation was appended at seq ${seq} and committed on ${branch}, but \`git push -u origin ${branch}\` was REJECTED: ${pushFailureText(push)}. STATE: the amendment commit exists LOCALLY on ${branch} and nowhere else; origin still carries the previous policy. Next: \`git push -u origin ${branch} && gh pr create --title ${JSON.stringify(prTitle(summary, String(seq)))} --body ${JSON.stringify(prBody(String(seq)))}\`, and merge that pull request with a merge commit`,
+          `the attestation was appended at seq ${seq} and committed on ${branch}, but \`git push -u origin ${branch}\` was REJECTED: ${pushFailureText(push)}. STATE: the amendment commit exists LOCALLY on ${branch} and nowhere else; origin still carries the previous policy. Next: \`git push -u origin ${branch} && ${prCreate}\`, and merge that pull request with a merge commit`,
           EXIT_IO,
+          runbook(st, "push-rejected", `the remote REJECTED \`git push -u origin ${branch}\``, {
+            quote: commandOutputLines(push.stderr, push.stdout),
+            state: [
+              `attestation appended at seq ${seq}: it is in the log, on disk`,
+              `committed LOCALLY on ${branch}, and nowhere else`,
+              "NOT on origin: origin still carries the previous policy",
+            ],
+            steps: [
+              { command: `git push -u origin ${branch}`, note: "once the remote will take it" },
+              { command: prCreate },
+              { command: `gh pr merge ${branch} --merge`, note: "or merge it in the web UI" },
+            ],
+            footer: [MERGE_COMMIT_LINE],
+          }),
         );
       }
       pushed = true;
@@ -949,12 +1042,29 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
         if (probe.defaultBranch !== null) args.push("--base", probe.defaultBranch);
         const pr = spawnSync("gh", args, { cwd: commitPlan.root, encoding: "utf8" });
         if (pr.error !== undefined || pr.status !== 0) {
+          const ghFailure = (pr.stderr ?? "").trim() || detail(pr.error ?? "gh did not run");
           return refuse(
             streams,
             json,
             "pr-failed",
-            `the attestation was appended at seq ${seq}, committed on ${branch} and pushed, but \`gh pr create\` failed: ${(pr.stderr ?? "").trim() || detail(pr.error ?? "gh did not run")}; open the pull request by hand and merge it with a merge commit`,
+            `the attestation was appended at seq ${seq}, committed on ${branch} and pushed, but \`gh pr create\` failed: ${ghFailure}; open the pull request by hand and merge it with a merge commit`,
             EXIT_IO,
+            runbook(st, "pr-failed", "`gh pr create` failed; the branch is already on origin", {
+              quote: commandOutputLines(ghFailure),
+              state: [
+                `attestation appended at seq ${seq}: it is in the log, on disk`,
+                `committed on ${branch} and PUSHED: origin has the branch`,
+                "no pull request: origin's default branch still carries the previous policy",
+              ],
+              steps: [
+                {
+                  command: `gh pr create --title ${JSON.stringify(prTitle(summary, String(seq)))} --body ${JSON.stringify(prBody(String(seq)))} --head ${branch}${probe.defaultBranch === null ? "" : ` --base ${probe.defaultBranch}`}`,
+                  note: "retry, or open it in the web UI",
+                },
+                { command: `gh pr merge ${branch} --merge`, note: "or merge it in the web UI" },
+              ],
+              footer: [MERGE_COMMIT_LINE],
+            }),
           );
         }
         const url = pr.stdout
@@ -981,12 +1091,29 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
         const push = git(["push", "origin", target], commitPlan.root);
         if (!push.ok) {
           const recovery = branchName(String(seq));
+          const prCreate = `gh pr create --title ${JSON.stringify(prTitle(summary, String(seq)))} --body ${JSON.stringify(prBody(String(seq)))} --head ${recovery}`;
           return refuse(
             streams,
             json,
             "push-rejected",
-            `the attestation was appended at seq ${seq} and committed on ${target}, but \`git push origin ${target}\` was REJECTED by the remote: ${pushFailureText(push)}. STATE: the amendment is committed LOCALLY on ${target} and is NOT on origin, so origin still carries the previous policy and your ${target} is one commit ahead of it. ${target} is protected (whatever the protection probe reported: the remote just refused the push), so land the commit through a pull request: \`git branch ${recovery} && git push -u origin ${recovery} && gh pr create --title ${JSON.stringify(prTitle(summary, String(seq)))} --body ${JSON.stringify(prBody(String(seq)))} --head ${recovery}\`. Merge it with a merge commit, then put your local ${target} back on the remote with \`git fetch origin && git reset --hard origin/${target}\``,
+            `the attestation was appended at seq ${seq} and committed on ${target}, but \`git push origin ${target}\` was REJECTED by the remote: ${pushFailureText(push)}. STATE: the amendment is committed LOCALLY on ${target} and is NOT on origin, so origin still carries the previous policy and your ${target} is one commit ahead of it. ${target} is protected (whatever the protection probe reported: the remote just refused the push), so land the commit through a pull request: \`git branch ${recovery} && git push -u origin ${recovery} && ${prCreate}\`. Merge it with a merge commit, then pull with the log set aside; docs/dogfood-cutover.md shows the safe sequence`,
             EXIT_IO,
+            runbook(st, "push-rejected", `the remote REJECTED \`git push origin ${target}\``, {
+              quote: commandOutputLines(push.stderr, push.stdout),
+              state: [
+                `attestation appended at seq ${seq}: it is in the log, on disk`,
+                `committed LOCALLY on ${target}, one commit ahead of origin`,
+                "NOT on origin: origin still carries the previous policy",
+                `${target} is protected, whatever the probe reported: the remote just refused`,
+              ],
+              steps: [
+                { command: `git branch ${recovery}`, note: "the same commit, on a branch" },
+                { command: `git push -u origin ${recovery}` },
+                { command: prCreate },
+                { command: `gh pr merge ${recovery} --merge`, note: "or merge it in the web UI" },
+              ],
+              footer: [MERGE_COMMIT_LINE, LOG_SAFE_PULL_LINE],
+            }),
           );
         }
         pushed = true;
