@@ -266,6 +266,43 @@ never moved off the operator's branch on their behalf. When there is no `origin`
 to push to, the direct flow reports the push as still to run rather than listing
 it among the commands it ran.
 
+A refusal that has to be READ AND ACTED ON is printed as a runbook: a headline,
+the remote's own output indented under it, the state in short lines, and the
+recovery numbered with ONE runnable command per line.
+
+```
+✗ push-rejected  the remote REJECTED `git push origin main`
+    remote: Changes must be made through a pull request.
+    To .../origin.git
+    ! [remote rejected] main -> main (pre-receive hook declined)
+    error: failed to push some refs to '.../origin.git'
+
+  YOUR STATE
+    attestation appended at seq 2: it is in the log, on disk
+    committed LOCALLY on main, one commit ahead of origin
+    NOT on origin: origin still carries the previous policy
+    main is protected, whatever the probe reported: the remote just refused
+
+  NEXT STEPS
+    1. git branch policy-amend-2  # the same commit, on a branch
+    2. git push -u origin policy-amend-2
+    3. gh pr create --title "Policy: …(attested seq 2)" --body "…" --head policy-amend-2
+    4. gh pr merge policy-amend-2 --merge  # or merge it in the web UI
+
+  why a MERGE COMMIT: the policy edit and its attestation stay one commit on main …
+  then pull with the log set aside: docs/dogfood-cutover.md shows the safe sequence …
+```
+
+(Step 3's `--title` and `--body` are shown elided here; the CLI prints them in
+full, so the line can be copied and run as it stands.) The recovery does not end
+on a hard reset onto `origin/main`, as it once did: with an uncommitted working
+log a hard reset rewinds `events.jsonl` underneath the daemon appending to it,
+which is a fork, so the last line points at the log-safe sequence instead. The
+same shape carries `git-failed` (what broke, and the commands still owed) and
+`pr-failed` (the branch is on origin; the pull request is not). The refusal
+codes, the exit codes and the `--json` shapes are unchanged by any of this: it
+is the human rendering only.
+
 **What it does, in this order.**
 
 1. resolves the live policy file and hashes its bytes;
@@ -347,7 +384,8 @@ A refusal is `{"ok":false,"error":{"code":"...","message":"..."}}` on stderr.
 - `push-rejected` — the attestation was appended and committed, and the remote
   refused the push. The message carries git's own output, the branch, the fact
   that origin still carries the previous policy, and the pull-request commands
-  that land the commit.
+  that land the commit. On a terminal the same facts are printed as the runbook
+  above; `error.message` is one line and unchanged.
 - `pr-failed` — the attestation was appended, committed and pushed, and
   `gh pr create` then failed.
 - `append-failed` — the attestation append itself failed.

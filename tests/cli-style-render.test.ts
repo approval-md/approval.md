@@ -29,7 +29,7 @@ import { renderQueueHuman, renderWaitHuman } from "../src/cli/execute.js";
 import { renderClassification } from "../src/cli/hook.js";
 import { renderTailHuman } from "../src/cli/main.js";
 import { renderExplainHuman } from "../src/cli/policy.js";
-import { makeStyle } from "../src/cli/style.js";
+import { makeStyle, runbook } from "../src/cli/style.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
@@ -553,4 +553,68 @@ test("the human amend report short-hashes and relativizes what --json leaves who
   for (const label of ["Policy", "Changes", "Load", "Would run"]) {
     assert.match(run.stdout, new RegExp(`^${label}$`, "mu"), label);
   }
+});
+
+// ---------------------------------------------------------------------------
+// The runbook shape (APRV-129)
+//
+// The unit-level counterpart to `tests/cli-amend.test.ts`'s live push-rejected:
+// the helper itself, in both modes, asserted on the properties that make a
+// refusal actionable rather than merely correct.
+// ---------------------------------------------------------------------------
+
+const RUNBOOK = {
+  quote: ["! [remote rejected] main -> main (pre-receive hook declined)"],
+  state: ["appended at seq 2", "committed LOCALLY on main", "NOT on origin"],
+  steps: [
+    { command: "git branch policy-amend-2", note: "the same commit, on a branch" },
+    { command: "git push -u origin policy-amend-2" },
+  ],
+  footer: ["why a MERGE COMMIT: … (docs/cli-reference.md)"],
+} as const;
+
+test("runbook: a headline, indented remote output, YOUR STATE, numbered steps", () => {
+  const plain = runbook(makeStyle({ tty: false }), "push-rejected", "the remote REJECTED the push", RUNBOOK);
+
+  assert.ok(!plain.includes(ESC));
+  assert.deepEqual(plain.split("\n"), [
+    "✗ push-rejected  the remote REJECTED the push",
+    "    ! [remote rejected] main -> main (pre-receive hook declined)",
+    "",
+    "  YOUR STATE",
+    "    appended at seq 2",
+    "    committed LOCALLY on main",
+    "    NOT on origin",
+    "",
+    "  NEXT STEPS",
+    "    1. git branch policy-amend-2  # the same commit, on a branch",
+    "    2. git push -u origin policy-amend-2",
+    "",
+    "  why a MERGE COMMIT: … (docs/cli-reference.md)",
+  ]);
+});
+
+test("runbook: colour dresses the code and the comment, never the command", () => {
+  const painted = runbook(makeStyle({ tty: true }), "push-rejected", "the remote REJECTED the push", RUNBOOK);
+
+  const steps = painted.split("\n").filter((line) => /^ {4}\d+\. /u.test(line));
+  assert.equal(steps.length, 2);
+  // Step 2 has no comment, so the whole line after the number is copyable bytes.
+  assert.equal(steps[1], "    2. git push -u origin policy-amend-2");
+  // Step 1's command is undressed up to its comment.
+  assert.ok(steps[0]?.startsWith("    1. git branch policy-amend-2  "));
+  assert.ok(painted.includes(ESC), "a terminal got no colour at all");
+});
+
+test("runbook: ASCII mode keeps every structural word", () => {
+  const ascii = runbook(
+    makeStyle({ tty: false, env: { APPROVAL_ASCII: "1" } }),
+    "git-failed",
+    "`git commit` failed",
+    { state: ["appended at seq 2"], steps: [{ command: "git add APPROVAL.md" }] },
+  );
+
+  assert.match(ascii, /^\[x\] git-failed {2}`git commit` failed$/mu);
+  assert.match(ascii, /^ {2}YOUR STATE$/mu);
+  assert.match(ascii, /^ {4}1\. git add APPROVAL\.md$/mu);
 });
