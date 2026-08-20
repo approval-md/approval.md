@@ -585,18 +585,29 @@ is running: the vault, the adapter boundary, and the single-use token. Keep
 
 ```
 npm run check:changed        # classify the working tree, then run that tier
-npm run check:tier -- <path> # classify the given paths and print light or full
+npm run check:tier -- <path> # classify the given paths and print the tier
 ```
 
-Checks come in two tiers. The **light** tier runs only the documentation guard
-(`tests/docs-guard.test.ts`), and a change qualifies for it only when every
-changed path is `README.md`, `docs/**/*.md`, or `examples/**/*.md`. The **full**
-tier is the standing gate, `npm test && npm run lint && npm run typecheck`, and
-a denylist forces it regardless of file extension: `APPROVAL.md`, `CLAUDE.md`,
-`.claude/**`, `SPEC.md`, `schema/**`, `**/fixtures/**`, `backlog/**`,
-`scripts/**`, `.github/**`, the packaging files, and `cli.js`. Backlog task
-files are on that list because their acceptance criteria are instructions to
-future agents: markdown by extension, behavior by effect.
+Checks come in three tiers.
+
+| Tier | Chosen when every changed path is | What runs |
+| --- | --- | --- |
+| light | `README.md`, `docs/**/*.md`, `examples/**/*.md` | the documentation guard (`tests/docs-guard.test.ts`) |
+| records | `backlog/**`, `MILESTONES.md` | the tests that read records (`milestones-guard`, `backlog-fixtures`, `docs-guard`), on Node 20 |
+| full | anything else, or a mix of the above | `npm test && npm run lint && npm run typecheck`, on Node 20 and 22 |
+
+A denylist forces the full tier regardless of file extension: `APPROVAL.md`,
+`CLAUDE.md`, `.claude/**`, `SPEC.md`, `schema/**`, `**/fixtures/**`,
+`backlog/**`, `scripts/**`, `.github/**`, the packaging files, and `cli.js`.
+
+`backlog/**` sits on both that denylist and the records list, which is what
+makes the records tier all-or-nothing: a task file mixed with any other path
+takes the full tier. Task files are markdown by extension and behavior by
+effect, since their acceptance criteria are instructions to future agents. That
+earns them every check which can observe a task file, and the records tier is
+exactly those; it does not earn them a matrix of ~1800 tests on two Node
+majors, none of which reads one. `MILESTONES.md` rides along because the
+milestones guard checks the two against each other.
 
 Classification is computed from the changed paths by
 `scripts/classify-tier.mjs`, never asserted by the author of the change. Every

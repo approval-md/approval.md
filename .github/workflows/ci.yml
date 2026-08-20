@@ -25,9 +25,10 @@ name: ci
 # Classification input, stated so nobody re-litigates it from symptoms: the
 # classifier diffs `base...HEAD` (three-dot, merge-base semantics), so a PR
 # that pulls main in via "Update branch" is still classified from its own
-# changes only. When a record-only PR runs the full gate, that is the
-# `backlog/**` denylist working as designed (task files are instruction-
-# bearing), never merge-commit pollution.
+# changes only. A record-only PR takes the `records` tier (APRV-112), which
+# runs every test that reads records on the Node floor; if such a PR runs the
+# full gate instead, some non-record path is in its diff, never merge-commit
+# pollution.
 on:
   push:
     branches: [main]
@@ -89,7 +90,7 @@ jobs:
           fi
           tier="$(node scripts/classify-tier.mjs --base "$base")"
           case "$tier" in
-            light|full) ;;
+            light|records|full) ;;
             *) tier=full ;;   # unrecognised output fails closed
           esac
           echo "base=$base tier=$tier"
@@ -127,6 +128,28 @@ jobs:
       - run: npm run build
       - run: node --test dist/tests/docs-guard.test.js
 
+  records:
+    # The records tier (APRV-112): a change that touches only backlog/** and
+    # MILESTONES.md runs every test that READS those records, on the Node floor
+    # alone. The set is named in scripts/classify-tier.mjs (RECORDS_TESTS) and
+    # passed through the same run-tests.mjs entry the full suite uses, which
+    # fails hard when a named test file is missing rather than running a
+    # smaller suite. Node 20 because the floor is the version nobody develops
+    # on, and a record cannot break a version-sensitive path.
+    name: records guards (records tier)
+    needs: classify
+    if: needs.classify.outputs.tier == 'records'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/run-tests.mjs --only milestones-guard backlog-fixtures docs-guard
+
   full:
     name: full gate (node ${{ matrix.node-version }})
     needs: classify
@@ -154,7 +177,7 @@ jobs:
     # job succeeds only when the tier that was chosen actually ran and
     # succeeded. Skipped-when-required is a failure here, not a pass.
     name: ci
-    needs: [classify, doc-guard, full]
+    needs: [classify, doc-guard, records, full]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -163,10 +186,11 @@ jobs:
           TIER: ${{ needs.classify.outputs.tier }}
           CLASSIFY_RESULT: ${{ needs.classify.result }}
           DOC_RESULT: ${{ needs['doc-guard'].result }}
+          RECORDS_RESULT: ${{ needs.records.result }}
           FULL_RESULT: ${{ needs.full.result }}
         run: |
           set -euo pipefail
-          echo "classify=$CLASSIFY_RESULT tier=$TIER doc-guard=$DOC_RESULT full=$FULL_RESULT"
+          echo "classify=$CLASSIFY_RESULT tier=$TIER doc-guard=$DOC_RESULT records=$RECORDS_RESULT full=$FULL_RESULT"
           if [ "$CLASSIFY_RESULT" != "success" ]; then
             echo "classify did not succeed; nothing downstream is trustworthy"
             exit 1
@@ -174,6 +198,9 @@ jobs:
           case "$TIER" in
             light)
               [ "$DOC_RESULT" = "success" ] || { echo "light tier required doc-guard to succeed, got $DOC_RESULT"; exit 1; }
+              ;;
+            records)
+              [ "$RECORDS_RESULT" = "success" ] || { echo "records tier required the records guards to succeed, got $RECORDS_RESULT"; exit 1; }
               ;;
             full)
               [ "$FULL_RESULT" = "success" ] || { echo "full tier required the full gate to succeed, got $FULL_RESULT"; exit 1; }
