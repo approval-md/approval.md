@@ -562,12 +562,14 @@ test("a carried grant is spent exactly once; the next identical command asks aga
 
 test("a retry while the question is pending adopts it rather than opening a duplicate", () => {
   // APRV-117 AC#2: the phone never shows two prompts for one command.
+  // The specimen carries a body: APRV-114 made a bare GET `read.web`, and this
+  // test needs a fetch the policy still holds at manual.
   const dir = ready();
   for (const toolUseId of ["tu-adopt-1", "tu-adopt-2", "tu-adopt-3"]) {
     const run = runCli(
       ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
       dir,
-      bashEvent("curl -sS https://example.com", toolUseId),
+      bashEvent("curl -d a=b https://example.com", toolUseId),
     );
     assert.equal(verdictOf(run).permission, "deny");
   }
@@ -589,7 +591,7 @@ test("a retry while the question is pending adopts it rather than opening a dupl
   const after = runCli(
     ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
     dir,
-    bashEvent("curl -sS https://example.com", "tu-adopt-4"),
+    bashEvent("curl -d a=b https://example.com", "tu-adopt-4"),
   );
   assert.equal(verdictOf(after).permission, "allow");
   assertClean(dir);
