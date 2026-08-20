@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md && gh api repos/approval-md/approval.md/rulesets --jq '.[] | {id, name, target, enforcement}'; gh api repos/approval-md/approval.md --jq '{private, visibility}'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/remote-control-f54e71"}

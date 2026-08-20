@@ -1,0 +1,1 @@
+{"command":"curl -sS -m 60 -o /tmp/evrec.md https://raw.githubusercontent.com/emiliaprotocol/emilia-protocol/main/docs/EP-EVIDENCE-RECORD-SPEC.md && wc -l /tmp/evrec.md","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

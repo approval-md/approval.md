@@ -1,0 +1,1 @@
+{"command":"cd /tmp && rm -rf /tmp/ep && git clone --depth 1 https://github.com/emiliaprotocol/emilia-protocol /tmp/ep 2>&1 | tail -5 && du -sh /tmp/ep","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

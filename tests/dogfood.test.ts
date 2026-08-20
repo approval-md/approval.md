@@ -112,7 +112,12 @@ interface Expectation {
 const EXPECTATIONS: readonly Expectation[] = [
   // manual — the side-effecting and self-modifying classes
   { actionClass: "deps.add", autonomy: "manual", provenance: "rule" },
-  { actionClass: "network.call", autonomy: "manual", provenance: "rule" },
+  {
+    actionClass: "network.call",
+    autonomy: "autonomous",
+    provenance: "rule",
+    note: "human loosening of 2026-08-20 (attested seq 163) to stop a per-fetch prompt flood; APRV-114's read.web refinement is the path back to manual",
+  },
   { actionClass: "release.publish", autonomy: "manual", provenance: "rule" },
   { actionClass: "policy.edit", autonomy: "manual", provenance: "rule" },
   { actionClass: "vcs.history.rewrite", autonomy: "manual", provenance: "rule" },

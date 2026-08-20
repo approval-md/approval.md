@@ -1,0 +1,1 @@
+{"command":"curl -sS -m 90 -o /tmp/verify.js https://raw.githubusercontent.com/emiliaprotocol/emilia-protocol/main/packages/verify/index.js && wc -l /tmp/verify.js && grep -n \"^export function\\|^function \\|^export async function\\|^const \" /tmp/verify.js | head -80","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
