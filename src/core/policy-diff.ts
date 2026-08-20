@@ -31,7 +31,7 @@
  * the pairs that differ. A diff that computed the answer a second way could
  * disagree with the engine, and the diff would be the more convincing lie.
  *
- * Four sections:
+ * Five sections:
  *
  * - **classes** — resolution changes (autonomy, provenance, matched pattern)
  *   over a probe set: every key of either version's `classes` map, plus the
@@ -43,6 +43,38 @@
  * - **defaults** — `autonomy`, `channel`, `approval_ttl`, `on_expiry`.
  * - **budgets** — every `(scope, limit)` pair, old -> new. Scopes are the
  *   `budgets` map's keys plus `classes.<pattern>` for a rule's `limits`.
+ * - **vocabulary** — every other key of the policy document, by dotted path,
+ *   before -> after. See below.
+ *
+ * ## The vocabulary section, and the incident that added it (APRV-111)
+ *
+ * On 2026-08-20 a real amendment added `protected_paths: [SPEC.md]` — a key
+ * that decides which file edits are `policy.edit`, which is to say which edits
+ * a human has to approve — and this module reported **"no semantic change"**.
+ * The four sections above were the whole diff, and none of them can see a
+ * top-level key outside `classes` / `approvers` / `defaults` / `budgets`. A
+ * human was shown "nothing changed" while signing bytes that moved the gate.
+ *
+ * The fix is not a fifth hand-written list, because a hand-written list is
+ * exactly what went stale: `protected_paths` was added to the vocabulary by
+ * APRV-107 and nothing here changed. {@link diffPolicies} now walks **both
+ * documents' actual keys**, flattens them to dotted paths, and reports every
+ * pair that differs. New spec keys are covered the day they parse, with no edit
+ * to this file. Paths the dedicated sections already report are dropped, so
+ * nothing is said twice.
+ *
+ * Two consequences worth stating:
+ *
+ * - **Unknown top-level keys are named, never dropped.** `policy.schema.json`
+ *   is closed, so an unrecognised key means the load FAILED and the policy is
+ *   all-manual. That key is reported (marked `recognised: false`) whether or
+ *   not its value changed: the display side fails closed too, and an edit this
+ *   module cannot describe must be called out rather than summarised as no
+ *   change.
+ * - **A side whose YAML never parsed has no vocabulary to read.** Then
+ *   {@link PolicyDiff.vocabularyComparable} is `false` and the renderer says the
+ *   rest of the document was not compared, instead of printing "no semantic
+ *   change" over an unexamined document.
  *
  * ## Probes are a report, not a proof
  *
@@ -143,6 +175,28 @@ export interface DefaultsChange {
   after: string | null;
 }
 
+/**
+ * A policy key outside the four dedicated sections, before -> after (APRV-111).
+ *
+ * `key` is a dotted path into the policy document (`protected_paths`,
+ * `audit.skew_tolerance`, `channels.telegram.token_env`). Values are rendered
+ * for reading, not for parsing: scalars as themselves, sequences and anything
+ * else as JSON. `null` means the key was absent on that side.
+ */
+export interface VocabularyChange {
+  key: string;
+  /**
+   * Is this path's TOP-LEVEL key part of SPEC.md §5.2's policy vocabulary?
+   *
+   * `false` means the schema does not know the key, which means the policy does
+   * not load, which means every class is `manual`. Reported even when the value
+   * did not change — see the module header.
+   */
+  recognised: boolean;
+  before: string | null;
+  after: string | null;
+}
+
 /** A budget or class limit whose value changed. `null` means "absent". */
 export interface BudgetChange {
   /** `budgets` key (e.g. `global`) or `classes.<pattern>` for a rule limit. */
@@ -171,6 +225,17 @@ export interface PolicyDiff {
   approvers: ApproverChange[];
   defaults: DefaultsChange[];
   budgets: BudgetChange[];
+  /**
+   * Every other key of the document, changed or unrecognised (APRV-111).
+   * Sorted by `key`, so the same two policies always diff byte-identically.
+   */
+  vocabulary: VocabularyChange[];
+  /**
+   * False when a side's document could not be read as a mapping at all (its
+   * YAML did not parse, or the file was missing), in which case `vocabulary` is
+   * empty because there were no keys to walk — not because none changed.
+   */
+  vocabularyComparable: boolean;
   /** True when no section reported a change. */
   unchanged: boolean;
 }
@@ -182,8 +247,126 @@ const DEFAULT_FIELDS: ReadonlyArray<DefaultsChange["field"]> = [
   "on_expiry",
 ];
 
+/**
+ * SPEC.md §5.2's top-level policy keys, as `policy.schema.json` declares them.
+ *
+ * Used for ONE decision: whether a key the document carries is part of the
+ * vocabulary at all. It is not used to decide what to walk (the documents' own
+ * keys decide that), so a key added to the schema and forgotten here is
+ * reported as unknown — loud and wrong-in-the-safe-direction — rather than
+ * silently skipped.
+ */
+export const POLICY_TOP_LEVEL_KEYS: readonly string[] = [
+  "approvers",
+  "audit",
+  "budgets",
+  "channels",
+  "classes",
+  "defaults",
+  "payload_retention",
+  "protected_paths",
+  "vault",
+  "version",
+];
+
+/**
+ * The one key the vocabulary walk skips: the classes map is the classes
+ * section's subject, and printing its raw text beside the resolution changes
+ * would say the same thing twice, less usefully.
+ */
+const VOCABULARY_SKIP_TOP_LEVEL = "classes";
+
 function policyOf(load: PolicyLoadResult): Policy | null {
   return load.ok ? load.policy : null;
+}
+
+/**
+ * The document as parsed, for the vocabulary walk: the loaded policy when the
+ * load succeeded, the rejected-but-parsed value when the schema said no, and
+ * `undefined` when there was never a value (missing file, no block, bad YAML).
+ *
+ * DISPLAY ONLY. Nothing in this module resolves an action against it.
+ */
+function rawOf(load: PolicyLoadResult): unknown {
+  return load.ok ? load.policy : load.raw;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A value rendered for a human to read: scalars as themselves, the rest JSON. */
+function renderValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value) ?? String(value);
+}
+
+/** Flatten nested mappings to dotted paths; sequences and scalars are leaves. */
+function flatten(value: unknown, prefix: string, out: Map<string, string>): void {
+  if (isRecord(value)) {
+    const keys = Object.keys(value).sort();
+    if (keys.length === 0) {
+      out.set(prefix, "{}");
+      return;
+    }
+    for (const key of keys) {
+      flatten(value[key], prefix === "" ? key : `${prefix}.${key}`, out);
+    }
+    return;
+  }
+  out.set(prefix, renderValue(value));
+}
+
+/** Every dotted path of a policy document, or `null` when there is no document. */
+function vocabularyTable(raw: unknown): Map<string, string> | null {
+  if (!isRecord(raw)) return null;
+  const table = new Map<string, string>();
+  for (const key of Object.keys(raw).sort()) {
+    if (key === VOCABULARY_SKIP_TOP_LEVEL) continue;
+    flatten(raw[key], key, table);
+  }
+  return table;
+}
+
+/**
+ * Is this path already reported by one of the four dedicated sections?
+ *
+ * Only asked when those sections actually ran (`structuralComparable`): a side
+ * that failed to load leaves them empty, and dropping the path then would hide
+ * the change entirely rather than avoid repeating it.
+ */
+function coveredByDedicatedSection(path: string): boolean {
+  const parts = path.split(".");
+  if (parts[0] === "defaults") {
+    return parts.length === 2 && DEFAULT_FIELDS.includes(parts[1] as DefaultsChange["field"]);
+  }
+  if (parts[0] === "approvers") return parts.length === 3 && parts[2] === "channels";
+  if (parts[0] === "budgets") return parts.length === 3;
+  return false;
+}
+
+function diffVocabulary(
+  before: unknown,
+  after: unknown,
+  structuralComparable: boolean,
+): { comparable: boolean; changes: VocabularyChange[] } {
+  const beforeTable = vocabularyTable(before);
+  const afterTable = vocabularyTable(after);
+  if (beforeTable === null || afterTable === null) return { comparable: false, changes: [] };
+
+  const changes: VocabularyChange[] = [];
+  for (const key of union([...beforeTable.keys()], [...afterTable.keys()])) {
+    const recognised = POLICY_TOP_LEVEL_KEYS.includes(key.split(".")[0] ?? key);
+    const previous = beforeTable.get(key) ?? null;
+    const next = afterTable.get(key) ?? null;
+    // An unrecognised key is reported whether or not it moved: it is why the
+    // policy fails closed, and a reader shown "no change" would never learn it.
+    if (recognised && previous === next) continue;
+    if (recognised && structuralComparable && coveredByDedicatedSection(key)) continue;
+    changes.push({ key, recognised, before: previous, after: next });
+  }
+  return { comparable: true, changes };
 }
 
 function failureOf(
@@ -355,6 +538,7 @@ export function diffPolicies(
   const approvers = structuralComparable ? diffApprovers(beforePolicy, afterPolicy) : [];
   const defaults = structuralComparable ? diffDefaults(beforePolicy, afterPolicy) : [];
   const budgets = structuralComparable ? diffBudgets(beforePolicy, afterPolicy) : [];
+  const vocabulary = diffVocabulary(rawOf(before), rawOf(after), structuralComparable);
 
   return {
     beforeFailure: failureOf(before),
@@ -365,11 +549,14 @@ export function diffPolicies(
     approvers,
     defaults,
     budgets,
+    vocabulary: vocabulary.changes,
+    vocabularyComparable: vocabulary.comparable,
     unchanged:
       classes.length === 0 &&
       approvers.length === 0 &&
       defaults.length === 0 &&
-      budgets.length === 0,
+      budgets.length === 0 &&
+      vocabulary.changes.length === 0,
   };
 }
 
@@ -396,7 +583,15 @@ export function renderDiff(diff: PolicyDiff): string[] {
   }
 
   if (diff.unchanged) {
-    lines.push(`no semantic change over ${diff.probes.length} probed class(es)`);
+    // "no semantic change" is a claim about the WHOLE document, so it is only
+    // made when the whole document was read. When a side's YAML never parsed
+    // there are keys nobody looked at, and saying nothing changed would be the
+    // APRV-111 failure with a different cause.
+    lines.push(
+      diff.vocabularyComparable
+        ? `no semantic change: ${diff.probes.length} probed class(es) resolve the same, and every policy key is unchanged`
+        : `no class resolution changed over ${diff.probes.length} probed class(es), but the rest of the policy could NOT be compared (a side's YAML did not parse), so an edit outside the classes may be invisible here — read the file diff yourself`,
+    );
     return lines;
   }
 
@@ -435,6 +630,22 @@ export function renderDiff(diff: PolicyDiff): string[] {
         `  ${change.scope}.${change.limit}: ${change.before ?? "(absent)"} -> ${change.after ?? "(absent)"}`,
       );
     }
+  }
+  if (diff.vocabulary.length > 0) {
+    lines.push(`policy keys changed (${diff.vocabulary.length}):`);
+    for (const change of diff.vocabulary) {
+      const values = `${change.before ?? "(absent)"} -> ${change.after ?? "(absent)"}`;
+      lines.push(
+        change.recognised
+          ? `  ${change.key}: ${values}`
+          : `  ${change.key}: ${values} (UNKNOWN KEY: not part of the policy vocabulary, so the policy FAILS CLOSED to all-manual until it is removed)`,
+      );
+    }
+  }
+  if (!diff.vocabularyComparable) {
+    lines.push(
+      "the policy keys were NOT compared: a side's YAML did not parse, so there was no document to walk. A change outside the classes is not visible above",
+    );
   }
   if (!diff.structuralComparable) {
     lines.push(

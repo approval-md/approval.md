@@ -523,10 +523,10 @@ Flags:
   --branch <name> / --direct      force the BRANCH or the DIRECT flow
   --yes / --json / -h, --help     skip the prompt / machine-readable / this text
 
-Hashes the live policy, diffs it against the BASELINE, attests, then runs a git
-ceremony of EXACTLY two files whose commit-preconditions are checked first
-(git-failed and pr-failed break after the append). The attested TEXT is
-NOT recoverable from the log: no git blob means HASH-ONLY MODE. Flows, in
+Hashes the live policy, diffs it against the BASELINE (classes AND every policy
+key), attests, then runs a git ceremony of EXACTLY two files, commit-preconditions
+first (git-failed, push-rejected, pr-failed break after the append). Attested TEXT
+is NOT recoverable from the log: no blob means HASH-ONLY MODE. Flows, in
 PRECEDENCE, highest first: --branch <name>, --direct; merge a PR by MERGE COMMIT.
 
 ${EXIT_CODES_POINTER}

@@ -215,6 +215,22 @@ export type PolicyLoadResult =
       code: PolicyLoadErrorCode;
       message: string;
       errors?: ValidationError[];
+      /**
+       * The parsed-but-rejected YAML value, when the failure happened AFTER a
+       * successful parse (APRV-111). It exists for one consumer and one purpose:
+       * `core/policy-diff.ts` renders the policy's key vocabulary, and the edit
+       * most in need of rendering is the one that made the policy invalid — an
+       * unknown top-level key, which this schema rejects outright. Without the
+       * rejected value that edit is invisible to every reader, and a differ that
+       * cannot see it would report "no semantic change" over bytes that took the
+       * whole policy fail-closed.
+       *
+       * Absent for `file-missing`, `no-block`, `multiple-blocks` and
+       * `yaml-error`: there is no value to carry. NOTHING may enforce against
+       * it — a failed load is all-manual, full stop, and this field is for
+       * DISPLAY only.
+       */
+      raw?: unknown;
     };
 
 /** Options accepted by {@link loadPolicy}. */
@@ -253,10 +269,12 @@ function failure(
   code: PolicyLoadErrorCode,
   message: string,
   errors?: ValidationError[],
+  raw?: unknown,
 ): PolicyLoadResult {
-  return errors === undefined
+  const base: PolicyLoadResult = errors === undefined
     ? { ok: false, code, message }
     : { ok: false, code, message, errors };
+  return raw === undefined ? base : { ...base, ok: false, code, message, raw };
 }
 
 function errorMessage(cause: unknown): string {
@@ -499,6 +517,7 @@ export function loadPolicy(options: LoadPolicyOptions = {}): PolicyLoadResult {
       "schema-invalid",
       `${resolved.path}: policy block failed schema validation`,
       validation.errors,
+      parsed.value,
     );
   }
 
@@ -521,6 +540,7 @@ export function loadPolicy(options: LoadPolicyOptions = {}): PolicyLoadResult {
             message: "expected <positive integer><unit> with unit in ms|s|m|h|d|w",
           },
         ],
+        parsed.value,
       );
     }
   }
@@ -543,6 +563,7 @@ export function loadPolicy(options: LoadPolicyOptions = {}): PolicyLoadResult {
             message: "expected <positive integer><unit> with unit in ms|s|m|h|d|w",
           },
         ],
+        parsed.value,
       );
     }
   }

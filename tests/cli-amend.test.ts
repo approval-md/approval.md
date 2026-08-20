@@ -216,6 +216,83 @@ const AFTER = policyText([
   "    daily_usd: 10",
 ]);
 
+/**
+ * BEFORE plus one key: the 2026-08-20 amendment that the differ reported as
+ * "no semantic change" (APRV-111). Nothing about any class moved; what moved is
+ * which file edits need a human.
+ */
+const PROTECTED_PATHS = policyText([
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: supervised",
+  "  approval_ttl: 24h",
+  "protected_paths: [SPEC.md]",
+  "approvers:",
+  "  carter:",
+  "    channels: [cli]",
+  "classes:",
+  "  read.*:",
+  "    autonomy: autonomous",
+  "  communicate.*:",
+  "    autonomy: manual",
+  "    approvers: [carter]",
+  "budgets:",
+  "  global:",
+  "    daily_usd: 10",
+]);
+
+/** BEFORE plus every non-class vocabulary key SPEC.md §5.2 defines. */
+const VOCABULARY = policyText([
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: supervised",
+  "  approval_ttl: 24h",
+  "payload_retention: 30d",
+  "protected_paths: [SPEC.md, design/]",
+  "approvers:",
+  "  carter:",
+  "    channels: [cli]",
+  "classes:",
+  "  read.*:",
+  "    autonomy: autonomous",
+  "  communicate.*:",
+  "    autonomy: manual",
+  "    approvers: [carter]",
+  "budgets:",
+  "  global:",
+  "    daily_usd: 10",
+  "audit:",
+  "  supervised_sample_rate: 0.1",
+  "  sampling_secret_env: APPROVAL_SAMPLING_SECRET",
+  "  skew_tolerance: 5s",
+  "channels:",
+  "  telegram:",
+  "    token_env: APPROVAL_TG_TOKEN",
+  "vault:",
+  "  passphrase_env: APPROVAL_VAULT_PASSPHRASE",
+]);
+
+/** A top-level key the closed schema does not know: the policy fails closed. */
+const UNKNOWN_KEY = policyText([
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: supervised",
+  "  approval_ttl: 24h",
+  "approvers:",
+  "  carter:",
+  "    channels: [cli]",
+  "classes:",
+  "  read.*:",
+  "    autonomy: autonomous",
+  "  communicate.*:",
+  "    autonomy: manual",
+  "    approvers: [carter]",
+  "budgets:",
+  "  global:",
+  "    daily_usd: 10",
+  "protected_path: [SPEC.md]",
+]);
+
 /** The seq-2 shape: an edit whose YAML is fine and whose schema is not. */
 const BROKEN = policyText([
   'version: "0.1"',
@@ -260,6 +337,42 @@ function repoWithRemote(text: string = BEFORE): { dir: string; remote: string } 
   git(["push", "-q", "-u", "origin", "main"], dir);
   git(["remote", "set-head", "origin", "main"], dir);
   return { dir, remote };
+}
+
+/**
+ * Make the bare remote refuse one ref, the way a protected branch does
+ * (APRV-111).
+ *
+ * A `pre-receive` hook is the closest a temp repository gets to GitHub's branch
+ * protection, and it is close in the way that matters: the refusal arrives from
+ * the remote, at push time, after the commit already exists locally. Note that
+ * `git push --dry-run` does NOT run this hook (it never sends the updates), so
+ * no probe can foresee this rejection — which is the whole reason the rejection
+ * itself has to be loud.
+ */
+function protectPushesTo(remote: string, ref: string): void {
+  const hook = join(remote, "hooks", "pre-receive");
+  writeFileSync(
+    hook,
+    [
+      "#!/bin/sh",
+      "while read -r old new target; do",
+      `  if [ "$target" = ${JSON.stringify(ref)} ]; then`,
+      '    echo "Changes must be made through a pull request." >&2',
+      "    exit 1",
+      "  fi",
+      "done",
+      "exit 0",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  chmodSync(hook, 0o755);
+}
+
+/** The commit `ref` points at in the bare remote, or "" when there is none. */
+function remoteHead(remote: string, ref: string): string {
+  return git(["rev-parse", "--verify", "--quiet", ref], remote).stdout.trim();
 }
 
 /** The files a commit on `branch` in the bare remote carries, sorted. */
@@ -540,6 +653,138 @@ test("a class that stops being named falls to defaults, and the diff says so", (
       after: { autonomy: "supervised", provenance: "default", pattern: null },
     },
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// (c2) The vocabulary diff: keys outside `classes` (APRV-111)
+//
+// The incident: `protected_paths: [SPEC.md]` was added, the differ probed 22
+// classes, found none of them moved, and printed "no semantic change" — over an
+// edit that widened which file edits need a human.
+// ---------------------------------------------------------------------------
+
+test("an added protected_paths is named in the diff, never 'no semantic change'", () => {
+  const dir = repoDir();
+  attest(dir);
+  writePolicy(dir, PROTECTED_PATHS);
+
+  const run = runCli(["policy", "amend", "--as", "human:carter", "--yes"], dir);
+
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stdout, /policy keys changed \(1\):/u);
+  assert.match(run.stdout, /protected_paths: \(absent\) -> \["SPEC\.md"\]/u);
+  assert.equal(
+    run.stdout.includes("no semantic change"),
+    false,
+    "the incident: an edit outside the classes reported as no change",
+  );
+  // And the commit subject the ceremony proposes names it too, rather than
+  // offering the operator "(no semantic change)" to sign.
+  assert.match(run.stdout, /1 policy key\(s\)/u);
+});
+
+test("every non-class vocabulary key is diffed, in before -> after form", () => {
+  const dir = repoDir();
+  attest(dir);
+  writePolicy(dir, VOCABULARY);
+
+  const run = runCli(["policy", "amend", "--as", "human:carter", "--yes", "--json"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  const diff = report(run)["diff"] as Record<string, unknown>;
+
+  assert.equal(diff["vocabularyComparable"], true);
+  assert.equal(diff["unchanged"], false);
+  assert.deepEqual(diff["vocabulary"], [
+    {
+      key: "audit.sampling_secret_env",
+      recognised: true,
+      before: null,
+      after: "APPROVAL_SAMPLING_SECRET",
+    },
+    { key: "audit.skew_tolerance", recognised: true, before: null, after: "5s" },
+    { key: "audit.supervised_sample_rate", recognised: true, before: null, after: "0.1" },
+    {
+      key: "channels.telegram.token_env",
+      recognised: true,
+      before: null,
+      after: "APPROVAL_TG_TOKEN",
+    },
+    { key: "payload_retention", recognised: true, before: null, after: "30d" },
+    {
+      key: "protected_paths",
+      recognised: true,
+      before: null,
+      after: '["SPEC.md","design/"]',
+    },
+    {
+      key: "vault.passphrase_env",
+      recognised: true,
+      before: null,
+      after: "APPROVAL_VAULT_PASSPHRASE",
+    },
+  ]);
+  // None of these keys move a class resolution, which is exactly why the class
+  // probes could not see them.
+  assert.deepEqual(diff["classes"], []);
+});
+
+test("an unknown top-level key is NAMED as unknown, not silently dropped", () => {
+  const dir = repoDir();
+  attest(dir);
+  writePolicy(dir, UNKNOWN_KEY);
+
+  const run = runCli(["policy", "amend", "--as", "human:carter", "--yes", "--json"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  const diff = report(run)["diff"] as Record<string, unknown>;
+  assert.deepEqual(diff["vocabulary"], [
+    { key: "protected_path", recognised: false, before: null, after: '["SPEC.md"]' },
+  ]);
+
+  const human = repoDir();
+  attest(human);
+  writePolicy(human, UNKNOWN_KEY);
+  const rendered = runCli(["policy", "amend", "--as", "human:carter", "--yes"], human);
+  assert.equal(rendered.code, 0, rendered.stderr);
+  assert.match(rendered.stdout, /protected_path: \(absent\) -> \["SPEC\.md"\] \(UNKNOWN KEY/u);
+  assert.match(rendered.stdout, /FAILS CLOSED to all-manual/u);
+});
+
+test("'no semantic change' is printed when the bytes moved and the meaning did not", () => {
+  const dir = repoDir();
+  attest(dir);
+  // Prose outside the fence: different bytes, so there is an amendment to make,
+  // and an identical policy, so the claim is true.
+  writePolicy(dir, `${BEFORE}\nA sentence of prose the parser never sees.\n`);
+
+  const run = runCli(["policy", "amend", "--as", "human:carter", "--yes", "--json"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  const diff = report(run)["diff"] as Record<string, unknown>;
+  assert.equal(diff["unchanged"], true);
+  assert.deepEqual(diff["vocabulary"], []);
+  assert.equal(diff["vocabularyComparable"], true);
+
+  const human = repoDir();
+  attest(human);
+  writePolicy(human, `${BEFORE}\nA sentence of prose the parser never sees.\n`);
+  const rendered = runCli(["policy", "amend", "--as", "human:carter", "--yes"], human);
+  assert.match(rendered.stdout, /no semantic change: \d+ probed class\(es\) resolve the same/u);
+  assert.match(rendered.stdout, /every policy key is unchanged/u);
+});
+
+test("a class-only edit reports no vocabulary change (the old sections are untouched)", () => {
+  const dir = repoDir();
+  attest(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(["policy", "amend", "--as", "human:carter", "--yes", "--json"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  const diff = report(run)["diff"] as Record<string, unknown>;
+  // The paths the four dedicated sections already report are not repeated here.
+  assert.deepEqual(diff["vocabulary"], []);
+  assert.equal(diff["vocabularyComparable"], true);
+  assert.equal((diff["classes"] as unknown[]).length, 1);
+  assert.equal((diff["defaults"] as unknown[]).length, 1);
+  assert.equal(run.stdout.includes("policy keys changed"), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -1088,6 +1333,152 @@ test("the branch flow with no origin remote refuses BEFORE attesting", () => {
   assert.equal(errorOf(run).code, "commit-preconditions");
   assert.match(errorOf(run).message, /needs an "origin" remote/u);
   assert.equal(rawLog(dir), before);
+});
+
+// ---------------------------------------------------------------------------
+// (i) The push the ceremony used to skip (APRV-111)
+//
+// The incident: on a branch-protected main the direct flow printed `git add`,
+// `git commit` and `git push` as the commands it had run, ran only the first
+// two, and exited 0. The commit sat ahead of origin and the terminal said the
+// amendment had landed.
+// ---------------------------------------------------------------------------
+
+test("the direct flow pushes, and the amendment reaches origin", () => {
+  const { dir, remote } = repoWithRemote();
+  const stub = ghStub({ protection: "unprotected" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  const gitPlan = report(run)["git"] as Record<string, unknown>;
+  assert.equal(gitPlan["flow"], "direct");
+  assert.equal(gitPlan["committed"], true);
+  assert.equal(gitPlan["pushed"], true);
+  assert.deepEqual(remoteFiles(remote, "main"), [".approval/log/events.jsonl", "APPROVAL.md"]);
+  assert.equal(remoteHead(remote, "main"), git(["rev-parse", "HEAD"], dir).stdout.trim());
+});
+
+test("a push the remote REJECTS is a nonzero refusal naming the state and the fix", () => {
+  const { dir, remote } = repoWithRemote();
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  // Protection the probe cannot see: gh answers nothing useful (the default
+  // stub), so the verb chooses the direct flow and the remote refuses it.
+  protectPushesTo(remote, "refs/heads/main");
+  const originBefore = remoteHead(remote, "main");
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"],
+    dir,
+  );
+
+  assert.equal(run.code, 4, run.stdout);
+  const error = errorOf(run);
+  assert.equal(error.code, "push-rejected");
+  // git's own words, so the operator can tell protection from a stale ref.
+  assert.match(error.message, /REJECTED by the remote/u);
+  assert.match(error.message, /Changes must be made through a pull request/u);
+  assert.match(error.message, /pre-receive hook declined/u);
+  // The exact state.
+  assert.match(error.message, /committed LOCALLY on main and is NOT on origin/u);
+  assert.match(error.message, /attestation was appended at seq 2/u);
+  // The exact next step: the branch flow, by name, with the PR command.
+  assert.match(error.message, /git branch policy-amend-2/u);
+  assert.match(error.message, /git push -u origin policy-amend-2/u);
+  assert.match(error.message, /gh pr create --title/u);
+
+  // And the state the message describes is the state on disk: the attestation
+  // is in the log, the commit is local, origin is untouched.
+  assert.equal(logRecords(dir).length, 2);
+  assert.equal(git(["rev-list", "--count", "HEAD"], dir).stdout.trim(), "3");
+  assert.equal(remoteHead(remote, "main"), originBefore);
+});
+
+test("a protected main takes the branch flow, and the protected remote accepts it", () => {
+  const { dir, remote } = repoWithRemote();
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/11" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  protectPushesTo(remote, "refs/heads/main");
+  const originBefore = remoteHead(remote, "main");
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  const gitPlan = report(run)["git"] as Record<string, unknown>;
+  assert.equal(gitPlan["flow"], "branch");
+  assert.equal(gitPlan["pushed"], true);
+  assert.deepEqual(remoteFiles(remote, "policy-amend-2"), [
+    ".approval/log/events.jsonl",
+    "APPROVAL.md",
+  ]);
+  // main is exactly where it was: the amendment reaches it through the PR.
+  assert.equal(remoteHead(remote, "main"), originBefore);
+});
+
+test("a rejected BRANCH push is push-rejected too, with the push and PR to run", () => {
+  const { dir, remote } = repoWithRemote();
+  const stub = ghStub({ protection: "protected" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  protectPushesTo(remote, "refs/heads/policy-amend-2");
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+
+  assert.equal(run.code, 4, run.stdout);
+  const error = errorOf(run);
+  assert.equal(error.code, "push-rejected");
+  assert.match(error.message, /exists LOCALLY on policy-amend-2 and nowhere else/u);
+  assert.match(error.message, /git push -u origin policy-amend-2/u);
+  assert.match(error.message, /gh pr create --title/u);
+  assert.equal(remoteHead(remote, "policy-amend-2"), "");
+});
+
+test("with no origin the direct --commit says the push is still to run", () => {
+  const dir = repoDir();
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(["policy", "amend", "--as", "human:carter", "--yes", "--commit"], dir);
+
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stdout, /NOT pushed:/u);
+  assert.match(run.stdout, /Still to run:/u);
+  assert.match(run.stdout, /git push origin/u);
+  // The push line is printed ONCE, under the commands that did not run.
+  assert.equal(run.stdout.split("git push origin").length - 1, 1);
 });
 
 // ---------------------------------------------------------------------------
