@@ -6,10 +6,11 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-19 12:32'
+updated_date: '2026-08-20 12:55'
 labels:
   - spec
   - docs
-milestone: m-11
+milestone: m-12
 dependencies: []
 priority: medium
 ordinal: 95000

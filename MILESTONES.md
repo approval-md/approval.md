@@ -18,8 +18,8 @@ here with a matching display name, so drift fails CI.
 | M6 | `m-8` | M6 - Backlog.md round-trip and AGENTS.md import | done | Round-trip writer, envelope write-back, envelope-loss detection, AGENTS.md import, format-fixture drift guard |
 | M7 | `m-9` | M7 - First adapter (email) and vault | done | Adapter contract + conformance, vault, SMTP email adapter, live channel dispatch, approval init, end-to-end SPEC demo |
 | M7.1 | `m-10` | M7.1 - Setup ergonomics | done | Policy-honoured env names, .approval/env source map + approval env, approval setup verbs, doctor fixes + environment check, docs cutover |
-| M8 | `m-11` | M8 - MCP wrapper and harness hooks | active | approval instructions + schemas registry, Claude Code PreToolUse hook (APRV-82), gated SDK dep-add, agent-only MCP server over CLI code paths, CLI legibility pass (APRV-91/93), e2e demo, README holistic pass |
-| v0.2 | `m-12` | v0.2 - Operator ergonomics | planned | Ambient runtime (approval up + login service); candidates at decomposition: sealed token delivery (APRV-105), attest from the phone (APRV-109), the v0.2 spec pass (APRV-80/103), log-fork mitigations |
+| M8 | `m-11` | M8 - MCP wrapper and harness hooks | done | approval instructions + schemas registry, Claude Code PreToolUse hook (APRV-82), gated SDK dep-add, agent-only MCP server over CLI code paths, CLI legibility pass (APRV-91/93), e2e demo, README holistic pass |
+| v0.2 | `m-12` | v0.2 - Operator ergonomics | planned | Ambient runtime (APRV-110), sealed token delivery (APRV-105), attest from the phone (APRV-109), spec pass (APRV-80/103), amend differ (APRV-111), CI records tier (APRV-112), classifier fidelity (APRV-114), prompt digests (APRV-115), README v2 (APRV-116), log-fork mitigations |
 
 Retired ids: `m-4` was an empty duplicate of M3.1 created by the implicit-
 creation footgun described below; it was removed and its number is not reused.

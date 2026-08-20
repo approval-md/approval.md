@@ -6,13 +6,13 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-19 22:13'
-updated_date: '2026-08-19 22:14'
+updated_date: '2026-08-20 12:56'
 labels:
   - ux
   - channels
   - policy
   - spec
-milestone: m-11
+milestone: m-12
 dependencies: []
 priority: medium
 ordinal: 101000
