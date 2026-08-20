@@ -21,6 +21,11 @@ import { join } from "node:path";
 import { after, test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import type { ChannelRequest } from "../src/channels/contract.js";
+import { LIVE_QUALIFIER, PROPOSAL_QUALIFIER } from "../src/channels/payload-view.js";
+import { buildPendingQueue } from "../src/channels/tagging.js";
+import { renderTelegram } from "../src/channels/telegram.js";
+
 /** dist/tests/cli-hook-scope.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
@@ -262,4 +267,128 @@ test("a worktree whose primary has no log denies with hook-log-unreachable", (t:
     "a refusal must not scaffold a log in the worktree",
   );
   assert.ok(!existsSync(join(primary, ".approval")), "nor in the primary checkout");
+});
+
+// ===========================================================================
+// Proposal tier vs live tier (APRV-124)
+// ===========================================================================
+
+/**
+ * A repository whose linked worktree sits where agent worktrees actually sit.
+ *
+ * `repoWithWorktree` puts its checkout at `<primary>/wt`, which is a linked
+ * worktree but not an AGENT worktree: the tier below is not "is this a git
+ * worktree" (a fact the hook could be told) but "is this target under the
+ * primary root's `.claude/worktrees/`", which is where this project's sessions
+ * are branched and where the merge back is separately gated.
+ */
+function repoWithAgentWorktree(name: string): { primary: string; worktree: string } {
+  const primary = caseDir(name);
+  assert.equal(git(["init", "-b", "main"], primary).code, 0);
+  assert.equal(git(["config", "user.email", "test@example.com"], primary).code, 0);
+  assert.equal(git(["config", "user.name", "Test"], primary).code, 0);
+  assert.equal(git(["add", "APPROVAL.md"], primary).code, 0);
+  const commit = git(["commit", "--no-gpg-sign", "-m", "policy"], primary);
+  assert.equal(commit.code, 0, commit.stderr);
+
+  const attest = runCli(["policy", "attest", "--as", "human:alice"], primary);
+  assert.equal(attest.code, 0, attest.stderr);
+
+  const worktree = join(primary, ".claude", "worktrees", "session-1");
+  const added = git(["worktree", "add", "--detach", worktree], primary);
+  assert.equal(added.code, 0, added.stderr);
+  return { primary, worktree: realpathSync(worktree) };
+}
+
+function editEvent(path: string, toolUseId: string): string {
+  return JSON.stringify({
+    session_id: "sess-tier",
+    transcript_path: "/dev/null",
+    cwd: "/repo",
+    hook_event_name: "PreToolUse",
+    tool_name: "Edit",
+    tool_input: { file_path: path, old_string: "autonomy: manual", new_string: "autonomy: none" },
+    tool_use_id: toolUseId,
+  });
+}
+
+/** The rendered prompt for the single request pending in `dir`. */
+function promptFor(dir: string): string {
+  const queue = buildPendingQueue(join(dir, LOG), { policy: { dir } }, new Date().toISOString());
+  assert.equal(queue.ok, true, JSON.stringify(queue));
+  assert.ok(queue.ok);
+  assert.equal(queue.requests.length, 1, "exactly one request is pending");
+  const rendered = renderTelegram(queue.requests[0] as ChannelRequest);
+  return `${rendered.header}\n${rendered.payloadText ?? ""}`;
+}
+
+test("a protected-path edit inside an agent worktree is prompted as a branch proposal", (t: TestContext) => {
+  if (!haveGit()) {
+    t.skip("git is not available on this host");
+    return;
+  }
+  const { primary, worktree } = repoWithAgentWorktree("tier-proposal");
+
+  // Run from inside the worktree, exactly as an agent session does: the tier is
+  // resolved from the hook's OWN process view, and the harness-supplied cwd
+  // (`/repo`, a lie in every one of these events) is never consulted.
+  const run = runCli(HOOK, worktree, editEvent(join(worktree, "APPROVAL.md"), "tu-proposal"));
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+
+  // The class is unchanged — policy semantics are untouched by this task — and
+  // the request landed in the primary checkout's log (APRV-101).
+  const log = rawLog(primary);
+  assert.match(log, /"class":"policy\.edit"/u);
+  // The tier LEADS the headline, so it survives the summary's truncation.
+  assert.match(log, /"summary":"branch proposal \(worktree session-1\): Edit /u);
+
+  const prompt = promptFor(primary);
+  assert.ok(prompt.includes("rule: protected-path-proposal"), prompt);
+  assert.ok(prompt.includes(PROPOSAL_QUALIFIER), prompt);
+  assert.ok(prompt.includes("-autonomy: manual"), prompt);
+  assert.ok(prompt.includes("+autonomy: none"), prompt);
+  assertClean(primary);
+});
+
+test("the same edit against the primary checkout is prompted as live", (t: TestContext) => {
+  if (!haveGit()) {
+    t.skip("git is not available on this host");
+    return;
+  }
+  const { primary } = repoWithAgentWorktree("tier-live");
+
+  const run = runCli(HOOK, primary, editEvent(join(primary, "APPROVAL.md"), "tu-live"));
+  assert.equal(verdictOf(run).permission, "deny");
+
+  const log = rawLog(primary);
+  assert.match(log, /"class":"policy\.edit"/u);
+  assert.doesNotMatch(log, /branch proposal/u);
+
+  const prompt = promptFor(primary);
+  assert.ok(prompt.includes("rule: protected-path\n"), prompt);
+  assert.equal(prompt.includes("protected-path-proposal"), false, prompt);
+  assert.ok(prompt.includes(LIVE_QUALIFIER), prompt);
+  assertClean(primary);
+});
+
+test("a lookalike path outside the primary's worktrees directory stays live-tier", (t: TestContext) => {
+  // Fail closed: only `<primary>/.claude/worktrees/<name>/…` is a proposal.
+  // A directory of the same name somewhere else proves nothing about how the
+  // change reaches the live file, so it is treated as if it reached it directly.
+  if (!haveGit()) {
+    t.skip("git is not available on this host");
+    return;
+  }
+  const { primary } = repoWithAgentWorktree("tier-lookalike");
+  const decoy = join(primary, "docs", ".claude", "worktrees", "session-1");
+  mkdirSync(decoy, { recursive: true });
+  writeFileSync(join(decoy, "APPROVAL.md"), POLICY, "utf8");
+
+  const run = runCli(HOOK, primary, editEvent(join(decoy, "APPROVAL.md"), "tu-decoy"));
+  assert.equal(verdictOf(run).permission, "deny");
+  assert.doesNotMatch(rawLog(primary), /branch proposal/u);
+  assert.ok(promptFor(primary).includes("rule: protected-path\n"));
+  assertClean(primary);
 });

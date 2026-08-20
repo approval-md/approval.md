@@ -56,9 +56,16 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { dirname, isAbsolute, join, resolve as resolvePathSegments } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  resolve as resolvePathSegments,
+  sep,
+} from "node:path";
 
 import {
   classifyCommand,
@@ -95,8 +102,15 @@ const DEFAULT_TIMEOUT = "55s";
 /** Poll interval for the decision wait. */
 const DEFAULT_INTERVAL_MS = 1_000;
 
-/** How much of the command line goes in the (claimed) summary field. */
-const SUMMARY_LIMIT = 160;
+/**
+ * How much of the command line goes in the (claimed) summary field.
+ *
+ * A HEADLINE, and only that (APRV-124). What the approver is bound to is the
+ * payload, which carries the whole command (or the whole change) and is never
+ * shortened; this is the one-line label above it. Exported because the tests
+ * pin the distinction.
+ */
+export const SUMMARY_LIMIT = 160;
 
 /**
  * The closed set of hook denial codes, frozen in the sense
@@ -636,22 +650,182 @@ function truncate(text: string, limit: number): string {
   return collapsed.length <= limit ? collapsed : `${collapsed.slice(0, limit - 1)}…`;
 }
 
+// ===========================================================================
+// File tools: the change, and which checkout it lands in (APRV-124)
+// ===========================================================================
+
 /**
- * The class a non-Bash tool call carries, or `null` when it is pass-through.
+ * The rule a protected-path file touch reports, on the SAME class.
+ *
+ * Two tiers, one class. A `policy.edit` inside an agent worktree is a branch
+ * PROPOSAL: the file it writes is a copy on a branch, and the merge that makes
+ * it real is separately gated (`vcs.push.main`, `gh pr merge`). A `policy.edit`
+ * in the live checkout is the file itself. The approver was being told the same
+ * thing about both, which is the "truthful label" half of this task.
+ *
+ * The distinction is deliberately NOT a class and NOT an autonomy: policy
+ * semantics are untouched here, both tiers resolve exactly as `policy.edit`
+ * resolves today, and APRV-127 is where sampling may hang off the difference.
+ * What changes is what the human reads.
+ */
+const PROTECTED_PATH_RULE = "protected-path";
+const PROTECTED_PATH_PROPOSAL_RULE = "protected-path-proposal";
+
+/** Where agent worktrees live, relative to the primary root. */
+const WORKTREE_DIR = [".claude", "worktrees"] as const;
+
+/** `realpathSync`, as a value. */
+function realOrNull(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `path` with every existing ancestor resolved through its symlinks.
+ *
+ * A `Write` names a file that need not exist yet, and a comparison of an
+ * unresolved path against a resolved root answers "no" for the wrong reason on
+ * any machine where the checkout sits under a symlink (`/tmp` on macOS, every
+ * home directory behind an automounter). So the deepest existing ancestor is
+ * resolved and the remainder is joined back on.
+ */
+function resolveExisting(path: string): string | null {
+  let current = path;
+  const tail: string[] = [];
+  for (;;) {
+    const real = realOrNull(current);
+    if (real !== null) return tail.length === 0 ? real : join(real, ...tail);
+    const parent = dirname(current);
+    if (parent === current) return null;
+    tail.unshift(basename(current));
+    current = parent;
+  }
+}
+
+/**
+ * The agent worktree `target` sits inside, or `null` for everything else.
+ *
+ * FAIL CLOSED, on every axis: anything not *provably* inside
+ * `<primary>/.claude/worktrees/<name>/…` is live-tier, because a wrong
+ * "proposal" tells a human their APPROVAL.md edit is a branch copy when it is
+ * the live file, and a wrong "live" costs nothing but a sterner sentence.
+ *
+ * The primary root comes from `primaryRoot`, i.e. from git run in the hook's
+ * OWN process directory (APRV-108's discipline). The harness-supplied `cwd`
+ * field is never consulted: it is authored by the party under oversight, and a
+ * tier that could be chosen by the subject of the gate is not a tier.
+ */
+function proposalWorktree(target: string, cwd: string): string | null {
+  const root = primaryRoot(cwd);
+  if (root === null) return null;
+  const base = resolveExisting(join(root, ...WORKTREE_DIR));
+  if (base === null) return null;
+  const file = resolveExisting(target);
+  if (file === null || !file.startsWith(`${base}${sep}`)) return null;
+  const rest = file.slice(base.length + 1).split(sep);
+  // `rest[0]` is the worktree; a target that IS the worktrees directory or a
+  // worktree root names no file inside one and stays live-tier.
+  const name = rest[0];
+  return name === undefined || name.length === 0 || rest.length < 2 ? null : name;
+}
+
+/** What a gated file tool call asks for: one class, its bytes, its headline. */
+interface FileGate {
+  cls: string;
+  rule: string;
+  /** The target, absolute and resolved from the hook's own directory. */
+  file: string;
+  /** The worktree this proposal lands in, or `null` for a live edit. */
+  worktree: string | null;
+  /** The binding bytes: the change, not the touch. */
+  payload: Record<string, unknown>;
+  summary: string;
+}
+
+/**
+ * What a non-Bash tool call asks for, or `null` when it is pass-through.
  *
  * Only one thing about a file edit is a gate question at v0.1: whether the file
  * is one only a human may write. Everything else the harness edits is
  * `files.write.workspace`, which this repository's policy makes autonomous, and
  * routing every keystroke of ordinary editing through a gate check would spend
  * latency to reach a foregone conclusion.
+ *
+ * ## The payload is the change (APRV-124)
+ *
+ * It used to be `{command: "Edit <path>", cwd}` — the *touch*. A human reading
+ * that was asked to approve "an edit to CI config", with no way to tell a typo
+ * fix from a disabled test job; the observed complaint (2026-08-20) is exactly
+ * "I don't know what the actual CI edit is". The PreToolUse event carries the
+ * whole change, so the payload does too:
+ *
+ * - `Edit` → `{tool, rule, file, before, after}` (plus `replace_all` when the
+ *   call sets it, because "replace every occurrence" is part of what is being
+ *   approved and two calls differing only in it are two different questions);
+ * - `Write` → `{tool, rule, file, content}`;
+ * - every other file tool → the same head plus its `tool_input` verbatim under
+ *   `input`, which renders as JSON rather than as a diff but hides nothing.
+ *
+ * Those bytes are what `payload_hash` binds, so the grant binds to the edit.
+ * They are also what APRV-117's carryover keys on: an identical retry of the
+ * identical edit hashes identically and adopts or carries the same question, a
+ * changed edit is a new question, and a proposal-tier grant cannot be spent on
+ * the live file because the absolute `file` differs.
+ *
+ * `description` is dropped on the way in: it is the agent's account of its own
+ * intent, and it has no business in the bytes a human is bound to.
  */
-function fileToolClass(
+function fileToolGate(
+  toolName: string,
   toolInput: Record<string, unknown>,
   protectedPaths: readonly string[],
-): string | null {
-  const path = readString(toolInput, "file_path") ?? readString(toolInput, "notebook_path");
-  if (path === null) return null;
-  return isProtectedPath(path, protectedPaths) ? "policy.edit" : null;
+  cwd: string,
+): FileGate | null {
+  const declared = readString(toolInput, "file_path") ?? readString(toolInput, "notebook_path");
+  if (declared === null) return null;
+  if (!isProtectedPath(declared, protectedPaths)) return null;
+
+  const file = absolute(declared, cwd);
+  const worktree = proposalWorktree(file, cwd);
+  const rule = worktree === null ? PROTECTED_PATH_RULE : PROTECTED_PATH_PROPOSAL_RULE;
+
+  const head = { tool: toolName, rule, file };
+  const before = toolInput["old_string"];
+  const after = toolInput["new_string"];
+  const content = toolInput["content"];
+  const replaceAll = toolInput["replace_all"];
+
+  let payload: Record<string, unknown>;
+  if (typeof before === "string" && typeof after === "string") {
+    payload =
+      typeof replaceAll === "boolean"
+        ? { ...head, replace_all: replaceAll, before, after }
+        : { ...head, before, after };
+  } else if (typeof content === "string") {
+    payload = { ...head, content };
+  } else {
+    const input: Record<string, unknown> = { ...toolInput };
+    delete input["description"];
+    payload = { ...head, input };
+  }
+
+  return {
+    cls: "policy.edit",
+    rule,
+    file,
+    worktree,
+    payload,
+    // The tier leads the headline rather than trailing it: a summary is
+    // truncated from the right, and the qualifier is the last thing that may
+    // be ellipsized away (a long path is not — the payload carries it whole).
+    summary:
+      worktree === null
+        ? `${toolName} ${file}`
+        : `branch proposal (worktree ${worktree}): ${toolName} ${file}`,
+  };
 }
 
 interface HookRun {
@@ -786,15 +960,21 @@ function gateAndWait(
   run: HookRun,
   input: HookInput,
   classes: string[],
-  command: string,
+  /**
+   * The bytes the grant binds to: `{command, cwd}` for a Bash call, the change
+   * itself for a file tool (APRV-124). Whatever this is, it is what reaches the
+   * approver's FULL PAYLOAD block, complete — the summary below is a headline
+   * and is the only thing here that may be shortened.
+   */
+  payload: unknown,
+  headline: string,
   /** The history-rewrite refinement's own words, or `""` (APRV-108). */
   note = "",
 ): number {
   const nonce = input.toolUseId ?? randomBytes(8).toString("hex");
   const task = `hook:${input.sessionId}:${nonce}`;
-  const payload = { command, cwd: input.cwd };
   const hash = payloadHash(payload);
-  const summary = truncate(command, SUMMARY_LIMIT);
+  const summary = truncate(headline, SUMMARY_LIMIT);
 
   // Intake reads the VERIFIED log, once, before anything is written: an
   // enforcement path reads nothing else (SPEC.md §11.1), and a carry decided
@@ -1108,7 +1288,9 @@ function runClaudeCodeHook(
 
   // What is being asked for, as one or more classes.
   let classes: string[];
-  let command: string;
+  /** The binding bytes, and the headline the approver's summary line carries. */
+  let payload: unknown;
+  let headline: string;
   /** What the history-rewrite refinement did, for the decision reason. */
   let notes: string[] = [];
   if (input.toolName === "Bash") {
@@ -1116,7 +1298,11 @@ function runClaudeCodeHook(
     if (raw === null) {
       return deny(streams, "hook-io", "Bash tool_input carries no command string");
     }
-    command = raw;
+    // Unchanged since APRV-117, deliberately: the payload is the WHOLE command
+    // and the directory it runs in, so the FULL PAYLOAD block on the phone
+    // carries every byte the harness will execute. Only `summary` is shortened.
+    payload = { command: raw, cwd: input.cwd };
+    headline = raw;
     const classified = classifyCommand(raw, protectedPaths);
     if (!classified.ok) {
       return deny(
@@ -1133,10 +1319,18 @@ function runClaudeCodeHook(
     const answer = refined.result.ok ? refined.result : classified;
     classes = answer.classes.filter((cls) => cls !== GATE_SELF_CLASS);
   } else {
-    const cls = fileToolClass(input.toolInput, protectedPaths);
-    if (cls === null) return allow(streams, `${input.toolName} is not a gated edit`);
-    classes = [cls];
-    command = `${input.toolName} ${readString(input.toolInput, "file_path") ?? readString(input.toolInput, "notebook_path") ?? ""}`;
+    const gated = fileToolGate(input.toolName, input.toolInput, protectedPaths, cwd);
+    if (gated === null) return allow(streams, `${input.toolName} is not a gated edit`);
+    classes = [gated.cls];
+    payload = gated.payload;
+    headline = gated.summary;
+    // The tier rides in the verdict's note as well as in the payload, so an
+    // `allow` says which checkout it authorized (APRV-124).
+    notes = [
+      gated.worktree === null
+        ? `${gated.rule}: ${gated.file} is the LIVE checkout's copy`
+        : `${gated.rule}: ${gated.file} is inside agent worktree ${gated.worktree}, so this is a branch proposal and the merge to the live checkout is gated separately`,
+    ];
   }
 
   if (classes.length === 0) {
@@ -1175,7 +1369,8 @@ function runClaudeCodeHook(
     { logPath, options, actor, timeoutMs, intervalMs, ttlMs: load.durations.approvalTtlMs },
     input,
     classes,
-    command,
+    payload,
+    headline,
     note,
   );
 }

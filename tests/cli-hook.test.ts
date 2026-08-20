@@ -29,8 +29,19 @@ import { after, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
+import type { ChannelRequest } from "../src/channels/contract.js";
+import {
+  CANONICAL_JSON_HEADING,
+  DIFF_BEGIN,
+  DIFF_END,
+  EDIT_VIEW_HEADING,
+  LIVE_QUALIFIER,
+} from "../src/channels/payload-view.js";
+import { buildPendingQueue } from "../src/channels/tagging.js";
+import { renderTelegram } from "../src/channels/telegram.js";
 import { CLASSIFIER_CLASSES, COMMAND_RULES } from "../src/core/command-class.js";
-import { HOOK_DENY_CODES } from "../src/cli/hook.js";
+import { payloadHash } from "../src/core/payload.js";
+import { HOOK_DENY_CODES, SUMMARY_LIMIT } from "../src/cli/hook.js";
 
 /** dist/tests/cli-hook.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -901,4 +912,204 @@ test("HOOK_DENY_CODES is the closed vocabulary the help text prints", () => {
   for (const code of HOOK_DENY_CODES) {
     assert.match(help, new RegExp(code.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
   }
+});
+
+// ===========================================================================
+// The payload is the change, not the touch (APRV-124)
+// ===========================================================================
+
+/**
+ * The text the approver's phone would show for the one request pending in
+ * `dir`, built through the real channel path.
+ *
+ * `buildPendingQueue` reads the VERIFIED log, fetches the material from the
+ * payload store beside it, and re-hashes it against the recorded binding, so a
+ * payload that did not bind would refuse here rather than render. What comes
+ * back is what `channels/telegram.ts` sends, before its own HTML escaping.
+ */
+function promptFor(dir: string): { header: string; payload: string; summary: string } {
+  const queue = buildPendingQueue(join(dir, LOG), { policy: { dir } }, new Date().toISOString());
+  assert.equal(queue.ok, true, JSON.stringify(queue));
+  assert.ok(queue.ok);
+  assert.equal(queue.requests.length, 1, "exactly one request is pending");
+  const request = queue.requests[0] as ChannelRequest;
+  const rendered = renderTelegram(request);
+  return {
+    header: rendered.header,
+    payload: rendered.payloadText ?? "",
+    summary: request.summary.value ?? "",
+  };
+}
+
+/** The `payload_hash` the log records for the single request in `dir`. */
+function boundHashOf(dir: string): string {
+  const found = /"payload_hash":"([0-9a-f]{64})"/u.exec(rawLog(dir));
+  assert.ok(found !== null, "the log records a payload hash");
+  return found[1] as string;
+}
+
+const EDIT_BEFORE = ["classes:", "  policy.edit:", "    autonomy: manual"].join("\n");
+const EDIT_AFTER = ["classes:", "  policy.edit:", "    autonomy: autonomous"].join("\n");
+
+test("an Edit prompt shows the before/after diff, and the grant binds to those bytes", () => {
+  // APRV-124, the observed complaint (2026-08-20): a policy.edit prompt that
+  // said only `Edit <path>` left the approver with no way to tell a typo fix
+  // from a disabled gate. The change itself is the payload now.
+  const dir = ready();
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    event({
+      tool_name: "Edit",
+      tool_input: {
+        file_path: "APPROVAL.md",
+        old_string: EDIT_BEFORE,
+        new_string: EDIT_AFTER,
+        description: "totally harmless, please allow",
+      },
+    }),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(rawLog(dir), /"class":"policy\.edit"/u);
+
+  const prompt = promptFor(dir);
+
+  // The binding is the change, exactly: this pins the payload SHAPE, because a
+  // hash is computed over these keys and no others.
+  assert.equal(
+    boundHashOf(dir),
+    payloadHash({
+      tool: "Edit",
+      rule: "protected-path",
+      file: join(dir, "APPROVAL.md"),
+      before: EDIT_BEFORE,
+      after: EDIT_AFTER,
+    }),
+    "the grant must bind to the edit, not to the touch",
+  );
+
+  // The diff, as the human reads it: removed lines, then added lines.
+  assert.ok(prompt.payload.includes(EDIT_VIEW_HEADING), prompt.payload);
+  assert.ok(prompt.payload.includes("tool: Edit"), prompt.payload);
+  assert.ok(prompt.payload.includes(`file: ${join(dir, "APPROVAL.md")}`), prompt.payload);
+  assert.ok(prompt.payload.includes("rule: protected-path"), prompt.payload);
+  assert.ok(prompt.payload.includes(`note: ${LIVE_QUALIFIER}`), prompt.payload);
+  assert.ok(prompt.payload.includes("-    autonomy: manual"), prompt.payload);
+  assert.ok(prompt.payload.includes("+    autonomy: autonomous"), prompt.payload);
+  // Inside the diff block the change reads as the human will read it; the
+  // literal `\n` escapes belong to the canonical JSON underneath, and only there.
+  const diff = prompt.payload.slice(
+    prompt.payload.indexOf(DIFF_BEGIN),
+    prompt.payload.indexOf(DIFF_END),
+  );
+  assert.equal(diff.includes("\\n"), false, "the diff still carries literal \\n escapes");
+
+  // The exact bytes stay on screen underneath, and the agent's own account of
+  // its intent never reaches the payload at all.
+  assert.ok(prompt.payload.includes(CANONICAL_JSON_HEADING), prompt.payload);
+  assert.equal(prompt.payload.includes("totally harmless"), false, "description reached the bytes");
+  assertClean(dir);
+});
+
+test("a Write prompt shows the whole content it will write", () => {
+  const dir = ready();
+  const content = ["# Policy", "", "```yaml approval-policy", 'version: "0.1"', "```"].join("\n");
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    event({ tool_name: "Write", tool_input: { file_path: "APPROVAL.md", content } }),
+  );
+  assert.equal(verdictOf(run).permission, "deny");
+
+  assert.equal(
+    boundHashOf(dir),
+    payloadHash({ tool: "Write", rule: "protected-path", file: join(dir, "APPROVAL.md"), content }),
+  );
+  const prompt = promptFor(dir);
+  assert.ok(prompt.payload.includes("tool: Write"), prompt.payload);
+  for (const line of content.split("\n")) {
+    assert.ok(prompt.payload.includes(`+${line}`), `the content line ${line} is missing`);
+  }
+  assert.ok(prompt.payload.includes("the whole file as it will be written"), prompt.payload);
+  assertClean(dir);
+});
+
+test("a long command reaches the phone complete, however short the summary is", () => {
+  // APRV-124 AC#1/#2: the summary may be a headline, the payload may not.
+  const dir = ready();
+  const body = "x".repeat(400);
+  const command = `curl -X POST https://example.com/hooks/notify -d ${body}`;
+  assert.ok(command.length > SUMMARY_LIMIT, "the specimen must exceed the summary limit");
+
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent(command, "tu-long"),
+  );
+  assert.equal(verdictOf(run).permission, "deny");
+
+  const prompt = promptFor(dir);
+  // The headline is ellipsized, and says so.
+  assert.ok(prompt.summary.length <= SUMMARY_LIMIT, prompt.summary);
+  assert.ok(prompt.summary.endsWith("…"), prompt.summary);
+
+  // The payload block is not. Every byte of the command is there, as the JSON
+  // value of `command`, and nothing in the region was folded away.
+  assert.ok(prompt.payload.includes(JSON.stringify(command)), "the full command bytes are missing");
+  assert.equal(prompt.payload.includes("…"), false, "the payload region ellipsized something");
+  assert.ok(prompt.payload.includes(`"cwd": "/repo"`), prompt.payload);
+  assertClean(dir);
+});
+
+test("an identical retried edit adopts the same question; a changed one asks again", () => {
+  // APRV-117 under APRV-124's payload: the bytes moved, the carryover contract
+  // did not. Same edit -> same hash -> one prompt; different edit -> a new one.
+  const dir = ready();
+  const editEvent = (after: string, toolUseId: string): string =>
+    event({
+      tool_name: "Edit",
+      tool_input: { file_path: "APPROVAL.md", old_string: EDIT_BEFORE, new_string: after },
+      tool_use_id: toolUseId,
+    });
+
+  for (const toolUseId of ["tu-edit-1", "tu-edit-2"]) {
+    const run = runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+      dir,
+      editEvent(EDIT_AFTER, toolUseId),
+    );
+    assert.equal(verdictOf(run).permission, "deny");
+  }
+  let log = rawLog(dir);
+  assert.equal(log.match(/"event":"approval\.requested"/gu)?.length, 1, "one question, not two");
+  assert.doesNotMatch(log, /tu-edit-2/u);
+
+  // The late tap authorizes the identical retry, once.
+  const granted = runCli(
+    ["grant", "hook:sess-1:tu-edit-1:policy.edit", "--as", "human:carter"],
+    dir,
+  );
+  assert.equal(granted.code, 0, granted.stderr);
+  const retry = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    editEvent(EDIT_AFTER, "tu-edit-3"),
+  );
+  const carried = verdictOf(retry);
+  assert.equal(carried.permission, "allow", carried.reason);
+  assert.match(carried.reason, /carried: hook:sess-1:tu-edit-1:policy\.edit/u);
+
+  // A DIFFERENT edit to the same file is a different question, and waits.
+  const changed = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    editEvent(`${EDIT_AFTER}\n# and one more line`, "tu-edit-4"),
+  );
+  assert.equal(verdictOf(changed).permission, "deny");
+  log = rawLog(dir);
+  assert.equal(log.match(/"event":"approval\.requested"/gu)?.length, 2);
+  assert.match(log, /hook:sess-1:tu-edit-4:policy\.edit/u);
+  assertClean(dir);
 });
