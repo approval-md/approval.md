@@ -20,6 +20,7 @@ import { after, test } from "node:test";
 
 import {
   appendAttestation,
+  consumeHarnessGrant,
   decide,
   expire,
   register,
@@ -28,6 +29,7 @@ import {
 } from "./clock-adapters.js";
 import {
   EXPIRY_ACTOR,
+  findHarnessCarry,
   GATE_REFUSAL_CODES,
   registeredAction,
   requestState,
@@ -1373,6 +1375,251 @@ test("a harness-executed request is granted completely and mints no token", () =
   assert.equal(payload["est_cost_usd"], 0.02);
   assert.equal(payload["payload_hash"], PAYLOAD_HASH);
   assert.equal(requestState(records(unit), "task-042:chaser", at(3), 3_600_000).state, "granted");
+  assertClean(unit);
+});
+
+// ===========================================================================
+// harness grant carryover (APRV-117)
+// ===========================================================================
+
+/** Register, request `execution: "harness"`, and grant, all through the gate. */
+function harnessGrant(unit: Case, requestedAt = at(1), decidedAt = at(2)): void {
+  attest(unit);
+  registerTask(unit);
+  const requested = request(
+    unit.logPath,
+    {
+      task: "task-042",
+      actionKey: "task-042:chaser",
+      payload_hash: PAYLOAD_HASH,
+      cls: "communicate.email.external",
+      est_cost_usd: 0.02,
+      reversible: false,
+      summary: "Send deposit chaser",
+      execution: "harness",
+    },
+    requestedAt,
+    "agent:claude",
+    unit.options,
+  );
+  assert.equal(requested.ok, true, requested.ok ? "" : requested.message);
+  const granted = decide(
+    unit.logPath,
+    "task-042:chaser",
+    "grant",
+    "human:carter",
+    decidedAt,
+    unit.options,
+  );
+  assert.equal(granted.ok, true, granted.ok ? "" : granted.message);
+}
+
+test("a harness grant is consumed once, and the second consumer is refused", () => {
+  const unit = newCase();
+  harnessGrant(unit);
+
+  const first = consumeHarnessGrant(
+    unit.logPath,
+    "task-042:chaser",
+    "agent:claude",
+    at(3),
+    unit.options,
+  );
+  assert.equal(first.ok, true, first.ok ? "" : first.message);
+  if (!first.ok) throw new Error("unreachable");
+  assert.equal(first.record.event, "execution.started");
+  // The marker says why no completion will ever follow it: the harness ran the
+  // command and this runtime never learns the outcome.
+  const payload = first.record.payload as Record<string, unknown>;
+  assert.equal(payload["execution"], "harness");
+  assert.equal(payload["class"], "communicate.email.external");
+  assert.equal(payload["est_cost_usd"], 0.02);
+  assert.equal(payload["payload_hash"], PAYLOAD_HASH);
+
+  const second = consumeHarnessGrant(
+    unit.logPath,
+    "task-042:chaser",
+    "agent:claude",
+    at(4),
+    unit.options,
+  );
+  assert.equal(second.ok, false);
+  if (second.ok) throw new Error("unreachable");
+  assert.equal(second.code, "already-executed");
+  assert.deepEqual(
+    eventTypes(unit).filter((event) => event === "execution.started"),
+    ["execution.started"],
+  );
+  assertClean(unit);
+});
+
+test("a token-bearing grant cannot be consumed as a harness grant", () => {
+  // The property: one authorization, one spender. If a harness could proceed on
+  // an ordinary grant, the token minted for it would still be live and the same
+  // approval would have authorized two different executions.
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  requestChaser(unit);
+  assert.equal(
+    decide(unit.logPath, "task-042:chaser", "grant", "human:carter", at(2), unit.options).ok,
+    true,
+  );
+
+  const spent = consumeHarnessGrant(
+    unit.logPath,
+    "task-042:chaser",
+    "agent:claude",
+    at(3),
+    unit.options,
+  );
+  assert.equal(spent.ok, false);
+  if (spent.ok) throw new Error("unreachable");
+  assert.equal(spent.code, "not-granted");
+  assert.ok(!eventTypes(unit).includes("execution.started"));
+  assertClean(unit);
+});
+
+test("a harness grant is not consumable past its request's TTL", () => {
+  // An approval's shelf life is its parent request's TTL — the rule
+  // `core/token.ts` applies to a token-bearing grant, applied here to the grant
+  // that mints no token.
+  const unit = newCase();
+  harnessGrant(unit);
+  const late = consumeHarnessGrant(
+    unit.logPath,
+    "task-042:chaser",
+    "agent:claude",
+    at(62),
+    unit.options,
+  );
+  assert.equal(late.ok, false);
+  if (late.ok) throw new Error("unreachable");
+  assert.equal(late.code, "expired");
+  assertClean(unit);
+});
+
+test("a pending harness request is not consumable", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  assert.equal(
+    request(
+      unit.logPath,
+      {
+        task: "task-042",
+        actionKey: "task-042:chaser",
+        payload_hash: PAYLOAD_HASH,
+        cls: "communicate.email.external",
+        summary: "Send deposit chaser",
+        execution: "harness",
+      },
+      at(1),
+      "agent:claude",
+      unit.options,
+    ).ok,
+    true,
+  );
+  const early = consumeHarnessGrant(
+    unit.logPath,
+    "task-042:chaser",
+    "agent:claude",
+    at(2),
+    unit.options,
+  );
+  assert.equal(early.ok, false);
+  if (early.ok) throw new Error("unreachable");
+  assert.equal(early.code, "not-granted");
+  assertClean(unit);
+});
+
+test("findHarnessCarry: the bounds are bytes, class, harness, unspent, live", () => {
+  const unit = newCase();
+  harnessGrant(unit);
+  const live = records(unit);
+  const ttl = 3_600_000;
+
+  // The grant carries: same hash, same class, unspent, inside the TTL.
+  const carry = findHarnessCarry(live, PAYLOAD_HASH, "communicate.email.external", at(3), ttl);
+  assert.equal(carry?.actionKey, "task-042:chaser");
+  assert.equal(carry?.kind, "granted");
+
+  // Different bytes, different class, and past the TTL each carry nothing.
+  assert.equal(
+    findHarnessCarry(live, "2".repeat(64), "communicate.email.external", at(3), ttl),
+    null,
+  );
+  assert.equal(findHarnessCarry(live, PAYLOAD_HASH, "financial.spend", at(3), ttl), null);
+  assert.equal(
+    findHarnessCarry(live, PAYLOAD_HASH, "communicate.email.external", at(62), ttl),
+    null,
+  );
+
+  // And once spent, it carries nothing either.
+  assert.equal(
+    consumeHarnessGrant(unit.logPath, "task-042:chaser", "agent:claude", at(3), unit.options).ok,
+    true,
+  );
+  assert.equal(
+    findHarnessCarry(records(unit), PAYLOAD_HASH, "communicate.email.external", at(4), ttl),
+    null,
+  );
+  assertClean(unit);
+});
+
+test("findHarnessCarry ignores a request that is not harness-executed", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  requestChaser(unit);
+  assert.equal(
+    findHarnessCarry(records(unit), PAYLOAD_HASH, "communicate.email.external", at(2), 3_600_000),
+    null,
+  );
+  assertClean(unit);
+});
+
+test("findHarnessCarry offers a pending request for adoption", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  assert.equal(
+    request(
+      unit.logPath,
+      {
+        task: "task-042",
+        actionKey: "task-042:chaser",
+        payload_hash: PAYLOAD_HASH,
+        cls: "communicate.email.external",
+        summary: "Send deposit chaser",
+        execution: "harness",
+      },
+      at(1),
+      "agent:claude",
+      unit.options,
+    ).ok,
+    true,
+  );
+  const carry = findHarnessCarry(
+    records(unit),
+    PAYLOAD_HASH,
+    "communicate.email.external",
+    at(2),
+    3_600_000,
+  );
+  assert.equal(carry?.kind, "pending");
+  assert.equal(carry?.actionKey, "task-042:chaser");
+
+  // A withdrawn request offers nothing: it is terminal, and nothing will ever
+  // be granted on it.
+  assert.equal(
+    withdraw(unit.logPath, "task-042:chaser", "agent:claude", at(3), unit.options).ok,
+    true,
+  );
+  assert.equal(
+    findHarnessCarry(records(unit), PAYLOAD_HASH, "communicate.email.external", at(4), 3_600_000),
+    null,
+  );
   assertClean(unit);
 });
 

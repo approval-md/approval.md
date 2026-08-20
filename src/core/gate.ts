@@ -90,8 +90,15 @@
  * It does not define execution tokens — `core/token.ts` does. {@link decide}'s
  * grant path calls that module's `mintToken` at the seam APRV-17 documented,
  * records only the digest in the `approval.granted` payload, and returns the raw
- * token to its caller. It still appends no `execution.*` event: spending a token
- * is `core/token.ts`'s `consumeToken`.
+ * token to its caller. {@link decide} still appends no `execution.*` event:
+ * spending a token is `core/token.ts`'s `consumeToken`.
+ *
+ * The one place this module writes an execution event is
+ * {@link consumeHarnessGrant} (APRV-117), and it is the exception that proves
+ * the rule: a harness grant mints no token, so nothing else in the system could
+ * record that it had been spent, and an authorization with no record of its
+ * spending is an authorization that never runs out. See that function for why
+ * the marker is `execution.started` and why no completion ever follows it.
  */
 
 import { existsSync } from "node:fs";
@@ -1616,6 +1623,302 @@ export function withdraw(
   if (!appended.ok) return appended;
 
   return { ok: true, state: "withdrawn", record: appended.record };
+}
+
+// ---------------------------------------------------------------------------
+// harness grant carryover (APRV-117)
+// ---------------------------------------------------------------------------
+
+/**
+ * What a harness invocation may do with a request some earlier invocation
+ * opened for the very same bytes.
+ *
+ * `pending` — the question is still in front of a human. A retry ADOPTS it and
+ * waits out the remainder, rather than opening a second one: two prompts for
+ * one command spend a human's attention twice on a single question, and
+ * attention is the audit budget (SPEC.md §11).
+ *
+ * `granted` — a human answered, the TTL has not lapsed, and nothing has spent
+ * the grant yet. A retry proceeds on it, once, through
+ * {@link consumeHarnessGrant}.
+ */
+export type HarnessCarryKind = "pending" | "granted";
+
+/** A request an identical harness invocation may adopt or spend (APRV-117). */
+export interface HarnessCarry {
+  actionKey: string;
+  task: string | null;
+  kind: HarnessCarryKind;
+  /** `seq` of the `approval.requested` that opened the current cycle. */
+  requestSeq: number | null;
+  /** `seq` of the `approval.granted`, on `granted` only. */
+  decisionSeq: number | null;
+}
+
+/**
+ * The request an identical harness command may carry over, or `null`.
+ *
+ * ## The replay bounds, in one place
+ *
+ * A harness grant authorizes **the same bytes, in the same cwd, once, within
+ * the TTL** — and nothing else. Each clause is a line of this function:
+ *
+ *  - *the same bytes, in the same cwd*: the candidate's declared
+ *    `payload_hash` must equal `payloadHash`, which the caller computes over
+ *    the concrete payload (for the Claude Code hook, `{command, cwd}`). A
+ *    different command, a different directory, a different byte of either:
+ *    different hash, no carry, a new question for a human.
+ *  - *harness only*: the candidate must have declared `execution: "harness"`.
+ *    A grant that minted an execution token belongs to `approval run`, and a
+ *    harness invocation must never spend it by proceeding on it — the token
+ *    would still be live, and one authorization would have authorized two
+ *    different executions.
+ *  - *the same class*: an action key covers one class, and a command that
+ *    resolves to three classes asks three questions. Carrying a `deps.add`
+ *    grant into a `network.call` check would answer a question nobody asked.
+ *  - *once*: a candidate with any `execution.*` record is skipped here and
+ *    refused at the append in {@link consumeHarnessGrant}. The single-use rule
+ *    is the gate's existing one; this only stops the caller from queueing up a
+ *    write that would be refused.
+ *  - *within the TTL*: state is derived at `ts` with `ttlMs`, so a lapsed
+ *    request reads `expired` and carries nothing, whether or not the daemon has
+ *    materialised an `approval.expired` record.
+ *
+ * PURE, and reads only records the caller verified — the enforcement path never
+ * touches an unverified log (SPEC.md §11.1). The latest candidate wins: a key
+ * whose earlier cycle was rejected, withdrawn or expired is superseded by the
+ * request that came after it, exactly as {@link requestState} treats cycles.
+ */
+/**
+ * Has a GRANTED request outlived `defaults.approval_ttl`?
+ *
+ * `requestState` reports a decided request by its decision forever: the TTL
+ * bounds the window in which a human may answer, not the answer's shelf life.
+ * The shelf life is a separate, settled rule and it already exists — `tokenStatus`
+ * in `core/token.ts` re-applies `requestTs + approval_ttl` to a granted request
+ * and refuses `token-expired` past it, so a token minted yesterday cannot be
+ * spent today. This is the same arithmetic for the grant that mints no token: a
+ * harness approval must not be the one kind that never goes stale.
+ *
+ * Unparseable instants read as lapsed, and a policy with no TTL declares no
+ * lapse at all — both exactly as `core/token.ts` reads them.
+ */
+function grantLapsed(derivation: RequestDerivation, ts: string, ttlMs: number | null): boolean {
+  if (ttlMs === null) return false;
+  const requestedAt = Date.parse(derivation.requestTs ?? "");
+  const asked = Date.parse(ts);
+  if (Number.isNaN(requestedAt) || Number.isNaN(asked)) return true;
+  return asked > requestedAt + ttlMs;
+}
+
+export function findHarnessCarry(
+  records: EventRecord[],
+  payloadHash: string,
+  cls: string,
+  ts: string,
+  ttlMs: number | null,
+): HarnessCarry | null {
+  if (!isPayloadHash(payloadHash)) return null;
+
+  // Distinct keys, latest request first: a later question about the same bytes
+  // is the live one, and an older key that was consumed or lapsed must not
+  // shadow it.
+  const keys: string[] = [];
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+    if (record === undefined) continue;
+    if (record.event !== "approval.requested") continue;
+    if (record.action_key === undefined) continue;
+    if (keys.includes(record.action_key)) continue;
+    const payload = payloadOf(record);
+    if (payload["execution"] !== "harness") continue;
+    if (payload["payload_hash"] !== payloadHash) continue;
+    if (payload["class"] !== cls) continue;
+    keys.push(record.action_key);
+  }
+
+  let pending: HarnessCarry | null = null;
+  for (const actionKey of keys) {
+    const derivation = requestState(records, actionKey, ts, ttlMs);
+    // The declaration is re-read from the derivation rather than from the
+    // record matched above: `requestState` resets on every `approval.requested`,
+    // so this is the cycle whose state was just derived.
+    if (derivation.declared.payload_hash !== payloadHash) continue;
+    if (derivation.declared.execution !== "harness") continue;
+    if (derivation.execution.started !== null) continue;
+    if (derivation.state === "granted") {
+      // An answer has a shelf life, and it is its request's TTL.
+      if (grantLapsed(derivation, ts, ttlMs)) continue;
+      return {
+        actionKey,
+        task: derivation.task,
+        kind: "granted",
+        requestSeq: derivation.requestSeq,
+        decisionSeq: derivation.decisionSeq,
+      };
+    }
+    if (derivation.state === "requested" && pending === null) {
+      pending = {
+        actionKey,
+        task: derivation.task,
+        kind: "pending",
+        requestSeq: derivation.requestSeq,
+        decisionSeq: null,
+      };
+    }
+  }
+  // A grant beats a pending question: proceeding on an answer that already
+  // exists asks nobody anything.
+  return pending;
+}
+
+export type ConsumeHarnessResult = { ok: true; record: EventRecord } | GateRefusal;
+
+/**
+ * Spend a harness grant, exactly once (APRV-117).
+ *
+ * ## Why this is `execution.started`, and why it is alone
+ *
+ * A harness grant mints no token (APRV-106), so nothing in `core/token.ts`
+ * records that it was used, and without such a record a grant could authorize
+ * an unbounded number of identical retries for the whole TTL. The consumption
+ * marker has to be a real event through compare-and-append (SPEC.md §11.1(5)),
+ * and it has to be one the gate already reads as terminal for an idempotency
+ * key. `execution.started` is exactly that: {@link request} refuses a key that
+ * has one as `already-executed`, and {@link decide} refuses to revoke past it.
+ * Reusing it means the single-use rule is the gate's existing rule rather than
+ * a second one written next to it.
+ *
+ * **No `execution.completed` or `execution.failed` follows, ever.** The harness
+ * runs the command; this runtime hands over permission and never observes an
+ * exit status. Appending a completion would fabricate an outcome, and in this
+ * vocabulary it would also assert something with consequences — an
+ * `execution.completed` clears a task's loop-escalation streak (SPEC.md §10.2).
+ * A harness execution is therefore recorded as begun and never as finished,
+ * which is precisely what the runtime knows. The `execution: "harness"` marker
+ * on the payload says so on the record itself, so a reader of the start event
+ * alone can see why no outcome ever lands.
+ *
+ * ## What it refuses
+ *
+ * Attestation is checked here, and not as a formality: this is the one
+ * enforcement path that reaches a harness `allow` without passing through
+ * {@link request} (that happened in an earlier process, possibly against
+ * earlier policy bytes). A policy that changed since the human attested it
+ * cannot answer anything, so it answers nothing.
+ *
+ * Everything else follows the derivation: `not-requested` when the key has no
+ * request, `expired` when the TTL lapsed (judged from the request's own `ts`,
+ * event or no event, exactly as {@link decide} judges it), `already-executed`
+ * when something already spent it, `not-granted` for every other state and for
+ * a grant that is not harness-executed. Budgets are not re-evaluated: the
+ * authorization was charged at `approval.granted`, and `core/budgets.ts`'s
+ * consumption contract already dedupes a start event against a grant carrying
+ * the same `action_key`.
+ */
+export function consumeHarnessGrant(
+  logPath: string,
+  actionKey: string,
+  actor: string,
+  options: GateOptions = {},
+): ConsumeHarnessResult {
+  const ts = tick(options);
+  if (!PRINCIPAL_ACTOR.test(actor)) {
+    return refuse(
+      "actor-invalid",
+      `consuming a harness grant requires a human: or agent: actor, got ${JSON.stringify(actor)}`,
+    );
+  }
+
+  const read = readGateRecords(logPath);
+  if (!read.ok) return read;
+
+  const attested = requireAttestation(read.records, options);
+  if (attested !== null) return attested;
+
+  const load = loadPolicy(loadOptionsOf(options));
+  const derivation = requestState(read.records, actionKey, ts, ttlOf(load));
+
+  if (derivation.state === "none") {
+    return refuse(
+      "not-requested",
+      `action ${actionKey} has no approval.requested record, so there is no grant to proceed on`,
+      { state: derivation.state },
+    );
+  }
+  if (derivation.execution.started !== null) {
+    return refuse(
+      "already-executed",
+      `action ${actionKey} was already spent (execution.started at seq ${String(derivation.execution.started)}); a harness grant authorizes one execution of the bytes it approved, and a further identical command is a new question`,
+      { state: derivation.state },
+    );
+  }
+  if (derivation.state === "expired") {
+    return refuse(
+      "expired",
+      `action ${actionKey} expired: the request at ${String(derivation.requestTs)} lapsed its TTL before ${ts}. A grant authorizes only inside the approval window.`,
+      { state: derivation.state },
+    );
+  }
+  if (derivation.state !== "granted") {
+    return refuse(
+      "not-granted",
+      `action ${actionKey} is ${derivation.state}, not granted; nothing authorizes proceeding on it`,
+      { state: derivation.state },
+    );
+  }
+  if (derivation.declared.execution !== "harness") {
+    return refuse(
+      "not-granted",
+      `action ${actionKey} was granted as an ordinary request and minted an execution token; it is spent by presenting that token to \`approval run\`, not by a harness proceeding on it. Two spenders of one authorization is the property this refuses.`,
+      { state: derivation.state },
+    );
+  }
+  if (grantLapsed(derivation, ts, ttlOf(load))) {
+    return refuse(
+      "expired",
+      `action ${actionKey}'s grant expired: the request at ${String(derivation.requestTs)} lapsed its TTL before ${ts}. There is no separate grant TTL — an approval lives exactly as long as its parent request, which is the rule \`core/token.ts\` applies to a token-bearing grant.`,
+      { state: derivation.state },
+    );
+  }
+  if (derivation.task === null) {
+    return refuse(
+      "not-registered",
+      `action ${actionKey} has a grant but no task on its request record; an execution event names both (SPEC.md §8) and nothing here invents one`,
+      { state: derivation.state },
+    );
+  }
+
+  const payload: Record<string, unknown> = {
+    // The budgets contract: class and est_cost_usd on every start event.
+    class: derivation.declared.class ?? "",
+    est_cost_usd: derivation.declared.est_cost_usd ?? 0,
+    // Why no completion will ever follow (see the doc comment).
+    execution: "harness",
+  };
+  if (derivation.declared.payload_hash !== null) {
+    payload["payload_hash"] = derivation.declared.payload_hash;
+  }
+  if (derivation.decisionSeq !== null) payload["grant_seq"] = derivation.decisionSeq;
+
+  const appended = append(
+    logPath,
+    {
+      ts,
+      event: "execution.started",
+      actor,
+      task: derivation.task,
+      action_key: actionKey,
+      payload,
+    },
+    options,
+    // The head read at the top: single-use, liveness and the harness marker
+    // were all judged against exactly that log, so a competing consumer that
+    // landed in between wins and this one is refused `head-moved`.
+    read.head,
+  );
+  if (!appended.ok) return appended;
+  return { ok: true, record: appended.record };
 }
 
 // ---------------------------------------------------------------------------

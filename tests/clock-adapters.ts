@@ -39,11 +39,13 @@ import {
   type StartResult,
 } from "../src/core/execute.js";
 import {
+  consumeHarnessGrant as consumeHarnessGrantCore,
   decide as decideCore,
   expire as expireCore,
   register as registerCore,
   request as requestCore,
   withdraw as withdrawCore,
+  type ConsumeHarnessResult,
   type Decision,
   type DecideOptions,
   type DecideResult,
@@ -115,6 +117,16 @@ export function withdraw(
   options: WithdrawOptions = {},
 ): WithdrawResult {
   return withdrawCore(logPath, actionKey, actor, frozen(options, ts));
+}
+
+export function consumeHarnessGrant(
+  logPath: string,
+  actionKey: string,
+  actor: string,
+  ts: string,
+  options: GateOptions = {},
+): ConsumeHarnessResult {
+  return consumeHarnessGrantCore(logPath, actionKey, actor, frozen(options, ts));
 }
 
 export function consumeToken(

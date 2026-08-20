@@ -26,6 +26,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import { CLASSIFIER_CLASSES, COMMAND_RULES } from "../src/core/command-class.js";
@@ -381,11 +382,14 @@ test("a rejected request denies with hook-rejected", () => {
   assertClean(dir);
 });
 
-test("no decision inside --timeout denies with hook-timeout and WITHDRAWS the request", () => {
-  // APRV-106, the behaviour change this task exists for. Before it, the request
-  // stayed in the queue for the policy's whole TTL after the hook had already
-  // denied the tool call, so a human could be pinged half an hour later and
-  // approve something that authorized nothing.
+test("no decision inside --timeout denies with hook-timeout and LEAVES THE REQUEST OPEN", () => {
+  // APRV-106 withdrew here, because a retried tool call was a new request with
+  // a new key and a late grant therefore authorized nothing. APRV-117 removes
+  // that premise (a retry adopts or carries the same question, keyed by the
+  // payload hash), so the question stays in front of the human and the answer
+  // it gets is worth something. The property APRV-106 was protecting — never
+  // solicit a decision nobody can consume — is preserved by carryover rather
+  // than by retraction, and the two tests below are what hold it.
   const dir = ready();
   const run = runCli(
     ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
@@ -395,39 +399,227 @@ test("no decision inside --timeout denies with hook-timeout and WITHDRAWS the re
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "deny");
   assert.match(verdict.reason, /^hook-timeout: /u);
-  assert.match(verdict.reason, /WITHDRAWN/u);
+  assert.match(verdict.reason, /NOTHING WAS WITHDRAWN/u);
+  assert.match(verdict.reason, /authorizes a retry/u);
 
-  // The event is on the record, with the reason and the hook's own actor.
+  // Nothing was retracted, and the request is the hook's own harness request.
   const log = rawLog(dir);
-  assert.match(log, /"event":"approval\.withdrawn"/u);
-  assert.match(log, /"reason":"timeout"/u);
+  assert.doesNotMatch(log, /"event":"approval\.withdrawn"/u);
+  assert.match(log, /"event":"approval\.requested"/u);
+  assert.match(log, /"execution":"harness"/u);
   assert.match(log, /"actor":"agent:claude-code"/u);
 
-  // And the human's inbox is empty: nobody is asked about a tool call that has
-  // already been denied.
+  // APRV-106's `wait_until` is gone: under carryover the sentence it rendered
+  // ("requester waits until …") is false, and the deadline that governs is the
+  // policy's TTL, which the channel line falls back to on its own.
+  assert.doesNotMatch(log, /"wait_until"/u);
+
+  // The human's inbox still holds the question, because answering it still does
+  // something.
   const queue = runCli(["queue", "--json"], dir);
   assert.equal(queue.code, 0, queue.stderr);
-  assert.doesNotMatch(queue.stdout, /hook:sess-1:tu-timeout:deps\.add/u);
+  assert.match(queue.stdout, /hook:sess-1:tu-timeout:deps\.add/u);
   assertClean(dir);
 });
 
-test("a withdrawn hook request cannot be granted afterwards", () => {
-  // The incident, replayed: the human reaches the request after the hook has
-  // stopped waiting. The gate refuses rather than recording an authorization
-  // that no process is left to consume.
+test("a grant landing after the wait authorizes an identical retry, with no second prompt", () => {
+  // APRV-117 AC#1 and AC#2's converse: the incident of 2026-08-19, replayed and
+  // fixed. The hook gives up, the human answers late, and the retried command
+  // proceeds on the answer they gave.
   const dir = ready();
-  runCli(
+  const first = runCli(
     ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
     dir,
     bashEvent("npm install left-pad", "tu-late"),
   );
+  assert.equal(verdictOf(first).permission, "deny");
+
+  // The late tap. It is accepted now — the request is still pending.
   const late = runCli(
     ["grant", "hook:sess-1:tu-late:deps.add", "--as", "human:carter", "--json"],
     dir,
   );
-  assert.notEqual(late.code, 0);
-  const error = JSON.parse(late.stderr) as { error: { code: string } };
-  assert.equal(error.error.code, "request-withdrawn");
+  assert.equal(late.code, 0, late.stderr);
+
+  // The retry: same bytes, same cwd, a NEW tool-use id, as the harness sends it.
+  const retry = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-retry"),
+  );
+  const verdict = verdictOf(retry);
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /^granted: /u);
+  assert.match(verdict.reason, /carried: hook:sess-1:tu-late:deps\.add/u);
+
+  // No second question was ever asked: exactly one approval.requested exists,
+  // and the retry opened no request of its own.
+  const log = rawLog(dir);
+  assert.equal(log.match(/"event":"approval\.requested"/gu)?.length, 1);
+  assert.doesNotMatch(log, /hook:sess-1:tu-retry/u);
+
+  // The grant was spent, once, through the ordinary execution vocabulary.
+  assert.match(log, /"event":"execution\.started"/u);
+  assert.doesNotMatch(log, /"event":"execution\.completed"/u);
+  assertClean(dir);
+});
+
+test("a carried grant is spent exactly once; the next identical command asks again", () => {
+  // APRV-117 AC#3. The second retry gets no free ride: it files a fresh request
+  // through the ordinary path and waits like anything else.
+  const dir = ready();
+  runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-once"),
+  );
+  const granted = runCli(
+    ["grant", "hook:sess-1:tu-once:deps.add", "--as", "human:carter"],
+    dir,
+  );
+  assert.equal(granted.code, 0, granted.stderr);
+
+  const spend = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-spend"),
+  );
+  assert.equal(verdictOf(spend).permission, "allow");
+
+  const again = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-again"),
+  );
+  const verdict = verdictOf(again);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+
+  const log = rawLog(dir);
+  // Two questions in total: the one the human answered, and the one the third
+  // invocation had to ask because the answer had been spent.
+  assert.equal(log.match(/"event":"approval\.requested"/gu)?.length, 2);
+  assert.equal(log.match(/"event":"execution\.started"/gu)?.length, 1);
+  assert.match(log, /hook:sess-1:tu-again:deps\.add/u);
+  assertClean(dir);
+});
+
+test("a retry while the question is pending adopts it rather than opening a duplicate", () => {
+  // APRV-117 AC#2: the phone never shows two prompts for one command.
+  const dir = ready();
+  for (const toolUseId of ["tu-adopt-1", "tu-adopt-2", "tu-adopt-3"]) {
+    const run = runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+      dir,
+      bashEvent("curl -sS https://example.com", toolUseId),
+    );
+    assert.equal(verdictOf(run).permission, "deny");
+  }
+
+  const log = rawLog(dir);
+  assert.equal(log.match(/"event":"approval\.requested"/gu)?.length, 1);
+  // Only the first invocation registered a task; the other two adopted its
+  // question and registered nothing.
+  assert.equal(log.match(/"event":"task\.registered"/gu)?.length, 1);
+  assert.doesNotMatch(log, /tu-adopt-2/u);
+  assert.doesNotMatch(log, /tu-adopt-3/u);
+
+  // And the adopters can consume the decision the first one waited for.
+  const granted = runCli(
+    ["grant", "hook:sess-1:tu-adopt-1:network.call", "--as", "human:carter"],
+    dir,
+  );
+  assert.equal(granted.code, 0, granted.stderr);
+  const after = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("curl -sS https://example.com", "tu-adopt-4"),
+  );
+  assert.equal(verdictOf(after).permission, "allow");
+  assertClean(dir);
+});
+
+test("replay bounds: different bytes or a different cwd is a different question", () => {
+  // APRV-117 AC#4. The grant authorizes THESE bytes in THIS directory. Anything
+  // else is a new request and a new prompt.
+  const dir = ready();
+  runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-bounds"),
+  );
+  const granted = runCli(
+    ["grant", "hook:sess-1:tu-bounds:deps.add", "--as", "human:carter"],
+    dir,
+  );
+  assert.equal(granted.code, 0, granted.stderr);
+
+  // A different command: one character of difference is a different payload.
+  const otherBytes = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install right-pad", "tu-other-bytes"),
+  );
+  const bytesVerdict = verdictOf(otherBytes);
+  assert.equal(bytesVerdict.permission, "deny");
+  assert.match(bytesVerdict.reason, /^hook-timeout: /u);
+
+  // The same command, run somewhere else. `cwd` is inside the hashed payload.
+  const elsewhere = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    JSON.stringify({
+      session_id: "sess-1",
+      cwd: "/somewhere-else",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "npm install left-pad" },
+      tool_use_id: "tu-other-cwd",
+    }),
+  );
+  const cwdVerdict = verdictOf(elsewhere);
+  assert.equal(cwdVerdict.permission, "deny");
+  assert.match(cwdVerdict.reason, /^hook-timeout: /u);
+
+  // Three separate questions; the original grant is untouched and unspent.
+  const log = rawLog(dir);
+  assert.equal(log.match(/"event":"approval\.requested"/gu)?.length, 3);
+  assert.equal(log.match(/"event":"execution\.started"/gu)?.length, undefined);
+  assertClean(dir);
+});
+
+test("a grant that lapsed its TTL carries nothing", async () => {
+  // The last replay bound: within the TTL. A one-second TTL makes the lapse
+  // observable without a clock injection, and `queue` is what materialises it.
+  const dir = caseDir();
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    POLICY.replace('approval_ttl: "1h"', 'approval_ttl: "1s"'),
+    "utf8",
+  );
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+
+  runCli(
+    ["hook", "claude-code", "--timeout", "100ms", "--interval", "50ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-ttl"),
+  );
+  const granted = runCli(["grant", "hook:sess-1:tu-ttl:deps.add", "--as", "human:carter"], dir);
+  assert.equal(granted.code, 0, granted.stderr);
+
+  // Wait out the TTL, then retry: the grant is no longer live, so the retry
+  // asks its own question rather than proceeding on a lapsed one.
+  await delay(1_400);
+  const retry = runCli(
+    ["hook", "claude-code", "--timeout", "100ms", "--interval", "50ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-ttl-retry"),
+  );
+  assert.equal(verdictOf(retry).permission, "deny");
+  const log = rawLog(dir);
+  assert.equal(log.match(/"event":"approval\.requested"/gu)?.length, 2);
+  assert.equal(log.match(/"event":"execution\.started"/gu)?.length, undefined);
   assertClean(dir);
 });
 
