@@ -22,6 +22,9 @@
  * 4. **Batch semantics** (§10.3, B7). A batch notify plus two decisions lands
  *    two events, each carrying the batch delivery id; and the forbidden mix is
  *    refused at {@link assembleBatch} before anything is delivered.
+ * 5. **Terminal requests are neither pending nor armed** (APRV-113). A request
+ *    the log has settled is absent from the derivation every channel builds its
+ *    queue from, and a second gesture on it is refused and appends nothing.
  *
  * ## How it is run
  *
@@ -221,6 +224,94 @@ export async function runChannelConformance(
   await checkDecisionRoundTrip(t, makeChannel, harness);
   await checkBatchSemantics(t, makeChannel, harness);
   await checkWithdrawal(t, makeChannel, harness);
+  await checkTerminalNotArmed(t, makeChannel, harness);
+}
+
+// ---------------------------------------------------------------------------
+// (f) a decided request is not presented as pending — APRV-113
+// ---------------------------------------------------------------------------
+
+/**
+ * A channel does not present a terminal request as pending, and does not leave
+ * a decision affordance armed for one.
+ *
+ * The withdrawal check above says this for one terminal state. This says it for
+ * the ordinary one: the request the human just answered. A pull channel passes
+ * by construction — `cli` and `web` build their view from the log every time
+ * they render, so a granted request is simply absent from the next one. A push
+ * channel has already put a message somewhere it cannot re-derive, and this is
+ * the check that says leaving it looking live is a conformance failure, not a
+ * cosmetic debt (`telegram` answers it by editing the message and forgetting
+ * the delivery — APRV-113).
+ *
+ * Two assertions, and the second is the one with teeth:
+ *
+ * 1. The request is terminal by the derivation every channel's queue is built
+ *    from, so nothing re-derived from the log can show it as pending.
+ * 2. A second gesture on it is REFUSED and appends nothing. An affordance that
+ *    is still on a screen somewhere must be inert — a channel cannot promise a
+ *    button is gone from a phone, but it must not be able to collect a second
+ *    decision through one.
+ */
+async function checkTerminalNotArmed(
+  t: ConformanceContext,
+  makeChannel: () => Channel,
+  harness: ConformanceHarness,
+): Promise<void> {
+  say(t, "a decided request is neither pending nor armed");
+  const unit = await harness.setup(1);
+  try {
+    const request = unit.requests[0];
+    assert.ok(request !== undefined, "harness.setup(1) returned no request");
+    const actionKey = request.action_key.value;
+
+    const channel = makeChannel();
+    const handler = handlerFor(unit);
+    channel.onDecision(handler);
+    const deliveryId = await channel.notify(request);
+
+    const decided = await deliver(harness, channel, handler, {
+      action_key: actionKey,
+      decision: "grant",
+      deliveryId,
+    });
+    assert.equal(decided.ok, true, `the decision was refused: ${JSON.stringify(decided)}`);
+
+    const state = requestState(recordsOf(unit.logPath), actionKey, new Date().toISOString(), null)
+      .state;
+    assert.equal(
+      state,
+      "granted",
+      'the decision did not settle the request; every channel derives its queue from `state === "requested"`, so a channel would keep presenting it',
+    );
+
+    const before = recordsOf(unit.logPath).length;
+    const second = recordChannelDecision(
+      unit.logPath,
+      { action_key: actionKey, decision: "grant", deliveryId },
+      unit.actor,
+      unit.gateOptions ?? {},
+    ).outcome;
+    assert.equal(
+      second.ok,
+      false,
+      "a decided request must not be decidable again; an affordance left on a screen has to be inert",
+    );
+    if (!second.ok) {
+      assert.equal(
+        second.code,
+        "already-decided",
+        `a second decision must refuse already-decided, got ${second.code}`,
+      );
+    }
+    assert.equal(
+      recordsOf(unit.logPath).length,
+      before,
+      "the refused second decision appended something",
+    );
+  } finally {
+    unit.cleanup?.();
+  }
 }
 
 // ---------------------------------------------------------------------------
