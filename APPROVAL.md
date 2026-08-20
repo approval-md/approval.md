@@ -23,6 +23,9 @@ approvers:
   carter:
     channels: [telegram, cli]
 
+protected_paths:            # widens policy.edit; the built-ins hold regardless
+  - SPEC.md
+
 classes:
   read.*:                    { autonomy: autonomous }
   files.write.workspace:     { autonomy: autonomous }   # src, tests, fixtures, backlog/
