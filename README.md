@@ -129,7 +129,7 @@ classes: deps.add
 ```
 
 Every segment of a command line is classified and the command takes the union, so
-`git status && curl …` is gated as `network.call`.
+`git status && curl -d … ` is gated as `network.call`.
 
 **2. Install the hook.** It lives in `.claude/settings.json`, and a human commits
 that file: an agent that could write its own hook entry could write itself out

@@ -549,6 +549,12 @@ interface RuleContext {
   positionals: string[];
   /** The matched subcommand (first positional), or `null`. */
   sub: string | null;
+  /**
+   * Did any of those words come out of a command substitution? Its text is
+   * gone by the time a rule sees it, so a rule that reads its arguments closely
+   * (APRV-114's fetch refinement) needs to know that one of them is a hole.
+   */
+  substituted: boolean;
 }
 
 /** A refinement's answer: a class and the rule id that chose it. */
@@ -710,6 +716,168 @@ function refineSed(ctx: RuleContext): Refinement {
     : { class: "read.shell", rule: "sed-read" };
 }
 
+/**
+ * The methods a fetch may name and still be a read: GET, and HEAD, which is a
+ * GET that discards the body. Everything else, including a method the
+ * classifier cannot read, is a write as far as this file is concerned.
+ */
+const READ_METHODS: readonly string[] = ["GET", "HEAD"];
+
+/** What a command line says about the HTTP method it will use. */
+type MethodVerdict = "absent" | "read" | "other";
+
+/**
+ * Read the method out of a method-naming flag.
+ *
+ * `long` holds the exact spellings (`--request`, `-X`, `--method`), matched
+ * both bare (`-X GET`) and joined (`--request=GET`); `short` is the short flag
+ * whose value may be glued to it (`-XGET`). A flag present with a value we
+ * cannot read, or with no value at all, is `other`: an unreadable method is a
+ * method we must assume mutates.
+ */
+function readMethodFlag(
+  args: readonly string[],
+  long: readonly string[],
+  short: string,
+): MethodVerdict {
+  let verdict: MethodVerdict = "absent";
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] as string;
+    const equals = arg.indexOf("=");
+    const name = equals === -1 ? arg : arg.slice(0, equals);
+    let value: string | undefined;
+    if (long.includes(name)) {
+      value = equals === -1 ? args[index + 1] : arg.slice(equals + 1);
+    } else if (!arg.startsWith("--") && arg.startsWith(short) && arg.length > short.length) {
+      value = arg.slice(short.length);
+    } else {
+      continue;
+    }
+    if (value === undefined || isUnknownValue(value) || !READ_METHODS.includes(value.toUpperCase())) {
+      return "other";
+    }
+    verdict = "read";
+  }
+  // A short-flag bundle carrying the method letter without being the whole flag
+  // (`-sSX POST`) hides its value from the scan above. This is a classifier over
+  // shell text, not curl's option grammar, so the bundle itself is the answer.
+  if (verdict === "absent" && hasShortFlag(args, [short.slice(1)])) return "other";
+  return verdict;
+}
+
+/**
+ * Flags that hand curl, wget or httpie a request body or an upload. Any one of
+ * them makes the invocation a write whatever method it names, so they are
+ * checked before the method is.
+ */
+const WEB_BODY_FLAGS: readonly string[] = [
+  "-d",
+  "--data",
+  "--data-raw",
+  "--data-ascii",
+  "--data-binary",
+  "--data-urlencode",
+  "--json",
+  "-F",
+  "--form",
+  "--form-string",
+  "-T",
+  "--upload-file",
+  "--post-data",
+  "--post-file",
+  "--body-data",
+  "--body-file",
+];
+
+/**
+ * Flags that let a file supply options this classifier never sees. A curl
+ * `-K config` can name any method and carry any body, so the invocation is
+ * unreadable in the only sense that matters here and takes the stricter class.
+ */
+const WEB_CONFIG_FLAGS: readonly string[] = ["-K", "--config"];
+
+/**
+ * Is this httpie word a request item (`name=value`, `field:=1`, `file@path`)
+ * rather than a URL? httpie turns request items into a JSON body and the method
+ * into POST, so an item is a write.
+ *
+ * A URL is exempted by its scheme or its path separator, which keeps
+ * `https://x/?a=b` a read; anything else carrying `=` or `@` is an item.
+ */
+function isHttpieRequestItem(word: string): boolean {
+  if (word.startsWith("http://") || word.startsWith("https://")) return false;
+  if (word.includes("/")) return false;
+  return word.includes("=") || word.includes("@");
+}
+
+/**
+ * curl, wget and httpie — a GET-shaped fetch is `read.web` (APRV-114).
+ *
+ * SPEC.md §7 already puts "web fetch, API GET" under `read.*`, and before this
+ * refinement the classifier answered `network.call` for every one of them, so a
+ * policy holding mutating calls at manual held every research fetch there too.
+ * That is the APRV-83 shape of problem (a class too coarse to state the policy
+ * the taxonomy already describes), and it takes the APRV-83 fix.
+ *
+ * The read branch is deliberately narrow: a body or upload flag, a method that
+ * is not GET or HEAD, a config file that could hold either, a short-flag bundle
+ * we decline to unbundle, or a bare `$VAR` that could expand into any of them
+ * all take `network.call`. Over-classifying a read as a write costs one
+ * approval; the reverse runs an unreviewed write.
+ */
+function refineWebFetch(ctx: RuleContext): Refinement {
+  const write: Refinement = { class: "network.call", rule: "web-write" };
+  // The method flag may carry its value glued on (`-XGET`), and those letters
+  // are not a short-flag bundle; scanning them for body letters would read the
+  // `T` in `GET` as an upload. The method is read on its own below.
+  const bundles = ctx.args.filter((arg) => arg.startsWith("--") || !arg.startsWith("-X"));
+  if (hasFlag(ctx.args, WEB_BODY_FLAGS) || hasShortFlag(bundles, ["d", "F", "T"])) return write;
+  if (hasFlag(ctx.args, WEB_CONFIG_FLAGS) || hasShortFlag(bundles, ["K"])) return write;
+  // A word that is an unexpanded expansion, or that came out of a command
+  // substitution, is not a URL we can read; it is whatever the environment puts
+  // there, flags included.
+  if (ctx.substituted || ctx.args.some((arg) => arg.startsWith("$"))) return write;
+  if (readMethodFlag(ctx.args, ["-X", "--request", "--method"], "-X") === "other") return write;
+  if (ctx.bin === "http" || ctx.bin === "httpie") {
+    // httpie names its method in a bare word and its body in request items.
+    // Every bare word is tested for the method, not only the first: a flag
+    // value ahead of it (`http -a user:pass POST url`) shifts its position, and
+    // this classifier does not know which flags take values.
+    for (const positional of ctx.positionals) {
+      if (/^[A-Z]+$/u.test(positional) && !READ_METHODS.includes(positional)) return write;
+      if (isHttpieRequestItem(positional)) return write;
+    }
+  }
+  return { class: "read.web", rule: "web-read" };
+}
+
+/**
+ * Flags that give `gh api` a request body. `-f`/`-F` here are gh's field flags,
+ * not curl's form and upload ones, and `--input` reads a body from a file.
+ */
+const GH_API_FIELD_FLAGS: readonly string[] = ["-f", "--field", "-F", "--raw-field", "--input"];
+
+/**
+ * `gh api` — a call with no method and no fields is a GET (APRV-114).
+ *
+ * gh defaults to GET, and to POST the moment a field appears, so those two flag
+ * families are the whole test. The read class is `read.vcs.remote`, the one
+ * `refineGh` already gives `gh pr view`: the same forge, read the same way,
+ * through a lower-level verb.
+ *
+ * The row this refines also matches `auth`, `gist`, `secret` and `workflow`,
+ * which stay `network.call` unconditionally.
+ */
+function refineGhApi(ctx: RuleContext): Refinement {
+  if (ctx.sub !== "api") return { class: "network.call", rule: "gh-api" };
+  const write: Refinement = { class: "network.call", rule: "gh-api-write" };
+  const bundles = ctx.args.filter((arg) => arg.startsWith("--") || !arg.startsWith("-X"));
+  if (hasFlag(ctx.args, GH_API_FIELD_FLAGS) || hasShortFlag(bundles, ["f", "F"])) return write;
+  if (ctx.substituted || ctx.args.some((arg) => arg.startsWith("$"))) return write;
+  if (readMethodFlag(ctx.args, ["-X", "--method"], "-X") === "other") return write;
+  return { class: "read.vcs.remote", rule: "gh-api-read" };
+}
+
 /** Does this path invoke the compiled `approval` CLI? */
 function isGateEntrypoint(path: string): boolean {
   const segments = pathSegments(path);
@@ -743,7 +911,8 @@ function refineNode(ctx: RuleContext): Refinement | null {
  * Order matters: the first row whose binary and subcommand match decides. Rows
  * are grouped by binary, strictest interpretation first within a binary, and
  * every class named here is one SPEC.md §7 declares (§7's developer-workstation
- * namespaces, plus `read.shell` / `read.vcs.remote` under `read.*`).
+ * namespaces, plus `read.shell` / `read.vcs.remote` / `read.web` under
+ * `read.*`).
  */
 export const COMMAND_RULES: readonly CommandRule[] = [
   // -- git -----------------------------------------------------------------
@@ -814,7 +983,14 @@ export const COMMAND_RULES: readonly CommandRule[] = [
 
   // -- gh ------------------------------------------------------------------
   { id: "gh-release", bins: ["gh"], subs: ["release"], class: "release.publish" },
-  { id: "gh-api", bins: ["gh"], subs: ["api", "auth", "gist", "secret", "workflow"], class: "network.call" },
+  {
+    id: "gh-api",
+    bins: ["gh"],
+    subs: ["api", "auth", "gist", "secret", "workflow"],
+    class: "network.call",
+    emits: ["read.vcs.remote"],
+    refine: refineGhApi,
+  },
   {
     id: "gh-simple-read",
     bins: ["gh"],
@@ -862,9 +1038,19 @@ export const COMMAND_RULES: readonly CommandRule[] = [
   { id: "sed", bins: ["sed"], class: "read.shell", emits: ["files.write.workspace"], refine: refineSed },
 
   // -- network -------------------------------------------------------------
+  // The HTTP clients split on their flags; the transports do not. What `ssh`,
+  // `rsync` or `nc` will do at the far end is not written in the argv, so there
+  // is no read-shaped invocation to carve out and they stay manual.
+  {
+    id: "web-fetch",
+    bins: ["curl", "wget", "http", "httpie"],
+    class: "network.call",
+    emits: ["read.web"],
+    refine: refineWebFetch,
+  },
   {
     id: "network",
-    bins: ["curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "telnet", "ftp", "http", "httpie"],
+    bins: ["ssh", "scp", "sftp", "rsync", "nc", "telnet", "ftp"],
     class: "network.call",
   },
 
@@ -1108,7 +1294,10 @@ function classifySegment(segment: LexSegment, protectedPaths: readonly string[])
     };
   }
 
-  const ctx: RuleContext = { bin: basename, args, positionals, sub };
+  const substituted = segment.words
+    .slice(cursor + 1)
+    .some((word) => word.substitutions.length > 0);
+  const ctx: RuleContext = { bin: basename, args, positionals, sub, substituted };
   const refined = rule.refine === undefined ? null : rule.refine(ctx);
   if (rule.refine !== undefined && refined === null) {
     return { ok: false, code: "opaque", detail: `${basename} runs inline source` };
