@@ -115,6 +115,7 @@ type AmendErrorCode =
   | "load-failed"
   | "commit-preconditions"
   | "git-failed"
+  | "push-rejected"
   | "pr-failed"
   | "append-failed"
   | "log-unreadable"
@@ -360,6 +361,29 @@ function probeProtection(root: string): ProtectionProbe {
   };
 }
 
+/** Does this repository have an `origin` to push to? */
+function hasOrigin(root: string): boolean {
+  return git(["remote", "get-url", "origin"], root).ok;
+}
+
+/**
+ * Everything git said about a failed push, on one line (APRV-111).
+ *
+ * A rejection's useful text is spread over four lines — the remote's own
+ * message, the `! [remote rejected]` line, and git's summary — and the refusal
+ * that carries it is a single message string. They are joined rather than
+ * trimmed to the first line, because "which ref, rejected by what" lives in
+ * different lines depending on who did the rejecting.
+ */
+function pushFailureText(run: GitRun): string {
+  const text = `${run.stderr}\n${run.stdout}`
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join(" | ");
+  return text.length === 0 ? "git printed nothing" : text;
+}
+
 /** Is `gh` runnable at all? Used to decide whether the PR is opened or printed. */
 function ghAvailable(root: string): boolean {
   const probe = spawnSync("gh", ["--version"], { cwd: root, encoding: "utf8" });
@@ -465,6 +489,7 @@ function summarize(policyPath: string, diff: PolicyDiff | null): string {
   if (diff.approvers.length > 0) parts.push(`${diff.approvers.length} approver change(s)`);
   if (diff.defaults.length > 0) parts.push(`${diff.defaults.length} default(s)`);
   if (diff.budgets.length > 0) parts.push(`${diff.budgets.length} limit(s)`);
+  if (diff.vocabulary.length > 0) parts.push(`${diff.vocabulary.length} policy key(s)`);
   if (parts.length === 0) return `amend ${name} (no semantic change)`;
   return `amend ${name}: ${parts.join(", ")}`;
 }
@@ -902,8 +927,8 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
         return refuse(
           streams,
           json,
-          "git-failed",
-          `the attestation was appended at seq ${seq} and committed on ${branch}, but \`git push -u origin ${branch}\` failed: ${push.stderr.trim() || push.stdout.trim()}; push the branch and open the pull request by hand`,
+          "push-rejected",
+          `the attestation was appended at seq ${seq} and committed on ${branch}, but \`git push -u origin ${branch}\` was REJECTED: ${pushFailureText(push)}. STATE: the amendment commit exists LOCALLY on ${branch} and nowhere else; origin still carries the previous policy. Next: \`git push -u origin ${branch} && gh pr create --title ${JSON.stringify(prTitle(summary, String(seq)))} --body ${JSON.stringify(prBody(String(seq)))}\`, and merge that pull request with a merge commit`,
           EXIT_IO,
         );
       }
@@ -938,6 +963,35 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
           .filter((line) => line.startsWith("http"));
         prUrl = url[url.length - 1] ?? null;
       }
+    } else {
+      // APRV-111. The direct flow used to stop at the commit while PRINTING the
+      // push line among the commands it had just run, so a push that never
+      // happened — and, on the day this was found, a push that GitHub's branch
+      // protection would have rejected — read as a finished ceremony. The commit
+      // sat ahead of origin, unpushed and unnoticed.
+      //
+      // Now the flow runs its own third command, and a rejection is a refusal:
+      // exit nonzero, name the state, and hand over the branch-flow commands
+      // that land the same commit through a pull request. Recovering by hand is
+      // deliberate — `git branch` is safe, but moving the operator's checked-out
+      // branch back off a commit they just signed for is not something a verb
+      // should do to a repository behind their back.
+      const target = probe.currentBranch;
+      if (target !== null && hasOrigin(commitPlan.root)) {
+        const push = git(["push", "origin", target], commitPlan.root);
+        if (!push.ok) {
+          const recovery = branchName(String(seq));
+          return refuse(
+            streams,
+            json,
+            "push-rejected",
+            `the attestation was appended at seq ${seq} and committed on ${target}, but \`git push origin ${target}\` was REJECTED by the remote: ${pushFailureText(push)}. STATE: the amendment is committed LOCALLY on ${target} and is NOT on origin, so origin still carries the previous policy and your ${target} is one commit ahead of it. ${target} is protected (whatever the protection probe reported: the remote just refused the push), so land the commit through a pull request: \`git branch ${recovery} && git push -u origin ${recovery} && gh pr create --title ${JSON.stringify(prTitle(summary, String(seq)))} --body ${JSON.stringify(prBody(String(seq)))} --head ${recovery}\`. Merge it with a merge commit, then put your local ${target} back on the remote with \`git fetch origin && git reset --hard origin/${target}\``,
+            EXIT_IO,
+          );
+        }
+        pushed = true;
+        output = `${output}\n${`${push.stdout}${push.stderr}`.trim()}`.trim();
+      }
     }
   }
 
@@ -970,12 +1024,30 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
           : `${st.glyph("ok")} committed the policy and the log together on ${branch}:`,
         "",
       ];
+      // APRV-111: only the commands that actually RAN are listed under
+      // "committed". A push the verb skipped (no origin, or a detached HEAD)
+      // used to be printed here as though it had run, which is how an unpushed
+      // amendment came to look like a finished one. A push that ran and FAILED
+      // never reaches this branch at all: it is a refusal above.
+      const remaining: string[] = [];
       for (const command of commands) {
         // The PR command is printed as a to-do when gh could not run it.
         if (command.startsWith("gh pr create") && prUrl === null && branch !== null) continue;
+        if (command.startsWith("git push") && !pushed) {
+          remaining.push(command);
+          continue;
+        }
         done.push(`  ${st.value(humanCommand(command))}`);
       }
       if (output !== null && output.length > 0) done.push("", ...output.split("\n"));
+      if (remaining.length > 0) {
+        done.push(
+          "",
+          `${st.warn("NOT pushed:")} the commit is local only, and origin still carries the previous policy. Still to run:`,
+          "",
+          ...remaining.map((command) => `  ${st.value(humanCommand(command))}`),
+        );
+      }
       if (branch !== null) {
         done.push("");
         if (prUrl !== null) {

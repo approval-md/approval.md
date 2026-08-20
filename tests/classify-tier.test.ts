@@ -5,8 +5,10 @@
  * verdict is a pure function of the changed paths, computed by the pipeline,
  * and that it cannot be talked into the light tier by the change that would
  * benefit from it. So the interesting cases here are the refusals: the
- * classifier's own source, its configuration's home, backlog task files whose
- * markdown extension hides instructions to future agents, and the empty set.
+ * classifier's own source, its configuration's home, a backlog task file mixed
+ * into a change set alongside anything else, and the empty set. Since APRV-112
+ * a pure-records change has its own tier, and the cases below pin both halves:
+ * which sets reach it, and which sets are refused it.
  *
  * The script is spawned rather than imported, because what the npm scripts run
  * is the process, and a unit-level import would not catch an argv or exit-code
@@ -102,8 +104,9 @@ const DENIED: ReadonlyArray<readonly [string, string]> = [
   ["schema/event.schema.json", "schema/**"],
   ["schema/fixtures/x/valid/y.md", "schema/**"],
   ["tests/fixtures/policy/readme.md", "**/fixtures/**"],
-  ["backlog/tasks/task-1 - x.md", "backlog/**"],
-  ["backlog/docs/decision.md", "backlog/**"],
+  // `backlog/**` is exercised below rather than here: since APRV-112 a change
+  // set of nothing but records takes the records tier, and the denylist entry
+  // is what keeps a record MIXED with anything else on the full tier.
   ["scripts/classify-tier.mjs", "scripts/**"],
   ["scripts/notes.md", "scripts/**"],
   [".github/workflows/ci.yml", ".github/**"],
@@ -123,7 +126,84 @@ for (const [path, rule] of DENIED) {
 }
 
 test("a denylisted path is full even alongside otherwise light documentation", () => {
+  assert.equal(tier("README.md", "schema/event.schema.json"), "full");
+});
+
+// ---------------------------------------------------------------------------
+// The records tier (APRV-112)
+// ---------------------------------------------------------------------------
+//
+// The property is the one the whole classifier exists for. A records change is
+// cheaper only when the change set contains nothing but records, and what
+// makes it legitimate is not that fewer checks run: it is that the checks
+// which can observe a record all still run. One foreign path escalates exactly
+// as before.
+
+const RECORDS: readonly string[] = [
+  "backlog/tasks/task-1 - x.md",
+  "backlog/drafts/draft-2 - y.md",
+  "backlog/docs/decision.md",
+  "backlog/decisions/decision-1 - z.md",
+  "backlog/milestones/milestone-12 - w.md",
+  "MILESTONES.md",
+];
+
+for (const path of RECORDS) {
+  test(`${path} alone takes the records tier`, () => {
+    assert.equal(tier(path), "records");
+  });
+}
+
+test("a change set of nothing but records takes the records tier", () => {
+  const verdict = json(...RECORDS);
+  assert.equal(verdict.tier, "records");
+  assert.equal(verdict.reason, "all-paths-in-records-set");
+  assert.deepEqual(verdict.paths, [...RECORDS]);
+  assert.deepEqual(verdict.forcedBy, []);
+});
+
+test("records mixed with source is full", () => {
+  assert.equal(tier("backlog/tasks/task-1 - x.md", "src/core/gate.ts"), "full");
+  assert.equal(tier("MILESTONES.md", "src/core/gate.ts"), "full");
+});
+
+test("records mixed with light documentation is full, never the cheaper of the two", () => {
+  // Neither tier's checks cover the other's paths, so a mixed set takes the
+  // tier that covers both. Escalation, never a union of two cheap runs.
   assert.equal(tier("README.md", "backlog/tasks/task-1 - x.md"), "full");
+  assert.equal(tier("docs/checks.md", "MILESTONES.md"), "full");
+  const verdict = json("README.md", "backlog/tasks/task-1 - x.md");
+  assert.equal(verdict.reason, "denylisted-path");
+  assert.deepEqual(verdict.forcedBy, [
+    { path: "backlog/tasks/task-1 - x.md", rule: "backlog/**" },
+  ]);
+});
+
+test("an empty path set is full rather than records", () => {
+  // "No path lies outside the records set" is vacuously true of the empty set,
+  // and the cheapest tier must never be where a failure to read a diff lands.
+  assert.equal(json().tier, "full");
+});
+
+test("a path that merely looks like a record is not one", () => {
+  for (const impostor of [
+    "backlog.md",
+    "src/backlog/tasks/task-1 - x.md",
+    "MILESTONES.md.bak",
+    "docs/MILESTONES.md",
+  ]) {
+    assert.notEqual(tier(impostor), "records", `${impostor} should not be a record`);
+  }
+});
+
+test("the classifier cannot classify a change to itself or to CI as records", () => {
+  for (const path of [
+    "scripts/classify-tier.mjs",
+    "scripts/run-tests.mjs",
+    ".github/workflows/ci.yml",
+  ]) {
+    assert.equal(tier(path), "full", `${path} must stay on the full tier`);
+  }
 });
 
 test("the classifier cannot classify a change to its own code or config as light", () => {
@@ -204,11 +284,11 @@ test("--working-tree reads changed paths from git and yields a real verdict", ()
   // The script classifies the repository it lives in, whatever the caller's
   // cwd, so this exercises the git plumbing end to end. The verdict itself
   // depends on the working tree of whoever is running the suite, so what is
-  // asserted is the contract: exit 0 and one of the two tier words.
+  // asserted is the contract: exit 0 and one of the three tier words.
   const { stdout, status } = run(["--working-tree"]);
   assert.equal(status, 0);
   assert.ok(
-    ["light", "full"].includes(stdout.trim()),
+    ["light", "records", "full"].includes(stdout.trim()),
     `--working-tree printed ${JSON.stringify(stdout)}`,
   );
 });

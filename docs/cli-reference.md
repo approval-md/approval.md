@@ -224,7 +224,20 @@ answer is UNKNOWN. It is read-only and it never fails the command: a probe that
 could not answer leaves an attestation that already happened exactly where it
 was. When the direct flow is about to push a protected default branch, the
 report prints a one-line warning before the push command rather than letting
-GitHub deliver the news.
+GitHub deliver the news. Detection is a probe, not a guarantee: `git push
+--dry-run` never reaches the remote's pre-receive hook, so a push it cannot
+foresee is caught where it actually happens, by `push-rejected` below.
+
+**The semantic diff** has five sections: class resolutions, approvers, defaults,
+limits, and the policy KEYS. The keys section walks both documents' own dotted
+paths (`protected_paths`, `audit.skew_tolerance`, `channels.telegram.token_env`,
+`vault.passphrase_env`, `payload_retention`, `version`) and renders each change
+as `before -> after`, so a spec key added tomorrow is covered without an edit
+here. A top-level key the schema does not know is listed as an UNKNOWN KEY
+whether or not its value moved, because it is what makes the policy fail closed.
+`no semantic change` is printed only when the probed classes AND every key
+compared equal; when a side's YAML did not parse there are no keys to walk, and
+the report says the document was not compared instead.
 
 **Baseline** (a stated limitation, flagged for human review): an attestation
 records only the SHA-256 of the policy bytes, so the attested TEXT is not
@@ -243,6 +256,15 @@ is the amendment" false. On the branch flow it also refuses when there is no
 `origin` remote, and when a `--branch` name already exists. Every one of those
 refusals happens BEFORE the attestation, so a refused `--commit` never leaves an
 attested policy without its commit.
+
+`--commit` also pushes, on both flows. A push the remote REJECTS (branch
+protection the detection probe did not see, a stale ref, a hook) is
+`push-rejected`: a nonzero refusal naming the branch, what git said, the fact
+that the commit is local only and origin still carries the previous policy, and
+the branch-and-pull-request commands that land the same commit. The commit is
+never moved off the operator's branch on their behalf. When there is no `origin`
+to push to, the direct flow reports the push as still to run rather than listing
+it among the commands it ran.
 
 **What it does, in this order.**
 
@@ -289,6 +311,9 @@ attestation may still proceed.
                 "on_expiry","before":null|"...","after":null|"..."}],
               "budgets":[{"scope":"global"|"classes.<pattern>",
                 "limit":"daily_usd","before":null|N,"after":null|N}],
+              "vocabulary":[{"key":"protected_paths","recognised":true,
+                "before":null|"...","after":null|"[\\"SPEC.md\\"]"}],
+              "vocabularyComparable":true,
               "unchanged":false},
  "load":null|{"ok":true|false,"code":null|"...","message":null|"..."},
  "attestation":null|{"seq":3,"sha256":"<64 hex>"},
@@ -319,6 +344,10 @@ A refusal is `{"ok":false,"error":{"code":"...","message":"..."}}` on stderr.
   appended.
 - `git-failed` — the attestation WAS appended and git then failed; the message
   names the seq and what to run by hand.
+- `push-rejected` — the attestation was appended and committed, and the remote
+  refused the push. The message carries git's own output, the branch, the fact
+  that origin still carries the previous policy, and the pull-request commands
+  that land the commit.
 - `pr-failed` — the attestation was appended, committed and pushed, and
   `gh pr create` then failed.
 - `append-failed` — the attestation append itself failed.

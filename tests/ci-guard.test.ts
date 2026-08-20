@@ -25,7 +25,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
 import { parseHardenedYaml } from "../src/core/policy-load.js";
@@ -171,6 +171,63 @@ test("the light tier's job runs the documentation guard", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The records tier runs every test that reads records (APRV-112)
+// ---------------------------------------------------------------------------
+//
+// The records tier is only defensible while its job runs the whole set the
+// classifier names. Two ways that could rot: the workflow drops a test from
+// its command, or the classifier's list grows and the workflow does not
+// follow. Both are asserted from the two files' own bytes.
+
+test("the records job runs exactly the record-reading tests the classifier names", async () => {
+  const { RECORDS_TESTS } = (await import(
+    pathToFileURL(CLASSIFIER).href
+  )) as { RECORDS_TESTS: readonly string[] };
+  assert.deepEqual(
+    [...RECORDS_TESTS].sort(),
+    ["backlog-fixtures", "docs-guard", "milestones-guard"],
+    "the records tier's test set changed. Every test that reads backlog/** or MILESTONES.md must be in it, or a records-only change ships without the guard that would have caught it.",
+  );
+  const steps = job("records")["steps"];
+  assert.ok(Array.isArray(steps), "the `records` job declares no steps");
+  const commands = steps
+    .map((step) => (typeof step === "object" && step !== null ? (step as Record<string, unknown>)["run"] : undefined))
+    .filter((run): run is string => typeof run === "string");
+  const only = commands.find((run) => run.includes("run-tests.mjs"));
+  assert.ok(only !== undefined, "the `records` job no longer runs the test runner");
+  assert.deepEqual(
+    only.trim().split(/\s+/u).slice(3).sort(),
+    [...RECORDS_TESTS].sort(),
+    `the \`records\` job's command (${only.trim()}) names a different set of tests than scripts/classify-tier.mjs does`,
+  );
+});
+
+test("the records job runs on the Node floor", () => {
+  const steps = job("records")["steps"] as Array<Record<string, unknown>>;
+  const setup = steps.find((step) => String(step["uses"] ?? "").startsWith("actions/setup-node"));
+  assert.ok(setup !== undefined, "the `records` job does not set up Node");
+  assert.equal(
+    Number((setup["with"] as Record<string, unknown>)["node-version"]),
+    20,
+    "the records tier runs one Node version and it must be the floor: the floor is the version nobody develops on, so it is the one a single-version tier should exercise",
+  );
+});
+
+test("run-tests --only refuses a name that matches no built test file", () => {
+  const result = spawnSync(
+    process.execPath,
+    [join(REPO_ROOT, "scripts", "run-tests.mjs"), "--only", "milestones-guard", "no-such-guard"],
+    { encoding: "utf8" },
+  );
+  assert.notEqual(
+    result.status,
+    0,
+    "run-tests.mjs ran a smaller suite than asked for. A renamed test file must fail the tier that exists to run it, never disappear from it.",
+  );
+  assert.match(result.stderr, /no-such-guard/u);
+});
+
+// ---------------------------------------------------------------------------
 // The tier is computed, never asserted
 // ---------------------------------------------------------------------------
 
@@ -191,6 +248,7 @@ test("the tier output is produced by the classifier step alone", () => {
 test("the downstream jobs gate on the computed tier and nothing else", () => {
   for (const [name, expected] of [
     ["doc-guard", "light"],
+    ["records", "records"],
     ["full", "full"],
   ] as const) {
     const condition = job(name)["if"];
@@ -227,6 +285,25 @@ test("a push to main takes the full tier without consulting anything", () => {
   assert.ok(
     !beforeRule.includes("classify-tier.mjs"),
     "the main-branch rule now runs after a classifier invocation; it must short-circuit first",
+  );
+});
+
+test("a merge-queue candidate takes the full tier without consulting anything", () => {
+  // A queue candidate is the next main, so it gets what a push to main gets.
+  // Asserted alongside the push rule because the cheap tiers make skipping the
+  // matrix attractive exactly where it must not be skippable.
+  const rule =
+    /if \[ "\$EVENT_NAME" = "merge_group" \]; then\n\s*echo "merge queue candidate: tier=full, unconditionally"\n\s*echo "tier=full" >> "\$GITHUB_OUTPUT"\n\s*exit 0/u;
+  assert.match(
+    WORKFLOW_TEXT,
+    rule,
+    "the unconditional merge_group full-tier rule is gone from .github/workflows/ci.yml",
+  );
+  const stepStart = WORKFLOW_TEXT.indexOf("- id: tier");
+  const beforeRule = WORKFLOW_TEXT.slice(stepStart, WORKFLOW_TEXT.search(rule));
+  assert.ok(
+    !beforeRule.includes("classify-tier.mjs"),
+    "the merge-queue rule now runs after a classifier invocation; it must short-circuit first",
   );
 });
 
@@ -278,15 +355,17 @@ test("the ci aggregator requires the active tier to have succeeded (APRV-44)", (
   const jobs = doc["jobs"] as Record<string, Record<string, unknown>>;
   const ci = jobs["ci"];
   assert.ok(ci !== undefined, "an aggregator job named ci must exist for branch protection");
-  assert.deepEqual(ci["needs"], ["classify", "doc-guard", "full"]);
+  assert.deepEqual(ci["needs"], ["classify", "doc-guard", "records", "full"]);
   assert.equal(ci["if"], "always()", "the aggregator must run even when tier jobs are skipped");
   const steps = ci["steps"] as Array<Record<string, unknown>>;
   const script = String((steps[steps.length - 1] as Record<string, unknown>)["run"]);
   for (const needle of [
     'if [ "$CLASSIFY_RESULT" != "success" ]',
     'light)',
+    'records)',
     'full)',
     '[ "$DOC_RESULT" = "success" ]',
+    '[ "$RECORDS_RESULT" = "success" ]',
     '[ "$FULL_RESULT" = "success" ]',
     "unrecognized tier",
   ]) {
@@ -294,6 +373,7 @@ test("the ci aggregator requires the active tier to have succeeded (APRV-44)", (
   }
   const env = (steps[steps.length - 1] as Record<string, unknown>)["env"] as Record<string, string>;
   assert.equal(env["DOC_RESULT"], "${{ needs['doc-guard'].result }}");
+  assert.equal(env["RECORDS_RESULT"], "${{ needs.records.result }}");
   assert.equal(env["FULL_RESULT"], "${{ needs.full.result }}");
 });
 

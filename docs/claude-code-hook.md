@@ -96,8 +96,8 @@ The tokenizer understands quotes, backslash escapes and line continuations,
 `VAR=value` prefixes, redirections (including heredocs, whose bodies are data and
 are never classified), the operators `&& || ; | &` and newline, subshell
 parentheses, and `$(…)` command substitution. Every segment of a command line is
-classified, and the command's classes are the union: `git status && curl …` is
-gated as `network.call`.
+classified, and the command's classes are the union: `git status && curl -d … `
+is gated as `network.call`.
 
 ### The rule table
 
@@ -119,7 +119,7 @@ an addition).
 | `git-remote-read` | git | fetch \| ls-remote \| remote | read.vcs.remote |
 | `git-read` | git | blame \| describe \| diff \| grep \| log \| ls-files \| reflog \| rev-list \| rev-parse \| shortlog \| show \| status | read.shell |
 | `gh-release` | gh | release | release.publish |
-| `gh-api` | gh | api \| auth \| gist \| secret \| workflow | network.call |
+| `gh-api` | gh | api \| auth \| gist \| secret \| workflow | read.vcs.remote for a `gh api` with no method flag (or `GET`) and no `-f`/`-F`/`--field`/`--raw-field`/`--input`; every other call, and every other subcommand on the row, network.call |
 | `gh-simple-read` | gh | browse \| search \| status | read.vcs.remote |
 | `gh` | gh | pr \| issue \| repo \| run \| cache | read.vcs.remote for view/list/status/checks/diff; `gh pr create` vcs.pr.open, `gh pr edit/comment/review/ready/close/reopen` vcs.pr.update, `gh pr merge` vcs.push.main, `gh pr checkout` vcs.commit.branch; every other write network.call |
 | `npm-publish` | npm, pnpm, yarn, bun | publish \| version \| deprecate \| dist-tag \| unpublish | release.publish |
@@ -139,7 +139,8 @@ an addition).
 | `workspace-write` | mkdir, cp, mv, touch, tee, ln, chmod, truncate, rmdir | (any) | files.write.workspace |
 | `rm` | rm | (any) | files.write.workspace, files.delete.out_of_scope |
 | `sed` | sed | (any) | read.shell, files.write.workspace |
-| `network` | curl, wget, ssh, scp, sftp, rsync, nc, telnet, ftp, http, httpie | (any) | network.call |
+| `web-fetch` | curl, wget, http, httpie | (any) | read.web for a GET-shaped fetch; network.call for a body, an upload, a non-GET method, or anything ambiguous |
+| `network` | ssh, scp, sftp, rsync, nc, telnet, ftp | (any) | network.call |
 | `read-shell` | basename, cat, cd, cksum, cut, diff, dirname, du, echo, false, file, find, grep, head, jq, ls, md5sum, printf, pwd, readlink, realpath, rg, shasum, sha256sum, sort, stat, tail, test, tr, tree, true, type, uniq, wc, which | (any) | read.shell |
 
 † These rewrites are LOCAL, and the hook refines them against the checkout it
@@ -172,6 +173,38 @@ Four overrides sit on top of the table:
 Stricter-when-unsure, throughout: `git push` with no refspec is `vcs.push.main`,
 an `rm` path holding an unexpanded `$VAR` is `files.delete.out_of_scope`, and a
 remote-branch deletion takes the trunk class rather than the branch one.
+
+### GET-shaped fetches
+
+SPEC.md §7 puts "web fetch, API GET" under `read.*`, and the classifier used to
+answer `network.call` for every curl and every `gh api` alike. In a repository
+whose policy holds `network.call` at manual, that priced a documentation lookup
+at a human decision, and a session doing research generated one approval per
+URL. The rule is narrower now (APRV-114): `curl`, `wget`, `http` and `httpie`
+answer `read.web` when the invocation is GET-shaped, and `gh api` answers
+`read.vcs.remote`, the class `gh pr view` already had.
+
+A fetch is GET-shaped when nothing in it says otherwise. Any of these takes
+`network.call` instead:
+
+- a body or upload flag: `-d`, `--data*`, `--json`, `-F`, `--form*`, `-T`,
+  `--upload-file`, `--post-data`, `--post-file`, `--body-data`, `--body-file`,
+  and for `gh api` the field flags `-f`, `-F`, `--field`, `--raw-field`,
+  `--input`;
+- a method flag naming anything but `GET` or `HEAD`: `-X`, `--request`,
+  `--method`, joined or separate;
+- an httpie method word (`http POST …`) or request item (`http url name=x`);
+- a config file that could hold either: `curl -K`, `--config`;
+- anything unreadable: `-X "$METHOD"`, a method flag with no value, a bare
+  `$VAR` argument, an argument produced by `$(…)`, or a short-flag bundle whose
+  method value is in the next word (`curl -sSX POST`), which this classifier
+  does not unbundle.
+
+The transports (`ssh`, `scp`, `sftp`, `rsync`, `nc`, `telnet`, `ftp`) are
+unchanged and unconditional: what happens at the far end is not written in the
+argv, so there is no read-shaped invocation to carve out. A GET-shaped fetch
+redirected into a file is still `files.write.workspace`, by the `redirect-write`
+override above.
 
 ### Rewriting unpublished history
 

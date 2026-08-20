@@ -204,6 +204,40 @@ test("hook classify --json is the classifier result verbatim", () => {
   assert.deepEqual(parsed["classes"], ["deps.add"]);
 });
 
+test("hook classify reports the read class for a GET-shaped fetch", () => {
+  // APRV-114, end to end: the verb a session is told to run when in doubt has
+  // to show the carve-out, or the carve-out does not exist where it is used.
+  const dir = caseDir();
+  const run = runCli(["hook", "classify", "--", "curl", "https://example.com"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stdout, /^read\.web {2,}web-read {2,}curl https:\/\/example\.com$/mu);
+  assert.match(run.stdout, /^classes: read\.web$/mu);
+});
+
+test("hook classify keeps a body-carrying fetch at network.call", () => {
+  const dir = caseDir();
+  for (const command of ["curl -X POST https://example.com", "curl -d a=b https://example.com"]) {
+    const run = runCli(["hook", "classify", "--json", "--", command], dir);
+    assert.equal(run.code, 0, run.stderr);
+    const parsed = JSON.parse(run.stdout) as Record<string, unknown>;
+    assert.deepEqual(parsed["classes"], ["network.call"], command);
+  }
+});
+
+test("hook classify reads gh api by its method and field flags", () => {
+  const dir = caseDir();
+  const read = runCli(["hook", "classify", "--json", "--", "gh api repos/x/y/pulls"], dir);
+  assert.equal(read.code, 0, read.stderr);
+  assert.deepEqual((JSON.parse(read.stdout) as Record<string, unknown>)["classes"], [
+    "read.vcs.remote",
+  ]);
+  const write = runCli(["hook", "classify", "--json", "--", "gh api -X POST repos/x/y/issues"], dir);
+  assert.equal(write.code, 0, write.stderr);
+  assert.deepEqual((JSON.parse(write.stdout) as Record<string, unknown>)["classes"], [
+    "network.call",
+  ]);
+});
+
 test("hook classify reports a refusal without failing", () => {
   const dir = caseDir();
   const run = runCli(["hook", "classify", "--json", "--", "bash -c 'rm -rf /'"], dir);
@@ -274,6 +308,28 @@ test("an autonomous command is allowed with no log growth", () => {
   assert.equal(verdict.permission, "allow");
   assert.match(verdict.reason, /^autonomous: /u);
   assert.equal(rawLog(dir), before, "an autonomous action has no approval lifecycle");
+});
+
+test("a GET-shaped fetch runs unattended, and a POST-shaped one does not", () => {
+  // APRV-114: the noise this refinement exists to remove. A research fetch is
+  // a read under the policy's `read.*` rule and asks nobody; the same binary
+  // carrying a body is still held at manual.
+  const dir = ready();
+  const before = rawLog(dir);
+  const read = runCli(["hook", "claude-code"], dir, bashEvent("curl -sS https://example.com"));
+  const verdict = verdictOf(read);
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /^autonomous: /u);
+  assert.equal(rawLog(dir), before, "a read fetch has no approval lifecycle");
+
+  const write = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("curl -X POST https://example.com", "tu-post"),
+  );
+  assert.equal(verdictOf(write).permission, "deny");
+  assert.match(rawLog(dir), /"class":"network\.call"/u);
+  assertClean(dir);
 });
 
 test("the approval CLI itself is pass-through", () => {
@@ -374,7 +430,7 @@ test("a rejected request denies with hook-rejected", () => {
   const run = runCli(
     ["hook", "claude-code", "--timeout", "20s", "--interval", "100ms"],
     dir,
-    bashEvent("curl -sS https://example.com", "tu-reject"),
+    bashEvent("curl -X POST https://example.com", "tu-reject"),
   );
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "deny");
@@ -643,7 +699,7 @@ test("a mixed command gates on the strictest class it contains", () => {
   const run = runCli(
     ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
     dir,
-    bashEvent("git status && curl -sS https://example.com", "tu-mixed"),
+    bashEvent("git status && curl -d a=b https://example.com", "tu-mixed"),
   );
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "deny");
