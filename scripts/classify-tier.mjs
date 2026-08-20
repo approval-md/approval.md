@@ -165,7 +165,9 @@ export function normalizePath(raw) {
   if (typeof raw !== "string") return null;
   let path = raw.trim().replaceAll("\\", "/");
   if (path.startsWith('"') && path.endsWith('"') && path.length > 1) {
-    // git quotes paths containing unusual bytes; such a path is never prose.
+    // A C-quoted path, which the git sources above no longer produce (they
+    // read NUL-delimited output). Anything still arriving in this shape came
+    // from a caller this classifier cannot vouch for, so it is refused.
     return null;
   }
   while (path.startsWith("./")) path = path.slice(2);
@@ -277,11 +279,24 @@ function workingTreePaths() {
   return paths;
 }
 
-/** Changed paths between `base` and HEAD. `null` on error. */
+/**
+ * Changed paths between `base` and HEAD. `null` on error.
+ *
+ * `-z` is load-bearing (APRV-128). Without it git renders any path holding a
+ * byte outside printable ASCII in C-quoted form, `"backlog/tasks/aprv-103 -
+ * \302\247.md"`, which {@link normalizePath} refuses to reason about; a
+ * pure-records diff then classified full because one task filename contained a
+ * section sign (observed on PR 109, 2026-08-20). Failing closed was right, so
+ * the fix is upstream of the refusal: NUL-delimited output is neither quoted
+ * nor escaped, so real record filenames reach the path rules intact. It is
+ * preferred over `-c core.quotepath=false` because it also survives a newline
+ * in a filename, which quotepath-off would emit as two apparent paths. The
+ * refusal stays for whatever still cannot be parsed.
+ */
 function basePaths(base) {
-  const out = git(["diff", "--name-only", `${base}...HEAD`]);
+  const out = git(["diff", "-z", "--name-only", `${base}...HEAD`]);
   if (out === null) return null;
-  return out.split("\n").filter((line) => line !== "");
+  return out.split("\0").filter((field) => field !== "");
 }
 
 // ---------------------------------------------------------------------------

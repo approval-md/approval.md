@@ -19,7 +19,16 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
@@ -185,6 +194,34 @@ test("an empty path set is full rather than records", () => {
   assert.equal(json().tier, "full");
 });
 
+// ---------------------------------------------------------------------------
+// Record filenames git has to escape (APRV-128)
+// ---------------------------------------------------------------------------
+//
+// The names below are the two shapes that broke, pinned as fixtures: a section
+// sign (a real task filename, `aprv-103 ... §10.1 ...`, which classified a
+// pure-records diff full on PR 109) and a space next to a double quote. Both
+// are ordinary records; nothing about how git chooses to render a path may
+// change which tier its change set takes.
+
+const AWKWARD_RECORDS: readonly string[] = [
+  "backlog/tasks/aprv-103 - hold-the-line-on-SPEC-§10.1.md",
+  'backlog/docs/a "quoted" note.md',
+];
+
+for (const path of AWKWARD_RECORDS) {
+  test(`a record named ${path} is still a record`, () => {
+    assert.equal(tier(path), "records");
+  });
+}
+
+test("a records-only change set of awkwardly named files takes the records tier", () => {
+  const verdict = json(...AWKWARD_RECORDS);
+  assert.equal(verdict.tier, "records");
+  assert.equal(verdict.reason, "all-paths-in-records-set");
+  assert.deepEqual(verdict.paths, [...AWKWARD_RECORDS]);
+});
+
 test("a path that merely looks like a record is not one", () => {
   for (const impostor of [
     "backlog.md",
@@ -307,4 +344,69 @@ test("an unreadable git state resolves to full with the reason named", () => {
 
 test("explicit paths win over the git sources, so a caller cannot be surprised", () => {
   assert.equal(tier("--working-tree", "README.md"), "light");
+});
+
+test("a C-quoted path is refused, which is the branch that fails closed", () => {
+  // The git sources no longer produce this shape (APRV-128 made them read
+  // NUL-delimited output), and the refusal it triggers is kept anyway: a path
+  // arriving pre-escaped came from somewhere this classifier cannot vouch for,
+  // and an escaped name is not a name it can match rules against.
+  const quoted = '"backlog/tasks/aprv-103 - \\302\\247.md"';
+  const verdict = json(quoted);
+  assert.equal(verdict.tier, "full");
+  assert.deepEqual(verdict.forcedBy, [{ path: quoted, rule: "unparseable-path" }]);
+});
+
+test("a records-only diff of awkwardly named files classifies records through git", () => {
+  // The end-to-end case for APRV-128, and the only way to exercise the git
+  // path source with filenames of our choosing: the classifier classifies the
+  // repository it lives in, so a copy of it inside a throwaway repository puts
+  // a real `git diff` of real files in front of the real code path. Before the
+  // `-z` change this printed `full`, because git rendered the section sign
+  // C-quoted and the quoted path was (correctly) refused.
+  // realpath: on macOS the temp root is itself a symlink, and the script runs
+  // its CLI only when argv[1] resolves to its own module URL.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "classify-tier-")));
+  const gitIn = (args: readonly string[]): string => {
+    const result = spawnSync("git", [...args], { cwd: dir, encoding: "utf8" });
+    assert.equal(result.status, 0, `git ${args.join(" ")} failed: ${result.stderr}`);
+    return result.stdout;
+  };
+  try {
+    gitIn(["init", "-q"]);
+    gitIn(["config", "user.email", "tier@example.invalid"]);
+    gitIn(["config", "user.name", "tier test"]);
+    mkdirSync(join(dir, "scripts"), { recursive: true });
+    copyFileSync(SCRIPT, join(dir, "scripts", "classify-tier.mjs"));
+    gitIn(["add", "-A"]);
+    gitIn(["commit", "-qm", "base"]);
+    const base = gitIn(["rev-parse", "HEAD"]).trim();
+
+    for (const name of AWKWARD_RECORDS) {
+      mkdirSync(dirname(join(dir, name)), { recursive: true });
+      writeFileSync(join(dir, name), "a record\n");
+    }
+    gitIn(["add", "-A"]);
+    gitIn(["commit", "-qm", "records only"]);
+
+    const result = spawnSync(
+      process.execPath,
+      [join(dir, "scripts", "classify-tier.mjs"), "--base", base, "--json"],
+      { cwd: dir, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, `classify-tier failed: ${result.stderr}`);
+    const verdict = JSON.parse(result.stdout) as Verdict;
+    assert.deepEqual(
+      [...verdict.paths].sort(),
+      [...AWKWARD_RECORDS].sort(),
+      "git's rendering of a filename reached the path rules altered; the diff must be read NUL-delimited so a record's real name is what gets classified",
+    );
+    assert.equal(
+      verdict.tier,
+      "records",
+      "a diff of nothing but records classified as something else because of how its filenames are spelled",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
