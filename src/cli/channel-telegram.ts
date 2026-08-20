@@ -112,10 +112,15 @@ import {
   type TagOptions,
 } from "../channels/tagging.js";
 import {
+  decidedLine,
+  isTelegramTerminalState,
   TelegramChannel,
   telegramChatEnvFor,
   telegramTokenEnvFor,
+  TELEGRAM_TERMINAL_HEADLINES,
+  utcClock,
   type TelegramConfig,
+  type TelegramTerminalState,
 } from "../channels/telegram.js";
 import { loadPolicy } from "../core/policy-load.js";
 import { payloadOf, readVerifiedRecords, requestState } from "../core/state.js";
@@ -380,14 +385,21 @@ export interface DispatchState {
   /** `<action key>:<code>` skips already reported, so cycles do not repeat them. */
   readonly warned: Set<string>;
   /**
-   * Keys this process has already retracted on the approver's phone
-   * (APRV-106). In memory, like `delivered`, and for the same reason: it stops
-   * a second edit of the same message, and its loss costs a duplicate edit at
-   * worst. A fresh listener never sends a withdrawn request in the first place
-   * — `buildPendingQueue` re-derives from the verified log and `withdrawn` is
-   * not `requested` — so there is nothing for a restart to miss.
+   * Keys this process has already annotated on the approver's phone (APRV-106
+   * for withdrawal, APRV-113 for every other terminal state). In memory, like
+   * `delivered`, and for the same reason: it stops a second edit of the same
+   * message, and its loss costs a duplicate edit at worst.
+   *
+   * The memory that matters here is `delivered`, and losing it degrades to
+   * un-annotated messages, NEVER to wrong annotations: a process that does not
+   * remember sending a message cannot edit it, and one that does re-reads the
+   * outcome from the verified log every cycle. A fresh listener also never
+   * sends a settled request in the first place — `buildPendingQueue` re-derives
+   * from the verified log and only `requested` is pending — so a restart leaves
+   * stale text on old messages whose buttons the gate refuses anyway, and
+   * nothing worse.
    */
-  readonly retracted: Set<string>;
+  readonly annotated: Set<string>;
 }
 
 export function newDispatchState(): DispatchState {
@@ -395,7 +407,7 @@ export function newDispatchState(): DispatchState {
     delivered: new Map(),
     attempts: new Map(),
     warned: new Set(),
-    retracted: new Set(),
+    annotated: new Set(),
   };
 }
 
@@ -410,20 +422,41 @@ export interface DispatchResult {
    * verify. Nothing was sent. Fatal at startup, retried on later cycles.
    */
   queueError?: { code: ChannelTagRefusalCode; message: string };
-  /** Deliveries annotated as withdrawn and disarmed this cycle (APRV-106). */
-  retracted: { action_key: string; delivery_id: DeliveryId }[];
+  /**
+   * Deliveries annotated with their terminal outcome and disarmed this cycle
+   * (APRV-106 for `withdrawn`, APRV-113 for the rest).
+   */
+  annotated: { action_key: string; delivery_id: DeliveryId; outcome: TelegramTerminalState }[];
 }
 
-/** A delivery whose request the log now says was withdrawn (APRV-106). */
-interface WithdrawnDelivery {
+/** A delivery whose request the log now says is settled (APRV-106, APRV-113). */
+interface TerminalDelivery {
   actionKey: string;
   deliveryId: DeliveryId;
-  /** The line the approver reads on the edited message. */
-  reason: string;
+  /** Which terminal state the verified log derived. Chooses the headline. */
+  outcome: TelegramTerminalState;
+  /** The lines the approver reads under the headline on the edited message. */
+  detail: string[];
 }
 
+/** The event that records each terminal state, for finding the settling record. */
+const TERMINAL_EVENT: Record<TelegramTerminalState, string> = {
+  granted: "approval.granted",
+  rejected: "approval.rejected",
+  revoked: "approval.revoked",
+  expired: "approval.expired",
+  withdrawn: "approval.withdrawn",
+};
+
 /**
- * Which of this process's deliveries the log says are withdrawn (APRV-106).
+ * Which of this process's deliveries the log says are settled (APRV-113,
+ * generalizing APRV-106's withdrawal-only pass).
+ *
+ * This is the cross-surface half of the feature. A request answered at the CLI
+ * or on the web queue, revoked afterwards, or expired by the daemon, leaves a
+ * chat prompt that this process delivered and that nothing else will ever
+ * correct — so every cycle asks the verified log what became of each message it
+ * sent, and annotates the ones that are over.
  *
  * Reads only VERIFIED records (SPEC.md §11.1(1)). A channel edit is not an
  * enforcement decision, but it is a statement to a human about what the log
@@ -431,49 +464,79 @@ interface WithdrawnDelivery {
  * a smaller hat.
  *
  * Never throws: an unreadable or unverifiable log yields an empty list, and the
- * cycle's own `queueError` path already reports that failure. Retracting on a
+ * cycle's own `queueError` path already reports that failure. Annotating from a
  * log this process could not verify would be worse than leaving the message.
  */
-function withdrawnDeliveries(
+function terminalDeliveries(
   setup: ListenSetup,
   state: DispatchState,
   now: string,
-): WithdrawnDelivery[] {
+): TerminalDelivery[] {
   if (state.delivered.size === 0) return [];
   const read = readVerifiedRecords(setup.logPath);
   if (!read.ok) return [];
 
-  const gone: WithdrawnDelivery[] = [];
+  const settled: TerminalDelivery[] = [];
   for (const [actionKey, deliveryId] of state.delivered) {
-    // `ttlMs: null` is correct here rather than lazy. A withdrawal SETTLES the
-    // request, so the derivation returns `withdrawn` before it ever reaches the
-    // TTL arithmetic, and the only question this loop asks is "withdrawn or
-    // not". Loading the policy to answer a question that cannot depend on it
-    // would make a cosmetic edit depend on a file read that can fail.
+    // `ttlMs: null` is correct here rather than lazy, and it is the reason this
+    // pass annotates the daemon's `approval.expired` but not a TTL that has
+    // merely lapsed by arithmetic: an annotation states what the LOG says, and
+    // a lazily-expired request has no record saying anything yet. Loading the
+    // policy to compute a deadline would also make a cosmetic edit depend on a
+    // file read that can fail. The armed message left behind is refused at the
+    // gate, and gets its annotation on the cycle after the daemon writes.
     const derivation = requestState(read.records, actionKey, now, null);
-    if (derivation.state !== "withdrawn") continue;
+    if (!isTelegramTerminalState(derivation.state)) continue;
+    const outcome = derivation.state;
     const record = read.records.find(
-      (entry) => entry.seq === derivation.decisionSeq && entry.event === "approval.withdrawn",
+      (entry) =>
+        entry.seq === derivation.decisionSeq && entry.event === TERMINAL_EVENT[outcome],
     );
     const payload = record === undefined ? {} : payloadOf(record);
-    const why = typeof payload["reason"] === "string" ? payload["reason"] : "withdrawn";
     const at = record === undefined ? now : record.ts;
-    const note = typeof payload["note"] === "string" ? `\n${payload["note"]}` : "";
-    gone.push({
+    const seq = record?.seq ?? derivation.decisionSeq;
+
+    if (outcome === "withdrawn") {
+      const why = typeof payload["reason"] === "string" ? payload["reason"] : "withdrawn";
+      const note = typeof payload["note"] === "string" ? `\n${payload["note"]}` : "";
+      settled.push({
+        actionKey,
+        deliveryId,
+        outcome,
+        // APRV-106's exact line, unchanged: it is what the approver reads.
+        detail: [`withdrawn by the requester at ${utcClock(at)} (${why}) · nothing to do${note}`],
+      });
+      continue;
+    }
+
+    if (outcome === "expired") {
+      settled.push({
+        actionKey,
+        deliveryId,
+        outcome,
+        detail: [
+          `no answer arrived before the deadline · recorded at ${utcClock(at)}${
+            seq === null ? "" : ` (seq ${seq})`
+          }`,
+        ],
+      });
+      continue;
+    }
+
+    // granted / rejected / revoked: a human answered, somewhere. The actor is
+    // the log's, never this listener's configured identity — the answer may
+    // have come from another surface entirely.
+    settled.push({
       actionKey,
       deliveryId,
-      reason: `withdrawn by the requester at ${clockOf(at)} (${why}) · nothing to do${note}`,
+      outcome,
+      detail:
+        record === undefined
+          ? [`recorded at ${utcClock(at)}`]
+          : [decidedLine(record.actor, record.ts, record.seq)],
     });
   }
-  return gone;
-}
-
-/** `HH:MM UTC`, or the raw instant when it does not parse. */
-function clockOf(ts: string): string {
-  const ms = Date.parse(ts);
-  if (Number.isNaN(ms)) return ts;
-  const at = new Date(ms);
-  return `${String(at.getUTCHours()).padStart(2, "0")}:${String(at.getUTCMinutes()).padStart(2, "0")} UTC`;
+  return settled;
 }
 
 /**
@@ -491,7 +554,7 @@ export async function dispatchPending(
   state: DispatchState,
   now: string,
 ): Promise<DispatchResult> {
-  const result: DispatchResult = { delivered: [], failed: [], retracted: [] };
+  const result: DispatchResult = { delivered: [], failed: [], annotated: [] };
 
   const queue = buildPendingQueue(setup.logPath, setup.tagOptions, now);
   if (!queue.ok) {
@@ -499,35 +562,48 @@ export async function dispatchPending(
     return result;
   }
 
-  // APRV-106, before the sends. A request this process delivered and that the
-  // log now says was withdrawn gets its message annotated and its buttons
-  // taken away, so the approver's phone stops offering a decision nobody is
-  // waiting on. The withdrawal itself is derived from the VERIFIED log by
-  // `withdrawnDeliveries`, not remembered here; this state only prevents a
-  // second edit of the same message.
-  for (const gone of withdrawnDeliveries(setup, state, now)) {
-    if (state.retracted.has(gone.actionKey)) continue;
-    state.retracted.add(gone.actionKey);
-    if (setup.channel.retract === undefined) continue;
+  // APRV-106 (withdrawal) generalized by APRV-113 (every terminal state),
+  // before the sends. A request this process delivered and that the log now
+  // says is settled — granted or rejected at any surface, revoked, expired by
+  // the daemon, or withdrawn by its requester — gets its message annotated with
+  // that outcome and its buttons taken away, so the approver's phone stops
+  // showing a decided question as a live one. What became of it is derived from
+  // the VERIFIED log by `terminalDeliveries`, never remembered here; this state
+  // only prevents a second edit of the same message.
+  for (const settled of terminalDeliveries(setup, state, now)) {
+    if (state.annotated.has(settled.actionKey)) continue;
+    state.annotated.add(settled.actionKey);
     try {
-      await setup.channel.retract(gone.deliveryId, gone.reason);
-      result.retracted.push({ action_key: gone.actionKey, delivery_id: gone.deliveryId });
+      await setup.channel.annotate(
+        settled.deliveryId,
+        TELEGRAM_TERMINAL_HEADLINES[settled.outcome],
+        settled.detail,
+      );
+      result.annotated.push({
+        action_key: settled.actionKey,
+        delivery_id: settled.deliveryId,
+        outcome: settled.outcome,
+      });
       if (setup.json) {
         streams.out(
           `${JSON.stringify({
-            event: "retracted",
-            action_key: gone.actionKey,
-            delivery_id: gone.deliveryId,
+            event: "annotated",
+            action_key: settled.actionKey,
+            delivery_id: settled.deliveryId,
+            outcome: settled.outcome,
           })}\n`,
         );
       } else {
-        streams.out(`retracted ${gone.actionKey} (message ${gone.deliveryId}): withdrawn\n`);
+        streams.out(
+          `annotated ${settled.actionKey} (message ${settled.deliveryId}): ${settled.outcome}\n`,
+        );
       }
     } catch (cause) {
       // Cosmetic, and said so on stderr. The gate refuses a tap on the stale
-      // buttons anyway (`request-withdrawn`), so nothing can be decided.
+      // buttons anyway (`already-decided`, `request-withdrawn`, `expired`), so
+      // nothing can be decided by one.
       streams.err(
-        `approval: telegram could not annotate the withdrawn ${gone.actionKey} (message ${gone.deliveryId}): ${
+        `approval: telegram could not annotate the ${settled.outcome} ${settled.actionKey} (message ${settled.deliveryId}): ${
           cause instanceof Error ? cause.message : String(cause)
         } — the buttons are stale but the gate refuses a tap on them\n`,
       );

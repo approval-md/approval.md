@@ -102,6 +102,38 @@
  * Approve/Reject keyboard, all sharing one batch delivery id so every resulting
  * event carries it and audit granularity survives. What is missing is the
  * ergonomics (one tap for five requests), never the semantics.
+ *
+ * Because a batch is one message per member, the terminal annotation below is
+ * already per member: deciding one member edits that member's own message and
+ * leaves the others armed, and the last one decided leaves no armed message
+ * behind. There is no shared keyboard to re-render, and the channel holds no
+ * per-member state to re-render one from.
+ *
+ * ## Every terminal state edits its message (APRV-113)
+ *
+ * A decided prompt used to look exactly like a pending one: the tap toasted,
+ * and the message kept its text and its live buttons. So did a request answered
+ * at the CLI or the web queue while the chat prompt was up, and so did one the
+ * daemon expired. The chat transcript — the thing the approver actually scrolls
+ * — said "APPROVAL REQUIRED" about a question that had been settled hours ago.
+ *
+ * Every terminal state this process observes for a message it delivered now
+ * edits that message: {@link TelegramChannel.annotate} replaces the text with
+ * the outcome and clears the keyboard in ONE `editMessageText`, and forgets the
+ * delivery so a tap on a button the edit did not remove refuses rather than
+ * decides. {@link TelegramChannel.retract} is the withdrawal case of it.
+ *
+ * Two properties this keeps, deliberately:
+ *
+ * - **It is not state.** The map this consults is delivery bookkeeping, and
+ *   annotating removes from it rather than adding. Losing it (a restart)
+ *   degrades to a message that is never annotated — stale text in front of a
+ *   human whose gate still refuses every tap on it — and never to a message
+ *   annotated with the wrong outcome, because every outcome word comes from the
+ *   verified log at the moment it is written.
+ * - **The token is never in an edit.** An annotation carries the outcome word,
+ *   the action key, who decided, when, and the record's seq. It never carries
+ *   the execution token, for the reason spelled out above.
  */
 
 import type {
@@ -145,6 +177,54 @@ export const TELEGRAM_MAX_CALLBACK_BYTES = 64;
 
 /** The note recorded on a rejection collected from a button. */
 export const TELEGRAM_REJECT_NOTE = "rejected via telegram";
+
+/**
+ * The headline each terminal state puts on the message it settles (APRV-113).
+ *
+ * Keyed by `core/state.ts`'s `RequestState` names for the terminal states, so
+ * the caller that derived the state from the verified log picks a word by
+ * indexing rather than by re-deciding what happened.
+ *
+ * Glyphs, not emoji: `✓`/`✗` are the vocabulary `cli/style.ts` uses for the
+ * same ok/fail distinction, and every line of *message text* this channel
+ * writes ("APPROVAL REQUIRED", "FULL PAYLOAD", "WITHDRAWN") is emoji-free. The
+ * emoji live on the button labels, which are a different surface and stay as
+ * they are. `withdrawn` keeps the exact wording APRV-106 shipped.
+ */
+export const TELEGRAM_TERMINAL_HEADLINES = {
+  granted: "✓ APPROVED",
+  rejected: "✗ REJECTED",
+  revoked: "✗ REVOKED — the grant was taken back",
+  expired: "✗ EXPIRED — the approval window closed",
+  withdrawn: "WITHDRAWN — no decision is needed",
+} as const;
+
+/** A state {@link TELEGRAM_TERMINAL_HEADLINES} has a word for. */
+export type TelegramTerminalState = keyof typeof TELEGRAM_TERMINAL_HEADLINES;
+
+/** Whether a derived request state is one an annotation can settle a message on. */
+export function isTelegramTerminalState(state: string): state is TelegramTerminalState {
+  return Object.prototype.hasOwnProperty.call(TELEGRAM_TERMINAL_HEADLINES, state);
+}
+
+/**
+ * `HH:MM UTC`, or the raw instant when it does not parse.
+ *
+ * UTC and not a local zone: the listener, the approver's phone and the log can
+ * all be in different places, and the log's own timestamps are UTC. A clock a
+ * reader can line up against `approval log` beats one that matches their wrist.
+ */
+export function utcClock(ts: string): string {
+  const ms = Date.parse(ts);
+  if (Number.isNaN(ms)) return ts;
+  const at = new Date(ms);
+  return `${String(at.getUTCHours()).padStart(2, "0")}:${String(at.getUTCMinutes()).padStart(2, "0")} UTC`;
+}
+
+/** The "who decided, when, and which record says so" line of an annotation. */
+export function decidedLine(actor: string, ts: string, seq: number): string {
+  return `by ${actor} at ${utcClock(ts)} (seq ${seq})`;
+}
 
 /** Room left under {@link TELEGRAM_MAX_MESSAGE_CHARS} for our own markup. */
 const SEGMENT_BUDGET = 3600;
@@ -756,40 +836,60 @@ export class TelegramChannel implements TestableChannel {
   }
 
   /**
-   * Edit a delivered message to say its question is gone, and remove the
-   * buttons (APRV-106).
+   * Forget every nonce issued for `deliveryId`, and report the action key it
+   * was issued for.
+   *
+   * Called by {@link annotate} before the edit goes out, so a tap on a button
+   * the edit does not manage to remove resolves to nothing and is answered as
+   * an `unknown-callback` rather than carried to the gate as a decision
+   * attempt. Forgetting is never the channel growing state.
+   */
+  private disarm(deliveryId: DeliveryId): string {
+    let actionKey = "";
+    // Deleting the current entry mid-iteration is defined behaviour for a Map,
+    // and every nonce for this message id goes — a re-notify of the same
+    // message would otherwise leave an older nonce still resolving.
+    for (const [nonce, delivery] of this.deliveries) {
+      if (delivery.deliveryId !== deliveryId) continue;
+      actionKey = delivery.actionKey;
+      this.deliveries.delete(nonce);
+    }
+    return actionKey;
+  }
+
+  /**
+   * Edit a delivered message to say what became of its question, and remove the
+   * buttons (APRV-106 for withdrawal, generalized in APRV-113 to every terminal
+   * state).
    *
    * ONE `editMessageText` call, not two. Telegram's `editMessageText` replaces
    * the reply markup along with the text, and omitting `reply_markup` clears
    * it — so the annotation and the disarming land together, and there is no
-   * window in which the message reads "withdrawn" and still offers a tap.
+   * window in which the message reads "approved" and still offers a tap.
    *
    * The text is REPLACED rather than appended to, because this class does not
    * remember what it sent (it remembers a nonce and a message id) and refetching
    * a message to append to it would be the channel reconstructing state it is
-   * not supposed to hold. What the approver keeps is the action key and the
-   * reason, which is what a chat transcript needs to stay readable.
+   * not supposed to hold. What the approver keeps is the outcome, the action key
+   * and the detail lines, which is what a chat transcript needs to stay readable.
+   *
+   * `outcome` is a headline word (see {@link TELEGRAM_TERMINAL_HEADLINES}) and
+   * `detail` the lines under it; both are HTML-escaped here, and neither may
+   * carry an execution token — no caller in this repository has one to give,
+   * since {@link DecisionOutcome} deliberately does not carry it.
    *
    * Best effort: {@link TelegramApiError} propagates to the caller, which logs
    * it and carries on. A message that could not be edited is a cosmetic
-   * problem — the request is already withdrawn in the log, so a tap on the
-   * stale buttons is refused by the gate and answered with the refusal toast.
+   * problem — the log has already settled the request, so a tap on the stale
+   * buttons is refused by the gate and answered with the refusal toast.
    */
-  async retract(deliveryId: DeliveryId, reason: string): Promise<void> {
-    let actionKey = "";
-    for (const [nonce, delivery] of this.deliveries) {
-      if (delivery.deliveryId !== deliveryId) continue;
-      actionKey = delivery.actionKey;
-      // The nonce stops resolving, so a tap on a button the edit did not manage
-      // to remove is an `unknown-callback` rather than a decision attempt.
-      this.deliveries.delete(nonce);
-      break;
-    }
+  async annotate(deliveryId: DeliveryId, outcome: string, detail: string[]): Promise<void> {
+    const actionKey = this.disarm(deliveryId);
     const text = [
-      "<b>WITHDRAWN — no decision is needed</b>",
+      `<b>${escapeHtml(outcome)}</b>`,
       `<code>${escapeHtml(actionKey)}</code>`,
       "",
-      escapeHtml(reason),
+      ...detail.map((entry) => escapeHtml(entry)),
     ].join("\n");
     await this.call("editMessageText", {
       chat_id: this.chatId,
@@ -798,6 +898,14 @@ export class TelegramChannel implements TestableChannel {
       parse_mode: "HTML",
       disable_web_page_preview: true,
     });
+  }
+
+  /**
+   * The withdrawal case of {@link annotate} (APRV-106), and the one the
+   * {@link Channel} interface names. Its wording is unchanged.
+   */
+  async retract(deliveryId: DeliveryId, reason: string): Promise<void> {
+    await this.annotate(deliveryId, TELEGRAM_TERMINAL_HEADLINES.withdrawn, [reason]);
   }
 
   // -------------------------------------------------------------------------
@@ -923,7 +1031,11 @@ export class TelegramChannel implements TestableChannel {
         callbackId,
         "unknown-callback",
         `no delivery for nonce ${JSON.stringify(parsed.nonce)} (a restarted listener forgets its buttons; the pending queue is re-sent on start)`,
-        "This request is unknown to the running listener — check the newest message.",
+        // Two ways to get here, and the reply has to serve both: a button this
+        // process never issued (a restart forgot it), and a button on a message
+        // this process has already annotated (APRV-113 forgets the nonce with
+        // the edit). Either way the message text is the thing to read.
+        "This button is no longer live — read the message for the outcome, or the newest message for the request.",
       );
       return;
     }
@@ -966,6 +1078,32 @@ export class TelegramChannel implements TestableChannel {
     this.counters.decisions += 1;
     result.outcomes.push({ action_key: delivery.actionKey, outcome });
     await this.answer(callbackId, this.answerFor(decision, outcome));
+
+    // APRV-113. The tap is now visible in the transcript, not only in a toast
+    // that vanishes. The outcome word comes from the record the gate actually
+    // appended, so a refused tap (already decided, withdrawn, expired) edits
+    // nothing and the message keeps whatever the poll cycle later gives it.
+    //
+    // AFTER the toast, and never before it: the toast is the thing the tapping
+    // human is waiting on, and a slow edit must not delay it. Best effort in
+    // the same sense `retract` is — a failed edit is complained about and
+    // dropped, because the decision is already in the log and nothing about it
+    // depends on a chat message being redrawn.
+    if (!outcome.ok) return;
+    const record = outcome.record;
+    const headline =
+      outcome.decision === "grant"
+        ? TELEGRAM_TERMINAL_HEADLINES.granted
+        : TELEGRAM_TERMINAL_HEADLINES.rejected;
+    try {
+      await this.annotate(delivery.deliveryId, headline, [
+        decidedLine(record.actor, record.ts, record.seq),
+      ]);
+    } catch (cause) {
+      this.complain(
+        `approval: telegram could not annotate the decided ${delivery.actionKey} (message ${delivery.deliveryId}): ${this.describe(cause)} — the decision is recorded; only the message is stale`,
+      );
+    }
   }
 
   /**
