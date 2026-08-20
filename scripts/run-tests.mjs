@@ -45,9 +45,9 @@ function collectTestFiles(dir) {
   return files;
 }
 
-const files = collectTestFiles(TEST_DIR).sort();
+const discovered = collectTestFiles(TEST_DIR).sort();
 
-if (files.length === 0) {
+if (discovered.length === 0) {
   console.error(
     `run-tests: no *.test.js files found under ${relative(REPO_ROOT, TEST_DIR)}; ` +
       "did the build run? Refusing to report success on an empty suite.",
@@ -55,7 +55,42 @@ if (files.length === 0) {
   process.exit(1);
 }
 
-console.error(`run-tests: ${files.length} test files discovered`);
+/**
+ * `--only <name>...` runs a named subset, which is how the records tier
+ * (APRV-112) reaches the tests that read the project's records without
+ * duplicating discovery. Names are base names without the `.test.js` suffix.
+ * A name that matches nothing is a hard failure, never a quietly smaller run:
+ * a renamed test file must not silently drop out of the tier that exists to
+ * run it.
+ */
+let files = discovered;
+const argv = process.argv.slice(2);
+if (argv.length > 0) {
+  if (argv[0] !== "--only") {
+    console.error(`run-tests: unknown option ${argv[0]}; usage: run-tests.mjs [--only <name>...]`);
+    process.exit(1);
+  }
+  const names = argv.slice(1);
+  if (names.length === 0) {
+    console.error("run-tests: --only requires at least one test name");
+    process.exit(1);
+  }
+  const byName = new Map(
+    discovered.map((file) => [file.slice(TEST_DIR.length + 1, -".test.js".length), file]),
+  );
+  const missing = names.filter((name) => !byName.has(name));
+  if (missing.length > 0) {
+    console.error(
+      `run-tests: --only named ${missing.join(", ")}, which matched no built test file. ` +
+        "Refusing to run a smaller suite than was asked for.",
+    );
+    process.exit(1);
+  }
+  files = names.map((name) => byName.get(name));
+  console.error(`run-tests: ${files.length} of ${discovered.length} test files selected by --only`);
+} else {
+  console.error(`run-tests: ${files.length} test files discovered`);
+}
 
 const result = spawnSync(process.execPath, ["--test", ...files], {
   cwd: REPO_ROOT,

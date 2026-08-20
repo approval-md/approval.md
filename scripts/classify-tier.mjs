@@ -15,6 +15,11 @@
  * else is full, including the empty set, an unreadable git state, and any path
  * shape the matcher does not understand. Ambiguity resolves to full, always.
  *
+ * A third tier, `records` (APRV-112), covers the project's own records: the
+ * Backlog.md tree and the milestone map those records are checked against. It
+ * is chosen only when *every* changed path is a record, and it runs every test
+ * that reads records. See {@link RECORDS_ALLOWLIST}.
+ *
  * The configuration is this file, deliberately. A tiering config living in its
  * own data file would be a markdown-adjacent thing an edit could plausibly be
  * argued into the light tier; keeping it inline means `scripts/**` on the
@@ -51,11 +56,17 @@ export const LIGHT_ALLOWLIST = Object.freeze([
  * because the file is instruction-bearing, frozen, or load-bearing for the
  * checks themselves; a markdown extension does not make any of them prose.
  *
- * `backlog/**` is the subtle one. Backlog task files are markdown, and read
- * like documentation, but their acceptance criteria are commands to future
- * worker agents. Editing a pending task's criteria changes what an agent will
- * later do, which is a behavioral change wearing a documentation extension.
- * It never rides the light tier.
+ * `backlog/**` is the subtle one, and APRV-112 narrowed what its presence
+ * here means. Backlog task files are markdown, and read like documentation,
+ * but their acceptance criteria are commands to future worker agents. Editing
+ * a pending task's criteria changes what an agent will later do, which is a
+ * behavioral change wearing a documentation extension, so it never rides the
+ * light tier: the light tier runs the docs guard, which cannot observe a task
+ * file at all. What that argument actually demands is that every test which
+ * READS records runs, and that is exactly the records tier below. The
+ * protection that mattered here, drift between the records and the guards
+ * that read them, is preserved; what is dropped is the 1800-test matrix on
+ * two Node majors, none of which can observe a task file.
  */
 export const FULL_TIER_DENYLIST = Object.freeze([
   "APPROVAL.md",
@@ -74,6 +85,26 @@ export const FULL_TIER_DENYLIST = Object.freeze([
   "cli.js",
 ]);
 
+/**
+ * The records set: the project's own bookkeeping, plus the one file outside
+ * `backlog/` that a records-reading guard checks the records against.
+ *
+ * `MILESTONES.md` is in here because `tests/milestones-guard.test.ts` reads it
+ * in the same breath as `backlog/tasks/` and `backlog/milestones/`: the guard
+ * asserts the two agree, so the pair is one editable unit and splitting it
+ * across tiers would mean half a rename runs the guard and half does not. It
+ * was verified by reading the guards: MILESTONES.md has exactly one reader in
+ * the repository, and that reader is in the records tier's set.
+ *
+ * The tier is all-or-nothing. One path outside this list, `README.md`
+ * included, and the change escalates exactly as it does today; nothing here
+ * can make a mixed change cheaper, only a pure-records change cheaper.
+ */
+export const RECORDS_ALLOWLIST = Object.freeze([
+  "backlog/**",
+  "MILESTONES.md",
+]);
+
 /** Why a whole change set was forced to the full tier, when no path names it. */
 const REASON = Object.freeze({
   EMPTY: "empty-path-set",
@@ -81,6 +112,7 @@ const REASON = Object.freeze({
   DENIED: "denylisted-path",
   OUTSIDE: "path-outside-light-allowlist",
   LIGHT: "all-paths-in-light-allowlist",
+  RECORDS: "all-paths-in-records-set",
 });
 
 /** The marker used when a path is simply not documentation. */
@@ -122,6 +154,7 @@ function globToRegExp(glob) {
 
 const ALLOW_RES = LIGHT_ALLOWLIST.map((glob) => [glob, globToRegExp(glob)]);
 const DENY_RES = FULL_TIER_DENYLIST.map((glob) => [glob, globToRegExp(glob)]);
+const RECORDS_RES = RECORDS_ALLOWLIST.map((glob) => [glob, globToRegExp(glob)]);
 
 /**
  * A repository-relative POSIX path, or `null` if the input is a shape this
@@ -160,14 +193,35 @@ export function classifyPath(raw) {
     : { path, light: false, forcedBy: NOT_ALLOWLISTED };
 }
 
+/** Is this path one of the project's own records? */
+export function isRecordPath(raw) {
+  const path = normalizePath(raw);
+  if (path === null) return false;
+  return RECORDS_RES.some(([, re]) => re.test(path));
+}
+
 /**
  * The verdict for a whole change set. Light requires a non-empty set in which
- * every path is light; every other outcome, including the empty set, is full.
+ * every path is light; records requires a non-empty set in which every path is
+ * a record; every other outcome, including the empty set, is full.
+ *
+ * Records is tested before the light/full split because `backlog/**` is on the
+ * denylist, which is what makes a *mixed* change full. Order matters only for
+ * sets that are entirely records, and for those the denylist entry has nothing
+ * left to protect: the records tier runs every guard that reads them.
  */
 export function classify(rawPaths) {
   const paths = rawPaths.map((raw) => classifyPath(raw));
   if (paths.length === 0) {
     return { tier: "full", reason: REASON.EMPTY, paths: [], forcedBy: [] };
+  }
+  if (rawPaths.every((raw) => isRecordPath(raw))) {
+    return {
+      tier: "records",
+      reason: REASON.RECORDS,
+      paths: paths.map((entry) => entry.path),
+      forcedBy: [],
+    };
   }
   const forcedBy = paths
     .filter((entry) => !entry.light)
@@ -257,6 +311,42 @@ function runLight() {
   return run(process.execPath, ["--test", "dist/tests/docs-guard.test.js"]);
 }
 
+/**
+ * The tests that read the project's records. This list is the records tier;
+ * anything added later that reads `backlog/**` or `MILESTONES.md` belongs
+ * here, or the records tier stops being the guard it claims to be.
+ *
+ *   - milestones-guard: reads `backlog/tasks/`, `backlog/milestones/`, and
+ *     `MILESTONES.md`, and asserts they agree.
+ *   - backlog-fixtures: the Backlog.md round-trip corpus and its version pin,
+ *     the guard behind "preserve unknown frontmatter"; it reads the fixture
+ *     tree rather than `backlog/` itself, and it is the check that catches a
+ *     record written in a shape the runtime cannot round-trip.
+ *   - docs-guard: its retired-name sweep walks the whole tree (excluding
+ *     `backlog/`, which it audits by its own rule), so a record can still
+ *     trip it.
+ */
+export const RECORDS_TESTS = Object.freeze([
+  "milestones-guard",
+  "backlog-fixtures",
+  "docs-guard",
+]);
+
+/**
+ * The records tier: build, then the reading tests only, on this Node. It
+ * compiles for the same reason the light tier does, the tests are TypeScript;
+ * the saving is the rest of the suite and the second Node major.
+ */
+function runRecords() {
+  const built = run(NPM, ["run", "build"]);
+  if (built !== 0) return built;
+  return run(process.execPath, [
+    "scripts/run-tests.mjs",
+    "--only",
+    ...RECORDS_TESTS,
+  ]);
+}
+
 /** The full tier is the standing gate, unchanged. */
 function runFull() {
   for (const script of ["test", "lint", "typecheck"]) {
@@ -325,7 +415,9 @@ function main(argv) {
   }
 
   if (!options.run) return 0;
-  return verdict.tier === "light" ? runLight() : runFull();
+  if (verdict.tier === "light") return runLight();
+  if (verdict.tier === "records") return runRecords();
+  return runFull();
 }
 
 const invokedDirectly =
