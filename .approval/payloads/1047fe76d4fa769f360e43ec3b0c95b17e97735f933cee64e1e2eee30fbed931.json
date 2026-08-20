@@ -1,0 +1,1 @@
+{"command":"curl -sS -m 60 -o /tmp/prov.md https://raw.githubusercontent.com/emiliaprotocol/emilia-protocol/main/docs/EP-PROVENANCE-RECEIPT-SPEC.md && wc -l /tmp/prov.md","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

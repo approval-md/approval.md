@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md && git stash push -q .approval/log/events.jsonl 2>/dev/null; git pull -q --ff-only && git stash pop -q 2>/dev/null; git log --oneline -1 && npm run build 2>&1 | tail -1; node cli.js hook classify -- vi SPEC.md | head -2; node cli.js log verify | head -1","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/remote-control-f54e71"}

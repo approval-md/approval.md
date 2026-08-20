@@ -1,0 +1,1 @@
+{"command":"curl -sS -m 30 -o /tmp/npm_verify.json \"https://registry.npmjs.org/@emilia-protocol/verify\" && jq -r '.name, (.versions|keys|length), (.time|to_entries|sort_by(.value)|.[0].key + \" \" + .[0].value), (.\"dist-tags\".latest), (.time.modified)' /tmp/npm_verify.json","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

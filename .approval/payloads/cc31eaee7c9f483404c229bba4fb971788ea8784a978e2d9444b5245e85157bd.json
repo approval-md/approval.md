@@ -1,0 +1,1 @@
+{"command":"cd /tmp/ep && curl -sS -m 60 -o /tmp/contrib.json \"https://api.github.com/repos/emiliaprotocol/emilia-protocol/contributors?per_page=100\" && jq -r '.[] | \"\\(.contributions)\\t\\(.login)\\t\\(.type)\"' /tmp/contrib.json","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

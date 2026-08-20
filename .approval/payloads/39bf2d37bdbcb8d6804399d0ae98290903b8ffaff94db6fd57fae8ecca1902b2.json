@@ -1,0 +1,1 @@
+{"command":"curl -sS -m 60 -o /tmp/runs.json \"https://api.github.com/repos/emiliaprotocol/emilia-protocol/actions/runs?branch=main&per_page=40\" && jq -r '.workflow_runs[] | \"\\(.conclusion)\\t\\(.name)\\t\\(.created_at)\"' /tmp/runs.json | head -40","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

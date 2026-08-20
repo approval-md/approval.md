@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md && gh api repos/approval-md/approval.md/rulesets/20465858 --jq '[.rules[].type]' 2>/dev/null; gh pr view 97 --json mergeStateStatus -q .mergeStateStatus","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/remote-control-f54e71"}
