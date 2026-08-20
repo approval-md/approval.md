@@ -38,10 +38,21 @@
  * precisely when it mattered.
  *
  * **The harness executes, not the runtime.** The hook decides *before* the tool
- * runs and never spawns anything, so there is no `execution.started` /
- * `execution.completed` pair to write here — the runtime did not execute the
- * command and must not claim it did. What the log records is the approval
- * lifecycle: `task.registered`, `approval.requested`, and the human's decision.
+ * runs and never spawns anything, so it never writes an `execution.completed`
+ * or `execution.failed`: the runtime does not run the command and never learns
+ * how it went. It does write one `execution.started`, and only where a verdict
+ * of `allow` rests on a human's grant — that record is the *consumption* of the
+ * grant (APRV-117), which a harness request needs because it mints no token
+ * that could be spent instead. `core/gate.ts`'s `consumeHarnessGrant` is where
+ * that lives and why. What the log records is otherwise the approval lifecycle:
+ * `task.registered`, `approval.requested`, and the human's decision.
+ *
+ * **A decision outlives the invocation that asked for it (APRV-117).** Requests
+ * are matched by the payload hash of `{command, cwd}`, so the answer to "may I
+ * run these bytes, here" belongs to the bytes rather than to one tool-use id.
+ * A retry while the question is pending adopts it instead of asking twice; a
+ * retry after a grant lands proceeds on it, once, inside the TTL. That is why
+ * the wait no longer ends in a withdrawal: a late tap now authorizes something.
  */
 
 import { spawnSync } from "node:child_process";
@@ -55,11 +66,18 @@ import {
   isProtectedPath,
   type CommandClassification,
 } from "../core/command-class.js";
-import { register, request, withdraw, type GateOptions } from "../core/gate.js";
+import {
+  consumeHarnessGrant,
+  findHarnessCarry,
+  register,
+  request,
+  withdraw,
+  type GateOptions,
+} from "../core/gate.js";
 import { payloadHash } from "../core/payload.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
 import { resolve as resolvePolicy } from "../core/policy-match.js";
-import { readVerifiedRecords, requestState } from "../core/state.js";
+import { readVerifiedRecords, requestState, type WithdrawReason } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { HOOK_HELP } from "./help.js";
@@ -103,12 +121,17 @@ export const HOOK_DENY_CODES = [
   /** The request's TTL lapsed before a decision. */
   "hook-expired",
   /**
-   * The request was withdrawn before a decision landed (APRV-106). Usually
-   * this invocation's own retraction on a previous cycle of a resumed wait, or
-   * an operator's `approval withdraw`. Terminal, and not a refusal by anyone.
+   * The request was withdrawn before a decision landed (APRV-106). Since
+   * APRV-117 the timeout no longer produces this: what does is a session that
+   * ended mid-wait (signal or failure) and an operator's `approval withdraw`.
+   * Terminal, and not a refusal by anyone.
    */
   "hook-withdrawn",
-  /** The wait elapsed with the request still undecided; it is then withdrawn. */
+  /**
+   * The wait elapsed with the request still undecided. The request STAYS OPEN
+   * until the policy's TTL (APRV-117): a decision inside that window authorizes
+   * a retry of the identical command in the identical directory, once.
+   */
   "hook-timeout",
   /** The gate refused intake; the gate's own code follows a colon. */
   "hook-gate-refused",
@@ -586,10 +609,21 @@ function commandClassify(argv: string[], streams: Streams, cwd: string): number 
 // hook claude-code
 // ===========================================================================
 
-/** What the gate was asked about: one class, one action key. */
+/**
+ * What the gate was asked about: one class, one action key, and where that
+ * key's authorization comes from (APRV-117).
+ */
 interface GatedAction {
   cls: string;
   actionKey: string;
+  /**
+   * `new` — this invocation opened the request.
+   * `adopted` — an earlier invocation asked the same question about the same
+   * bytes and it is still pending; this one waits out the remainder.
+   * `carried` — an earlier invocation's question was answered `grant`, inside
+   * the TTL, and nothing has spent it yet.
+   */
+  origin: "new" | "adopted" | "carried";
 }
 
 function sleepSync(ms: number): void {
@@ -631,7 +665,8 @@ interface HookRun {
 }
 
 /**
- * Withdraw every still-pending key this invocation opened (APRV-106).
+ * Withdraw every still-pending key this invocation OPENED (APRV-106, narrowed
+ * by APRV-117).
  *
  * BEST EFFORT, always. The caller has already decided what verdict it is
  * printing; this only decides whether a human is still going to be asked about
@@ -639,18 +674,34 @@ interface HookRun {
  * including the case that matters most, `already-decided`, which means a human
  * answered while this was running and their answer must not be touched.
  *
- * The `requested` filter is not an optimization. `withdraw` refuses a decided
- * request anyway, so re-checking here is belt and braces; what it buys is a
- * quiet stderr in the ordinary "the human already answered" race.
+ * Two things narrowed under APRV-117, and both are load-bearing.
+ *
+ * **The timeout no longer calls this.** A request keyed by payload hash can be
+ * adopted by the retry, so an answer that lands after this process gave up
+ * still authorizes something; retracting it would be throwing away the very
+ * decision the human is about to make. What still calls this is every path
+ * where nothing will retry: a signal, a thrown failure, an intake refusal that
+ * dooms the whole command.
+ *
+ * **Only keys this invocation opened.** An ADOPTED key was requested by another
+ * process, and `withdraw` is requester-only by design (APRV-106 rule 1): taking
+ * back a question somebody else asked is exactly the queue-clearing the gate
+ * refuses. So adopted keys are never passed here.
  *
  * Returns the keys actually withdrawn, for the deny reason.
  */
-function withdrawPending(run: HookRun, streams: Streams, keys: readonly string[], why: string): string[] {
+function withdrawPending(
+  run: HookRun,
+  streams: Streams,
+  keys: readonly string[],
+  why: string,
+  reason: WithdrawReason = "cancelled",
+): string[] {
   const withdrawn: string[] = [];
   for (const key of keys) {
     const result = withdraw(run.logPath, key, run.actor, {
       ...run.options,
-      reason: "timeout",
+      reason,
       note: why,
     });
     if (result.ok) {
@@ -666,26 +717,69 @@ function withdrawPending(run: HookRun, streams: Streams, keys: readonly string[]
 }
 
 /**
- * The gated half: register one envelope, request every class, wait for the
- * decisions. Returns the exit code of whatever verdict it printed.
+ * Spend every grant this verdict rests on, once each (APRV-117).
  *
- * ## Why the wait ends in a withdrawal (APRV-106)
+ * A harness grant mints no token, so the record that it was used has to be
+ * written deliberately: `consumeHarnessGrant` appends one `execution.started`
+ * per key, through compare-and-append, and refuses `already-executed` if
+ * anything spent it first. Called ONLY immediately before an `allow`, so a
+ * verdict of deny spends nothing.
  *
- * Before this, a wait that elapsed left the request pending for the policy's
- * whole TTL. That is what produced the 2026-08-19 incident: the hook denied a
- * `git commit --amend` after nine minutes, the request sat in the queue for
- * twenty-four hours, the human was pinged half an hour later and approved it,
- * and the grant authorized nothing at all — a retried tool call is a new
- * request with a new key, so there was no longer any process that could consume
- * the answer. Human attention is the audit budget (SPEC.md §11), and it was
- * spent on a question whose asker had left.
+ * Returns `null` on success, or the refusal that stopped it. A multi-class
+ * command can consume its first key and fail on its second; the result is a
+ * DENY with the first grant spent, which costs one extra prompt on the retry
+ * and authorizes nothing. The reverse ordering — allow first, record later —
+ * would trade that for a grant the harness used and the log never saw, so the
+ * cheap failure is the correct one.
+ */
+function consumeGrants(
+  run: HookRun,
+  keys: readonly string[],
+): { code: string; message: string } | null {
+  for (const key of keys) {
+    const spent = consumeHarnessGrant(run.logPath, key, run.actor, run.options);
+    if (!spent.ok) return { code: spent.code, message: `${key}: ${spent.message}` };
+  }
+  return null;
+}
+
+/**
+ * The gated half: find what is already open for these bytes, request whatever
+ * is not, wait for the decisions, spend the grants. Returns the exit code of
+ * whatever verdict it printed.
  *
- * So every path out of the wait that is not a decision retracts the request
- * first: the timeout, the thrown error, and a SIGTERM or SIGINT arriving
- * mid-wait. The signal handlers are installed for the duration of the wait
- * ONLY, and removed in `finally`: a hook process is short-lived and borrowing
- * the harness's signal disposition for longer than the loop would be a
- * side effect nobody asked for.
+ * ## Requests are keyed by bytes, not by invocation (APRV-117)
+ *
+ * The action key is still `hook:<session>:<tool-use id>:<class>` and is still
+ * unique per invocation — what changed is that intake LOOKS for an earlier
+ * request about the same `{command, cwd}` before opening a new one, matching on
+ * the `payload_hash` recorded on `approval.requested`. Three outcomes per class,
+ * decided by `core/gate.ts`'s `findHarnessCarry`:
+ *
+ *  - nothing to carry: register and request, exactly as before;
+ *  - a pending request: **adopt** it — wait out the remainder of this
+ *    invocation's window on somebody else's key, opening nothing. The approver's
+ *    phone never shows two prompts for one command, because there is only ever
+ *    one question;
+ *  - an unspent grant inside the TTL: **carry** it — no wait, no prompt, and
+ *    the grant is spent (once) before the allow is printed.
+ *
+ * ## Why the wait no longer ends in a withdrawal (APRV-106, revised)
+ *
+ * APRV-106 retracted the request when the wait elapsed, because a retried tool
+ * call was a new request with a new key and a late tap therefore authorized
+ * nothing: the human spent attention on a question whose asker had left. The
+ * carryover above removes the premise. A late tap now authorizes the retry, so
+ * the request stays open for the policy's TTL and the timeout says so.
+ *
+ * What still withdraws is every path where nothing can adopt the question: a
+ * SIGTERM or SIGINT (the session is going away), a thrown failure, and an intake
+ * refusal partway through a multi-class command (the command cannot proceed on
+ * any retry, so the classes already opened are noise in a human's queue). The
+ * signal handlers are installed for the duration of the wait ONLY, and removed
+ * in `finally`: a hook process is short-lived and borrowing the harness's
+ * signal disposition for longer than the loop would be a side effect nobody
+ * asked for.
  */
 function gateAndWait(
   streams: Streams,
@@ -702,41 +796,62 @@ function gateAndWait(
   const hash = payloadHash(payload);
   const summary = truncate(command, SUMMARY_LIMIT);
 
-  const actions: GatedAction[] = classes.map((cls) => ({
-    cls,
-    actionKey: `${task}:${cls}`,
-  }));
+  // Intake reads the VERIFIED log, once, before anything is written: an
+  // enforcement path reads nothing else (SPEC.md §11.1), and a carry decided
+  // from unverified bytes would be a grant invented by whoever could write the
+  // file.
+  const intake = readVerifiedRecords(run.logPath);
+  if (!intake.ok) return deny(streams, "hook-io", intake.message);
+  const intakeTs = new Date().toISOString();
 
-  const envelope = {
-    origin: { app: "claude-code-hook", created_by: run.actor },
-    state: "proposed",
-    actions: actions.map((action) => ({
-      class: action.cls,
-      summary,
-      idempotency_key: action.actionKey,
-      payload_hash: hash,
-    })),
-  };
+  const actions: GatedAction[] = classes.map((cls) => {
+    const carry = findHarnessCarry(intake.records, hash, cls, intakeTs, run.ttlMs);
+    if (carry === null) return { cls, actionKey: `${task}:${cls}`, origin: "new" as const };
+    return {
+      cls,
+      actionKey: carry.actionKey,
+      origin: carry.kind === "granted" ? ("carried" as const) : ("adopted" as const),
+    };
+  });
 
-  const registered = register(run.logPath, { task, envelope }, run.actor, run.options);
-  if (!registered.ok) {
-    return deny(streams, `hook-gate-refused:${registered.code}`, registered.message);
+  const fresh = actions.filter((action) => action.origin === "new");
+  const adopted = actions.filter((action) => action.origin === "adopted");
+  const carried = actions.filter((action) => action.origin === "carried");
+
+  // Only the classes that need a new question are registered. A retry whose
+  // every class carries or adopts registers no task at all — the envelope it
+  // would declare already exists, under the key it is about to wait on.
+  if (fresh.length > 0) {
+    const envelope = {
+      origin: { app: "claude-code-hook", created_by: run.actor },
+      state: "proposed",
+      actions: fresh.map((action) => ({
+        class: action.cls,
+        summary,
+        idempotency_key: action.actionKey,
+        payload_hash: hash,
+      })),
+    };
+
+    const registered = register(run.logPath, { task, envelope }, run.actor, run.options);
+    if (!registered.ok) {
+      return deny(streams, `hook-gate-refused:${registered.code}`, registered.message);
+    }
   }
 
-  // APRV-106. Both fields are recorded on every request this verb opens, and
-  // both are about what happens AFTER the human looks at their phone.
-  //
-  // `wait_until` is the deadline a channel shows the approver: "requester waits
-  // until 09:23 UTC". It is claimed, display-only, and gates nothing.
-  //
   // `execution: "harness"` says a grant here mints no execution token. The hook
   // answers allow/deny and Claude Code runs the command; nothing ever calls
   // `approval run`, so a minted token would be a live credential with no
   // spender. It removes capability from the requester and grants none.
-  const waitUntil = new Date(Date.now() + run.timeoutMs).toISOString();
-
-  const pendingKeys: string[] = [];
-  for (const action of actions) {
+  //
+  // APRV-106's companion field, `wait_until`, is deliberately NOT declared any
+  // more. It rendered as "requester waits until 09:23 UTC" on the approver's
+  // phone, and under carryover that sentence is false: an answer after this
+  // invocation stops waiting authorizes the retry. With no `wait_until` the
+  // channel's own line falls back to the deadline that does govern — "expires
+  // HH:MM UTC", the policy's TTL — which is now exactly the truth.
+  const ownKeys: string[] = [];
+  for (const action of fresh) {
     const result = request(
       run.logPath,
       {
@@ -747,40 +862,67 @@ function gateAndWait(
         payload_hash: hash,
         payload: { value: payload },
         execution: "harness",
-        wait_until: waitUntil,
       },
       run.actor,
       run.options,
     );
     if (!result.ok) {
-      // Whatever was already opened is retracted before the deny: a refusal on
-      // the third class must not leave the first two standing in a queue that
-      // no process is waiting on any more.
-      withdrawPending(run, streams, pendingKeys, `intake refused ${action.actionKey}; this invocation is not waiting for a decision`);
+      // Whatever this invocation opened is retracted before the deny: a refusal
+      // on the third class dooms the command on every retry too, so the first
+      // two must not stand in a queue that nothing will ever adopt.
+      withdrawPending(
+        run,
+        streams,
+        ownKeys,
+        `intake refused ${action.actionKey}; this command cannot proceed, so the classes already opened for it are questions nobody needs to answer`,
+      );
       return deny(streams, `hook-gate-refused:${result.code}`, result.message);
     }
-    if (result.record !== null) pendingKeys.push(action.actionKey);
+    if (result.record !== null) ownKeys.push(action.actionKey);
   }
 
-  if (pendingKeys.length === 0) {
-    // Every class resolved supervised: intake recorded no request (amended
-    // SPEC.md §6.3), so there is nothing to wait for.
-    return allow(streams, `granted: ${classes.join(", ")} needs no approval under this policy${note}`);
+  /** Every key that must be granted before this hook says yes. */
+  const waitKeys = [...adopted.map((action) => action.actionKey), ...ownKeys];
+  /** Every key whose grant this verdict would spend. */
+  const spendKeys = [...carried.map((action) => action.actionKey), ...waitKeys];
+
+  /** How the allow line describes where its authorization came from. */
+  const provenance =
+    carried.length === 0
+      ? ""
+      : ` (carried: ${carried.map((action) => action.actionKey).join(", ")})`;
+
+  if (waitKeys.length === 0) {
+    if (spendKeys.length === 0) {
+      // Every class resolved supervised: intake recorded no request (amended
+      // SPEC.md §6.3), so there is nothing to wait for and nothing to spend.
+      return allow(
+        streams,
+        `granted: ${classes.join(", ")} needs no approval under this policy${note}`,
+      );
+    }
+    // Every gated class carried an unspent grant: a human already answered this
+    // exact question about these exact bytes, and nobody is asked again.
+    const failed = consumeGrants(run, spendKeys);
+    if (failed !== null) {
+      return deny(streams, `hook-gate-refused:${failed.code}`, failed.message);
+    }
+    return allow(streams, `granted: ${classes.join(", ")}${provenance}${note}`);
   }
 
   const deadline = Date.now() + run.timeoutMs;
 
-  // A signal arriving mid-wait is the same fact as the timeout — this process
-  // is going away and will consume no decision — so it is answered the same
-  // way. `process.exit` is deliberate and immediate: the default disposition
-  // for these signals is to die, and a handler that only withdrew would leave
-  // the hook wedged in its poll loop with the harness waiting on it.
+  // A signal arriving mid-wait means the session is going away: nothing will
+  // retry this command, so the question this invocation opened is retracted.
+  // `process.exit` is deliberate and immediate: the default disposition for
+  // these signals is to die, and a handler that only withdrew would leave the
+  // hook wedged in its poll loop with the harness waiting on it.
   const onSignal = (signal: NodeJS.Signals): void => {
     withdrawPending(
       run,
       streams,
-      pendingKeys,
-      `the requesting hook process received ${signal} while waiting; it can no longer consume a decision`,
+      ownKeys,
+      `the requesting hook process received ${signal} while waiting; the session is ending, so no retry will adopt this request`,
     );
     process.exit(EXIT_USAGE);
   };
@@ -793,18 +935,21 @@ function gateAndWait(
     for (;;) {
       const read = readVerifiedRecords(run.logPath);
       if (!read.ok) {
-        withdrawPending(run, streams, pendingKeys, `the hook could not read the log while waiting on ${task}`);
+        withdrawPending(
+          run,
+          streams,
+          ownKeys,
+          `the hook could not read the log while waiting on ${task}`,
+        );
         return deny(streams, "hook-io", read.message);
       }
 
       const ts = new Date().toISOString();
-      // Only the keys this invocation requested count. Deriving the set from
-      // the log again would let an empty or foreign result read as "nothing
-      // pending" and fall through to allow; the verified log must show every
-      // one of our keys granted before the hook says yes.
-      const states = pendingKeys.map(
-        (key) => requestState(read.records, key, ts, run.ttlMs).state,
-      );
+      // Only the keys this invocation is waiting on count. Deriving the set
+      // from the log again would let an empty or foreign result read as
+      // "nothing pending" and fall through to allow; the verified log must show
+      // every one of these keys granted before the hook says yes.
+      const states = waitKeys.map((key) => requestState(read.records, key, ts, run.ttlMs).state);
 
       if (!states.includes("requested")) {
         // Precedence, as `approval wait` fixes it: a human's "no" outranks a
@@ -828,11 +973,17 @@ function gateAndWait(
           return deny(streams, "hook-expired", `the request for ${task} lapsed before a decision`);
         }
         if (states.every((state) => state === "granted")) {
-          return allow(streams, `granted: ${task} (${classes.join(", ")})${note}`);
+          // The grants are spent before the allow is printed, so this exact
+          // command cannot ride the same authorization twice.
+          const failed = consumeGrants(run, spendKeys);
+          if (failed !== null) {
+            return deny(streams, `hook-gate-refused:${failed.code}`, failed.message);
+          }
+          return allow(streams, `granted: ${task} (${classes.join(", ")})${provenance}${note}`);
         }
         // Not a wait outcome: the log disagrees with itself about keys this
-        // process opened. Nothing is retracted, because the state that would
-        // justify retracting is the state that could not be established.
+        // process is waiting on. Nothing is retracted, because the state that
+        // would justify retracting is the state that could not be established.
         return deny(
           streams,
           "hook-io",
@@ -841,34 +992,28 @@ function gateAndWait(
       }
 
       if (Date.now() >= deadline) {
-        // APRV-106, the whole point of the task. The deny is returned either
-        // way; what changes is whether a human is woken up for a question this
-        // process has already answered for itself.
-        const withdrawn = withdrawPending(
-          run,
-          streams,
-          pendingKeys,
-          `the hook's ${String(run.timeoutMs)}ms wait elapsed; this tool call was denied and a retried one is a new request, so a decision here can no longer authorize anything`,
-        );
+        // APRV-117, the behaviour APRV-106 had to get wrong for want of
+        // carryover. The request STAYS OPEN: a decision inside the policy's TTL
+        // authorizes the retry of this exact command in this exact directory,
+        // once. Withdrawing here would discard the answer the human is about to
+        // give.
         return deny(
           streams,
           "hook-timeout",
-          withdrawn.length === pendingKeys.length
-            ? `no decision on ${task} within the hook's wait. The request(s) were WITHDRAWN, so nobody will be asked about a tool call this hook has already denied; a retried tool call is a new request and gets a fresh one.`
-            : `no decision on ${task} within the hook's wait, and ${String(pendingKeys.length - withdrawn.length)} request(s) could not be withdrawn — they stay live until their TTL, and a late grant on one authorizes nothing, because a retried tool call is a new request`,
+          `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open until the policy's approval TTL, and a decision inside that window authorizes a retry of this exact command in this exact directory, once. Retry it after the approver answers; the retry adopts the same question rather than asking a second one.`,
         );
       }
       sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
     }
   } catch (cause) {
     // The thrown path. `commandHookClaudeCode` turns this into an ordinary
-    // deny, so from the human's side it is the timeout case with a different
-    // reason: this process is not going to consume a decision, and it says so
-    // before it stops.
+    // deny. Unlike the timeout, this process cannot say what state it left
+    // behind, so the question it opened is retracted rather than left standing
+    // on a failure nobody diagnosed.
     withdrawPending(
       run,
       streams,
-      pendingKeys,
+      ownKeys,
       `the requesting hook process failed while waiting (${cause instanceof Error ? cause.message : String(cause)})`,
     );
     throw cause;

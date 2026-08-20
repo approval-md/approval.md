@@ -256,7 +256,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-rejected` | a human said no |
 | `hook-revoked` | a granted approval was withdrawn before use |
 | `hook-expired` | the TTL lapsed before a decision |
-| `hook-timeout` | no decision inside `--timeout`; the request is WITHDRAWN, a retry files a new one |
+| `hook-timeout` | no decision inside `--timeout`; the request stays OPEN, and a decision inside the TTL authorizes an identical retry, once |
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
 | `hook-policy-unavailable` | `APPROVAL.md` could not be loaded |
@@ -268,43 +268,56 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 and any `$(…)` that is not purely a read: all deny. The fix is to write the
 command out, or to run the effect through `approval run` with a granted token.
 
-### When the wait runs out (APRV-106)
+### When the wait runs out (APRV-106, revised by APRV-117)
 
-A `hook-timeout` now **withdraws** the request it opened. Every path out of the
-wait that is not a decision does: the timeout, an unexpected failure, and a
-`SIGTERM` or `SIGINT` arriving while the hook is polling.
+A `hook-timeout` leaves the request **open**. The tool call is denied, nothing is
+withdrawn, and a decision that lands inside the policy's approval TTL authorizes
+a retry of the same command in the same directory, once.
 
-This is a change, and it is worth saying why. Until APRV-106 the request stayed
-pending for the policy's whole TTL after the hook had already denied the tool
-call. On 2026-08-19 that produced exactly the failure it looks like: a
-`git commit --amend` was classified manual, the hook waited nine minutes, got
-nothing, denied and moved on — and half an hour later the human was pinged on
-their phone and approved it. The grant authorized nothing at all, because a
-retried tool call is a new `tool_use_id` and files a new request (an idempotency
-key names one execution of one side effect, SPEC §6). A person spent attention
-on a question whose asker had left, and SPEC §11 makes human attention the audit
-budget.
+This is a change on a change, and both halves are worth saying.
 
-**What the human sees.** If the message has not been answered, the Telegram
-listener edits it in place: the two buttons go away and the text becomes
+The incident first. On 2026-08-19 a `git commit --amend` was classified manual,
+the hook waited nine minutes, got nothing, denied and moved on; half an hour
+later the human was pinged on their phone and approved it, and the grant
+authorized nothing at all, because a retried tool call was a new `tool_use_id`
+and filed a new request. A person spent attention on a question whose asker had
+left, and SPEC §11 makes human attention the audit budget. APRV-106's answer was
+to retract the question when the hook stopped waiting.
 
-```
-WITHDRAWN — no decision is needed
-hook:sess-1:tu-timeout:deps.add
+APRV-117 answers the same incident the other way, by making the late decision
+useful. Hook requests are matched by the **payload hash of `{command, cwd}`**, so
+the answer belongs to the bytes rather than to one invocation:
 
-withdrawn by the requester at 10:11 UTC (timeout) · nothing to do
-```
+- a retry while the question is still pending **adopts** it and waits out the
+  remainder — the approver never sees two prompts for one command;
+- a retry after a grant landed **proceeds on it**, with no new prompt, provided
+  the TTL has not lapsed and nothing has spent it;
+- a grant is spent **exactly once**. Consumption is an `execution.started`
+  carrying `execution: "harness"`, appended through compare-and-append by
+  `consumeHarnessGrant` before the `allow` is printed. No `execution.completed`
+  ever follows it: the harness runs the command and this runtime never learns
+  the outcome.
 
-If they tap a stale button before the edit lands, the toast says *"Withdrawn —
-the requester took this back and is no longer waiting; nothing was recorded"*,
-and nothing is. A live prompt now also carries a line saying how long an answer
-still has: `waiting: requested 4 min ago · requester waits until 10:10 UTC`,
-where that deadline is the hook's own `--timeout`, not the policy's TTL.
+**The replay bounds, exactly.** Same command bytes, same `cwd`, same class, once,
+inside the TTL, and only against a request that declared `execution: "harness"`.
+Any difference in any of those is a different question and gets a new prompt. A
+second retry after the grant has been spent is refused through the ordinary path:
+it files a fresh request and waits like any other.
 
-The withdrawal is **best effort and never changes the verdict**. A failure is
-reported on stderr and the deny still returns `hook-timeout`; a human's answer
-landing mid-flight is `already-decided` and is never touched. Raise the hook
-`timeout` and `--timeout` together so decisions normally land inside the wait.
+**What still withdraws.** Every path where nothing can adopt the question: a
+`SIGTERM` or `SIGINT` arriving while the hook polls (the session is ending), an
+unexpected failure mid-wait, and an intake refusal partway through a multi-class
+command. Withdrawal remains requester-only, so an adopted request is never
+withdrawn by the process that adopted it.
+
+**What the human sees.** A pending prompt stays live and keeps its buttons until
+it is answered or the TTL lapses, and every terminal state still annotates the
+message in place (APRV-113): `✓ APPROVED`, `✗ EXPIRED — the approval window
+closed`, `WITHDRAWN — no decision is needed`. The prompt's own waiting line now
+reads `requested 4 min ago · expires 10:34 UTC` — the policy's TTL, which is the
+deadline that actually governs. Hook requests no longer declare a `wait_until`,
+because "requester waits until 10:10 UTC" stopped being true the moment a late
+answer started authorizing a retry.
 
 ### No token is minted for a hook grant
 
