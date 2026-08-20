@@ -1,9 +1,10 @@
 ---
 id: APRV-114
 title: 'Classifier: GET-shaped web fetches are read.web, not network.call'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-20 12:08'
+updated_date: '2026-08-20 15:28'
 labels:
   - classifier
   - dogfood
@@ -35,3 +36,9 @@ Alternative the human may prefer instead (or in the interim, since only a human 
 - [ ] #5 approval hook classify -- 'curl https://example.com' reports the read class end-to-end; hook tests cover it
 - [ ] #6 SPEC §7 wording checked; amended only if the refinement diverges from it (expected: no change needed)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Human sign-off given in session 2026-08-20 (the autonomy widening under the live dogfood policy is approved). Build started; the pin note on tests/dogfood.test.ts records the intent to return network.call to manual once this lands.
+<!-- SECTION:NOTES:END -->
