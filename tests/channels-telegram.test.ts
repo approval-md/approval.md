@@ -46,6 +46,7 @@ import {
   CANONICAL_JSON_HEADING,
   EMAIL_VIEW_HEADING,
 } from "../src/channels/payload-view.js";
+import { assembleBatch } from "../src/channels/batch.js";
 import { buildPendingQueue, type TagOptions } from "../src/channels/tagging.js";
 import {
   callbackData,
@@ -64,7 +65,7 @@ import { appendAttestation } from "../src/core/attest.js";
 import { register as registerCore, request as requestCore } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
 import { readVerifiedRecords } from "../src/core/state.js";
-import { register, request, withdraw } from "./clock-adapters.js";
+import { expire, register, request, withdraw } from "./clock-adapters.js";
 import {
   assertLocal,
   callbackUpdate,
@@ -294,6 +295,36 @@ async function press(
   );
   const result = await channel.pollOnce();
   return result.outcomes.find((entry) => entry.action_key === actionKey)?.outcome;
+}
+
+/**
+ * Every `editMessageText` the mock has received for one message id.
+ *
+ * The mock is shared by the whole file and `edits()` accumulates across tests,
+ * so every assertion about "how many times was THIS message edited" filters by
+ * its id (APRV-113: successful taps edit their own messages now, so a global
+ * count is a count of the whole suite).
+ */
+function editsFor(messageId: string | number): { text: string; replyMarkup: unknown }[] {
+  return mock.edits().filter((entry) => entry.messageId === Number(messageId));
+}
+
+/**
+ * A 64-hex run: the shape of an execution token, and of nothing else this
+ * channel legitimately prints (a payload sha256 is 64 hex too, which is why the
+ * sweep below runs over EDITS, where no hash belongs, rather than over sends).
+ */
+const HEX64 = /\b[0-9a-f]{64}\b/u;
+
+/** No edit this suite ever produced may carry anything token-shaped. */
+function assertNoTokenInEdits(): void {
+  for (const edit of mock.edits()) {
+    assert.doesNotMatch(
+      edit.text,
+      HEX64,
+      `an annotation carried a 64-hex run — the execution token is never sent to Telegram: ${edit.text}`,
+    );
+  }
 }
 
 async function until(predicate: () => boolean, label: string, ms = 5_000): Promise<void> {
@@ -658,7 +689,14 @@ test("a callback whose nonce this listener never issued is ignored", async () =>
   assertClean(world.unit);
 });
 
-test("a duplicate callback is refused idempotently and appends no second event", async () => {
+test("a duplicate callback is refused and appends no second event", async () => {
+  // APRV-113 changed which layer refuses the SECOND tap, deliberately. The
+  // first tap's annotation forgets the delivery's nonce (that is what disarms a
+  // button the edit did not manage to remove), so a redelivered callback is an
+  // `unknown-callback` anomaly rather than a decision the gate then refuses as
+  // `already-decided`. Both refuse; neither appends. The property this test
+  // exists for — a second tap can never produce a second event — is unchanged,
+  // and the gate's own idempotency is still pinned by `tests/gate.test.ts`.
   const world = live(1);
   const key = world.keys[0] as string;
   const [request_] = queueOf(world, at(2));
@@ -672,15 +710,212 @@ test("a duplicate callback is refused idempotently and appends no second event",
   assert.equal(first?.ok, true, JSON.stringify(first));
   const after_ = recordsOf(world.unit.logPath).length;
 
-  const second = await press(channel, key, "grant");
-  assert.equal(second?.ok, false, "a second tap must be refused");
-  if (second !== undefined && !second.ok) assert.equal(second.code, "already-decided");
+  mock.queueUpdate(
+    callbackUpdate({ data: mock.callbackDataFor(key, "grant"), chatId: CHAT }),
+  );
+  const second = await channel.pollOnce();
+  assert.deepEqual(second.outcomes, [], "a second tap must reach no decision at all");
+  assert.deepEqual(
+    second.ignored.map((entry) => entry.kind),
+    ["unknown-callback"],
+  );
   assert.equal(
     recordsOf(world.unit.logPath).length,
     after_,
-    "the gate's idempotency is what stops the second event; the channel adds no logic",
+    "a second tap must never produce a second event",
   );
-  assert.match(mock.answerTexts().join("\n"), /Already decided/u);
+  assert.match(mock.answerTexts().join("\n"), /This button is no longer live/u);
+  assertClean(world.unit);
+});
+
+// ---------------------------------------------------------------------------
+// Terminal states are annotated on the message (APRV-113)
+// ---------------------------------------------------------------------------
+
+test("a tap edits its own message to the outcome and takes the buttons away", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const messageId = await channel.notify(request_);
+
+  const outcome = await press(channel, key, "grant");
+  assert.equal(outcome?.ok, true, JSON.stringify(outcome));
+
+  const edits = editsFor(messageId);
+  assert.equal(edits.length, 1, JSON.stringify(edits));
+  const text = String(edits[0]?.text);
+  assert.match(text, /^<b>✓ APPROVED<\/b>\n/u);
+  assert.match(text, new RegExp(`<code>${key}</code>`, "u"));
+  assert.match(text, /by human:carter at \d\d:\d\d UTC \(seq \d+\)/u);
+  assert.doesNotMatch(text, /APPROVAL REQUIRED/u, "the prompt text is replaced, not appended to");
+  assert.equal(edits[0]?.replyMarkup, undefined, "the buttons must be gone");
+
+  // The terminal panel is unchanged: the token goes to stdout, never to a chat.
+  assertNoTokenInEdits();
+  assertClean(world.unit);
+});
+
+test("a rejection edits its message too", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const messageId = await channel.notify(request_);
+
+  assert.equal((await press(channel, key, "reject"))?.ok, true);
+  const text = String(editsFor(messageId)[0]?.text);
+  assert.match(text, /^<b>✗ REJECTED<\/b>/u);
+  assert.match(text, /by human:carter at \d\d:\d\d UTC \(seq \d+\)/u);
+  assertClean(world.unit);
+});
+
+test("a failed edit does not block the decision or the loop", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  // Only `editMessageText` fails. Failing the whole transport would fail the
+  // poll instead, which is a different (already tested) path; the property here
+  // is that the ONE call the annotation makes can fail without touching either
+  // the decision or the loop.
+  const passthrough = globalThis.fetch as unknown as NonNullable<TelegramConfig["fetch"]>;
+  const channel = channelFor({
+    fetch: async (url, init) => {
+      if (url.endsWith("/editMessageText")) {
+        return { ok: false, status: 500, text: async () => "mock: edit refused" };
+      }
+      return await passthrough(url, init);
+    },
+  });
+  channel.onDecision(handlerFor(world, at(2)));
+  const messageId = await channel.notify(request_);
+
+  const before = complaints.length;
+  const outcome = await press(channel, key, "grant");
+  assert.equal(outcome?.ok, true, JSON.stringify(outcome));
+
+  const granted = recordsOf(world.unit.logPath).filter(
+    (record) => record.event === "approval.granted" && record.action_key === key,
+  );
+  assert.equal(granted.length, 1, "the decision must be recorded whatever the edit did");
+  assert.equal(editsFor(messageId).length, 0, "no edit landed");
+  assert.match(
+    complaints.slice(before).join("\n"),
+    /could not annotate the decided .* — the decision is recorded; only the message is stale/u,
+  );
+
+  // And the loop is still a loop: the next poll works.
+  const next = await channel.pollOnce();
+  assert.equal(next.updates, 0);
+  assertClean(world.unit);
+});
+
+test("a decision taken at another surface annotates the chat prompt on the next cycle", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const setup = setupFor(world, channelFor());
+  const state = newDispatchState();
+
+  const first = await dispatchPending(setup, capture().streams, state, at(2));
+  const messageId = first.delivered[0]?.delivery_id as string;
+  assert.ok(messageId !== undefined, JSON.stringify(first));
+
+  // The human answers at the CLI instead, while the chat prompt is still up.
+  const decided = recordChannelDecision(
+    world.unit.logPath,
+    { action_key: key, decision: "grant", deliveryId: "cli" },
+    { actor: HUMAN, channel: "cli" },
+    { ...world.unit.options, clock: fixedClock(at(3)) },
+  );
+  assert.equal(decided.outcome.ok, true, JSON.stringify(decided.outcome));
+
+  const { streams, out } = capture();
+  const second = await dispatchPending(setup, streams, state, at(4));
+  assert.deepEqual(
+    second.annotated.map((entry) => [entry.action_key, entry.outcome]),
+    [[key, "granted"]],
+  );
+  assert.ok(out.join("").includes(`annotated ${key} (message ${messageId}): granted`));
+
+  const text = String(editsFor(messageId)[0]?.text);
+  assert.match(text, /^<b>✓ APPROVED<\/b>/u);
+  assert.match(text, /by human:carter at \d\d:\d\d UTC \(seq \d+\)/u);
+  assert.equal(editsFor(messageId)[0]?.replyMarkup, undefined, "the buttons must be gone");
+
+  // And once only.
+  const third = await dispatchPending(setup, capture().streams, state, at(5));
+  assert.deepEqual(third.annotated, []);
+  assert.equal(editsFor(messageId).length, 1);
+  assertNoTokenInEdits();
+  assertClean(world.unit);
+});
+
+test("an expiry appended by the daemon annotates the prompt as EXPIRED", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const setup = setupFor(world, channelFor());
+  const state = newDispatchState();
+
+  const first = await dispatchPending(setup, capture().streams, state, at(2));
+  const messageId = first.delivered[0]?.delivery_id as string;
+  assert.ok(messageId !== undefined, JSON.stringify(first));
+
+  // Past the 24h TTL: the daemon writes `approval.expired` at 1500 minutes.
+  const lapsed = expire(world.unit.logPath, key, at(1500), world.unit.options);
+  assert.equal(lapsed.ok, true, JSON.stringify(lapsed));
+
+  const second = await dispatchPending(setup, capture().streams, state, at(1501));
+  assert.deepEqual(
+    second.annotated.map((entry) => entry.outcome),
+    ["expired"],
+  );
+  const text = String(editsFor(messageId)[0]?.text);
+  assert.match(text, /^<b>✗ EXPIRED — the approval window closed<\/b>/u);
+  assert.match(text, /no answer arrived before the deadline · recorded at \d\d:\d\d UTC \(seq \d+\)/u);
+  assert.equal(editsFor(messageId)[0]?.replyMarkup, undefined, "the buttons must be gone");
+  assertClean(world.unit);
+});
+
+test("a batch annotates member by member: one decided, the rest still armed", async () => {
+  // Telegram's batch is one message per member, each with its own keyboard and
+  // its own delivery id, so per-member annotation needs no shared state to
+  // re-render from: deciding one member edits exactly one message.
+  const world = live(2);
+  const [firstKey, secondKey] = world.keys as [string, string];
+  const requests = queueOf(world, at(2));
+  assert.equal(requests.length, 2);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const assembled = assembleBatch(requests);
+  assert.equal(assembled.ok, true, JSON.stringify(assembled));
+  if (!assembled.ok) return;
+  await channel.notify(assembled.batch);
+
+  assert.equal(channel.lastRendered().length, 2, "a batch is rendered member by member");
+
+  const editedBefore = mock.edits().length;
+  assert.equal((await press(channel, firstKey, "grant"))?.ok, true);
+  const afterFirst = mock.edits().slice(editedBefore);
+  assert.equal(afterFirst.length, 1, "exactly one member's message may be edited");
+  assert.match(String(afterFirst[0]?.text), new RegExp(`<code>${firstKey}</code>`, "u"));
+  assert.equal(afterFirst[0]?.replyMarkup, undefined);
+
+  // The undecided member is untouched and still answerable.
+  assert.equal((await press(channel, secondKey, "reject"))?.ok, true);
+  const afterSecond = mock.edits().slice(editedBefore + 1);
+  assert.equal(afterSecond.length, 1, "the last member decided leaves no armed message");
+  assert.match(String(afterSecond[0]?.text), new RegExp(`<code>${secondKey}</code>`, "u"));
+  assert.match(String(afterSecond[0]?.text), /✗ REJECTED/u);
+  assertNoTokenInEdits();
   assertClean(world.unit);
 });
 
@@ -810,16 +1045,19 @@ test("a withdrawn request is annotated on the phone and its buttons removed", as
 
   const second = await dispatchPending(setup, capture().streams, state, at(12));
   assert.deepEqual(
-    second.retracted.map((entry) => entry.action_key),
+    second.annotated.map((entry) => entry.action_key),
     [key],
+  );
+  assert.deepEqual(
+    second.annotated.map((entry) => entry.outcome),
+    ["withdrawn"],
   );
 
   // ONE editMessageText: the annotation and the disarming land together, so
   // there is no window in which the message reads "withdrawn" and still offers
   // a tap.
-  const edits = mock.edits();
+  const edits = editsFor(messageId);
   assert.equal(edits.length, 1, JSON.stringify(edits));
-  assert.equal(edits[0]?.messageId, Number(messageId));
   assert.match(String(edits[0]?.text), /WITHDRAWN — no decision is needed/u);
   assert.match(
     String(edits[0]?.text),
@@ -829,8 +1067,8 @@ test("a withdrawn request is annotated on the phone and its buttons removed", as
 
   // Idempotent: a third cycle edits nothing further.
   const third = await dispatchPending(setup, capture().streams, state, at(13));
-  assert.deepEqual(third.retracted, []);
-  assert.equal(mock.edits().length, 1);
+  assert.deepEqual(third.annotated, []);
+  assert.equal(editsFor(messageId).length, 1);
   assertClean(world.unit);
 });
 
@@ -881,7 +1119,7 @@ test("a fresh listener never sends a withdrawn request at all", async () => {
   const setup = setupFor(world, channelFor());
   const result = await dispatchPending(setup, capture().streams, newDispatchState(), at(12));
   assert.deepEqual(result.delivered, []);
-  assert.deepEqual(result.retracted, []);
+  assert.deepEqual(result.annotated, []);
   assert.equal(messagesMentioning(key), 0, "a withdrawn request must never be sent");
   assertClean(world.unit);
 });

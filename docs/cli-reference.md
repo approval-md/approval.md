@@ -1300,7 +1300,18 @@ one keyboard to one message, and a batch carrying every member's full payload
 would exceed the 4096-character limit long before the keyboard helped. `notify()`
 still accepts a batch and sends one message per member sharing one batch delivery
 id, so every event carries it — the semantics are there, the one-tap ergonomics
-are not.
+are not. One message per member also makes the annotation below per member:
+deciding one member edits that member's message and leaves the others armed.
+
+**A settled request stops looking live.** Every terminal state the listener
+observes for a message it sent edits that message: the text becomes the outcome
+(`✓ APPROVED`, `✗ REJECTED`, `✗ REVOKED`, `✗ EXPIRED`, `WITHDRAWN`) with the
+action key, who decided, when, and the record's seq, and the buttons go in the
+same call. A tap annotates immediately; a decision taken at the CLI or on the web
+queue, a revocation, and an expiry the daemon appended are picked up on the next
+poll cycle, which re-derives every delivered message's state from the verified
+log. The edit is best effort — a failure is a stderr complaint, never a blocked
+decision — and an annotation never carries the execution token.
 
 The bot token and chat id come from the environment and the policy names the
 variables (`channels.telegram.token_env` / `chat_id_env`, defaulting to
@@ -1315,6 +1326,8 @@ rather than a query:
 
 ```
 {"event":"notified","action_key":"task-042:chaser","delivery_id":"41"}
+{"event":"annotated","action_key":"task-042:chaser","delivery_id":"41",
+ "outcome":"granted"}
 {"event":"decision","action_key":"task-042:chaser","decision":"grant",
  "ok":true,"seq":7,"state":"granted","token_issued":true}
 {"event":"decision","action_key":"...","decision":"grant","ok":false,
