@@ -114,9 +114,9 @@ const EXPECTATIONS: readonly Expectation[] = [
   { actionClass: "deps.add", autonomy: "manual", provenance: "rule" },
   {
     actionClass: "network.call",
-    autonomy: "autonomous",
+    autonomy: "manual",
     provenance: "rule",
-    note: "human loosening of 2026-08-20 (attested seq 163) to stop a per-fetch prompt flood; APRV-114's read.web refinement is the path back to manual",
+    note: "re-tightened 2026-08-20 (attested seq 293) once APRV-114 taught the classifier that GET-shaped fetches are read.web; this class now covers only the mutating and ambiguous remainder",
   },
   { actionClass: "release.publish", autonomy: "manual", provenance: "rule" },
   { actionClass: "policy.edit", autonomy: "manual", provenance: "rule" },
