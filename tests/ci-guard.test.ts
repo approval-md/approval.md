@@ -23,7 +23,8 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
@@ -105,14 +106,14 @@ test("the CI workflow references no secrets anywhere", () => {
 // Triggers
 // ---------------------------------------------------------------------------
 
-test("the CI workflow runs on push and on pull_request", () => {
+test("the CI workflow runs on push, on pull_request and on merge_group", () => {
   const triggers = workflow()["on"];
   assert.ok(
     typeof triggers === "object" && triggers !== null,
     ".github/workflows/ci.yml has no trigger mapping. Note the parse is YAML 1.2 core: `on` is the string key, not the 1.1 boolean.",
   );
   const keys = Object.keys(triggers as Record<string, unknown>);
-  for (const event of ["push", "pull_request"]) {
+  for (const event of ["push", "pull_request", "merge_group"]) {
     assert.ok(
       keys.includes(event),
       `.github/workflows/ci.yml no longer runs on ${event}; a gate that skips an event is not a gate for that event`,
@@ -288,22 +289,115 @@ test("a push to main takes the full tier without consulting anything", () => {
   );
 });
 
-test("a merge-queue candidate takes the full tier without consulting anything", () => {
-  // A queue candidate is the next main, so it gets what a push to main gets.
-  // Asserted alongside the push rule because the cheap tiers make skipping the
-  // matrix attractive exactly where it must not be skippable.
-  const rule =
-    /if \[ "\$EVENT_NAME" = "merge_group" \]; then\n\s*echo "merge queue candidate: tier=full, unconditionally"\n\s*echo "tier=full" >> "\$GITHUB_OUTPUT"\n\s*exit 0/u;
-  assert.match(
-    WORKFLOW_TEXT,
-    rule,
-    "the unconditional merge_group full-tier rule is gone from .github/workflows/ci.yml",
+/**
+ * The tier step's shell script, as the workflow declares it. Extracted so the
+ * rules below can be executed rather than only matched: a regex over YAML
+ * proves the text is present, running it proves the text means what the
+ * comment above it claims.
+ */
+function tierScript(): string {
+  const steps = job("classify")["steps"];
+  assert.ok(Array.isArray(steps), "the `classify` job declares no steps");
+  const step = (steps as Array<Record<string, unknown>>).find(
+    (entry) => entry["id"] === "tier",
   );
-  const stepStart = WORKFLOW_TEXT.indexOf("- id: tier");
-  const beforeRule = WORKFLOW_TEXT.slice(stepStart, WORKFLOW_TEXT.search(rule));
+  assert.ok(step !== undefined, "the `classify` job no longer has a step with id `tier`");
+  const script = step["run"];
+  assert.equal(typeof script, "string", "the tier step declares no shell script");
+  return script as string;
+}
+
+/** Run the tier step's own script with the context a given event supplies. */
+function runTierScript(env: Record<string, string>): { tier: string; stdout: string } {
+  const outputFile = join(
+    mkdtempSync(join(tmpdir(), "ci-guard-")),
+    "github-output",
+  );
+  writeFileSync(outputFile, "");
+  const result = spawnSync("bash", ["-c", tierScript()], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    env: { ...process.env, GITHUB_OUTPUT: outputFile, ...env },
+  });
+  assert.equal(result.status, 0, `the tier script exited ${result.status}: ${result.stderr}`);
+  const written = readFileSync(outputFile, "utf8").trim();
+  const match = /^tier=(.*)$/mu.exec(written);
+  assert.ok(match !== null, `the tier script wrote no tier= output, wrote ${JSON.stringify(written)}`);
+  return { tier: match[1] as string, stdout: result.stdout };
+}
+
+test("a merge-queue candidate classifies its own diff instead of answering full (APRV-128)", () => {
+  // The queue candidate used to short-circuit to full the way a push to main
+  // does. It no longer may: a candidate whose diff is nothing but records runs
+  // the records guards, which are exactly the tests that read what changed.
+  // What must stay true is that the answer comes from the classifier, so the
+  // absence of any merge_group short-circuit is asserted, not merely the
+  // presence of the classifier call.
+  const script = tierScript();
   assert.ok(
-    !beforeRule.includes("classify-tier.mjs"),
-    "the merge-queue rule now runs after a classifier invocation; it must short-circuit first",
+    !/EVENT_NAME"\s*=\s*"merge_group"/u.test(script),
+    "the tier step branches on the merge_group event again. A queue candidate must reach the classifier like a pull request does; a special case for it is a tier decided by which event fired rather than by what changed.",
+  );
+  assert.ok(
+    script.includes('node scripts/classify-tier.mjs --base "$base"'),
+    "the tier step no longer asks the classifier",
+  );
+});
+
+test("the tier step resolves a merge-queue candidate's base to origin/main", () => {
+  // Verified against a live merge_group run (2026-08-20): the event supplies
+  // an empty base_ref and a `refs/heads/gh-readonly-queue/...` ref, and the
+  // queue's temporary branch carries the target branch's history, so
+  // `origin/main...HEAD` is the candidate's own change set.
+  const { tier, stdout } = runTierScript({
+    EVENT_NAME: "merge_group",
+    REF: "refs/heads/gh-readonly-queue/main/pr-109-deadbeef",
+    BASE_REF: "",
+  });
+  assert.match(
+    stdout,
+    /base=origin\/main/u,
+    "a merge-queue candidate is classified against some base other than origin/main",
+  );
+  assert.ok(
+    ["light", "records", "full"].includes(tier),
+    `the tier step wrote ${JSON.stringify(tier)}, which is not one of the three tiers`,
+  );
+});
+
+test("an empty base_ref never becomes the ref `origin/`", () => {
+  // The pull_request branch interpolates $BASE_REF into a ref name. An event
+  // that reports none must fall through to origin/main rather than build a ref
+  // that cannot resolve; the classifier would fail closed to full either way,
+  // but a base that silently never resolves makes every tier below full dead
+  // code and hides the breakage.
+  const { stdout } = runTierScript({
+    EVENT_NAME: "pull_request",
+    REF: "refs/pull/1/merge",
+    BASE_REF: "",
+  });
+  assert.match(stdout, /base=origin\/main/u);
+});
+
+test("a push to main still short-circuits when the script is actually run", () => {
+  const { tier } = runTierScript({
+    EVENT_NAME: "push",
+    REF: "refs/heads/main",
+    BASE_REF: "",
+  });
+  assert.equal(tier, "full", "a push to main must be full whatever the classifier would say");
+});
+
+test("the tier step fails closed on any word that is not a tier", () => {
+  const script = tierScript();
+  assert.ok(
+    script.includes("light|records|full) ;;"),
+    "the tier step no longer enumerates the tiers it accepts",
+  );
+  assert.match(
+    script,
+    /\*\)\s*tier=full/u,
+    "the tier step no longer forces an unrecognised classifier output to full",
   );
 });
 
