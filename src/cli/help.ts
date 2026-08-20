@@ -511,23 +511,23 @@ ${why("policy-attest")}`;
 export const POLICY_AMEND_HELP = `approval policy amend — the whole amendment ceremony, in one verb
 
 Usage:
-  approval policy amend [--policy <p>] [--dir <p>] [--log <p>] [--as human:<id>]
-                        [--require-load] [--dry-run] [--commit] [--yes] [--json]
-                        [--branch <name> | --direct]
+  approval policy amend [--policy|--dir|--log <p>] [--as human:<id>] [--require-load]
+      [--dry-run] [--commit] [--no-publish] [--yes] [--json] [--branch <name>|--direct]
 
 Flags:
   --policy <p> / --dir <p> / --log <p>  policy, its discovery dir, and the log
   --as human:<id>                 the human amending; else APPROVAL_HUMAN
   --require-load                  refuse to attest a policy that does not load
-  --dry-run / --commit            print and write nothing / run the ceremony
+  --dry-run / --commit / --no-publish   write nothing / the ceremony / stop at commit
   --branch <name> / --direct      force the BRANCH or the DIRECT flow
   --yes / --json / -h, --help     skip the prompt / machine-readable / this text
 
-Hashes the live policy, diffs it against the BASELINE (classes AND every policy
-key), attests, then runs a git ceremony of EXACTLY two files, commit-preconditions
-first (git-failed, push-rejected, pr-failed break after the append). Attested TEXT
-is NOT recoverable from the log: no blob means HASH-ONLY MODE. Flows, in
-PRECEDENCE, highest first: --branch <name>, --direct; merge a PR by MERGE COMMIT.
+Hashes the live policy, diffs it against the BASELINE (classes AND every policy key),
+attests, then runs a git ceremony of EXACTLY two files, commit-preconditions first
+(git-failed, push-rejected, pr-failed break after the append). Attested TEXT is NOT
+recoverable from the log: no blob means HASH-ONLY MODE. Flows, in PRECEDENCE, highest first:
+--branch <name>, --direct. A refused push PUBLISHES ITSELF (branch, push, PR, auto-merge)
+without moving your checkout, dropping to a RUNBOOK at a failed step; merge by MERGE COMMIT.
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
