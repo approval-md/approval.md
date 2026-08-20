@@ -39,12 +39,17 @@ import {
   type ConformanceHarness,
 } from "../src/channels/conformance.js";
 import {
+  changePayloadView,
   emailPayloadFields,
   payloadRegionText,
   BODY_BEGIN,
   BODY_END,
   CANONICAL_JSON_HEADING,
+  DIFF_LINE_BUDGET,
+  EDIT_VIEW_HEADING,
   EMAIL_VIEW_HEADING,
+  LIVE_QUALIFIER,
+  PROPOSAL_QUALIFIER,
 } from "../src/channels/payload-view.js";
 import { assembleBatch } from "../src/channels/batch.js";
 import { buildPendingQueue, type TagOptions } from "../src/channels/tagging.js";
@@ -176,7 +181,12 @@ let fixtureCounter = 0;
  * pinned to 2026-08-05 would be long expired by the time its own TTL was
  * judged against the wall clock.
  */
-function live(count: number, realClock = false): Live {
+function live(
+  count: number,
+  realClock = false,
+  /** The payload each request binds to. Overridden by the APRV-124 cases. */
+  makePayload: (index: number) => Record<string, unknown> = payloadFor,
+): Live {
   fixtureCounter += 1;
   const prefix = `chaser${fixtureCounter}`;
   const unit = newScenario(scratch.root, POLICY);
@@ -193,7 +203,7 @@ function live(count: number, realClock = false): Live {
   const actions = [];
   for (let index = 0; index < count; index += 1) {
     const key = actionKeyFor(prefix, index);
-    const payload = payloadFor(index);
+    const payload = makePayload(index);
     keys.push(key);
     payloads.set(key, payload);
     actions.push({
@@ -1783,4 +1793,113 @@ test("listen runs the dispatch hook before every poll, including after a poll er
   });
   mock.fail(null);
   assert.ok(calls >= 2, `the hook did not run again after a poll error (${calls})`);
+});
+
+// ---------------------------------------------------------------------------
+// File changes on the phone (APRV-124)
+// ---------------------------------------------------------------------------
+
+test("a file-change payload renders as a diff, and every other shape stays JSON", () => {
+  const json = (value: unknown): string => JSON.stringify(value, null, 2);
+  const view = (value: unknown, truncated = false): string =>
+    payloadRegionText({ value, text: json(value), hash: "h", truncated });
+
+  const edit = {
+    tool: "Edit",
+    rule: "protected-path",
+    file: "/repo/.github/workflows/ci.yml",
+    before: "  - run: npm test\n  - run: npm run lint",
+    after: "  - run: npm test",
+  };
+  const rendered = view(edit);
+  assert.ok(rendered.startsWith(EDIT_VIEW_HEADING), rendered);
+  assert.ok(rendered.includes("file: /repo/.github/workflows/ci.yml"), rendered);
+  assert.ok(rendered.includes(`note: ${LIVE_QUALIFIER}`), rendered);
+  assert.ok(rendered.includes("-  - run: npm run lint"), rendered);
+  assert.ok(rendered.includes("+  - run: npm test"), rendered);
+  // The exact bytes stay underneath: the diff is an aid, never a replacement.
+  assert.ok(rendered.includes(CANONICAL_JSON_HEADING), rendered);
+  assert.ok(rendered.endsWith(json(edit)), rendered);
+
+  // The proposal tier renders its own qualifier, from the same key.
+  assert.ok(view({ ...edit, rule: "protected-path-proposal" }).includes(PROPOSAL_QUALIFIER));
+
+  // A whole-file write: no removed side, and the absence is stated.
+  const write = { tool: "Write", rule: "protected-path", file: "/repo/APPROVAL.md", content: "a\nb" };
+  assert.ok(view(write).includes("the whole file as it will be written (2 lines)"), view(write));
+  assert.ok(view(write).includes("+a\n+b"), view(write));
+
+  // Half a change, an unknown key, a wrong type, a truncated rendering: JSON.
+  for (const value of [
+    { tool: "Edit", file: "/repo/x", before: "a" },
+    { tool: "Edit", file: "/repo/x", after: "a" },
+    { tool: "Edit", file: "/repo/x", before: "a", after: "b", extra: 1 },
+    { tool: "Edit", file: "/repo/x", before: "a", after: "b", content: "c" },
+    { tool: "Edit", file: 3, before: "a", after: "b" },
+    { tool: "Edit", file: "/repo/x", before: "a", after: "b", replace_all: "yes" },
+    { file: "/repo/x" },
+    "just a string",
+    null,
+  ]) {
+    assert.equal(changePayloadView(value), null, `wrongly recognised ${json(value)}`);
+    assert.equal(view(value), json(value), `rendering changed for ${json(value)}`);
+  }
+  assert.equal(view(edit, true), json(edit), "a truncated rendering must not be re-expanded");
+
+  // `replace_all` is part of the question and is shown when the call sets it.
+  assert.ok(view({ ...edit, replace_all: true }).includes("replace_all: true"));
+});
+
+test("a very long change folds with an explicit marker, never silently", () => {
+  const after = Array.from({ length: DIFF_LINE_BUDGET + 25 }, (_, index) => `line ${index}`).join(
+    "\n",
+  );
+  const payload = { tool: "Write", rule: "protected-path", file: "/repo/CLAUDE.md", content: after };
+  const text = payloadRegionText({
+    value: payload,
+    text: JSON.stringify(payload, null, 2),
+    hash: "h",
+    truncated: false,
+  });
+  assert.ok(text.includes(`+line ${String(DIFF_LINE_BUDGET - 1)}`), "the budget is spent in full");
+  assert.equal(text.includes(`+line ${String(DIFF_LINE_BUDGET)}`), false, "the fold did not happen");
+  assert.ok(text.includes("… 25 more lines (hash covers all bytes)"), text);
+  // And the folded lines are still on screen, in the canonical JSON underneath.
+  assert.ok(text.includes(JSON.stringify(after)), "the exact bytes left the message");
+});
+
+test("a diff reaches Telegram escaped, chunked and complete", async () => {
+  // The end-to-end of the APRV-124 complaint: the approver reads the CHANGE,
+  // through the real transport, with markup in it that must not become markup.
+  const change = {
+    tool: "Edit",
+    rule: "protected-path-proposal",
+    file: "/repo/.github/workflows/ci.yml",
+    before: "run: npm test <all> & lint",
+    after: "run: npm test --silent",
+  };
+  const world = live(1, false, () => change);
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = mock.sentTexts().length;
+  await channel.notify(request_);
+  const texts = mock.sentTexts().slice(before);
+  const whole = texts.join("\n");
+
+  assert.ok(whole.includes("rule: protected-path-proposal"), whole);
+  assert.ok(whole.includes(PROPOSAL_QUALIFIER), whole);
+  assert.ok(whole.includes("-run: npm test &lt;all&gt; &amp; lint"), whole);
+  assert.ok(whole.includes("+run: npm test --silent"), whole);
+  assert.equal(whole.includes("<all>"), false, "raw markup reached the message");
+  assert.ok(
+    whole.includes(`--- full payload (sha256 ${request_.payload_hash.value}) ---`),
+    "the payload region lost its hash label",
+  );
+  for (const text of texts) {
+    assert.ok(text.length <= 4096, "a message exceeded Telegram's 4096-character limit");
+  }
+  assert.equal(recordsOf(world.unit.logPath).length, 3);
 });

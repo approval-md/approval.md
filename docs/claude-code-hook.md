@@ -243,6 +243,37 @@ it prints is what the hook decides, and a refined segment shows the rule name
 `rewrite-unpublished`. When the hook refines, its
 `permissionDecisionReason` says so.
 
+### What the approver reads (APRV-124)
+
+The prompt binds to the payload, and the payload is the thing being done, whole.
+A `summary` is a headline and may be ellipsized; the FULL PAYLOAD block never is.
+
+| tool | payload the grant binds to |
+| --- | --- |
+| `Bash` | `{command, cwd}` — the complete command line, not the headline |
+| `Edit` | `{tool, rule, file, before, after}` (plus `replace_all` when the call sets it) |
+| `Write` | `{tool, rule, file, content}` |
+| other file tools | `{tool, rule, file, input}`, the tool input verbatim |
+
+An `Edit` or a `Write` renders on the phone as a diff (removed lines `-`, added
+lines `+`) with the canonical JSON underneath it, so the human approves the
+change rather than the fact that a file was touched. A change too long for one
+screen folds in the diff view with an explicit `… N more lines (hash covers all
+bytes)` marker, and the bytes it folded are still in the JSON below.
+
+`rule` is the tier of a protected-path touch, on the same class:
+
+- `protected-path` — the target is the LIVE checkout's file;
+- `protected-path-proposal` — the target resolves inside
+  `<primary>/.claude/worktrees/<name>/`, so the edit is a branch proposal and
+  the merge that makes it real is separately gated.
+
+The tier is resolved from the hook's own process view (`git rev-parse
+--git-common-dir`, then the real paths), never from the `cwd` the harness sends,
+and it fails closed: anything not provably inside an agent worktree is live-tier.
+It changes no policy semantics — both tiers resolve exactly as `policy.edit`
+resolves — only what the prompt says.
+
 ## Deny reasons
 
 The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen in
@@ -285,8 +316,10 @@ left, and SPEC §11 makes human attention the audit budget. APRV-106's answer wa
 to retract the question when the hook stopped waiting.
 
 APRV-117 answers the same incident the other way, by making the late decision
-useful. Hook requests are matched by the **payload hash of `{command, cwd}`**, so
-the answer belongs to the bytes rather than to one invocation:
+useful. Hook requests are matched by the **payload hash** — of `{command, cwd}`
+for a Bash call, of the change itself for a file tool (see [What the approver
+reads](#what-the-approver-reads-aprv-124)) — so the answer belongs to the bytes
+rather than to one invocation:
 
 - a retry while the question is still pending **adopts** it and waits out the
   remainder — the approver never sees two prompts for one command;
