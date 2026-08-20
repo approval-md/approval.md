@@ -70,7 +70,22 @@ const FIXTURES: readonly Fixture[] = [
 
   // -- gh -------------------------------------------------------------------
   { command: "gh release create v0.1.0", class: "release.publish", rule: "gh-release" },
-  { command: "gh api repos/x/y/pulls", class: "network.call", rule: "gh-api" },
+  // `gh api` splits on its method and field flags (APRV-114); the other
+  // subcommands on the row are `network.call` whatever their flags say.
+  { command: "gh api repos/x/y/pulls", class: "read.vcs.remote", rule: "gh-api-read", row: "gh-api" },
+  { command: "gh api -X GET repos/x/y", class: "read.vcs.remote", rule: "gh-api-read", row: "gh-api" },
+  { command: "gh api --method GET repos/x/y", class: "read.vcs.remote", rule: "gh-api-read", row: "gh-api" },
+  { command: "gh api repos/x/y --paginate --jq .[].name", class: "read.vcs.remote", rule: "gh-api-read", row: "gh-api" },
+  { command: "gh api -X POST repos/x/y/issues", class: "network.call", rule: "gh-api-write", row: "gh-api" },
+  { command: "gh api --method=PATCH repos/x/y", class: "network.call", rule: "gh-api-write", row: "gh-api" },
+  { command: "gh api -XDELETE repos/x/y", class: "network.call", rule: "gh-api-write", row: "gh-api" },
+  { command: "gh api graphql -f query=Q", class: "network.call", rule: "gh-api-write", row: "gh-api" },
+  { command: "gh api repos/x/y --field a=b", class: "network.call", rule: "gh-api-write", row: "gh-api" },
+  { command: "gh api repos/x/y --raw-field a=b", class: "network.call", rule: "gh-api-write", row: "gh-api" },
+  { command: "gh api repos/x/y -F a=b", class: "network.call", rule: "gh-api-write", row: "gh-api" },
+  { command: "gh api repos/x/y --input body.json", class: "network.call", rule: "gh-api-write", row: "gh-api" },
+  { command: "gh auth status", class: "network.call", rule: "gh-api" },
+  { command: "gh secret set TOKEN", class: "network.call", rule: "gh-api" },
   { command: "gh status", class: "read.vcs.remote", rule: "gh-simple-read" },
   { command: "gh pr view 51", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
   { command: "gh pr checks", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
@@ -116,9 +131,57 @@ const FIXTURES: readonly Fixture[] = [
   { command: "sed -n '1,20p' README.md", class: "read.shell", rule: "sed-read", row: "sed" },
   { command: "sed -i.bak s/a/b/ src/x.ts", class: "files.write.workspace", rule: "sed-in-place", row: "sed" },
 
-  // -- network and reads ----------------------------------------------------
-  { command: "curl -sS https://example.com", class: "network.call", rule: "network" },
-  { command: "wget https://example.com/x.tgz", class: "network.call", rule: "network" },
+  // -- web fetches: GET-shaped is read.web, everything else network.call -----
+  { command: "curl https://example.com", class: "read.web", rule: "web-read", row: "web-fetch" },
+  { command: "curl -sS https://example.com", class: "read.web", rule: "web-read", row: "web-fetch" },
+  { command: "curl -fsSL https://example.com/api", class: "read.web", rule: "web-read", row: "web-fetch" },
+  { command: "curl -I https://example.com", class: "read.web", rule: "web-read", row: "web-fetch" },
+  { command: "curl -X GET https://example.com", class: "read.web", rule: "web-read", row: "web-fetch" },
+  { command: "curl -XGET https://example.com", class: "read.web", rule: "web-read", row: "web-fetch" },
+  { command: "curl --request=GET https://example.com", class: "read.web", rule: "web-read", row: "web-fetch" },
+  { command: "curl --request HEAD https://example.com", class: "read.web", rule: "web-read", row: "web-fetch" },
+  { command: "curl -H 'Accept: application/json' https://example.com", class: "read.web", rule: "web-read", row: "web-fetch" },
+  { command: "wget https://example.com/x.tgz", class: "read.web", rule: "web-read", row: "web-fetch" },
+  { command: "wget --method=GET https://example.com", class: "read.web", rule: "web-read", row: "web-fetch" },
+  { command: "http https://example.com", class: "read.web", rule: "web-read", row: "web-fetch" },
+  { command: "http GET https://example.com", class: "read.web", rule: "web-read", row: "web-fetch" },
+  { command: "httpie https://example.com/?a=b", class: "read.web", rule: "web-read", row: "web-fetch" },
+
+  { command: "curl -X POST https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl -XPOST https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl --request DELETE https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl --method PUT https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl -d a=b https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl --data a=b https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl --data-raw a=b https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl --data-ascii a=b https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl --data-binary @body.json https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl --data-urlencode a=b https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl --json '{}' https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl -F file=@x.png https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl --form file=@x.png https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl --form-string a=b https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl -T upload.tgz https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl --upload-file upload.tgz https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "wget --post-data=a=b https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "wget --post-file body.txt https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "wget --body-data a=b https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "wget --body-file body.txt https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "wget --method PUT https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "http POST https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "httpie PUT https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "http https://example.com name=carter", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "http --form https://example.com a=b", class: "network.call", rule: "web-write", row: "web-fetch" },
+
+  // -- transports: manual whatever the argv says ----------------------------
+  { command: "ssh host uptime", class: "network.call", rule: "network" },
+  { command: "scp local.txt host:/tmp/", class: "network.call", rule: "network" },
+  { command: "sftp host", class: "network.call", rule: "network" },
+  { command: "rsync -a src/ host:/srv/", class: "network.call", rule: "network" },
+  { command: "nc -z host 443", class: "network.call", rule: "network" },
+  { command: "telnet host 25", class: "network.call", rule: "network" },
+  { command: "ftp host", class: "network.call", rule: "network" },
+
   { command: "ls -la src", class: "read.shell", rule: "read-shell" },
   { command: "grep -rn TODO src", class: "read.shell", rule: "read-shell" },
 
@@ -145,6 +208,73 @@ for (const fixture of FIXTURES) {
     if (fixture.classes !== undefined) assert.deepEqual(result.classes, fixture.classes);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Web fetches: the ambiguous invocations fail toward network.call (APRV-114)
+// ---------------------------------------------------------------------------
+
+/**
+ * The read carve-out is only safe while everything it cannot read stays out of
+ * it. Each line below is a way to reach the network with a method or a body the
+ * text does not show, and each one must answer `network.call`: a fetch we have
+ * to guess about is a fetch a human decides.
+ */
+const AMBIGUOUS_FETCHES: readonly string[] = [
+  // A method the environment supplies, in each spelling of the flag.
+  'curl -X "$METHOD" https://example.com',
+  "curl --request $METHOD https://example.com",
+  "curl --request=$METHOD https://example.com",
+  "gh api -X $METHOD repos/x/y",
+  // A method flag with nothing after it.
+  "curl -X",
+  "curl https://example.com --request",
+  // A short-flag bundle we decline to unbundle: the method is in the next word.
+  "curl -sSX POST https://example.com",
+  "gh api -sX POST repos/x/y",
+  // A config file can carry any option, including a method and a body.
+  "curl -K request.conf https://example.com",
+  "curl --config request.conf https://example.com",
+  "wget --config=wgetrc https://example.com",
+  // A bare expansion is not a URL; it is whatever the environment puts there.
+  "curl $ENDPOINT",
+  "curl $CURL_OPTS https://example.com",
+  "gh api $ROUTE",
+  // Flags written after `--`. Real curl reads them as URLs, so this is stricter
+  // than curl itself, which is the direction this classifier errs in.
+  "curl -- -d a=b https://example.com",
+];
+
+for (const command of AMBIGUOUS_FETCHES) {
+  test(`an ambiguous fetch is network.call: ${command}`, () => {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
+    if (!result.ok) return;
+    assert.deepEqual(result.classes, ["network.call"]);
+  });
+}
+
+test("a fetch whose argument is a read-only substitution is still network.call", () => {
+  // The substitution itself is inert, so the segment classifies; the word it
+  // produces is not a URL this file can read, so the fetch is not a read.
+  const result = classifyCommand("curl $(cat url.txt)");
+  assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
+  if (!result.ok) return;
+  assert.deepEqual(result.classes, ["network.call"]);
+});
+
+test("a fetch built by a write substitution is opaque", () => {
+  const result = classifyCommand("curl $(npm publish)");
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.code, "opaque");
+});
+
+test("a GET-shaped fetch redirected into a file is a workspace write, not a read", () => {
+  const result = classifyCommand("curl -sS https://example.com > out.json");
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(result.classes, ["files.write.workspace"]);
+});
 
 // ---------------------------------------------------------------------------
 // Coverage: no row of the table is unexercised
@@ -184,7 +314,7 @@ test("every segment of a list is classified, and the classes are the union", () 
 });
 
 test("a pipeline classifies both sides", () => {
-  const result = classifyCommand("curl -s https://example.com | jq .name");
+  const result = classifyCommand("curl -X POST https://example.com | jq .name");
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.deepEqual(result.classes, ["network.call", "read.shell"]);
