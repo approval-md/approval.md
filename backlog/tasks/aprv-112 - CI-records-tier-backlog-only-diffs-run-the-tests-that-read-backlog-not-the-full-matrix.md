@@ -3,10 +3,10 @@ id: APRV-112
 title: >-
   CI records tier: backlog-only diffs run the tests that read backlog, not the
   full matrix
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-20 09:11'
-updated_date: '2026-08-20 12:56'
+updated_date: '2026-08-20 15:28'
 labels:
   - ci
   - dx

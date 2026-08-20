@@ -3,10 +3,10 @@ id: APRV-111
 title: >-
   policy amend: the semantic diff must name non-class vocabulary changes, and
   the ceremony must survive a protected main it did not detect
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-20 09:07'
-updated_date: '2026-08-20 12:56'
+updated_date: '2026-08-20 15:28'
 labels:
   - cli
   - policy

@@ -3,9 +3,10 @@ id: APRV-117
 title: >-
   Hook grant carryover: a decision after timeout still authorizes the retried
   command
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-20 14:06'
+updated_date: '2026-08-20 15:28'
 labels:
   - hook
   - ux
@@ -39,3 +40,9 @@ Interim option for the human (their file, their call): raise the wait moderately
 - [ ] #4 Replay bounds stated in SPEC and tested: same bytes, same cwd, once, within TTL; any difference is a new request
 - [ ] #5 Withdrawal behavior redefined coherently with APRV-106 and the decided-prompt annotations of APRV-113
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Human sign-off given in session 2026-08-20. Build started.
+<!-- SECTION:NOTES:END -->
