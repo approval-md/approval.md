@@ -89,6 +89,7 @@ import {
   runbook,
   shortHash,
   style,
+  type RunbookStep,
   type TableRow,
 } from "./style.js";
 import { usageErrorText } from "./usage.js";
@@ -101,6 +102,7 @@ const FLAGS: Record<string, FlagKind> = {
   "--require-load": "boolean",
   "--dry-run": "boolean",
   "--commit": "boolean",
+  "--no-publish": "boolean",
   "--branch": "string",
   "--direct": "boolean",
   "--yes": "boolean",
@@ -152,9 +154,18 @@ function refuse(
   message: string,
   exitCode: number,
   human?: string,
+  /**
+   * The ceremony's own outcome, ADDITIVE (APRV-130). A refusal that arrives
+   * AFTER the attestation is a refusal of a sub-step, and a machine caller has
+   * to be able to see that split without parsing the message: `ceremony` and
+   * `publishing` ride alongside the frozen `{ok:false,error:{…}}`, never
+   * inside it.
+   */
+  extra?: Record<string, unknown>,
 ): number {
-  if (json) streams.err(`${JSON.stringify({ ok: false, error: { code, message } })}\n`);
-  else if (human !== undefined) streams.err(`${human}\n`);
+  if (json) {
+    streams.err(`${JSON.stringify({ ok: false, error: { code, message }, ...extra })}\n`);
+  } else if (human !== undefined) streams.err(`${human}\n`);
   else streams.err(`approval: ${message}\n`);
   return exitCode;
 }
@@ -435,6 +446,35 @@ function ghAvailable(root: string): boolean {
   return probe.error === undefined && probe.status === 0;
 }
 
+/** `gh`, run the way {@link git} runs git: never throws, always answers. */
+function gh(args: string[], cwd: string): GitRun {
+  const result = spawnSync("gh", args, { cwd, encoding: "utf8" });
+  if (result.error !== undefined || result.status === null) {
+    return { ok: false, stdout: "", stderr: detail(result.error ?? "gh did not run") };
+  }
+  return { ok: result.status === 0, stdout: result.stdout, stderr: result.stderr };
+}
+
+/** The last URL `gh` printed, which is where `gh pr create` puts the PR. */
+function lastUrl(text: string): string | null {
+  const urls = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("http"));
+  return urls[urls.length - 1] ?? null;
+}
+
+/**
+ * How a pull request is named to a human: `#7` when the URL carries a number,
+ * the URL itself otherwise. "PR #7 opened" is the sentence the operator repeats
+ * back; a bare URL is not.
+ */
+function prLabel(url: string | null): string {
+  if (url === null) return "the pull request";
+  const number = /\/pull\/(\d+)/u.exec(url)?.[1];
+  return number === undefined ? url : `PR #${number}`;
+}
+
 /** The pull request title. It names the seq, so the PR is findable from the log. */
 function prTitle(summary: string, seq: string): string {
   return `Policy: ${summary} (attested seq ${seq})`;
@@ -561,6 +601,10 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   const dryRun = boolFlag(parsed.flags, "--dry-run");
   const requireLoad = boolFlag(parsed.flags, "--require-load");
   const wantCommit = boolFlag(parsed.flags, "--commit");
+  // APRV-130: the ceremony publishes by default (push, and on a protected main
+  // branch + push + PR). `--no-publish` is the operator who wants it to stop at
+  // the commit, which is what `--commit` did before the publishing half existed.
+  const noPublish = boolFlag(parsed.flags, "--no-publish");
   const assumeYes = boolFlag(parsed.flags, "--yes");
   const branchFlag = stringFlag(parsed.flags, "--branch");
   const forceDirect = boolFlag(parsed.flags, "--direct");
@@ -920,6 +964,32 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   }
   const seq = result.record.seq;
 
+  // (f2) SUCCESS FIRST (APRV-130).
+  //
+  // The incident: a re-tighten ceremony attested correctly — the one act only a
+  // human can perform, done — and the terminal opened with the word REJECTED,
+  // because the convenience push that follows had been refused by branch
+  // protection. The reader was told their signature had failed when what had
+  // failed was a `git push`.
+  //
+  // So the achievement is printed HERE, the moment it is true, before a single
+  // git command runs. Everything after it is logistics: it can fail, it is
+  // reported where it fails, and it prints beneath a line that already says the
+  // policy is operative. A failure word may headline a SUB-STEP; it may never
+  // headline a ceremony whose attestation landed.
+  if (!json) {
+    streams.out(`${st.glyph("ok")} attested seq ${String(seq)} — the policy is operative\n`);
+    for (const line of st
+      .table([
+        { left: "file", right: relPath(policyPath, cwd) },
+        { left: "sha256", right: shortHash(liveSha256) },
+      ])
+      .split("\n")) {
+      streams.out(`  ${line}\n`);
+    }
+    streams.out("\n");
+  }
+
   // (g) The git ceremony: the two files, together, or the commands to do it.
   const commands = gitCommands(String(seq));
   const branch = useBranch ? branchName(String(seq)) : null;
@@ -927,6 +997,48 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   let pushed = false;
   let prUrl: string | null = null;
   let output: string | null = null;
+
+  /**
+   * What the publishing half did, for the machine and for the terminal
+   * (APRV-130).
+   *
+   * `attested` is deliberately NOT a key of this object and not a rename of the
+   * report's existing top-level `attested` (which is, and stays, the PREVIOUS
+   * attestation this amendment moved from). The new boolean lives on
+   * `ceremony`, so both facts keep their names.
+   */
+  const publishing: PublishingReport = {
+    attempted: false,
+    complete: false,
+    via: "none",
+    branch: null,
+    pushed: false,
+    prUrl: null,
+    autoMerge: "not-attempted",
+    steps: [],
+    stoppedAt: null,
+    reason: null,
+  };
+
+  /** The `Publishing` section, accumulated as the steps run and flushed once. */
+  const publishLines: string[] = [];
+  let publishFlushed = false;
+  const note = (line: string): void => {
+    if (!json) publishLines.push(line);
+  };
+  const quoteUnder = (run: GitRun): void => {
+    for (const line of commandOutputLines(run.stderr, run.stdout)) note(`    ${st.muted(line)}`);
+  };
+  const flushPublishing = (): void => {
+    if (json || publishFlushed || publishLines.length === 0) return;
+    publishFlushed = true;
+    section("Publishing", publishLines);
+  };
+  /** The additive `--json` half of the same, for every exit after the append. */
+  const ceremonyJson = (): Record<string, unknown> => ({
+    ceremony: { attested: true, seq },
+    publishing,
+  });
 
   /**
    * A `git-failed` refusal, as a runbook (APRV-129).
@@ -960,7 +1072,74 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
           "these two files land in ONE commit: a main carrying the policy without its attestation refuses every gate operation",
         ],
       }),
+      ceremonyJson(),
     );
+
+  /**
+   * The publishing half stopped at one of its own steps (APRV-130).
+   *
+   * `owed` is the WHOLE recovery, in order, and `index` the step that failed:
+   * the runbook is rendered from there, so the reader is never handed a command
+   * this verb already ran successfully. That slice is the entire relationship
+   * between the automatic path and the APRV-129 runbook — the runbook is what
+   * automation degrades INTO, at the exact point it ran out.
+   */
+  const stalled = (
+    code: AmendErrorCode,
+    headline: string,
+    failure: GitRun,
+    message: string,
+    state: readonly string[],
+    owed: readonly RunbookStep[],
+    index: number,
+    footer: readonly string[],
+  ): number => {
+    note(`${st.glyph("fail")} ${headline}`);
+    quoteUnder(failure);
+    note(st.muted("the automatic path stopped here; what is still owed is printed below"));
+    publishing.stoppedAt = owed[index]?.command ?? null;
+    publishing.reason = commandOutputLines(failure.stderr, failure.stdout)[0] ?? null;
+    flushPublishing();
+    return refuse(
+      streams,
+      json,
+      code,
+      message,
+      EXIT_IO,
+      runbook(st, code, headline, {
+        quote: commandOutputLines(failure.stderr, failure.stdout),
+        state,
+        steps: owed.slice(index),
+        footer,
+      }),
+      ceremonyJson(),
+    );
+  };
+
+  /**
+   * `gh pr merge --auto`, which is allowed to say no.
+   *
+   * A merge queue, a repository with auto-merge disabled, a PR that is already
+   * mergeable: `--auto` refuses all three, and none of them is a failure of the
+   * ceremony. The pull request is open either way, so a refusal reports the PR
+   * and stops — still inside the success framing.
+   */
+  const armAutoMerge = (root: string, target: string): void => {
+    const merge = gh(["pr", "merge", target, "--merge", "--auto"], root);
+    publishing.steps.push({ command: `gh pr merge ${target} --merge --auto`, ok: merge.ok });
+    if (merge.ok) {
+      publishing.autoMerge = "armed";
+      note(
+        `${st.glyph("ok")} auto-merge armed: ${prLabel(publishing.prUrl)} lands on ${probe.defaultBranch ?? "the default branch"} as a merge commit when CI is green`,
+      );
+      return;
+    }
+    publishing.autoMerge = "refused";
+    const why = commandOutputLines(merge.stderr, merge.stdout)[0];
+    note(
+      `${prLabel(publishing.prUrl)} is open — merge it with a MERGE COMMIT when CI is green. auto-merge was not armed${why === undefined ? "" : `: ${why}`}`,
+    );
+  };
 
   if (commitPlan !== null) {
     if (branch !== null) {
@@ -997,81 +1176,88 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     committed = true;
     output = `${commit.stdout}${commit.stderr}`.trim();
 
-    // The branch flow does not stop at the commit: the commit is only useful on
-    // a protected main once it is on a branch, pushed, and carried by a PR.
-    if (branch !== null) {
+    /** `gh pr create …` as the operator would type it, for both flows. */
+    const prCreateCommand = (head: string): string =>
+      `gh pr create --title ${JSON.stringify(prTitle(summary, String(seq)))} --body ${JSON.stringify(prBody(String(seq)))} --head ${head}${probe.defaultBranch === null ? "" : ` --base ${probe.defaultBranch}`}`;
+    const prCreateArgs = (head: string): string[] => [
+      "pr",
+      "create",
+      "--title",
+      prTitle(summary, String(seq)),
+      "--body",
+      prBody(String(seq)),
+      "--head",
+      head,
+      ...(probe.defaultBranch === null ? [] : ["--base", probe.defaultBranch]),
+    ];
+
+    if (noPublish) {
+      // The old stop-after-commit ceremony, on request. Nothing is pushed, so
+      // the push and (on the branch flow) the pull request are printed as owed.
+      publishing.via = useBranch ? "branch" : "direct";
+      publishing.branch = branch;
+      publishing.reason = "--no-publish: the ceremony stopped at the commit";
+    } else if (branch !== null) {
+      // The branch flow does not stop at the commit: the commit is only useful
+      // on a protected main once it is on a branch, pushed, and carried by a PR.
+      publishing.attempted = true;
+      publishing.via = "branch";
+      publishing.branch = branch;
       const push = git(["push", "-u", "origin", branch], commitPlan.root);
+      publishing.steps.push({ command: `git push -u origin ${branch}`, ok: push.ok });
       if (!push.ok) {
         const prCreate = `gh pr create --title ${JSON.stringify(prTitle(summary, String(seq)))} --body ${JSON.stringify(prBody(String(seq)))}`;
-        return refuse(
-          streams,
-          json,
+        return stalled(
           "push-rejected",
+          `the remote REJECTED \`git push -u origin ${branch}\``,
+          push,
           `the attestation was appended at seq ${seq} and committed on ${branch}, but \`git push -u origin ${branch}\` was REJECTED: ${pushFailureText(push)}. STATE: the amendment commit exists LOCALLY on ${branch} and nowhere else; origin still carries the previous policy. Next: \`git push -u origin ${branch} && ${prCreate}\`, and merge that pull request with a merge commit`,
-          EXIT_IO,
-          runbook(st, "push-rejected", `the remote REJECTED \`git push -u origin ${branch}\``, {
-            quote: commandOutputLines(push.stderr, push.stdout),
-            state: [
-              `attestation appended at seq ${seq}: it is in the log, on disk`,
-              `committed LOCALLY on ${branch}, and nowhere else`,
-              "NOT on origin: origin still carries the previous policy",
-            ],
-            steps: [
-              { command: `git push -u origin ${branch}`, note: "once the remote will take it" },
-              { command: prCreate },
-              { command: `gh pr merge ${branch} --merge`, note: "or merge it in the web UI" },
-            ],
-            footer: [MERGE_COMMIT_LINE],
-          }),
+          [
+            `attestation appended at seq ${seq}: it is in the log, on disk`,
+            `committed LOCALLY on ${branch}, and nowhere else`,
+            "NOT on origin: origin still carries the previous policy",
+          ],
+          [
+            { command: `git push -u origin ${branch}`, note: "once the remote will take it" },
+            { command: prCreate },
+            { command: `gh pr merge ${branch} --merge`, note: "or merge it in the web UI" },
+          ],
+          0,
+          [MERGE_COMMIT_LINE],
         );
       }
       pushed = true;
+      publishing.pushed = true;
       output = `${output}\n${`${push.stdout}${push.stderr}`.trim()}`.trim();
 
       if (ghAvailable(commitPlan.root)) {
-        const args = [
-          "pr",
-          "create",
-          "--title",
-          prTitle(summary, String(seq)),
-          "--body",
-          prBody(String(seq)),
-          "--head",
-          branch,
-        ];
-        if (probe.defaultBranch !== null) args.push("--base", probe.defaultBranch);
-        const pr = spawnSync("gh", args, { cwd: commitPlan.root, encoding: "utf8" });
-        if (pr.error !== undefined || pr.status !== 0) {
-          const ghFailure = (pr.stderr ?? "").trim() || detail(pr.error ?? "gh did not run");
-          return refuse(
-            streams,
-            json,
+        const pr = gh(prCreateArgs(branch), commitPlan.root);
+        publishing.steps.push({ command: prCreateCommand(branch), ok: pr.ok });
+        if (!pr.ok) {
+          const ghFailure = pr.stderr.trim() || pr.stdout.trim() || "gh did not run";
+          return stalled(
             "pr-failed",
+            "`gh pr create` failed; the branch is already on origin",
+            pr,
             `the attestation was appended at seq ${seq}, committed on ${branch} and pushed, but \`gh pr create\` failed: ${ghFailure}; open the pull request by hand and merge it with a merge commit`,
-            EXIT_IO,
-            runbook(st, "pr-failed", "`gh pr create` failed; the branch is already on origin", {
-              quote: commandOutputLines(ghFailure),
-              state: [
-                `attestation appended at seq ${seq}: it is in the log, on disk`,
-                `committed on ${branch} and PUSHED: origin has the branch`,
-                "no pull request: origin's default branch still carries the previous policy",
-              ],
-              steps: [
-                {
-                  command: `gh pr create --title ${JSON.stringify(prTitle(summary, String(seq)))} --body ${JSON.stringify(prBody(String(seq)))} --head ${branch}${probe.defaultBranch === null ? "" : ` --base ${probe.defaultBranch}`}`,
-                  note: "retry, or open it in the web UI",
-                },
-                { command: `gh pr merge ${branch} --merge`, note: "or merge it in the web UI" },
-              ],
-              footer: [MERGE_COMMIT_LINE],
-            }),
+            [
+              `attestation appended at seq ${seq}: it is in the log, on disk`,
+              `committed on ${branch} and PUSHED: origin has the branch`,
+              "no pull request: origin's default branch still carries the previous policy",
+            ],
+            [
+              { command: prCreateCommand(branch), note: "retry, or open it in the web UI" },
+              { command: `gh pr merge ${branch} --merge`, note: "or merge it in the web UI" },
+            ],
+            0,
+            [MERGE_COMMIT_LINE],
           );
         }
-        const url = pr.stdout
-          .split("\n")
-          .map((line) => line.trim())
-          .filter((line) => line.startsWith("http"));
-        prUrl = url[url.length - 1] ?? null;
+        prUrl = lastUrl(pr.stdout);
+        publishing.prUrl = prUrl;
+        publishing.complete = true;
+        // APRV-130: the ceremony offers to finish the last step too.
+        armAutoMerge(commitPlan.root, branch);
       }
     } else {
       // APRV-111. The direct flow used to stop at the commit while PRINTING the
@@ -1080,44 +1266,123 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       // protection would have rejected — read as a finished ceremony. The commit
       // sat ahead of origin, unpushed and unnoticed.
       //
-      // Now the flow runs its own third command, and a rejection is a refusal:
-      // exit nonzero, name the state, and hand over the branch-flow commands
-      // that land the same commit through a pull request. Recovering by hand is
-      // deliberate — `git branch` is safe, but moving the operator's checked-out
-      // branch back off a commit they just signed for is not something a verb
-      // should do to a repository behind their back.
+      // APRV-130. The rejection used to end the verb, handing the operator four
+      // commands to type. Those four commands are non-destructive and entirely
+      // mechanical, so the verb RUNS them: a branch off the commit that already
+      // exists, a push of that branch, a pull request, and an attempt at
+      // auto-merge. What is NOT automated is the APRV-111 constraint, unchanged:
+      // `git branch` copies a ref, so the operator's checked-out branch stays
+      // exactly where they left it, on the commit they just signed for.
       const target = probe.currentBranch;
       if (target !== null && hasOrigin(commitPlan.root)) {
+        publishing.attempted = true;
+        publishing.via = "direct";
         const push = git(["push", "origin", target], commitPlan.root);
-        if (!push.ok) {
+        publishing.steps.push({ command: `git push origin ${target}`, ok: push.ok });
+        if (push.ok) {
+          pushed = true;
+          publishing.pushed = true;
+          publishing.complete = true;
+          output = `${output}\n${`${push.stdout}${push.stderr}`.trim()}`.trim();
+        } else {
+          // ---- the ceremony finishes its own job ----
           const recovery = branchName(String(seq));
-          const prCreate = `gh pr create --title ${JSON.stringify(prTitle(summary, String(seq)))} --body ${JSON.stringify(prBody(String(seq)))} --head ${recovery}`;
-          return refuse(
-            streams,
-            json,
-            "push-rejected",
-            `the attestation was appended at seq ${seq} and committed on ${target}, but \`git push origin ${target}\` was REJECTED by the remote: ${pushFailureText(push)}. STATE: the amendment is committed LOCALLY on ${target} and is NOT on origin, so origin still carries the previous policy and your ${target} is one commit ahead of it. ${target} is protected (whatever the protection probe reported: the remote just refused the push), so land the commit through a pull request: \`git branch ${recovery} && git push -u origin ${recovery} && ${prCreate}\`. Merge it with a merge commit, then pull with the log set aside; docs/dogfood-cutover.md shows the safe sequence`,
-            EXIT_IO,
-            runbook(st, "push-rejected", `the remote REJECTED \`git push origin ${target}\``, {
-              quote: commandOutputLines(push.stderr, push.stdout),
-              state: [
-                `attestation appended at seq ${seq}: it is in the log, on disk`,
-                `committed LOCALLY on ${target}, one commit ahead of origin`,
-                "NOT on origin: origin still carries the previous policy",
-                `${target} is protected, whatever the probe reported: the remote just refused`,
-              ],
-              steps: [
-                { command: `git branch ${recovery}`, note: "the same commit, on a branch" },
-                { command: `git push -u origin ${recovery}` },
-                { command: prCreate },
-                { command: `gh pr merge ${recovery} --merge`, note: "or merge it in the web UI" },
-              ],
-              footer: [MERGE_COMMIT_LINE, LOG_SAFE_PULL_LINE],
-            }),
+          publishing.via = "recovery";
+          publishing.branch = recovery;
+          const owed: RunbookStep[] = [
+            { command: `git branch ${recovery}`, note: "the same commit, on a branch" },
+            { command: `git push -u origin ${recovery}` },
+            { command: prCreateCommand(recovery) },
+            { command: `gh pr merge ${recovery} --merge`, note: "or merge it in the web UI" },
+          ];
+          /** The state lines every stop on this path shares, plus its own. */
+          const state = (last: string): string[] => [
+            `attestation appended at seq ${seq}: it is in the log, on disk`,
+            `committed LOCALLY on ${target}, one commit ahead of origin`,
+            `${target} is protected, whatever the probe reported: the remote just refused`,
+            last,
+          ];
+          const preamble = `the attestation was appended at seq ${seq} and committed on ${target}, but \`git push origin ${target}\` was REJECTED by the remote: ${pushFailureText(push)}. ${target} is protected (whatever the protection probe reported: the remote just refused the push), so this ceremony published through branch ${recovery} instead`;
+
+          note(
+            `${st.warn(`${target} is protected:`)} the direct push was refused, so this amendment publishes through branch ${recovery}`,
           );
+          quoteUnder(push);
+
+          // 1. The branch. A ref copy: HEAD does not move.
+          const branched = git(["branch", recovery], commitPlan.root);
+          publishing.steps.push({ command: `git branch ${recovery}`, ok: branched.ok });
+          if (!branched.ok) {
+            return stalled(
+              "push-rejected",
+              `\`git branch ${recovery}\` failed, so the recovery branch does not exist`,
+              branched,
+              `${preamble}, and \`git branch ${recovery}\` failed: ${pushFailureText(branched)}. STATE: the amendment is committed LOCALLY on ${target} and is NOT on origin, so origin still carries the previous policy and your ${target} is one commit ahead of it. Next: \`git branch ${recovery} && git push -u origin ${recovery} && ${prCreateCommand(recovery)}\`. Merge it with a merge commit, then pull with the log set aside; docs/dogfood-cutover.md shows the safe sequence`,
+              state("NOT on origin: origin still carries the previous policy"),
+              owed,
+              0,
+              [MERGE_COMMIT_LINE, LOG_SAFE_PULL_LINE],
+            );
+          }
+          note(
+            `${st.glyph("ok")} branch ${recovery} created — your checkout stays on ${target}`,
+          );
+
+          // 2. The push of that branch.
+          const branchPush = git(["push", "-u", "origin", recovery], commitPlan.root);
+          publishing.steps.push({ command: `git push -u origin ${recovery}`, ok: branchPush.ok });
+          if (!branchPush.ok) {
+            return stalled(
+              "push-rejected",
+              `the remote REJECTED \`git push -u origin ${recovery}\``,
+              branchPush,
+              `${preamble}; \`git push -u origin ${recovery}\` was REJECTED too: ${pushFailureText(branchPush)}. STATE: the amendment is committed LOCALLY on ${target} and is NOT on origin, so origin still carries the previous policy and your ${target} is one commit ahead of it. Next: \`git push -u origin ${recovery} && ${prCreateCommand(recovery)}\`. Merge it with a merge commit, then pull with the log set aside; docs/dogfood-cutover.md shows the safe sequence`,
+              state("NOT on origin: origin still carries the previous policy"),
+              owed,
+              1,
+              [MERGE_COMMIT_LINE, LOG_SAFE_PULL_LINE],
+            );
+          }
+          publishing.pushed = true;
+          note(`${st.glyph("ok")} pushed ${recovery} to origin`);
+
+          // 3. The pull request. `gh` absent is a failure of THIS step and
+          //    nothing more: the branch is on origin either way, so the runbook
+          //    resumes from here rather than from the beginning.
+          if (!ghAvailable(commitPlan.root)) {
+            return stalled(
+              "pr-failed",
+              "gh is not available, so the pull request was not opened",
+              { ok: false, stdout: "", stderr: "gh is not on PATH" },
+              `${preamble}, and ${recovery} is on origin, but \`gh\` is not available so the pull request was not opened: open it by hand and merge it with a merge commit. STATE: the amendment is committed LOCALLY on ${target} and is on origin as ${recovery}; origin's ${probe.defaultBranch ?? "default branch"} still carries the previous policy. Next: \`${prCreateCommand(recovery)}\`; docs/dogfood-cutover.md shows the safe sequence for pulling afterwards`,
+              state(`on origin as ${recovery}: no pull request carries it yet`),
+              owed,
+              2,
+              [MERGE_COMMIT_LINE, LOG_SAFE_PULL_LINE],
+            );
+          }
+          const pr = gh(prCreateArgs(recovery), commitPlan.root);
+          publishing.steps.push({ command: prCreateCommand(recovery), ok: pr.ok });
+          if (!pr.ok) {
+            return stalled(
+              "pr-failed",
+              "`gh pr create` failed; the branch is already on origin",
+              pr,
+              `${preamble}, and ${recovery} is on origin, but \`gh pr create\` failed: ${pushFailureText(pr)}; open the pull request by hand and merge it with a merge commit. STATE: the amendment is committed LOCALLY on ${target} and is on origin as ${recovery}; origin's ${probe.defaultBranch ?? "default branch"} still carries the previous policy. Next: \`${prCreateCommand(recovery)}\`; docs/dogfood-cutover.md shows the safe sequence for pulling afterwards`,
+              state(`on origin as ${recovery}: no pull request carries it yet`),
+              owed,
+              2,
+              [MERGE_COMMIT_LINE, LOG_SAFE_PULL_LINE],
+            );
+          }
+          prUrl = lastUrl(pr.stdout);
+          publishing.prUrl = prUrl;
+          publishing.complete = true;
+          note(`${st.glyph("ok")} ${prLabel(prUrl)} opened${prUrl === null ? "" : `: ${prUrl}`}`);
+
+          // 4. Auto-merge, which is allowed to refuse.
+          armAutoMerge(commitPlan.root, recovery);
         }
-        pushed = true;
-        output = `${output}\n${`${push.stdout}${push.stderr}`.trim()}`.trim();
       }
     }
   }
@@ -1135,15 +1400,10 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       noop: false,
       dryRun: false,
       aborted: false,
+      ceremony: { attested: true, seq },
+      publishing,
     });
   } else {
-    section("Attested", [
-      st.table([
-        { left: "file", right: relPath(policyPath, cwd) },
-        { left: "seq", right: String(seq) },
-        { left: "sha256", right: shortHash(liveSha256) },
-      ]),
-    ]);
     if (committed) {
       const done: string[] = [
         branch === null
@@ -1158,10 +1418,18 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       // never reaches this branch at all: it is a refusal above.
       const remaining: string[] = [];
       for (const command of commands) {
-        // The PR command is printed as a to-do when gh could not run it.
-        if (command.startsWith("gh pr create") && prUrl === null && branch !== null) continue;
+        // The PR command is printed as a to-do when gh could not run it, or
+        // (APRV-130) when --no-publish stopped the ceremony before it.
+        if (command.startsWith("gh pr create") && branch !== null) {
+          if (noPublish) remaining.push(command);
+          if (prUrl === null) continue;
+        }
         if (command.startsWith("git push") && !pushed) {
-          remaining.push(command);
+          // APRV-130: the direct push that the RECOVERY answered is not owed to
+          // anybody. It ran, the remote refused it, and the Publishing section
+          // below says so and says what was done instead. Printing it here as
+          // "still to run" would send the operator to re-run a rejected push.
+          if (publishing.via !== "recovery") remaining.push(command);
           continue;
         }
         done.push(`  ${st.value(humanCommand(command))}`);
@@ -1170,12 +1438,14 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       if (remaining.length > 0) {
         done.push(
           "",
-          `${st.warn("NOT pushed:")} the commit is local only, and origin still carries the previous policy. Still to run:`,
+          noPublish
+            ? `${st.warn("--no-publish:")} the commit is local only, and origin still carries the previous policy. Still to run:`
+            : `${st.warn("NOT pushed:")} the commit is local only, and origin still carries the previous policy. Still to run:`,
           "",
           ...remaining.map((command) => `  ${st.value(humanCommand(command))}`),
         );
       }
-      if (branch !== null) {
+      if (branch !== null && !noPublish) {
         done.push("");
         if (prUrl !== null) {
           done.push(`${st.key("pull request:")} ${st.value(prUrl)}`);
@@ -1206,6 +1476,9 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
           : []),
       ]);
     }
+    // Logistics, beneath the achievement and beneath the commit: what the
+    // publishing half did, step by step, when it had to do anything unusual.
+    flushPublishing();
   }
   return EXIT_OK;
 }
@@ -1319,6 +1592,35 @@ interface GitReport {
   output: string | null;
 }
 
+/**
+ * What the publishing half of the ceremony did (APRV-130). ADDITIVE: it reports
+ * on the steps that follow the attestation, and it removes nothing.
+ */
+interface PublishingReport {
+  /** Did the verb try to publish at all? False for `--no-publish` and no origin. */
+  attempted: boolean;
+  /** Is the amendment on origin, as a pushed branch or as an open pull request? */
+  complete: boolean;
+  /**
+   * `direct` pushed the operator's branch; `branch` is the pre-planned branch
+   * flow; `recovery` is the direct push that was refused and published through
+   * a branch anyway; `none` published nothing.
+   */
+  via: "direct" | "branch" | "recovery" | "none";
+  /** The branch that was published, when one was. */
+  branch: string | null;
+  /** Did a push reach origin? */
+  pushed: boolean;
+  prUrl: string | null;
+  autoMerge: "armed" | "refused" | "not-attempted";
+  /** Every publishing command the verb RAN, in order, with its outcome. */
+  steps: { command: string; ok: boolean }[];
+  /** The command the automatic path stopped at, when it stopped. */
+  stoppedAt: string | null;
+  /** Why publishing is incomplete, in one clause. */
+  reason: string | null;
+}
+
 /** The frozen `--json` report. Every key is always present. */
 interface Report {
   policyPath: string;
@@ -1332,6 +1634,13 @@ interface Report {
   noop: boolean;
   dryRun: boolean;
   aborted: boolean;
+  /**
+   * Did the ATTESTATION land (APRV-130)? A separate key because the report's
+   * top-level `attested` is, and stays, the attestation this amendment moved
+   * FROM. Two different facts; two different names.
+   */
+  ceremony?: { attested: boolean; seq: number | null };
+  publishing?: PublishingReport;
 }
 
 function emitReport(streams: Streams, report: Report): void {
@@ -1349,6 +1658,10 @@ function emitReport(streams: Streams, report: Report): void {
       load: report.load,
       attestation: report.attestation,
       git: report.git,
+      // Additive (APRV-130), and always present: a machine caller reads the
+      // ceremony's own outcome without inferring it from `attestation`.
+      ceremony: report.ceremony ?? { attested: report.attestation !== null, seq: null },
+      publishing: report.publishing ?? null,
     })}\n`,
   );
 }

@@ -257,44 +257,101 @@ is the amendment" false. On the branch flow it also refuses when there is no
 refusals happens BEFORE the attestation, so a refused `--commit` never leaves an
 attested policy without its commit.
 
-`--commit` also pushes, on both flows. A push the remote REJECTS (branch
-protection the detection probe did not see, a stale ref, a hook) is
-`push-rejected`: a nonzero refusal naming the branch, what git said, the fact
-that the commit is local only and origin still carries the previous policy, and
-the branch-and-pull-request commands that land the same commit. The commit is
-never moved off the operator's branch on their behalf. When there is no `origin`
-to push to, the direct flow reports the push as still to run rather than listing
-it among the commands it ran.
+`--commit` also pushes, on both flows. When there is no `origin` to push to, the
+direct flow reports the push as still to run rather than listing it among the
+commands it ran. `--no-publish` stops the ceremony at the commit: nothing is
+pushed, no pull request is opened, and the push (with the pull request, on the
+branch flow) is printed as still to run. That is the behaviour `--commit` had
+before the publishing half existed, kept for operators who want it.
+
+**Success first.** The attestation is the ceremony: it is the act only a human
+can perform, and everything after it is logistics. So the first line printed
+after the confirmation is the achievement, and the publishing status prints
+beneath it.
+
+```
+✓ attested seq 2 — the policy is operative
+  file    APPROVAL.md
+  sha256  8acbd01cda98
+
+Committed
+  ✓ committed the policy and the log together:
+
+    git add APPROVAL.md .approval/log/events.jsonl
+    git commit -m "Policy: amend APPROVAL.md: 1 class resolution(s) (attested seq 2)"
+
+Publishing
+  main is protected: the direct push was refused, so this amendment publishes through branch policy-amend-2
+      remote: Changes must be made through a pull request.
+      ! [remote rejected] main -> main (pre-receive hook declined)
+  ✓ branch policy-amend-2 created — your checkout stays on main
+  ✓ pushed policy-amend-2 to origin
+  ✓ PR #7 opened: https://github.test/o/r/pull/7
+  ✓ auto-merge armed: PR #7 lands on main as a merge commit when CI is green
+```
+
+A failure word may headline a SUB-STEP; it never headlines a ceremony whose
+attestation landed. `--json` carries the same split additively: `ceremony` is
+`{"attested":true,"seq":N}` and `publishing` reports what the publishing half
+did. The report's existing top-level `attested` is unchanged and still means the
+attestation this amendment moved FROM, which is why the new boolean has a key of
+its own.
+
+**The ceremony finishes its own job.** A direct push the remote REJECTS (branch
+protection the detection probe did not see, a stale ref, a hook) used to end the
+verb with four commands for the operator to type. Those four commands are
+non-destructive and mechanical, so the verb runs them: `git branch
+policy-amend-<seq>`, `git push -u origin policy-amend-<seq>`, `gh pr create` with
+the one-commit body, then `gh pr merge --auto`. Each is reported as it lands.
+`git branch` copies a ref, so the constraint above holds unchanged: the
+operator's checked-out branch never moves off the commit they signed for. An
+auto-merge the repository refuses (a merge queue, auto-merge disabled) is not a
+failure of the ceremony, since the pull request is open either way: the output
+names the PR, says to merge it when CI is green, and exits 0.
+
+Attested and published (or a pull request opened) exits 0. Attested with
+publishing incomplete keeps the nonzero I/O exit, which is the split the two
+audiences need: the exit code speaks to scripts, the rendering to people.
+
+The publishing half's `gh` calls are classified like any other command this
+runtime sees (`vcs.pr.*`, `vcs.push.*`), so under some policies the tail of the
+ceremony may itself prompt for approval.
 
 A refusal that has to be READ AND ACTED ON is printed as a runbook: a headline,
 the remote's own output indented under it, the state in short lines, and the
-recovery numbered with ONE runnable command per line.
+recovery numbered with ONE runnable command per line. It renders when the
+AUTOMATIC path itself runs out, and it begins at the step that failed: a runbook
+is what automation degrades into, not the default reward. Below, the direct push
+was refused, the recovery branch was created, and the remote refused that push
+too, so the runbook owes the three steps that are left.
 
 ```
-✗ push-rejected  the remote REJECTED `git push origin main`
+✗ push-rejected  the remote REJECTED `git push -u origin policy-amend-2`
     remote: Changes must be made through a pull request.
     To .../origin.git
-    ! [remote rejected] main -> main (pre-receive hook declined)
+    ! [remote rejected] policy-amend-2 -> policy-amend-2 (pre-receive hook declined)
     error: failed to push some refs to '.../origin.git'
 
   YOUR STATE
     attestation appended at seq 2: it is in the log, on disk
     committed LOCALLY on main, one commit ahead of origin
-    NOT on origin: origin still carries the previous policy
     main is protected, whatever the probe reported: the remote just refused
+    NOT on origin: origin still carries the previous policy
 
   NEXT STEPS
-    1. git branch policy-amend-2  # the same commit, on a branch
-    2. git push -u origin policy-amend-2
-    3. gh pr create --title "Policy: …(attested seq 2)" --body "…" --head policy-amend-2
-    4. gh pr merge policy-amend-2 --merge  # or merge it in the web UI
+    1. git push -u origin policy-amend-2
+    2. gh pr create --title "Policy: …(attested seq 2)" --body "…" --head policy-amend-2
+    3. gh pr merge policy-amend-2 --merge  # or merge it in the web UI
 
   why a MERGE COMMIT: the policy edit and its attestation stay one commit on main …
   then pull with the log set aside: docs/dogfood-cutover.md shows the safe sequence …
 ```
 
-(Step 3's `--title` and `--body` are shown elided here; the CLI prints them in
-full, so the line can be copied and run as it stands.) The recovery does not end
+(Step 2's `--title` and `--body` are shown elided here; the CLI prints them in
+full, so the line can be copied and run as it stands.) `gh` that is absent or
+that fails degrades to this same runbook, sliced from the pull-request step: the
+branch is on origin, so only the PR and the merge are owed. The recovery does not
+end
 on a hard reset onto `origin/main`, as it once did: with an uncommitted working
 log a hard reset rewinds `events.jsonl` underneath the daemon appending to it,
 which is a fork, so the last line points at the log-safe sequence instead. The
@@ -315,7 +372,10 @@ is the human rendering only.
 6. attests: one `policy.updated` event, identical to `approval policy attest`;
 7. prints, or with `--commit` runs, the git ceremony — `git add <policy> <log>`,
    a `git commit` citing the attestation seq, and the push (and, on the branch
-   flow, the branch and the pull request).
+   flow, the branch and the pull request);
+8. publishes, unless `--no-publish`: a push the remote refuses is answered by
+   the branch, push, pull request and auto-merge above, each reported as it
+   lands, and a step that fails drops to the runbook from there.
 
 **Flow precedence, highest first:** `--branch <name>` (with `--direct` it is a
 usage error), then `--direct`, then detection — the branch flow when the default
@@ -361,12 +421,29 @@ attestation may still proceed.
              "branch":null|"policy-amend-7","warning":null|"...",
              "commands":["git add ...","git commit -m ...","git push ..."],
              "committed":false,"pushed":false,"prUrl":null|"https://...",
-             "output":null|"..."}}
+             "output":null|"..."},
+ "ceremony":{"attested":true|false,"seq":null|2},
+ "publishing":null|{"attempted":true,"complete":true,
+             "via":"direct"|"branch"|"recovery"|"none",
+             "branch":null|"policy-amend-2","pushed":true,
+             "prUrl":null|"https://...",
+             "autoMerge":"armed"|"refused"|"not-attempted",
+             "steps":[{"command":"git push origin main","ok":false}],
+             "stoppedAt":null|"git push -u origin policy-amend-2",
+             "reason":null|"..."}}
 ```
 
 `diff` is null in hash-only mode; `attestation` is null for a no-op, a dry run,
 and an abort. In a dry run the commands carry the literal placeholder `<seq>`.
-A refusal is `{"ok":false,"error":{"code":"...","message":"..."}}` on stderr.
+`ceremony` and `publishing` are additive (they were added without changing any
+key beside them): `ceremony.attested` is whether THIS run attested, while the
+top-level `attested` remains the attestation it moved from, and `publishing` is
+null until a ceremony reaches its publishing half. `publishing.steps` lists the
+commands the verb RAN, in order, the refused direct push included.
+A refusal is `{"ok":false,"error":{"code":"...","message":"..."}}` on stderr,
+and after the attestation it carries `ceremony` and `publishing` alongside
+`error`, so a machine caller reads "attested, not published" without parsing
+the message.
 
 **Refusal codes** (`error.code` with `--json`; frozen public API):
 
@@ -382,12 +459,14 @@ A refusal is `{"ok":false,"error":{"code":"...","message":"..."}}` on stderr.
 - `git-failed` — the attestation WAS appended and git then failed; the message
   names the seq and what to run by hand.
 - `push-rejected` — the attestation was appended and committed, and the remote
-  refused the push. The message carries git's own output, the branch, the fact
-  that origin still carries the previous policy, and the pull-request commands
-  that land the commit. On a terminal the same facts are printed as the runbook
-  above; `error.message` is one line and unchanged.
-- `pr-failed` — the attestation was appended, committed and pushed, and
-  `gh pr create` then failed.
+  refused the push AND the automatic recovery could not get the commit onto
+  origin either. The message carries git's own output, the branch, the fact that
+  origin still carries the previous policy, and the commands that are left. On a
+  terminal the same facts are printed as the runbook above; `error.message` is
+  one line and unchanged.
+- `pr-failed` — the attestation was appended, committed and pushed (on the
+  recovery path, pushed as `policy-amend-<seq>`), and `gh pr create` then failed
+  or `gh` was not available.
 - `append-failed` — the attestation append itself failed.
 - `log-unreadable` / `log-torn-tail` / `log-corrupt` — nothing is amended from a
   log that does not verify.

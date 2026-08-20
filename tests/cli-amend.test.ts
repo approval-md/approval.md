@@ -89,6 +89,12 @@ interface GhBehaviour {
   defaultBranch?: string;
   /** What `gh pr create` prints; absent means it fails. */
   prUrl?: string;
+  /**
+   * Whether `gh pr merge --auto` refuses (APRV-130). A merge queue, and a
+   * repository with auto-merge disabled, both refuse it; neither is a failure
+   * of the ceremony, because the pull request is open either way.
+   */
+  autoMergeRefused?: boolean;
 }
 
 /** A directory holding the `gh` stub, plus the path of its invocation log. */
@@ -112,6 +118,10 @@ function ghStub(behaviour: GhBehaviour): { dir: string; log: string } {
     behaviour.prUrl === undefined
       ? 'echo "gh: pr create failed" >&2; exit 1'
       : `echo ${behaviour.prUrl}; exit 0`;
+  const merge =
+    behaviour.autoMergeRefused === true
+      ? 'echo "gh: auto-merge is not enabled on this repository" >&2; exit 1'
+      : "exit 0";
 
   const script = [
     "#!/bin/sh",
@@ -121,7 +131,12 @@ function ghStub(behaviour: GhBehaviour): { dir: string; log: string } {
     '  --version) echo "gh version 2.0.0 (stub)"; exit 0 ;;',
     `  api) ${api} ;;`,
     `  repo) ${repo} ;;`,
-    `  pr) ${pr} ;;`,
+    // APRV-130: `pr create` and `pr merge` are different answers, so the stub
+    // splits on the subcommand and not on the noun.
+    '  pr) case "$2" in',
+    `    merge) ${merge} ;;`,
+    `    *) ${pr} ;;`,
+    "  esac ;;",
     "esac",
     "exit 1",
     "",
@@ -350,17 +365,19 @@ function repoWithRemote(text: string = BEFORE): { dir: string; remote: string } 
  * no probe can foresee this rejection — which is the whole reason the rejection
  * itself has to be loud.
  */
-function protectPushesTo(remote: string, ref: string): void {
+function protectPushesTo(remote: string, ...refs: string[]): void {
   const hook = join(remote, "hooks", "pre-receive");
   writeFileSync(
     hook,
     [
       "#!/bin/sh",
       "while read -r old new target; do",
-      `  if [ "$target" = ${JSON.stringify(ref)} ]; then`,
-      '    echo "Changes must be made through a pull request." >&2',
-      "    exit 1",
-      "  fi",
+      // Variadic since APRV-130: the automatic recovery pushes a SECOND ref, so
+      // a test that wants the whole automatic path refused protects both.
+      ...refs.map(
+        (ref) =>
+          `  if [ "$target" = ${JSON.stringify(ref)} ]; then echo "Changes must be made through a pull request." >&2; exit 1; fi`,
+      ),
       "done",
       "exit 0",
       "",
@@ -454,6 +471,8 @@ test("the no-op --json report carries every frozen key", () => {
     "attestation",
     "attested",
     "baseline",
+    // APRV-130, additive: the ceremony's own outcome, and the publishing half.
+    "ceremony",
     "diff",
     "dryRun",
     "git",
@@ -462,7 +481,12 @@ test("the no-op --json report carries every frozen key", () => {
     "noop",
     "ok",
     "policy",
+    "publishing",
   ]);
+  // `attested` still means the attestation this amendment moved FROM. The new
+  // boolean is `ceremony.attested`, and a no-op ceremony attested nothing.
+  assert.deepEqual(parsed["ceremony"], { attested: false, seq: null });
+  assert.equal(parsed["publishing"], null);
   assert.equal(parsed["ok"], true);
   assert.equal(parsed["noop"], true);
   assert.equal(parsed["diff"], null);
@@ -1376,8 +1400,11 @@ test("a push the remote REJECTS is a nonzero refusal naming the state and the fi
   git(["commit", "-qm", "attestation"], dir);
   git(["push", "-q", "origin", "main"], dir);
   // Protection the probe cannot see: gh answers nothing useful (the default
-  // stub), so the verb chooses the direct flow and the remote refuses it.
-  protectPushesTo(remote, "refs/heads/main");
+  // stub), so the verb chooses the direct flow and the remote refuses it. Since
+  // APRV-130 the verb then publishes through a branch by itself, so a test of
+  // the REFUSAL has to refuse that branch too — otherwise the ceremony succeeds,
+  // which is the entire point of the change.
+  protectPushesTo(remote, "refs/heads/main", "refs/heads/policy-amend-2");
   const originBefore = remoteHead(remote, "main");
   writePolicy(dir, AFTER);
 
@@ -1396,16 +1423,26 @@ test("a push the remote REJECTS is a nonzero refusal naming the state and the fi
   // The exact state.
   assert.match(error.message, /committed LOCALLY on main and is NOT on origin/u);
   assert.match(error.message, /attestation was appended at seq 2/u);
-  // The exact next step: the branch flow, by name, with the PR command.
-  assert.match(error.message, /git branch policy-amend-2/u);
+  // What the verb TRIED, by name, and the step that is still owed.
+  assert.match(error.message, /published through branch policy-amend-2/u);
   assert.match(error.message, /git push -u origin policy-amend-2/u);
   assert.match(error.message, /gh pr create --title/u);
+
+  // The additive machine half: the attestation landed, the publishing did not.
+  const refusal = JSON.parse(run.stderr) as Record<string, unknown>;
+  assert.deepEqual(refusal["ceremony"], { attested: true, seq: 2 });
+  const publishing = refusal["publishing"] as Record<string, unknown>;
+  assert.equal(publishing["complete"], false);
+  assert.equal(publishing["via"], "recovery");
+  assert.equal(publishing["stoppedAt"], "git push -u origin policy-amend-2");
 
   // And the state the message describes is the state on disk: the attestation
   // is in the log, the commit is local, origin is untouched.
   assert.equal(logRecords(dir).length, 2);
   assert.equal(git(["rev-list", "--count", "HEAD"], dir).stdout.trim(), "3");
   assert.equal(remoteHead(remote, "main"), originBefore);
+  // The APRV-111 constraint, still: the operator is standing where they were.
+  assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "main");
 });
 
 test("a protected main takes the branch flow, and the protected remote accepts it", () => {
@@ -1490,14 +1527,21 @@ test("with no origin the direct --commit says the push is still to run", () => {
 // facts do not change here; the shape does, and the shape is what these assert.
 // ---------------------------------------------------------------------------
 
-/** A repo whose main the remote refuses, and the refusal it produces. */
+/**
+ * A repo whose main AND recovery branch the remote refuses, and the refusal it
+ * produces.
+ *
+ * Both refs since APRV-130: a rejected direct push now publishes through
+ * `policy-amend-2` by itself, so a runbook only renders once that automatic
+ * path has itself run out. This helper is the "automation ran out" case.
+ */
 function rejectedDirectPush(env: Record<string, string> = {}): Run {
   const { dir, remote } = repoWithRemote();
   attest(dir);
   git(["add", "-A"], dir);
   git(["commit", "-qm", "attestation"], dir);
   git(["push", "-q", "origin", "main"], dir);
-  protectPushesTo(remote, "refs/heads/main");
+  protectPushesTo(remote, "refs/heads/main", "refs/heads/policy-amend-2");
   writePolicy(dir, AFTER);
   return runCli(["policy", "amend", "--as", "human:carter", "--yes", "--commit"], dir, env);
 }
@@ -1522,7 +1566,9 @@ test("push-rejected renders a headline, YOUR STATE, and numbered NEXT STEPS", ()
   // The headline: one short line naming what happened, with the code on it.
   const headline = run.stderr.split("\n")[0] ?? "";
   assert.match(headline, /push-rejected/u);
-  assert.match(headline, /the remote REJECTED `git push origin main`/u);
+  // APRV-130: the headline names the SUB-STEP that was refused, which after the
+  // automatic recovery is the branch push and no longer the direct one.
+  assert.match(headline, /the remote REJECTED `git push -u origin policy-amend-2`/u);
   assert.ok(headline.length < 90, `headline is a paragraph again: ${headline}`);
 
   // The remote's own words are indented under the headline, not inside prose.
@@ -1548,8 +1594,11 @@ test("push-rejected renders a headline, YOUR STATE, and numbered NEXT STEPS", ()
     assert.ok(rest.length <= 1, `more than a trailing comment: ${step}`);
     assert.ok((rest[0] ?? "").length <= 60, `the comment is prose: ${step}`);
   }
-  assert.match(steps[0] ?? "", /^1\. git branch policy-amend-2/u);
+  // APRV-130: the runbook resumes at the step the automatic path STOPPED at.
+  // `git branch policy-amend-2` ran and succeeded, so it is not owed to anybody.
+  assert.match(steps[0] ?? "", /^1\. git push -u origin policy-amend-2/u);
   assert.match(steps.join("\n"), /gh pr create --title/u);
+  assert.doesNotMatch(steps.join("\n"), /git branch policy-amend-2/u);
 
   // The rationale is one line with a pointer, not an inline essay. (The one
   // other MERGE COMMIT in the output is inside the PR body being quoted into
@@ -1577,7 +1626,7 @@ test("the runbook survives NO_COLOR and ASCII mode with its structure intact", (
   assert.ok(!plain.stderr.includes("\u001b"), "an escape sequence survived NO_COLOR");
   assert.match(plain.stderr, /^\[x\] push-rejected {2}the remote REJECTED/u);
   assert.ok(sectionLines(plain.stderr, "YOUR STATE").length >= 3);
-  assert.match(sectionLines(plain.stderr, "NEXT STEPS")[0] ?? "", /^1\. git branch/u);
+  assert.match(sectionLines(plain.stderr, "NEXT STEPS")[0] ?? "", /^1\. git push -u origin/u);
   assert.doesNotMatch(plain.stderr, /reset --hard/u);
 });
 
@@ -1587,7 +1636,7 @@ test("push-rejected keeps its machine surface: same code, exit, and message fact
   git(["add", "-A"], dir);
   git(["commit", "-qm", "attestation"], dir);
   git(["push", "-q", "origin", "main"], dir);
-  protectPushesTo(remote, "refs/heads/main");
+  protectPushesTo(remote, "refs/heads/main", "refs/heads/policy-amend-2");
   writePolicy(dir, AFTER);
 
   const run = runCli(["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"], dir);
@@ -1598,7 +1647,7 @@ test("push-rejected keeps its machine surface: same code, exit, and message fact
   // One line, no runbook indentation, no escapes: the frozen shape.
   assert.doesNotMatch(error.message, /\n/u);
   assert.match(error.message, /committed LOCALLY on main and is NOT on origin/u);
-  assert.match(error.message, /git branch policy-amend-2/u);
+  assert.match(error.message, /git push -u origin policy-amend-2/u);
   assert.doesNotMatch(error.message, /reset --hard/u);
   assert.match(error.message, /docs\/dogfood-cutover\.md/u);
 });
@@ -1625,6 +1674,317 @@ test("a rejected BRANCH push renders the same runbook shape", () => {
   assert.match(sectionLines(run.stderr, "YOUR STATE").join("\n"), /nowhere else/u);
   assert.match(sectionLines(run.stderr, "NEXT STEPS")[0] ?? "", /^1\. git push -u origin policy-amend-2/u);
   assert.doesNotMatch(run.stderr, /reset --hard/u);
+});
+
+// ---------------------------------------------------------------------------
+// APRV-130 — the ceremony is a success, and it finishes its own job
+//
+// The incident, 2026-08-20: a re-tighten ceremony attested at seq 293 — the one
+// act only a human can perform, and it landed — and the terminal opened with
+// the word REJECTED, because the convenience push after it had been refused by
+// branch protection. The human: "it doesnt seem user friendly that one of the
+// few human-only actions is rewarded with a REJECTED message".
+//
+// Two properties are asserted here. The attestation headlines its own ceremony,
+// always. And the four recovery commands the runbook used to hand over are RUN,
+// so the runbook is what the automation degrades INTO, sliced from the step it
+// ran out at.
+// ---------------------------------------------------------------------------
+
+/** The first line of `text` that carries anything, headline included. */
+function firstLine(text: string): string {
+  return text.split("\n").find((line) => line.trim().length > 0) ?? "";
+}
+
+/**
+ * Everything printed AFTER the human confirms.
+ *
+ * `Policy` / `Changes` / `Load` are the report the operator reads in order to
+ * decide, and they are printed before the question. The ceremony's own output —
+ * the subject of "no failure word headlines a ceremony whose attestation
+ * landed" — begins where that report ends.
+ */
+function ceremonyOutput(stdout: string): string {
+  const lines = stdout.split("\n");
+  const load = lines.findIndex((line) => line.trim() === "Load");
+  assert.notEqual(load, -1, `no Load section in:\n${stdout}`);
+  let end = load + 1;
+  while (end < lines.length && (lines[end] ?? "").trim() !== "") end += 1;
+  return lines.slice(end).join("\n");
+}
+
+/**
+ * A repo on a main the remote refuses, a gh that answers, and the run.
+ *
+ * `protect` names the refs the remote will not take, so a caller can refuse the
+ * direct push only (the automatic path succeeds) or the recovery branch too.
+ */
+function protectedMain(options: {
+  protect: string[];
+  gh?: GhBehaviour;
+  args?: string[];
+  path?: string;
+}): { run: Run; dir: string; remote: string; log: string } {
+  const { dir, remote } = repoWithRemote();
+  const stub = ghStub(options.gh ?? { defaultBranch: "main", prUrl: "https://github.test/o/r/pull/7" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  protectPushesTo(remote, ...options.protect);
+  writePolicy(dir, AFTER);
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", ...(options.args ?? [])],
+    dir,
+    {},
+    options.path ?? pathWith(stub.dir),
+  );
+  return { run, dir, remote, log: stub.log };
+}
+
+test("a rejected push is published through a branch, and the ceremony reads as a success", () => {
+  const { run, dir, remote, log } = protectedMain({ protect: ["refs/heads/main"] });
+
+  // Attested AND published: the ceremony finished its own job, so it is a 0.
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(run.stderr, "");
+
+  // THE PROPERTY: the first line is the achievement, not the failed sub-step.
+  assert.match(firstLine(ceremonyOutput(run.stdout)), /attested seq 2 — the policy is operative/u);
+  assert.doesNotMatch(firstLine(ceremonyOutput(run.stdout)), /REJECT|fail|✗/iu);
+
+  // Each automatic step is reported, in the order it happened, beneath.
+  const stdout = run.stdout;
+  const order = [
+    /main is protected:/u,
+    /branch policy-amend-2 created/u,
+    /pushed policy-amend-2 to origin/u,
+    /PR #7 opened/u,
+    /auto-merge armed/u,
+  ].map((pattern) => pattern.exec(stdout)?.index ?? -1);
+  assert.ok(
+    order.every((index) => index > 0),
+    `a publishing step went unreported:\n${stdout}`,
+  );
+  assert.deepEqual([...order].sort((a, b) => a - b), order, `the steps are out of order:\n${stdout}`);
+  // The achievement is above every one of them.
+  assert.ok(stdout.indexOf("attested seq 2") < order[0]!);
+
+  // The APRV-111 constraint: `git branch` copies a ref, so the operator is
+  // still standing on the commit they signed for.
+  assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "main");
+  // The amendment is on origin as a branch, and main is untouched.
+  assert.deepEqual(remoteFiles(remote, "policy-amend-2"), [
+    ".approval/log/events.jsonl",
+    "APPROVAL.md",
+  ]);
+  assert.equal(
+    remoteHead(remote, "policy-amend-2"),
+    git(["rev-parse", "HEAD"], dir).stdout.trim(),
+  );
+  // The PR was opened for the recovery branch, with the one-commit body.
+  const calls = ghCalls(log);
+  assert.equal(calls[calls.indexOf("--head") + 1], "policy-amend-2");
+  assert.match(calls[calls.indexOf("--body") + 1] ?? "", /exactly one commit/u);
+  assert.ok(calls.includes("--auto"), "auto-merge was never attempted");
+  // And nothing tells the operator to re-run the push the remote refused.
+  assert.doesNotMatch(stdout, /NOT pushed:/u);
+});
+
+test("the same run reports attested and its publishing outcome in --json", () => {
+  const { run } = protectedMain({ protect: ["refs/heads/main"], args: ["--json"] });
+
+  assert.equal(run.code, 0, run.stderr);
+  const parsed = report(run);
+  // Additive: `attested` is still the attestation this amendment moved FROM.
+  assert.deepEqual(parsed["ceremony"], { attested: true, seq: 2 });
+  assert.deepEqual(parsed["attested"], parsed["attested"]);
+  const publishing = parsed["publishing"] as Record<string, unknown>;
+  assert.equal(publishing["attempted"], true);
+  assert.equal(publishing["complete"], true);
+  assert.equal(publishing["via"], "recovery");
+  assert.equal(publishing["branch"], "policy-amend-2");
+  assert.equal(publishing["pushed"], true);
+  assert.equal(publishing["prUrl"], "https://github.test/o/r/pull/7");
+  assert.equal(publishing["autoMerge"], "armed");
+  assert.equal(publishing["stoppedAt"], null);
+  // Every step the verb RAN, in order, with the refused direct push first.
+  const steps = publishing["steps"] as { command: string; ok: boolean }[];
+  assert.deepEqual(
+    steps.map((step) => `${step.ok ? "ok" : "no"} ${step.command.split(" --title")[0]}`),
+    [
+      "no git push origin main",
+      "ok git branch policy-amend-2",
+      "ok git push -u origin policy-amend-2",
+      "ok gh pr create",
+      "ok gh pr merge policy-amend-2 --merge --auto",
+    ],
+  );
+  // The frozen `git` sub-object is untouched by any of it.
+  const gitPlan = parsed["git"] as Record<string, unknown>;
+  assert.equal(gitPlan["committed"], true);
+  assert.equal(gitPlan["flow"], "direct");
+});
+
+test("a refused auto-merge is still a success: the PR is open, and it says so", () => {
+  const { run } = protectedMain({
+    protect: ["refs/heads/main"],
+    gh: { defaultBranch: "main", prUrl: "https://github.test/o/r/pull/9", autoMergeRefused: true },
+  });
+
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(firstLine(ceremonyOutput(run.stdout)), /attested seq 2 — the policy is operative/u);
+  assert.match(run.stdout, /PR #9 is open — merge it with a MERGE COMMIT when CI is green/u);
+  assert.match(run.stdout, /auto-merge was not armed: gh: auto-merge is not enabled/u);
+});
+
+test("a recovery step that fails drops to the runbook, sliced from that step", () => {
+  // The recovery branch push is refused too, so the automatic path stops at its
+  // SECOND step and the runbook owes steps 2..4.
+  const { run } = protectedMain({
+    protect: ["refs/heads/main", "refs/heads/policy-amend-2"],
+  });
+
+  assert.equal(run.code, 4, run.stdout);
+  // Success first, even here: the attestation landed, so it headlines.
+  assert.match(firstLine(ceremonyOutput(run.stdout)), /attested seq 2 — the policy is operative/u);
+  // The steps that DID work are reported; the failure is a sub-step on stderr.
+  assert.match(run.stdout, /branch policy-amend-2 created/u);
+  assert.match(run.stdout, /the automatic path stopped here/u);
+  assert.match(firstLine(run.stderr), /✗ push-rejected/u);
+
+  const steps = sectionLines(run.stderr, "NEXT STEPS");
+  assert.match(steps[0] ?? "", /^1\. git push -u origin policy-amend-2/u);
+  assert.match(steps[1] ?? "", /^2\. gh pr create --title/u);
+  assert.match(steps[2] ?? "", /^3\. gh pr merge policy-amend-2 --merge/u);
+  assert.equal(steps.length, 3, `the runbook was not sliced: ${steps.join(" | ")}`);
+});
+
+test("a recovery branch that already exists slices the runbook from step one", () => {
+  const { dir, remote } = repoWithRemote();
+  const stub = ghStub({ defaultBranch: "main", prUrl: "https://github.test/o/r/pull/7" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  protectPushesTo(remote, "refs/heads/main");
+  // The name the recovery wants is taken, so its FIRST step fails.
+  git(["branch", "policy-amend-2"], dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+
+  assert.equal(run.code, 4, run.stdout);
+  assert.match(firstLine(ceremonyOutput(run.stdout)), /attested seq 2 — the policy is operative/u);
+  const steps = sectionLines(run.stderr, "NEXT STEPS");
+  assert.equal(steps.length, 4, `the runbook lost a step: ${steps.join(" | ")}`);
+  assert.match(steps[0] ?? "", /^1\. git branch policy-amend-2/u);
+  assert.match(run.stderr, /already exists/u);
+});
+
+test("gh absent degrades the recovery to the runbook, with the branch on origin", () => {
+  const { run, dir, remote } = protectedMain({
+    protect: ["refs/heads/main"],
+    path: pathWithoutGh(),
+  });
+
+  // The push half succeeded, so the branch IS on origin; only the PR is owed.
+  assert.equal(run.code, 4, run.stdout);
+  assert.match(firstLine(ceremonyOutput(run.stdout)), /attested seq 2 — the policy is operative/u);
+  assert.deepEqual(remoteFiles(remote, "policy-amend-2"), [
+    ".approval/log/events.jsonl",
+    "APPROVAL.md",
+  ]);
+  assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "main");
+
+  assert.match(firstLine(run.stderr), /✗ pr-failed/u);
+  assert.match(run.stderr, /gh is not available, so the pull request was not opened/u);
+  const steps = sectionLines(run.stderr, "NEXT STEPS");
+  assert.equal(steps.length, 2, `the runbook was not sliced: ${steps.join(" | ")}`);
+  assert.match(steps[0] ?? "", /^1\. gh pr create --title/u);
+  // The state names what IS true: on origin as a branch, no pull request.
+  assert.match(sectionLines(run.stderr, "YOUR STATE").join("\n"), /on origin as policy-amend-2/u);
+});
+
+test("--no-publish stops at the commit, and says what is still owed", () => {
+  const { dir, remote } = repoWithRemote();
+  const stub = ghStub({ protection: "unprotected" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  const originBefore = remoteHead(remote, "main");
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--no-publish"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(firstLine(ceremonyOutput(run.stdout)), /attested seq 2 — the policy is operative/u);
+  // Committed, and nothing else: origin is exactly where it was.
+  assert.equal(git(["rev-list", "--count", "HEAD"], dir).stdout.trim(), "3");
+  assert.equal(remoteHead(remote, "main"), originBefore);
+  assert.match(run.stdout, /--no-publish:/u);
+  assert.match(run.stdout, /Still to run:/u);
+  assert.match(run.stdout, /git push origin main/u);
+});
+
+test("--no-publish on the branch flow owes the push AND the pull request", () => {
+  const { dir, remote } = repoWithRemote();
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/7" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--no-publish", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  const publishing = report(run)["publishing"] as Record<string, unknown>;
+  assert.equal(publishing["attempted"], false);
+  assert.equal(publishing["pushed"], false);
+  assert.match(publishing["reason"] as string, /--no-publish/u);
+  assert.equal(remoteHead(remote, "policy-amend-2"), "");
+  // No `gh` call was made at all: publishing is where gh lives.
+  assert.equal(ghCalls(stub.log).includes("create"), false);
+});
+
+test("the direct flow's success path is unchanged: no publishing narration", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "unprotected" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(firstLine(ceremonyOutput(run.stdout)), /attested seq 2 — the policy is operative/u);
+  // A push that worked first time needs no explaining.
+  assert.doesNotMatch(run.stdout, /Publishing/u);
+  assert.doesNotMatch(run.stdout, /policy-amend-2/u);
 });
 
 // ---------------------------------------------------------------------------
