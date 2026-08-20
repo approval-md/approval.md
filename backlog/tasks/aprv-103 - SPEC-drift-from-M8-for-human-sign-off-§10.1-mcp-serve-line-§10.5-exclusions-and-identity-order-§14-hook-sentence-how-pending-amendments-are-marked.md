@@ -3,10 +3,10 @@ id: APRV-103
 title: >-
   SPEC drift from M8, for human sign-off: §10.1 mcp serve line, §10.5 exclusions
   and identity order, §14 hook sentence, how pending amendments are marked
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-19 12:32'
-updated_date: '2026-08-20 12:55'
+updated_date: '2026-08-20 19:05'
 labels:
   - spec
   - docs
@@ -24,10 +24,18 @@ Found by the 2026-08-19 M8 review (code on main at 3637632 audited against SPEC.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 SPEC §10.1 lists approval mcp serve with a one-line gloss matching the other verbs
-- [ ] #2 SPEC §10.5 names the consume and hook claude-code exclusions and states that the server identity is appended last to every argv
-- [ ] #3 SPEC §14 M8 sentence matches what src/cli/hook.ts does (or a task is filed to change the hook), decided by the human
-- [ ] #4 A convention for marking amendments pending sign-off exists and the seven listed amendments are marked or signed
+- [x] #1 SPEC §10.1 lists approval mcp serve with a one-line gloss matching the other verbs
+- [x] #2 SPEC §10.5 names the consume and hook claude-code exclusions and states that the server identity is appended last to every argv
+- [x] #3 SPEC §14 M8 sentence matches what src/cli/hook.ts does (or a task is filed to change the hook), decided by the human
+- [x] #4 A convention for marking amendments pending sign-off exists and the seven listed amendments are marked or signed
 - [ ] #5 verb-registry.ts carries human_only_note only where human_only is true; the MCP exclusion reasoning lives in one place
-- [ ] #6 npm test passes (docs-guard, cli-help and layering tests included)
+- [x] #6 npm test passes (docs-guard, cli-help and layering tests included)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+SPEC amendments applied and SIGNED OFF: the human merged PR 107 (2026-08-20), which is the sign-off for the applied wording, and ratified the pending-amendment convention (the (Amended APRV-n, pending sign-off.) suffix, stated once in the front matter). Follow-up PR 108 (also merged) applied the suffix to the APRV-58/82/106/107 sites flagged in task notes but outside this task's seven. Builder process note for the record: the first application run stopped mid-work on a hook-timeout per CLAUDE.md's stop-and-escalate rule (the human was away from the phone); the remaining four suffix edits were finished by the orchestrator under per-edit gating. Remaining OPEN on this task: the code-side ACs (verb-registry human_only_note cleanup on consume / hook claude-code; the stale --dir claims in docs/claude-code-hook.md lines 56-57) need a code branch.
+
+AC 5 left UNCHECKED because it is WRONG, discovered by attempting it: human_only_note records why the human_only judgment went the way it did in EITHER direction, and tests/cli-instructions.test.ts pins that agent-facing-by-argument verbs (consume, hook claude-code, adapter email) MUST carry the note. The AC's premise (notes only where human_only is true) came from the degraded-context review misreading the field. The MCP exclusion reasoning already lives in one place per side of the boundary: src/mcp/server.ts names its exclusions with reasons, SPEC 10.5 states them normatively (signed off in PR 107). The docs --dir lines the review flagged were already corrected by APRV-101. Nothing remains; task closed with AC 5 recorded as invalid rather than satisfied.
+<!-- SECTION:NOTES:END -->

@@ -3,10 +3,10 @@ id: APRV-117
 title: >-
   Hook grant carryover: a decision after timeout still authorizes the retried
   command
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-20 14:06'
-updated_date: '2026-08-20 15:28'
+updated_date: '2026-08-20 18:49'
 labels:
   - hook
   - ux
@@ -34,15 +34,15 @@ Interim option for the human (their file, their call): raise the wait moderately
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A grant landed after the hook wait elapsed authorizes a retry of the identical command within TTL, with no second prompt
-- [ ] #2 A retry while the original request is still pending adopts it rather than opening a duplicate; the phone never shows two prompts for one command
-- [ ] #3 A carried grant is consumed exactly once; a second retry after consumption is refused through the ordinary path
+- [x] #1 A grant landed after the hook wait elapsed authorizes a retry of the identical command within TTL, with no second prompt
+- [x] #2 A retry while the original request is still pending adopts it rather than opening a duplicate; the phone never shows two prompts for one command
+- [x] #3 A carried grant is consumed exactly once; a second retry after consumption is refused through the ordinary path
 - [ ] #4 Replay bounds stated in SPEC and tested: same bytes, same cwd, once, within TTL; any difference is a new request
-- [ ] #5 Withdrawal behavior redefined coherently with APRV-106 and the decided-prompt annotations of APRV-113
+- [x] #5 Withdrawal behavior redefined coherently with APRV-106 and the decided-prompt annotations of APRV-113
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Human sign-off given in session 2026-08-20. Build started.
+Merged as PR 106 (branch aprv-117-grant-carryover) after one merge-queue-caught semantic conflict with APRV-114 (the adoption test's curl specimen became an autonomous read; specimen now carries a body). Requests keyed by payload hash + cwd + class; adoption is read-only (a retry waits on the existing key and appends nothing, so duplicate prompts are impossible); consumption is one execution.started with execution: harness through compare-and-append on EVERY granted proceed, appended by the new gate.consumeHarnessGrant which re-checks attestation (the carried path is the only allow that never passes through request). Deliberately NO completion event: the runtime never observes the harness outcome, and a fabricated completed would clear loop-escalation streaks; the harness marker tells a reader why no outcome lands. Builder soundness fixes beyond the spec: a decided request is not immortal (token shelf-life rule applied to token-less grants, else hook grants never staled); hook prompts drop the now-false 'requester waits until' line (TTL is the governing deadline). Timeout no longer withdraws (carryover serves APRV-106's intent); withdrawal survives on SIGTERM, thrown failure, and intake refusal, reason cancelled; adopted keys never retracted by the adopter; APRV-113 annotations unchanged. AC 4 left UNCHECKED on its SPEC half: replay bounds (same bytes, same cwd, same class, once, within TTL, harness-only) are tested and documented in docs/claude-code-hook.md but not yet stated in SPEC - that amendment plus the section 6.3 withdrawal-rationale rewording and the harness execution-record shape are listed for the next spec pass, flagged per the ratified pending-sign-off convention. Invariants touched and named: compare-and-append on the new append site; gate-typed events runtime-timestamped; enforcement reads only verified records; the consumed-once rule reuses the gate's existing execution.started terminality rather than a second mechanism.
 <!-- SECTION:NOTES:END -->
