@@ -3,10 +3,10 @@ id: APRV-112
 title: >-
   CI records tier: backlog-only diffs run the tests that read backlog, not the
   full matrix
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-20 09:11'
-updated_date: '2026-08-20 15:28'
+updated_date: '2026-08-20 18:47'
 labels:
   - ci
   - dx
@@ -24,7 +24,13 @@ Human feedback 2026-08-20: record-only PRs through the full CI gate are slowing 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 classify-tier resolves a pure-backlog (and exactly-the-files-the-guards-read) diff to a records tier; mixed or empty diffs resolve to full; pinned by tests
-- [ ] #2 The records tier runs milestones-guard, backlog-fixtures and docs-guard on one Node version and is wired in ci.yml as a required check like the light tier
-- [ ] #3 README Running-the-checks updated; npm test and lint clean; the ci.yml change lands behind the policy.edit gate
+- [x] #1 classify-tier resolves a pure-backlog (and exactly-the-files-the-guards-read) diff to a records tier; mixed or empty diffs resolve to full; pinned by tests
+- [x] #2 The records tier runs milestones-guard, backlog-fixtures and docs-guard on one Node version and is wired in ci.yml as a required check like the light tier
+- [x] #3 README Running-the-checks updated; npm test and lint clean; the ci.yml change lands behind the policy.edit gate
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Merged as PR 104. New records tier: a diff touching only backlog/** or MILESTONES.md runs build + milestones-guard + backlog-fixtures + docs-guard on Node 20 via run-tests.mjs --only, instead of the two-version full matrix. Fail-closed table verified: push-to-main and merge_group unconditionally full; any non-record path, empty path set, unreadable git state, unparseable path, or unrecognized classifier output all resolve full; the ci aggregator gained a records case and still fails a skipped required tier. ci-guard asserts the workflow's named test set equals the classifier's exported RECORDS_TESTS so they cannot drift; near-misses (backlog.md, src/backlog/, MILESTONES.md.bak) pinned as not-records. scripts/** and .github/** force full, so the classifier and workflow cannot ride the tier they define. README Running-the-checks documents the three tiers and the all-or-nothing rule. Honest note: backlog-fixtures reads the generated corpus, not live backlog/; it is in the set for subject matter, and the 'exactly three readers' rationale holds for two. The ci.yml change merged through the gated vcs.push.main path. A merge_group short-circuit test now covers rule 1b, previously untested.
+<!-- SECTION:NOTES:END -->

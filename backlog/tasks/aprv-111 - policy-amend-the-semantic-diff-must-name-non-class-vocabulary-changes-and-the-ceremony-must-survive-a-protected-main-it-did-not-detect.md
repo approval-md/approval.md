@@ -3,10 +3,10 @@ id: APRV-111
 title: >-
   policy amend: the semantic diff must name non-class vocabulary changes, and
   the ceremony must survive a protected main it did not detect
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-20 09:07'
-updated_date: '2026-08-20 15:28'
+updated_date: '2026-08-20 18:49'
 labels:
   - cli
   - policy
@@ -25,7 +25,13 @@ Observed 2026-08-20 during the real protected_paths amendment (attested seq 48, 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The semantic diff renders changes to every recognised non-class key in before -> after form and names unknown keys; "no semantic change" is printed only when the parsed policies are semantically identical
-- [ ] #2 On a protected main the ceremony takes the branch flow; a rejected push is a loud nonzero failure naming the fix, never a silent success; tests cover both with a temp bare repo
-- [ ] #3 npm test and lint clean
+- [x] #1 The semantic diff renders changes to every recognised non-class key in before -> after form and names unknown keys; "no semantic change" is printed only when the parsed policies are semantically identical
+- [x] #2 On a protected main the ceremony takes the branch flow; a rejected push is a loud nonzero failure naming the fix, never a silent success; tests cover both with a temp bare repo
+- [x] #3 npm test and lint clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Merged as PR 105 (branch aprv-111-amend-differ). The differ gained a derived vocabulary section: it walks both documents' own keys, flattens to dotted paths, and reports every differing pair before -> after, so future policy vocabulary (APRV-105's token_delivery) is covered with no differ edit; unknown top-level keys are listed and marked recognised: false whether or not the value moved; rejected-but-parsed YAML reaches the differ via a DISPLAY-ONLY raw field on a failed load, since an unknown key is otherwise invisible. 'no semantic change' prints only when probes and every compared key agree; an unparsed side says the document was not compared. Second defect deeper than filed: the direct flow printed git push among commands it had run while never running it; the push now runs, and a rejection is refusal push-rejected (exit 4) carrying git's verbatim output, the exact local state, and the branch+PR recovery, without moving the operator off a commit they signed. FINDING against the task's own proposal, verified empirically: git push --dry-run cannot detect branch protection (pre-receive never runs on a dry run) - documented in cli-reference and the test helper so it is not re-proposed. +10 tests including a temp bare repo with a real pre-receive refusal.
+<!-- SECTION:NOTES:END -->
