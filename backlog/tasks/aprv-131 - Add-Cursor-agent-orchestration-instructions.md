@@ -1,11 +1,11 @@
 ---
 id: APRV-131
 title: Add Cursor agent orchestration instructions
-status: In Progress
+status: Done
 assignee:
   - '@gpt-5.6-sol'
 created_date: '2026-08-21 11:07'
-updated_date: '2026-08-21 18:13'
+updated_date: '2026-08-21 18:27'
 labels: []
 dependencies: []
 modified_files:
@@ -24,10 +24,10 @@ Translate repository working practices from CLAUDE.md into Cursor-native instruc
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Root AGENTS.md captures repository-wide workflow, safety, verification, and approval practices without conflicting with APPROVAL.md or SPEC.md
-- [ ] #2 A version-controlled Cursor custom agent pins token-heavy implementation work to claude-opus-5-thinking-high and defines its handoff contract
+- [x] #2 A version-controlled Cursor custom agent pins token-heavy implementation work to claude-opus-5-thinking-high and defines its handoff contract
 - [x] #3 AGENTS.md tells GPT-5.6 Sol when and how to delegate to the Opus agent, including complete-context prompts and final parent review
 - [x] #4 Cursor-specific instructions avoid Claude Code-only hook or model names where they do not apply
-- [ ] #5 AGENTS.md defines the parent completion loop to commit and push reviewed in-scope changes on a feature branch by default, while excluding approval-log artifacts and never pushing main
+- [x] #5 AGENTS.md defines the parent completion loop to commit and push reviewed in-scope changes on a feature branch by default, while excluding approval-log artifacts and never pushing main
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -50,4 +50,12 @@ User corrected the desired Cursor worker model from GPT-5.6 Terra Medium to Clau
 Updated AGENTS.md and .cursor/agents/token-heavy-implementer.md to Claude Opus 5 Thinking High using the supported slug claude-opus-5-thinking-high. The AGENTS.md protected-path edit was granted through the live policy.edit gate; the runtime classified the .cursor custom-agent edit as ungated, while the user's explicit request authorized the model correction. Verification: no Terra references remain in active Cursor instruction files, npm run lint passed, and approval log verify is clean at 346 records. The earlier full suite remains 2029/2029; no runtime code changed.
 
 User requested that the Cursor parent agent complete implementation loops by committing and pushing the reviewed feature branch without a separate prompt. This standing instruction applies unless the user opts out; it does not authorize main-branch pushes or inclusion of .approval log artifacts.
+
+Commit 8ad69c0 tracks AGENTS.md and .cursor/agents/token-heavy-implementer.md. Scripted assertions confirmed the Opus model pin, standing parent authorization, main-branch prohibition, and .approval exclusion. The user explicitly confirmed the completion-loop behavior.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added Cursor-native repository instructions with GPT-5.6 Sol orchestrating Claude Opus 5 Thinking High, plus a standing parent completion loop that commits and pushes reviewed feature-branch work while excluding .approval artifacts and main. Verified with 2029/2029 tests, lint, scripted instruction assertions, a clean 354-record approval log, and commit 8ad69c0.
+<!-- SECTION:FINAL_SUMMARY:END -->
