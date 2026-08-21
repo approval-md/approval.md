@@ -37,11 +37,11 @@ Additional rules:
 
 ## Cursor model orchestration
 
-GPT-5.6 Sol is the orchestrator. The parent keeps task selection, decomposition, architecture, safety judgment, approval routing, integration decisions, and final review.
+Grok 4.6 Extra High is the orchestrator. The parent keeps task selection, decomposition, architecture, safety judgment, approval routing, integration decisions, and final review.
 
-For settled, token-heavy coding, invoke the version-controlled `/token-heavy-implementer` custom agent proactively. It runs Claude Opus 5 Thinking High for feature implementation against written acceptance criteria, fixture generation, broad test suites, per-channel mirrors, and mechanical refactors.
+For settled, token-heavy coding, invoke the version-controlled `/token-heavy-implementer` custom agent proactively. It runs Grok 4.6 Extra High for feature implementation against written acceptance criteria, fixture generation, broad test suites, per-channel mirrors, and mechanical refactors.
 
-If the custom agent is unavailable in the current interface, call a general-purpose subagent with model `claude-opus-5-thinking-high`. Always pass the model explicitly; do not rely on inheritance.
+If the custom agent is unavailable in the current interface, call a general-purpose subagent with model `cursor-grok-4.6-xhigh`. Always pass the model explicitly; do not rely on inheritance.
 
 Every delegation prompt must be self-contained because subagents start with clean context. Include:
 
