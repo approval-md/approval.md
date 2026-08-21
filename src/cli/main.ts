@@ -881,12 +881,13 @@ export function main(argv: string[], options: MainOptions = {}): number {
       );
       return EXIT_OK;
     }
-    // The harness verb (APRV-82). `hook claude-code` reads a PreToolUse event
-    // on STDIN and answers allow or deny, so a command the harness runs itself
-    // cannot skip the gate the way `approval run` cannot. It is the one command
-    // whose stdout is a decision object for another program rather than a
-    // report for a human, and the one whose exit code is deliberately 0 on a
-    // refusal: the harness reads a hook's verdict only on exit 0.
+    // The harness verbs (APRV-82, APRV-133). `hook claude-code` and
+    // `hook cursor` each read a pre-tool event on STDIN and answer allow or
+    // deny, so a command the harness runs itself cannot skip the gate the way
+    // `approval run` cannot. They are the commands whose stdout is a decision
+    // object for another program rather than a report for a human, and whose
+    // exit code is deliberately 0 on a refusal: the harness reads a hook's
+    // verdict only on exit 0.
     case "hook":
       return commandHook(rest, streams, cwd);
     // The interoperability verb (APRV-64). `import agents-md` reads permissions

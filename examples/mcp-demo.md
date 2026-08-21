@@ -104,7 +104,7 @@ a human's surface, which is the phone in step 3.
 
 `approval mcp serve --help` prints the whole rationale, including the two
 agent-facing verbs that are withheld for transport reasons (`consume`, which
-`run` wraps, and `hook claude-code`, which reads a PreToolUse event from a stdin
+and `hook claude-code` / `hook cursor`, which each read a pre-tool event from a stdin
 this transport already owns).
 
 ## Step 2: start the daemon and the listener

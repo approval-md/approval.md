@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [{
+      "command": "approval hook cursor --dir /Users/carter/dev/approval-md --as agent:cursor --timeout 9m",
+      "matcher": "Shell|Write|Delete",
+      "timeout": 600,
+      "failClosed": true
+    }]
+  }
+}

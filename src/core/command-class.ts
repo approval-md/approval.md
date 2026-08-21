@@ -174,6 +174,13 @@ export function isProtectedPath(candidate: string, extra: readonly string[] = []
       const next = segments[index + 1];
       if (next !== undefined && next.startsWith("settings")) return true;
     }
+    // Cursor's equivalent surface: the hook install file, hook scripts, and
+    // custom-agent prompts. An agent that could write those could write itself
+    // out of the gate (APRV-133).
+    if (segment === ".cursor") {
+      const next = segments[index + 1];
+      if (next === "hooks.json" || next === "hooks" || next === "agents") return true;
+    }
     // CI configuration.
     if (segment === ".github" && segments[index + 1] === "workflows") return true;
   }

@@ -63,7 +63,7 @@ Agents must not edit `APPROVAL.md`, `.approval/`, credentials, tokens, or the va
 
 From M2 onward, this repository operates under its own policy. Manual-class actions carry an approval declaration, then use `approval register`, `approval request`, and `approval wait` against the primary checkout. Proceed only on a grant and execute through the approved path. Gate operations never run in agent worktrees, and log advances never ride feature branches. See `docs/dogfood-cutover.md`.
 
-Cursor does not inherit the Claude Code PreToolUse hook automatically. Until an equivalent Cursor hook is configured, classify uncertain shell commands with `approval hook classify -- "<command>"` and treat the result as binding. Prose compliance remains required where mechanical enforcement is absent.
+Local Cursor Agent `Shell`, `Write`, and `Delete` calls are gated by `approval hook cursor` once `.cursor/hooks.json` is committed (`docs/cursor-hook.md`). Until that file is present in the checkout, classify uncertain shell commands with `approval hook classify -- "<command>"` and treat the result as binding. Prose compliance remains required where mechanical enforcement is absent.
 
 The committed log has one writer: the daemon in the primary checkout while it runs. Never manually edit `.approval/QUEUE.md`, payloads, or the log. A session that cannot reach the gate stops and escalates.
 

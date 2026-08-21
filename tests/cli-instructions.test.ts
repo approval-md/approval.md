@@ -423,6 +423,7 @@ const AGENT_FACING: readonly string[] = [
   "channel telegram health",
   "adapter email",
   "hook claude-code",
+  "hook cursor",
   "hook classify",
 ];
 
@@ -454,7 +455,7 @@ test("registry: a human_only decision that needed an argument carries its note",
       `"${label}" is a judgment call and must record why`,
     );
   }
-  for (const label of ["adapter email", "hook claude-code", "consume"]) {
+  for (const label of ["adapter email", "hook claude-code", "hook cursor", "consume"]) {
     const spec = findVerb(label);
     assert.equal(spec.human_only, false);
     assert.ok(

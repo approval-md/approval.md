@@ -1519,6 +1519,32 @@ const VERBS: VerbSpec[] = [
 
   {
     name: "hook",
+    subcommand: "cursor",
+    purpose:
+      "Put the gate in front of a local Cursor Agent: read one native preToolUse event on stdin, classify Shell commands and Write/Delete paths, resolve the class against APPROVAL.md, and answer native {permission: allow|deny} JSON on stdout — waiting on a real decision when the class is manual. THE VERDICT IS NEVER 'ask'. Exit 0 carries the verdict, and exit 2 means the hook itself is misconfigured.",
+    human_only: false,
+    human_only_note:
+      "The agent harness surface, so agent-facing by construction: the harness invokes it around the agent's own tool calls. It records the agent's proposal and waits for a human; it never records a decision.",
+    input: input({
+      flags: {
+        ...AS_FLAG,
+        "--timeout": "string",
+        "--interval": "string",
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      { code: 0, meaning: "the verdict (allow OR deny) is the JSON object on stdout" },
+      { code: 2, meaning: "the hook is misconfigured; the harness blocks and reads stderr" },
+    ],
+  },
+
+  {
+    name: "hook",
     subcommand: "classify",
     purpose:
       "Print what the classifier makes of a command line: the segments it split it into, the class it assigned each, and the rule that decided. Reads no log, resolves no policy, writes nothing. The classifier is best effort and is not scheming-robust; it reads the command text and never the agent's own description of it.",
@@ -1575,7 +1601,7 @@ const VERBS: VerbSpec[] = [
     name: "mcp",
     subcommand: "serve",
     purpose:
-      "Serve the verbs of this registry as MCP tools over stdio, in the foreground, sharing the CLI's code paths (SPEC.md §10.5). The published tool list is this registry filtered by human_only false, less `consume` (internal plumbing) and `hook claude-code` (it reads a stdin this transport owns), and every tool's input schema is the verb's own with `--as` removed. It runs as ONE agent identity, fixed at startup, that no tool call can supply or change.",
+      "Serve the verbs of this registry as MCP tools over stdio, in the foreground, sharing the CLI's code paths (SPEC.md §10.5). The published tool list is this registry filtered by human_only false, less `consume` (internal plumbing) and `hook claude-code` / `hook cursor` (each reads a stdin this transport owns), and every tool's input schema is the verb's own with `--as` removed. It runs as ONE agent identity, fixed at startup, that no tool call can supply or change.",
     human_only: true,
     human_only_note:
       "An OPERATOR process, like `daemon run`: long-lived, launched by a person, and holding the agent identity every tool call is recorded under. It publishes no human-only verb, so an agent that could start one would gain no authority it lacked; what it would gain is a second writer against the log nobody supervises, and a choice of identity that belongs to the human who launched the process. Marked human_only so no wrapper offers a wrapper.",

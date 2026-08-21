@@ -209,6 +209,7 @@ test("mcp: the tool list is the registry filtered by human_only, less the two ex
       "mcp_serve",
       "consume",
       "hook_claude-code",
+      "hook_cursor",
     ]) {
       assert.ok(!listed.includes(withheld), `"${withheld}" must not be a tool`);
     }
@@ -228,7 +229,7 @@ test("mcp: the exclusions are agent-facing verbs, each with a stated reason", ()
     );
     assert.ok(reason.length > 40, `"${label}" is excluded without a reason`);
   }
-  assert.deepEqual([...EXCLUDED_VERBS.keys()].sort(), ["consume", "hook claude-code"]);
+  assert.deepEqual([...EXCLUDED_VERBS.keys()].sort(), ["consume", "hook claude-code", "hook cursor"]);
 });
 
 test("mcp: every tool's inputSchema is the registry's, with --as removed and nothing else", async () => {

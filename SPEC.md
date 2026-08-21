@@ -308,6 +308,9 @@ approval setup identity|vault|sampling|channel <name>|adapter <name>
 approval hook claude-code           # gate an agent harness: reads a PreToolUse
                                    #   event on stdin, classifies the command,
                                    #   answers allow/deny (never "ask")
+approval hook cursor               # gate a local Cursor Agent: native
+                                   #   preToolUse JSON in, {permission}
+                                   #   allow/deny out (never "ask")
 approval hook classify -- <cmd…>   # what the classifier makes of a command
 approval reindex | render
 approval daemon run                # the §10.2 watch loop, in the foreground
@@ -318,7 +321,7 @@ approval mcp serve                 # the §10.5 MCP server over stdio, in the
 
 Machine-readable output: every command supports `--json`; schemas for inputs and outputs are printed by `approval instructions --schemas`.
 
-Four lines in this block are amendments awaiting sign-off: `setup` (Amended APRV-79, pending sign-off), `env` (Amended APRV-73, pending sign-off), `mcp serve` (Amended APRV-103, pending sign-off), and `hook claude-code` (Amended APRV-82, pending sign-off).
+Five lines in this block are amendments awaiting sign-off: `setup` (Amended APRV-79, pending sign-off), `env` (Amended APRV-73, pending sign-off), `mcp serve` (Amended APRV-103, pending sign-off), `hook claude-code` (Amended APRV-82, pending sign-off), and `hook cursor` (Amended APRV-133, pending sign-off).
 
 ### 10.2 Daemon
 
@@ -352,7 +355,7 @@ For `manual` actions, channels MUST present the full payload or a faithful rende
 
 A thin MCP server exposing the same verbs as tools for clients where MCP is more ergonomic than shelling out. It shares the CLI's code paths.
 
-What shipped is `approval mcp serve`: a foreground server speaking MCP over stdio, running as one `agent:<id>` the operator fixes when they start it. The tool surface is the agent-facing half of the verb registry, one tool per verb (`register`, `request`, `wait`, `run`, `queue`, `status`, `log_verify`, and the rest). Human-only verbs are absent by design, which is §11's argument applied to a transport: the agent is the untrusted policy and the human is the trusted overseer, an MCP client is an agent's harness, so publishing `grant` on it would hand the untrusted policy the overseer's pen. Two agent-facing verbs are withheld as well, for transport reasons rather than authority reasons: `consume`, which is internal plumbing that `run` wraps, and `hook claude-code`, which reads its event from the stdin this transport already owns. A conformance reader building the tool list from this section takes it to be the registry filtered by `human_only`, minus those two. Tool descriptions and input schemas are derived from the same registry `approval instructions --schemas` prints, with `--as` deleted from every published schema, so a caller cannot name an identity; the server's own identity is appended last to every argv, so it wins even where one arrives by another route. A tool call builds an argv and invokes the function the CLI dispatches to, so a refusal is the CLI's refusal, returned as a tool result carrying `{"error":{"code","message"}}` rather than as a protocol error. The [MCP tasks extension](https://modelcontextprotocol.io) and elicitation MAY be mapped onto `awaiting` when client support stabilizes; that remains post-v1, and until then `wait` blocks and answers. A2A's `input-required` maps cleanly for agent-to-agent deployments. (Amended APRV-88, APRV-103, pending sign-off.)
+What shipped is `approval mcp serve`: a foreground server speaking MCP over stdio, running as one `agent:<id>` the operator fixes when they start it. The tool surface is the agent-facing half of the verb registry, one tool per verb (`register`, `request`, `wait`, `run`, `queue`, `status`, `log_verify`, and the rest). Human-only verbs are absent by design, which is §11's argument applied to a transport: the agent is the untrusted policy and the human is the trusted overseer, an MCP client is an agent's harness, so publishing `grant` on it would hand the untrusted policy the overseer's pen. Three agent-facing verbs are withheld as well, for transport reasons rather than authority reasons: `consume`, which is internal plumbing that `run` wraps, and `hook claude-code` / `hook cursor`, which each read their event from the stdin this transport already owns. A conformance reader building the tool list from this section takes it to be the registry filtered by `human_only`, minus those three. Tool descriptions and input schemas are derived from the same registry `approval instructions --schemas` prints, with `--as` deleted from every published schema, so a caller cannot name an identity; the server's own identity is appended last to every argv, so it wins even where one arrives by another route. A tool call builds an argv and invokes the function the CLI dispatches to, so a refusal is the CLI's refusal, returned as a tool result carrying `{"error":{"code","message"}}` rather than as a protocol error. The [MCP tasks extension](https://modelcontextprotocol.io) and elicitation MAY be mapped onto `awaiting` when client support stabilizes; that remains post-v1, and until then `wait` blocks and answers. A2A's `input-required` maps cleanly for agent-to-agent deployments. (Amended APRV-88, APRV-103, pending sign-off.)
 
 ## 11. Security and control model
 
@@ -405,7 +408,7 @@ No new task file format. No kanban UI. No agent framework or orchestration platf
 
 Post-v1 (non-normative): `review: adversarial` as a per-class flag. Before a flagged `manual` request reaches the approver, an independent agent instance with the raw payload and no stake in the outcome writes a dissent: worst plausible reading, omissions, questions a suspicious reviewer would ask. The approver adjudicates between framings instead of consuming one. Untrusted monitoring, spent where human attention is scarcest.
 
-Post-v1 (non-normative): a Rust fast-path implementation of the hot loop (policy resolution, chain-tail verification, gate verdict) as the latency accelerator for the v1 harness hook of §14 (`approval hook claude-code`) and the per-tool-call adapters like it, where Node startup latency on every gated tool call is unacceptable. Conformance is defined by the fixture suite; the crates.io name `approval-md` is reserved for it. The TypeScript runtime remains the reference implementation for the full surface.
+Post-v1 (non-normative): a Rust fast-path implementation of the hot loop (policy resolution, chain-tail verification, gate verdict) as the latency accelerator for the v1 harness hook of §14 (`approval hook claude-code`, `approval hook cursor`) and the per-tool-call adapters like it, where Node startup latency on every gated tool call is unacceptable. Conformance is defined by the fixture suite; the crates.io name `approval-md` is reserved for it. The TypeScript runtime remains the reference implementation for the full surface.
 
 ## 14. Repository layout and roadmap
 
@@ -430,7 +433,7 @@ Milestones sized for agent-driven development (each = one reviewable task):
 - **M5** Daemon: watch, TTL, sampling, loop-escalation.
 - **M6** Backlog.md round-trip + AGENTS.md import.
 - **M7** First adapter (email) + vault; end-to-end demo: agent drafts chaser → Telegram ping → approve from phone → sent → log verifies.
-- **M8** MCP wrapper (§10.5) and the agent-harness hook, `approval hook claude-code`: a Claude Code PreToolUse adapter that classifies the command a harness is about to run and resolves it against the policy. Allow is recorded only where the class is gated: a manual class waits on a decision the log records, a supervised class appends `task.registered` and proceeds, an autonomous class appends nothing. Both surfaces expose the same gate to a client that is not a shell. The §13 Rust fast-path is this hook's post-v1 latency accelerator, not a prerequisite. Post-v1: TickTick/GCal sinks, inbound capture adapters. (Amended APRV-103, pending sign-off.)
+- **M8** MCP wrapper (§10.5) and the agent-harness hooks, `approval hook claude-code` and `approval hook cursor`: a Claude Code PreToolUse adapter that classifies the command a harness is about to run and resolves it against the policy. Allow is recorded only where the class is gated: a manual class waits on a decision the log records, a supervised class appends `task.registered` and proceeds, an autonomous class appends nothing. Both surfaces expose the same gate to a client that is not a shell. The §13 Rust fast-path is this hook's post-v1 latency accelerator, not a prerequisite. Post-v1: TickTick/GCal sinks, inbound capture adapters. (Amended APRV-103, pending sign-off.)
 
 ## 15. References
 

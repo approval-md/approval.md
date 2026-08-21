@@ -190,6 +190,9 @@ const FIXTURES: readonly Fixture[] = [
   { command: "cp draft.md CLAUDE.md", class: "policy.edit", rule: "protected-path" },
   { command: "rm -rf .approval/log", class: "policy.edit", rule: "protected-path" },
   { command: "cp x .github/workflows/ci.yml", class: "policy.edit", rule: "protected-path" },
+  { command: "cp x .cursor/hooks.json", class: "policy.edit", rule: "protected-path" },
+  { command: "rm -rf .cursor/hooks", class: "policy.edit", rule: "protected-path" },
+  { command: "tee .cursor/agents/x.md", class: "policy.edit", rule: "protected-path" },
   { command: "ls src > listing.txt", class: "files.write.workspace", rule: "redirect-write" },
   { command: "APPROVAL_HUMAN=human:alice", class: "read.shell", rule: "assignment" },
   { command: "APPROVAL_HUMAN=human:alice approval queue", class: GATE_SELF_CLASS, rule: "approval" },
@@ -497,6 +500,9 @@ test("isProtectedPath names the policy surface and nothing else", () => {
     "/repo/.approval/vault.enc",
     ".claude/settings.json",
     ".claude/settings.local.json",
+    ".cursor/hooks.json",
+    ".cursor/hooks/approve.sh",
+    ".cursor/agents/token-heavy-implementer.md",
     ".github/workflows/ci.yml",
   ]) {
     assert.equal(isProtectedPath(path), true, `${path} must be protected`);
@@ -506,6 +512,7 @@ test("isProtectedPath names the policy surface and nothing else", () => {
     "src/core/gate.ts",
     "docs/claude-code-hook.md",
     ".claude/agents/reviewer.md",
+    ".cursor/rules/style.mdc",
     ".github/ISSUE_TEMPLATE.md",
     "backlog/tasks/aprv-82.md",
     "",
@@ -584,6 +591,9 @@ test("the built-in set is protected whatever the policy lists (fail closed)", ()
       ".npmrc",
       ".approval/log/events.jsonl",
       ".claude/settings.json",
+      ".cursor/hooks.json",
+      ".cursor/hooks/x.sh",
+      ".cursor/agents/x.md",
       ".github/workflows/ci.yml",
     ]) {
       assert.equal(
