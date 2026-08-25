@@ -309,6 +309,38 @@
       }
     },
     {
+      "$comment": "SPEC.md §5.2/§8 (amended, APRV-118): a request and the grant that answers it each pin the SHA-256 of the attested policy the runtime evaluated them under, so a reader can see whether the approver decided by the rules the requester was routed by. The runtime assigns the value at the write boundary from its own attestation check, exactly as it assigns `ts` to a gate-typed event; a grant whose hash differs from its request's is refused `policy-drift` and never reaches this schema. Optional, and deliberately: the field is additive, so records written before it existed still validate and still verify, and only its SHAPE is constrained here — a 64-character lowercase hex digest, never an empty string or a truncated one that audit would have to guess at. Whether the hash names an attestation the log actually carries is not expressible in a schema that sees one record, and is the gate's check.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "enum": [
+              "approval.requested",
+              "approval.granted"
+            ]
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "policy_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "description": "SPEC.md §5.2: SHA-256 (lowercase hex) of the attested policy file's exact bytes, as recorded by the `policy.updated` attestation the live file matched when this event was written."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "SPEC.md §8/§9 (amended, APRV-38): `payload.pruned` records that the daemon removed a payload file from `.approval/payloads/` under `payload_retention`. Two constraints, both about who and what: the actor is `system:` because pruning is a retention rule executing on a schedule rather than anyone's decision (a `human:` or `agent:` pruner would be a party under oversight deleting the evidence its approval bound to), and the payload names the removed bytes by their SHA-256, which is the store's own key and the same value a grant binds to. The log therefore states exactly what the store no longer holds.",
       "if": {
         "type": "object",
