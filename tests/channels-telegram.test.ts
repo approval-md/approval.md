@@ -40,14 +40,23 @@ import {
 } from "../src/channels/conformance.js";
 import {
   changePayloadView,
+  commandPayloadView,
   emailPayloadFields,
+  foldMarker,
+  markEscapes,
   payloadRegionText,
+  rawBytesLine,
   BODY_BEGIN,
   BODY_END,
   CANONICAL_JSON_HEADING,
+  COMMAND_BEGIN,
+  COMMAND_END,
+  COMMAND_LINE_BUDGET,
+  COMMAND_VIEW_HEADING,
   DIFF_LINE_BUDGET,
   EDIT_VIEW_HEADING,
   EMAIL_VIEW_HEADING,
+  ESCAPE_LEGEND,
   LIVE_QUALIFIER,
   PROPOSAL_QUALIFIER,
 } from "../src/channels/payload-view.js";
@@ -1894,6 +1903,182 @@ test("a diff reaches Telegram escaped, chunked and complete", async () => {
   assert.ok(whole.includes("-run: npm test &lt;all&gt; &amp; lint"), whole);
   assert.ok(whole.includes("+run: npm test --silent"), whole);
   assert.equal(whole.includes("<all>"), false, "raw markup reached the message");
+  assert.ok(
+    whole.includes(`--- full payload (sha256 ${request_.payload_hash.value}) ---`),
+    "the payload region lost its hash label",
+  );
+  for (const text of texts) {
+    assert.ok(text.length <= 4096, "a message exceeded Telegram's 4096-character limit");
+  }
+  assert.equal(recordsOf(world.unit.logPath).length, 3);
+});
+
+// ---------------------------------------------------------------------------
+// Shell commands on the phone (APRV-126)
+// ---------------------------------------------------------------------------
+
+test("a command payload renders over its real lines, with cwd and the store path", () => {
+  const json = (value: unknown): string => JSON.stringify(value, null, 2);
+  const view = (value: unknown, truncated = false): string =>
+    payloadRegionText({ value, text: json(value), hash: "deadbeef", truncated });
+
+  const command = [
+    "gh pr create --title 'ship it' --body 'first line",
+    "second line",
+    "",
+    "a literal escape: a\\nb'",
+  ].join("\n");
+  const payload = { command, cwd: "/repo" };
+  const rendered = view(payload);
+
+  assert.ok(rendered.startsWith(COMMAND_VIEW_HEADING), rendered);
+  assert.ok(rendered.includes(ESCAPE_LEGEND), rendered);
+  assert.ok(rendered.includes("command (4 lines):"), rendered);
+  assert.ok(rendered.includes(`${COMMAND_BEGIN}\ngh pr create`), rendered);
+  assert.ok(rendered.includes("\nsecond line\n"), "the line break was not rendered as one");
+  // The two literal bytes are marked, so they cannot be read as a line break.
+  assert.ok(rendered.includes("a literal escape: a«\\n»b'"), rendered);
+  // cwd on its own line, beneath the command block.
+  assert.ok(rendered.includes(`${COMMAND_END}\ncwd: /repo`), rendered);
+  // And where the exact bytes are, said in the prompt itself.
+  assert.ok(rendered.includes(rawBytesLine("deadbeef")), rendered);
+
+  // The exact bytes stay underneath: the view is an aid, never a replacement.
+  assert.ok(rendered.includes(CANONICAL_JSON_HEADING), rendered);
+  assert.ok(rendered.endsWith(json(payload)), rendered);
+
+  // A payload without a cwd says so rather than rendering an empty line.
+  assert.ok(view({ command: "ls" }).includes("cwd: (none declared)"));
+});
+
+test("only structurally command-shaped payloads leave the JSON rendering", () => {
+  const json = (value: unknown): string => JSON.stringify(value, null, 2);
+  const view = (value: unknown, truncated = false): string =>
+    payloadRegionText({ value, text: json(value), hash: "h", truncated });
+
+  assert.deepEqual(commandPayloadView({ command: "ls", cwd: "/repo" }), {
+    command: "ls",
+    cwd: "/repo",
+  });
+  assert.deepEqual(commandPayloadView({ command: "ls" }), { command: "ls", cwd: null });
+
+  // An unknown key, a wrong type, a truncated rendering: JSON, every time. A
+  // key this view cannot show would be a hidden payload wearing a friendlier
+  // face, which is the failure the email view was careful about first.
+  for (const value of [
+    { command: "ls", cwd: "/repo", shell: "zsh" },
+    { command: "ls", cwd: 3 },
+    { command: 3, cwd: "/repo" },
+    { cwd: "/repo" },
+    ["ls"],
+    "just a string",
+    null,
+  ]) {
+    assert.equal(commandPayloadView(value), null, `wrongly recognised ${json(value)}`);
+    assert.equal(view(value), json(value), `rendering changed for ${json(value)}`);
+  }
+  const whole = { command: "ls", cwd: "/repo" };
+  assert.equal(view(whole, true), json(whole), "a truncated rendering must not be re-expanded");
+});
+
+test("two distinct byte strings never render identically (property)", () => {
+  // The rendering the command block applies to the bytes: split on real
+  // newlines, mark literal escape sequences on each line. If this were not
+  // injective an agent could write one payload and have the approver read
+  // another, which is the whole reason the marker exists.
+  const display = (bytes: string): string => bytes.split("\n").map(markEscapes).join("\n");
+
+  // The case the acceptance criterion names, stated on its own so a failure
+  // reads as the thing it is rather than as a generator seed.
+  assert.notEqual(display("a\\nb"), display("a\nb"));
+  assert.equal(display("a\\nb"), "a«\\n»b");
+  assert.equal(display("a\nb"), "a\nb");
+
+  // And the general property, over an alphabet built from exactly the
+  // characters that could collide: the escape letters, the backslash, real
+  // control characters, and the marker delimiters themselves.
+  const alphabet = ["\\", "n", "r", "t", "\n", "\r", "\t", "«", "»", "a", " "];
+  let seed = 0x5eed_1260;
+  const next = (): number => {
+    seed = (seed + 0x6d2b_79f5) >>> 0;
+    let t = seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+  };
+
+  const seen = new Map<string, string>();
+  for (let index = 0; index < 4_000; index += 1) {
+    const length = 1 + Math.floor(next() * 6);
+    let bytes = "";
+    for (let position = 0; position < length; position += 1) {
+      bytes += alphabet[Math.floor(next() * alphabet.length)] as string;
+    }
+    const shown = display(bytes);
+    const first = seen.get(shown);
+    if (first === undefined) {
+      seen.set(shown, bytes);
+      continue;
+    }
+    assert.equal(
+      first,
+      bytes,
+      `two distinct byte strings rendered identically: ${JSON.stringify(first)} and ${JSON.stringify(bytes)} both render ${JSON.stringify(shown)}`,
+    );
+  }
+  assert.ok(seen.size > 1_000, `the generator produced too few distinct strings (${seen.size})`);
+});
+
+test("a very long command folds with an explicit marker, never silently", () => {
+  const command = Array.from(
+    { length: COMMAND_LINE_BUDGET + 12 },
+    (_, index) => `echo ${String(index)}`,
+  ).join("\n");
+  const payload = { command, cwd: "/repo" };
+  const text = payloadRegionText({
+    value: payload,
+    text: JSON.stringify(payload, null, 2),
+    hash: "h",
+    truncated: false,
+  });
+
+  assert.ok(
+    text.includes(`echo ${String(COMMAND_LINE_BUDGET - 1)}`),
+    "the budget is not spent in full",
+  );
+  assert.equal(
+    text.includes(`echo ${String(COMMAND_LINE_BUDGET)}\n`),
+    false,
+    "the fold did not happen",
+  );
+  assert.ok(text.includes(foldMarker(12)), text);
+  // The folded lines are still on screen, in the canonical JSON underneath, and
+  // the reader is told where the whole thing lives.
+  assert.ok(text.includes(JSON.stringify(command)), "the exact bytes left the message");
+  assert.ok(text.includes(rawBytesLine("h")), text);
+});
+
+test("a command reaches Telegram escaped, chunked and complete", async () => {
+  // The end-to-end of the APRV-126 complaint: the approver reads the COMMAND,
+  // through the real transport, with markup in it that must not become markup.
+  const command = "gh pr create --body 'a <b> & c\nsecond line'";
+  const payload = { command, cwd: "/repo" };
+  const world = live(1, false, () => payload);
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = mock.sentTexts().length;
+  await channel.notify(request_);
+  const texts = mock.sentTexts().slice(before);
+  const whole = texts.join("\n");
+
+  assert.ok(whole.includes("gh pr create --body 'a &lt;b&gt; &amp; c"), whole);
+  assert.ok(whole.includes("\nsecond line'"), "the line break did not survive the transport");
+  assert.equal(whole.includes("<b> &"), false, "raw markup reached the message");
+  assert.ok(whole.includes(`cwd: /repo`), whole);
+  assert.ok(whole.includes(rawBytesLine(request_.payload_hash.value)), whole);
   assert.ok(
     whole.includes(`--- full payload (sha256 ${request_.payload_hash.value}) ---`),
     "the payload region lost its hash label",
