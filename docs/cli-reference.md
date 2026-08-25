@@ -1441,13 +1441,29 @@ rejection is recorded with the note "rejected via telegram (callback `<id>`)".
 Use `approval reject --note` when the reason matters. (A ForceReply flow is a
 follow-up, flagged rather than silently dropped.)
 
-**Batching is deferred.** §10.3 permits one gesture over a set; Telegram binds
-one keyboard to one message, and a batch carrying every member's full payload
-would exceed the 4096-character limit long before the keyboard helped. `notify()`
-still accepts a batch and sends one message per member sharing one batch delivery
-id, so every event carries it — the semantics are there, the one-tap ergonomics
-are not. One message per member also makes the annotation below per member:
-deciding one member edits that member's message and leaves the others armed.
+**Similar pending requests arrive as one digest.** A burst of same-shaped manual
+actions used to be one message each, which turns the chat into a notification
+hose. Requests pending in the same poll cycle that share a class, an origin task
+and requester, and a payload shape (a shell command groups by its `argv[0]`) are
+now delivered together: every member's full prompt and full payload first, in
+its own messages and with no buttons, then one trailing digest message carrying
+a line per request and the keyboard — Approve/Reject per numbered request, plus
+an "all" row.
+
+The payloads are always above the buttons, so no gesture can cover bytes that
+were not on screen. A group that cannot be rendered whole falls back to one
+message per member (the previous behaviour), a group larger than eight becomes
+several digests, and a set §10.3's B7 refuses is never presented as a set at
+all. The failure direction is always more messages.
+
+An "all" tap is N separate decisions. The runtime records one
+`approval.granted` / `approval.rejected` per member through the same
+compare-and-append path, each bound to its own action and payload hash, each
+carrying the shared batch delivery id: the log never batches. A member the gate
+refuses (already decided, expired, withdrawn) appends nothing and does not stop
+the rest, and the toast says how many landed. Annotation is per member too: a
+decided, expired or withdrawn request marks its own line and loses its own
+buttons, so a partially decided digest shows mixed state.
 
 **A settled request stops looking live.** Every terminal state the listener
 observes for a message it sent edits that message: the text becomes the outcome

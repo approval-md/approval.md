@@ -95,6 +95,14 @@ export interface MockBotApi {
   setWebhookInfo(info: { url?: string; pendingUpdateCount?: number }): void;
   /** The `callback_data` of the Approve/Reject button delivered for `actionKey`. */
   callbackDataFor(actionKey: string, decision: "grant" | "reject"): string;
+  /**
+   * The `callback_data` of the most recent digest's "all" button (APRV-115).
+   *
+   * A digest keyboard is one row per open member plus a trailing all-row, and
+   * the all-row is the one whose labels say "all". Nothing here decodes a
+   * nonce: the mock reads the buttons exactly as a phone would.
+   */
+  digestAllDataFor(decision: "grant" | "reject"): string;
   /** Every `text` the bot has sent, in order. */
   sentTexts(): string[];
   /** Every `answerCallbackQuery` text, in order. */
@@ -113,6 +121,24 @@ export interface MockBotApi {
   restart(): Promise<void>;
   /** Shut down for good. */
   close(): Promise<void>;
+}
+
+/**
+ * The member number a digest gives `actionKey`, or `null` when `text` is not a
+ * digest that lists it (APRV-115).
+ *
+ * A digest lists its members as `<n>. <code>key</code> — …`. Matched by string
+ * search rather than by a built regular expression, because an action key
+ * carries `:` and whatever else a task id contains.
+ */
+function digestNumberOf(text: string, actionKey: string): number | null {
+  for (const line of text.split("\n")) {
+    const marker = line.indexOf(`. <code>${actionKey}</code>`);
+    if (marker <= 0) continue;
+    const number = Number.parseInt(line.slice(0, marker), 10);
+    if (Number.isInteger(number)) return number;
+  }
+  return null;
 }
 
 /** A test's `apiBase` points at loopback. Called before every channel is built. */
@@ -364,10 +390,17 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
       }
     },
     callbackDataFor(actionKey, decision) {
-      // Messages are sent in order: the header naming the action key, then the
-      // payload chunks, and the LAST message of a request carries the keyboard.
-      // So walk forward, remember whose header we last saw, and take the
-      // keyboard that follows it.
+      // Two shapes reach a phone, and this reads both the way a phone would.
+      //
+      // A single prompt: the header naming the action key, then the payload
+      // chunks, and the LAST message carries the keyboard. So walk forward,
+      // remember whose header was seen last, and take the keyboard that
+      // follows it.
+      //
+      // A digest (APRV-115): the buttons are on a message that names every
+      // member itself, as numbered lines, and the buttons are labelled with
+      // the same numbers. So a keyboard message that lists the action key
+      // answers for itself, and the row is found by that label.
       let current: string | null = null;
       let found: string | null = null;
       for (const entry of requests) {
@@ -378,8 +411,21 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
         const markup = entry.body["reply_markup"] as
           | { inline_keyboard?: { text: string; callback_data: string }[][] }
           | undefined;
-        if (markup === undefined || current !== actionKey) continue;
-        const row = markup.inline_keyboard?.[0] ?? [];
+        if (markup === undefined) continue;
+        const rows = markup.inline_keyboard ?? [];
+
+        const numbered = digestNumberOf(text, actionKey);
+        if (numbered !== null) {
+          const label = decision === "grant" ? `✅ Approve ${numbered}` : `🛑 Reject ${numbered}`;
+          for (const row of rows) {
+            const button = row.find((candidate) => candidate.text === label);
+            if (button !== undefined) found = button.callback_data;
+          }
+          continue;
+        }
+
+        if (current !== actionKey) continue;
+        const row = rows[0] ?? [];
         const button = decision === "grant" ? row[0] : row[1];
         if (button !== undefined) found = button.callback_data;
       }
@@ -387,6 +433,22 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
         found !== null,
         `the mock received no keyboard for ${JSON.stringify(actionKey)}`,
       );
+      return found;
+    },
+    digestAllDataFor(decision) {
+      const prefix = decision === "grant" ? "✅ Approve all" : "🛑 Reject all";
+      let found: string | null = null;
+      for (const entry of requests) {
+        if (entry.method !== "sendMessage" && entry.method !== "editMessageText") continue;
+        const markup = entry.body["reply_markup"] as
+          | { inline_keyboard?: { text: string; callback_data: string }[][] }
+          | undefined;
+        for (const row of markup?.inline_keyboard ?? []) {
+          const button = row.find((candidate) => candidate.text.startsWith(prefix));
+          if (button !== undefined) found = button.callback_data;
+        }
+      }
+      assert.ok(found !== null, "the mock received no digest all-button");
       return found;
     },
     sentTexts() {

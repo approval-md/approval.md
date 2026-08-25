@@ -15,6 +15,12 @@
  * - A payload whose **structure** matches the email adapter's payload shape
  *   ({@link ../adapters/email.js}) is rendered field by field, with the body as
  *   the human will read it: real line breaks, no JSON escapes.
+ * - A payload whose structure is a **shell command** (APRV-126: the shape
+ *   `cli/hook.ts` builds for a `Bash` tool call) is rendered as the command a
+ *   shell would receive, over as many lines as it really has, with `cwd` on its
+ *   own line beneath it. Same reason again: `"command": "gh pr create --body
+ *   'a\nb'"` on a phone is one paragraph of escaped JSON, and the observed
+ *   failure (2026-08-20) is a human being asked to take responsibility for it.
  * - A payload whose structure is a **file change** (APRV-124: the shape
  *   `cli/hook.ts` builds for an `Edit` or a `Write` tool call) is rendered as a
  *   diff, so the approver reads the change rather than the fact that a file was
@@ -43,7 +49,14 @@
  *    A `tool` or a `rule` value inside a file-change payload is rendered for
  *    the reader and is never what selects the rendering: the shape is, exactly
  *    as for an email.
- * 4. **A fold is announced.** The diff view is a reading aid over a payload
+ * 4. **Two different byte strings never look the same.** A reading aid that
+ *    interprets escape sequences has to answer the question it creates: if a
+ *    real line break becomes a line break, what does the two-byte sequence
+ *    backslash-`n` become? Rendering both as a line break would let an agent
+ *    write one payload and have the approver read another. So the rendering is
+ *    INJECTIVE by construction ({@link markEscapes}), and the property is
+ *    tested by generating pairs of distinct byte strings.
+ * 5. **A fold is announced.** The diff view is a reading aid over a payload
  *    whose canonical JSON sits underneath it in full, so a very long change may
  *    be folded in the aid — but only with an explicit
  *    `… N more lines (hash covers all bytes)` marker on the line where it
@@ -230,14 +243,29 @@ export function changePayloadView(value: unknown): ChangeView | null {
   };
 }
 
+/**
+ * The one way this module is allowed to stop showing lines.
+ *
+ * Exported and shared by every view here (APRV-126), because a second wording
+ * of "there is more" is a second thing a reader has to learn to notice, and the
+ * whole point of the marker is that it cannot be mistaken for the end.
+ */
+export function foldMarker(hidden: number): string {
+  return `… ${String(hidden)} more lines (hash covers all bytes)`;
+}
+
+/** `lines`, cut to `budget` with {@link foldMarker} on the line where it happened. */
+function fold(lines: string[], budget: number): string[] {
+  if (lines.length <= budget) return lines;
+  return [...lines.slice(0, budget), foldMarker(lines.length - budget)];
+}
+
 /** `text` as prefixed diff lines, folded — audibly — past the budget. */
 function diffLines(text: string, marker: "-" | "+"): string[] {
-  const lines = text.split("\n");
-  if (lines.length <= DIFF_LINE_BUDGET) return lines.map((line) => `${marker}${line}`);
-  const shown = lines.slice(0, DIFF_LINE_BUDGET).map((line) => `${marker}${line}`);
-  const hidden = lines.length - DIFF_LINE_BUDGET;
-  shown.push(`… ${String(hidden)} more lines (hash covers all bytes)`);
-  return shown;
+  return fold(
+    text.split("\n").map((line) => `${marker}${line}`),
+    DIFF_LINE_BUDGET,
+  );
 }
 
 function lineCount(text: string): number {
@@ -273,6 +301,136 @@ function changeRegionText(view: ChangeView): string[] {
   return lines;
 }
 
+// ---------------------------------------------------------------------------
+// Shell commands (APRV-126)
+// ---------------------------------------------------------------------------
+
+/** Keys a command payload may carry (`cli/hook.ts`: `{command, cwd}`). */
+const COMMAND_KEYS = ["command", "cwd"] as const;
+
+/** The heading and delimiters of the command view. Exported because tests pin them. */
+export const COMMAND_VIEW_HEADING =
+  "command — rendered; the hash binds the RAW BYTES, not this view. Every value below is CLAIMED, authored by the requesting party";
+export const COMMAND_BEGIN = "--- command begins ---";
+export const COMMAND_END = "--- command ends ---";
+
+/**
+ * The delimiters around a marked escape sequence.
+ *
+ * Guillemets rather than brackets: `[` and `]` are ordinary shell and regex
+ * characters, so a marker built from them would be indistinguishable from the
+ * command's own text at a glance, which is the failure this marker exists to
+ * prevent.
+ */
+export const ESCAPE_OPEN = "«";
+export const ESCAPE_CLOSE = "»";
+
+/** The legend printed above every command block, so the marker needs no lore. */
+export const ESCAPE_LEGEND = `escapes: ${ESCAPE_OPEN}\\n${ESCAPE_CLOSE} is the two LITERAL bytes backslash-n; a real line break is a line break`;
+
+/** Lines of command before the view folds. Same budget, same marker, as a diff. */
+export const COMMAND_LINE_BUDGET = DIFF_LINE_BUDGET;
+
+/**
+ * The escape letters that name a character the reader could otherwise mistake
+ * for the real thing.
+ *
+ * `\` is in the set for the same reason: `\\n` and `\n` are different bytes and
+ * a reader must not have to count backslashes to tell them apart.
+ */
+const MARKED_ESCAPES = new Set(["n", "r", "t", "\\"]);
+
+/**
+ * One line of a command, with literal escape sequences marked.
+ *
+ * INJECTIVE, and the proof is short enough to keep here. The rendering is a
+ * left-to-right tokenizer over two tokens: a backslash followed by a letter in
+ * {@link MARKED_ESCAPES} becomes `«\c»`, and every other character is itself.
+ * A `«\c»` in the OUTPUT can therefore only have come from that first token,
+ * because a backslash followed by such a letter in the input is never emitted
+ * bare — so reading the output back left to right recovers the input exactly,
+ * and a left inverse is all injectivity needs.
+ *
+ * Real newlines are handled by the caller, which splits on them before calling
+ * this: a line break in the output comes from a line break in the input, and
+ * from nothing else.
+ */
+export function markEscapes(line: string): string {
+  let out = "";
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index] as string;
+    const next = index + 1 < line.length ? (line[index + 1] as string) : "";
+    if (character === "\\" && MARKED_ESCAPES.has(next)) {
+      out += `${ESCAPE_OPEN}\\${next}${ESCAPE_CLOSE}`;
+      index += 1;
+      continue;
+    }
+    out += character;
+  }
+  return out;
+}
+
+/** A shell command, recognised structurally. */
+export interface CommandView {
+  /** The command, exactly as the payload carries it. */
+  command: string;
+  /** The working directory, or `null` when the payload names none. */
+  cwd: string | null;
+}
+
+/**
+ * Recognise a command payload, structurally.
+ *
+ * Accepted when the payload carries a string `command` and nothing this module
+ * cannot show. `cwd` is optional here even though `cli/hook.ts` always sets it:
+ * the question this answers is "will a human read this better as a command?",
+ * and a payload missing its directory reads better either way.
+ */
+export function commandPayloadView(value: unknown): CommandView | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+
+  const known = new Set<string>(COMMAND_KEYS);
+  for (const key of Object.keys(record)) {
+    if (!known.has(key)) return null;
+  }
+  if (typeof record["command"] !== "string") return null;
+  const cwd = record["cwd"];
+  if (cwd !== undefined && typeof cwd !== "string") return null;
+
+  return { command: record["command"], cwd: typeof cwd === "string" ? cwd : null };
+}
+
+/**
+ * Where the exact bytes live, and how to get them back (APRV-126).
+ *
+ * The store is content-addressed by this very hash and re-verified on every
+ * read (`core/payload-store.ts`), so the line is an instruction, never a claim:
+ * following it produces the bytes or produces a refusal, and never something
+ * else wearing the same name.
+ */
+export function rawBytesLine(hash: string): string {
+  return `raw bytes: .approval/payloads/${hash}.json — re-verified against this sha256 on every read`;
+}
+
+/** The command view: the command over its real lines, then `cwd`. */
+function commandRegionText(view: CommandView, hash: string): string[] {
+  const lines: string[] = [COMMAND_VIEW_HEADING, ESCAPE_LEGEND];
+
+  const commandLines = view.command.split("\n");
+  const count = commandLines.length;
+  lines.push(`command (${String(count)} line${count === 1 ? "" : "s"}):`);
+  lines.push(COMMAND_BEGIN);
+  lines.push(...fold(commandLines.map(markEscapes), COMMAND_LINE_BUDGET));
+  lines.push(COMMAND_END);
+  // On its own line, beneath the command, because it is the other half of what
+  // the command does and a `cd` the reader never saw is the whole difference
+  // between a repository and someone else's.
+  lines.push(`cwd: ${view.cwd === null ? "(none declared)" : markEscapes(view.cwd)}`);
+  lines.push(rawBytesLine(hash));
+  return lines;
+}
+
 /**
  * The text a channel puts inside its payload region.
  *
@@ -284,6 +442,16 @@ function changeRegionText(view: ChangeView): string[] {
  */
 export function payloadRegionText(rendering: PayloadRendering): string {
   if (rendering.truncated) return rendering.text;
+
+  const command = commandPayloadView(rendering.value);
+  if (command !== null) {
+    return [
+      ...commandRegionText(command, rendering.hash),
+      "",
+      CANONICAL_JSON_HEADING,
+      rendering.text,
+    ].join("\n");
+  }
 
   const change = changePayloadView(rendering.value);
   if (change !== null) {

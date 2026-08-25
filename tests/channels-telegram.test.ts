@@ -28,6 +28,9 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  batchDeliveryIdOf,
+  claimed,
+  computed,
   recordChannelDecision,
   type ChannelDecision,
   type ChannelRequest,
@@ -40,14 +43,23 @@ import {
 } from "../src/channels/conformance.js";
 import {
   changePayloadView,
+  commandPayloadView,
   emailPayloadFields,
+  foldMarker,
+  markEscapes,
   payloadRegionText,
+  rawBytesLine,
   BODY_BEGIN,
   BODY_END,
   CANONICAL_JSON_HEADING,
+  COMMAND_BEGIN,
+  COMMAND_END,
+  COMMAND_LINE_BUDGET,
+  COMMAND_VIEW_HEADING,
   DIFF_LINE_BUDGET,
   EDIT_VIEW_HEADING,
   EMAIL_VIEW_HEADING,
+  ESCAPE_LEGEND,
   LIVE_QUALIFIER,
   PROPOSAL_QUALIFIER,
 } from "../src/channels/payload-view.js";
@@ -55,10 +67,17 @@ import { assembleBatch } from "../src/channels/batch.js";
 import { buildPendingQueue, type TagOptions } from "../src/channels/tagging.js";
 import {
   callbackData,
+  digestCallbackData,
+  digestKeyOf,
+  groupForDigest,
   parseCallbackData,
+  payloadShapeKey,
   TelegramChannel,
+  TELEGRAM_DIGEST_MAX_MEMBERS,
   TELEGRAM_MAX_CALLBACK_BYTES,
+  TELEGRAM_PROMPT_HEADING,
   type TelegramConfig,
+  type TelegramPollResult,
 } from "../src/channels/telegram.js";
 import {
   dispatchPending,
@@ -551,6 +570,7 @@ test("callback_data is bounded, and the nonce — not the wire's key — is auth
   assert.equal(short, "g:abc123:task-1:x");
   assert.deepEqual(parseCallbackData(short), {
     decision: "grant",
+    scope: "one",
     nonce: "abc123",
     actionKey: "task-1:x",
   });
@@ -562,6 +582,23 @@ test("callback_data is bounded, and the nonce — not the wire's key — is auth
   );
   assert.deepEqual(parseCallbackData(long), {
     decision: "reject",
+    scope: "one",
+    nonce: "abc123",
+    actionKey: null,
+  });
+
+  // APRV-115: an "all" button names a delivery and never a set of keys, so the
+  // set it decides cannot be chosen by whatever sent the bytes back.
+  assert.equal(digestCallbackData("G", "abc123"), "G:abc123");
+  assert.deepEqual(parseCallbackData("G:abc123"), {
+    decision: "grant",
+    scope: "all",
+    nonce: "abc123",
+    actionKey: null,
+  });
+  assert.deepEqual(parseCallbackData("R:abc123"), {
+    decision: "reject",
+    scope: "all",
     nonce: "abc123",
     actionKey: null,
   });
@@ -894,10 +931,11 @@ test("an expiry appended by the daemon annotates the prompt as EXPIRED", async (
   assertClean(world.unit);
 });
 
-test("a batch annotates member by member: one decided, the rest still armed", async () => {
-  // Telegram's batch is one message per member, each with its own keyboard and
-  // its own delivery id, so per-member annotation needs no shared state to
-  // re-render from: deciding one member edits exactly one message.
+test("a digest annotates member by member: one decided, the rest still armed", async () => {
+  // APRV-115: a batch is now ONE digest message carrying every member's row, so
+  // per-member annotation is a redraw of that message rather than an edit of a
+  // message of its own. The property is unchanged and is the one that matters:
+  // deciding one member must leave the others answerable.
   const world = live(2);
   const [firstKey, secondKey] = world.keys as [string, string];
   const requests = queueOf(world, at(2));
@@ -908,24 +946,423 @@ test("a batch annotates member by member: one decided, the rest still armed", as
   const assembled = assembleBatch(requests);
   assert.equal(assembled.ok, true, JSON.stringify(assembled));
   if (!assembled.ok) return;
-  await channel.notify(assembled.batch);
+  const delivered = await channel.notifyBatch(assembled.batch);
+  assert.ok(delivered.digestId !== null, "two similar requests must digest");
 
   assert.equal(channel.lastRendered().length, 2, "a batch is rendered member by member");
 
   const editedBefore = mock.edits().length;
   assert.equal((await press(channel, firstKey, "grant"))?.ok, true);
   const afterFirst = mock.edits().slice(editedBefore);
-  assert.equal(afterFirst.length, 1, "exactly one member's message may be edited");
-  assert.match(String(afterFirst[0]?.text), new RegExp(`<code>${firstKey}</code>`, "u"));
-  assert.equal(afterFirst[0]?.replyMarkup, undefined);
+  assert.equal(afterFirst.length, 1, "one member decided is one redraw of the digest");
+  const mixed = String(afterFirst[0]?.text);
+  assert.match(mixed, /1 OF 2 REQUESTS STILL AWAITING APPROVAL/u);
+  assert.match(mixed, /✓ APPROVED/u);
+  assert.ok(mixed.includes(firstKey) && mixed.includes(secondKey), "a member left the digest");
 
-  // The undecided member is untouched and still answerable.
+  // The still-open member keeps its buttons; the decided one has lost them, and
+  // with one left there is no "all" row to press by accident.
+  const keyboard = afterFirst[0]?.replyMarkup as
+    | { inline_keyboard: { text: string }[][] }
+    | undefined;
+  assert.deepEqual(
+    keyboard?.inline_keyboard.map((row) => row.map((button) => button.text)),
+    [["✅ Approve 2", "🛑 Reject 2"]],
+  );
+
+  // And it really is still answerable.
   assert.equal((await press(channel, secondKey, "reject"))?.ok, true);
   const afterSecond = mock.edits().slice(editedBefore + 1);
-  assert.equal(afterSecond.length, 1, "the last member decided leaves no armed message");
-  assert.match(String(afterSecond[0]?.text), new RegExp(`<code>${secondKey}</code>`, "u"));
+  assert.equal(afterSecond.length, 1);
+  assert.match(String(afterSecond[0]?.text), /ALL 2 REQUESTS DECIDED/u);
   assert.match(String(afterSecond[0]?.text), /✗ REJECTED/u);
+  assert.equal(afterSecond[0]?.replyMarkup, undefined, "a fully decided digest keeps no buttons");
   assertNoTokenInEdits();
+  assertClean(world.unit);
+});
+
+// ---------------------------------------------------------------------------
+// Digests (APRV-115)
+// ---------------------------------------------------------------------------
+
+/**
+ * A research session once produced forty near-identical `network.call` prompts
+ * in twenty minutes, one Telegram message each. These cases are about the two
+ * halves of the fix and about the line between them:
+ *
+ * - the listener groups only requests that really are the same question, and
+ * - a digest never gets a human closer to a grant than they were to the bytes.
+ *
+ * Nothing here writes a log line by hand. The all-button case in particular
+ * drives the real callback path into the real handler into `decide()`, which is
+ * the only way the "one event per member" property means anything.
+ */
+
+/** Press a digest's "all" button, and return the poll that carried it. */
+async function pressAll(
+  channel: TelegramChannel,
+  decision: "grant" | "reject",
+): Promise<TelegramPollResult> {
+  mock.queueUpdate(callbackUpdate({ data: mock.digestAllDataFor(decision), chatId: CHAT }));
+  return await channel.pollOnce();
+}
+
+test("only same-class, same-origin, same-shape requests share a digest", () => {
+  const world = live(4);
+  const requests = queueOf(world, at(2));
+  const [a, b, c, d] = requests as [
+    ChannelRequest,
+    ChannelRequest,
+    ChannelRequest,
+    ChannelRequest,
+  ];
+
+  // Same class, same task, same payload shape for A and D. B declares another
+  // class and C another task, and each of those is enough to split.
+  const mixed: ChannelRequest[] = [
+    a,
+    { ...b, class: computed("network.call", "log") },
+    { ...c, task: computed("task-999", "log") },
+    d,
+  ];
+
+  assert.deepEqual(
+    groupForDigest(mixed).map((group) => group.map((entry) => entry.action_key.value)),
+    [[a.action_key.value, d.action_key.value], [b.action_key.value], [c.action_key.value]],
+    "the grouping key is not (class, task, shape)",
+  );
+  assert.equal(digestKeyOf(a), digestKeyOf(d));
+  assert.notEqual(digestKeyOf(a), digestKeyOf(mixed[1] as ChannelRequest));
+  assert.notEqual(digestKeyOf(a), digestKeyOf(mixed[2] as ChannelRequest));
+  assertClean(world.unit);
+});
+
+test("a command payload groups by argv[0]; anything else by its key set", () => {
+  // Forty curls are one decision with forty URLs in it. A curl next to an rm is
+  // not, and the shape token has to say so.
+  assert.equal(payloadShapeKey({ command: "curl -s https://a.example", cwd: "/w" }), "argv0:curl");
+  assert.equal(payloadShapeKey({ command: "curl -s https://b.example", cwd: "/w" }), "argv0:curl");
+  assert.equal(payloadShapeKey({ command: "rm -rf /tmp/x", cwd: "/w" }), "argv0:rm");
+
+  // Key order is not shape: the same object written two ways is one group.
+  assert.equal(payloadShapeKey({ to: ["a@b.example"], subject: "s", body: "b" }), "keys:body,subject,to");
+  assert.equal(payloadShapeKey({ body: "b", subject: "s", to: ["a@b.example"] }), "keys:body,subject,to");
+  assert.notEqual(payloadShapeKey({ to: ["a@b.example"], subject: "s" }), "keys:body,subject,to");
+
+  // A self-declared "kind" is just another key, never a way to choose a group.
+  assert.equal(
+    payloadShapeKey({ kind: "curl", command: "curl x", cwd: "/w" }),
+    "keys:command,cwd,kind",
+  );
+
+  assert.equal(payloadShapeKey(null), "null");
+  assert.equal(payloadShapeKey([1, 2]), "array");
+  assert.equal(payloadShapeKey("text"), "scalar:string");
+});
+
+test("a burst larger than the cap becomes several digests, never one wall", () => {
+  const world = live(5);
+  const requests = queueOf(world, at(2));
+  assert.deepEqual(
+    groupForDigest(requests, 2).map((group) => group.length),
+    [2, 2, 1],
+    "a group past the cap must close and a fresh one open",
+  );
+  assert.equal(
+    groupForDigest(requests).length,
+    1,
+    `five similar requests are one digest under the default cap of ${TELEGRAM_DIGEST_MAX_MEMBERS}`,
+  );
+  assertClean(world.unit);
+});
+
+test("a burst of similar requests yields one digest, and mixed decisions land per member", async () => {
+  const world = live(3);
+  const [first, second, third] = world.keys as [string, string, string];
+  const channel = channelFor();
+  const setup = setupFor(world, channel);
+  channel.onDecision(handlerFor(world, at(3)));
+
+  const before = mock.sentTexts().length;
+  const { streams, out } = capture();
+  const cycle = await dispatchPending(setup, streams, newDispatchState(), at(2));
+
+  assert.equal(cycle.digests.length, 1, `three similar requests must digest: ${JSON.stringify(cycle.digests)}`);
+  assert.deepEqual(cycle.digests[0]?.action_keys, [first, second, third]);
+  const digestId = cycle.digests[0]?.delivery_id as string;
+  assert.deepEqual(
+    cycle.delivered.map((entry) => entry.delivery_id),
+    [digestId, digestId, digestId],
+    "every member's annotation must target the one digest message",
+  );
+  assert.ok(out.join("").includes(`notified ${first} (digest ${digestId}, 3 requests)`));
+
+  const texts = mock.sentTexts().slice(before);
+  const digestText = texts[texts.length - 1] as string;
+
+  // AC3, structurally: the buttons are on the LAST message, and every member's
+  // payload arrived in a message above it.
+  assert.match(digestText, /3 REQUESTS AWAITING APPROVAL/u);
+  const above = texts.slice(0, -1).join("\n");
+  for (const [index, key] of world.keys.entries()) {
+    assert.ok(digestText.includes(key), `${key} has no line on the digest`);
+    assert.ok(above.includes(key), `${key} was never prompted above the digest`);
+    assert.ok(
+      above.includes(`Invoice ${41 + index} chaser`),
+      `the payload of ${key} was not on screen before the buttons`,
+    );
+    assert.ok(
+      above.includes(`REQUEST ${index + 1} OF 3`),
+      "a digest member's prompt must say which request it is",
+    );
+  }
+  assert.equal(
+    above.includes(TELEGRAM_PROMPT_HEADING),
+    false,
+    "a member prompt carries no buttons and must not claim to be answerable",
+  );
+
+  // Mixed per-member decisions, through the real callback path.
+  assert.equal((await press(channel, second, "grant"))?.ok, true);
+  assert.equal((await press(channel, first, "reject"))?.ok, true);
+
+  const records = recordsOf(world.unit.logPath);
+  const decisions = records.filter(
+    (record) => record.event === "approval.granted" || record.event === "approval.rejected",
+  );
+  assert.deepEqual(
+    decisions.map((record) => [record.event, record.action_key]),
+    [
+      ["approval.granted", second],
+      ["approval.rejected", first],
+    ],
+    "a mixed digest decided the wrong requests",
+  );
+
+  // The untouched member is still answerable, and the digest still says so.
+  assert.equal((await press(channel, third, "grant"))?.ok, true);
+  assertNoTokenInEdits();
+  assertClean(world.unit);
+});
+
+test("Approve all is N decisions: one event per member, each bound to its own action", async () => {
+  const world = live(3);
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(3)));
+
+  const assembled = assembleBatch(queueOf(world, at(2)));
+  assert.equal(assembled.ok, true, JSON.stringify(assembled));
+  if (!assembled.ok) return;
+  const delivered = await channel.notifyBatch(assembled.batch);
+  assert.ok(delivered.digestId !== null);
+
+  const before = recordsOf(world.unit.logPath).length;
+  const poll = await pressAll(channel, "grant");
+
+  // One outcome per member, in member order, from the ONE tap.
+  assert.deepEqual(
+    poll.outcomes.map((entry) => entry.action_key),
+    world.keys,
+  );
+
+  const records = recordsOf(world.unit.logPath);
+  const appended = records.slice(before);
+  assert.equal(appended.length, 3, "one tap over three requests must append exactly three events");
+
+  for (const [index, record] of appended.entries()) {
+    const key = world.keys[index] as string;
+    assert.equal(record.event, "approval.granted");
+    // No event spans actions: each names one action key, and the log has no
+    // shape in which it could name two.
+    assert.equal(record.action_key, key);
+    assert.equal(typeof record.action_key, "string");
+    // And each is bound to ITS OWN payload, not to the batch's first one.
+    const payload = (record.payload ?? {}) as Record<string, unknown>;
+    assert.equal(
+      payload["payload_hash"],
+      payloadHash(world.payloads.get(key)),
+      "a batched grant must carry the payload hash of its own action",
+    );
+    // The one thing tying the three back together for audit (SPEC.md §10.3).
+    assert.equal(batchDeliveryIdOf(record), delivered.batchDeliveryId);
+  }
+
+  // Compare-and-append: three appends, three consecutive sequence numbers, and
+  // the chain verifies. A concurrent writer would have refused one member with
+  // `append-failed` rather than producing this.
+  assert.deepEqual(
+    appended.map((record) => record.seq),
+    [before + 1, before + 2, before + 3],
+  );
+  assertClean(world.unit);
+
+  // The digest now says so, and offers nothing further.
+  const edits = editsFor(delivered.digestId as string);
+  assert.equal(edits.length, 1, "one tap over the set is one redraw");
+  assert.match(String(edits[0]?.text), /ALL 3 REQUESTS DECIDED/u);
+  assert.equal(edits[0]?.replyMarkup, undefined);
+  assert.match(mock.answerTexts().join("\n"), /Approved 3 — one log event each\./u);
+  assertNoTokenInEdits();
+});
+
+test("Approve all after a member was decided elsewhere records only the rest", async () => {
+  const world = live(3);
+  const [first] = world.keys as [string, string, string];
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(4)));
+
+  const assembled = assembleBatch(queueOf(world, at(2)));
+  assert.equal(assembled.ok, true, JSON.stringify(assembled));
+  if (!assembled.ok) return;
+  await channel.notifyBatch(assembled.batch);
+
+  // The human answered this one at the CLI a moment ago. The digest has not
+  // been redrawn yet, so its button is still there — and the gate is what
+  // refuses it, not the channel's memory.
+  const early = recordChannelDecision(
+    world.unit.logPath,
+    { action_key: first, decision: "grant", deliveryId: "cli" },
+    { actor: HUMAN, channel: "cli" },
+    { ...world.unit.options, clock: fixedClock(at(3)) },
+  );
+  assert.equal(early.outcome.ok, true, JSON.stringify(early.outcome));
+
+  const before = recordsOf(world.unit.logPath).length;
+  const poll = await pressAll(channel, "grant");
+  assert.equal(poll.outcomes.length, 3, "every open member is still attempted");
+  assert.deepEqual(
+    poll.outcomes.map((entry) => (entry.outcome.ok ? "ok" : entry.outcome.code)),
+    ["already-decided", "ok", "ok"],
+  );
+  assert.equal(
+    recordsOf(world.unit.logPath).length,
+    before + 2,
+    "a refused member must append nothing, and must not stop the others",
+  );
+  assert.match(mock.answerTexts().join("\n"), /Approved 2; 1 refused \(already-decided\)/u);
+  assertClean(world.unit);
+});
+
+test("a digest too large to render falls back to one message per member", async () => {
+  // Eight members whose claimed summaries are long enough that their eight
+  // digest lines cannot fit one message. Each member's own prompt still fits,
+  // which is the point: the fallback is more messages, never a shorter digest.
+  const world = live(8);
+  const requests = queueOf(world, at(2)).map((request) => ({
+    ...request,
+    summary: claimed("chase ".repeat(80), ACTOR),
+  }));
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const assembled = assembleBatch(requests);
+  assert.equal(assembled.ok, true, JSON.stringify(assembled));
+  if (!assembled.ok) return;
+
+  const before = mock.sentTexts().length;
+  const delivered = await channel.notifyBatch(assembled.batch);
+  assert.equal(delivered.digestId, null, "an oversized digest must fall back, never truncate");
+  assert.equal(
+    new Set(delivered.members.map((member) => member.delivery_id)).size,
+    8,
+    "the fallback is one message per member, so each has its own delivery id",
+  );
+  for (const text of mock.sentTexts().slice(before)) {
+    assert.ok(text.length <= 4096, "a fallback message exceeded Telegram's limit");
+  }
+
+  // Still one batch delivery id, so audit granularity survives the fallback.
+  const [firstKey, secondKey] = world.keys as [string, string];
+  assert.equal((await press(channel, firstKey, "grant"))?.ok, true);
+  assert.equal((await press(channel, secondKey, "grant"))?.ok, true);
+  for (const record of recordsOf(world.unit.logPath).filter(
+    (entry) => entry.event === "approval.granted",
+  )) {
+    assert.equal(batchDeliveryIdOf(record), delivered.batchDeliveryId);
+  }
+  assertClean(world.unit);
+});
+
+test("a withdrawn digest member is annotated on its own line; the rest stay armed", async () => {
+  const world = live(2);
+  const [first, second] = world.keys as [string, string];
+  const setup = setupFor(world, channelFor());
+  const state = newDispatchState();
+
+  const cycle = await dispatchPending(setup, capture().streams, state, at(2));
+  const digestId = cycle.digests[0]?.delivery_id as string;
+  assert.ok(digestId !== undefined, JSON.stringify(cycle));
+
+  const gone = withdraw(world.unit.logPath, first, ACTOR, at(11), {
+    ...world.unit.options,
+    reason: "timeout",
+  });
+  assert.equal(gone.ok, true, gone.ok ? "" : gone.message);
+
+  const next = await dispatchPending(setup, capture().streams, state, at(12));
+  assert.deepEqual(
+    next.annotated.map((entry) => [entry.action_key, entry.outcome]),
+    [[first, "withdrawn"]],
+  );
+
+  const edits = editsFor(digestId);
+  assert.equal(edits.length, 1, "one member settling is one redraw");
+  const text = String(edits[0]?.text);
+  assert.match(text, /1 OF 2 REQUESTS STILL AWAITING APPROVAL/u);
+  assert.match(text, /WITHDRAWN — no decision is needed/u);
+  assert.match(text, /withdrawn by the requester at 10:11 UTC \(timeout\) · nothing to do/u);
+  assert.ok(text.includes(second), "the surviving member left the digest");
+
+  // Mixed state, and the survivor keeps exactly its own buttons.
+  const keyboard = edits[0]?.replyMarkup as
+    | { inline_keyboard: { text: string }[][] }
+    | undefined;
+  assert.deepEqual(
+    keyboard?.inline_keyboard.map((row) => row.map((button) => button.text)),
+    [["✅ Approve 2", "🛑 Reject 2"]],
+  );
+
+  // Idempotent, exactly as the single-prompt case is.
+  const again = await dispatchPending(setup, capture().streams, state, at(13));
+  assert.deepEqual(again.annotated, []);
+  assert.equal(editsFor(digestId).length, 1);
+  assertClean(world.unit);
+});
+
+test("a digest expired by the daemon annotates its member, and the tap is refused", async () => {
+  const world = live(2);
+  const [first] = world.keys as [string, string];
+  const channel = channelFor();
+  const setup = setupFor(world, channel);
+  channel.onDecision(handlerFor(world, at(1502)));
+  const state = newDispatchState();
+
+  const cycle = await dispatchPending(setup, capture().streams, state, at(2));
+  const digestId = cycle.digests[0]?.delivery_id as string;
+  assert.ok(digestId !== undefined, JSON.stringify(cycle));
+
+  const lapsed = expire(world.unit.logPath, first, at(1500), world.unit.options);
+  assert.equal(lapsed.ok, true, JSON.stringify(lapsed));
+
+  const next = await dispatchPending(setup, capture().streams, state, at(1501));
+  assert.deepEqual(
+    next.annotated.map((entry) => entry.outcome),
+    ["expired"],
+  );
+  assert.match(String(editsFor(digestId)[0]?.text), /EXPIRED — the approval window closed/u);
+
+  // Its nonce went with the redraw, so a stale tap resolves to nothing rather
+  // than reaching the gate at all.
+  const before = recordsOf(world.unit.logPath).length;
+  mock.queueUpdate(
+    callbackUpdate({ data: mock.callbackDataFor(first, "grant"), chatId: CHAT }),
+  );
+  const poll = await channel.pollOnce();
+  assert.deepEqual(
+    poll.ignored.map((entry) => entry.kind),
+    ["unknown-callback"],
+  );
+  assert.equal(recordsOf(world.unit.logPath).length, before, "a stale tap appended something");
   assertClean(world.unit);
 });
 
@@ -1894,6 +2331,182 @@ test("a diff reaches Telegram escaped, chunked and complete", async () => {
   assert.ok(whole.includes("-run: npm test &lt;all&gt; &amp; lint"), whole);
   assert.ok(whole.includes("+run: npm test --silent"), whole);
   assert.equal(whole.includes("<all>"), false, "raw markup reached the message");
+  assert.ok(
+    whole.includes(`--- full payload (sha256 ${request_.payload_hash.value}) ---`),
+    "the payload region lost its hash label",
+  );
+  for (const text of texts) {
+    assert.ok(text.length <= 4096, "a message exceeded Telegram's 4096-character limit");
+  }
+  assert.equal(recordsOf(world.unit.logPath).length, 3);
+});
+
+// ---------------------------------------------------------------------------
+// Shell commands on the phone (APRV-126)
+// ---------------------------------------------------------------------------
+
+test("a command payload renders over its real lines, with cwd and the store path", () => {
+  const json = (value: unknown): string => JSON.stringify(value, null, 2);
+  const view = (value: unknown, truncated = false): string =>
+    payloadRegionText({ value, text: json(value), hash: "deadbeef", truncated });
+
+  const command = [
+    "gh pr create --title 'ship it' --body 'first line",
+    "second line",
+    "",
+    "a literal escape: a\\nb'",
+  ].join("\n");
+  const payload = { command, cwd: "/repo" };
+  const rendered = view(payload);
+
+  assert.ok(rendered.startsWith(COMMAND_VIEW_HEADING), rendered);
+  assert.ok(rendered.includes(ESCAPE_LEGEND), rendered);
+  assert.ok(rendered.includes("command (4 lines):"), rendered);
+  assert.ok(rendered.includes(`${COMMAND_BEGIN}\ngh pr create`), rendered);
+  assert.ok(rendered.includes("\nsecond line\n"), "the line break was not rendered as one");
+  // The two literal bytes are marked, so they cannot be read as a line break.
+  assert.ok(rendered.includes("a literal escape: a«\\n»b'"), rendered);
+  // cwd on its own line, beneath the command block.
+  assert.ok(rendered.includes(`${COMMAND_END}\ncwd: /repo`), rendered);
+  // And where the exact bytes are, said in the prompt itself.
+  assert.ok(rendered.includes(rawBytesLine("deadbeef")), rendered);
+
+  // The exact bytes stay underneath: the view is an aid, never a replacement.
+  assert.ok(rendered.includes(CANONICAL_JSON_HEADING), rendered);
+  assert.ok(rendered.endsWith(json(payload)), rendered);
+
+  // A payload without a cwd says so rather than rendering an empty line.
+  assert.ok(view({ command: "ls" }).includes("cwd: (none declared)"));
+});
+
+test("only structurally command-shaped payloads leave the JSON rendering", () => {
+  const json = (value: unknown): string => JSON.stringify(value, null, 2);
+  const view = (value: unknown, truncated = false): string =>
+    payloadRegionText({ value, text: json(value), hash: "h", truncated });
+
+  assert.deepEqual(commandPayloadView({ command: "ls", cwd: "/repo" }), {
+    command: "ls",
+    cwd: "/repo",
+  });
+  assert.deepEqual(commandPayloadView({ command: "ls" }), { command: "ls", cwd: null });
+
+  // An unknown key, a wrong type, a truncated rendering: JSON, every time. A
+  // key this view cannot show would be a hidden payload wearing a friendlier
+  // face, which is the failure the email view was careful about first.
+  for (const value of [
+    { command: "ls", cwd: "/repo", shell: "zsh" },
+    { command: "ls", cwd: 3 },
+    { command: 3, cwd: "/repo" },
+    { cwd: "/repo" },
+    ["ls"],
+    "just a string",
+    null,
+  ]) {
+    assert.equal(commandPayloadView(value), null, `wrongly recognised ${json(value)}`);
+    assert.equal(view(value), json(value), `rendering changed for ${json(value)}`);
+  }
+  const whole = { command: "ls", cwd: "/repo" };
+  assert.equal(view(whole, true), json(whole), "a truncated rendering must not be re-expanded");
+});
+
+test("two distinct byte strings never render identically (property)", () => {
+  // The rendering the command block applies to the bytes: split on real
+  // newlines, mark literal escape sequences on each line. If this were not
+  // injective an agent could write one payload and have the approver read
+  // another, which is the whole reason the marker exists.
+  const display = (bytes: string): string => bytes.split("\n").map(markEscapes).join("\n");
+
+  // The case the acceptance criterion names, stated on its own so a failure
+  // reads as the thing it is rather than as a generator seed.
+  assert.notEqual(display("a\\nb"), display("a\nb"));
+  assert.equal(display("a\\nb"), "a«\\n»b");
+  assert.equal(display("a\nb"), "a\nb");
+
+  // And the general property, over an alphabet built from exactly the
+  // characters that could collide: the escape letters, the backslash, real
+  // control characters, and the marker delimiters themselves.
+  const alphabet = ["\\", "n", "r", "t", "\n", "\r", "\t", "«", "»", "a", " "];
+  let seed = 0x5eed_1260;
+  const next = (): number => {
+    seed = (seed + 0x6d2b_79f5) >>> 0;
+    let t = seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+  };
+
+  const seen = new Map<string, string>();
+  for (let index = 0; index < 4_000; index += 1) {
+    const length = 1 + Math.floor(next() * 6);
+    let bytes = "";
+    for (let position = 0; position < length; position += 1) {
+      bytes += alphabet[Math.floor(next() * alphabet.length)] as string;
+    }
+    const shown = display(bytes);
+    const first = seen.get(shown);
+    if (first === undefined) {
+      seen.set(shown, bytes);
+      continue;
+    }
+    assert.equal(
+      first,
+      bytes,
+      `two distinct byte strings rendered identically: ${JSON.stringify(first)} and ${JSON.stringify(bytes)} both render ${JSON.stringify(shown)}`,
+    );
+  }
+  assert.ok(seen.size > 1_000, `the generator produced too few distinct strings (${seen.size})`);
+});
+
+test("a very long command folds with an explicit marker, never silently", () => {
+  const command = Array.from(
+    { length: COMMAND_LINE_BUDGET + 12 },
+    (_, index) => `echo ${String(index)}`,
+  ).join("\n");
+  const payload = { command, cwd: "/repo" };
+  const text = payloadRegionText({
+    value: payload,
+    text: JSON.stringify(payload, null, 2),
+    hash: "h",
+    truncated: false,
+  });
+
+  assert.ok(
+    text.includes(`echo ${String(COMMAND_LINE_BUDGET - 1)}`),
+    "the budget is not spent in full",
+  );
+  assert.equal(
+    text.includes(`echo ${String(COMMAND_LINE_BUDGET)}\n`),
+    false,
+    "the fold did not happen",
+  );
+  assert.ok(text.includes(foldMarker(12)), text);
+  // The folded lines are still on screen, in the canonical JSON underneath, and
+  // the reader is told where the whole thing lives.
+  assert.ok(text.includes(JSON.stringify(command)), "the exact bytes left the message");
+  assert.ok(text.includes(rawBytesLine("h")), text);
+});
+
+test("a command reaches Telegram escaped, chunked and complete", async () => {
+  // The end-to-end of the APRV-126 complaint: the approver reads the COMMAND,
+  // through the real transport, with markup in it that must not become markup.
+  const command = "gh pr create --body 'a <b> & c\nsecond line'";
+  const payload = { command, cwd: "/repo" };
+  const world = live(1, false, () => payload);
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = mock.sentTexts().length;
+  await channel.notify(request_);
+  const texts = mock.sentTexts().slice(before);
+  const whole = texts.join("\n");
+
+  assert.ok(whole.includes("gh pr create --body 'a &lt;b&gt; &amp; c"), whole);
+  assert.ok(whole.includes("\nsecond line'"), "the line break did not survive the transport");
+  assert.equal(whole.includes("<b> &"), false, "raw markup reached the message");
+  assert.ok(whole.includes(`cwd: /repo`), whole);
+  assert.ok(whole.includes(rawBytesLine(request_.payload_hash.value)), whole);
   assert.ok(
     whole.includes(`--- full payload (sha256 ${request_.payload_hash.value}) ---`),
     "the payload region lost its hash label",

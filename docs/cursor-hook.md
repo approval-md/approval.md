@@ -244,6 +244,15 @@ change rather than the fact that a file was touched. A change too long for one
 screen folds in the diff view with an explicit `… N more lines (hash covers all
 bytes)` marker, and the bytes it folded are still in the JSON below.
 
+A `Shell` command renders over the lines it really has, with `cwd` on its own
+line beneath it and the store path of the exact bytes under that (APRV-126).
+Showing a real line break as a line break raises the question of what a
+*literal* backslash-`n` should look like, and the answer is that it is marked:
+`«\n»` is the two bytes, a line break is a line break, and no two payloads
+render the same way. The block says `the hash binds the RAW BYTES, not this
+view`, the canonical JSON underneath it is unchanged, and a long command folds
+with the same counted marker a diff uses.
+
 `rule` is the tier of a protected-path touch, on the same class:
 
 - `protected-path` — the target is the LIVE checkout's file;
