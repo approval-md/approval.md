@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-25 13:08'
+updated_date: '2026-08-25 13:42'
 labels:
   - spec
   - cleanroom-review
@@ -46,4 +47,15 @@ The clean-room reflection also proposes a normative appendix: one line per refus
 - [ ] #4 Any mismatch between TS behavior and the new spec text is resolved toward the stricter reading or called out to the human as a divergence, never patched silently
 - [ ] #5 APRV-122 is annotated to consume the appendix as its failure_class source
 - [ ] #6 npm test passes; lint clean
+- [ ] #7 Grant enforces the resolved rule approvers set: a grant by an actor not in approvers is refused (defense-in-depth, bounded by the config-declared-identity trust boundary). This is the surviving real piece of red-team F4; the class/cost-trust half of F4 is refuted, since CLI/MCP/hook intake re-derive class and cost from the schema-validated task.registered record (src/cli/gate.ts, verb-registry.ts) and negative costs are rejected by the envelope schema at register time
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: claude
+created: 2026-08-25 13:42
+---
+Added AC for red-team F4-approvers (approvers parsed at src/core/policy-match.ts but enforced nowhere; decide() at src/core/gate.ts ~1250-1255 checks actor shape only). Recorded here rather than as a new task because it overlaps GAP-3 (tie-break scope for approvers/limits). The rest of F4 (core request() trusting caller class/cost/reversibility) is refuted at the real entry points and should not be re-litigated.
+---
+<!-- COMMENTS:END -->
