@@ -115,6 +115,7 @@ import { createHash } from "node:crypto";
 import { closeSync, openSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { isPolicySha256, POLICY_HASH_FIELD } from "./attest.js";
 import type { EventRecord, LogHead } from "./log.js";
 import { isPayloadHash } from "./payload.js";
 import {
@@ -609,6 +610,19 @@ export interface DeclaredAction {
    * is, never less.
    */
   wait_until: string | null;
+  /**
+   * The SHA-256 of the attested policy in force when the runtime evaluated the
+   * request (APRV-118, amended SPEC.md §5.2), or `null` for a record written
+   * before the field existed.
+   *
+   * Computed, never claimed: the requester has no parameter that reaches it, and
+   * the gate assigns it at the write boundary from its own read of the attested
+   * file, exactly as it assigns `ts`. The grant path compares it against the hash
+   * in force at decision time and refuses `policy-drift` on a difference, so a
+   * value that disagrees with the runtime's can only refuse a grant, never
+   * produce one.
+   */
+  policy_sha256: string | null;
 }
 
 /** Execution facts for the action key: the seq of each event, or `null`. */
@@ -657,6 +671,7 @@ function declaredFrom(record: EventRecord): DeclaredAction {
   const hash = payload["payload_hash"];
   const execution = payload["execution"];
   const waitUntil = payload["wait_until"];
+  const policySha256 = payload[POLICY_HASH_FIELD];
   return {
     class: typeof cls === "string" ? cls : null,
     est_cost_usd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
@@ -669,6 +684,12 @@ function declaredFrom(record: EventRecord): DeclaredAction {
     execution: execution === "harness" ? "harness" : null,
     wait_until:
       typeof waitUntil === "string" && !Number.isNaN(Date.parse(waitUntil)) ? waitUntil : null,
+    // A malformed hash reads as `null`, which is the pre-APRV-118 shape: the
+    // grant path then has nothing to compare and proceeds under the current
+    // policy. Treating an unreadable value as a mismatch would let a corrupt
+    // byte void a pending request, and treating it as a match would let a
+    // crafted one claim agreement it cannot prove.
+    policy_sha256: isPolicySha256(policySha256) ? policySha256 : null,
   };
 }
 
@@ -727,6 +748,7 @@ export function requestState(
     payload_hash: null,
     execution: null,
     wait_until: null,
+    policy_sha256: null,
   };
   const execution: ExecutionFacts = { started: null, completed: null, failed: null };
 

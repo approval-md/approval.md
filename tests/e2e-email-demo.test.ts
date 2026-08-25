@@ -254,6 +254,11 @@ const logPath = join(demo, ".approval", "log", "events.jsonl");
 const vaultPath = join(demo, ".approval", "vault.enc");
 const messagePath = join(demo, "message.json");
 
+/** The attested policy hash APRV-118 pins onto request and grant. */
+function policySha256(): string {
+  return createHash("sha256").update(readFileSync(join(demo, "APPROVAL.md"))).digest("hex");
+}
+
 let bot: MockBotApi;
 let smtp: MockSmtp;
 
@@ -596,6 +601,8 @@ test("the M7 demo: draft -> telegram -> approve -> mail sent -> chain clean", as
       payload_hash: PAYLOAD_HASH,
       summary: "Send deposit chaser to agency@example.co.uk",
       reversible: false,
+      // APRV-118: the attested policy this request was routed by.
+      policy_sha256: policySha256(),
     });
     assert.equal(recordAt(3)["actor"], AGENT);
 
@@ -737,6 +744,8 @@ test("the M7 demo: draft -> telegram -> approve -> mail sent -> chain clean", as
       "class",
       "est_cost_usd",
       "payload_hash",
+      // APRV-118: the attested policy the approver decided under.
+      "policy_sha256",
       "token_sha256",
     ]);
 

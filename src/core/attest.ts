@@ -70,6 +70,23 @@ export const HUMAN_ACTOR_ENV = "APPROVAL_HUMAN";
  */
 export const ATTESTATION_REFUSAL = "policy-not-attested";
 
+/**
+ * The payload field carrying the attested policy hash a gate event was decided
+ * under (APRV-118, amended SPEC.md §5.2).
+ *
+ * Written on `approval.requested` and `approval.granted`, and named here rather
+ * than in `core/gate.ts` because the value is this module's: it is the SHA-256
+ * the live policy file matched when {@link checkAttestation} said `attested`.
+ * Pinning it lets a reader of the log answer a question attestation alone cannot
+ * — whether the approver decided under the rules the requester was routed by.
+ */
+export const POLICY_HASH_FIELD = "policy_sha256";
+
+/** Is `value` a lowercase-hex SHA-256, the shape {@link POLICY_HASH_FIELD} takes? */
+export function isPolicySha256(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+}
+
 /** Why an attestation check refused. Mirrors the non-`attested` statuses. */
 export type AttestationRefusalDetail = "not-attested" | "hash-mismatch" | "unreadable";
 

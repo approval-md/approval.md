@@ -414,6 +414,11 @@ test("the MCP demo: a client requests, a phone grants, the tool call proceeds", 
         payload_hash: PAYLOAD_HASH,
         summary: "Run `echo hello` in the demo directory",
         reversible: true,
+        // APRV-118: the attested policy this request was routed by, stamped by
+        // the runtime and never named by the MCP client.
+        policy_sha256: createHash("sha256")
+          .update(readFileSync(join(demo, "APPROVAL.md")))
+          .digest("hex"),
       });
 
       // ---------------------------------------------------------------------

@@ -144,6 +144,14 @@ function caseDir(policyText: string = POLICY): string {
   return dir;
 }
 
+/**
+ * The SHA-256 of the case's policy bytes — the value APRV-118 pins onto
+ * `approval.requested` and `approval.granted` at the write boundary.
+ */
+function policySha256(dir: string): string {
+  return createHash("sha256").update(readFileSync(join(dir, "APPROVAL.md"))).digest("hex");
+}
+
 function logRecords(dir: string): Record<string, unknown>[] {
   const path = join(dir, ".approval", "log", "events.jsonl");
   if (!existsSync(path)) return [];
@@ -303,6 +311,8 @@ test("request on the manual path appends approval.requested", () => {
     payload_hash: PAYLOAD_HASH,
     summary: "Send deposit chaser to agency@example.co.uk",
     reversible: false,
+    // APRV-118: the attested policy this request was routed by.
+    policy_sha256: policySha256(dir),
   });
   assertClean(dir);
 });
@@ -452,6 +462,8 @@ test("grant --json emits the frozen shape and records the human decision", () =>
     payload_hash: PAYLOAD_HASH,
     note: "go, but cc me",
     token_sha256: createHash("sha256").update(token, "utf8").digest("hex"),
+    // APRV-118: the attested policy the approver decided under.
+    policy_sha256: policySha256(dir),
   });
   assertClean(dir);
 });
