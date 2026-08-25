@@ -640,9 +640,11 @@ export function payloadShapeKey(value: unknown): string {
  * the safe direction: it costs a message and never merges two things a human
  * would have wanted to weigh separately.
  *
- * ` ` as the separator because every component is agent-influenced text
+ * `"\0"` as the separator because every component is agent-influenced text
  * and a separator that can appear inside one would let a crafted task name
- * collide two classes into one group.
+ * collide two classes into one group. Written as the escape, never the raw
+ * byte: a literal NUL in the source turns this file into "binary" for grep,
+ * diff tooling, and editors, and the escape compiles to the same string.
  */
 export function digestKeyOf(request: ChannelRequest): string {
   return [
@@ -651,7 +653,7 @@ export function digestKeyOf(request: ChannelRequest): string {
     request.autonomy.value,
     originOf(request.summary),
     payloadShapeKey(request.fullPayload.value?.value),
-  ].join(" ");
+  ].join("\0");
 }
 
 /**
