@@ -1,17 +1,11 @@
-# The Claude Code hook — `approval hook claude-code` (APRV-82)
+# The Cursor hook — `approval hook cursor` (APRV-133)
 
 `approval run` gates the commands an agent hands to the runtime. It cannot gate
-the ones the agent's harness runs directly, and those are most of them: `git
-push`, `gh pr create`, `npm install`, `curl`. Until this verb, enforcement of
-`vcs.push.*`, `deps.add`, `network.call` and `release.publish` in this repository
-was prose in CLAUDE.md plus an agent's willingness to read it, which is the
-AGENTS.md failure SPEC.md §2 exists to criticize.
-
-`approval hook claude-code` is a [Claude Code PreToolUse
-hook](https://code.claude.com/docs/en/hooks). Claude Code runs it before a tool
-call, hands it the event as JSON on stdin, and reads a decision back on stdout.
-The hook classifies the command, resolves the class against `APPROVAL.md`, and
-answers:
+the ones the agent's harness runs directly. Cursor Agent has native `preToolUse`
+hooks. `approval hook cursor` is that adapter: it classifies `Shell`, `Write` and
+`Delete`, resolves the class against `APPROVAL.md`, and answers native permission
+JSON. It reuses the same deterministic core as `approval hook claude-code`. It
+does not speak Claude's nested `hookSpecificOutput` envelope.
 
 | resolved autonomy | answer | what reaches the log |
 |---|---|---|
@@ -21,66 +15,56 @@ answers:
 | unclassifiable | deny | nothing |
 
 The decision arrives through whatever channel the policy names. In this
-repository that is Telegram: the command sits at the gate, the phone buzzes, a
-tap grants it, and the hook returns allow to the harness that was blocked on it.
+repository that is Telegram.
 
 ## Installing it
 
-The hook lives in `.claude/settings.json`. **A human commits this file.** It is
-`policy.edit` in the taxonomy and in this repository's own policy: a file that
-configures the gate is part of the gate, and an agent that could write its own
-hook entry could write itself out of it. The hook classifies edits to it as
-`policy.edit` for the same reason.
+The hook lives in `.cursor/hooks.json`. **A human commits this file.** It is
+`policy.edit`: a file that configures the gate is part of the gate. The
+classifier treats `.cursor/hooks.json`, `.cursor/hooks/`, and `.cursor/agents/`
+as `policy.edit` for the same reason.
 
 ```json
 {
+  "version": 1,
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "approval hook claude-code --dir <primary checkout> --as agent:claude-code --timeout 9m",
-            "timeout": 600
-          }
-        ]
-      }
-    ]
+    "preToolUse": [{
+      "command": "approval hook cursor --dir <primary checkout> --as agent:cursor --timeout 9m",
+      "matcher": "Shell|Write|Delete",
+      "timeout": 600,
+      "failClosed": true
+    }]
   }
 }
 ```
 
+`failClosed: true` is required. Cursor otherwise lets the tool through on crash,
+timeout, or invalid JSON. The CLI still turns unexpected throws into deny JSON
+and exits 0, so a launched hook that fails internally still blocks; `failClosed`
+covers the cases where the process never answers.
+
+Do not also register `beforeShellExecution` for the same Shell calls: that would
+double-prompt. User-typed terminal outside Agent remains ungated, the same class
+of gap as Claude Code without a Bash PreToolUse. Cloud Agents are out of scope:
+a cloud VM cannot append the primary log without a shared gate.
+
 A few things about those numbers and paths:
 
 - `--dir <primary checkout>` points policy discovery AND the log at the primary
-  checkout, whose committed log the daemon writes: the log path is
-  `<dir>/.approval/log/events.jsonl`, never relative to the session's working
-  directory. `--policy` and `--log` override either half; with neither `--dir`
+  checkout. `--policy` and `--log` override either half; with neither `--dir`
   nor `--log`, the hook asks git for the primary checkout
-  (`git rev-parse --git-common-dir`, whose parent is the primary root) and uses
-  its policy and its log, so a session inside a linked worktree still writes to
-  the one log. A plain checkout resolves to itself, and outside a repository (or
-  without git) the hook falls back to its working directory.
+  (`git rev-parse --git-common-dir`) and uses its policy and its log.
 - **The hook never creates a log.** If the resolved log is not there, it denies
-  with `hook-log-unreachable` naming the path it looked for, rather than
-  scaffolding a second chain that forks from the real one's tail — hash chains
-  do not survive a merge. Run `approval init` and `approval policy attest` in
-  the primary checkout first.
-- `timeout` is Claude Code's cap on the hook process, in seconds. `--timeout` is
-  how long the hook waits for a human, in the SPEC.md §5.2 duration grammar. Keep
-  `--timeout` comfortably below `timeout`, so a wait that runs out produces a
-  `hook-timeout` deny with an explanation rather than a killed process.
-- The default `--timeout` is 55s, which suits Claude Code's default 60s hook
-  timeout. Raise both together if you want a human to have minutes rather than a
-  minute.
+  with `hook-log-unreachable`.
+- `timeout` is Cursor's cap on the hook process, in seconds. `--timeout` is how
+  long the hook waits for a human. Keep `--timeout` below `timeout`.
+- The default `--timeout` is 55s. Raise both together for a longer wait.
+- Default identity is `agent:cursor`.
 
 Install the CLI on `PATH` (`npm link`, or an absolute path in the `command`).
-**A hook whose binary cannot be launched is a non-blocking error in Claude Code,
-which means the tool call proceeds.** An uninstalled CLI is therefore an open
-gate, and `approval doctor` will not know to look for it.
 
 ## What the classifier decides
+
 
 `src/core/command-class.ts` is a pure function from a command line to classes.
 `approval hook classify -- <command…>` prints its answer for any command, which
@@ -241,7 +225,7 @@ one of them failing, or answering ambiguously, leaves the class alone.
 `approval hook classify` runs the same refinement in the same directory, so what
 it prints is what the hook decides, and a refined segment shows the rule name
 `rewrite-unpublished`. When the hook refines, its
-`permissionDecisionReason` says so.
+`agent_message` says so.
 
 ### What the approver reads (APRV-124)
 
@@ -250,12 +234,11 @@ A `summary` is a headline and may be ellipsized; the FULL PAYLOAD block never is
 
 | tool | payload the grant binds to |
 | --- | --- |
-| `Bash` | `{command, cwd}` — the complete command line, not the headline |
-| `Edit` | `{tool, rule, file, before, after}` (plus `replace_all` when the call sets it) |
+| `Shell` | `{command, cwd}` — the complete command line, not the headline |
 | `Write` | `{tool, rule, file, content}` |
-| other file tools | `{tool, rule, file, input}`, the tool input verbatim |
+| `Delete` | `{tool, rule, file, input}`, the tool input verbatim |
 
-An `Edit` or a `Write` renders on the phone as a diff (removed lines `-`, added
+A `Write` renders on the phone as a diff (removed lines `-`, added
 lines `+`) with the canonical JSON underneath it, so the human approves the
 change rather than the fact that a file was touched. A change too long for one
 screen folds in the diff view with an explicit `… N more lines (hash covers all
@@ -276,7 +259,8 @@ resolves — only what the prompt says.
 
 ## Deny reasons
 
-The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen in
+Stdout is `{ "permission": "allow" | "deny", "user_message": "...", "agent_message": "..." }`.
+Never `ask`. The `agent_message` is `<code>: <detail>`, and the codes are frozen in
 `HOOK_DENY_CODES`:
 
 | code | meaning |
@@ -317,7 +301,7 @@ to retract the question when the hook stopped waiting.
 
 APRV-117 answers the same incident the other way, by making the late decision
 useful. Hook requests are matched by the **payload hash** — of `{command, cwd}`
-for a Bash call, of the change itself for a file tool (see [What the approver
+for a Shell call, of the change itself for a file tool (see [What the approver
 reads](#what-the-approver-reads-aprv-124)) — so the answer belongs to the bytes
 rather than to one invocation:
 
@@ -354,7 +338,7 @@ answer started authorizing a retry.
 
 ### No token is minted for a hook grant
 
-The hook answers allow or deny; Claude Code runs the command, and nothing ever
+The hook answers allow or deny; Cursor runs the command, and nothing ever
 calls `approval run`. So the hook's requests carry `execution: "harness"`, and a
 grant on one mints no execution token — a minted token would be a live
 credential with no spender. The grant is otherwise complete: class, cost and the

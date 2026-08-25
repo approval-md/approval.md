@@ -1,7 +1,6 @@
 /**
- * `approval hook` — the harness adapter of SPEC.md §10.5's neighbourhood
- * (APRV-82): a Claude Code PreToolUse hook that puts the gate in front of the
- * commands an agent's harness runs directly.
+ * `approval hook` — harness adapters that put the gate in front of the commands
+ * an agent's harness runs directly (APRV-82 Claude Code, APRV-133 Cursor).
  *
  * The problem it closes. Until this verb, the runtime gated what went through
  * `approval run`. Everything the harness executed on its own — `git push`, `gh
@@ -164,9 +163,6 @@ export const HOOK_DENY_CODES = [
 
 export type HookDenyCode = (typeof HOOK_DENY_CODES)[number];
 
-/** Tools whose input names a file rather than a command line. */
-const FILE_TOOLS: readonly string[] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
-
 const COMMON_FLAGS: Record<string, FlagKind> = {
   "--help": "boolean",
   "-h": "boolean",
@@ -247,14 +243,48 @@ function hookScope(flags: Record<string, string | boolean>, cwd: string): HookSc
 
 type Permission = "allow" | "deny";
 
+/** Which harness JSON envelope to print. Never `ask`. */
+type HarnessKind = "claude-code" | "cursor";
+
+interface HarnessAdapter {
+  kind: HarnessKind;
+  originApp: string;
+  defaultActor: string;
+  shellTool: string;
+  fileTools: readonly string[];
+}
+
+const CLAUDE_ADAPTER: HarnessAdapter = {
+  kind: "claude-code",
+  originApp: "claude-code-hook",
+  defaultActor: "agent:claude-code",
+  shellTool: "Bash",
+  fileTools: ["Edit", "Write", "MultiEdit", "NotebookEdit"],
+};
+
+const CURSOR_ADAPTER: HarnessAdapter = {
+  kind: "cursor",
+  originApp: "cursor-hook",
+  defaultActor: "agent:cursor",
+  shellTool: "Shell",
+  fileTools: ["Write", "Delete"],
+};
+
 /**
- * The PreToolUse decision object Claude Code reads from stdout.
+ * The decision object the harness reads from stdout.
  *
- * One shape, one place: the hook's whole contract with the harness is this
- * object plus exit 0, and a second construction site is a second thing to keep
- * in step with the harness's schema.
+ * Claude Code wants the nested PreToolUse envelope. Cursor native hooks want
+ * `{permission, user_message, agent_message}`. One construction site per
+ * harness, still never `ask`.
  */
-function decision(permission: Permission, reason: string): string {
+function decision(permission: Permission, reason: string, harness: HarnessKind): string {
+  if (harness === "cursor") {
+    return `${JSON.stringify({
+      permission,
+      user_message: reason,
+      agent_message: reason,
+    })}\n`;
+  }
   return `${JSON.stringify({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
@@ -264,13 +294,13 @@ function decision(permission: Permission, reason: string): string {
   })}\n`;
 }
 
-function allow(streams: Streams, reason: string): number {
-  streams.out(decision("allow", reason));
+function allow(streams: Streams, reason: string, harness: HarnessKind): number {
+  streams.out(decision("allow", reason, harness));
   return EXIT_OK;
 }
 
-function deny(streams: Streams, code: string, detail: string): number {
-  streams.out(decision("deny", `${code}: ${detail}`));
+function deny(streams: Streams, code: string, detail: string, harness: HarnessKind): number {
+  streams.out(decision("deny", `${code}: ${detail}`, harness));
   return EXIT_OK;
 }
 
@@ -784,7 +814,10 @@ function fileToolGate(
   protectedPaths: readonly string[],
   cwd: string,
 ): FileGate | null {
-  const declared = readString(toolInput, "file_path") ?? readString(toolInput, "notebook_path");
+  const declared =
+    readString(toolInput, "file_path") ??
+    readString(toolInput, "notebook_path") ??
+    readString(toolInput, "path");
   if (declared === null) return null;
   if (!isProtectedPath(declared, protectedPaths)) return null;
 
@@ -795,7 +828,7 @@ function fileToolGate(
   const head = { tool: toolName, rule, file };
   const before = toolInput["old_string"];
   const after = toolInput["new_string"];
-  const content = toolInput["content"];
+  const content = toolInput["content"] ?? toolInput["contents"];
   const replaceAll = toolInput["replace_all"];
 
   let payload: Record<string, unknown>;
@@ -836,6 +869,8 @@ interface HookRun {
   intervalMs: number;
   /** `defaults.approval_ttl`, or `null` when the policy declares none. */
   ttlMs: number | null;
+  harness: HarnessKind;
+  originApp: string;
 }
 
 /**
@@ -975,13 +1010,16 @@ function gateAndWait(
   const task = `hook:${input.sessionId}:${nonce}`;
   const hash = payloadHash(payload);
   const summary = truncate(headline, SUMMARY_LIMIT);
+  const sayAllow = (reason: string): number => allow(streams, reason, run.harness);
+  const sayDeny = (code: string, detail: string): number =>
+    deny(streams, code, detail, run.harness);
 
   // Intake reads the VERIFIED log, once, before anything is written: an
   // enforcement path reads nothing else (SPEC.md §11.1), and a carry decided
   // from unverified bytes would be a grant invented by whoever could write the
   // file.
   const intake = readVerifiedRecords(run.logPath);
-  if (!intake.ok) return deny(streams, "hook-io", intake.message);
+  if (!intake.ok) return sayDeny("hook-io", intake.message);
   const intakeTs = new Date().toISOString();
 
   const actions: GatedAction[] = classes.map((cls) => {
@@ -1003,7 +1041,7 @@ function gateAndWait(
   // would declare already exists, under the key it is about to wait on.
   if (fresh.length > 0) {
     const envelope = {
-      origin: { app: "claude-code-hook", created_by: run.actor },
+      origin: { app: run.originApp, created_by: run.actor },
       state: "proposed",
       actions: fresh.map((action) => ({
         class: action.cls,
@@ -1015,7 +1053,7 @@ function gateAndWait(
 
     const registered = register(run.logPath, { task, envelope }, run.actor, run.options);
     if (!registered.ok) {
-      return deny(streams, `hook-gate-refused:${registered.code}`, registered.message);
+      return sayDeny(`hook-gate-refused:${registered.code}`, registered.message);
     }
   }
 
@@ -1056,7 +1094,7 @@ function gateAndWait(
         ownKeys,
         `intake refused ${action.actionKey}; this command cannot proceed, so the classes already opened for it are questions nobody needs to answer`,
       );
-      return deny(streams, `hook-gate-refused:${result.code}`, result.message);
+      return sayDeny(`hook-gate-refused:${result.code}`, result.message);
     }
     if (result.record !== null) ownKeys.push(action.actionKey);
   }
@@ -1076,8 +1114,7 @@ function gateAndWait(
     if (spendKeys.length === 0) {
       // Every class resolved supervised: intake recorded no request (amended
       // SPEC.md §6.3), so there is nothing to wait for and nothing to spend.
-      return allow(
-        streams,
+      return sayAllow(
         `granted: ${classes.join(", ")} needs no approval under this policy${note}`,
       );
     }
@@ -1085,9 +1122,9 @@ function gateAndWait(
     // exact question about these exact bytes, and nobody is asked again.
     const failed = consumeGrants(run, spendKeys);
     if (failed !== null) {
-      return deny(streams, `hook-gate-refused:${failed.code}`, failed.message);
+      return sayDeny(`hook-gate-refused:${failed.code}`, failed.message);
     }
-    return allow(streams, `granted: ${classes.join(", ")}${provenance}${note}`);
+    return sayAllow(`granted: ${classes.join(", ")}${provenance}${note}`);
   }
 
   const deadline = Date.now() + run.timeoutMs;
@@ -1121,7 +1158,7 @@ function gateAndWait(
           ownKeys,
           `the hook could not read the log while waiting on ${task}`,
         );
-        return deny(streams, "hook-io", read.message);
+        return sayDeny("hook-io", read.message);
       }
 
       const ts = new Date().toISOString();
@@ -1137,35 +1174,33 @@ function gateAndWait(
         // with the refusals: it is not a decision, but it is terminal, and it
         // means this key will never be granted.
         if (states.includes("rejected")) {
-          return deny(streams, "hook-rejected", `a human rejected ${task}`);
+          return sayDeny("hook-rejected", `a human rejected ${task}`);
         }
         if (states.includes("revoked")) {
-          return deny(streams, "hook-revoked", `approval for ${task} was withdrawn`);
+          return sayDeny("hook-revoked", `approval for ${task} was withdrawn`);
         }
         if (states.includes("withdrawn")) {
-          return deny(
-            streams,
+          return sayDeny(
             "hook-withdrawn",
             `the request for ${task} was withdrawn before a decision; nothing is pending and nothing was authorized`,
           );
         }
         if (states.includes("expired")) {
-          return deny(streams, "hook-expired", `the request for ${task} lapsed before a decision`);
+          return sayDeny("hook-expired", `the request for ${task} lapsed before a decision`);
         }
         if (states.every((state) => state === "granted")) {
           // The grants are spent before the allow is printed, so this exact
           // command cannot ride the same authorization twice.
           const failed = consumeGrants(run, spendKeys);
           if (failed !== null) {
-            return deny(streams, `hook-gate-refused:${failed.code}`, failed.message);
+            return sayDeny(`hook-gate-refused:${failed.code}`, failed.message);
           }
-          return allow(streams, `granted: ${task} (${classes.join(", ")})${provenance}${note}`);
+          return sayAllow(`granted: ${task} (${classes.join(", ")})${provenance}${note}`);
         }
         // Not a wait outcome: the log disagrees with itself about keys this
         // process is waiting on. Nothing is retracted, because the state that
         // would justify retracting is the state that could not be established.
-        return deny(
-          streams,
+        return sayDeny(
           "hook-io",
           `the verified log does not show every request for ${task} as granted (states: ${states.join(", ")})`,
         );
@@ -1177,8 +1212,7 @@ function gateAndWait(
         // authorizes the retry of this exact command in this exact directory,
         // once. Withdrawing here would discard the answer the human is about to
         // give.
-        return deny(
-          streams,
+        return sayDeny(
           "hook-timeout",
           `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open until the policy's approval TTL, and a decision inside that window authorizes a retry of this exact command in this exact directory, once. Retry it after the approver answers; the retry adopts the same question rather than asking a second one.`,
         );
@@ -1186,7 +1220,7 @@ function gateAndWait(
       sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
     }
   } catch (cause) {
-    // The thrown path. `commandHookClaudeCode` turns this into an ordinary
+    // The thrown path. `commandHarnessHook` turns this into an ordinary
     // deny. Unlike the timeout, this process cannot say what state it left
     // behind, so the question it opened is retracted rather than left standing
     // on a failure nobody diagnosed.
@@ -1203,12 +1237,13 @@ function gateAndWait(
   }
 }
 
-/** The verb body, wrapped by {@link commandHookClaudeCode}'s try/catch. */
-function runClaudeCodeHook(
+/** The verb body, wrapped by {@link commandHarnessHook}'s try/catch. */
+function runHarnessHook(
   argv: string[],
   streams: Streams,
   cwd: string,
   readStdin: () => string,
+  adapter: HarnessAdapter,
 ): number {
   const parsed = parseFlags(argv, {
     ...COMMON_FLAGS,
@@ -1229,7 +1264,7 @@ function runClaudeCodeHook(
   }
 
   const asFlag = stringFlag(parsed.flags, "--as");
-  const actor = asFlag ?? "agent:claude-code";
+  const actor = asFlag ?? adapter.defaultActor;
   if (!PRINCIPAL_ACTOR.test(actor)) {
     return usageError(
       streams,
@@ -1255,11 +1290,11 @@ function runClaudeCodeHook(
   }
 
   const parsedInput = parseHookInput(readStdin());
-  if (!parsedInput.ok) return deny(streams, "hook-io", parsedInput.detail);
+  if (!parsedInput.ok) return deny(streams, "hook-io", parsedInput.detail, adapter.kind);
   const input = parsedInput.input;
 
-  if (input.toolName !== "Bash" && !FILE_TOOLS.includes(input.toolName)) {
-    return allow(streams, `${input.toolName} is not a gated tool`);
+  if (input.toolName !== adapter.shellTool && !adapter.fileTools.includes(input.toolName)) {
+    return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind);
   }
 
   const { logPath, root, options } = hookScope(parsed.flags, cwd);
@@ -1282,6 +1317,7 @@ function runClaudeCodeHook(
       streams,
       "hook-policy-unavailable",
       `${load.code}: ${load.message}; every class resolves to manual and the hook cannot verify a decision`,
+      adapter.kind,
     );
   }
   const protectedPaths = load.policy.protected_paths ?? [];
@@ -1293,10 +1329,15 @@ function runClaudeCodeHook(
   let headline: string;
   /** What the history-rewrite refinement did, for the decision reason. */
   let notes: string[] = [];
-  if (input.toolName === "Bash") {
+  if (input.toolName === adapter.shellTool) {
     const raw = readString(input.toolInput, "command");
     if (raw === null) {
-      return deny(streams, "hook-io", "Bash tool_input carries no command string");
+      return deny(
+        streams,
+        "hook-io",
+        `${adapter.shellTool} tool_input carries no command string`,
+        adapter.kind,
+      );
     }
     // Unchanged since APRV-117, deliberately: the payload is the WHOLE command
     // and the directory it runs in, so the FULL PAYLOAD block on the phone
@@ -1309,6 +1350,7 @@ function runClaudeCodeHook(
         streams,
         `hook-${classified.code}`,
         `${classified.detail} (segment: ${classified.segment}). Rewrite it as a command the classifier can read, or run the effect through \`approval run\` with a granted token.`,
+        adapter.kind,
       );
     }
     // APRV-108: a local rewrite of history this checkout never published is a
@@ -1320,7 +1362,9 @@ function runClaudeCodeHook(
     classes = answer.classes.filter((cls) => cls !== GATE_SELF_CLASS);
   } else {
     const gated = fileToolGate(input.toolName, input.toolInput, protectedPaths, cwd);
-    if (gated === null) return allow(streams, `${input.toolName} is not a gated edit`);
+    if (gated === null) {
+      return allow(streams, `${input.toolName} is not a gated edit`, adapter.kind);
+    }
     classes = [gated.cls];
     payload = gated.payload;
     headline = gated.summary;
@@ -1334,7 +1378,11 @@ function runClaudeCodeHook(
   }
 
   if (classes.length === 0) {
-    return allow(streams, "the approval CLI is the gate itself and is not gated by it");
+    return allow(
+      streams,
+      "the approval CLI is the gate itself and is not gated by it",
+      adapter.kind,
+    );
   }
 
   /** Appended to every verdict this invocation prints, when it refined one. */
@@ -1347,7 +1395,7 @@ function runClaudeCodeHook(
     // Nothing is appended: an autonomous action has no approval lifecycle
     // (amended SPEC.md §6.3), and writing one here would fill the log with the
     // agent's every `ls`.
-    return allow(streams, `autonomous: ${classes.join(", ")}${note}`);
+    return allow(streams, `autonomous: ${classes.join(", ")}${note}`, adapter.kind);
   }
 
   // Past here the hook appends. It writes to a log that already exists and
@@ -1361,12 +1409,22 @@ function runClaudeCodeHook(
       streams,
       "hook-log-unreachable",
       `no log at ${logPath}; the hook writes to an existing log and never creates one. Run \`approval init\` (then \`approval policy attest\`) in ${root}, or pass --log <path> to point the hook at the log that already exists`,
+      adapter.kind,
     );
   }
 
   return gateAndWait(
     streams,
-    { logPath, options, actor, timeoutMs, intervalMs, ttlMs: load.durations.approvalTtlMs },
+    {
+      logPath,
+      options,
+      actor,
+      timeoutMs,
+      intervalMs,
+      ttlMs: load.durations.approvalTtlMs,
+      harness: adapter.kind,
+      originApp: adapter.originApp,
+    },
     input,
     classes,
     payload,
@@ -1375,22 +1433,25 @@ function runClaudeCodeHook(
   );
 }
 
-function commandHookClaudeCode(
+function commandHarnessHook(
   argv: string[],
   streams: Streams,
   cwd: string,
   readStdin: () => string,
+  adapter: HarnessAdapter,
 ): number {
   try {
-    return runClaudeCodeHook(argv, streams, cwd, readStdin);
+    return runHarnessHook(argv, streams, cwd, readStdin, adapter);
   } catch (cause) {
-    // A hook that throws is a hook Claude Code treats as a non-blocking error,
+    // A hook that throws is a hook the harness treats as a non-blocking error,
     // which would let the command through. Every unexpected failure becomes an
-    // ordinary deny instead.
+    // ordinary deny instead. Cursor additionally needs failClosed on the
+    // hooks.json entry so a crash of this process still blocks.
     return deny(
       streams,
       "hook-io",
       `the hook failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      adapter.kind,
     );
   }
 }
@@ -1423,7 +1484,9 @@ export function commandHook(
 
   switch (sub) {
     case "claude-code":
-      return commandHookClaudeCode(rest, streams, cwd, readStdin);
+      return commandHarnessHook(rest, streams, cwd, readStdin, CLAUDE_ADAPTER);
+    case "cursor":
+      return commandHarnessHook(rest, streams, cwd, readStdin, CURSOR_ADAPTER);
     case "classify":
       return commandClassify(rest, streams, cwd);
     default:

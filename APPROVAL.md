@@ -4,11 +4,12 @@ This repo builds the tool this file configures, and this file is the
 authoritative statement of what agents here may do: CLAUDE.md's Permissions
 section is the AGENTS.md-shaped summary and yields to this file wherever the
 two disagree. Enforcement is mechanical where the runtime sits in the path:
-`approval run` for actions executed through the gate, and `approval hook
-claude-code` (docs/claude-code-hook.md) for the shell commands and policy-file
-edits a Claude Code session issues directly, once `.claude/settings.json`
-carries the hook entry. Anything outside those two paths is still held to this
-policy by CLAUDE.md prose and the agent's reading of it.
+`approval run` for actions executed through the gate, `approval hook
+claude-code` (docs/claude-code-hook.md) for Claude Code once
+`.claude/settings.json` carries the hook entry, and `approval hook cursor`
+(docs/cursor-hook.md) for local Cursor Agent once `.cursor/hooks.json`
+carries the hook entry. Anything outside those paths is still held to this
+policy by CLAUDE.md / AGENTS.md prose and the agent's reading of it.
 
 ```yaml approval-policy
 version: "0.1"

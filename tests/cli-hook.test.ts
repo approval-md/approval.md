@@ -730,6 +730,7 @@ test("hook --help and the subcommand helps exit 0", () => {
   for (const args of [
     ["hook", "--help"],
     ["hook", "claude-code", "--help"],
+    ["hook", "cursor", "--help"],
     ["hook", "classify", "--help"],
   ]) {
     const run = runCli(args, dir);

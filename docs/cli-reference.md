@@ -1537,8 +1537,9 @@ that no event records, no channel delivered, and no audit can reconstruct.
 The classifier is best effort and is not scheming-robust (SPEC.md §11). It reads
 the command text and nothing else — never the agent's own `description` field,
 which is self-reported. The hard boundary remains the vault and the execution
-token (SPEC.md §10.4). See `docs/claude-code-hook.md` for the settings.json
-entry, which a HUMAN commits: it is `policy.edit`.
+token (SPEC.md §10.4). See `docs/claude-code-hook.md` for the Claude Code
+settings.json entry and `docs/cursor-hook.md` for Cursor's `.cursor/hooks.json`.
+A HUMAN commits those files: they are `policy.edit`.
 
 **What it decides.**
 
@@ -1550,9 +1551,11 @@ manual class       register + request, then WAIT for a human decision. Allow
 gate.self          the "approval" CLI itself is pass-through
 ```
 
-Bash commands are classified into SPEC.md §7 action classes; Edit, Write,
-MultiEdit and NotebookEdit are gated only when the file is policy-protected
+Bash (Claude Code) and Shell (Cursor) commands are classified into SPEC.md §7
+action classes. Claude file tools (Edit, Write, MultiEdit, NotebookEdit) and
+Cursor Write/Delete are gated only when the file is policy-protected
 (`APPROVAL.md`, `.approval/`, `CLAUDE.md`, `AGENTS.md`, `.claude/settings*`,
+`.cursor/hooks.json`, `.cursor/hooks/`, `.cursor/agents/`,
 `.github/workflows/`, `.npmrc`); every other tool passes through. `hook classify`
 reads no log, resolves no policy and writes nothing; put the command after `--` so
 its own flags are not parsed as this verb's.
@@ -2275,8 +2278,8 @@ can write into the wire. SIGINT and SIGTERM close the transport and exit 0.
 registry (`approval instructions --schemas`) filtered by `human_only` false, and
 every tool's `inputSchema` is that verb's registry input schema. Two agent-facing
 verbs are still withheld: `consume`, which is internal plumbing that `run` wraps,
-and `hook claude-code`, which reads a PreToolUse event from a stdin this transport
-already owns.
+and `hook claude-code` / `hook cursor`, which each read a pre-tool event from a
+stdin this transport already owns.
 
 **Not published**, and this is the design rather than an omission: grant, reject,
 revoke, policy attest, policy amend, execution resolve, audit review, expire, env,

@@ -90,6 +90,9 @@ Usage:
   approval hook claude-code [--as agent:<id>] [--timeout <duration>]
                       [--interval <d>] [--policy <path>] [--dir <path>]
                       [--log <path>]                    (reads PreToolUse JSON)
+  approval hook cursor [--as agent:<id>] [--timeout <duration>]
+                      [--interval <d>] [--policy <path>] [--dir <path>]
+                      [--log <path>]                    (reads preToolUse JSON)
   approval hook classify [--json] [--policy <path>] [--dir <path>] -- <command…>
   approval import agents-md <file> [--out <path>] [--json]
   approval mcp serve  --as agent:<id> [--dir <path>] [--log <path>]
@@ -171,13 +174,14 @@ Ask — an agent declares an action and acts on the answer:
             decision (0 granted, 1 rejected/revoked/withdrawn, 3 expired, 6 timeout)
   withdraw  take back your OWN pending request (timeout, cancelled, superseded);
             terminal, requester-only, and a late grant then authorizes nothing
-  hook      put the gate in front of an agent HARNESS. "hook claude-code" reads
-            a Claude Code PreToolUse event on stdin, classifies the command it
-            is about to run, resolves the class against APPROVAL.md, and answers
-            allow or deny — waiting on a real approval decision when the class
-            is manual. It never answers "ask": a decision taken outside the log
-            is a decision nothing can audit. "hook classify" prints what the
-            classifier makes of a command and touches nothing
+  hook      put the gate in front of an agent HARNESS. "hook claude-code" and
+            "hook cursor" each read their harness's pre-tool event on stdin,
+            classify the command or protected-path edit it is about to run,
+            resolve the class against APPROVAL.md, and answer allow or deny —
+            waiting on a real approval decision when the class is manual. They
+            never answer "ask": a decision taken outside the log is a decision
+            nothing can audit. "hook classify" prints what the classifier makes
+            of a command and touches nothing
   mcp       "mcp serve" is the optional MCP wrapper of SPEC.md §10.5: the same
             verbs as tools, over stdio, sharing the CLI's code paths. It is
             AGENT-FACING ONLY — grant, reject, revoke, attest, amend, vault,
@@ -1094,27 +1098,27 @@ ${why("init")}`;
 export const HOOK_HELP = `approval hook — put the gate in front of an agent harness
 
 Usage:
-  approval hook claude-code [--as agent:<id>] [--timeout <d>] [--interval <d>]
-                            [--policy <p>] [--dir <p>] [--log <p>]
+  approval hook claude-code|cursor [--as agent:<id>] [--timeout <d>]
+                            [--interval <d>] [--policy <p>] [--dir <p>] [--log <p>]
   approval hook classify [--json] [--policy <p>] [--dir <p>] -- <command…>
 
 Commands:
-  claude-code  read one PreToolUse event on STDIN, decide on stdout
+  claude-code  Claude PreToolUse JSON in; nested decision JSON out
+  cursor       Cursor preToolUse JSON in; native {permission} JSON out
   classify     print what the classifier makes of a command line and exit
 
-Flags (claude-code):
-  --as <id>        the proposing identity (default agent:claude-code)
+Flags (claude-code, cursor):
+  --as <id>        proposing identity (default agent:claude-code / agent:cursor)
   --timeout <d>    how long to wait for a decision (default 55s)
   --interval <d>   poll interval while waiting (default 1s)
   --dir/--policy/--log <p>   policy+log root; --dir sets BOTH, default primary
   -h, --help       this text
 
-Deny reasons: hook-unclassified, hook-opaque, hook-unparseable, hook-rejected,
-hook-revoked, hook-expired, hook-withdrawn, hook-timeout (which now leaves the
-request OPEN for the TTL), hook-gate-refused:<code>, hook-policy-unavailable,
-hook-log-unreachable, hook-io. EXIT 0 CARRIES THE VERDICT, never "ask".
+Deny: hook-unclassified, hook-opaque, hook-unparseable, hook-rejected, hook-revoked,
+hook-expired, hook-withdrawn, hook-timeout (request stays OPEN), hook-gate-refused:<c>,
+hook-policy-unavailable, hook-log-unreachable, hook-io. EXIT 0 = verdict, never "ask".
 
-${EXIT_CODES_POINTER} (claude-code uses only 0 and 2)
+${EXIT_CODES_POINTER} (harness verbs use only 0 and 2)
 ${why("hook")}`;
 
 export const IMPORT_HELP = `approval import — turn existing permissions prose into a draft policy
