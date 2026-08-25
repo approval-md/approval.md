@@ -169,6 +169,14 @@ function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+/**
+ * The SHA-256 of the case's policy bytes — the value APRV-118 pins onto
+ * `approval.requested` and `approval.granted` at the write boundary.
+ */
+function policySha256(dir: string): string {
+  return createHash("sha256").update(readFileSync(join(dir, "APPROVAL.md"))).digest("hex");
+}
+
 /** Attest, register, request: a live manual request awaiting a decision. */
 function readyForDecision(policyText: string = POLICY, actionKey = "task-042:chaser"): string {
   const dir = caseDir(policyText);
@@ -216,6 +224,8 @@ test("grant prints the raw token on stdout, warns it is shown once, and logs onl
     est_cost_usd: 0.02,
     payload_hash: PAYLOAD_HASH,
     token_sha256: sha256(token),
+    // APRV-118: the attested policy the approver decided under.
+    policy_sha256: policySha256(dir),
   });
   assertTokenAbsentFromLog(dir, token);
   assertClean(dir);

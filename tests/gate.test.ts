@@ -13,6 +13,7 @@
  */
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -551,6 +552,9 @@ test("request on the manual path appends approval.requested with class and cost"
     payload_hash: PAYLOAD_HASH,
     summary: "Send deposit chaser",
     reversible: false,
+    // APRV-118: the attested policy this request was routed by, stamped at the
+    // write boundary.
+    policy_sha256: policySha256(unit),
   });
   assertClean(unit);
 });
@@ -746,6 +750,9 @@ test("grant appends approval.granted carrying class and est_cost_usd (budgets co
     payload_hash: PAYLOAD_HASH,
     note: "go, but cc me",
     token_sha256: tokenHash(result.token ?? ""),
+    // APRV-118: the attested policy the approver decided under, checked against
+    // the request's before anything was appended.
+    policy_sha256: policySha256(unit),
   });
   assertClean(unit);
 });
@@ -1651,6 +1658,12 @@ test("the refusal-code union is frozen public API", () => {
   // one is a breaking change, so the list is pinned here rather than assumed.
   assert.deepEqual([...GATE_REFUSAL_CODES], [
     "policy-not-attested",
+    // APRV-118: the request pins the attested policy hash, and a grant under a
+    // different attested policy is refused rather than recorded. An addition,
+    // and deliberately not folded into `policy-not-attested`: that code says the
+    // live file is unverified, this one says it is verified and is a different
+    // file from the one the request was routed by.
+    "policy-drift",
     "envelope-invalid",
     "task-file-unreadable",
     "task-already-registered",
@@ -1702,4 +1715,145 @@ test("the refusal-code union is frozen public API", () => {
     "log-corrupt",
     "append-failed",
   ]);
+});
+
+// ===========================================================================
+// policy pinning (APRV-118)
+// ===========================================================================
+
+/** The same policy with a longer TTL: different bytes, different hash. */
+const POLICY_EDITED = POLICY.replace('  approval_ttl: "1h"', '  approval_ttl: "4h"');
+
+/** The SHA-256 of the live policy file's exact bytes — what attestation records. */
+function policySha256(unit: Case): string {
+  return createHash("sha256").update(readFileSync(unit.policyPath)).digest("hex");
+}
+
+function payloadFieldOf(record: EventRecord, field: string): unknown {
+  return (record.payload as Record<string, unknown> | undefined)?.[field];
+}
+
+test("request and grant pin the attested policy hash", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  const sha = policySha256(unit);
+
+  const requested = requestChaser(unit);
+  assert.equal(payloadFieldOf(requested, "policy_sha256"), sha);
+
+  const granted = decide(unit.logPath, "task-042:chaser", "grant", "human:carter", at(2), unit.options);
+  assert.equal(granted.ok, true, granted.ok ? "" : granted.message);
+  if (!granted.ok) throw new Error("unreachable");
+  assert.equal(payloadFieldOf(granted.record, "policy_sha256"), sha);
+  assertClean(unit);
+});
+
+test("the pinned hash is the runtime's, never the caller's", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+
+  // `RequestInput` has no `policy_sha256` field, which is the compile-level half
+  // of the guarantee — the same structural refusal amended SPEC.md §8 (A2) gives
+  // caller-supplied timestamps. This cast reaches past the type to prove the
+  // runtime half: a value that arrives anyway is not what gets recorded.
+  const smuggled = {
+    task: "task-042",
+    actionKey: "task-042:chaser",
+    payload_hash: PAYLOAD_HASH,
+    cls: "communicate.email.external",
+    est_cost_usd: 0.02,
+    reversible: false,
+    policy_sha256: "0".repeat(64),
+  } as unknown as Parameters<typeof request>[1];
+
+  const result = request(unit.logPath, smuggled, at(1), "agent:claude", unit.options);
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  if (!result.ok || result.record === null) throw new Error("expected a record");
+  assert.equal(payloadFieldOf(result.record, "policy_sha256"), policySha256(unit));
+  assertClean(unit);
+});
+
+test("a grant under a re-attested policy is refused policy-drift, and nothing is appended", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  requestChaser(unit);
+
+  // The human edits the policy and attests the edit: everything is verified,
+  // and the rules that routed this request are gone.
+  writeFileSync(unit.policyPath, POLICY_EDITED, "utf8");
+  attest(unit, at(2));
+
+  const before = eventTypes(unit);
+  const refusal = asRefusal(
+    decide(unit.logPath, "task-042:chaser", "grant", "human:carter", at(3), unit.options),
+  );
+  // The code is the contract: agents branch on it, so it is pinned here.
+  assert.equal(refusal.code, "policy-drift");
+  assert.notEqual(refusal.code, "policy-not-attested");
+  assert.deepEqual(eventTypes(unit), before);
+  assert.equal(requestState(records(unit), "task-042:chaser", at(4), 3_600_000).state, "requested");
+  assertClean(unit);
+
+  // The stated repair: the requester takes the void question back and asks it
+  // again, which routes it under the policy now in force and pins that hash.
+  assert.equal(withdraw(unit.logPath, "task-042:chaser", "agent:claude", at(5), unit.options).ok, true);
+  const reRequested = requestChaser(unit, at(6));
+  assert.equal(payloadFieldOf(reRequested, "policy_sha256"), policySha256(unit));
+  const granted = decide(unit.logPath, "task-042:chaser", "grant", "human:carter", at(7), unit.options);
+  assert.equal(granted.ok, true, granted.ok ? "" : granted.message);
+  if (!granted.ok) throw new Error("unreachable");
+  assert.equal(payloadFieldOf(granted.record, "policy_sha256"), policySha256(unit));
+  assertClean(unit);
+});
+
+test("a request written before the field existed still validates, verifies, and grants", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+
+  // Written through the real append path, and shaped as a pre-APRV-118 record:
+  // the field is additive, so its absence must be an ordinary request rather
+  // than drift. Reading the absence as a mismatch would void every pending
+  // request in a log that predates the change.
+  const appended = appendEvent(unit.logPath, {
+    ts: at(1),
+    event: "approval.requested",
+    actor: "agent:claude",
+    task: "task-042",
+    action_key: "task-042:chaser",
+    payload: {
+      class: "communicate.email.external",
+      est_cost_usd: 0.02,
+      payload_hash: PAYLOAD_HASH,
+    },
+  });
+  assert.equal(appended.ok, true, "a record without policy_sha256 must pass the write boundary");
+  assertClean(unit);
+
+  const granted = decide(unit.logPath, "task-042:chaser", "grant", "human:carter", at(2), unit.options);
+  assert.equal(granted.ok, true, granted.ok ? "" : granted.message);
+  if (!granted.ok) throw new Error("unreachable");
+  // The grant still records what the approver decided under.
+  assert.equal(payloadFieldOf(granted.record, "policy_sha256"), policySha256(unit));
+  assertClean(unit);
+});
+
+test("a malformed policy_sha256 is refused at the write boundary", () => {
+  const unit = newCase();
+  attest(unit);
+  const appended = appendEvent(unit.logPath, {
+    ts: at(1),
+    event: "approval.requested",
+    actor: "agent:claude",
+    task: "task-042",
+    action_key: "task-042:chaser",
+    payload: { class: "communicate.email.external", policy_sha256: "not-a-digest" },
+  });
+  assert.equal(appended.ok, false);
+  if (appended.ok) throw new Error("unreachable");
+  assert.equal(appended.error.code, "validation");
+  assertClean(unit);
 });

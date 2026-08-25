@@ -108,6 +108,7 @@ import {
   ATTESTATION_REFUSAL,
   attestationRefusal,
   checkAttestation,
+  POLICY_HASH_FIELD,
   type AttestationRefusalDetail,
 } from "./attest.js";
 import { evaluateBudgetsWithTask, type BudgetScope, type BudgetVerdict } from "./budgets.js";
@@ -180,6 +181,22 @@ const HUMAN_ACTOR = /^human:.+/u;
 export const GATE_REFUSAL_CODES = [
   /** Policy is unattested or its bytes changed (`core/attest.ts`). */
   "policy-not-attested",
+  /**
+   * The policy attested now is not the policy the request was routed under
+   * (APRV-118, amended SPEC.md §5.2): the hash pinned on `approval.requested`
+   * differs from the hash in force at the moment of the grant.
+   *
+   * Distinct from `policy-not-attested`, and the distinction is the whole point.
+   * That code says the live file is unverified; this one says the file is
+   * perfectly verified and is a DIFFERENT file from the one that decided this
+   * action's autonomy, its limits, and its TTL. A human re-attested in between,
+   * so the routing that put the question in front of an approver was computed
+   * from rules nobody is enforcing any more, and a grant recorded here would
+   * claim a decision under rules the approver never saw. The pending request is
+   * void: nothing is appended, and the action is requested again so that it is
+   * routed, budgeted, and displayed under the policy actually in force.
+   */
+  "policy-drift",
   /** The envelope failed `envelope.schema.json`, or the task file has none. */
   "envelope-invalid",
   /** The task file could not be read. */
@@ -442,12 +459,28 @@ function appendOptionsOf(options: GateOptions): AppendOptions {
   return append;
 }
 
-/** Refuse unless the live policy bytes match the latest attestation. */
-function requireAttestation(records: EventRecord[], options: GateOptions): GateRefusal | null {
+/**
+ * Refuse unless the live policy bytes match the latest attestation, and return
+ * the hash they matched (APRV-118).
+ *
+ * The hash is the same value `approval policy attest` recorded and the same
+ * bytes `loadPolicy` is about to parse, so it names the exact rules this
+ * operation is being decided under. Callers pin it onto the event they write:
+ * an operation that could not be authorized without an attested policy should
+ * say, on the record, which attested policy authorized it.
+ */
+function requireAttestation(
+  records: EventRecord[],
+  options: GateOptions,
+): { ok: true; sha256: string } | GateRefusal {
   const status = checkAttestation(records, policyPathOf(options));
   const refusal = attestationRefusal(status);
-  if (refusal === null) return null;
-  return refuse(ATTESTATION_REFUSAL, refusal.message, { detail: refusal.detail });
+  if (refusal !== null) {
+    return refuse(ATTESTATION_REFUSAL, refusal.message, { detail: refusal.detail });
+  }
+  // `attestationRefusal` returns null for exactly one status, and that status
+  // is the one carrying the hash.
+  return { ok: true, sha256: (status as { status: "attested"; sha256: string }).sha256 };
 }
 
 /** The TTL in force, or `null` when the policy declares (or can declare) none. */
@@ -974,7 +1007,7 @@ export function request(
   if (!read.ok) return read;
 
   const attested = requireAttestation(read.records, options);
-  if (attested !== null) return attested;
+  if (!attested.ok) return attested;
 
   const load = loadPolicy(loadOptionsOf(options));
   const resolution = resolve(
@@ -1123,6 +1156,13 @@ export function request(
     class: input.cls,
     est_cost_usd: costOf(input.est_cost_usd),
     payload_hash: payloadHash,
+    // APRV-118. The attested policy this request was routed by, assigned here
+    // at the write boundary from the runtime's own attestation check — the same
+    // read that authorized the request, one line of code from the append.
+    // {@link RequestInput} carries no field for it, exactly as it carries no
+    // `ts`: the refusal of a caller-supplied value is structural, so a requester
+    // cannot name the rules it claims to have been routed by.
+    [POLICY_HASH_FIELD]: attested.sha256,
   };
   if (input.summary !== undefined) payload["summary"] = input.summary;
   if (input.reversible !== undefined) payload["reversible"] = input.reversible;
@@ -1226,6 +1266,16 @@ const DECISION_STATE: Readonly<Record<Decision, RequestState>> = {
  * leave a live grant standing because a file changed — the strict direction and
  * the safe direction point the same way, and it is not "refuse everything".
  *
+ * Attestation also answers a question it could not answer before APRV-118:
+ * *which* policy. The hash the live file matched is compared against the hash
+ * `approval.requested` pinned, and a difference refuses `policy-drift` with
+ * nothing appended. Attestation alone catches an unattested edit; this catches
+ * an attested one, which is the case where every check still passes and the
+ * rules have nonetheless changed underneath a pending question. The hash in
+ * force is then recorded on the grant, so the log states the rules the approver
+ * decided under rather than leaving a reader to assume they were the
+ * requester's.
+ *
  * Budgets are re-evaluated at grant time. A request may have sat in the queue
  * while other actions consumed the window, and the moment that matters for a
  * commitment is the moment the human commits.
@@ -1257,9 +1307,11 @@ export function decide(
   const read = readGateRecords(logPath);
   if (!read.ok) return read;
 
+  let attestedSha256: string | null = null;
   if (decision === "grant") {
     const attested = requireAttestation(read.records, options);
-    if (attested !== null) return attested;
+    if (!attested.ok) return attested;
+    attestedSha256 = attested.sha256;
   }
 
   const load = loadPolicy(loadOptionsOf(options));
@@ -1340,6 +1392,26 @@ export function decide(
 
   const payload: Record<string, unknown> = {};
   if (decision === "grant") {
+    // APRV-118, and first among the grant's checks because it decides whether
+    // the request in front of this approver is still a request at all. A pinned
+    // hash that differs from the hash in force now means a human re-attested a
+    // policy between the routing and the decision, so the autonomy, limits and
+    // TTL that produced this question are gone. The request is void; nothing is
+    // appended, and the action is requested again under the policy that now
+    // governs it. A request written before the field existed carries `null` and
+    // is decided as it always was — the field is additive, and reading its
+    // absence as drift would void every pending request in an older log.
+    if (
+      derivation.declared.policy_sha256 !== null &&
+      attestedSha256 !== null &&
+      derivation.declared.policy_sha256 !== attestedSha256
+    ) {
+      return refuse(
+        "policy-drift",
+        `action ${actionKey} was requested under policy ${derivation.declared.policy_sha256} and the attested policy is now ${attestedSha256}; the rules that routed this request to a human are no longer the rules in force, so a grant recorded here would claim a decision under a policy the approver was never shown. Nothing was appended: the pending request is void and the action must be requested again, which re-resolves its autonomy, limits and TTL under the current policy.`,
+        { state: derivation.state },
+      );
+    }
     // A grant with no class is refused rather than recorded with an empty one.
     // The empty-string substitution this replaces produced an authorization
     // that no class rule could match and no class-scoped budget could charge —
@@ -1360,6 +1432,14 @@ export function decide(
     if (derivation.declared.payload_hash !== null) {
       payload["payload_hash"] = derivation.declared.payload_hash;
     }
+    // APRV-118. The one field on this payload that is NOT copied from the
+    // request: it is the hash the runtime just checked the live policy against,
+    // assigned here at the write boundary like `ts`. Copying the request's value
+    // would record what the requester was routed by rather than what the
+    // approver decided under, and the two agreeing is the check above, not an
+    // assumption this line may make. `DecideOptions` carries no field for it, so
+    // a caller-supplied value is refused structurally.
+    if (attestedSha256 !== null) payload[POLICY_HASH_FIELD] = attestedSha256;
   }
   if (options.note !== undefined) payload["note"] = options.note;
   if (
@@ -1834,7 +1914,7 @@ export function consumeHarnessGrant(
   if (!read.ok) return read;
 
   const attested = requireAttestation(read.records, options);
-  if (attested !== null) return attested;
+  if (!attested.ok) return attested;
 
   const load = loadPolicy(loadOptionsOf(options));
   const derivation = requestState(read.records, actionKey, ts, ttlOf(load));

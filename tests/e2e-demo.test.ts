@@ -158,6 +158,11 @@ const payloadPath = join(demo, "payload.json");
 /** Where the store files them: `.approval/payloads/<payload_hash>.json`. */
 const storedPayloadPath = join(demo, ".approval", "payloads", `${PAYLOAD_HASH}.json`);
 
+/** The attested policy hash APRV-118 pins onto request and grant. */
+function policySha256(): string {
+  return createHash("sha256").update(readFileSync(join(demo, "APPROVAL.md"))).digest("hex");
+}
+
 let mock: MockBotApi;
 
 before(async () => {
@@ -305,6 +310,8 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
       payload_hash: PAYLOAD_HASH,
       summary: "Send the deposit chaser to agency@example.co.uk",
       reversible: false,
+      // APRV-118: the attested policy this request was routed by.
+      policy_sha256: policySha256(),
     });
     assert.equal(recordAt(3)["actor"], AGENT);
 
@@ -506,6 +513,9 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
       "class",
       "est_cost_usd",
       "payload_hash",
+      // APRV-118: the attested policy the approver decided under, which the
+      // runtime stamps rather than the channel supplying it.
+      "policy_sha256",
       "token_sha256",
     ]);
 
