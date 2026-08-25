@@ -100,9 +100,11 @@ import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
 import type { DecideOptions } from "../core/gate.js";
+import { assembleBatch } from "../channels/batch.js";
 import {
   recordChannelDecision,
   type ChannelDecision,
+  type ChannelRequest,
   type DecisionOutcome,
   type DeliveryId,
 } from "../channels/contract.js";
@@ -113,6 +115,7 @@ import {
 } from "../channels/tagging.js";
 import {
   decidedLine,
+  groupForDigest,
   isTelegramTerminalState,
   TelegramChannel,
   telegramChatEnvFor,
@@ -427,6 +430,16 @@ export interface DispatchResult {
    * (APRV-106 for `withdrawn`, APRV-113 for the rest).
    */
   annotated: { action_key: string; delivery_id: DeliveryId; outcome: TelegramTerminalState }[];
+  /**
+   * Digests sent this cycle (APRV-115): the message that carries the buttons,
+   * the batch delivery id every member's event will carry, and the members.
+   * A group that fell back to one message per member produces no entry here.
+   */
+  digests: {
+    delivery_id: DeliveryId;
+    batch_delivery_id: DeliveryId;
+    action_keys: string[];
+  }[];
 }
 
 /** A delivery whose request the log now says is settled (APRV-106, APRV-113). */
@@ -554,7 +567,7 @@ export async function dispatchPending(
   state: DispatchState,
   now: string,
 ): Promise<DispatchResult> {
-  const result: DispatchResult = { delivered: [], failed: [], annotated: [] };
+  const result: DispatchResult = { delivered: [], failed: [], annotated: [], digests: [] };
 
   const queue = buildPendingQueue(setup.logPath, setup.tagOptions, now);
   if (!queue.ok) {
@@ -574,10 +587,14 @@ export async function dispatchPending(
     if (state.annotated.has(settled.actionKey)) continue;
     state.annotated.add(settled.actionKey);
     try {
+      // The action key is what makes this per member on a digest (APRV-115):
+      // one delivery id can carry several requests, and settling one of them
+      // must leave the others armed.
       await setup.channel.annotate(
         settled.deliveryId,
         TELEGRAM_TERMINAL_HEADLINES[settled.outcome],
         settled.detail,
+        settled.actionKey,
       );
       result.annotated.push({
         action_key: settled.actionKey,
@@ -619,25 +636,87 @@ export async function dispatchPending(
     );
   }
 
-  for (const request of queue.requests) {
+  // APRV-115. The window is this cycle: whatever is pending and undelivered
+  // right now is grouped, and a group of similar requests goes out as one
+  // digest instead of one message each. Nothing waits for more — there is no
+  // new latency mechanism here, and a lone request is delivered exactly as it
+  // always was.
+  const undelivered = queue.requests.filter(
+    (request) => !state.delivered.has(request.action_key.value),
+  );
+
+  for (const group of groupForDigest(undelivered)) {
+    if (group.length < 2) {
+      await deliverUnits(setup, streams, state, result, group);
+      continue;
+    }
+
+    // B7 first (SPEC.md §10.3): a set carrying more than one distinct payload
+    // where any member is not whole must not be presented as a set at all. The
+    // refusal is reported once and the members go out individually, which is
+    // the same direction every other digest fallback takes.
+    const assembled = assembleBatch(group);
+    if (!assembled.ok) {
+      const token = `${group.map((request) => request.action_key.value).join(",")}:${assembled.code}`;
+      if (!state.warned.has(token)) {
+        state.warned.add(token);
+        streams.err(
+          `approval: telegram cannot digest ${group.length} similar requests (${assembled.code}): ${assembled.message} — sending them one message each instead\n`,
+        );
+      }
+      await deliverUnits(setup, streams, state, result, group);
+      continue;
+    }
+
+    const keys = group.map((request) => request.action_key.value);
+    try {
+      const delivered = await setup.channel.notifyBatch(assembled.batch);
+      for (const member of delivered.members) {
+        state.delivered.set(member.action_key, member.delivery_id);
+        state.attempts.delete(member.action_key);
+        result.delivered.push({ action_key: member.action_key, delivery_id: member.delivery_id });
+      }
+      if (delivered.digestId !== null) {
+        result.digests.push({
+          delivery_id: delivered.digestId,
+          batch_delivery_id: delivered.batchDeliveryId,
+          action_keys: delivered.members.map((member) => member.action_key),
+        });
+      }
+      report(setup, streams, delivered.digestId, delivered.members);
+    } catch (cause) {
+      // Every member stays out of `delivered`, so the next cycle re-sends the
+      // whole group. A half-sent digest arms nothing (the member nonces are
+      // registered only once the message with the buttons exists), so the cost
+      // is a duplicate prompt and never a live button on a partial set.
+      const message = cause instanceof Error ? cause.message : String(cause);
+      for (const actionKey of keys) {
+        const attempts = (state.attempts.get(actionKey) ?? 0) + 1;
+        state.attempts.set(actionKey, attempts);
+        result.failed.push({ action_key: actionKey, attempts, message });
+      }
+    }
+  }
+
+  return result;
+}
+
+/** Deliver each request as its own prompt: the pre-digest path, unchanged. */
+async function deliverUnits(
+  setup: ListenSetup,
+  streams: Streams,
+  state: DispatchState,
+  result: DispatchResult,
+  requests: ChannelRequest[],
+): Promise<void> {
+  for (const request of requests) {
     const actionKey = request.action_key.value;
-    if (state.delivered.has(actionKey)) continue;
     try {
       const deliveryId = await setup.channel.notify(request);
       state.delivered.set(actionKey, deliveryId);
       state.attempts.delete(actionKey);
       result.delivered.push({ action_key: actionKey, delivery_id: deliveryId });
-      if (setup.json) {
-        streams.out(
-          `${JSON.stringify({
-            event: "notified",
-            action_key: actionKey,
-            delivery_id: deliveryId,
-          })}\n`,
-        );
-      } else {
-        streams.out(`notified ${actionKey} (message ${deliveryId})\n`);
-      }
+      report(setup, streams, null, [{ action_key: actionKey, delivery_id: deliveryId }]);
     } catch (cause) {
       // The key stays out of `delivered`, so the next cycle tries again.
       const attempts = (state.attempts.get(actionKey) ?? 0) + 1;
@@ -646,8 +725,33 @@ export async function dispatchPending(
       result.failed.push({ action_key: actionKey, attempts, message });
     }
   }
+}
 
-  return result;
+/** One `notified` line (or JSON object) per request actually delivered. */
+function report(
+  setup: ListenSetup,
+  streams: Streams,
+  digestId: DeliveryId | null,
+  members: { action_key: string; delivery_id: DeliveryId }[],
+): void {
+  for (const member of members) {
+    if (setup.json) {
+      streams.out(
+        `${JSON.stringify({
+          event: "notified",
+          action_key: member.action_key,
+          delivery_id: member.delivery_id,
+          ...(digestId === null ? {} : { digest_id: digestId, digest_size: members.length }),
+        })}\n`,
+      );
+    } else {
+      streams.out(
+        digestId === null
+          ? `notified ${member.action_key} (message ${member.delivery_id})\n`
+          : `notified ${member.action_key} (digest ${digestId}, ${members.length} requests)\n`,
+      );
+    }
+  }
 }
 
 /**

@@ -89,25 +89,51 @@
  * came from, and says nothing about why. A follow-up may add the ForceReply
  * flow; until then, a reason belongs in `approval reject --note`.
  *
- * ## Batching (B7) — deferred, and why
+ * ## Batching (B7): the digest (APRV-115)
  *
- * SPEC.md §10.3 lets a channel collect one gesture over a set. Telegram binds
- * exactly one inline keyboard to one message, and a message carrying every
- * member's full payload would blow the 4096-character limit long before the
- * keyboard became useful — so "one gesture over the set" would need either a
- * media-group hack or a stateful multi-select keyboard that redraws itself on
- * every tap. That is a design task, not a rendering detail, so it is deferred.
- * {@link TelegramChannel.notify} still accepts a {@link ChannelBatch} and
- * handles it **degenerately**: one message per member, each with its own
- * Approve/Reject keyboard, all sharing one batch delivery id so every resulting
- * event carries it and audit granularity survives. What is missing is the
- * ergonomics (one tap for five requests), never the semantics.
+ * SPEC.md §10.3 lets a channel collect one gesture over a set, and until
+ * APRV-115 this channel took that option **degenerately**: one message per
+ * member, each with its own keyboard, all sharing one batch delivery id. The
+ * semantics were right and the ergonomics were the incident. A research session
+ * once produced forty near-identical `network.call` prompts in twenty minutes,
+ * one message each, and a channel that behaves like a notification hose is a
+ * channel a human learns to swipe away.
  *
- * Because a batch is one message per member, the terminal annotation below is
- * already per member: deciding one member edits that member's own message and
- * leaves the others armed, and the last one decided leaves no armed message
- * behind. There is no shared keyboard to re-render, and the channel holds no
- * per-member state to re-render one from.
+ * A group of similar pending requests (the grouping key is
+ * {@link digestKeyOf}, applied by the listener) is now delivered as a
+ * **digest**: every member's full prompt and full payload first, in its own
+ * messages and with no buttons, then ONE trailing message carrying the
+ * headline, one summary line per member, and the keyboard — a per-member
+ * Approve/Reject row for each, plus an "all" row.
+ *
+ * Four properties hold it together:
+ *
+ * - **The payloads come first.** The buttons are on the LAST message, and
+ *   every member's `<pre>` payload region has already been sent above it. An
+ *   approver cannot reach an "Approve all" without the bytes it covers having
+ *   been put in front of them (SPEC.md §10.4).
+ * - **It fails toward more messages.** A group whose digest text would not fit
+ *   inside {@link TELEGRAM_MAX_MESSAGE_CHARS}, or that has fewer than two
+ *   members, falls back to the old one-message-per-member delivery, and so
+ *   does a group `assembleBatch` refuses. The listener caps a digest at
+ *   {@link TELEGRAM_DIGEST_MAX_MEMBERS} and splits a larger burst into
+ *   several. Never a grant covering an unseen payload.
+ * - **"All" is N decisions, not one.** An all-button hands the runtime's
+ *   handler one {@link ChannelDecision} per still-armed member, in order, and
+ *   the handler records each through the gate's compare-and-append on its own.
+ *   The log never learns the word "batch": it gets N `approval.granted` or
+ *   `approval.rejected` events, each bound to its own action and payload hash,
+ *   each carrying the shared batch delivery id (SPEC.md §10.3).
+ * - **Annotation is per member.** A decided, expired or withdrawn member marks
+ *   its own line on the digest and loses its own buttons; the others stay
+ *   armed. A partially decided digest therefore shows mixed state, which is
+ *   what {@link TelegramChannel.annotate} redraws it to.
+ *
+ * The digest bookkeeping is delivery state of exactly the kind the nonce map
+ * already was: what was sent where, never what was decided. Every outcome word
+ * on it comes from the verified log or from the record the gate appended, and
+ * losing the map to a restart degrades to a stale message whose buttons the
+ * gate refuses, never to a wrong one.
  *
  * ## Every terminal state edits its message (APRV-113)
  *
@@ -148,7 +174,7 @@ import type {
   TaggedField,
   TestableChannel,
 } from "./contract.js";
-import { payloadRegionText } from "./payload-view.js";
+import { commandPayloadView, payloadRegionText } from "./payload-view.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -177,6 +203,27 @@ export const TELEGRAM_MAX_CALLBACK_BYTES = 64;
 
 /** The note recorded on a rejection collected from a button. */
 export const TELEGRAM_REJECT_NOTE = "rejected via telegram";
+
+/**
+ * The headline of an ordinary single-request prompt.
+ *
+ * Exported because the mock Bot API and several tests key on it, and because a
+ * digest member's header deliberately does NOT use it: a member prompt carries
+ * no buttons, so calling it "APPROVAL REQUIRED" would point a reader at a
+ * message that cannot take their answer.
+ */
+export const TELEGRAM_PROMPT_HEADING = "APPROVAL REQUIRED";
+
+/**
+ * The most members one digest may carry (APRV-115).
+ *
+ * Not a rendering limit — {@link renderDigest} checks the real one against
+ * {@link TELEGRAM_MAX_MESSAGE_CHARS} — but a *reading* one: a keyboard of
+ * twenty rows is a wall, and the failure this feature exists to fix is a human
+ * who stops reading. A burst larger than this becomes several digests, which is
+ * the direction this whole design fails in.
+ */
+export const TELEGRAM_DIGEST_MAX_MEMBERS = 8;
 
 /**
  * The headline each terminal state puts on the message it settles (APRV-113).
@@ -435,8 +482,19 @@ function attestationSummary(request: ChannelRequest): string {
   }
 }
 
-/** Build the two regions and the line list. Pure: no I/O, no clock. */
-export function renderTelegram(request: ChannelRequest): TelegramRendering {
+/**
+ * Build the two regions and the line list. Pure: no I/O, no clock.
+ *
+ * `heading` is the message's first line. It is a parameter for exactly one
+ * reason (APRV-115): a digest member's prompt carries no buttons, and telling
+ * a reader "APPROVAL REQUIRED" above a message they cannot answer on is the
+ * kind of small lie that costs a channel its legibility. Everything below the
+ * first line is identical either way, computed/claimed split included.
+ */
+export function renderTelegram(
+  request: ChannelRequest,
+  heading: string = TELEGRAM_PROMPT_HEADING,
+): TelegramRendering {
   const payload = request.fullPayload.value;
 
   const computedLines: Line[] = [
@@ -497,7 +555,7 @@ export function renderTelegram(request: ChannelRequest): TelegramRendering {
     `• <b>${escapeHtml(entry.label)}:</b> ${escapeHtml(entry.text)} <i>(${escapeHtml(entry.origin)})</i>`;
 
   const header = [
-    "<b>APPROVAL REQUIRED</b>",
+    `<b>${escapeHtml(heading)}</b>`,
     `<code>${escapeHtml(request.action_key.value)}</code>`,
     "",
     "<b>COMPUTED — derived by the runtime from the log, the policy and the payload bytes</b>",
@@ -545,6 +603,247 @@ export function chunkForTelegram(text: string, budget: number = SEGMENT_BUDGET):
 }
 
 // ---------------------------------------------------------------------------
+// Digests (APRV-115)
+// ---------------------------------------------------------------------------
+
+/**
+ * The shape token of a payload, for grouping.
+ *
+ * A shell command groups by its `argv[0]`, because that is what makes forty
+ * `network.call` prompts "the same question forty times" to the human reading
+ * them: forty `curl`s are one decision with forty URLs in it, and a `curl` next
+ * to an `rm` is not. Everything else groups by its top-level key set, which is
+ * the structural sense in which two payloads are the same shape.
+ *
+ * Structural, never self-declared: nothing here reads a `kind` or `type` field,
+ * for the reason `payload-view.ts` spells out — a field authored by the party
+ * under oversight must not choose how the party's requests are presented.
+ */
+export function payloadShapeKey(value: unknown): string {
+  const command = commandPayloadView(value);
+  if (command !== null) {
+    const argv0 = command.command.trim().split(/\s+/u)[0] ?? "";
+    return `argv0:${argv0}`;
+  }
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  if (typeof value !== "object") return `scalar:${typeof value}`;
+  return `keys:${Object.keys(value as Record<string, unknown>).sort().join(",")}`;
+}
+
+/**
+ * The grouping key: requests that share it are the same question asked twice.
+ *
+ * Signed off 2026-08-25 as (class, origin session/task, argv[0] or payload
+ * shape). The requesting actor rides along too, which can only ever SPLIT a
+ * group — two agents working the same task get two digests — and splitting is
+ * the safe direction: it costs a message and never merges two things a human
+ * would have wanted to weigh separately.
+ *
+ * ` ` as the separator because every component is agent-influenced text
+ * and a separator that can appear inside one would let a crafted task name
+ * collide two classes into one group.
+ */
+export function digestKeyOf(request: ChannelRequest): string {
+  return [
+    request.class.value,
+    request.task.value ?? "",
+    request.autonomy.value,
+    originOf(request.summary),
+    payloadShapeKey(request.fullPayload.value?.value),
+  ].join(" ");
+}
+
+/**
+ * Split `requests` into digest groups, preserving queue order.
+ *
+ * One poll window is the whole window: this is called on the requests one
+ * dispatch cycle found undelivered, and nothing here waits for more. A group of
+ * one is returned as a group of one, and the caller sends it as an ordinary
+ * prompt.
+ */
+export function groupForDigest(
+  requests: ChannelRequest[],
+  max: number = TELEGRAM_DIGEST_MAX_MEMBERS,
+): ChannelRequest[][] {
+  const groups: ChannelRequest[][] = [];
+  const byKey = new Map<string, ChannelRequest[]>();
+
+  for (const request of requests) {
+    const key = digestKeyOf(request);
+    let group = byKey.get(key);
+    // A group that has reached the cap is closed and a fresh one opened under
+    // the same key: a burst of twenty becomes three digests, never one wall.
+    if (group === undefined || group.length >= max) {
+      group = [];
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    group.push(request);
+  }
+
+  return groups;
+}
+
+/** One button on a digest keyboard. */
+interface InlineButton {
+  text: string;
+  callback_data: string;
+}
+
+/** A digest member, as the delivering process remembers it. Never a decision. */
+export interface DigestMemberState {
+  actionKey: string;
+  /** The nonce this member's own two buttons were issued under. */
+  nonce: string;
+  /** The agent's one-line description of the effect. Claimed. */
+  summary: string;
+  /** The agent's cost estimate, formatted. Claimed. */
+  cost: string;
+  /**
+   * The terminal outcome, once one has been observed for this member. Written
+   * only from a gate record or the verified log, never inferred here.
+   */
+  settled: { headline: string; detail: string[] } | null;
+}
+
+/** One digest message, as the delivering process remembers it. */
+export interface DigestState {
+  /** The digest message's own id: what every member's annotation edits. */
+  deliveryId: DeliveryId;
+  /** Shared by every member's decision event (SPEC.md §10.3). */
+  batchDeliveryId: DeliveryId;
+  /** The nonce the "all" buttons were issued under. */
+  allNonce: string;
+  /** The computed facts every member shares, already rendered as text. */
+  facts: { label: string; text: string; origin: string }[];
+  /** Who authored the claimed lines below. */
+  author: string;
+  members: DigestMemberState[];
+}
+
+/**
+ * The computed facts a digest's members share, as the digest states them.
+ *
+ * Every one is read off the first member, which is sound precisely because the
+ * grouping key made them equal across the set: a digest whose members disagreed
+ * about their class or their task is a digest the listener would not have
+ * built. The last line is the one an approver needs most — it says how many
+ * payloads are above and that each request has its own.
+ */
+export function digestFacts(
+  members: ChannelRequest[],
+): { label: string; text: string; origin: string }[] {
+  const first = members[0];
+  if (first === undefined) return [];
+  return [
+    { label: "class", text: first.class.value, origin: originOf(first.class) },
+    { label: "autonomy", text: first.autonomy.value, origin: originOf(first.autonomy) },
+    { label: "task", text: first.task.value ?? "(none)", origin: originOf(first.task) },
+    {
+      label: "grouped by",
+      text: `one class, one task, one payload shape (${payloadShapeKey(first.fullPayload.value?.value)})`,
+      origin: "grouping",
+    },
+    {
+      label: "payloads",
+      text: `${members.length} full payloads, one per request, in the ${members.length} prompts above this message`,
+      origin: originOf(first.fullPayload),
+    },
+  ];
+}
+
+/** The digest's headline, given how much of it is still open. */
+function digestHeadline(open: number, total: number): string {
+  if (open === 0) return `ALL ${total} REQUESTS DECIDED`;
+  if (open === total) return `${total} REQUESTS AWAITING APPROVAL`;
+  return `${open} OF ${total} REQUESTS STILL AWAITING APPROVAL`;
+}
+
+/**
+ * The digest message: text plus the keyboard for whatever is still open.
+ *
+ * Pure. The computed/claimed split of an ordinary prompt is kept — the shared
+ * facts are computed and sit under a heading that says so, the per-member lines
+ * are the agent's own words and sit under one that says they are not verified —
+ * because a digest is a prompt, and SPEC.md §9 does not stop applying because
+ * there are five of them.
+ *
+ * A settled member keeps its line, gains its outcome underneath, and loses its
+ * buttons. The "all" row appears only while two or more members are open: with
+ * one left, "all" is the same tap as its own Approve and a second way to do one
+ * thing is a way to do the wrong one.
+ */
+export function renderDigest(digest: DigestState): {
+  text: string;
+  keyboard: { inline_keyboard: InlineButton[][] } | null;
+} {
+  const open = digest.members.filter((member) => member.settled === null);
+  const total = digest.members.length;
+
+  const lines: string[] = [
+    `<b>${escapeHtml(digestHeadline(open.length, total))}</b>`,
+    "",
+    "<b>COMPUTED — derived by the runtime from the log and the policy</b>",
+    ...digest.facts.map(
+      (fact) =>
+        `• <b>${escapeHtml(fact.label)}:</b> ${escapeHtml(fact.text)} <i>(${escapeHtml(fact.origin)})</i>`,
+    ),
+    "",
+    `<b>CLAIMED — authored by ${escapeHtml(digest.author)}, NOT verified by the runtime</b>`,
+  ];
+
+  for (const [index, member] of digest.members.entries()) {
+    lines.push(
+      `${index + 1}. <code>${escapeHtml(member.actionKey)}</code> — ${escapeHtml(member.summary)} · ${escapeHtml(member.cost)}`,
+    );
+    if (member.settled !== null) {
+      lines.push(`   <b>${escapeHtml(member.settled.headline)}</b>`);
+      for (const detail of member.settled.detail) lines.push(`   ${escapeHtml(detail)}`);
+    }
+  }
+
+  lines.push(
+    "",
+    escapeHtml(
+      `Each button decides ONE request, numbered as above. "all" is ${open.length} separate decisions, one log event each; the full payload of every request is in the messages above this one.`,
+    ),
+  );
+
+  const rows: InlineButton[][] = [];
+  for (const [index, member] of digest.members.entries()) {
+    if (member.settled !== null) continue;
+    rows.push([
+      {
+        text: `✅ Approve ${index + 1}`,
+        callback_data: callbackData("g", member.nonce, member.actionKey),
+      },
+      {
+        text: `🛑 Reject ${index + 1}`,
+        callback_data: callbackData("r", member.nonce, member.actionKey),
+      },
+    ]);
+  }
+  if (open.length > 1) {
+    rows.push([
+      {
+        text: `✅ Approve all (${open.length})`,
+        callback_data: digestCallbackData("G", digest.allNonce),
+      },
+      {
+        text: `🛑 Reject all (${open.length})`,
+        callback_data: digestCallbackData("R", digest.allNonce),
+      },
+    ]);
+  }
+
+  return {
+    text: lines.join("\n"),
+    keyboard: rows.length === 0 ? null : { inline_keyboard: rows },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Callback data
 // ---------------------------------------------------------------------------
 
@@ -567,24 +866,47 @@ export function callbackData(verb: "g" | "r", nonce: string, actionKey: string):
     : `${verb}:${nonce}`;
 }
 
+/**
+ * `callback_data` for a digest's "all" button: `<G|R>:<nonce>` (APRV-115).
+ *
+ * Upper case, and no action key: an "all" button names a *delivery*, and the
+ * set it decides is whichever members of that delivery are still open at the
+ * moment of the tap — which the delivering process knows and the network does
+ * not. Naming keys in the bytes would let something that can reach the bot
+ * choose the set, and there is no length at which that becomes acceptable.
+ */
+export function digestCallbackData(verb: "G" | "R", nonce: string): string {
+  return `${verb}:${nonce}`;
+}
+
 interface ParsedCallback {
   decision: "grant" | "reject";
+  /** `all` for a digest's "all" button; `one` for every per-request button. */
+  scope: "one" | "all";
   nonce: string;
   actionKey: string | null;
 }
+
+const CALLBACK_VERBS: Record<string, { decision: "grant" | "reject"; scope: "one" | "all" }> = {
+  g: { decision: "grant", scope: "one" },
+  r: { decision: "reject", scope: "one" },
+  G: { decision: "grant", scope: "all" },
+  R: { decision: "reject", scope: "all" },
+};
 
 export function parseCallbackData(data: unknown): ParsedCallback | null {
   if (typeof data !== "string") return null;
   const first = data.indexOf(":");
   if (first === -1) return null;
-  const verb = data.slice(0, first);
-  if (verb !== "g" && verb !== "r") return null;
+  const verb = CALLBACK_VERBS[data.slice(0, first)];
+  if (verb === undefined) return null;
   const rest = data.slice(first + 1);
   const second = rest.indexOf(":");
   const nonce = second === -1 ? rest : rest.slice(0, second);
   if (nonce.length === 0) return null;
   return {
-    decision: verb === "g" ? "grant" : "reject",
+    decision: verb.decision,
+    scope: verb.scope,
     nonce,
     actionKey: second === -1 ? null : rest.slice(second + 1),
   };
@@ -647,6 +969,21 @@ interface Delivery {
   batchDeliveryId?: DeliveryId;
 }
 
+/**
+ * What {@link TelegramChannel.notifyBatch} did with a set (APRV-115).
+ *
+ * `digestId` is `null` when the set was delivered the old way, one message per
+ * member — the fallback every "cannot render this whole" path takes. `members`
+ * carries the message id each member's annotation must edit, which for a digest
+ * is the one digest message and for the fallback is the member's own.
+ */
+export interface TelegramBatchDelivery {
+  batchDeliveryId: DeliveryId;
+  digestId: DeliveryId | null;
+  members: { action_key: string; delivery_id: DeliveryId }[];
+  rendered: RenderedRequest[];
+}
+
 export class TelegramChannel implements TestableChannel {
   readonly name = "telegram";
 
@@ -663,6 +1000,10 @@ export class TelegramChannel implements TestableChannel {
 
   private handler: ((decision: ChannelDecision) => DecisionOutcome) | null = null;
   private readonly deliveries = new Map<string, Delivery>();
+  /** Digest message id -> what is on it. Delivery bookkeeping, never truth. */
+  private readonly digests = new Map<DeliveryId, DigestState>();
+  /** "All" nonce -> the digest message it was issued for. */
+  private readonly allNonces = new Map<string, DeliveryId>();
   private rendered: RenderedRequest[] = [];
   private offset = 0;
   private counter = 0;
@@ -744,38 +1085,148 @@ export class TelegramChannel implements TestableChannel {
   }
 
   /**
-   * Put a request (or, degenerately, a batch) in front of the approver.
+   * Put a request, or a set of them, in front of the approver.
    *
-   * One message per request; the last message of a request carries the
-   * Approve/Reject keyboard and its `message_id` is the delivery id. A batch
-   * gets one shared batch delivery id, which is what `notify` returns and what
-   * every resulting event will carry.
+   * One request is one prompt: its header, its payload chunks, and the
+   * Approve/Reject keyboard on the last message, whose `message_id` is the
+   * delivery id. A {@link ChannelBatch} goes through {@link notifyBatch} and
+   * comes back as a digest when it can be one; either way it gets one shared
+   * batch delivery id, which is what this returns and what every resulting
+   * event will carry.
    */
   async notify(target: ChannelRequest | ChannelBatch): Promise<DeliveryId> {
-    const isBatch = "requests" in target;
-    const members = isBatch ? target.requests : [target];
-    const batchDeliveryId = isBatch ? `tg-batch-${this.makeNonce()}` : undefined;
-
-    const rendered: RenderedRequest[] = [];
-    let lastDeliveryId = batchDeliveryId ?? "";
-
-    for (const member of members) {
-      const delivered = await this.deliverOne(member, batchDeliveryId);
-      rendered.push(delivered.rendered);
-      if (batchDeliveryId === undefined) lastDeliveryId = delivered.deliveryId;
-    }
-
-    this.rendered = rendered;
-    return lastDeliveryId;
+    if ("requests" in target) return (await this.notifyBatch(target)).batchDeliveryId;
+    const delivered = await this.deliverOne(target, undefined);
+    this.rendered = [delivered.rendered];
+    return delivered.deliveryId;
   }
 
-  private async deliverOne(
+  /**
+   * Deliver a set as one digest, or as one message per member when it cannot
+   * be one (APRV-115).
+   *
+   * The fallback is taken for a set of fewer than two, and for one whose digest
+   * text would not fit inside {@link TELEGRAM_MAX_MESSAGE_CHARS}. Both are the
+   * same rule: the approver sees every member before any button that decides
+   * more than one appears, and when that cannot be arranged the channel sends
+   * MORE messages rather than fewer.
+   *
+   * Not atomic, and it cannot be: a `sendMessage` that fails part way leaves
+   * the messages already sent in the chat, and this throws. Nothing is armed —
+   * the member nonces are registered only once the digest message carrying
+   * their buttons exists — so the caller's retry re-sends the set and the
+   * approver gets a duplicate prompt, never a live button on a half-sent one.
+   */
+  async notifyBatch(batch: ChannelBatch): Promise<TelegramBatchDelivery> {
+    const members = batch.requests;
+    const batchDeliveryId = batch.deliveryId ?? `tg-batch-${this.makeNonce()}`;
+
+    const digest = members.length < 2 ? null : await this.deliverDigest(members, batchDeliveryId);
+    if (digest !== null) {
+      this.rendered = digest.rendered;
+      return digest;
+    }
+
+    const rendered: RenderedRequest[] = [];
+    const delivered: { action_key: string; delivery_id: DeliveryId }[] = [];
+    for (const member of members) {
+      const one = await this.deliverOne(member, batchDeliveryId);
+      rendered.push(one.rendered);
+      delivered.push({ action_key: member.action_key.value, delivery_id: one.deliveryId });
+    }
+    this.rendered = rendered;
+    return { batchDeliveryId, digestId: null, members: delivered, rendered };
+  }
+
+  /**
+   * The digest itself: every member's prompt and payload, then the one message
+   * that carries the buttons.
+   *
+   * Returns `null` when the digest message would not fit, so the caller falls
+   * back — and it decides that BEFORE sending anything, because a fallback
+   * discovered after four member prompts had gone out would double them.
+   */
+  private async deliverDigest(
+    members: ChannelRequest[],
+    batchDeliveryId: DeliveryId,
+  ): Promise<TelegramBatchDelivery | null> {
+    const allNonce = this.makeNonce();
+    const state: DigestState = {
+      // Assigned once the message exists; nothing consults it before then.
+      deliveryId: "",
+      batchDeliveryId,
+      allNonce,
+      facts: digestFacts(members),
+      author: originOf((members[0] as ChannelRequest).summary),
+      members: members.map((member) => ({
+        actionKey: member.action_key.value,
+        nonce: this.makeNonce(),
+        summary: member.summary.value ?? "(none given)",
+        cost: `$${member.est_cost_usd.value.toFixed(2)}`,
+        settled: null,
+      })),
+    };
+
+    const drawn = renderDigest(state);
+    if (drawn.text.length > TELEGRAM_MAX_MESSAGE_CHARS) return null;
+
+    const rendered: RenderedRequest[] = [];
+    for (const [index, member] of members.entries()) {
+      const one = await this.sendPrompt(
+        member,
+        `REQUEST ${index + 1} OF ${members.length} — decide it on the digest below`,
+        null,
+      );
+      rendered.push({ ...one.rendered, batchDeliveryId });
+    }
+
+    const result = await this.call<{ message_id: number }>("sendMessage", {
+      chat_id: this.chatId,
+      text: drawn.text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      ...(drawn.keyboard === null ? {} : { reply_markup: drawn.keyboard }),
+    });
+    const deliveryId = String(result.message_id);
+    state.deliveryId = deliveryId;
+
+    // Armed only now, and all at once: until the message with the buttons on it
+    // exists there is nothing a callback could legitimately answer.
+    for (const member of state.members) {
+      this.deliveries.set(member.nonce, {
+        actionKey: member.actionKey,
+        deliveryId,
+        batchDeliveryId,
+      });
+    }
+    this.digests.set(deliveryId, state);
+    this.allNonces.set(allNonce, deliveryId);
+    this.counters.notified += members.length;
+
+    return {
+      batchDeliveryId,
+      digestId: deliveryId,
+      members: state.members.map((member) => ({
+        action_key: member.actionKey,
+        delivery_id: deliveryId,
+      })),
+      rendered,
+    };
+  }
+
+  /**
+   * Send one request's messages: the header, then the payload chunks, with
+   * `keyboard` (when there is one) on the last.
+   *
+   * Shared by the ordinary prompt and by a digest member, which differ in
+   * exactly two things: the heading, and whether anything is armed.
+   */
+  private async sendPrompt(
     request: ChannelRequest,
-    batchDeliveryId: DeliveryId | undefined,
+    heading: string,
+    keyboard: { inline_keyboard: InlineButton[][] } | null,
   ): Promise<{ deliveryId: DeliveryId; rendered: RenderedRequest }> {
-    const rendering = renderTelegram(request);
-    const actionKey = request.action_key.value;
-    const nonce = this.makeNonce();
+    const rendering = renderTelegram(request, heading);
 
     const segments: string[] = [rendering.header];
     if (rendering.payloadText !== null) {
@@ -789,15 +1240,6 @@ export class TelegramChannel implements TestableChannel {
       }
     }
 
-    const keyboard = {
-      inline_keyboard: [
-        [
-          { text: "✅ Approve", callback_data: callbackData("g", nonce, actionKey) },
-          { text: "🛑 Reject", callback_data: callbackData("r", nonce, actionKey) },
-        ],
-      ],
-    };
-
     let deliveryId = "";
     for (const [index, segment] of segments.entries()) {
       const last = index === segments.length - 1;
@@ -806,17 +1248,10 @@ export class TelegramChannel implements TestableChannel {
         text: segment,
         parse_mode: "HTML",
         disable_web_page_preview: true,
-        ...(last ? { reply_markup: keyboard } : {}),
+        ...(last && keyboard !== null ? { reply_markup: keyboard } : {}),
       });
       if (last) deliveryId = String(result.message_id);
     }
-
-    this.counters.notified += 1;
-    this.deliveries.set(nonce, {
-      actionKey,
-      deliveryId,
-      ...(batchDeliveryId === undefined ? {} : { batchDeliveryId }),
-    });
 
     const fields: RenderedField[] = rendering.lines.map((entry) => ({
       field: entry.field,
@@ -827,9 +1262,41 @@ export class TelegramChannel implements TestableChannel {
     return {
       deliveryId,
       rendered: {
-        action_key: actionKey,
+        action_key: request.action_key.value,
         fields,
         fullPayloadText: rendering.payloadText,
+      },
+    };
+  }
+
+  private async deliverOne(
+    request: ChannelRequest,
+    batchDeliveryId: DeliveryId | undefined,
+  ): Promise<{ deliveryId: DeliveryId; rendered: RenderedRequest }> {
+    const actionKey = request.action_key.value;
+    const nonce = this.makeNonce();
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: "✅ Approve", callback_data: callbackData("g", nonce, actionKey) },
+          { text: "🛑 Reject", callback_data: callbackData("r", nonce, actionKey) },
+        ],
+      ],
+    };
+
+    const sent = await this.sendPrompt(request, TELEGRAM_PROMPT_HEADING, keyboard);
+
+    this.counters.notified += 1;
+    this.deliveries.set(nonce, {
+      actionKey,
+      deliveryId: sent.deliveryId,
+      ...(batchDeliveryId === undefined ? {} : { batchDeliveryId }),
+    });
+
+    return {
+      deliveryId: sent.deliveryId,
+      rendered: {
+        ...sent.rendered,
         ...(batchDeliveryId === undefined ? {} : { batchDeliveryId }),
       },
     };
@@ -854,7 +1321,49 @@ export class TelegramChannel implements TestableChannel {
       actionKey = delivery.actionKey;
       this.deliveries.delete(nonce);
     }
+    const digest = this.digests.get(deliveryId);
+    if (digest !== undefined) {
+      this.allNonces.delete(digest.allNonce);
+      this.digests.delete(deliveryId);
+    }
     return actionKey;
+  }
+
+  /**
+   * Mark one digest member settled and redraw the digest (APRV-115).
+   *
+   * The member's own nonce is forgotten first, so a tap on a button the redraw
+   * does not manage to remove resolves to nothing rather than reaching the
+   * gate. The other members keep theirs: a partially decided digest is a real
+   * state and the rest of it is still answerable.
+   */
+  private async settleMember(
+    digest: DigestState,
+    actionKey: string,
+    outcome: string,
+    detail: string[],
+  ): Promise<void> {
+    const member = digest.members.find((entry) => entry.actionKey === actionKey);
+    if (member === undefined || member.settled !== null) return;
+    member.settled = { headline: outcome, detail };
+    this.deliveries.delete(member.nonce);
+    if (digest.members.every((entry) => entry.settled !== null)) {
+      this.allNonces.delete(digest.allNonce);
+    }
+    await this.redraw(digest);
+  }
+
+  /** One `editMessageText` that replaces a digest's text and its keyboard. */
+  private async redraw(digest: DigestState): Promise<void> {
+    const drawn = renderDigest(digest);
+    await this.call("editMessageText", {
+      chat_id: this.chatId,
+      message_id: Number(digest.deliveryId),
+      text: drawn.text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      ...(drawn.keyboard === null ? {} : { reply_markup: drawn.keyboard }),
+    });
   }
 
   /**
@@ -883,11 +1392,27 @@ export class TelegramChannel implements TestableChannel {
    * problem — the log has already settled the request, so a tap on the stale
    * buttons is refused by the gate and answered with the refusal toast.
    */
-  async annotate(deliveryId: DeliveryId, outcome: string, detail: string[]): Promise<void> {
-    const actionKey = this.disarm(deliveryId);
+  async annotate(
+    deliveryId: DeliveryId,
+    outcome: string,
+    detail: string[],
+    /**
+     * Which request this settles, when `deliveryId` names a digest (APRV-115).
+     * A digest holds several, so an annotation without one can only mean the
+     * whole delivery is over — which is handled by falling through to the
+     * message-replacing path below, buttons and all.
+     */
+    actionKey?: string,
+  ): Promise<void> {
+    const digest = this.digests.get(deliveryId);
+    if (digest !== undefined && actionKey !== undefined) {
+      await this.settleMember(digest, actionKey, outcome, detail);
+      return;
+    }
+    const settledKey = this.disarm(deliveryId);
     const text = [
       `<b>${escapeHtml(outcome)}</b>`,
-      `<code>${escapeHtml(actionKey)}</code>`,
+      `<code>${escapeHtml(actionKey ?? settledKey)}</code>`,
       "",
       ...detail.map((entry) => escapeHtml(entry)),
     ].join("\n");
@@ -904,8 +1429,8 @@ export class TelegramChannel implements TestableChannel {
    * The withdrawal case of {@link annotate} (APRV-106), and the one the
    * {@link Channel} interface names. Its wording is unchanged.
    */
-  async retract(deliveryId: DeliveryId, reason: string): Promise<void> {
-    await this.annotate(deliveryId, TELEGRAM_TERMINAL_HEADLINES.withdrawn, [reason]);
+  async retract(deliveryId: DeliveryId, reason: string, actionKey?: string): Promise<void> {
+    await this.annotate(deliveryId, TELEGRAM_TERMINAL_HEADLINES.withdrawn, [reason], actionKey);
   }
 
   // -------------------------------------------------------------------------
@@ -1024,6 +1549,14 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
+    // APRV-115. An "all" button names a digest, not a request: the set it
+    // decides is whatever is still open on that delivery right now, which this
+    // process knows and the callback bytes deliberately do not say.
+    if (parsed.scope === "all") {
+      await this.handleDigestAll(parsed.decision, parsed.nonce, callbackId, result);
+      return;
+    }
+
     const delivery = this.deliveries.get(parsed.nonce);
     if (delivery === undefined) {
       await this.ignore(
@@ -1096,12 +1629,119 @@ export class TelegramChannel implements TestableChannel {
         ? TELEGRAM_TERMINAL_HEADLINES.granted
         : TELEGRAM_TERMINAL_HEADLINES.rejected;
     try {
-      await this.annotate(delivery.deliveryId, headline, [
-        decidedLine(record.actor, record.ts, record.seq),
-      ]);
+      await this.annotate(
+        delivery.deliveryId,
+        headline,
+        [decidedLine(record.actor, record.ts, record.seq)],
+        delivery.actionKey,
+      );
     } catch (cause) {
       this.complain(
         `approval: telegram could not annotate the decided ${delivery.actionKey} (message ${delivery.deliveryId}): ${this.describe(cause)} — the decision is recorded; only the message is stale`,
+      );
+    }
+  }
+
+  /**
+   * One tap over every still-open member of a digest (APRV-115).
+   *
+   * **N decisions, never one.** Each member is turned into its own
+   * {@link ChannelDecision} — its own action key, its own payload binding — and
+   * handed to the runtime's handler on its own, which records it through the
+   * gate's compare-and-append on its own. There is no code path here that could
+   * produce a single event covering two actions, because there is no call here
+   * that writes anything at all.
+   *
+   * A member that refuses (already decided elsewhere, expired, withdrawn) does
+   * not stop the rest, for the reason `channels/batch.ts` sets out: abandoning
+   * four answers because the fifth had lapsed would discard a human's decision,
+   * and un-appending the ones already written is not a thing the log permits.
+   * The toast says how many landed and how many did not.
+   *
+   * The digest is redrawn ONCE at the end rather than per member: N edits of
+   * the same message would show the approver their own decisions arriving one
+   * at a time, and would spend N Bot API calls to end in the same place.
+   */
+  private async handleDigestAll(
+    decision: "grant" | "reject",
+    nonce: string,
+    callbackId: string,
+    result: TelegramPollResult,
+  ): Promise<void> {
+    const deliveryId = this.allNonces.get(nonce);
+    const digest = deliveryId === undefined ? undefined : this.digests.get(deliveryId);
+    if (digest === undefined) {
+      await this.ignore(
+        result,
+        callbackId,
+        "unknown-callback",
+        `no digest for nonce ${JSON.stringify(nonce)} (a restarted listener forgets its buttons; the pending queue is re-sent on start)`,
+        "This button is no longer live — read the message for the outcome, or the newest message for the requests.",
+      );
+      return;
+    }
+
+    if (this.handler === null) {
+      await this.ignore(
+        result,
+        callbackId,
+        "unknown-callback",
+        "a callback arrived before the runtime registered a decision handler",
+        "The runtime is not ready to record decisions.",
+      );
+      return;
+    }
+
+    const open = digest.members.filter((member) => member.settled === null);
+    let landed = 0;
+    const refusals: string[] = [];
+
+    for (const member of open) {
+      const one: ChannelDecision = {
+        action_key: member.actionKey,
+        decision,
+        deliveryId: digest.deliveryId,
+        batchDeliveryId: digest.batchDeliveryId,
+        ...(decision === "reject"
+          ? { note: `${TELEGRAM_REJECT_NOTE} (callback ${callbackId}, all)` }
+          : {}),
+      };
+      const outcome = this.handler(one);
+      this.counters.decisions += 1;
+      result.outcomes.push({ action_key: member.actionKey, outcome });
+
+      if (!outcome.ok) {
+        refusals.push(outcome.code);
+        continue;
+      }
+      landed += 1;
+      // Bookkeeping only: the words come from the record the gate appended.
+      member.settled = {
+        headline:
+          outcome.decision === "grant"
+            ? TELEGRAM_TERMINAL_HEADLINES.granted
+            : TELEGRAM_TERMINAL_HEADLINES.rejected,
+        detail: [decidedLine(outcome.record.actor, outcome.record.ts, outcome.record.seq)],
+      };
+      this.deliveries.delete(member.nonce);
+    }
+
+    if (digest.members.every((member) => member.settled !== null)) {
+      this.allNonces.delete(digest.allNonce);
+    }
+
+    const word = decision === "grant" ? "Approved" : "Rejected";
+    const summary =
+      refusals.length === 0
+        ? `${word} ${landed} — one log event each.`
+        : `${word} ${landed}; ${refusals.length} refused (${[...new Set(refusals)].join(", ")}). Nothing was recorded for those.`;
+    await this.answer(callbackId, summary);
+
+    try {
+      await this.redraw(digest);
+    } catch (cause) {
+      this.complain(
+        `approval: telegram could not redraw the digest (message ${digest.deliveryId}): ${this.describe(cause)} — the decisions are recorded; only the message is stale`,
       );
     }
   }
