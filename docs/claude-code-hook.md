@@ -15,10 +15,23 @@ answers:
 
 | resolved autonomy | answer | what reaches the log |
 |---|---|---|
-| `autonomous` | allow | nothing (amended SPEC.md §6.3) |
-| `supervised` | allow | `task.registered` |
-| `manual` | wait for a human, then allow or deny | `task.registered`, `approval.requested`, the decision |
+| `autonomous` | allow | `execution.started` |
+| `supervised` | allow | `task.registered`, `execution.started` |
+| `manual` | wait for a human, then allow or deny | `task.registered`, `approval.requested`, the decision, `execution.started` on an allow |
 | unclassifiable | deny | nothing |
+
+No approval lifecycle exists off the manual path (amended SPEC.md §6.3): the
+`autonomous` and `supervised` rows request nothing, ask nobody, and record no
+decision. What they do record, since APRV-141, is the execution itself, marked
+`execution: "harness"` because this runtime hands over permission and never sees
+an exit status. That record is the one budgets charge and the one the
+retrospective audit sampler draws from, so without it the path carrying most of
+an agent's traffic was unbudgeted and unsampled.
+
+Before any of those rows allows, the hook establishes two facts from the
+verified log (APRV-139): a human has attested the live policy bytes, and the
+task is not loop-escalated. Either failing, or the log being unreachable at all,
+is a deny.
 
 The decision arrives through whatever channel the policy names. In this
 repository that is Telegram: the command sits at the gate, the phone buzzes, a

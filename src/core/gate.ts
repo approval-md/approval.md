@@ -108,6 +108,7 @@ import {
   ATTESTATION_REFUSAL,
   attestationRefusal,
   checkAttestationOfBytes,
+  isPolicySha256,
   POLICY_HASH_FIELD,
   unreadablePolicyStatus,
   type AttestationRefusalDetail,
@@ -1937,6 +1938,25 @@ export function findHarnessCarry(
   return pending;
 }
 
+/**
+ * The policy hash pinned on the `approval.granted` record at `seq`, or `null`.
+ *
+ * `null` covers both shapes that are not a claim about policy: a grant written
+ * before APRV-118 added the field, and a value that is not a SHA-256. A
+ * malformed one reads as absent for the same reason `core/state.ts` reads it
+ * that way — a corrupt byte must not be able to void an authorization, and a
+ * crafted one must not be able to claim agreement it cannot prove.
+ */
+function grantedPolicyHash(records: EventRecord[], seq: number | null): string | null {
+  if (seq === null) return null;
+  for (const record of records) {
+    if (record.seq !== seq) continue;
+    const value = payloadOf(record)[POLICY_HASH_FIELD];
+    return isPolicySha256(value) ? value : null;
+  }
+  return null;
+}
+
 export type ConsumeHarnessResult = { ok: true; record: EventRecord } | GateRefusal;
 
 /**
@@ -1970,7 +1990,11 @@ export type ConsumeHarnessResult = { ok: true; record: EventRecord } | GateRefus
  * enforcement path that reaches a harness `allow` without passing through
  * {@link request} (that happened in an earlier process, possibly against
  * earlier policy bytes). A policy that changed since the human attested it
- * cannot answer anything, so it answers nothing.
+ * cannot answer anything, so it answers nothing. `policy-drift` is the second
+ * half of the same idea and is APRV-134: attested is not enough when what is
+ * attested is a DIFFERENT policy from the one the approver decided under, and
+ * the gap between a tap and a retry's spend is exactly where a re-attestation
+ * fits.
  *
  * Everything else follows the derivation: `not-requested` when the key has no
  * request, `expired` when the TTL lapsed (judged from the request's own `ts`,
@@ -2055,6 +2079,35 @@ export function consumeHarnessGrant(
     );
   }
 
+  // APRV-134: the spend-time half of APRV-118's comparison. `decide` refuses a
+  // grant whose request was routed under a policy that is no longer in force;
+  // this path is the remaining consumer that could still spend one under
+  // different rules, because a harness grant is spent by a LATER PROCESS —
+  // a retry after the first invocation's wait timed out, minutes later. A human
+  // re-attesting in that gap changes the autonomy, the limits and the TTL that
+  // put the question in front of them, and the command about to run is the one
+  // they answered under the old rules. Refused with APRV-118's own
+  // `policy-drift`, and deliberately the same code: the fact is the same fact
+  // (the file is attested and is a different file), the remedy is the same
+  // remedy (request it again under the policy that governs now), and a second
+  // code for one condition would be a distinction an agent has to learn without
+  // being able to act on it differently.
+  //
+  // The grant's own pinned hash is read first and the request's is the
+  // fallback, so a log in which only one of the pair carries the field is
+  // judged by whichever one does. Absence on both is not a mismatch: the field
+  // is additive per SPEC.md §8, and reading its absence as drift would strand
+  // every grant in a log written before APRV-118.
+  const pinned =
+    grantedPolicyHash(read.records, derivation.decisionSeq) ?? derivation.declared.policy_sha256;
+  if (pinned !== null && pinned !== attested.sha256) {
+    return refuse(
+      "policy-drift",
+      `action ${actionKey} was approved under policy ${pinned} and the attested policy is now ${attested.sha256}; a human re-attested between the decision and this spend, so the rules the approver saw are not the rules this command would run under. Nothing was appended: the grant is void and the action must be requested again, which re-resolves its autonomy, limits and TTL under the current policy.`,
+      { state: derivation.state },
+    );
+  }
+
   const payload: Record<string, unknown> = {
     // The budgets contract: class and est_cost_usd on every start event.
     class: derivation.declared.class ?? "",
@@ -2081,6 +2134,175 @@ export function consumeHarnessGrant(
     // The head read at the top: single-use, liveness and the harness marker
     // were all judged against exactly that log, so a competing consumer that
     // landed in between wins and this one is refused `head-moved`.
+    read.head,
+  );
+  if (!appended.ok) return appended;
+  return { ok: true, record: appended.record };
+}
+
+// ---------------------------------------------------------------------------
+// startHarnessExecution
+// ---------------------------------------------------------------------------
+
+/** What the harness is about to run, as one class of one command. */
+export interface HarnessStartInput {
+  task: string;
+  actionKey: string;
+  cls: string;
+  /** The bytes the verdict was computed over, when the caller has a hash. */
+  payload_hash?: string;
+  est_cost_usd?: number;
+}
+
+export type HarnessStartResult = { ok: true; record: EventRecord } | GateRefusal;
+
+/**
+ * Charge and record a harness execution that no human was asked about
+ * (APRV-141).
+ *
+ * ## The blind spot this closes
+ *
+ * `core/budgets.ts` computes consumption from `approval.granted` and
+ * `execution.started`, and `core/audit.ts` draws its retrospective sample from
+ * `execution.started` alone. The harness hook wrote neither for a supervised or
+ * autonomous verdict — the comment said, correctly, that writing one per agent
+ * action fills the log — so under Claude Code the majority of real activity
+ * consumed no budget, `daily_actions` included, and was invisible to the
+ * overseer that exists to read a sample of it. A budget that the busiest
+ * execution path does not charge is not a budget, and the decision recorded on
+ * APRV-141 is that the log volume is the lesser cost.
+ *
+ * ## Why this record and not a new event type
+ *
+ * It is the same `execution.started` {@link consumeHarnessGrant} appends, with
+ * the same `execution: "harness"` marker saying why no `execution.completed` or
+ * `execution.failed` will ever follow: the harness runs the command and this
+ * runtime never observes an exit status. Reusing the shape means budgets and
+ * audit count these without learning a second vocabulary, and the gate's
+ * existing single-use rule (a key with an `execution.started` is
+ * `already-executed`) applies unchanged. What differs is only the authorization
+ * being recorded: there, a human's grant; here, the policy itself.
+ *
+ * ## What it refuses
+ *
+ * The same two facts the hook's own guard checks and `core/execute.ts` checks
+ * before an unattended start — attestation and loop-escalation — re-checked at
+ * the write boundary against the records this append is authorized by, plus the
+ * budget verdict this record is the charge for. A class that resolves `manual`
+ * is refused outright: a manual action is authorized by a grant and spent
+ * through {@link consumeHarnessGrant} or a token, and admitting one here would
+ * be a second, unapproved spender.
+ */
+export function startHarnessExecution(
+  logPath: string,
+  input: HarnessStartInput,
+  actor: string,
+  options: GateOptions = {},
+): HarnessStartResult {
+  const ts = tick(options);
+  if (!PRINCIPAL_ACTOR.test(actor)) {
+    return refuse(
+      "actor-invalid",
+      `recording a harness execution requires a human: or agent: actor, got ${JSON.stringify(actor)}`,
+    );
+  }
+
+  const read = readGateRecords(logPath);
+  if (!read.ok) return read;
+
+  // One read of the policy file for the whole operation (APRV-142): the same
+  // bytes are hashed for attestation and parsed for the decision.
+  const policyRead = readPolicyOnce(options);
+  const attested = requireAttestation(read.records, policyRead);
+  if (!attested.ok) return attested;
+
+  const load = parsePolicy(policyRead, options);
+  const resolution = resolve(load, input.cls);
+  if (resolution.autonomy === "manual") {
+    return refuse(
+      "not-granted",
+      `class ${input.cls} resolves to manual (${resolution.provenance}), and a manual action is authorized by a human's grant rather than by the policy. Request it and spend the grant; this path records only the executions the policy itself authorized.`,
+    );
+  }
+
+  if (isLoopEscalated(read.records, input.task)) {
+    return refuse(
+      "loop-escalated",
+      `task ${input.task} has three consecutive execution.failed events and is escalated to manual (SPEC.md §10.2), so its ${resolution.autonomy} actions may not start unsupervised. The streak clears when an execution.completed for the task lands.`,
+    );
+  }
+
+  for (const record of read.records) {
+    if (record.action_key !== input.actionKey) continue;
+    if (record.event !== "execution.started") continue;
+    return refuse(
+      "already-executed",
+      `action ${input.actionKey} already started at seq ${record.seq}; an idempotency key is single-use`,
+    );
+  }
+
+  const cost = costOf(input.est_cost_usd);
+  const budget = evaluateBudgetsWithTask(
+    read.records,
+    budgetScopeOf(load, resolution),
+    { class: input.cls, est_cost_usd: cost },
+    ts,
+    input.task,
+  );
+  if (!budget.pass) {
+    const failed = budget.verdicts.filter((verdict) => !verdict.pass);
+    const logged = append(
+      logPath,
+      {
+        ts,
+        event: "budget.exceeded",
+        actor,
+        task: input.task,
+        action_key: input.actionKey,
+        payload: {
+          class: input.cls,
+          est_cost_usd: cost,
+          stage: "execution",
+          verdicts: budget.verdicts,
+        },
+      },
+      options,
+      read.head,
+    );
+    const message = `budget refused the execution: ${failed
+      .map((verdict) => `${verdict.limit} (${verdict.scope})`)
+      .join(", ")}`;
+    return logged.ok
+      ? refuse("budget-exceeded", message, { verdicts: failed, record: logged.record })
+      : refuse(
+          "budget-exceeded",
+          `${message}; the budget.exceeded event could not be appended: ${logged.message}`,
+          { verdicts: failed },
+        );
+  }
+
+  const payload: Record<string, unknown> = {
+    // The budgets contract: class and est_cost_usd on every start event.
+    class: input.cls,
+    est_cost_usd: cost,
+    // Why no completion will ever follow (see `consumeHarnessGrant`).
+    execution: "harness",
+  };
+  if (isPayloadHash(input.payload_hash)) payload["payload_hash"] = input.payload_hash;
+
+  const appended = append(
+    logPath,
+    {
+      ts,
+      event: "execution.started",
+      actor,
+      task: input.task,
+      action_key: input.actionKey,
+      payload,
+    },
+    options,
+    // The head read at the top: attestation, escalation, single-use and the
+    // budget verdict were all judged against exactly that log.
     read.head,
   );
   if (!appended.ok) return appended;

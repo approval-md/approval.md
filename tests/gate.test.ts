@@ -1910,6 +1910,86 @@ test("a malformed policy_sha256 is refused at the write boundary", () => {
 });
 
 // ===========================================================================
+// harness grant spend under a re-attested policy (APRV-134)
+// ===========================================================================
+
+test("a harness grant spent under a re-attested policy is refused policy-drift", () => {
+  // The gap APRV-118 left open. A harness grant is spent by a LATER process —
+  // the retry that adopts it after the first invocation's wait timed out — so
+  // there is real time between the human's tap and the spend, and a
+  // re-attestation fits inside it. Everything here is verified; the policy in
+  // force is simply not the policy the approver decided under.
+  const unit = newCase();
+  harnessGrant(unit);
+
+  writeFileSync(unit.policyPath, POLICY_EDITED, "utf8");
+  attest(unit, at(3));
+
+  const before = eventTypes(unit);
+  const refusal = asRefusal(
+    consumeHarnessGrant(unit.logPath, "task-042:chaser", "agent:claude", at(4), unit.options),
+  );
+  assert.equal(refusal.code, "policy-drift");
+  assert.notEqual(refusal.code, "policy-not-attested");
+  assert.match(refusal.message, /must be requested again/u);
+  assert.deepEqual(eventTypes(unit), before, "a refused spend appends nothing");
+  assertClean(unit);
+});
+
+test("a harness grant with no pinned hash spends as it always did", () => {
+  // The additive rule (SPEC.md §8): a pre-APRV-118 request and grant carry no
+  // policy_sha256, and reading that absence as drift would strand every
+  // carryover in a log written before the field existed. Both records go
+  // through the real append path, shaped as the pair that predates it.
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  for (const event of [
+    {
+      ts: at(1),
+      event: "approval.requested" as const,
+      actor: "agent:claude",
+      payload: {
+        class: "communicate.email.external",
+        est_cost_usd: 0.02,
+        payload_hash: PAYLOAD_HASH,
+        execution: "harness",
+      },
+    },
+    {
+      ts: at(2),
+      event: "approval.granted" as const,
+      actor: "human:carter",
+      payload: { class: "communicate.email.external", est_cost_usd: 0.02 },
+    },
+  ]) {
+    const appended = appendEvent(unit.logPath, {
+      ...event,
+      task: "task-042",
+      action_key: "task-042:chaser",
+    });
+    assert.equal(appended.ok, true, `${event.event} must pass the write boundary`);
+  }
+
+  // Even a policy re-attested in between: absence is not a claim about which
+  // rules governed, so there is nothing to disagree with.
+  writeFileSync(unit.policyPath, POLICY_EDITED, "utf8");
+  attest(unit, at(3));
+
+  const spent = consumeHarnessGrant(
+    unit.logPath,
+    "task-042:chaser",
+    "agent:claude",
+    at(4),
+    unit.options,
+  );
+  assert.equal(spent.ok, true, spent.ok ? "" : spent.message);
+  if (!spent.ok) throw new Error("unreachable");
+  assert.equal(spent.record.event, "execution.started");
+  assertClean(unit);
+});
+
+// ===========================================================================
 // one policy read per gate operation (APRV-142)
 // ===========================================================================
 
