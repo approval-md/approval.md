@@ -412,6 +412,13 @@ const AGENT_FACING: readonly string[] = [
   "log verify",
   "log tail",
   "log export",
+  // APRV-125. The two verbs that move the log FILE are agent-facing on purpose:
+  // they establish no human authority, and withholding them would put the
+  // ritual they replace back into an agent's hands as raw shell. Whether an
+  // agent may run one is decided by the policy, through their own classes
+  // (`log.sync`, `log.advance`), and not by this marker.
+  "log sync",
+  "log advance",
   "policy check",
   "policy test",
   "payload hash",

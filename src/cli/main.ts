@@ -70,6 +70,7 @@ import { commandHook } from "./hook.js";
 import { commandImport } from "./import.js";
 import { commandInstructions } from "./instructions.js";
 import { commandInit } from "./init.js";
+import { commandLogAdvance, commandLogSync } from "./log-verbs.js";
 import { commandMcp } from "./mcp.js";
 import { commandPayload } from "./payload.js";
 import { commandPolicy } from "./policy.js";
@@ -561,6 +562,13 @@ function commandLog(argv: string[], streams: Streams, cwd: string): number {
       return commandTail(rest, streams, cwd);
     case "export":
       return commandExport(rest, streams, cwd);
+    // APRV-125. The two verbs that move the log FILE rather than reading it: a
+    // fast-forward pull with a chain reconcile, and the commit-and-push of what
+    // the chain has grown since. Neither appends an event.
+    case "sync":
+      return commandLogSync(rest, streams, cwd);
+    case "advance":
+      return commandLogAdvance(rest, streams, cwd);
     default:
       return usageError(
         streams,

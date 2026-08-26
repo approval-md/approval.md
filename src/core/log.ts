@@ -199,6 +199,15 @@ export interface AppendOptions extends ValidateOptions {
 const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
 const DEFAULT_LOCK_RETRY_MS = 20;
 
+/** How long a whole-operation lock holder waits before reporting `lock-timeout`. */
+export interface LockOptions {
+  lockTimeoutMs?: number;
+  lockRetryMs?: number;
+}
+
+/** The outcome of {@link withAppendLock}: the callback's value, or a refusal. */
+export type LockedResult<T> = { ok: true; value: T } | { ok: false; error: AppendError };
+
 /**
  * Strip `hash` and canonicalize. Exported shape is documented on
  * {@link computeRecordHash}; kept separate so hashing and verification cannot
@@ -465,24 +474,58 @@ function buildRecord(input: EventInput, seq: number, prev: string | null): Event
  * something read from the log: the head is compared under the lock and a moved
  * head refuses `head-moved` without writing.
  */
+/**
+ * Hold `<logPath>.lock` for the whole of `run`, then release it.
+ *
+ * The lockfile exists so that a read-tail → compute → write sequence cannot
+ * interleave with another writer's. Some operations need that exclusion over a
+ * span much longer than one append: `approval log sync` (APRV-125) reads the
+ * chain, moves the file aside, lets git advance the committed baseline, and
+ * puts the chain back, and an append landing anywhere inside that window is
+ * exactly the interleaving that forked this repository's own log on 2026-08-20.
+ *
+ * The callback is handed no lock handle and no write primitive: this module
+ * still exposes nothing that mutates an existing byte, and a caller holding the
+ * lock has the same append-only API everyone else has. What it gains is the
+ * guarantee that nobody else is appending while it works.
+ */
+export function withAppendLock<T>(
+  logPath: string,
+  run: () => T,
+  options: LockOptions = {},
+): LockedResult<T> {
+  try {
+    mkdirSync(dirname(logPath), { recursive: true });
+  } catch (cause) {
+    return {
+      ok: false,
+      error: {
+        code: "io",
+        message: `log directory for ${logPath} could not be created: ${errorMessage(cause)}`,
+      },
+    };
+  }
+
+  const lock = acquireLock(
+    logPath,
+    options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS,
+    options.lockRetryMs ?? DEFAULT_LOCK_RETRY_MS,
+  );
+  if (!lock.ok) return { ok: false, error: lock.error };
+
+  try {
+    return { ok: true, value: run() };
+  } finally {
+    releaseLock(lock.path);
+  }
+}
+
 export function appendEvent(
   logPath: string,
   input: EventInput,
   options: AppendOptions = {},
 ): AppendResult {
-  const lockTimeoutMs = options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
-  const lockRetryMs = options.lockRetryMs ?? DEFAULT_LOCK_RETRY_MS;
-
-  try {
-    mkdirSync(dirname(logPath), { recursive: true });
-  } catch (cause) {
-    return fail("io", `log directory for ${logPath} could not be created: ${errorMessage(cause)}`);
-  }
-
-  const lock = acquireLock(logPath, lockTimeoutMs, lockRetryMs);
-  if (!lock.ok) return { ok: false, error: lock.error };
-
-  try {
+  const held = withAppendLock<AppendResult>(logPath, () => {
     const tail = readTail(logPath);
     if (!tail.ok) return { ok: false, error: tail.error };
 
@@ -541,7 +584,7 @@ export function appendEvent(
     }
 
     return { ok: true, record, line };
-  } finally {
-    releaseLock(lock.path);
-  }
+  }, options);
+
+  return held.ok ? held.value : { ok: false, error: held.error };
 }

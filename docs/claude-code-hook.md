@@ -133,8 +133,8 @@ an addition).
 | `npm-network` | npm, pnpm, yarn, bun | audit \| outdated \| view \| search \| info \| login \| whoami | network.call |
 | `npm-list` | npm, pnpm, yarn, bun | ls \| list \| config \| help | read.shell |
 | `npm-script` | npm, pnpm, yarn, bun | run \| run-script \| test \| start \| build \| lint \| exec | files.write.workspace |
-| `node` | node | (any) | files.write.workspace, gate.self |
-| `approval` | approval | (any) | gate.self |
+| `node` | node | (any) | files.write.workspace, gate.self, log.sync, log.advance |
+| `approval` | approval | (any) | gate.self, log.sync, log.advance |
 | `workspace-tool` | npx, tsx, ts-node, tsc, oxlint, eslint, prettier, vitest, jest, backlog, make | (any) | files.write.workspace |
 | `workspace-write` | mkdir, cp, mv, touch, tee, ln, chmod, truncate, rmdir | (any) | files.write.workspace |
 | `rm` | rm | (any) | files.write.workspace, files.delete.out_of_scope |
@@ -167,6 +167,11 @@ Four overrides sit on top of the table:
 - **`gate.self`.** The `approval` CLI (and `node …/dist/src/cli/main.js`) is the
   enforcement path; gating it with itself would deadlock. It is allowed and
   nothing is logged.
+- **`log.sync` / `log.advance`.** The two exceptions to that (APRV-125).
+  `approval log sync` and `approval log advance` move the log FILE and drive git
+  against a shared remote, which is a real-world effect, so they classify by
+  name and the policy decides. Under a policy that declares neither, the
+  unknown-class default applies and both are manual.
 - **`rewrite-unpublished` → `vcs.commit.branch`.** A local rewrite of history
   this checkout never published is a commit. See below.
 

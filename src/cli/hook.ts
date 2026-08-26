@@ -86,6 +86,7 @@ import { resolve as resolvePolicy } from "../core/policy-match.js";
 import { readVerifiedRecords, requestState, type WithdrawReason } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
+import { primaryRoot as resolvePrimaryRoot } from "./git-scope.js";
 import { HOOK_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
@@ -195,14 +196,13 @@ function usageError(streams: Streams, message: string): number {
  * is a value. When git is absent, or `cwd` is not a repository at all, this
  * returns `null` and the caller falls back to `cwd` — today's behaviour, which
  * is what a non-git deployment of the hook has always relied on.
+ *
+ * APRV-125 gave the resolution two more callers (`log sync` and `log advance`,
+ * which refuse outside the primary rather than falling back), so the
+ * implementation moved to `cli/git-scope.ts`. This alias keeps the hook reading
+ * the same answer they read.
  */
-function primaryRoot(cwd: string): string | null {
-  const result = spawnSync("git", ["rev-parse", "--git-common-dir"], { cwd, encoding: "utf8" });
-  if (result.error !== undefined || result.status !== 0) return null;
-  const common = result.stdout.trim();
-  if (common.length === 0) return null;
-  return dirname(absolute(common, cwd));
-}
+const primaryRoot = resolvePrimaryRoot;
 
 /** Where the hook reads policy from and appends to, resolved together. */
 interface HookScope {

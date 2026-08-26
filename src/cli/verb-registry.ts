@@ -398,6 +398,121 @@ const VERBS: VerbSpec[] = [
     exit_codes: [OK, { code: 1, meaning: "the log is corrupt; nothing was printed" }, USAGE, TORN, IO],
   },
 
+  // APRV-125. The two verbs that move the log FILE. `human_only` is false on
+  // both: an agent may run them, and the policy decides whether it may — they
+  // classify as `log.sync` and `log.advance` rather than as the gate's own
+  // pass-through, precisely so a policy can hold them.
+  {
+    name: "log",
+    subcommand: "sync",
+    purpose:
+      "Fast-forward the committed log and put the working chain back, safely. Holds the append lockfile for the WHOLE operation, verifies the chain, snapshots events.jsonl inside .approval/ (never `git stash`), fetches and merges --ff-only, then reconciles: the committed chain must be a prefix of the snapshot, equal to it, or an extension of it, and anything else refuses `log-diverged` naming both heads and the first divergent seq. Chains are never merged or re-chained. QUEUE.md and the index are REBUILT from the reconciled log rather than restored, any failure at any step restores the snapshot before exiting, and no event is appended. PRIMARY CHECKOUT ONLY.",
+    human_only: false,
+    input: input({
+      flags: { "--remote": "string", "--branch": "string", ...JSON_FLAG, ...HELP_FLAGS },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        root: STRING,
+        log: STRING,
+        remote: STRING,
+        branch: STRING,
+        commit: object({ before: STRING, after: STRING, pulled: INTEGER }, [
+          "before",
+          "after",
+          "pulled",
+        ]),
+        head: object({ before: HEAD, after: HEAD }, ["before", "after"]),
+        relation: STRING,
+        ahead: INTEGER,
+        behind: INTEGER,
+        restored: BOOLEAN,
+        queue: object({ path: STRING, bytes: INTEGER }, ["path", "bytes"]),
+        index: STRING,
+      },
+      [
+        "ok",
+        "root",
+        "log",
+        "remote",
+        "branch",
+        "commit",
+        "head",
+        "relation",
+        "ahead",
+        "behind",
+        "restored",
+        "queue",
+        "index",
+      ],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      OK,
+      { code: 1, meaning: "the chains diverged, or a log did not verify; nothing was changed" },
+      USAGE,
+      IO,
+    ],
+  },
+
+  {
+    name: "log",
+    subcommand: "advance",
+    purpose:
+      "Commit the log's uncommitted records and push them to a records branch. Verifies the chain under the append lock, stages EXACTLY .approval/log/events.jsonl, .approval/QUEUE.md and .approval/payloads/ (any other staged path refuses `log-advance-dirty-stage` rather than being unstaged), commits on the branch you are standing on with the seq range in the message, and pushes that commit by refspec to `--branch` (default records-log-<date>), never to main. It CHECKS OUT NOTHING and appends no event. `--pr` opens the pull request through the ordinary gh path; `--dry-run` reports and writes nothing. PRIMARY CHECKOUT ONLY.",
+    human_only: false,
+    input: input({
+      flags: {
+        "--remote": "string",
+        "--branch": "string",
+        "--pr": "boolean",
+        "--dry-run": "boolean",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        root: STRING,
+        branch: STRING,
+        recordsBranch: STRING,
+        remote: STRING,
+        range: nullable(object({ from: INTEGER, to: INTEGER }, ["from", "to"])),
+        head: object({ committed: HEAD, working: HEAD }, ["committed", "working"]),
+        staged: arrayOf(STRING),
+        message: STRING,
+        commit: nullable(STRING),
+        pushed: BOOLEAN,
+        prUrl: nullable(STRING),
+        dryRun: BOOLEAN,
+      },
+      [
+        "ok",
+        "root",
+        "branch",
+        "recordsBranch",
+        "remote",
+        "range",
+        "head",
+        "staged",
+        "message",
+        "commit",
+        "pushed",
+        "prUrl",
+        "dryRun",
+      ],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      OK,
+      { code: 1, meaning: "the log did not verify, or the chains diverged; nothing was committed" },
+      USAGE,
+      IO,
+    ],
+  },
+
   {
     name: "policy",
     subcommand: "check",
