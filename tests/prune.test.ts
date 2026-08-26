@@ -242,7 +242,7 @@ test("revoked and executed are terminal too, and executed is dated from the log"
   const started = startExecution(
     executed.logPath,
     SUPERVISED_ACTION,
-    { policy: { file: executed.policyPath } },
+    { policy: { file: executed.policyPath }, presentedPayloadHash: DRAFT_HASH },
     at(4),
     AGENT,
   );

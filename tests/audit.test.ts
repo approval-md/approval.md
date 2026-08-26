@@ -187,9 +187,19 @@ function ready(audit: string[] = SAMPLE_EVERYTHING): Case {
   return unit;
 }
 
-/** Start a supervised execution. No token: supervised actions have no grant. */
+/**
+ * Start a supervised execution. No token: supervised actions have no grant, so
+ * the declaration is what authorizes and the executor states its bytes against
+ * it (APRV-140).
+ */
 function startSupervised(unit: Case, key: string, minutes: number): void {
-  const started = startExecution(unit.logPath, key, unit.options, at(minutes), "agent:claude");
+  const started = startExecution(
+    unit.logPath,
+    key,
+    { ...unit.options, presentedPayloadHash: bindingFor(key) },
+    at(minutes),
+    "agent:claude",
+  );
   assert.equal(started.ok, true, started.ok ? "" : started.message);
 }
 

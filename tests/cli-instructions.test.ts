@@ -44,6 +44,7 @@ import {
   type JsonSchema,
   type VerbSpec,
 } from "../src/cli/verb-registry.js";
+import { runPayloadHash } from "../src/core/payload.js";
 
 const addFormats = (addFormatsModule as unknown as { default: FormatsPlugin }).default;
 
@@ -150,7 +151,15 @@ test("registry: the shared error shape accepts both failure forms", () => {
 // (b) the both-directions pin: real --json output validates
 // ---------------------------------------------------------------------------
 
-const TASK_FILE = [
+/** The command the captured `run` spawns, and therefore what it binds to. */
+const CHILD = [process.execPath, "-e", "0"];
+
+/**
+ * APRV-140: `approval run` recomputes the binding from the argv and cwd it will
+ * spawn, so the declaration commits to {@link CHILD} rather than to a stand-in.
+ */
+function taskFile(binding: string): string {
+  return [
   "---",
   "id: task-042",
   "title: Chase deposit refund",
@@ -168,12 +177,13 @@ const TASK_FILE = [
   "      reversible: false",
   "      est_cost_usd: 0.02",
   '      idempotency_key: "task-042:chaser"',
-  `      payload_hash: "${"3".repeat(64)}"`,
+  `      payload_hash: "${binding}"`,
   "---",
   "",
   "Body.",
   "",
-].join("\n");
+  ].join("\n");
+}
 
 const AGENTS_MD = [
   "# Permissions",
@@ -217,7 +227,7 @@ function captureLiveOutputs(): Capture[] {
   capture("init", "fresh directory", runCli(["init", "--json"], dir, env));
   capture("policy attest", "first attestation", runCli(["policy", "attest", "--json"], dir, env));
 
-  writeFileSync(join(dir, "task-042.md"), TASK_FILE);
+  writeFileSync(join(dir, "task-042.md"), taskFile(runPayloadHash(CHILD, dir)));
   writeFileSync(join(dir, "payload.json"), '{"to":"b@example.com","subject":"hi"}\n');
   writeFileSync(join(dir, "agents.md"), AGENTS_MD);
 
@@ -286,19 +296,7 @@ function captureLiveOutputs(): Capture[] {
     "run",
     "spends the token; summary on stderr",
     runCli(
-      [
-        "run",
-        "task-042:chaser",
-        "--token",
-        token,
-        "--payload-hash",
-        "3".repeat(64),
-        "--json",
-        "--",
-        process.execPath,
-        "-e",
-        "0",
-      ],
+      ["run", "task-042:chaser", "--token", token, "--json", "--", ...CHILD],
       dir,
       env,
     ),

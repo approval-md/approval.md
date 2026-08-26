@@ -389,12 +389,26 @@ export function commandRun(
     );
   }
 
-  // Content binding (amended SPEC.md §6.2, §10). §6.2 defines `approval run`'s
+  // Content binding (amended SPEC.md §6.2, §10.4). §6.2 defines `approval run`'s
   // payload as "the argv array and cwd", so run computes the hash itself from
-  // the command it is about to spawn — an executor that had to be *told* what
-  // it was running could be told wrong. `--payload-hash` overrides it for
-  // adapters whose real payload is something else (a message body, a proposed
-  // record) and who wrap `run` rather than calling core.
+  // the command it is about to spawn — an executor that had to be *told* what it
+  // was running could be told wrong.
+  //
+  // APRV-140 (red-team F3) closes the door that used to be here. `--payload-hash`
+  // was an OVERRIDE: when it was present the computation was skipped entirely,
+  // so presenting the grant's own hash while spawning arbitrary argv spent the
+  // token and ran something nobody approved. Adapters whose real payload is
+  // something else (a message body, a proposed record) were the reason, but they
+  // do not need this door: `src/adapters/contract.ts` hashes the bytes and calls
+  // core directly, and `approval consume` spends a token for a payload this
+  // process is not spawning. Neither is a plain `approval run` invocation, which
+  // is what an agent has.
+  //
+  // So the flag survives as a CHECK, never a substitute: run always recomputes,
+  // and a supplied value must equal what will actually spawn. The refusal is
+  // `payload-mismatch` — the same code the manual path already emits for the
+  // same fact, because an agent's response to it is the same either way — and it
+  // happens before `startExecution`, so nothing is appended and no token moves.
   const hashFlag = stringFlag(flags, "--payload-hash");
   if (hashFlag !== null && !isPayloadHash(hashFlag)) {
     return usageError(
@@ -404,7 +418,14 @@ export function commandRun(
       RUN_HELP,
     );
   }
-  const payloadHash = hashFlag ?? runPayloadHash(childArgv, cwd);
+  const payloadHash = runPayloadHash(childArgv, cwd);
+  if (hashFlag !== null && hashFlag !== payloadHash) {
+    return emitRefusal(streams, json, {
+      ok: false,
+      code: "payload-mismatch",
+      message: `--payload-hash ${hashFlag} is not the hash of the command this would spawn: ${JSON.stringify(childArgv[0])} and ${childArgv.length - 1} argument(s) in ${cwd} hash to ${payloadHash}. \`approval run\` recomputes the binding from the argv and cwd it is about to spawn and never accepts a caller's substitute for it (amended SPEC.md §10.4, APRV-140); the flag states what you believe you are running, and this is a refusal to run something else. Nothing was appended.`,
+    });
+  }
 
   // execution.started is appended HERE, before the child exists. A crash from
   // this line until the finish below leaves a dangling execution, which

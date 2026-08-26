@@ -17,7 +17,9 @@
  *    differently and in this order: the action must be declared in a
  *    `task.registered` record, the policy must be attested, loop safety must not
  *    have escalated the task, no execution may already have started for the key,
- *    and the budget must pass. Only then is `execution.started` appended.
+ *    the executor's recomputed `payload_hash` must equal the one the declaration
+ *    bound to (APRV-140), and the budget must pass. Only then is
+ *    `execution.started` appended.
  * 2. **`started` precedes the side effect.** The CLI's `approval run` appends
  *    the start event *before* it spawns the child, never after. A log that
  *    records an execution only once it succeeded is a log that cannot tell you
@@ -81,6 +83,7 @@ import {
   type LogHead,
 } from "./log.js";
 import { isLoopEscalated } from "./loop.js";
+import { isPayloadHash } from "./payload.js";
 import { loadPolicy, POLICY_FILENAMES, type Autonomy, type LoadPolicyOptions } from "./policy-load.js";
 import { resolve } from "./policy-match.js";
 import { readVerifiedRecords, type LogReadRefusal } from "./state.js";
@@ -199,10 +202,15 @@ export interface ExecuteOptions extends ClockOptions {
   token?: string;
   /**
    * The hash of the payload about to be executed (amended SPEC.md §10, A1),
-   * forwarded to `core/token.ts` on the manual path. `approval run` computes it
-   * with `runPayloadHash(argv, cwd)`; an adapter with a different payload
-   * computes its own. REQUIRED whenever the grant bound to bytes, which under
-   * A1 is every manual grant.
+   * forwarded to `core/token.ts` on the manual path and checked against the
+   * registered declaration off it (APRV-140). `approval run` computes it with
+   * `runPayloadHash(argv, cwd)`; an adapter with a different payload computes
+   * its own. REQUIRED on every path: under A1 every manual grant binds to
+   * bytes, and under APRV-140 so does every declaration that executes.
+   *
+   * It is never read from the log. A value read from the log would prove
+   * nothing: the point is that the executor states, independently, what it
+   * holds, and the runtime compares.
    */
   presentedPayloadHash?: string;
   /** Where to find `APPROVAL.md`. Same semantics as `loadPolicy`. */
@@ -310,6 +318,13 @@ export interface Declaration {
   est_cost_usd: number;
   reversible: boolean | null;
   summary: string | null;
+  /**
+   * The content binding the registration declared (amended SPEC.md §6.2,
+   * APRV-140), or `null` when it declared none. Off the manual path this is the
+   * ONLY thing an execution can be checked against: there is no grant, so the
+   * declaration is the whole of what was authorized.
+   */
+  payload_hash: string | null;
 }
 
 /**
@@ -347,12 +362,14 @@ export function findDeclaration(
       const cost = item["est_cost_usd"];
       const reversible = item["reversible"];
       const summary = item["summary"];
+      const binding = item["payload_hash"];
       found = {
         task,
         class: cls,
         est_cost_usd: typeof cost === "number" && Number.isFinite(cost) ? cost : 0,
         reversible: typeof reversible === "boolean" ? reversible : null,
         summary: typeof summary === "string" ? summary : null,
+        payload_hash: isPayloadHash(binding) ? binding : null,
       };
     }
   }
@@ -427,10 +444,12 @@ export type StartResult =
  *    policy, and re-checking would refuse an execution a human already
  *    authorized because a file changed afterwards.
  * 5. **Non-manual path**, in order: attestation → loop escalation → idempotency
- *    → budgets → append. Attestation first because an unverified policy cannot
- *    answer the autonomy question it was just asked to answer; budgets last
- *    because a budget refusal *writes* (`budget.exceeded`), and the cheaper
- *    refusals must leave the log untouched.
+ *    → content binding → budgets → append. Attestation first because an
+ *    unverified policy cannot answer the autonomy question it was just asked to
+ *    answer; the binding (APRV-140) after the free checks and before the
+ *    charging one; budgets last because a budget refusal *writes*
+ *    (`budget.exceeded`), and the cheaper refusals must leave the log
+ *    untouched.
  *
  * `actor` is not pre-validated: the event schema is the authority on actor
  * shape, and a malformed one is refused at the write boundary as
@@ -533,6 +552,40 @@ export function startExecution(
     );
   }
 
+  // Content binding off the manual path (amended SPEC.md §6.2/§10.4, APRV-140).
+  //
+  // Until this, a supervised or autonomous action executed whatever bytes the
+  // executor happened to hold: no grant exists on this path, so nothing was
+  // compared, and `approval run <key> -- <anything>` under an autonomous class
+  // was unauthenticated arbitrary execution (the residual APRV-138 left open).
+  // The declaration is what authorizes here, so the declaration is what the
+  // executor is checked against: it states its bytes, and they must be the ones
+  // the registered action named.
+  //
+  // A declaration carrying NO binding is refused rather than waved through, for
+  // the reason `core/token.ts` refuses an unbound grant: an action that can
+  // execute without stating its bytes makes the binding optional in practice,
+  // and ambiguity resolves to the stricter path. The repair is to declare
+  // `payload_hash` on the action and register the task again.
+  //
+  // Checked before budgets, because a budget refusal WRITES and this one must
+  // leave the log exactly as it found it.
+  const presented = options.presentedPayloadHash;
+  if (declared.payload_hash === null) {
+    return refuse(
+      "payload-mismatch",
+      `action ${actionKey} resolves to ${resolution.autonomy} and its registered declaration carries no payload_hash. Off the manual path there is no grant, so the declaration is the only statement of what was authorized: amended SPEC.md §6.2 (APRV-140) makes the hash MUST for every action that executes, and an execution that cannot be checked against anything is not an authorized execution. Declare payload_hash (SHA-256 over the RFC 8785 canonical serialization of the concrete payload) on the action and register the task again.`,
+    );
+  }
+  if (!isPayloadHash(presented) || presented !== declared.payload_hash) {
+    return refuse(
+      "payload-mismatch",
+      presented === undefined
+        ? `action ${actionKey} is declared with payload_hash ${declared.payload_hash} and this executor presented none. Amended SPEC.md §10.4: an executor MUST recompute the hash of the payload it is about to execute; a start that cannot state its bytes cannot be shown to be executing the declared ones. Nothing was appended.`
+        : `the payload presented for ${actionKey} is not the one declared: the registration binds to ${declared.payload_hash}, this executor presented ${JSON.stringify(presented)}. A declaration authorizes specific bytes; changing them requires registering the action again. Nothing was appended.`,
+    );
+  }
+
   const budget = evaluateBudgetsWithTask(
     records,
     {
@@ -589,7 +642,20 @@ export function startExecution(
       action_key: actionKey,
       // The budgets contract: class and est_cost_usd on every start event. This
       // is the charge point for supervised/autonomous actions.
-      payload: { class: declared.class, est_cost_usd: declared.est_cost_usd },
+      //
+      // APRV-140 adds the third field: the hash of the bytes that are about to
+      // run, recomputed by the executor and checked against the declaration
+      // just above. It is what makes the log say WHAT ran rather than only that
+      // something did — for `approval run` it is `runPayloadHash(argv, cwd)`,
+      // which an operator holding the command can reproduce exactly. The argv
+      // itself is deliberately NOT recorded: a command line carries whatever an
+      // agent put on it, secrets included, and §11.1's third invariant says the
+      // log holds hashes of such material rather than the material.
+      payload: {
+        class: declared.class,
+        est_cost_usd: declared.est_cost_usd,
+        payload_hash: declared.payload_hash,
+      },
     },
     options,
     read.head,

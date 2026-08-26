@@ -143,6 +143,9 @@ const ENVELOPE = {
       reversible: true,
       est_cost_usd: 0,
       idempotency_key: "task-042:peek",
+      // APRV-140: an autonomous action binds to bytes as well. There is no
+      // grant on this path, so the declaration is the whole of what authorizes.
+      payload_hash: PAYLOAD_HASH,
     },
     {
       class: "financial.spend",
@@ -450,7 +453,11 @@ test("execution start: an autonomous action whose start cannot be recorded does 
     startExecution(
       unit.logPath,
       "task-042:peek",
-      { policy: { file: unit.policyPath }, append: { ...IMPATIENT } },
+      {
+        policy: { file: unit.policyPath },
+        presentedPayloadHash: PAYLOAD_HASH,
+        append: { ...IMPATIENT },
+      },
       at(2),
       "agent:claude",
     ),
@@ -464,7 +471,7 @@ test("execution start: an autonomous action whose start cannot be recorded does 
   const started = startExecution(
     unit.logPath,
     "task-042:peek",
-    { policy: { file: unit.policyPath } },
+    { policy: { file: unit.policyPath }, presentedPayloadHash: PAYLOAD_HASH },
     at(3),
     "agent:claude",
   );
@@ -479,7 +486,11 @@ test("execution start: a schema refusal at the write boundary is also append-fai
   const refused = startExecution(
     unit.logPath,
     "task-042:peek",
-    { policy: { file: unit.policyPath }, schemaDir: schemaDirRejecting("execution.started") },
+    {
+      policy: { file: unit.policyPath },
+      presentedPayloadHash: PAYLOAD_HASH,
+      schemaDir: schemaDirRejecting("execution.started"),
+    },
     at(2),
     "agent:claude",
   );

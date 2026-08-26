@@ -946,14 +946,23 @@ actually observed, with `approval execution resolve`, which appends
 `attested_by_human` true, so no reader mistakes an observation for a
 measurement.
 
-Content binding (amended SPEC.md §6.2, §10): run computes the hash of the argv
-and cwd it is about to spawn and presents it when spending the token. By default
-that is right, because the command IS the action: an executor that had to be
-told what it was running could be told wrong. An action whose grant bound to
-content instead — an email body, a record write, a message and its recipients —
-must pass `--payload-hash` with that content's hash. If the grant bound to
-different bytes the spend is refused `payload-mismatch`, nothing is appended,
-and the token stays live. A grant approves specific bytes.
+Content binding (amended SPEC.md §6.2, §10.4): run computes the hash of the argv
+and cwd it is about to spawn, always, and presents that. The command IS the
+action here, and an executor that had to be told what it was running could be
+told wrong. `--payload-hash` is consequently a CHECK and never a substitute
+(APRV-140): a value differing from the recomputed one is refused
+`payload-mismatch` before the child exists and before anything is appended. An
+action whose payload is content rather than an argv (an email body, a record
+write, a message and its recipients) is executed through the adapter contract of
+§10.4, `approval adapter email`, which hashes those bytes itself; a token for
+such a grant is spent with `approval consume`, never by spawning a command that
+is not the approved bytes.
+
+The binding is required off the manual path too. A supervised or autonomous
+action has no grant, so its registered declaration is the whole of what
+authorizes it: run presents the recomputed hash, `execution.started` records it,
+and a declaration carrying no `payload_hash` (or an executor whose bytes differ
+from it) is refused `payload-mismatch` with the log untouched.
 
 Exit 5 is an addition to the frozen table, emitted by this verb alone, and it is
 distinct from 1 because the repair is distinct: request the action, have a human

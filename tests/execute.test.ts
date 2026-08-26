@@ -147,6 +147,19 @@ function bindingFor(key: string): string {
   return createHash("sha256").update(`payload:${key}`, "utf8").digest("hex");
 }
 
+/**
+ * `unit.options` plus the binding an executor must now state (APRV-140).
+ *
+ * Off the manual path the declaration is the whole of what was authorized, so
+ * `startExecution` requires the executor to say which bytes it holds and
+ * compares them against it. Every start meant to SUCCEED therefore goes through
+ * here; the cases that pass bare `unit.options` are the ones pinning what
+ * happens when it does not.
+ */
+function bound(unit: Case, key: string): ExecuteOptions {
+  return { ...unit.options, presentedPayloadHash: bindingFor(key) };
+}
+
 const ENVELOPE = {
   origin: { app: "example-capture", created_by: "human:carter" },
   state: "proposed",
@@ -358,7 +371,7 @@ test("a supervised action starts with no token and charges its budget at the sta
   const started = startExecution(
     unit.logPath,
     "task-042:draft",
-    unit.options,
+    bound(unit, "task-042:draft"),
     at(2),
     "agent:claude",
   );
@@ -366,9 +379,13 @@ test("a supervised action starts with no token and charges its budget at the sta
   if (!started.ok) throw new Error("unreachable");
   assert.equal(started.autonomy, "supervised");
   assert.equal(started.tokenSha256, undefined);
+  // APRV-140: the start event names the bytes as well as the price. The hash is
+  // the one the executor recomputed and the declaration bound to, so the log
+  // says WHAT ran and not only that something did.
   assert.deepEqual(started.record.payload, {
     class: "files.write.local",
     est_cost_usd: 0.01,
+    payload_hash: bindingFor("task-042:draft"),
   });
   assert.deepEqual(eventTypes(unit), ["policy.updated", "task.registered", "execution.started"]);
   assertClean(unit);
@@ -376,11 +393,11 @@ test("a supervised action starts with no token and charges its budget at the sta
 
 test("the start event is what a budget window sees, and an exceeded budget refuses AFTER logging", () => {
   const unit = ready(POLICY_TIGHT); // global.daily_actions: 1
-  const first = startExecution(unit.logPath, "task-042:draft", unit.options, at(2), "agent:claude");
+  const first = startExecution(unit.logPath, "task-042:draft", bound(unit, "task-042:draft"), at(2), "agent:claude");
   assert.equal(first.ok, true);
 
   const refusal = asRefusal(
-    startExecution(unit.logPath, "task-042:draft2", unit.options, at(3), "agent:claude"),
+    startExecution(unit.logPath, "task-042:draft2", bound(unit, "task-042:draft2"), at(3), "agent:claude"),
   );
   assert.equal(refusal.code, "budget-exceeded");
   assert.equal(refusal.verdicts?.[0]?.limit, "global.daily_actions");
@@ -401,7 +418,7 @@ test("a supervised action refuses when the policy bytes changed since attestatio
   writeFileSync(unit.policyPath, `${POLICY}\n# edited after attestation\n`, "utf8");
 
   const refusal = asRefusal(
-    startExecution(unit.logPath, "task-042:draft", unit.options, at(2), "agent:claude"),
+    startExecution(unit.logPath, "task-042:draft", bound(unit, "task-042:draft"), at(2), "agent:claude"),
   );
   assert.equal(refusal.code, "policy-not-attested");
   assert.equal(refusal.detail, "hash-mismatch");
@@ -411,11 +428,11 @@ test("a supervised action refuses when the policy bytes changed since attestatio
 test("a second start for the same non-manual key refuses already-executed", () => {
   const unit = ready();
   assert.equal(
-    startExecution(unit.logPath, "task-042:draft", unit.options, at(2), "agent:claude").ok,
+    startExecution(unit.logPath, "task-042:draft", bound(unit, "task-042:draft"), at(2), "agent:claude").ok,
     true,
   );
   const refusal = asRefusal(
-    startExecution(unit.logPath, "task-042:draft", unit.options, at(3), "agent:claude"),
+    startExecution(unit.logPath, "task-042:draft", bound(unit, "task-042:draft"), at(3), "agent:claude"),
   );
   assert.equal(refusal.code, "already-executed");
   assertClean(unit);
@@ -431,7 +448,7 @@ test("a spliced-out record refuses log-corrupt: nothing executes on an unverifia
   const before = readFileSync(unit.logPath, "utf8");
 
   const refusal = asRefusal(
-    startExecution(unit.logPath, "task-042:draft", unit.options, at(2), "agent:claude"),
+    startExecution(unit.logPath, "task-042:draft", bound(unit, "task-042:draft"), at(2), "agent:claude"),
   );
   assert.equal(refusal.code, "log-corrupt");
   assert.match(refusal.message, /does not verify/);
@@ -450,7 +467,7 @@ test("finishExecution records completed for 0 and failed with the real exit code
   ] as const) {
     const unit = ready();
     assert.equal(
-      startExecution(unit.logPath, "task-042:draft", unit.options, at(2), "agent:claude").ok,
+      startExecution(unit.logPath, "task-042:draft", bound(unit, "task-042:draft"), at(2), "agent:claude").ok,
       true,
     );
     const finished = finishExecution(
@@ -477,7 +494,7 @@ test("finishExecution refuses not-started and already-finished, writing nothing 
   assert.equal(cold.code, "not-started");
 
   assert.equal(
-    startExecution(unit.logPath, "task-042:draft", unit.options, at(2), "agent:claude").ok,
+    startExecution(unit.logPath, "task-042:draft", bound(unit, "task-042:draft"), at(2), "agent:claude").ok,
     true,
   );
   assert.equal(finishExecution(unit.logPath, "task-042:draft", 0, at(3), "agent:claude").ok, true);
@@ -498,7 +515,7 @@ test("a start with no finish is dangling, and nothing repairs it on its own", ()
   const started = startExecution(
     unit.logPath,
     "task-042:draft",
-    unit.options,
+    bound(unit, "task-042:draft"),
     at(2),
     "agent:claude",
   );
@@ -517,7 +534,7 @@ test("a start with no finish is dangling, and nothing repairs it on its own", ()
 
   // A second run does not reconcile the first: it refuses.
   const again = asRefusal(
-    startExecution(unit.logPath, "task-042:draft", unit.options, at(3), "agent:claude"),
+    startExecution(unit.logPath, "task-042:draft", bound(unit, "task-042:draft"), at(3), "agent:claude"),
   );
   assert.equal(again.code, "already-executed");
   assert.equal(danglingExecutions(records(unit)).length, 1, "the refusal changed the state");
@@ -532,12 +549,13 @@ test("a start with no finish is dangling, and nothing repairs it on its own", ()
 test("danglingExecutions is per action key and only the latest cycle counts", () => {
   const unit = ready();
   assert.equal(
-    startExecution(unit.logPath, "task-042:draft", unit.options, at(2), "agent:claude").ok,
+    startExecution(unit.logPath, "task-042:draft", bound(unit, "task-042:draft"), at(2), "agent:claude").ok,
     true,
   );
   assert.equal(finishExecution(unit.logPath, "task-042:draft", 0, at(3), "agent:claude").ok, true);
   assert.equal(
-    startExecution(unit.logPath, "task-042:draft2", unit.options, at(4), "agent:claude").ok,
+    startExecution(unit.logPath, "task-042:draft2", bound(unit, "task-042:draft2"), at(4), "agent:claude")
+      .ok,
     true,
   );
 
@@ -554,7 +572,7 @@ test("danglingExecutions is per action key and only the latest cycle counts", ()
 /** Start and fail one supervised action, through the real append path. */
 function failOnce(unit: Case, actionKey: string, minute: number): void {
   assert.equal(
-    startExecution(unit.logPath, actionKey, unit.options, at(minute), "agent:claude").ok,
+    startExecution(unit.logPath, actionKey, bound(unit, actionKey), at(minute), "agent:claude").ok,
     true,
   );
   assert.equal(
@@ -589,7 +607,8 @@ test("three consecutive execution.failed escalate the task; a completed resets t
   failOnce(fresh, "task-042:draft", 2);
   failOnce(fresh, "task-042:draft2", 4);
   assert.equal(
-    startExecution(fresh.logPath, "task-042:draft3", fresh.options, at(6), "agent:claude").ok,
+    startExecution(fresh.logPath, "task-042:draft3", bound(fresh, "task-042:draft3"), at(6), "agent:claude")
+      .ok,
     true,
   );
   assert.equal(
@@ -609,7 +628,7 @@ test("an escalated task refuses a supervised start, and the gate refuses the req
   failOnce(unit, "task-042:draft3", 6);
 
   const refusal = asRefusal(
-    startExecution(unit.logPath, "task-042:draft4", unit.options, at(8), "agent:claude"),
+    startExecution(unit.logPath, "task-042:draft4", bound(unit, "task-042:draft4"), at(8), "agent:claude"),
   );
   assert.equal(refusal.code, "loop-escalated");
   assert.match(refusal.message, /§10\.2/u);
@@ -667,6 +686,7 @@ test("findDeclaration reads the class from the log, not from the task file", () 
     est_cost_usd: 0.02,
     reversible: false,
     summary: "Send deposit chaser",
+    payload_hash: bindingFor("task-042:chaser"),
   });
   assert.equal(findDeclaration(records(unit), "task-042:absent"), null);
 });
@@ -731,14 +751,16 @@ test("startExecution refuses a collision-shadowed key rather than run the weaker
 });
 
 /**
- * Residual hole deliberately left open by APRV-138, to be closed by the F3 task
- * (payload binding on the non-manual execute path). A single legitimate
- * autonomous registration executes with no token and no presented payload hash:
- * nothing here binds the executed bytes to the declaration yet. Pinned so F3 has
- * a failing assertion to flip; if this starts refusing, F3 has landed and this
- * test should move to asserting the bind.
+ * The residual APRV-138 left open, now closed (APRV-140, red-team F3).
+ *
+ * This test used to assert the hole: a lone autonomous registration executed
+ * with no token and no presented payload hash, so `approval run <key> --
+ * <anything>` under an autonomous class was unauthenticated arbitrary
+ * execution. It is flipped: off the manual path there is no grant, so the
+ * DECLARATION is what authorizes, and an executor that will not say which bytes
+ * it holds is refused `payload-mismatch` with the log untouched.
  */
-test("RESIDUAL (F3): a lone autonomous key executes with no token and no payload binding", () => {
+function autonomousCase(): Case {
   const unit = newCase();
   attest(unit);
   const envelope = {
@@ -757,9 +779,89 @@ test("RESIDUAL (F3): a lone autonomous key executes with no token and no payload
   };
   const registered = register(unit.logPath, { task: "task-500", envelope }, T0, "agent:claude");
   assert.equal(registered.ok, true, registered.ok ? "" : registered.message);
-  // No token, no presentedPayloadHash: still runs, because the non-manual path
-  // does not bind content yet (F3).
-  const started = startExecution(unit.logPath, "task-500:read", unit.options, at(2), "agent:x");
+  return unit;
+}
+
+test("F3 CLOSED: a lone autonomous key refuses when the executor states no payload", () => {
+  const unit = autonomousCase();
+  const before = records(unit).length;
+  const refusal = asRefusal(
+    startExecution(unit.logPath, "task-500:read", unit.options, at(2), "agent:x"),
+  );
+  assert.equal(refusal.code, "payload-mismatch");
+  assert.match(refusal.message, /presented none/u);
+  assert.equal(records(unit).length, before, "a refused start appended something");
+  assertClean(unit);
+});
+
+test("F3 CLOSED: an autonomous key refuses bytes other than the declared ones", () => {
+  const unit = autonomousCase();
+  const before = records(unit).length;
+  const refusal = asRefusal(
+    startExecution(
+      unit.logPath,
+      "task-500:read",
+      { ...unit.options, presentedPayloadHash: bindingFor("something-else") },
+      at(2),
+      "agent:x",
+    ),
+  );
+  assert.equal(refusal.code, "payload-mismatch");
+  assert.match(refusal.message, /not the one declared/u);
+  assert.equal(records(unit).length, before, "a refused start appended something");
+  assertClean(unit);
+});
+
+test("F3 CLOSED: the declared bytes start, and the start event records their hash", () => {
+  const unit = autonomousCase();
+  const started = startExecution(
+    unit.logPath,
+    "task-500:read",
+    bound(unit, "task-500:read"),
+    at(2),
+    "agent:x",
+  );
   assert.equal(started.ok, true, started.ok ? "" : (started as ExecuteRefusal).message);
+  if (!started.ok) throw new Error("unreachable");
+  assert.equal(
+    (started.record.payload as Record<string, unknown>)["payload_hash"],
+    bindingFor("task-500:read"),
+  );
+  assertClean(unit);
+});
+
+test("F3 CLOSED: an action declared with no payload_hash cannot execute at all", () => {
+  const unit = newCase();
+  attest(unit);
+  const envelope = {
+    origin: { app: "example-capture", created_by: "human:carter" },
+    state: "proposed",
+    actions: [
+      {
+        class: "read.web",
+        summary: "read a page",
+        reversible: true,
+        est_cost_usd: 0,
+        idempotency_key: "task-501:read",
+      },
+    ],
+  };
+  const registered = register(unit.logPath, { task: "task-501", envelope }, T0, "agent:claude");
+  assert.equal(registered.ok, true, registered.ok ? "" : registered.message);
+  const before = records(unit).length;
+  // Even a truthful executor is refused: there is nothing to check it against,
+  // and an unbound declaration would make the binding optional in practice.
+  const refusal = asRefusal(
+    startExecution(
+      unit.logPath,
+      "task-501:read",
+      { ...unit.options, presentedPayloadHash: bindingFor("task-501:read") },
+      at(2),
+      "agent:x",
+    ),
+  );
+  assert.equal(refusal.code, "payload-mismatch");
+  assert.match(refusal.message, /carries no payload_hash/u);
+  assert.equal(records(unit).length, before, "a refused start appended something");
   assertClean(unit);
 });

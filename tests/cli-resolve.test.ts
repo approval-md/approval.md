@@ -77,7 +77,7 @@ function childArgv(): string[] {
   return [process.execPath, "-e", "process.exit(0)"];
 }
 
-/** The task file, whose manual action binds to whatever `run` will hash. */
+/** The task file, whose actions bind to whatever `run` will hash. */
 function taskFile(binding: string): string {
   return [
     "---",
@@ -100,6 +100,10 @@ function taskFile(binding: string): string {
     "      reversible: true",
     "      est_cost_usd: 0.01",
     '      idempotency_key: "task-042:draft"',
+    // APRV-140: the supervised action binds to bytes as well. Off the manual
+    // path there is no grant, so the declaration is the whole of what
+    // authorizes, and an action that declares nothing cannot execute.
+    `      payload_hash: "${binding}"`,
     "---",
     "",
     "## Description",
@@ -267,7 +271,7 @@ test("the same command run from a different cwd is different bytes", () => {
   assertClean(unit.dir);
 });
 
-test("--payload-hash overrides the computation, and a malformed one is exit 2", () => {
+test("--payload-hash is checked against the computation, and a malformed one is exit 2", () => {
   const unit = ready();
   const token = grantChaser(unit.dir);
 
@@ -296,7 +300,44 @@ test("--payload-hash overrides the computation, and a malformed one is exit 2", 
   );
   assert.equal(events(unit.dir).includes("execution.started"), false);
 
-  // The override with the right value works: this is the adapter's door.
+  // APRV-140 (red-team F3): a well-formed hash that is NOT the hash of what
+  // would spawn used to be obeyed — the computation was skipped entirely when
+  // the flag was present, so presenting the grant's own binding while spawning
+  // arbitrary argv spent the token and ran something nobody approved. It is now
+  // a refusal, before anything is appended and before the child exists.
+  const substituted = runCli(
+    [
+      "run",
+      "task-042:chaser",
+      "--token",
+      token,
+      "--payload-hash",
+      unit.binding,
+      "--as",
+      "agent:claude",
+      "--json",
+      "--",
+      process.execPath,
+      "-e",
+      "console.log('arbitrary')",
+    ],
+    unit.dir,
+  );
+  assert.equal(substituted.code, 1, substituted.stderr);
+  assert.equal(
+    (
+      (JSON.parse(substituted.stderr.trim()) as Record<string, unknown>)["error"] as Record<
+        string,
+        unknown
+      >
+    )["code"],
+    "payload-mismatch",
+  );
+  assert.equal(substituted.stdout.includes("arbitrary"), false, "the child was spawned anyway");
+  assert.equal(events(unit.dir).includes("execution.started"), false);
+
+  // The flag agreeing with the computation is fine: it states what the caller
+  // believes it is running, and the belief happens to be true.
   const good = runCli(
     [
       "run",

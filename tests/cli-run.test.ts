@@ -28,6 +28,8 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { runPayloadHash } from "../src/core/payload.js";
+
 /** dist/tests/cli-run.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
@@ -85,57 +87,61 @@ const POLICY_SHORT_TTL = POLICY.replace('approval_ttl: "1h"', 'approval_ttl: "1s
 const POLICY_TIGHT = POLICY.replace("    daily_actions: 50", "    daily_actions: 1");
 
 /**
- * The content binding every declared action carries (amended SPEC.md §6.2, A1).
+ * The content binding every declared action carries (amended SPEC.md §6.2).
  *
- * Manual actions MUST have one — intake refuses `payload-hash-required` without
- * it — and the spend must present the same value, which these suites do with
- * `--payload-hash`. One constant across the fixture keeps the CLI assertions
- * about flags and exit codes rather than about hashing.
+ * A1 made the hash MUST for manual actions; APRV-140 made it MUST for every
+ * action that executes, and made `approval run` recompute it from the argv and
+ * cwd it is about to spawn rather than accept a caller's substitute. So the
+ * fixture can no longer use a stand-in constant: it commits, before it
+ * registers, to the exact bytes the case will run. Every action of a case
+ * declares the same binding because every case runs one command.
  */
-const PAYLOAD_HASH = "3".repeat(64);
+function taskFile(binding: string): string {
+  return [
+    "---",
+    "id: task-042",
+    "title: Chase deposit refund",
+    "status: In Progress",
+    "approval:",
+    "  origin:",
+    "    app: example-capture",
+    '    created_by: "human:carter"',
+    "  state: proposed",
+    "  actions:",
+    "    - class: communicate.email.external",
+    '      summary: "Send deposit chaser"',
+    "      reversible: false",
+    "      est_cost_usd: 0.02",
+    '      idempotency_key: "task-042:chaser"',
+    `      payload_hash: "${binding}"`,
+    "    - class: files.write.local",
+    '      summary: "Write the draft"',
+    "      reversible: true",
+    "      est_cost_usd: 0.01",
+    '      idempotency_key: "task-042:draft"',
+    `      payload_hash: "${binding}"`,
+    "    - class: files.write.local",
+    '      summary: "Write the second draft"',
+    "      reversible: true",
+    "      est_cost_usd: 0.01",
+    '      idempotency_key: "task-042:draft2"',
+    `      payload_hash: "${binding}"`,
+    "---",
+    "",
+    "## Description",
+    "Body.",
+    "",
+  ].join("\n");
+}
 
-const TASK_FILE = [
-  "---",
-  "id: task-042",
-  "title: Chase deposit refund",
-  "status: In Progress",
-  "approval:",
-  "  origin:",
-  "    app: example-capture",
-  '    created_by: "human:carter"',
-  "  state: proposed",
-  "  actions:",
-  "    - class: communicate.email.external",
-  '      summary: "Send deposit chaser"',
-  "      reversible: false",
-  "      est_cost_usd: 0.02",
-  '      idempotency_key: "task-042:chaser"',
-  `      payload_hash: "${PAYLOAD_HASH}"`,
-  "    - class: files.write.local",
-  '      summary: "Write the draft"',
-  "      reversible: true",
-  "      est_cost_usd: 0.01",
-  '      idempotency_key: "task-042:draft"',
-  `      payload_hash: "${PAYLOAD_HASH}"`,
-  "    - class: files.write.local",
-  '      summary: "Write the second draft"',
-  "      reversible: true",
-  "      est_cost_usd: 0.01",
-  '      idempotency_key: "task-042:draft2"',
-  `      payload_hash: "${PAYLOAD_HASH}"`,
-  "---",
-  "",
-  "## Description",
-  "Body.",
-  "",
-].join("\n");
-
-function caseDir(policyText: string = POLICY): string {
+function caseDir(policyText: string = POLICY, child: string[] = exiting(0)): string {
   counter += 1;
   const dir = join(scratch, `case-${counter}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "APPROVAL.md"), policyText, "utf8");
-  writeFileSync(join(dir, "task-042.md"), TASK_FILE, "utf8");
+  // The real derivation, not a stand-in: this is what `run` will compute for
+  // `child` in `dir`, and therefore what the spend must match.
+  writeFileSync(join(dir, "task-042.md"), taskFile(runPayloadHash(child, dir)), "utf8");
   return dir;
 }
 
@@ -175,8 +181,8 @@ function jsonErr(run: Run): Record<string, unknown> {
 }
 
 /** Attest + register: the baseline every scenario starts from. */
-function ready(policyText: string = POLICY): string {
-  const dir = caseDir(policyText);
+function ready(policyText: string = POLICY, child: string[] = exiting(0)): string {
+  const dir = caseDir(policyText, child);
   assert.equal(runCli(["policy", "attest", "--as", "human:carter"], dir).code, 0);
   assert.equal(runCli(["register", "task-042.md", "--as", "agent:claude"], dir).code, 0);
   return dir;
@@ -227,7 +233,7 @@ test("run with the wrong token exits 1 (a refusal is not a missing token)", () =
     [
       "run",
       "task-042:chaser",
-      "--payload-hash", PAYLOAD_HASH, "--token",
+      "--token",
       "a".repeat(64),
       "--as",
       "agent:claude",
@@ -266,26 +272,19 @@ test("run without a command, without an action key, or without an identity exits
 // ===========================================================================
 
 test("run appends execution.started BEFORE the child runs, then completed with exit 0", () => {
-  const dir = ready();
+  const snapshotChild = [
+    process.execPath,
+    "-e",
+    "require('fs').copyFileSync(process.env.SNAP_LOG, process.env.SNAP_OUT);console.log('child ran')",
+  ];
+  const dir = ready(POLICY, snapshotChild);
   const token = grantChaser(dir);
   const snapshot = join(dir, "log-as-the-child-saw-it.jsonl");
 
   // The child copies the log the moment it starts: whatever is in that file is
   // proof of what had been appended before the spawn.
   const run = runCli(
-    [
-      "run",
-      "task-042:chaser",
-      "--payload-hash", PAYLOAD_HASH, "--token",
-      token,
-      "--as",
-      "agent:claude",
-      "--json",
-      "--",
-      process.execPath,
-      "-e",
-      "require('fs').copyFileSync(process.env.SNAP_LOG, process.env.SNAP_OUT);console.log('child ran')",
-    ],
+    ["run", "task-042:chaser", "--token", token, "--as", "agent:claude", "--json", "--", ...snapshotChild],
     dir,
     { SNAP_LOG: logPath(dir), SNAP_OUT: snapshot },
   );
@@ -323,18 +322,19 @@ test("run appends execution.started BEFORE the child runs, then completed with e
     outcome: "execution.completed",
     outcome_seq: 6,
     exit_code: 0,
-    // A1: the binding run presented when it spent the token. Here it is the
-    // --payload-hash override; the computed path has its own test below.
-    payload_hash: PAYLOAD_HASH,
+    // A1 plus APRV-140: the binding run RECOMPUTED from the argv and cwd it
+    // spawned. There is no override to report — the flag, when passed, is
+    // checked against this value rather than substituted for it.
+    payload_hash: runPayloadHash(snapshotChild, dir),
   });
   assertClean(dir);
 });
 
 test("a failing child is recorded as execution.failed and run exits with the child's code", () => {
-  const dir = ready();
+  const dir = ready(POLICY, exiting(42));
   const token = grantChaser(dir);
   const run = runCli(
-    ["run", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", token, "--as", "agent:claude", "--", ...exiting(42)],
+    ["run", "task-042:chaser", "--token", token, "--as", "agent:claude", "--", ...exiting(42)],
     dir,
   );
   assert.equal(run.code, 42, run.stderr);
@@ -344,21 +344,11 @@ test("a failing child is recorded as execution.failed and run exits with the chi
 });
 
 test("a child killed by a signal is recorded and reported as 128 + signal", () => {
-  const dir = ready();
+  const suicidal = [process.execPath, "-e", "process.kill(process.pid, 'SIGKILL')"];
+  const dir = ready(POLICY, suicidal);
   const token = grantChaser(dir);
   const run = runCli(
-    [
-      "run",
-      "task-042:chaser",
-      "--payload-hash", PAYLOAD_HASH, "--token",
-      token,
-      "--as",
-      "agent:claude",
-      "--",
-      process.execPath,
-      "-e",
-      "process.kill(process.pid, 'SIGKILL')",
-    ],
+    ["run", "task-042:chaser", "--token", token, "--as", "agent:claude", "--", ...suicidal],
     dir,
   );
   assert.equal(run.code, 137, `expected 128+SIGKILL(9): ${run.stderr}`);
@@ -368,19 +358,13 @@ test("a child killed by a signal is recorded and reported as 128 + signal", () =
 });
 
 test("a command that cannot be spawned is recorded as exit_code 127", () => {
-  const dir = ready();
+  // Under `scratch` rather than the case directory: the binding is declared
+  // before the case directory's name is known to the fixture.
+  const missing = [join(scratch, "no-such-binary")];
+  const dir = ready(POLICY, missing);
   const token = grantChaser(dir);
   const run = runCli(
-    [
-      "run",
-      "task-042:chaser",
-      "--payload-hash", PAYLOAD_HASH, "--token",
-      token,
-      "--as",
-      "agent:claude",
-      "--",
-      join(dir, "no-such-binary"),
-    ],
+    ["run", "task-042:chaser", "--token", token, "--as", "agent:claude", "--", ...missing],
     dir,
   );
   assert.equal(run.code, 127);
@@ -404,9 +388,13 @@ test("a supervised action runs with NO token and its budget is charged at the st
     "execution.started",
     "execution.completed",
   ]);
+  // APRV-140: the start event carries the hash of what actually spawned, so an
+  // operator holding the command can reproduce it and see that the log names
+  // the bytes that ran.
   assert.deepEqual(logRecords(dir)[2]?.["payload"], {
     class: "files.write.local",
     est_cost_usd: 0.01,
+    payload_hash: runPayloadHash(exiting(0), dir),
   });
 
   // The start event IS the authorization the budget window counts.
@@ -454,24 +442,14 @@ test("a supervised run refuses when the policy changed since attestation", () =>
 // ===========================================================================
 
 test("a crash between started and its outcome leaves a dangling execution nothing repairs", () => {
-  const dir = ready();
+  const parricide = [process.execPath, "-e", "process.kill(process.ppid, 'SIGKILL')"];
+  const dir = ready(POLICY, parricide);
   const token = grantChaser(dir);
 
   // A real crash: the child kills the `approval run` process that spawned it,
   // after execution.started has landed and before any outcome could.
   const crashed = runCli(
-    [
-      "run",
-      "task-042:chaser",
-      "--payload-hash", PAYLOAD_HASH, "--token",
-      token,
-      "--as",
-      "agent:claude",
-      "--",
-      process.execPath,
-      "-e",
-      "process.kill(process.ppid, 'SIGKILL')",
-    ],
+    ["run", "task-042:chaser", "--token", token, "--as", "agent:claude", "--", ...parricide],
     dir,
   );
   assert.notEqual(crashed.code, 0);
@@ -497,8 +475,10 @@ test("a crash between started and its outcome leaves a dangling execution nothin
 
   // Nothing auto-repairs: a second run refuses, and the log is unchanged.
   const before = rawLog(dir);
+  // The SAME bytes, so the refusal is about the token and not about the
+  // binding: a second run of an already-spent grant is token-consumed.
   const again = runCli(
-    ["run", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", token, "--as", "agent:claude", "--json", "--", ...exiting(0)],
+    ["run", "task-042:chaser", "--token", token, "--as", "agent:claude", "--json", "--", ...parricide],
     dir,
   );
   assert.equal(again.code, 1);

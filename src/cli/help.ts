@@ -818,9 +818,9 @@ Usage:
 
 Flags:
   --token <t>      the raw token "approval grant" printed. REQUIRED for manual
-  --payload-hash <64hex>   the content binding. By default run hashes
-                   "the argv array and cwd"; an action whose grant bound to
-                   content MUST pass this flag ("approval payload hash <file>")
+  --payload-hash <64hex>   the content binding, CHECKED and never trusted. run
+                   always hashes "the argv array and cwd" it is about to spawn;
+                   a differing value is refused payload-mismatch, not obeyed
   --as <id>        the executing identity; else APPROVAL_HUMAN
   --policy <p> / --dir <p> / --log <p>   policy, its discovery dir, and the log
   --json / -h, --help   machine-readable summary ON STDERR / this text
@@ -1238,7 +1238,7 @@ canonical serialization of the parsed VALUE. Reads no log, writes no file.
 Where the hash goes:
   payload_hash     in a task file's action declaration, and in the log
   approval request --payload <file>|-   hashes, verifies and stores the bytes
-  approval run --payload-hash <64hex>   presents the binding when spending
+  approval run --payload-hash <64hex>   asserts the binding run recomputes
 
 MOST FLOWS NEVER NEED THIS VERB: "approval request --payload" both stores and
 verifies. Bytes that do not parse as JSON are a usage error (exit 2).

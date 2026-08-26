@@ -293,13 +293,17 @@ test("--help names the three places a payload_hash goes, and the exit table", ()
   assert.match(run.stdout, /exit codes: approval --help/u);
 });
 
-test("approval run --help promotes --payload-hash for content-shaped payloads", () => {
+test("approval run --help says --payload-hash is checked, never obeyed", () => {
+  // APRV-140: the flag used to be an override, and the help promoted it as the
+  // way to state a content-shaped payload. It is a CHECK now — run always
+  // hashes the argv and cwd it is about to spawn — and the help says so, because
+  // an agent that read the old text would build an invocation that refuses.
   const dir = caseDir();
 
   const run = runCli(["run", "--help"], dir);
 
   assert.equal(run.code, 0, run.stderr);
-  assert.match(run.stdout, /MUST pass/u);
-  assert.match(run.stdout, /approval payload hash/u);
+  assert.match(run.stdout, /CHECKED and never trusted/u);
+  assert.match(run.stdout, /payload-mismatch/u);
   assert.match(run.stdout, /argv array and cwd/u);
 });

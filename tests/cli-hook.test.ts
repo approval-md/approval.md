@@ -40,6 +40,7 @@ import {
 import { buildPendingQueue } from "../src/channels/tagging.js";
 import { renderTelegram } from "../src/channels/telegram.js";
 import { supervisedExecutions } from "../src/core/audit.js";
+import { runPayloadHash } from "../src/core/payload.js";
 import { CLASSIFIER_CLASSES, COMMAND_RULES } from "../src/core/command-class.js";
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
@@ -505,6 +506,10 @@ test("a loop-escalated harness task may not run unattended", () => {
   const dir = ready();
   const task = "hook:sess-1:tu-loop";
   const actions = ["one", "two", "three"];
+  // APRV-140: a supervised action binds to the bytes it will run, so the
+  // declaration commits to this exact command before it is registered.
+  const failing = [process.execPath, "-e", "process.exit(1)"];
+  const binding = runPayloadHash(failing, dir);
   writeFileSync(
     join(dir, "loop-task.md"),
     [
@@ -523,6 +528,7 @@ test("a loop-escalated harness task may not run unattended", () => {
         `      summary: "attempt ${name}"`,
         "      est_cost_usd: 0",
         `      idempotency_key: "${task}:${name}"`,
+        `      payload_hash: "${binding}"`,
       ]),
       "---",
       "",
@@ -535,16 +541,7 @@ test("a loop-escalated harness task may not run unattended", () => {
   assert.equal(runCli(["register", "loop-task.md", "--as", "agent:claude-code"], dir).code, 0);
   for (const name of actions) {
     const failed = runCli(
-      [
-        "run",
-        `${task}:${name}`,
-        "--as",
-        "agent:claude-code",
-        "--",
-        process.execPath,
-        "-e",
-        "process.exit(1)",
-      ],
+      ["run", `${task}:${name}`, "--as", "agent:claude-code", "--", ...failing],
       dir,
     );
     assert.equal(failed.code, 1, `${name}: ${failed.stderr}`);
