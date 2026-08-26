@@ -468,18 +468,36 @@ function resolveFile(options: LoadPolicyOptions): PolicyLoadResult | { path: str
 }
 
 /**
- * Load, extract, parse, and validate the policy block of an `APPROVAL.md`.
+ * The fail-closed result for policy bytes that could not be read at all.
  *
- * Discovery: `options.file` when given, otherwise `APPROVAL.md` in
- * `options.dir` (default cwd), falling back to `APPROVALS.md`. `APPROVAL.md`
- * wins when both exist (SPEC.md §5).
- *
- * Fails closed on every error path — see {@link PolicyLoadResult}. Never
- * throws; a thrown error would be a policy bypass.
+ * Exported for callers that read the file themselves and still need a
+ * {@link PolicyLoadResult} to hand `resolve` (APRV-142): a caller must never
+ * have to invent one, because an invented result is where a permissive default
+ * would creep in. `file-missing` is the same code {@link loadPolicy} reports
+ * for the same fact.
  */
-export function loadPolicy(options: LoadPolicyOptions = {}): PolicyLoadResult {
-  const resolved = resolveFile(options);
-  if ("ok" in resolved) return resolved;
+export function policyUnreadable(path: string, cause: string): PolicyLoadResult {
+  return failure("file-missing", `policy file ${path} could not be read: ${cause}`);
+}
+
+/**
+ * Extract, parse, and validate the policy block of an already-read policy file.
+ *
+ * The bytes-in form of {@link loadPolicy}, split out for APRV-142: a gate
+ * operation reads `APPROVAL.md` **once** and feeds the same buffer to both the
+ * attestation hash check and this parse, so no mid-operation file swap can
+ * attest one policy and enforce another. `path` is used for messages and for
+ * {@link PolicySource}; nothing here touches the filesystem.
+ *
+ * Fails closed on every error path and never throws, exactly as
+ * {@link loadPolicy} does — it is the same code.
+ */
+export function loadPolicyText(
+  path: string,
+  text: string,
+  options: { schemaDir?: string } = {},
+): PolicyLoadResult {
+  const resolved = { path, text };
 
   const scan = scanPolicyFences(resolved.text);
   if (scan.unterminated) {
@@ -574,4 +592,28 @@ export function loadPolicy(options: LoadPolicyOptions = {}): PolicyLoadResult {
     source: { path: resolved.path, filename: basename(resolved.path) },
     durations: { approvalTtlMs, skewToleranceMs },
   };
+}
+
+/**
+ * Load, extract, parse, and validate the policy block of an `APPROVAL.md`.
+ *
+ * Discovery: `options.file` when given, otherwise `APPROVAL.md` in
+ * `options.dir` (default cwd), falling back to `APPROVALS.md`. `APPROVAL.md`
+ * wins when both exist (SPEC.md §5).
+ *
+ * Fails closed on every error path — see {@link PolicyLoadResult}. Never
+ * throws; a thrown error would be a policy bypass.
+ *
+ * This is discovery plus {@link loadPolicyText}. A caller that has already read
+ * the bytes (the gate, since APRV-142) calls the latter directly rather than
+ * paying for a second read that could see different bytes.
+ */
+export function loadPolicy(options: LoadPolicyOptions = {}): PolicyLoadResult {
+  const resolved = resolveFile(options);
+  if ("ok" in resolved) return resolved;
+  return loadPolicyText(
+    resolved.path,
+    resolved.text,
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+  );
 }

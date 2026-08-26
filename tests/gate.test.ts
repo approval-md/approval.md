@@ -1908,3 +1908,174 @@ test("a malformed policy_sha256 is refused at the write boundary", () => {
   assert.equal(appended.error.code, "validation");
   assertClean(unit);
 });
+
+// ===========================================================================
+// one policy read per gate operation (APRV-142)
+// ===========================================================================
+
+/**
+ * The gate used to read `APPROVAL.md` twice per operation — once to hash it for
+ * attestation, once to parse it for the decision — with nothing holding the two
+ * reads to the same bytes. The red team measured the window (946 of 3000 probes
+ * saw the file change between the reads) without ever winning it, which is a
+ * statement about their probe rather than about the code.
+ *
+ * These tests close the question structurally by driving the one read seam
+ * `GateOptions.policy.read` with a reader that hands back *different bytes on
+ * every call*: the worst file swap an attacker could hope to land, delivered on
+ * schedule. A gate that reads once cannot be split by it, and the proof is that
+ * the operation is decided under the bytes that were attested.
+ */
+
+/** The attested policy: the canonical manual class stays manual. */
+const POLICY_ATTESTED = POLICY;
+
+/** Same file, one word changed: the manual class becomes autonomous. */
+const POLICY_SWAPPED = POLICY.replace(
+  ["  communicate.email.external:", "    autonomy: manual"].join("\n"),
+  ["  communicate.email.external:", "    autonomy: autonomous"].join("\n"),
+);
+
+/**
+ * A reader that returns `first` once and `rest` forever after — the file swapped
+ * in the instant between the two former read points. `calls` counts reads, so a
+ * test can assert the seam was used exactly once.
+ */
+function swappingReader(first: string, rest: string): { read: (path: string) => Uint8Array; calls: () => number } {
+  let calls = 0;
+  return {
+    read: () => {
+      calls += 1;
+      return Buffer.from(calls === 1 ? first : rest, "utf8");
+    },
+    calls: () => calls,
+  };
+}
+
+function withReader(unit: Case, read: (path: string) => Uint8Array): GateOptions {
+  return { ...unit.options, policy: { ...unit.options.policy, read } };
+}
+
+test("a swap after the attestation check cannot change the policy the request is decided under", () => {
+  assert.notEqual(POLICY_SWAPPED, POLICY_ATTESTED, "the two policies must differ");
+  const unit = newCase(POLICY_ATTESTED);
+  attest(unit);
+  registerTask(unit);
+
+  const reader = swappingReader(POLICY_ATTESTED, POLICY_SWAPPED);
+  const result = request(
+    unit.logPath,
+    {
+      task: "task-042",
+      actionKey: "task-042:chaser",
+      payload_hash: PAYLOAD_HASH,
+      cls: "communicate.email.external",
+      est_cost_usd: 0.02,
+      reversible: false,
+      summary: "Send deposit chaser",
+    },
+    at(1),
+    "agent:claude",
+    withReader(unit, reader.read),
+  );
+
+  // Had the parse re-read the file, it would have seen the autonomous policy and
+  // waved the action through with no approval.requested record at all.
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  if (!result.ok) throw new Error("unreachable");
+  assert.equal(result.autonomy, "manual");
+  assert.equal(result.proceed, false);
+  assert.notEqual(result.record, null);
+  assert.equal(reader.calls(), 1, "a gate operation reads the policy file exactly once");
+  assert.deepEqual(eventTypes(unit), ["policy.updated", "task.registered", "approval.requested"]);
+  assertClean(unit);
+});
+
+test("the pinned hash is the hash of the bytes that were parsed", () => {
+  const unit = newCase(POLICY_ATTESTED);
+  attest(unit);
+  registerTask(unit);
+
+  const reader = swappingReader(POLICY_ATTESTED, POLICY_SWAPPED);
+  const requested = requestChaser(unit, at(1));
+  assert.equal(payloadFieldOf(requested, "policy_sha256"), policySha256(unit));
+
+  const granted = decide(
+    unit.logPath,
+    "task-042:chaser",
+    "grant",
+    "human:carter",
+    at(2),
+    withReader(unit, reader.read),
+  );
+  assert.equal(granted.ok, true, granted.ok ? "" : granted.message);
+  if (!granted.ok) throw new Error("unreachable");
+  assert.equal(payloadFieldOf(granted.record, "policy_sha256"), policySha256(unit));
+  assert.equal(reader.calls(), 1, "the grant reads the policy file exactly once");
+  assertClean(unit);
+});
+
+test("a swap before the attestation check refuses rather than half-landing", () => {
+  const unit = newCase(POLICY_ATTESTED);
+  attest(unit);
+  registerTask(unit);
+
+  // The mirror image: the swapped bytes arrive first. There is no read left for
+  // the attested bytes to arrive on, so the operation refuses on the bytes it
+  // has. Fail closed, and nothing is appended.
+  const reader = swappingReader(POLICY_SWAPPED, POLICY_ATTESTED);
+  const before = eventTypes(unit);
+  const refusal = asRefusal(
+    request(
+      unit.logPath,
+      {
+        task: "task-042",
+        actionKey: "task-042:chaser",
+        payload_hash: PAYLOAD_HASH,
+        cls: "communicate.email.external",
+        est_cost_usd: 0.02,
+        reversible: false,
+        summary: "Send deposit chaser",
+      },
+      at(1),
+      "agent:claude",
+      withReader(unit, reader.read),
+    ),
+  );
+  assert.equal(refusal.code, "policy-not-attested");
+  assert.equal(refusal.detail, "hash-mismatch");
+  assert.equal(reader.calls(), 1);
+  assert.deepEqual(eventTypes(unit), before);
+  assertClean(unit);
+});
+
+test("an unreadable policy read is a refusal, not a pass", () => {
+  const unit = newCase(POLICY_ATTESTED);
+  attest(unit);
+  registerTask(unit);
+
+  const refusal = asRefusal(
+    request(
+      unit.logPath,
+      {
+        task: "task-042",
+        actionKey: "task-042:chaser",
+        payload_hash: PAYLOAD_HASH,
+        cls: "read.file",
+        est_cost_usd: 0,
+        reversible: true,
+        summary: "Read a file",
+      },
+      at(1),
+      "agent:claude",
+      withReader(unit, () => {
+        throw new Error("EIO: simulated read failure");
+      }),
+    ),
+  );
+  // `read.file` is autonomous under the attested policy, so a permissive read
+  // failure would have been a proceed:true. It is a refusal instead.
+  assert.equal(refusal.code, "policy-not-attested");
+  assert.equal(refusal.detail, "unreadable");
+  assertClean(unit);
+});

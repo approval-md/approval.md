@@ -163,7 +163,20 @@ function detail(cause: unknown): string {
  * `unreadable`.
  */
 export function policyFileHash(path: string): string {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
+  return policyBytesHash(readFileSync(path));
+}
+
+/**
+ * SHA-256 (lowercase hex) of policy bytes a caller has already read.
+ *
+ * The same digest {@link policyFileHash} computes, over bytes rather than a
+ * path. It exists so a gate operation can read `APPROVAL.md` once and hash the
+ * exact buffer it is also about to parse (APRV-142): hashing by path a second
+ * time would reopen the window where the attestation check and the parse can
+ * see different bytes.
+ */
+export function policyBytesHash(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 /**
@@ -290,15 +303,40 @@ export function checkAttestation(
 ): AttestationStatus {
   // Read the live file first: unreadable is its own status, and it outranks
   // "never attested" because it is the fact we are most sure of.
-  let liveSha256: string;
+  let bytes: Uint8Array;
   try {
-    liveSha256 = policyFileHash(policyPath);
+    bytes = readFileSync(policyPath);
   } catch (cause) {
-    return {
-      status: "unreadable",
-      message: `policy ${policyPath} could not be read: ${detail(cause)}`,
-    };
+    return unreadablePolicyStatus(policyPath, detail(cause));
   }
+  return checkAttestationOfBytes(records, bytes);
+}
+
+/** The `unreadable` status for a policy read the caller performed itself. */
+export function unreadablePolicyStatus(policyPath: string, cause: string): AttestationStatus {
+  return {
+    status: "unreadable",
+    message: `policy ${policyPath} could not be read: ${cause}`,
+  };
+}
+
+/**
+ * {@link checkAttestation} against bytes the caller already holds.
+ *
+ * Same comparison, no read. A gate operation reads the policy file once and
+ * passes that one buffer here and to the parser (APRV-142), which is what makes
+ * "attested one policy, enforced another" structurally impossible rather than
+ * merely unlikely.
+ *
+ * The `unreadable` status has no counterpart here: bytes that exist were read.
+ * A caller whose read failed calls {@link unreadablePolicyStatus} instead, so
+ * the fail-closed ordering of {@link checkAttestation} survives the split.
+ */
+export function checkAttestationOfBytes(
+  records: EventRecord[],
+  bytes: Uint8Array,
+): AttestationStatus {
+  const liveSha256 = policyBytesHash(bytes);
 
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index] as EventRecord;
