@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-139-hook && npm run lint && git status --short && git add -A src tests SPEC.md && git status --short","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/remote-control-f54e71"}
