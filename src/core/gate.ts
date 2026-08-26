@@ -126,7 +126,7 @@ import {
 } from "./log.js";
 import { isLoopEscalated } from "./loop.js";
 import { isPayloadHash, payloadHash as hashOfPayload } from "./payload.js";
-import { payloadStoreDirFor, storePayload } from "./payload-store.js";
+import { loadPayload, payloadStoreDirFor, storePayload } from "./payload-store.js";
 import {
   loadPolicyText,
   policyUnreadable,
@@ -147,6 +147,7 @@ import {
 } from "./state.js";
 import { mintToken, tokenHash, TOKEN_HASH_FIELD } from "./token.js";
 import { validate, type ValidationError } from "./validate.js";
+import { displayHashOf, DISPLAY_HASH_FIELD } from "./wysiwys.js";
 
 /**
  * The approval-state derivation moved to `core/state.ts` in APRV-20 (finding
@@ -1036,6 +1037,40 @@ function costOf(value: number | undefined): number {
 }
 
 /**
+ * `{ display_hash }` for the material this runtime holds, or `{}` (APRV-119).
+ *
+ * The material is the caller's, when it supplied any, and otherwise whatever the
+ * payload store holds under the declared binding — the same two sources
+ * `channels/tagging.ts` renders from, in the same order, so the hash recorded
+ * here names the rendering a channel will actually produce. The store is
+ * content-addressed and re-verified on every read, so a tampered file answers
+ * nothing rather than a rendering of the wrong bytes.
+ *
+ * Never fatal. A payload that cannot be canonicalized, a store that cannot be
+ * read, a file that does not verify: each costs a reader one cross-check, and
+ * none of them is a reason to refuse a request that has passed every check that
+ * governs authority.
+ */
+function displayHashField(
+  input: RequestInput,
+  options: GateOptions,
+  logPath: string,
+  boundHash: string,
+  cls: string,
+): Record<string, string> {
+  let material: unknown;
+  if (input.payload !== undefined) {
+    material = input.payload.value;
+  } else {
+    const loaded = loadPayload(options.payloadStoreDir ?? payloadStoreDirFor(logPath), boundHash);
+    if (!loaded.ok) return {};
+    material = loaded.value;
+  }
+  const hash = displayHashOf(material, cls);
+  return hash === null ? {} : { [DISPLAY_HASH_FIELD]: hash };
+}
+
+/**
  * Gate intake.
  *
  * Check order, and why it is this order:
@@ -1241,6 +1276,19 @@ export function request(
     class: input.cls,
     est_cost_usd: costOf(input.est_cost_usd),
     payload_hash: payloadHash,
+    // APRV-119 (WYSIWYS). The digest of the canonical rendering every channel
+    // MUST present for this payload, so the log states what reading the
+    // approver was shown and not only which bytes they were bound to. Assigned
+    // here at the write boundary from `core/wysiwys.ts` — the same pure
+    // function the channels render with — exactly as `policy_sha256` is
+    // assigned from the runtime's own attestation check, and for the same
+    // reason: a requester that could name its own display hash could show one
+    // reading and record another. `RequestInput` carries no field for it.
+    //
+    // Absent, rather than invented, when this runtime does not hold the bytes:
+    // the caller supplied none and the store has none. A hash over material
+    // nobody holds would name a rendering nobody made.
+    ...displayHashField(input, options, logPath, payloadHash, input.cls),
     // APRV-118. The attested policy this request was routed by, assigned here
     // at the write boundary from the runtime's own attestation check — the same
     // read that authorized the request, one line of code from the append.

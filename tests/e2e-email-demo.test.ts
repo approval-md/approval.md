@@ -71,6 +71,7 @@ import {
   type EmailPayload,
 } from "../src/adapters/email.js";
 import { payloadHash } from "../src/core/payload.js";
+import { canonicalRender } from "../src/core/wysiwys.js";
 import { commandSetup } from "../src/cli/setup.js";
 import {
   type KeystoreKind,
@@ -603,6 +604,9 @@ test("the M7 demo: draft -> telegram -> approve -> mail sent -> chain clean", as
       reversible: false,
       // APRV-118: the attested policy this request was routed by.
       policy_sha256: policySha256(),
+      // APRV-119 (WYSIWYS): the digest of the canonical rendering every channel
+      // presents for these bytes, stamped by the runtime at the write boundary.
+      display_hash: canonicalRender(PAYLOAD, "communicate.email.external").display_hash,
     });
     assert.equal(recordAt(3)["actor"], AGENT);
 

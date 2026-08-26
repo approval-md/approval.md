@@ -43,6 +43,7 @@ import {
   type RenderedRequest,
   type TestableChannel,
 } from "../src/channels/contract.js";
+import { payloadRegionText } from "../src/channels/payload-view.js";
 import {
   runChannelConformance,
   type ConformanceCase,
@@ -1134,10 +1135,13 @@ class MockChannel implements TestableChannel {
     return {
       action_key: request_.action_key.value,
       fields,
+      // APRV-119: a conforming channel presents the CANONICAL rendering, which
+      // carries the payload text inside it. Building the region from
+      // `rendering.text` alone was conforming before WYSIWYS and is not now.
       fullPayloadText:
         this.mode === "no-full-payload" || rendering === null
           ? null
-          : `--- payload ---\n${rendering.text}`,
+          : `--- payload ---\n${payloadRegionText(rendering, request_.class.value)}`,
       ...(batchDeliveryId === undefined ? {} : { batchDeliveryId }),
     };
   }

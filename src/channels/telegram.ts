@@ -160,6 +160,24 @@
  * - **The token is never in an edit.** An annotation carries the outcome word,
  *   the action key, who decided, when, and the record's seq. It never carries
  *   the execution token, for the reason spelled out above.
+ *
+ * ## The bookkeeping is swept (APRV-135)
+ *
+ * Both maps used to be released only by process exit. Annotating a delivery
+ * removes its nonces, but nothing removes a delivery that is never annotated
+ * (a request that simply lapsed) or a digest whose members were each settled
+ * individually, so a listener left running for weeks held memory proportional
+ * to every prompt it had ever sent — and APRV-110's ambient runtime makes
+ * week-long listeners the normal case rather than the exception.
+ *
+ * {@link TelegramChannel.sweep} drops an entry when every member of it is
+ * terminal AND the entry is older than the policy's approval TTL. Both halves
+ * matter and the pair is what makes the drop safe: past the TTL the gate
+ * refuses every decision on the request, so a button referencing a dropped
+ * entry could not have been honoured anyway, and it is answered by the
+ * stale-callback path that a restarted listener's buttons already take. It is
+ * process memory and nothing else: no event is appended, no message is edited,
+ * and the log is not opened.
  */
 
 import type {
@@ -284,6 +302,26 @@ const DEFAULT_BACKOFF_MS = 1_000;
 const DEFAULT_MAX_BACKOFF_MS = 30_000;
 
 /**
+ * How long a settled delivery is remembered when the policy declares no
+ * `defaults.approval_ttl` (APRV-135).
+ *
+ * A policy with no TTL bounds nothing, so "past the approval TTL" can never
+ * become true and a sweep keyed on it alone would never fire — which is the
+ * unbounded map this task exists to remove. The retention floor takes over
+ * there, and it applies only to entries whose every member this process has
+ * seen settled: with no TTL an undecided request stays answerable forever, and
+ * forgetting its button would take a live decision away from an approver.
+ *
+ * A day, because the point of remembering a settled delivery at all is that an
+ * approver may still tap a button on a message already scrolled past, and the
+ * answer they should get is the stale-callback reply either way.
+ */
+export const TELEGRAM_DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+/** Least time between two sweeps. A sweep is O(map); once a minute is plenty. */
+export const TELEGRAM_SWEEP_INTERVAL_MS = 60_000;
+
+/**
  * The slice of `fetch` this module uses, structurally.
  *
  * Declared here rather than imported so the channel depends on a shape, not on
@@ -336,6 +374,25 @@ export interface TelegramConfig {
   log?: (message: string) => void;
   /** Injectable nonce source, for deterministic tests. */
   nonce?: () => string;
+  /**
+   * The policy's `defaults.approval_ttl` in milliseconds, or `null` when it
+   * declares none (APRV-135).
+   *
+   * Passed in by the verb, which has already loaded the policy; the channel
+   * neither reads a policy file nor holds an opinion about what the TTL should
+   * be. It is used for one thing: deciding when a delivery this process
+   * remembers can no longer be the subject of a decision, and can therefore be
+   * forgotten. See {@link TelegramChannel.sweep}.
+   */
+  approvalTtlMs?: number | null;
+  /**
+   * Injectable monotonic-ish clock, in milliseconds, for the sweep.
+   *
+   * Defaults to `Date.now`. It exists so a test can run a week of deliveries in
+   * a millisecond; nothing else in this class reads a clock, and nothing that
+   * reaches a human or the log reads this one.
+   */
+  now?: () => number;
 }
 
 // ---------------------------------------------------------------------------
@@ -601,7 +658,7 @@ export function renderTelegram(
     payloadText:
       payload === null
         ? null
-        : `--- full payload (sha256 ${payload.hash}${payload.truncated ? ", TRUNCATED" : ""}) ---\n${payloadRegionText(payload)}`,
+        : `--- full payload (sha256 ${payload.hash}${payload.truncated ? ", TRUNCATED" : ""}) ---\n${payloadRegionText(payload, request.class.value)}`,
   };
 }
 
@@ -752,6 +809,13 @@ export interface DigestState {
   /** Who authored the claimed lines below. */
   author: string;
   members: DigestMemberState[];
+  /**
+   * When this process delivered the digest, on {@link TelegramConfig.now}'s
+   * clock (APRV-135). Read by the sweep and by nothing else: it is never
+   * displayed, never compared against a log timestamp, and never a deadline —
+   * the request's own `ts` remains the only instant a TTL is measured from.
+   */
+  deliveredAtMs: number;
 }
 
 /**
@@ -999,6 +1063,8 @@ interface Delivery {
   actionKey: string;
   deliveryId: DeliveryId;
   batchDeliveryId?: DeliveryId;
+  /** When this process sent it, on {@link TelegramConfig.now}'s clock (APRV-135). */
+  deliveredAtMs: number;
 }
 
 /**
@@ -1029,6 +1095,11 @@ export class TelegramChannel implements TestableChannel {
   private readonly maxBackoffMs: number;
   private readonly complain: (message: string) => void;
   private readonly makeNonce: () => string;
+  /** The policy's approval TTL, or `null` when it declares none (APRV-135). */
+  private readonly approvalTtlMs: number | null;
+  private readonly now: () => number;
+  /** When {@link sweep} last ran, so the poll loop can call it every cycle. */
+  private lastSweepMs = Number.NEGATIVE_INFINITY;
 
   private handler: ((decision: ChannelDecision) => DecisionOutcome) | null = null;
   private readonly deliveries = new Map<string, Delivery>();
@@ -1069,6 +1140,8 @@ export class TelegramChannel implements TestableChannel {
       ((message: string) => {
         process.stderr.write(`${message}\n`);
       });
+    this.approvalTtlMs = config.approvalTtlMs ?? null;
+    this.now = config.now ?? (() => Date.now());
     this.makeNonce =
       config.nonce ??
       (() => {
@@ -1183,7 +1256,9 @@ export class TelegramChannel implements TestableChannel {
     batchDeliveryId: DeliveryId,
   ): Promise<TelegramBatchDelivery | null> {
     const allNonce = this.makeNonce();
+    const deliveredAtMs = this.now();
     const state: DigestState = {
+      deliveredAtMs,
       // Assigned once the message exists; nothing consults it before then.
       deliveryId: "",
       batchDeliveryId,
@@ -1229,6 +1304,7 @@ export class TelegramChannel implements TestableChannel {
         actionKey: member.actionKey,
         deliveryId,
         batchDeliveryId,
+        deliveredAtMs,
       });
     }
     this.digests.set(deliveryId, state);
@@ -1322,6 +1398,7 @@ export class TelegramChannel implements TestableChannel {
     this.deliveries.set(nonce, {
       actionKey,
       deliveryId: sent.deliveryId,
+      deliveredAtMs: this.now(),
       ...(batchDeliveryId === undefined ? {} : { batchDeliveryId }),
     });
 
@@ -1359,6 +1436,79 @@ export class TelegramChannel implements TestableChannel {
       this.digests.delete(deliveryId);
     }
     return actionKey;
+  }
+
+  /**
+   * Drop the delivery bookkeeping no callback can still be honoured against
+   * (APRV-135).
+   *
+   * The condition is both halves of the sentence, evaluated per entry:
+   *
+   * 1. **Every member is terminal.** For a digest that means every member
+   *    carries a `settled` outcome; for a unit delivery it is automatic in the
+   *    other direction, since annotating a decided, expired or withdrawn
+   *    request already forgets its nonces ({@link disarm}), so a delivery still
+   *    in the map is one this process has not seen settled. A request past its
+   *    approval TTL is terminal too — the gate refuses every decision on it —
+   *    which is what lets an unannotated delivery be swept at all.
+   * 2. **Older than the retention window**, which is the policy's approval TTL
+   *    when it declares one and {@link TELEGRAM_DEFAULT_RETENTION_MS} when it
+   *    does not. Measured from the moment THIS process delivered the message,
+   *    which is at or after the `approval.requested` the TTL actually runs
+   *    from, so the window this sweep waits out is never shorter than the one
+   *    the gate enforces.
+   *
+   * Both together are what makes forgetting safe: a live button can never
+   * reference a dropped entry, because the state in which no callback can still
+   * be honoured is exactly the state in which the entry is dropped. A tap that
+   * arrives anyway is answered by the stale-callback path a restarted
+   * listener's buttons already take — `unknown-callback`, counted, toasted,
+   * never carried to the gate.
+   *
+   * Process memory only. No event, no message edit, no log read. `nowMs`
+   * defaults to the configured clock and is a parameter so a test can run a
+   * simulated week without one.
+   */
+  sweep(nowMs: number = this.now()): { deliveries: number; digests: number } {
+    this.lastSweepMs = nowMs;
+    const retention = this.approvalTtlMs ?? TELEGRAM_DEFAULT_RETENTION_MS;
+    const expired = (deliveredAtMs: number): boolean => nowMs - deliveredAtMs >= retention;
+    // Past the approval TTL the gate refuses every decision, so the request is
+    // terminal whether or not this process saw it settle. With no TTL declared
+    // nothing expires, and only an observed settlement makes an entry droppable.
+    const lapsed = (deliveredAtMs: number): boolean =>
+      this.approvalTtlMs !== null && nowMs - deliveredAtMs >= this.approvalTtlMs;
+
+    let digests = 0;
+    for (const [deliveryId, digest] of this.digests) {
+      const terminal = digest.members.every((member) => member.settled !== null);
+      if (!(terminal || lapsed(digest.deliveredAtMs)) || !expired(digest.deliveredAtMs)) continue;
+      this.digests.delete(deliveryId);
+      this.allNonces.delete(digest.allNonce);
+      digests += 1;
+    }
+
+    let deliveries = 0;
+    for (const [nonce, delivery] of this.deliveries) {
+      // A nonce whose digest is still remembered is still armed on a message
+      // with buttons, whatever its own age says; the digest is the entry that
+      // decides, and it was just judged above.
+      if (this.digests.has(delivery.deliveryId)) continue;
+      if (!lapsed(delivery.deliveredAtMs) || !expired(delivery.deliveredAtMs)) continue;
+      this.deliveries.delete(nonce);
+      deliveries += 1;
+    }
+
+    return { deliveries, digests };
+  }
+
+  /** How many entries the bookkeeping holds. For tests and for operators. */
+  bookkeepingSize(): { deliveries: number; digests: number; allNonces: number } {
+    return {
+      deliveries: this.deliveries.size,
+      digests: this.digests.size,
+      allNonces: this.allNonces.size,
+    };
   }
 
   /**
@@ -1522,6 +1672,14 @@ export class TelegramChannel implements TestableChannel {
    * what {@link listen} catches and retries.
    */
   async pollOnce(): Promise<TelegramPollResult> {
+    // APRV-135. Before the long poll, not after: this is where the loop is
+    // about to block for up to `pollTimeoutSeconds`, and a sweep that ran after
+    // the block would be a sweep that never runs on a quiet chat. Rate-limited
+    // so a driver calling `pollOnce` in a tight loop does not spend its time
+    // walking two maps.
+    const nowMs = this.now();
+    if (nowMs - this.lastSweepMs >= TELEGRAM_SWEEP_INTERVAL_MS) this.sweep(nowMs);
+
     const updates = await this.call<unknown[]>(
       "getUpdates",
       {
