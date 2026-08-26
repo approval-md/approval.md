@@ -254,7 +254,7 @@ function live(
       idempotency_key: key,
       summary: `chase invoice ${41 + index}`,
       reversible: false,
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       payload_hash: payloadHash(payload),
     });
   }
@@ -277,7 +277,7 @@ function live(
       task: TASK,
       actionKey: key,
       cls: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       reversible: false,
       summary: `chase invoice ${41 + index}`,
     };
@@ -1572,7 +1572,7 @@ function hookedRequest(world: Live, options: HookedOptions = {}): string {
             idempotency_key: key,
             summary: command,
             reversible: false,
-            est_cost_usd: 0,
+            est_cost_usd: "0",
             payload_hash: payloadHash(payload),
           },
         ],
@@ -1590,7 +1590,7 @@ function hookedRequest(world: Live, options: HookedOptions = {}): string {
       task: "task-101",
       actionKey: key,
       cls: "communicate.email.external",
-      est_cost_usd: 0,
+      est_cost_usd: "0",
       reversible: false,
       summary: command,
       payload_hash: payloadHash(payload),
@@ -2129,7 +2129,7 @@ function staged(count: number): Live {
       idempotency_key: key,
       summary: `chase invoice ${41 + index}`,
       reversible: false,
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       payload_hash: payloadHash(payload),
     });
   }
@@ -2163,7 +2163,7 @@ function requestAt(world: Live, index: number, ts: string): string {
       task: TASK,
       actionKey: key,
       cls: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       reversible: false,
       summary: `chase invoice ${41 + index}`,
     },

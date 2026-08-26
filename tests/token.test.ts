@@ -191,7 +191,7 @@ function envelopeFor(keys: string[]): unknown {
       class: "communicate.email.external",
       summary: "Send deposit chaser",
       reversible: false,
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       idempotency_key: key,
       payload_hash: bindingFor(key),
     })),
@@ -215,7 +215,7 @@ function requestAction(unit: Case, actionKey: string, ts: string = at(1)): void 
       task: "task-042",
       actionKey,
       cls: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       reversible: false,
       summary: "Send deposit chaser",
       payload_hash: bindingFor(actionKey),
@@ -317,7 +317,7 @@ test("a harness-executed grant refuses the token path with its own code", () => 
       task: "task-042",
       actionKey: "task-042:chaser",
       cls: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       reversible: false,
       summary: "Send deposit chaser",
       payload_hash: bindingFor("task-042:chaser"),
@@ -356,7 +356,7 @@ test("grant mints a token, logs ONLY its sha256, and the raw token never reaches
   assert.equal(payload["token_sha256"], tokenHash(token));
   // The budgets contract survives the addition.
   assert.equal(payload["class"], "communicate.email.external");
-  assert.equal(payload["est_cost_usd"], 0.02);
+  assert.equal(payload["est_cost_usd"], "0.02");
 
   assertTokenAbsentFromLog(unit, token);
   assertClean(unit);
@@ -441,7 +441,7 @@ test("verifyToken accepts the minted token and reports the grant it came from", 
   assert.equal(result.tokenSha256, tokenHash(token));
   assert.equal(result.task, "task-042");
   assert.equal(result.class, "communicate.email.external");
-  assert.equal(result.est_cost_usd, 0.02);
+  assert.equal(result.est_cost_usd, "0.02");
   assert.equal(result.grantSeq, 4);
 });
 
@@ -510,7 +510,7 @@ test("a grant with no token_sha256 authorizes nothing (fail closed, token-mismat
     actor: "human:carter",
     task: "task-042",
     action_key: "task-042:chaser",
-    payload: { class: "communicate.email.external", est_cost_usd: 0.02 },
+    payload: { class: "communicate.email.external", est_cost_usd: "0.02" },
   });
   assert.equal(legacy.ok, true);
 
@@ -548,7 +548,7 @@ test("consumeToken appends execution.started with the exact contract payload", (
   assert.equal(result.record.action_key, "task-042:chaser");
   assert.deepEqual(result.record.payload, {
     class: "communicate.email.external",
-    est_cost_usd: 0.02,
+    est_cost_usd: "0.02",
     token_sha256: tokenHash(token),
     // A1: the bytes that ran, recorded beside the token that authorized them.
     payload_hash: bindingFor("task-042:chaser"),
@@ -625,7 +625,7 @@ test("an execution.started for the key spends it even if it named no token", () 
     actor: "agent:claude",
     task: "task-042",
     action_key: "task-042:chaser",
-    payload: { class: "communicate.email.external", est_cost_usd: 0.02 },
+    payload: { class: "communicate.email.external", est_cost_usd: "0.02" },
   });
   assert.equal(started.ok, true);
 
@@ -778,13 +778,13 @@ test("grant + consume charges the window ONCE (the double-count guard, end to en
     classPattern: "communicate.email.external",
     globalBudgets: null,
   };
-  const action = { class: "communicate.email.external", est_cost_usd: 0.02 };
+  const action = { class: "communicate.email.external", est_cost_usd: "0.02" };
 
   // After the grant alone: one authorization consumed, so a second would fail.
   const afterGrant = evaluateBudgets(records(unit), scope, action, at(3));
   assert.equal(afterGrant.pass, false);
   const grantVerdict = afterGrant.verdicts.find((verdict) => verdict.limit === "daily_actions");
-  assert.equal(grantVerdict?.consumed, 1);
+  assert.equal(grantVerdict?.consumed, "1");
 
   const consumed = consumeToken(
     unit.logPath,
@@ -800,7 +800,7 @@ test("grant + consume charges the window ONCE (the double-count guard, end to en
   // execution.started only when the window holds no same-key approval.granted.
   const afterConsume = evaluateBudgets(records(unit), scope, action, at(4));
   const consumeVerdict = afterConsume.verdicts.find((verdict) => verdict.limit === "daily_actions");
-  assert.equal(consumeVerdict?.consumed, 1, "the manual action was charged twice");
+  assert.equal(consumeVerdict?.consumed, "1", "the manual action was charged twice");
   assertClean(unit);
 });
 

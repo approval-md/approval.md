@@ -26,6 +26,8 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { runPayloadHash } from "../src/core/payload.js";
+
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-cli-status-")));
@@ -79,14 +81,17 @@ const POLICY = [
 const POLICY_NO_BUDGETS = POLICY.split("budgets:")[0] as string;
 
 /**
- * The content binding every declared action carries (amended SPEC.md §6.2, A1).
+ * The one command every case in this suite runs, and therefore the one payload
+ * every declared action binds to (amended SPEC.md §6.2, APRV-140).
  *
- * Manual actions MUST have one — intake refuses `payload-hash-required` without
- * it — and the spend must present the same value, which these suites do with
- * `--payload-hash`. One constant across the fixture keeps the CLI assertions
- * about flags and exit codes rather than about hashing.
+ * A1 made the hash MUST for manual actions; APRV-140 made it MUST for every
+ * action that executes, and made `approval run` recompute it from the argv and
+ * cwd it is about to spawn. A stand-in constant is no longer usable, so the
+ * child's exit code travels in the ENVIRONMENT rather than in its argv: every
+ * case runs the same bytes, and one binding per case directory covers the whole
+ * fixture.
  */
-const PAYLOAD_HASH = "3".repeat(64);
+const CHILD = [process.execPath, "-e", "process.exit(Number(process.env.CHILD_EXIT ?? 0))"];
 
 /**
  * The unrebuildable warning `status` carries in `payload_store.note`, pinned
@@ -101,7 +106,8 @@ const PAYLOAD_STORE_NOTE =
   "it is the one cache that cannot be rebuilt from the log, and losing it leaves " +
   "manual requests rendering as payload-unavailable rather than showing bytes no hash bound";
 
-const TASK_FILE = [
+function taskFile(binding: string): string {
+  return [
   "---",
   "id: task-042",
   "title: Chase deposit refund",
@@ -115,46 +121,52 @@ const TASK_FILE = [
   "    - class: communicate.email.external",
   '      summary: "Send deposit chaser"',
   "      reversible: false",
-  "      est_cost_usd: 0.02",
+  '      est_cost_usd: "0.02"',
   '      idempotency_key: "task-042:chaser"',
-  `      payload_hash: "${PAYLOAD_HASH}"`,
+  `      payload_hash: "${binding}"`,
   "    - class: communicate.email.external",
   '      summary: "Send the follow-up"',
   "      reversible: false",
-  "      est_cost_usd: 0.02",
+  '      est_cost_usd: "0.02"',
   '      idempotency_key: "task-042:followup"',
-  `      payload_hash: "${PAYLOAD_HASH}"`,
+  `      payload_hash: "${binding}"`,
   "    - class: files.write.local",
   '      summary: "Write the draft"',
   "      reversible: true",
-  "      est_cost_usd: 0.01",
+  '      est_cost_usd: "0.01"',
   '      idempotency_key: "task-042:draft"',
-  `      payload_hash: "${PAYLOAD_HASH}"`,
+  `      payload_hash: "${binding}"`,
   "    - class: files.write.local",
   '      summary: "Write the second draft"',
   "      reversible: true",
-  "      est_cost_usd: 0.01",
+  '      est_cost_usd: "0.01"',
   '      idempotency_key: "task-042:draft2"',
-  `      payload_hash: "${PAYLOAD_HASH}"`,
+  `      payload_hash: "${binding}"`,
   "    - class: files.write.local",
   '      summary: "Write the third draft"',
   "      reversible: true",
-  "      est_cost_usd: 0.01",
+  '      est_cost_usd: "0.01"',
   '      idempotency_key: "task-042:draft3"',
-  `      payload_hash: "${PAYLOAD_HASH}"`,
+  `      payload_hash: "${binding}"`,
   "---",
   "",
   "## Description",
   "Body.",
   "",
-].join("\n");
+  ].join("\n");
+}
+
+/** What `approval run` will compute for {@link CHILD} in `dir`. */
+function bindingFor(dir: string): string {
+  return runPayloadHash(CHILD, dir);
+}
 
 function caseDir(policyText: string = POLICY): string {
   counter += 1;
   const dir = join(scratch, `case-${counter}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "APPROVAL.md"), policyText, "utf8");
-  writeFileSync(join(dir, "task-042.md"), TASK_FILE, "utf8");
+  writeFileSync(join(dir, "task-042.md"), taskFile(bindingFor(dir)), "utf8");
   return dir;
 }
 
@@ -212,19 +224,9 @@ function queueJson(dir: string): { code: number; body: Record<string, unknown> }
 
 /** Run a supervised action to completion, or to a failure with `exitCode`. */
 function runSupervised(dir: string, actionKey: string, exitCode: number): void {
-  const run = runCli(
-    [
-      "run",
-      actionKey,
-      "--as",
-      "agent:claude",
-      "--",
-      process.execPath,
-      "-e",
-      `process.exit(${exitCode})`,
-    ],
-    dir,
-  );
+  const run = runCli(["run", actionKey, "--as", "agent:claude", "--", ...CHILD], dir, {
+    CHILD_EXIT: String(exitCode),
+  });
   assert.equal(run.code, exitCode, run.stderr);
 }
 
@@ -252,18 +254,18 @@ test("status --json on a healthy repo emits the frozen shape and exits 0", () =>
         window: "rolling-24h",
         // One authorization in the window (the grant), plus the zero-cost
         // probe's own action — documented in --help, asserted here.
-        consumed: 1,
-        requested: 1,
-        remaining: 48,
+        consumed: "1",
+        requested: "1",
+        remaining: "48",
         pass: true,
       },
       {
         limit: "global.daily_usd",
         scope: "global",
         window: "rolling-24h",
-        consumed: 0.02,
-        requested: 0,
-        remaining: 9.98,
+        consumed: "0.02",
+        requested: "0",
+        remaining: "9.98",
         pass: true,
       },
     ],
@@ -342,7 +344,7 @@ test("status counts the payload store once a real request has stored bytes", () 
   const hashRun = runCli(["payload", "hash", "payload.json"], dir);
   assert.equal(hashRun.code, 0, hashRun.stderr);
   const hash = hashRun.stdout.trim();
-  writeFileSync(join(dir, "task-042.md"), TASK_FILE.split(PAYLOAD_HASH).join(hash), "utf8");
+  writeFileSync(join(dir, "task-042.md"), taskFile(hash), "utf8");
 
   assert.equal(runCli(["policy", "attest", "--as", "human:carter"], dir).code, 0);
   assert.equal(runCli(["register", "task-042.md", "--as", "agent:claude"], dir).code, 0);
@@ -417,7 +419,10 @@ test("a dangling execution appears in status, never in queue, and nothing repair
   // `approval consume` starts the execution and, by design, never finishes it —
   // the same state a crash between started and its outcome leaves behind.
   assert.equal(
-    runCli(["consume", "task-042:chaser", "--payload-hash", PAYLOAD_HASH, "--token", token, "--as", "agent:claude"], dir).code,
+    runCli(
+      ["consume", "task-042:chaser", "--payload-hash", bindingFor(dir), "--token", token, "--as", "agent:claude"],
+      dir,
+    ).code,
     0,
   );
 
@@ -465,18 +470,7 @@ test("three consecutive failures raise a loop escalation in status; a completion
   assert.equal(queueJson(dir).body["pending"] instanceof Array, true);
   const token = grant(dir, "task-042:chaser");
   const ran = runCli(
-    [
-      "run",
-      "task-042:chaser",
-      "--payload-hash", PAYLOAD_HASH, "--token",
-      token,
-      "--as",
-      "agent:claude",
-      "--",
-      process.execPath,
-      "-e",
-      "process.exit(0)",
-    ],
+    ["run", "task-042:chaser", "--token", token, "--as", "agent:claude", "--", ...CHILD],
     dir,
   );
   assert.equal(ran.code, 0, ran.stderr);
@@ -505,7 +499,7 @@ test("queue lists exactly the live awaiting requests, with the TTL remaining", (
   const first = pending[0] as Record<string, unknown>;
   assert.equal(first["task"], "task-042");
   assert.equal(first["class"], "communicate.email.external");
-  assert.equal(first["est_cost_usd"], 0.02);
+  assert.equal(first["est_cost_usd"], "0.02");
   assert.equal(first["seq"], 3);
   assert.equal(typeof first["requested_ts"], "string");
   const remaining = first["ttl_remaining_ms"] as number;

@@ -43,6 +43,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { runPayloadHash } from "../src/core/payload.js";
 import type { DaemonEvent } from "../src/daemon/daemon.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -67,7 +68,20 @@ after(() => {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-const PAYLOAD_HASH = "3".repeat(64);
+/**
+ * A binding for a declaration nothing in this suite ever executes: the flow-style
+ * envelope of the write-back-refusal case, which is registered and never run.
+ * Every action that DOES execute binds to {@link CHILD} instead (APRV-140).
+ */
+const UNEXECUTED_BINDING = "3".repeat(64);
+
+/**
+ * The one command every `approval run` in this suite spawns. `run` recomputes
+ * the binding from the argv and cwd it is about to spawn (APRV-140), so the exit
+ * code travels in the ENVIRONMENT: one payload, one binding per case directory,
+ * and the declarations can commit to it before anything runs.
+ */
+const CHILD = [process.execPath, "-e", "process.exit(Number(process.env.CHILD_EXIT ?? 0))"];
 
 function policy(ttl: string): string {
   return [
@@ -115,7 +129,8 @@ const POLICY_SAMPLING = POLICY.replace(
 /** Short enough to lapse inside a test, long enough not to race the setup. */
 const POLICY_SHORT_TTL = policy("2s");
 
-function taskFile(state: string): string {
+function taskFile(state: string, dir: string): string {
+  const binding = runPayloadHash(CHILD, dir);
   return [
     "---",
     "id: task-042",
@@ -130,30 +145,33 @@ function taskFile(state: string): string {
     "    - class: communicate.email.external",
     '      summary: "Send deposit chaser"',
     "      reversible: false",
-    "      est_cost_usd: 0.02",
+    '      est_cost_usd: "0.02"',
     '      idempotency_key: "task-042:chaser"',
-    `      payload_hash: "${PAYLOAD_HASH}"`,
+    `      payload_hash: "${binding}"`,
     "    - class: communicate.email.external",
     '      summary: "Send the follow-up"',
     "      reversible: false",
-    "      est_cost_usd: 0.02",
+    '      est_cost_usd: "0.02"',
     '      idempotency_key: "task-042:followup"',
-    `      payload_hash: "${PAYLOAD_HASH}"`,
+    `      payload_hash: "${binding}"`,
     "    - class: files.write.local",
     '      summary: "Write the draft"',
     "      reversible: true",
-    "      est_cost_usd: 0.01",
+    '      est_cost_usd: "0.01"',
     '      idempotency_key: "task-042:draft"',
+    `      payload_hash: "${binding}"`,
     "    - class: files.write.local",
     '      summary: "Write the second draft"',
     "      reversible: true",
-    "      est_cost_usd: 0.01",
+    '      est_cost_usd: "0.01"',
     '      idempotency_key: "task-042:draft2"',
+    `      payload_hash: "${binding}"`,
     "    - class: files.write.local",
     '      summary: "Write the third draft"',
     "      reversible: true",
-    "      est_cost_usd: 0.01",
+    '      est_cost_usd: "0.01"',
     '      idempotency_key: "task-042:draft3"',
+    `      payload_hash: "${binding}"`,
     "---",
     "",
     "## Description",
@@ -189,7 +207,7 @@ function caseDir(policyText: string = POLICY, state = "proposed"): string {
   const dir = join(scratch, `case-${counter}`);
   mkdirSync(join(dir, "backlog", "tasks"), { recursive: true });
   writeFileSync(join(dir, "APPROVAL.md"), policyText, "utf8");
-  writeFileSync(join(dir, "backlog", "tasks", "task-042.md"), taskFile(state), "utf8");
+  writeFileSync(join(dir, "backlog", "tasks", "task-042.md"), taskFile(state, dir), "utf8");
   return dir;
 }
 
@@ -340,7 +358,7 @@ test("drift: a file whose state contradicts the log appends envelope.drift", () 
 
   // Drift, then repair (APRV-62): the disagreement reaches the log first and the
   // file is corrected second, in the same tick.
-  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("awaiting"));
+  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("awaiting", dir));
   assertClean(dir);
 });
 
@@ -373,7 +391,7 @@ test("drift: the same claim against the same log is recorded once, a new claim a
   assert.equal(eventsOf(dir, "envelope.drift").length, 1);
 
   // A different wrong claim is a different fact and is recorded.
-  writeFileSync(taskPath(dir), taskFile("executed"), "utf8");
+  writeFileSync(taskPath(dir), taskFile("executed", dir), "utf8");
   daemonOnce(dir);
   const drifts = eventsOf(dir, "envelope.drift");
   assert.equal(drifts.length, 2);
@@ -457,7 +475,7 @@ test("write-back: the log's state is written into the file, one line and no othe
   const changed = differingLines(before, after);
   assert.equal(changed.length, 1, `more than the state: line changed: ${JSON.stringify(changed)}`);
   assert.equal(after.split("\n")[changed[0] as number]?.trim(), "state: awaiting");
-  assert.equal(after, taskFile("awaiting"), "the file is the original with one value replaced");
+  assert.equal(after, taskFile("awaiting", dir), "the file is the original with one value replaced");
   assertClean(dir);
 });
 
@@ -494,7 +512,7 @@ test("write-back: a live daemon repairs once and then leaves the file alone", as
 
   const daemon = new LiveDaemon(dir, ["--interval", "100ms"]);
   await until(
-    () => readFileSync(taskPath(dir), "utf8") === taskFile("awaiting"),
+    () => readFileSync(taskPath(dir), "utf8") === taskFile("awaiting", dir),
     "the daemon to repair the file",
   );
   const mtime = statSync(taskPath(dir)).mtimeMs;
@@ -509,7 +527,7 @@ test("write-back: a live daemon repairs once and then leaves the file alone", as
   const code = await daemon.stopWith("SIGINT");
   assert.equal(code, 0, `daemon exited ${code}: ${daemon.stderr}`);
 
-  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("awaiting"));
+  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("awaiting", dir));
   assert.equal(statSync(taskPath(dir)).mtimeMs, mtime, "the daemon rewrote the file repeatedly");
   assert.equal(daemon.lines().filter((line) => line["event"] === "write_back").length, 1);
   assert.equal(eventsOf(dir, "envelope.drift").length, 1);
@@ -527,7 +545,7 @@ test("write-back: a file the writer will not round-trip is warned about and left
     "---",
     "id: task-042",
     "title: Chase deposit refund",
-    `approval: {origin: {app: example-capture, created_by: "human:carter"}, state: proposed, actions: [{class: communicate.email.external, summary: "Send deposit chaser", reversible: false, est_cost_usd: 0.02, idempotency_key: "task-042:chaser", payload_hash: "${PAYLOAD_HASH}"}]}`,
+    `approval: {origin: {app: example-capture, created_by: "human:carter"}, state: proposed, actions: [{class: communicate.email.external, summary: "Send deposit chaser", reversible: false, est_cost_usd: "0.02", idempotency_key: "task-042:chaser", payload_hash: "${UNEXECUTED_BINDING}"}]}`,
     "---",
     "",
     "## Description",
@@ -561,38 +579,25 @@ test("write-back: the file follows the log through registered, requested, grante
   // left three drift records and a file that never moved.
   daemonOnce(dir);
   assert.equal(eventsOf(dir, "envelope.drift").length, 0);
-  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("proposed"));
+  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("proposed", dir));
 
   request(dir, "task-042:chaser");
   daemonOnce(dir);
-  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("awaiting"));
+  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("awaiting", dir));
 
   const granted = runCli(["grant", "task-042:chaser", "--as", "human:carter", "--json"], dir);
   assert.equal(granted.code, 0, granted.stderr);
   const token = String((JSON.parse(granted.stdout) as Record<string, unknown>)["token"]);
   daemonOnce(dir);
-  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("approved"));
+  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("approved", dir));
 
   const executed = runCli(
-    [
-      "run",
-      "task-042:chaser",
-      "--payload-hash",
-      PAYLOAD_HASH,
-      "--token",
-      token,
-      "--as",
-      "agent:claude",
-      "--",
-      process.execPath,
-      "-e",
-      "process.exit(0)",
-    ],
+    ["run", "task-042:chaser", "--token", token, "--as", "agent:claude", "--", ...CHILD],
     dir,
   );
   assert.equal(executed.code, 0, executed.stderr);
   daemonOnce(dir);
-  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("executed"));
+  assert.equal(readFileSync(taskPath(dir), "utf8"), taskFile("executed", dir));
 
   // One drift record per transition the daemon observed: each marks a moment the
   // file was found behind the log and brought up to it, and none is a repeat.
@@ -740,10 +745,9 @@ test("queue: the daemon regenerates the queue after an append it did not make", 
 test("escalation: three consecutive failures are surfaced by the daemon and by status", () => {
   const dir = ready(POLICY, "proposed");
   for (const key of ["task-042:draft", "task-042:draft2", "task-042:draft3"]) {
-    const run = runCli(
-      ["run", key, "--as", "agent:claude", "--", process.execPath, "-e", "process.exit(1)"],
-      dir,
-    );
+    const run = runCli(["run", key, "--as", "agent:claude", "--", ...CHILD], dir, {
+      CHILD_EXIT: "1",
+    });
     assert.equal(run.code, 1, run.stderr);
   }
 
@@ -925,7 +929,7 @@ test("sampling: a supervised execution drawn by the daemon is one `sampled` JSON
   // Supervised: it runs without asking and is sampled afterwards, which is the
   // only kind of execution the sweep can draw.
   const ran = runCli(
-    ["run", "task-042:draft", "--as", "agent:claude", "--", process.execPath, "--version"],
+    ["run", "task-042:draft", "--as", "agent:claude", "--", ...CHILD],
     dir,
     { [SAMPLING_SECRET_ENV]: SAMPLING_SECRET },
   );

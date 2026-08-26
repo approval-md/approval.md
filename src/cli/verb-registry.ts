@@ -76,6 +76,23 @@ const NUMBER: JsonSchema = { type: "number" };
 const SHA256: JsonSchema = { type: "string", pattern: "^[0-9a-f]{64}$" };
 
 /**
+ * A USD amount as the log holds it since APRV-121: a canonical decimal string.
+ *
+ * The `--json` surface reports what the record says, so it reports the same
+ * spelling. A consumer that wants arithmetic parses it, which is the one thing
+ * a decimal string makes unambiguous across languages.
+ *
+ * The pattern is spelled out rather than imported: this module is deliberately
+ * free of runtime imports so that the frozen output shapes are readable as
+ * data. `tests/money.test.ts` asserts it is character-for-character the
+ * `USD_STRING_PATTERN` of `core/money.ts`, so the copy cannot drift.
+ */
+const USD_AMOUNT: JsonSchema = {
+  type: "string",
+  pattern: "^(0|[1-9][0-9]*)(\\.[0-9]{0,5}[1-9])?$",
+};
+
+/**
  * `anyOf` rather than a union `type`, deliberately: the repo's Ajv runs
  * `strict: true`, which refuses union types unless `allowUnionTypes` is set,
  * and relaxing a strict flag to make a schema compile is the wrong trade.
@@ -854,7 +871,7 @@ const VERBS: VerbSpec[] = [
         token_sha256: SHA256,
         grant_seq: INTEGER,
         class: STRING,
-        est_cost_usd: NUMBER,
+        est_cost_usd: USD_AMOUNT,
         payload_hash: nullable(SHA256),
         task: STRING,
       },
@@ -892,7 +909,7 @@ const VERBS: VerbSpec[] = [
         token_sha256: SHA256,
         grant_seq: INTEGER,
         class: STRING,
-        est_cost_usd: NUMBER,
+        est_cost_usd: USD_AMOUNT,
       },
       ["ok", "action_key", "event", "seq", "token_sha256", "grant_seq", "class", "est_cost_usd"],
     ),
@@ -987,6 +1004,51 @@ const VERBS: VerbSpec[] = [
         actor: STRING,
       },
       ["ok", "action_key", "task", "event", "outcome", "seq", "attested_by_human", "actor"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
+    name: "execution",
+    subcommand: "reconcile",
+    purpose:
+      "Record what a HUMAN ESTABLISHED about an INDETERMINATE execution — one whose side effect was attempted and whose outcome nobody knows, which is a different state from a dangling execution and from a failure. It appends execution.reconciled naming the execution.indeterminate record by seq and never rewriting it, so the doubt survives its own answer, and it demands the evidence as a non-empty note. Resolving not-executed re-opens the EFFECT and not this action: the idempotency key stays burned either way, so the repair is a fresh action and a fresh request. Nothing auto-resolves an indeterminate outcome, the daemon least of all.",
+    human_only: true,
+    input: input({
+      positionals: positionals([{ name: "action-key", description: "the action's idempotency_key" }], 1),
+      flags: {
+        "--resolution": "string",
+        "--note": "string",
+        ...AS_FLAG,
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        action_key: STRING,
+        task: STRING,
+        event: { const: "execution.reconciled" },
+        resolution: { enum: ["executed", "not-executed"] },
+        indeterminate_seq: INTEGER,
+        seq: INTEGER,
+        attested_by_human: { const: true },
+        actor: STRING,
+      },
+      [
+        "ok",
+        "action_key",
+        "task",
+        "event",
+        "resolution",
+        "indeterminate_seq",
+        "seq",
+        "attested_by_human",
+        "actor",
+      ],
     ),
     error: ERROR_SCHEMA,
     exit_codes: BASE_EXIT_CODES,
@@ -1202,7 +1264,7 @@ const VERBS: VerbSpec[] = [
               action_key: STRING,
               task: STRING,
               class: STRING,
-              est_cost_usd: nullable(NUMBER),
+              est_cost_usd: nullable(USD_AMOUNT),
               requested_ts: STRING,
               seq: INTEGER,
               ttl_remaining_ms: nullable(INTEGER),
@@ -1220,7 +1282,7 @@ const VERBS: VerbSpec[] = [
   {
     name: "status",
     purpose:
-      "System HEALTH, from the log: attestation state, the latest chain verdict, dangling executions, budget headroom from a zero-cost probe, loop escalations, and the payload store's size. Exit 1 when any of those needs attention. This is what an operator must fix; `queue` is what a human must answer, and neither carries the other's content. Writes nothing.",
+      "System HEALTH, from the log: attestation state, the latest chain verdict, dangling executions, indeterminate executions, budget headroom from a zero-cost probe, loop escalations, and the payload store's size. Exit 1 when any of those needs attention. `dangling` is executions the runtime meant to watch and did not, and never harness executions, which are terminal by design and gain no outcome; `indeterminate` is side effects that were attempted and whose fate nobody has established, and it appears only when there are some. This is what an operator must fix; `queue` is what a human must answer, and neither carries the other's content. Writes nothing.",
     human_only: false,
     input: input({ flags: { ...POLICY_FLAGS, ...LOG_FLAG, ...JSON_FLAG, ...HELP_FLAGS } }),
     output: object(
@@ -1230,6 +1292,7 @@ const VERBS: VerbSpec[] = [
         attestation: object({ state: STRING, seq: nullable(INTEGER) }, ["state", "seq"]),
         verification: object({ status: STRING, records: nullable(INTEGER) }, ["status", "records"]),
         dangling: arrayOf(OPEN_OBJECT),
+        indeterminate: arrayOf(OPEN_OBJECT),
         budgets: arrayOf(OPEN_OBJECT),
         loop_escalations: arrayOf(OPEN_OBJECT),
         // APRV-127: reconciliation obligations opened by a retrospective denial

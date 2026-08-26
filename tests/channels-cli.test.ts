@@ -112,7 +112,7 @@ function live(count: number): Live {
       idempotency_key: key,
       summary: `chase invoice ${41 + index}`,
       reversible: false,
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       payload_hash: payloadHash(payload),
     });
   }
@@ -133,7 +133,7 @@ function live(count: number): Live {
         task: TASK,
         actionKey: key,
         cls: "communicate.email.external",
-        est_cost_usd: 0.02,
+        est_cost_usd: "0.02",
         reversible: false,
         summary: `chase invoice ${41 + index}`,
       },
@@ -426,7 +426,7 @@ function repo(options: { withRequest?: boolean } = {}): Repo {
       "    - class: communicate.email.external",
       '      summary: "Send the deposit chaser"',
       "      reversible: false",
-      "      est_cost_usd: 0.02",
+      '      est_cost_usd: "0.02"',
       `      idempotency_key: "${key}"`,
       `      payload_hash: "${payloadHash(payload)}"`,
       "---",

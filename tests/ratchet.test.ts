@@ -19,7 +19,7 @@
  *    reads the field at all.
  * 2. **A confident, cheap, well-summarized action is treated identically.**
  *    Two envelopes differing only in the claimed fields resolve the same way,
- *    refuse the same way, and consume the same budget — and `est_cost_usd: 0`
+ *    refuse the same way, and consume the same budget — and `est_cost_usd: "0"`
  *    still spends one action of every action-count limit, because an
  *    authorization with no declared cost is still an authorization.
  */
@@ -115,7 +115,7 @@ const POLICY_COUNTED = [
 const BOUND = "d".repeat(64);
 
 /** An envelope whose CLAIMED fields are dialed all the way up or all the way down. */
-function envelope(confidence: number, summary: string, cost: number): unknown {
+function envelope(confidence: number, summary: string, cost: string): unknown {
   return {
     origin: { app: "example-capture", created_by: "agent:claude" },
     route: { assignee: "agent:claude", confidence, rationale: summary },
@@ -148,14 +148,14 @@ function ready(env: unknown): Scenario {
 
 test("confidence 0.01 and 0.99 produce identical resolutions and identical refusals", () => {
   const outcomes = [0.01, 0.99].map((confidence) => {
-    const unit = ready(envelope(confidence, "routine templated chaser, no risk", 0.02));
+    const unit = ready(envelope(confidence, "routine templated chaser, no risk", "0.02"));
     const result = request(
       unit.logPath,
       {
         task: "task-042",
         actionKey: "task-042:chaser",
         cls: "communicate.email.external",
-        est_cost_usd: 0.02,
+        est_cost_usd: "0.02",
         reversible: false,
         summary: "routine templated chaser, no risk",
       },
@@ -188,7 +188,7 @@ test("confidence 0.01 and 0.99 produce identical resolutions and identical refus
 });
 
 test("est_cost_usd: 0 does not buy a free action — daily_actions still charges 1", () => {
-  const unit = ready(envelope(0.99, "free, trivial, already approved in spirit", 0));
+  const unit = ready(envelope(0.99, "free, trivial, already approved in spirit", "0"));
 
   const first = request(
     unit.logPath,
@@ -196,7 +196,7 @@ test("est_cost_usd: 0 does not buy a free action — daily_actions still charges
       task: "task-042",
       actionKey: "task-042:chaser",
       cls: "communicate.email.external",
-      est_cost_usd: 0,
+      est_cost_usd: "0",
       reversible: false,
     },
     "agent:claude",
@@ -218,11 +218,11 @@ test("est_cost_usd: 0 does not buy a free action — daily_actions still charges
       classPattern: "communicate.email.external",
       globalBudgets: null,
     },
-    { class: "communicate.email.external", est_cost_usd: 0 },
+    { class: "communicate.email.external", est_cost_usd: "0" },
     at(3),
   );
   const counted = verdicts.verdicts.find((verdict) => verdict.limit === "daily_actions");
-  assert.equal(counted?.consumed, 1, "a $0 authorization was not counted as an action");
+  assert.equal(counted?.consumed, "1", "a $0 authorization was not counted as an action");
   assert.equal(verdicts.pass, false);
 
   // And the gate agrees: a second zero-cost action of the same class is refused.
@@ -232,7 +232,7 @@ test("est_cost_usd: 0 does not buy a free action — daily_actions still charges
       task: "task-042",
       actionKey: "task-042:second",
       cls: "communicate.email.external",
-      est_cost_usd: 0,
+      est_cost_usd: "0",
       reversible: false,
       payload_hash: BOUND,
     },

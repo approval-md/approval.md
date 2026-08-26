@@ -35,6 +35,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { VERB_REGISTRY, verbLabel, type VerbSpec } from "../src/cli/verb-registry.js";
+import { runPayloadHash } from "../src/core/payload.js";
 import {
   EXCLUDED_VERBS,
   resolveAgentActor,
@@ -73,7 +74,15 @@ function runCli(args: string[], cwd: string): Run {
   return { code: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
 }
 
-const TASK_FILE = [
+/** The command the `run` case spawns, and therefore what the action binds to. */
+const CHILD = [process.execPath, "-e", "process.stdout.write('hello from the child')"];
+
+/**
+ * APRV-140: `approval run` recomputes the binding from the argv and cwd it will
+ * spawn, so the declaration commits to {@link CHILD} in the world's directory.
+ */
+function taskFile(binding: string): string {
+  return [
   "---",
   "id: task-mcp",
   "title: Chase the deposit",
@@ -88,14 +97,15 @@ const TASK_FILE = [
   "    - class: communicate.email.external",
   '      summary: "Send the chaser"',
   "      reversible: false",
-  "      est_cost_usd: 0.02",
+  '      est_cost_usd: "0.02"',
   '      idempotency_key: "task-mcp:chaser"',
-  `      payload_hash: "${"3".repeat(64)}"`,
+  `      payload_hash: "${binding}"`,
   "---",
   "",
   "Body.",
   "",
-].join("\n");
+  ].join("\n");
+}
 
 /** A fresh initialised, attested world with the task file on disk. */
 function newWorld(label: string): string {
@@ -103,7 +113,7 @@ function newWorld(label: string): string {
   mkdirSync(dir, { recursive: true });
   assert.equal(runCli(["init", "--json"], dir).code, 0);
   assert.equal(runCli(["policy", "attest", "--json"], dir).code, 0);
-  writeFileSync(join(dir, "task-mcp.md"), TASK_FILE);
+  writeFileSync(join(dir, "task-mcp.md"), taskFile(runPayloadHash(CHILD, dir)));
   writeFileSync(join(dir, "payload.json"), '{"to":"b@example.com","subject":"hi"}\n');
   return dir;
 }
@@ -410,8 +420,8 @@ test("mcp: run executes behind the gate and pipes the child rather than the tran
   try {
     const ran = await call(client, "run", {
       positionals: ["task-mcp:chaser"],
-      flags: { "--token": token, "--payload-hash": "3".repeat(64) },
-      trailing: [process.execPath, "-e", "process.stdout.write('hello from the child')"],
+      flags: { "--token": token },
+      trailing: CHILD,
     });
     assert.equal(ran.isError, false);
     assert.equal((ran.structured ?? {})["outcome"], "execution.completed");
@@ -649,10 +659,9 @@ test("mcp: tool calls run serially within one server", async () => {
       const name = `task-${index}.md`;
       writeFileSync(
         join(dir, name),
-        TASK_FILE.replace("id: task-mcp", `id: task-${index}`).replace(
-          '"task-mcp:chaser"',
-          `"task-${index}:chaser"`,
-        ),
+        taskFile(runPayloadHash(CHILD, dir))
+          .replace("id: task-mcp", `id: task-${index}`)
+          .replace('"task-mcp:chaser"', `"task-${index}:chaser"`),
       );
       files.push(name);
     }

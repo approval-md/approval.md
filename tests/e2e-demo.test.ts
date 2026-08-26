@@ -12,8 +12,8 @@
  * **Everything is driven through the CLI as a child process.** That is the
  * surface a human and an agent actually touch, so a demo that called core
  * functions would prove something nobody can run. Core is imported for exactly
- * one thing — {@link payloadHash}, to build the fixture's content binding and to
- * assert against it — and never to perform a step.
+ * one thing — {@link runPayloadHash}, to build the fixture's content binding and
+ * to assert against it — and never to perform a step.
  *
  * **The negative space is part of the demo.** A walk that only shows the happy
  * path would not distinguish this runtime from one that always says yes, so the
@@ -48,7 +48,7 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { payloadHash } from "../src/core/payload.js";
+import { runPayloadHash } from "../src/core/payload.js";
 import { canonicalRender } from "../src/core/wysiwys.js";
 import {
   assertLocal,
@@ -72,21 +72,37 @@ const AGENT = "agent:drafter";
 const TASK = "task-demo";
 const ACTION = "task-demo:chaser";
 
+/** realpath: macOS hands out /var/… symlinks, and attestation compares paths. */
+const demo = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-e2e-demo-")));
+
+/** The command the demo executes once the approval is in hand. */
+const DEMO_COMMAND = [
+  process.execPath,
+  "-e",
+  "console.log('sent <second> & final, 21 days past the scheme deadline');process.exit(0)",
+];
+
 /**
- * The action's concrete payload: the email the agent proposes to send.
+ * The action's concrete payload: the exact command the agent proposes to run,
+ * in the directory it will run in.
  *
- * The subject carries `<` and `&` on purpose. §10.4 requires the channel to
- * present the payload, and the demo asserts it arrives verbatim in the rendered
- * region and HTML-escaped on the wire.
+ * §6.2 defines `approval run`'s payload as "the argv array and cwd", and
+ * APRV-140 makes `run` RECOMPUTE that from what it is about to spawn rather
+ * than accept a caller's word for it. So this object is the whole of what the
+ * approver sees, what the grant binds to, and what actually executes: there is
+ * no step in this walk where the approved bytes and the run bytes could differ.
+ * (An action whose payload is a message body rather than an argv is executed
+ * through the adapter contract of §10.4 — `approval adapter email` and
+ * `tests/e2e-email-demo.test.ts` — which hashes those bytes itself.)
+ *
+ * The command's text carries `<` and `&` on purpose. §10.4 requires the channel
+ * to present the payload, and the demo asserts it arrives verbatim in the
+ * rendered region and HTML-escaped on the wire.
  */
-const PAYLOAD = {
-  to: ["agency@example.co.uk"],
-  subject: "Deposit refund chaser <second> & final",
-  body: "Following up on the deposit refund, now 21 days past the scheme deadline.",
-};
+const PAYLOAD = { argv: DEMO_COMMAND, cwd: demo };
 
 /** The content binding (amended SPEC.md §6.2): SHA-256 over the RFC 8785 form. */
-const PAYLOAD_HASH = payloadHash(PAYLOAD);
+const PAYLOAD_HASH = runPayloadHash(DEMO_COMMAND, demo);
 
 const POLICY = [
   "# Approval policy (demo)",
@@ -130,7 +146,7 @@ const TASK_FILE = [
   "    - class: communicate.email.external",
   '      summary: "Send the deposit chaser to agency@example.co.uk"',
   "      reversible: false",
-  "      est_cost_usd: 0.02",
+  '      est_cost_usd: "0.02"',
   `      idempotency_key: "${ACTION}"`,
   `      payload_hash: "${PAYLOAD_HASH}"`,
   "---",
@@ -145,8 +161,6 @@ const TASK_FILE = [
 // The scratch demo home
 // ---------------------------------------------------------------------------
 
-/** realpath: macOS hands out /var/… symlinks, and attestation compares paths. */
-const demo = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-e2e-demo-")));
 const logPath = join(demo, ".approval", "log", "events.jsonl");
 const queuePath = join(demo, ".approval", "QUEUE.md");
 /**
@@ -256,9 +270,6 @@ async function until(predicate: () => boolean, label: string, ms = 15_000): Prom
   assert.fail(`timed out waiting for ${label}`);
 }
 
-/** The command the demo executes once the approval is in hand. */
-const DEMO_COMMAND = [process.execPath, "-e", "console.log('sent');process.exit(0)"];
-
 /** Filled in at the Telegram hop; spent at the execution hop. */
 let executionToken = "";
 
@@ -307,7 +318,7 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
     // were named before a human was.
     assert.deepEqual(payloadOf(recordAt(3)), {
       class: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       payload_hash: PAYLOAD_HASH,
       summary: "Send the deposit chaser to agency@example.co.uk",
       reversible: false,
@@ -345,7 +356,7 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
     assert.equal(pending[0]?.["action_key"], ACTION);
     assert.equal(pending[0]?.["task"], TASK);
     assert.equal(pending[0]?.["class"], "communicate.email.external");
-    assert.equal(pending[0]?.["est_cost_usd"], 0.02);
+    assert.equal(pending[0]?.["est_cost_usd"], "0.02");
     assert.ok((pending[0]?.["ttl_remaining_ms"] as number) > 0, "the request is inside its TTL");
 
     const render = runCli(["render", "--json"]);
@@ -370,7 +381,11 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
     assert.match(queueMd, /_None\._ Every live request above is rendered in full\./u);
     // Holding the bytes is not the same as printing them: QUEUE.md is a summary
     // surface that collects no decision, so it still carries only the binding.
-    assert.equal(queueMd.includes(PAYLOAD.body), false, "QUEUE.md must not inline payload bytes");
+    assert.equal(
+      queueMd.includes("21 days past the scheme deadline"),
+      false,
+      "QUEUE.md must not inline payload bytes",
+    );
     assert.match(queueMd, new RegExp(PAYLOAD_HASH, "u"));
 
     // Pending is not unhealthy: a request awaiting a human is the system
@@ -388,17 +403,7 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
   await t.test("(c) negative space: run before the approval exits 5 and appends nothing", () => {
     const before_ = rawLog();
 
-    const refused = runCli([
-      "run",
-      ACTION,
-      "--payload-hash",
-      PAYLOAD_HASH,
-      "--as",
-      AGENT,
-      "--json",
-      "--",
-      ...DEMO_COMMAND,
-    ]);
+    const refused = runCli(["run", ACTION, "--as", AGENT, "--json", "--", ...DEMO_COMMAND]);
 
     assert.equal(refused.code, 5, refused.stderr);
     assert.equal(jsonErr(refused)["code"], "token-required");
@@ -466,9 +471,9 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
     assert.match(delivered, new RegExp(`CLAIMED — authored by ${AGENT}, NOT verified`, "u"));
     assert.match(delivered, /FULL PAYLOAD/u);
     assert.match(delivered, new RegExp(PAYLOAD_HASH, "u"), "the binding is shown to the approver");
-    // The payload arrives whole, and HTML-escaped: an agent-authored subject
-    // must not become markup on its way to a phone.
-    assert.match(delivered, /Deposit refund chaser &lt;second&gt; &amp; final/u);
+    // The payload arrives whole, and HTML-escaped: agent-authored bytes must
+    // not become markup on their way to a phone.
+    assert.match(delivered, /sent &lt;second&gt; &amp; final/u);
     assert.match(delivered, /21 days past the scheme deadline/u);
     assert.equal(delivered.includes("<second>"), false, "raw markup reached the message");
 
@@ -501,7 +506,7 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
     assert.equal(granted["action_key"], ACTION);
     const grantPayload = payloadOf(granted);
     assert.equal(grantPayload["class"], "communicate.email.external");
-    assert.equal(grantPayload["est_cost_usd"], 0.02);
+    assert.equal(grantPayload["est_cost_usd"], "0.02");
     // The grant carries the SAME binding the request did: the human approved
     // these bytes, and the token below can only spend them.
     assert.equal(grantPayload["payload_hash"], PAYLOAD_HASH);
@@ -550,8 +555,6 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
       ACTION,
       "--token",
       executionToken,
-      "--payload-hash",
-      PAYLOAD_HASH,
       "--as",
       AGENT,
       "--json",
@@ -597,8 +600,6 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
       ACTION,
       "--token",
       executionToken,
-      "--payload-hash",
-      PAYLOAD_HASH,
       "--as",
       AGENT,
       "--json",

@@ -82,9 +82,8 @@
             "description": "SPEC.md §7: whether the effect can be undone. `false` actions MUST NOT be eligible for `autonomous` regardless of policy — the runtime enforces that floor."
           },
           "est_cost_usd": {
-            "type": "number",
-            "minimum": 0,
-            "description": "SPEC.md §6.2: estimated cost in USD, checked against task and policy budgets (conjunctively)."
+            "$ref": "#/$defs/usd_amount",
+            "description": "SPEC.md §6.2 (amended, APRV-121): estimated cost in USD as a decimal string (`\"0.02\"`), checked against task and policy budgets (conjunctively). A JSON number is refused at the write boundary: this value rides inside hashed material and cross-language float serialization is where byte-identical hashing breaks."
           },
           "idempotency_key": {
             "type": "string",
@@ -105,9 +104,8 @@
       "additionalProperties": false,
       "properties": {
         "max_cost_usd": {
-          "type": "number",
-          "minimum": 0,
-          "description": "SPEC.md §6.2: maximum total spend in USD across this task's actions."
+          "$ref": "#/$defs/usd_amount",
+          "description": "SPEC.md §6.2 (amended, APRV-121): maximum total spend in USD across this task's actions, as a decimal string (`\"25\"`, `\"0.5\"`). Copied into the `task.registered` payload at registration, so it is hashed material and carries the same string rule as `est_cost_usd`."
         },
         "max_latency": {
           "type": "string",
@@ -115,6 +113,24 @@
           "description": "SPEC.md §6.1: duration string bounding how long the request may stay pending (`6h`, `30m`, `7d`). Integer magnitude plus one unit suffix."
         }
       }
+    }
+  },
+  "$defs": {
+    "usd_amount_string": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,5}[1-9])?$",
+      "description": "SPEC.md §6.2 (amended, APRV-121): a USD amount as a canonical decimal string. No sign, no exponent, no leading zeros, at most six fractional digits, and no trailing zeros beyond the last significant digit — one value has exactly one spelling, so two records carrying the same amount always hash the same way."
+    },
+    "usd_amount": {
+      "$ref": "#/$defs/usd_amount_string",
+      "description": "The write-boundary form of a USD amount: the decimal string, and nothing else. `validate(..., { mode: \"historical\" })` replaces this definition with `usd_amount_historical` so that records written before APRV-121 keep validating; nothing else in the runtime relaxes it."
+    },
+    "usd_amount_historical": {
+      "anyOf": [
+        { "$ref": "#/$defs/usd_amount_string" },
+        { "type": "number", "minimum": 0 }
+      ],
+      "description": "The read form: the decimal string, or the pre-APRV-121 JSON number. The log is append-only (SPEC.md §8), so a verifier must accept every shape the write boundary ever admitted. Used only in historical validation mode."
     }
   }
 }

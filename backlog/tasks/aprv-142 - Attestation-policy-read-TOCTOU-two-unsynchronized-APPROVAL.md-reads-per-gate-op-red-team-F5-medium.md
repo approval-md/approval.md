@@ -3,9 +3,10 @@ id: APRV-142
 title: >-
   Attestation/policy read TOCTOU: two unsynchronized APPROVAL.md reads per gate
   op (red-team F5, medium)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-25 13:41'
+updated_date: '2026-08-26 16:37'
 labels:
   - security
   - hardening
@@ -29,7 +30,19 @@ PLAUSIBLE, verified as a real window but narrow; the red-teams own race probe sa
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A gate operation reads APPROVAL.md bytes once and uses the same bytes for both the attestation check and the policy parse
-- [ ] #2 Test asserts that a file swap between the two former read points cannot produce an attested-but-different parsed policy
-- [ ] #3 npm test passes; lint clean
+- [x] #1 A gate operation reads APPROVAL.md bytes once and uses the same bytes for both the attestation check and the policy parse
+- [x] #2 Test asserts that a file swap between the two former read points cannot produce an attested-but-different parsed policy
+- [x] #3 npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Built 2026-08-26 by an Opus subagent, reviewed by fable, merged in PR #126 (commit 3e08153). One policy read per gate operation at ALL FIVE sites (request, decide, withdraw, consumeHarnessGrant, expire), threaded through APRV-118's requireAttestation so the pinned policy_sha256 is by construction the hash of the parsed bytes. loadPolicy split into discovery + loadPolicyText; checkAttestationOfBytes is the no-I/O form; checkAttestation keeps its signature for CLI/doctor callers. Read seam GateOptions.policy.read (widens no authority). Side benefit: policyPathOf and loadPolicy's discovery can no longer pick different files on the gate path. Tested with a reader returning different bytes on every call. Merge note: PR #127's startHarnessExecution was reconciled onto this pattern during the conflict resolution, so the new writer obeys the one-read invariant too. Out of scope, noticed: resolveFile remains the discovery for non-gate loadPolicy callers (not a defect).
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A gate operation reads APPROVAL.md once and both the attestation check and the parse consume the same bytes, at all five gate sites; a mid-operation file swap is structurally impossible. Verified with an every-call-different-bytes read seam; merged in PR #126.
+<!-- SECTION:FINAL_SUMMARY:END -->

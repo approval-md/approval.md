@@ -103,7 +103,7 @@ function envelope(bind: boolean): unknown {
         class: "communicate.email.external",
         summary: "Send deposit chaser",
         reversible: false,
-        est_cost_usd: 0.02,
+        est_cost_usd: "0.02",
         idempotency_key: MANUAL_KEY,
         ...(bind ? { payload_hash: BOUND } : {}),
       },
@@ -111,7 +111,7 @@ function envelope(bind: boolean): unknown {
         class: "files.write.local",
         summary: "Write the draft",
         reversible: true,
-        est_cost_usd: 0.01,
+        est_cost_usd: "0.01",
         idempotency_key: SUPERVISED_KEY,
       },
     ],
@@ -138,7 +138,7 @@ function requestManual(unit: Scenario, ts: string = at(1)) {
       task: "task-042",
       actionKey: MANUAL_KEY,
       cls: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       reversible: false,
     },
     "agent:claude",
@@ -200,7 +200,7 @@ test("the log's declaration wins over a caller-supplied hash", () => {
       task: "task-042",
       actionKey: MANUAL_KEY,
       cls: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       reversible: false,
       payload_hash: OTHER,
     },
@@ -307,7 +307,7 @@ test("a grant that recorded NO binding cannot be spent at all — not even with 
     actor: "agent:mallory",
     task: "task-042",
     action_key: "task-042:legacy",
-    payload: { class: "communicate.email.external", est_cost_usd: 0.02 },
+    payload: { class: "communicate.email.external", est_cost_usd: "0.02" },
   });
   assert.equal(requested.ok, true);
   const granted = appendEvent(unit.logPath, {
@@ -318,7 +318,7 @@ test("a grant that recorded NO binding cannot be spent at all — not even with 
     action_key: "task-042:legacy",
     payload: {
       class: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       token_sha256: tokenHash(token),
     },
   });
@@ -373,7 +373,7 @@ test("a grant on a request with no usable class is refused, not recorded with an
     actor: "agent:mallory",
     task: "task-042",
     action_key: "task-042:classless",
-    payload: { est_cost_usd: 0, payload_hash: BOUND },
+    payload: { est_cost_usd: "0", payload_hash: BOUND },
   });
   assert.equal(appended.ok, true);
 
@@ -450,7 +450,7 @@ test("reject and revoke need no class: withdrawing authority is not scoped by on
     actor: "agent:mallory",
     task: "task-042",
     action_key: "task-042:classless",
-    payload: { est_cost_usd: 0 },
+    payload: { est_cost_usd: "0" },
   });
   assert.equal(appended.ok, true);
 

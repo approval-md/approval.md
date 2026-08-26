@@ -40,6 +40,8 @@
         "execution.started",
         "execution.completed",
         "execution.failed",
+        "execution.indeterminate",
+        "execution.reconciled",
         "budget.exceeded",
         "policy.updated",
         "envelope.drift",
@@ -49,7 +51,7 @@
         "reconciliation.satisfied",
         "payload.pruned"
       ],
-      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of twenty event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, and `reconciliation.required` / `reconciliation.satisfied` (APRV-127) the third and fourth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept them all."
+      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of twenty-two event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, `execution.indeterminate` with `execution.reconciled` (APRV-120) the third and fourth, and `reconciliation.required` / `reconciliation.satisfied` (APRV-127) the fifth and sixth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept them all."
     },
     "actor": {
       "type": "string",
@@ -94,7 +96,41 @@
     },
     "payload": {
       "type": "object",
-      "description": "SPEC.md §8: event-type-specific detail (the example record carries an approver's note). Shape is deliberately open at v0.1; per-type payload schemas are a later, separate task."
+      "description": "SPEC.md §8: event-type-specific detail (the example record carries an approver's note). Shape is deliberately open at v0.1; per-type payload schemas are a later, separate task. Two names are constrained regardless of event type (APRV-121), because they are the monetary fields the budgets contract reads and the whole payload is hashed material: `est_cost_usd`, and `budget.max_cost_usd` as copied onto `task.registered`. The rest of the payload stays open.",
+      "properties": {
+        "est_cost_usd": {
+          "$ref": "#/$defs/usd_amount",
+          "description": "SPEC.md §5.2 budgets contract (amended, APRV-121): the authorization's declared cost in USD as a decimal string. Recorded on `approval.requested`, `approval.granted`, `execution.started` and `budget.exceeded`; a JSON number is the pre-APRV-121 form and is accepted on read, never on write."
+        },
+        "budget": {
+          "type": "object",
+          "description": "SPEC.md §6.2 `budget`, copied onto `task.registered` at registration so the task's own cap is read from the log rather than from a file that may have been edited since.",
+          "properties": {
+            "max_cost_usd": {
+              "$ref": "#/$defs/usd_amount",
+              "description": "SPEC.md §6.2 (amended, APRV-121): the task's lifetime cap in USD as a decimal string."
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "usd_amount_string": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,5}[1-9])?$",
+      "description": "SPEC.md §8 (amended, APRV-121): a USD amount as a canonical decimal string. No sign, no exponent, no leading zeros, at most six fractional digits, and no trailing zeros beyond the last significant digit — one value has exactly one spelling, so two records carrying the same amount always hash the same way, in any language."
+    },
+    "usd_amount": {
+      "$ref": "#/$defs/usd_amount_string",
+      "description": "The write-boundary form of a USD amount: the decimal string, and nothing else. `validate(..., { mode: \"historical\" })` replaces this definition with `usd_amount_historical` so that records written before APRV-121 keep validating and verifying; nothing else in the runtime relaxes it."
+    },
+    "usd_amount_historical": {
+      "anyOf": [
+        { "$ref": "#/$defs/usd_amount_string" },
+        { "type": "number", "minimum": 0 }
+      ],
+      "description": "The read form: the decimal string, or the pre-APRV-121 JSON number. The log is append-only, so a verifier must accept every shape the write boundary ever admitted. Used only in historical validation mode."
     }
   },
   "allOf": [
@@ -266,7 +302,9 @@
             "enum": [
               "execution.started",
               "execution.completed",
-              "execution.failed"
+              "execution.failed",
+              "execution.indeterminate",
+              "execution.reconciled"
             ]
           }
         },
@@ -616,6 +654,107 @@
                 "type": "string",
                 "pattern": "^[a-f0-9]{64}$",
                 "description": "SPEC.md §6.2/§9: SHA-256 (lowercase hex) of the pruned payload's bytes — the content address `.approval/payloads/` filed them under, and the value the action's grant bound to."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §6.3/§10.4 (amended, APRV-120): `execution.indeterminate` records that a side effect was ATTEMPTED and that its outcome is unknown. It is not a failure — a failure is a fact — and the difference is what stops a blind retry against an action that may already have happened. Two constraints, both about what may be written down. `reason` is required and closed: an unknown outcome that does not say where the unknowing began is not machine-readable, and a free-text reason is where an exception message (and the credential quoted inside it) would arrive. `exit_code` is `null` when present, never a number: nobody observed one, and a fabricated code would read exactly like a measured one. The bytes of the exception are deliberately absent from this record; the executing caller receives them, redacted, and the log holds the closed code.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "execution.indeterminate"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "payload"
+        ],
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "act-threw"
+                ],
+                "description": "Where the unknowing began. `act-threw`: the adapter's `act` was entered and raised, so the provider call may or may not have committed. Closed, and extended only by a task that adds the case."
+              },
+              "exit_code": {
+                "type": "null",
+                "description": "Always `null`. No process was watched to an exit, and an invented number would be indistinguishable from an observed one."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §6.3/§10.4 (amended, APRV-120): `execution.reconciled` records what a person established about an indeterminate execution. It never rewrites the indeterminate record — the original observation survives its resolution, which is the point of an append-only log — and it names that record by seq so a reader can walk from one to the other. Human-only, for the reason `execution resolve` is: an agent reconciling its own indeterminate outcome is the executing party reporting on itself. The note is the evidence and is required non-empty, because an unexplained resolution cannot be told apart from a guess, and `resolution` is closed to two values so that \"it did happen\" and \"it did not\" are distinct in the log rather than a matter of reading prose.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "execution.reconciled"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^human:"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "indeterminate_seq",
+              "resolution",
+              "note",
+              "attested_by_human"
+            ],
+            "properties": {
+              "indeterminate_seq": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The `seq` of the `execution.indeterminate` record this resolves. That the named record exists, concerns this action key, and is not already reconciled is the gate's check; a schema sees one record and can only constrain the shape."
+              },
+              "resolution": {
+                "type": "string",
+                "enum": [
+                  "executed",
+                  "not-executed"
+                ],
+                "description": "What the evidence established. `executed`: the side effect did happen. `not-executed`: it did not, which is what re-opens the possibility of a fresh request for the same effect under a new idempotency key. The key itself stays burned either way."
+              },
+              "note": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The evidence, in the reconciler's own words: which log, which provider console, which message id. The whole value of the record is this."
+              },
+              "attested_by_human": {
+                "const": true,
+                "description": "Marks the record as an observation rather than a machine's report, exactly as `execution resolve` marks its own."
               }
             }
           }

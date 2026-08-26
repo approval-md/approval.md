@@ -856,7 +856,7 @@ which of the three deaths applied: execution (`token-consumed`), revocation
 ```
 live     {"ok":true,"action_key":"...","state":"granted","live":true,
           "token_sha256":"<64 hex>","grant_seq":4,"class":"...",
-          "est_cost_usd":0.02,"payload_hash":"<64 hex>"|null,
+          "est_cost_usd":"0.02","payload_hash":"<64 hex>"|null,
           "task":"task-042"}
 refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"...",
           "seq"?:N}}  on stderr
@@ -921,7 +921,7 @@ The appended `execution.started` carries
 ```
 success  {"ok":true,"action_key":"...","event":"execution.started","seq":5,
           "token_sha256":"<64 hex>","grant_seq":4,"class":"...",
-          "est_cost_usd":0.02}
+          "est_cost_usd":"0.02"}
 refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"...",
           "seq"?:N}}  on stderr
 ```
@@ -946,14 +946,23 @@ actually observed, with `approval execution resolve`, which appends
 `attested_by_human` true, so no reader mistakes an observation for a
 measurement.
 
-Content binding (amended SPEC.md §6.2, §10): run computes the hash of the argv
-and cwd it is about to spawn and presents it when spending the token. By default
-that is right, because the command IS the action: an executor that had to be
-told what it was running could be told wrong. An action whose grant bound to
-content instead — an email body, a record write, a message and its recipients —
-must pass `--payload-hash` with that content's hash. If the grant bound to
-different bytes the spend is refused `payload-mismatch`, nothing is appended,
-and the token stays live. A grant approves specific bytes.
+Content binding (amended SPEC.md §6.2, §10.4): run computes the hash of the argv
+and cwd it is about to spawn, always, and presents that. The command IS the
+action here, and an executor that had to be told what it was running could be
+told wrong. `--payload-hash` is consequently a CHECK and never a substitute
+(APRV-140): a value differing from the recomputed one is refused
+`payload-mismatch` before the child exists and before anything is appended. An
+action whose payload is content rather than an argv (an email body, a record
+write, a message and its recipients) is executed through the adapter contract of
+§10.4, `approval adapter email`, which hashes those bytes itself; a token for
+such a grant is spent with `approval consume`, never by spawning a command that
+is not the approved bytes.
+
+The binding is required off the manual path too. A supervised or autonomous
+action has no grant, so its registered declaration is the whole of what
+authorizes it: run presents the recomputed hash, `execution.started` records it,
+and a declaration carrying no `payload_hash` (or an executor whose bytes differ
+from it) is refused `payload-mismatch` with the log untouched.
 
 **`--token` is optional under sealed delivery** (APRV-105). With policy
 `defaults.token_delivery: sealed` and no `--token`, run opens the grant's
@@ -1118,7 +1127,7 @@ requested, and how much of the TTL is left.
 
 ```
 {"ok":true,"pending":[{"action_key":"task-042:chaser","task":"task-042",
- "class":"communicate.email.external","est_cost_usd":0.02,
+ "class":"communicate.email.external","est_cost_usd":"0.02",
  "requested_ts":"2026-08-06T10:00:00.000Z","seq":3,
  "ttl_remaining_ms":3599000}]}
 ```
@@ -1139,6 +1148,21 @@ the real outcome with `approval execution resolve`, which demands a mandatory
 note, a human actor, and records `exit_code` null rather than inventing one.
 Recording an outcome nobody observed is exactly the write this design refuses to
 make casual.
+
+It is executions the runtime MEANT to watch, and never harness executions. A
+harness execution records that the agent's harness ran the command and this
+runtime never sees an exit status, so no outcome will ever follow and the record
+is complete as written (SPEC.md §6.3 calls the state `delegated`). Listing those
+as debris is how a list an operator is supposed to act on becomes a list they
+scroll past — the reference repository's own log carried dozens of them.
+
+**indeterminate** is the other kind of debris, and it is reported separately
+because it asks a person for something different. A dangling execution asks them
+to look at what this runtime did. An indeterminate one — the side effect was
+attempted and nobody knows whether the far side committed — asks them to
+establish it from the provider's own evidence, and the verb for that is
+`approval execution reconcile`. Both make `healthy` false. The field is additive
+and appears only when there is at least one.
 
 **budgets** come from a zero-cost probe evaluated now: the numbers are what the
 evaluator would say about a hypothetical next action declaring $0. Consequently
@@ -1174,7 +1198,11 @@ does not know the flag exists.
   seq of the governing `policy.updated` record.
 - `verification` — the latest chain verdict, and the record count (null when
   corrupt).
-- `dangling` — executions that started and never finished.
+- `dangling` — executions the runtime meant to watch and never closed. Not
+  harness executions, which are terminal by design.
+- `indeterminate` — additive and present only when non-empty: side effects that
+  were attempted and whose fate nobody has established, with the closed `reason`
+  each was recorded under.
 - `budgets` — headroom per configured GLOBAL limit, from a zero-cost probe.
 - `loop_escalations` — tasks with three consecutive `execution.failed` events.
 - `reconciliation` — obligations opened by a retrospective denial and not yet
@@ -1470,11 +1498,20 @@ Refusals: `not-obliged` (no such obligation), `already-satisfied`,
 
 ## execution
 
+Two subcommands, for two states a human has to close by hand, and they are not
+interchangeable.
+
 A dangling execution is what a crash between `execution.started` and its outcome
 leaves behind: the log says truthfully that the action began and that nobody
-knows how it ended. Nothing in this codebase closes one automatically — an
-automatic reconciliation would have to guess whether the email went out, and a
-guess written into an append-only log is indistinguishable from a fact.
+knows how it ended. `execution resolve` closes it.
+
+An indeterminate execution is one whose side effect was ATTEMPTED and whose
+outcome nobody knows (SPEC.md §10.4). `execution reconcile` resolves it, from the
+relying party's evidence rather than from this machine's log.
+
+Nothing in this codebase closes either automatically — an automatic
+reconciliation would have to guess whether the email went out, and a guess
+written into an append-only log is indistinguishable from a fact.
 
 ## execution resolve
 
@@ -1501,6 +1538,65 @@ success  {"ok":true,"action_key":"...","task":"...",
           "attested_by_human":true,"actor":"human:alice"}
 refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
 ```
+
+## execution reconcile
+
+Three things a log can say about an execution that did not simply complete, and
+the whole of why this verb exists apart from `execution resolve`:
+
+- **failed** — the attempt provably did not commit. The provider answered no, or
+  the runtime never reached it. Retrying is safe.
+- **dangling** — the runtime meant to watch an outcome and died first. Nobody
+  knows what happened *here*, and looking at this machine settles it.
+  `execution resolve` records what the looker saw.
+- **indeterminate** — the side effect was ATTEMPTED and nobody knows whether the
+  far side committed. Looking at this machine settles nothing: the evidence is
+  the provider's console, inbox or ledger. This verb records what it showed.
+
+An email adapter that times out mid-send used to be written down as `failed`,
+which is the sentence that makes a retry look safe, and a retry against a send
+that did happen is a second email. Idempotency keys only partly cover it: a
+second request under a new key is perfectly legal.
+
+INDETERMINATE IS A CUSTODY STATE. The token stays spent, the idempotency key
+stays burned, the budget stays charged, and a re-run is refused
+(`execution-indeterminate`). Refunding an attempt whose outcome is unknown would
+be the runtime deciding the effect did not happen, which is the one thing nobody
+here knows.
+
+`--resolution executed|not-executed`, and nothing is inferred. The two are
+separate closed values in the log rather than two readings of one sentence,
+because everything downstream turns on which. `--note` is mandatory and non-empty
+and is the EVIDENCE — which console, which message id — because an unexplained
+resolution of an unknown outcome cannot be told apart from a guess. Human-only,
+and the daemon never auto-resolves: an automatic reconciliation would have to
+*guess* whether the email went out, and a guess written into an append-only log
+is indistinguishable from a fact.
+
+The appended `execution.reconciled` NAMES the `execution.indeterminate` record by
+seq and never rewrites it. The original observation survives its own resolution,
+so an auditor sees both the doubt and its answer.
+
+Resolving `not-executed` re-opens the EFFECT, not this action. An
+`idempotency_key` is the global identity of one side effect (SPEC.md §6.2) and a
+used one is used, so the repair is to declare a fresh action and request that —
+a new question with a new answer, which the reconciliation is what makes honest.
+Recovery is never evidence that the provider did not execute.
+
+**`--json`** (one object on stdout):
+
+```
+success  {"ok":true,"action_key":"...","task":"...",
+          "event":"execution.reconciled","resolution":"executed",
+          "indeterminate_seq":7,"seq":9,
+          "attested_by_human":true,"actor":"human:alice"}
+refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
+```
+
+Refusals: `not-indeterminate` (there is no unknown outcome here — a started
+execution with no outcome at all is dangling, and `execution resolve` closes it),
+`already-reconciled` (a person already answered, and neither record is
+rewritten).
 
 ## channel
 
@@ -2152,8 +2248,19 @@ this CLI still cannot send, because the credentials only answer to tokens.
 
 The runtime, not the adapter, owns the sequence: recompute the payload hash,
 verify and consume the token, append `execution.started`, call the adapter,
-append `execution.completed` or `execution.failed`. The adapter implements one
-method and cannot skip a step, because it never holds the sequence.
+append the outcome. The adapter implements one method and cannot skip a step,
+because it never holds the sequence.
+
+Which outcome is decided by where the sequence stopped, and the boundary is the
+moment `act` is invoked. A failure on the way in, or a failure the adapter
+RETURNS, is `execution.failed`: nothing was attempted, or the provider answered
+no. A throw from inside `act` is `execution.indeterminate`: the provider may or
+may not have committed and this runtime cannot tell. The refusal's `code` is
+`execution-indeterminate`, its `outcome` is `execution.indeterminate`, it carries
+no `exit_code`, the token and the idempotency key stay burned, a retry is refused,
+and `approval execution reconcile` is how a person resolves it. Recording an
+unknown outcome as a failure is what makes a retry look safe, and a retry against
+a send that did happen is a second email.
 
 ## adapter email
 

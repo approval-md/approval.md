@@ -138,7 +138,7 @@ const ENVELOPE = {
       class: "communicate.email.external",
       summary: "Send deposit chaser",
       reversible: false,
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       idempotency_key: "task-042:chaser",
       payload_hash: bindingFor("task-042:chaser"),
     },
@@ -146,7 +146,7 @@ const ENVELOPE = {
       class: "files.write.local",
       summary: "Write the draft",
       reversible: true,
-      est_cost_usd: 0.01,
+      est_cost_usd: "0.01",
       idempotency_key: "task-042:draft",
       payload_hash: bindingFor("task-042:draft"),
     },
@@ -154,7 +154,7 @@ const ENVELOPE = {
       class: "files.write.local",
       summary: "Write the second draft",
       reversible: true,
-      est_cost_usd: 0.01,
+      est_cost_usd: "0.01",
       idempotency_key: "task-042:draft2",
       payload_hash: bindingFor("task-042:draft2"),
     },
@@ -162,7 +162,7 @@ const ENVELOPE = {
       class: "read.inbox",
       summary: "Read the inbox",
       reversible: true,
-      est_cost_usd: 0,
+      est_cost_usd: "0",
       idempotency_key: "task-042:read",
       payload_hash: bindingFor("task-042:read"),
     },
@@ -187,9 +187,19 @@ function ready(audit: string[] = SAMPLE_EVERYTHING): Case {
   return unit;
 }
 
-/** Start a supervised execution. No token: supervised actions have no grant. */
+/**
+ * Start a supervised execution. No token: supervised actions have no grant, so
+ * the declaration is what authorizes and the executor states its bytes against
+ * it (APRV-140).
+ */
 function startSupervised(unit: Case, key: string, minutes: number): void {
-  const started = startExecution(unit.logPath, key, unit.options, at(minutes), "agent:claude");
+  const started = startExecution(
+    unit.logPath,
+    key,
+    { ...unit.options, presentedPayloadHash: bindingFor(key) },
+    at(minutes),
+    "agent:claude",
+  );
   assert.equal(started.ok, true, started.ok ? "" : started.message);
 }
 
@@ -286,7 +296,7 @@ test("only supervised executions are candidates", () => {
       task: "task-042",
       actionKey: "task-042:chaser",
       cls: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       reversible: false,
       summary: "Send deposit chaser",
       payload_hash: bindingFor("task-042:chaser"),

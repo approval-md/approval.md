@@ -198,7 +198,7 @@ async function ready(
     "    - class: communicate.email.external",
     '      summary: "Send deposit chaser"',
     "      reversible: false",
-    "      est_cost_usd: 0.02",
+    '      est_cost_usd: "0.02"',
     `      idempotency_key: "${actionKey}"`,
     `      payload_hash: "${payloadHash(payload)}"`,
     "---",

@@ -217,13 +217,18 @@ function countdown(ms: number | null): string {
  * `core/budgets.ts` defines it, so a failing verdict shows how far over the line
  * the action is rather than a reassuring zero.
  */
+/*
+ * The three figures are printed exactly as the evaluator reports them: since
+ * APRV-121 they are decimal strings computed in integer micro-USD, so there is
+ * no number here to reformat and no locale that could change what a human sees.
+ */
 function budgetLine(verdict: BudgetVerdict): string {
   const note = verdict.note === undefined ? "" : ` — ${span(verdict.note)}`;
   return `${verdict.pass ? "pass" : "**FAIL**"} ${span(verdict.limit)} (${span(
     verdict.scope,
-  )}, ${span(verdict.window)}): consumed ${num(verdict.consumed)}, requested ${num(
-    verdict.requested,
-  )}, remaining ${num(verdict.remaining)}${note}`;
+  )}, ${span(verdict.window)}): consumed ${verdict.consumed}, requested ${
+    verdict.requested
+  }, remaining ${verdict.remaining}${note}`;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md && node cli.js log sync 2>&1 | tail -12","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/remote-control-f54e71"}

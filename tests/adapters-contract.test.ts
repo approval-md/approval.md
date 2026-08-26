@@ -113,7 +113,7 @@ function granted(cls: string = MOCK_CLASS): AdapterConformanceCase {
             idempotency_key: actionKey,
             summary: `chase invoice ${counter}`,
             reversible: false,
-            est_cost_usd: 0.02,
+            est_cost_usd: "0.02",
             payload_hash: payloadHash(payload),
           },
         ],
@@ -131,7 +131,7 @@ function granted(cls: string = MOCK_CLASS): AdapterConformanceCase {
       task: TASK,
       actionKey,
       cls,
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       reversible: false,
       summary: `chase invoice ${counter}`,
     },
@@ -385,20 +385,89 @@ test("a reported failure closes the execution as failed and keeps the adapter's 
   }
 });
 
-test("a thrown error is recorded as a failed execution, message only", async () => {
+/** Every record in `unit`'s log, as parsed objects. */
+function logRecords(unit: AdapterConformanceCase): Record<string, unknown>[] {
+  return readFileSync(unit.logPath, "utf8")
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+test("a throw from INSIDE act is indeterminate, message only, closed reason only", async () => {
+  // APRV-120, the far side of the boundary: `act` was entered and raised, so
+  // the provider may or may not have committed and the log says exactly that.
+  // Recording it as `failed` is the sentence that makes a retry look safe.
   const unit = granted();
   const result = await run(mockAdapter({ throws: `upstream refused ${SECRET}` }), unit);
 
   assert.equal(result.ok, false);
   if (!result.ok) {
-    assert.equal(result.code, "adapter-act-threw");
-    assert.equal(result.outcome, "execution.failed");
-    // The message, redacted — and never the stack, which quotes call arguments.
-    assert.equal(result.message, `upstream refused ${REDACTION_PLACEHOLDER}`);
-    assert.equal(result.message.includes("at "), false, "a stack frame rode out in the message");
+    assert.equal(result.code, "execution-indeterminate");
+    assert.equal(result.outcome, "execution.indeterminate");
+    assert.equal(result.acted, true);
+    // The message, redacted, reaches the CALLER — and never the stack, which
+    // quotes call arguments.
+    assert.ok(
+      result.message.includes(`upstream refused ${REDACTION_PLACEHOLDER}`),
+      `the adapter's message did not reach the caller: ${result.message}`,
+    );
+    assert.equal(result.message.includes("\n    at "), false, "a stack frame rode out");
     assert.ok(result.redactions >= 1);
   }
+
+  // …and the RECORD carries the closed code and nothing else. An exception's
+  // text in an append-only log is a credential leak with a plausible excuse.
+  const raw = readFileSync(unit.logPath, "utf8");
+  assert.equal(raw.includes(SECRET), false);
+  assert.equal(raw.includes("upstream refused"), false, "exception text reached the log");
+  const record = logRecords(unit).find(
+    (entry) => entry["event"] === "execution.indeterminate",
+  );
+  assert.notEqual(record, undefined, "no execution.indeterminate was appended");
+  assert.deepEqual(record?.["payload"], { reason: "act-threw", exit_code: null });
+});
+
+test("a throw on the way INTO act is a failure: nothing was attempted", async () => {
+  // The near side of the same boundary, and the reason it is positional rather
+  // than a judgment about the error: reading the adapter's own method is the
+  // last thing this runtime does before the call becomes the far side's.
+  const unit = granted();
+  const broken: Adapter = {
+    name: "mock-email",
+    classes: [MOCK_CLASS],
+    get act(): Adapter["act"] {
+      throw new Error(`could not reach act ${SECRET}`);
+    },
+  };
+
+  const result = await run(broken, unit);
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.code, "adapter-act-threw");
+    assert.equal(result.outcome, "execution.failed");
+    assert.equal(result.acted, false, "nothing was attempted, so nothing was acted");
+  }
+  assert.notEqual(
+    logRecords(unit).find((entry) => entry["event"] === "execution.failed"),
+    undefined,
+    "no execution.failed was appended",
+  );
   assert.equal(readFileSync(unit.logPath, "utf8").includes(SECRET), false);
+});
+
+test("an indeterminate outcome burns the key: a re-run is refused with its own code", async () => {
+  const unit = granted();
+  await run(mockAdapter({ throws: "upstream refused" }), unit);
+  const before = readFileSync(unit.logPath, "utf8");
+
+  const again = await run(mockAdapter(), unit);
+  assert.equal(again.ok, false);
+  if (!again.ok) {
+    assert.equal(again.code, "execution-indeterminate");
+    assert.equal(again.acted, false, "the retry reached act");
+  }
+  assert.equal(readFileSync(unit.logPath, "utf8"), before, "a refused retry wrote to the log");
 });
 
 // ---------------------------------------------------------------------------

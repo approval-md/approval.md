@@ -53,6 +53,7 @@ import {
   type BudgetVerdict,
 } from "../core/budgets.js";
 import type { EventRecord } from "../core/log.js";
+import { usdNumber } from "../core/money.js";
 import { payloadHash } from "../core/payload.js";
 import { loadPayload, payloadStoreDirFor } from "../core/payload-store.js";
 import { explain } from "../core/policy-explain.js";
@@ -619,7 +620,11 @@ function tagDerivation(
   const explanation = explain(load, cls, reversible === null ? {} : { reversible });
   const resolution = resolve(load, cls, reversible === null ? {} : { reversible });
 
-  const cost = derivation.declared.est_cost_usd ?? 0;
+  // The declared amount in its canonical decimal form (APRV-121) for the
+  // budget evaluation, and as a number for the card. A channel card is a
+  // display surface: nothing it renders is hashed, so the float lives here and
+  // goes no further.
+  const cost = derivation.declared.est_cost_usd ?? "0";
   const budgets: BudgetVerdict[] = evaluateBudgetsWithTask(
     records,
     budgetScopeOf(load, resolution),
@@ -663,7 +668,7 @@ function tagDerivation(
     class: computed(cls, "log"),
     autonomy: computed(explanation.outcome.autonomy, "policy-match"),
     provenance: computed(explanation.provenance, "policy-match"),
-    est_cost_usd: claimed(cost, requestRecord.actor),
+    est_cost_usd: claimed(usdNumber(cost), requestRecord.actor),
     summary: claimed(derivation.declared.summary, requestRecord.actor),
     ...payloadDerivations(rendering, load),
     payload_hash: computed(boundHash, "log"),

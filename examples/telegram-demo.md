@@ -256,7 +256,7 @@ approval:
     - class: communicate.email.external
       summary: "Send the deposit chaser to agency@example.co.uk"
       reversible: false
-      est_cost_usd: 0.02
+      est_cost_usd: "0.02"
       idempotency_key: "task-demo:chaser"
       payload_hash: "$HASH"
 ---
@@ -316,15 +316,16 @@ approval status
 action            task       class                       cost   requested                 ttl
 task-demo:chaser  task-demo  communicate.email.external  $0.02  2026-08-05T12:07:51.447Z  1h 0m left
 wrote /tmp/approval-demo/.approval/QUEUE.md: 3204 byte(s), head seq 3 c0ec5027..., 1 pending, 0 not summarized, 0 awaiting audit review
-health                   ok
-attestation              attested (seq 1)
-verification             clean (3 record(s))
-timestamp anomalies      none
-dangling executions      none
-budgets                  none configured
-payload store            1 file(s), 0 pruned, 0 unbound
-loop escalations         none
-log                      .approval/log/events.jsonl
+health                    ok
+attestation               attested (seq 1)
+verification              clean (3 record(s))
+timestamp anomalies       none
+dangling executions       none
+indeterminate executions  none
+budgets                   none configured
+payload store             1 file(s), 0 pruned, 0 unbound
+loop escalations          none
+log                       .approval/log/events.jsonl
 ```
 
 Note `1 pending, 0 not summarized`, agreeing with `approval queue`. `approval
@@ -466,15 +467,16 @@ approval log verify
 
 ```
 queue: empty — no requests awaiting a decision
-health                   ok
-attestation              attested (seq 1)
-verification             clean (6 record(s))
-timestamp anomalies      none
-dangling executions      none
-budgets                  none configured
-payload store            1 file(s), 0 pruned, 0 unbound
-loop escalations         none
-log                      .approval/log/events.jsonl
+health                    ok
+attestation               attested (seq 1)
+verification              clean (6 record(s))
+timestamp anomalies       none
+dangling executions       none
+indeterminate executions  none
+budgets                   none configured
+payload store             1 file(s), 0 pruned, 0 unbound
+loop escalations          none
+log                       .approval/log/events.jsonl
 1  2026-08-05T12:07:51.096Z  policy.updated       human:alice    -
 2  2026-08-05T12:07:51.285Z  task.registered      agent:drafter  task-demo
 3  2026-08-05T12:07:51.447Z  approval.requested   agent:drafter  task-demo

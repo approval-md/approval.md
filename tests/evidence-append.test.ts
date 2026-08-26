@@ -133,7 +133,7 @@ const ENVELOPE = {
       class: "communicate.email.external",
       summary: "Send deposit chaser",
       reversible: false,
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       idempotency_key: "task-042:chaser",
       payload_hash: PAYLOAD_HASH,
     },
@@ -141,14 +141,17 @@ const ENVELOPE = {
       class: "read.file",
       summary: "Read the ledger",
       reversible: true,
-      est_cost_usd: 0,
+      est_cost_usd: "0",
       idempotency_key: "task-042:peek",
+      // APRV-140: an autonomous action binds to bytes as well. There is no
+      // grant on this path, so the declaration is the whole of what authorizes.
+      payload_hash: PAYLOAD_HASH,
     },
     {
       class: "financial.spend",
       summary: "Pay the invoice",
       reversible: false,
-      est_cost_usd: 5,
+      est_cost_usd: "5",
       idempotency_key: "task-042:pay",
       payload_hash: PAYLOAD_HASH,
     },
@@ -301,7 +304,7 @@ const CHASER_REQUEST = {
   actionKey: "task-042:chaser",
   payload_hash: PAYLOAD_HASH,
   cls: "communicate.email.external",
-  est_cost_usd: 0.02,
+  est_cost_usd: "0.02",
   reversible: false,
   summary: "Send deposit chaser",
 } as const;
@@ -450,7 +453,11 @@ test("execution start: an autonomous action whose start cannot be recorded does 
     startExecution(
       unit.logPath,
       "task-042:peek",
-      { policy: { file: unit.policyPath }, append: { ...IMPATIENT } },
+      {
+        policy: { file: unit.policyPath },
+        presentedPayloadHash: PAYLOAD_HASH,
+        append: { ...IMPATIENT },
+      },
       at(2),
       "agent:claude",
     ),
@@ -464,7 +471,7 @@ test("execution start: an autonomous action whose start cannot be recorded does 
   const started = startExecution(
     unit.logPath,
     "task-042:peek",
-    { policy: { file: unit.policyPath } },
+    { policy: { file: unit.policyPath }, presentedPayloadHash: PAYLOAD_HASH },
     at(3),
     "agent:claude",
   );
@@ -479,7 +486,11 @@ test("execution start: a schema refusal at the write boundary is also append-fai
   const refused = startExecution(
     unit.logPath,
     "task-042:peek",
-    { policy: { file: unit.policyPath }, schemaDir: schemaDirRejecting("execution.started") },
+    {
+      policy: { file: unit.policyPath },
+      presentedPayloadHash: PAYLOAD_HASH,
+      schemaDir: schemaDirRejecting("execution.started"),
+    },
     at(2),
     "agent:claude",
   );
@@ -636,7 +647,7 @@ test("a budget refusal whose budget.exceeded cannot be appended is still a refus
         actionKey: "task-042:pay",
         payload_hash: PAYLOAD_HASH,
         cls: "financial.spend",
-        est_cost_usd: 5,
+        est_cost_usd: "5",
         reversible: false,
         summary: "Pay the invoice",
       },
@@ -672,7 +683,7 @@ test("the supervised/autonomous admission has no event to fail, and its record i
         task: "task-042",
         actionKey: "task-042:peek",
         cls: "read.file",
-        est_cost_usd: 0,
+        est_cost_usd: "0",
         reversible: true,
         summary: "Read the ledger",
       },
