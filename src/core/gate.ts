@@ -101,14 +101,15 @@
  * the marker is `execution.started` and why no completion ever follows it.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import {
   ATTESTATION_REFUSAL,
   attestationRefusal,
-  checkAttestation,
+  checkAttestationOfBytes,
   POLICY_HASH_FIELD,
+  unreadablePolicyStatus,
   type AttestationRefusalDetail,
 } from "./attest.js";
 import { evaluateBudgetsWithTask, type BudgetScope, type BudgetVerdict } from "./budgets.js";
@@ -126,10 +127,10 @@ import { isLoopEscalated } from "./loop.js";
 import { isPayloadHash, payloadHash as hashOfPayload } from "./payload.js";
 import { payloadStoreDirFor, storePayload } from "./payload-store.js";
 import {
-  loadPolicy,
+  loadPolicyText,
+  policyUnreadable,
   POLICY_FILENAMES,
   type Autonomy,
-  type LoadPolicyOptions,
   type PolicyLoadResult,
 } from "./policy-load.js";
 import { resolve, type Resolution } from "./policy-match.js";
@@ -368,8 +369,19 @@ export interface GateRefusal {
 export interface GateOptions extends ClockOptions {
   /** Schema directory, passed to both envelope validation and the append. */
   schemaDir?: string;
-  /** Where to find `APPROVAL.md`. Same semantics as `loadPolicy`. */
-  policy?: { dir?: string; file?: string };
+  /**
+   * Where to find `APPROVAL.md`. `dir`/`file` have the same semantics as
+   * `loadPolicy`.
+   *
+   * `read` is the one read seam a gate operation uses to fetch the policy bytes
+   * (APRV-142), defaulting to `readFileSync`. It exists so a test can simulate
+   * a file swapped mid-operation and prove the swap cannot land: the seam is
+   * called exactly once per gate operation, so a reader that returns different
+   * bytes on its second call has no second call to return them to. It is not a
+   * widening of anything — a caller holding `GateOptions` can already name any
+   * file through `file`.
+   */
+  policy?: { dir?: string; file?: string; read?: (path: string) => Uint8Array };
   /** Lock tuning for the append path. */
   append?: AppendOptions;
   /**
@@ -444,13 +456,57 @@ function policyPathOf(options: GateOptions): string {
   return join(dir, POLICY_FILENAMES[0] ?? "APPROVAL.md");
 }
 
-function loadOptionsOf(options: GateOptions): LoadPolicyOptions {
-  const policy = options.policy ?? {};
-  const load: LoadPolicyOptions = {};
-  if (policy.file !== undefined) load.file = policy.file;
-  else load.dir = policy.dir ?? process.cwd();
-  if (options.schemaDir !== undefined) load.schemaDir = options.schemaDir;
-  return load;
+/**
+ * The policy bytes one gate operation decides under — read exactly once
+ * (APRV-142).
+ *
+ * The gate used to read `APPROVAL.md` twice per operation: once inside
+ * `checkAttestation` to hash it, and again inside `loadPolicy` to parse it. The
+ * red team measured the window (946 of 3000 probes saw the file change between
+ * the two reads) and never won it, but "narrow" is not a property, and the two
+ * reads could in principle attest one policy and enforce a different one. One
+ * read removes the window rather than shrinking it: there is no second read for
+ * a swap to land in.
+ *
+ * `bytes` is `null` only when the read itself failed, which every consumer
+ * turns into a refusal — an unreadable policy is never a pass.
+ */
+interface PolicyRead {
+  path: string;
+  bytes: Uint8Array | null;
+  cause: string | null;
+}
+
+/** Read the policy file once, through {@link GateOptions.policy}'s seam. */
+function readPolicyOnce(options: GateOptions): PolicyRead {
+  const path = policyPathOf(options);
+  const read = options.policy?.read ?? readFileSync;
+  try {
+    return { path, bytes: read(path), cause: null };
+  } catch (cause) {
+    return {
+      path,
+      bytes: null,
+      cause: cause instanceof Error ? cause.message : String(cause),
+    };
+  }
+}
+
+/**
+ * Parse the bytes already read, without touching the filesystem again.
+ *
+ * Fails closed on an unreadable read, exactly as `loadPolicy` would have: the
+ * result is a `file-missing` failure, and `resolve` reads that as all-manual.
+ */
+function parsePolicy(read: PolicyRead, options: GateOptions): PolicyLoadResult {
+  if (read.bytes === null) {
+    return policyUnreadable(read.path, read.cause ?? "unknown error");
+  }
+  return loadPolicyText(
+    read.path,
+    Buffer.from(read.bytes).toString("utf8"),
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+  );
 }
 
 function appendOptionsOf(options: GateOptions): AppendOptions {
@@ -463,17 +519,21 @@ function appendOptionsOf(options: GateOptions): AppendOptions {
  * Refuse unless the live policy bytes match the latest attestation, and return
  * the hash they matched (APRV-118).
  *
- * The hash is the same value `approval policy attest` recorded and the same
- * bytes `loadPolicy` is about to parse, so it names the exact rules this
+ * The hash is the same value `approval policy attest` recorded and, since
+ * APRV-142, provably the same bytes {@link parsePolicy} parses: both take the
+ * one {@link PolicyRead} the operation performed. It names the exact rules this
  * operation is being decided under. Callers pin it onto the event they write:
  * an operation that could not be authorized without an attested policy should
  * say, on the record, which attested policy authorized it.
  */
 function requireAttestation(
   records: EventRecord[],
-  options: GateOptions,
+  read: PolicyRead,
 ): { ok: true; sha256: string } | GateRefusal {
-  const status = checkAttestation(records, policyPathOf(options));
+  const status =
+    read.bytes === null
+      ? unreadablePolicyStatus(read.path, read.cause ?? "unknown error")
+      : checkAttestationOfBytes(records, read.bytes);
   const refusal = attestationRefusal(status);
   if (refusal !== null) {
     return refuse(ATTESTATION_REFUSAL, refusal.message, { detail: refusal.detail });
@@ -1027,10 +1087,13 @@ export function request(
   const read = readGateRecords(logPath);
   if (!read.ok) return read;
 
-  const attested = requireAttestation(read.records, options);
+  // One read of the policy file for the whole operation (APRV-142): the same
+  // bytes are hashed for attestation and parsed for the decision.
+  const policyRead = readPolicyOnce(options);
+  const attested = requireAttestation(read.records, policyRead);
   if (!attested.ok) return attested;
 
-  const load = loadPolicy(loadOptionsOf(options));
+  const load = parsePolicy(policyRead, options);
   const resolution = resolve(
     load,
     input.cls,
@@ -1328,14 +1391,15 @@ export function decide(
   const read = readGateRecords(logPath);
   if (!read.ok) return read;
 
+  const policyRead = readPolicyOnce(options);
   let attestedSha256: string | null = null;
   if (decision === "grant") {
-    const attested = requireAttestation(read.records, options);
+    const attested = requireAttestation(read.records, policyRead);
     if (!attested.ok) return attested;
     attestedSha256 = attested.sha256;
   }
 
-  const load = loadPolicy(loadOptionsOf(options));
+  const load = parsePolicy(policyRead, options);
   const ttlMs = ttlOf(load);
   const derivation = requestState(read.records, actionKey, ts, ttlMs);
 
@@ -1648,7 +1712,7 @@ export function withdraw(
   const read = readGateRecords(logPath);
   if (!read.ok) return read;
 
-  const load = loadPolicy(loadOptionsOf(options));
+  const load = parsePolicy(readPolicyOnce(options), options);
   const ttlMs = ttlOf(load);
   const derivation = requestState(read.records, actionKey, ts, ttlMs);
 
@@ -1934,10 +1998,11 @@ export function consumeHarnessGrant(
   const read = readGateRecords(logPath);
   if (!read.ok) return read;
 
-  const attested = requireAttestation(read.records, options);
+  const policyRead = readPolicyOnce(options);
+  const attested = requireAttestation(read.records, policyRead);
   if (!attested.ok) return attested;
 
-  const load = loadPolicy(loadOptionsOf(options));
+  const load = parsePolicy(policyRead, options);
   const derivation = requestState(read.records, actionKey, ts, ttlOf(load));
 
   if (derivation.state === "none") {
@@ -2089,7 +2154,7 @@ export function expire(
   const read = readGateRecords(logPath);
   if (!read.ok) return read;
 
-  const load = loadPolicy(loadOptionsOf(options));
+  const load = parsePolicy(readPolicyOnce(options), options);
   const ttlMs = ttlOf(load);
   const derivation = requestState(read.records, actionKey, ts, ttlMs);
 
