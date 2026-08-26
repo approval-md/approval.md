@@ -54,6 +54,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 import { runPayloadHash } from "../src/core/payload.js";
+import { canonicalRender } from "../src/core/wysiwys.js";
 import {
   assertLocal,
   callbackUpdate,
@@ -419,6 +420,10 @@ test("the MCP demo: a client requests, a phone grants, the tool call proceeds", 
         policy_sha256: createHash("sha256")
           .update(readFileSync(join(demo, "APPROVAL.md")))
           .digest("hex"),
+        // APRV-119 (WYSIWYS): the digest of the canonical rendering every
+        // channel presents for these bytes. Stamped by the runtime, never
+        // named by the MCP client, for the same reason the policy hash is.
+        display_hash: canonicalRender(PAYLOAD, "exec.local").display_hash,
       });
 
       // ---------------------------------------------------------------------

@@ -50,6 +50,7 @@ import assert from "node:assert/strict";
 
 import { withdraw, type DecideOptions } from "../core/gate.js";
 import { readVerifiedRecords, requestState } from "../core/state.js";
+import { canonicalRender, CANONICAL_BEGIN } from "../core/wysiwys.js";
 import { assembleBatch } from "./batch.js";
 import {
   assertTagged,
@@ -196,6 +197,30 @@ function assertFullPayloadPresented(request: ChannelRequest, rendered: RenderedR
     (rendered.fullPayloadText ?? "").includes(rendering.text),
     "the channel's full-payload region does not contain the payload text it was given",
   );
+
+  // APRV-119 (WYSIWYS). The region carries the CANONICAL rendering, verbatim:
+  // the one text `core/wysiwys.ts` derives from the bound bytes and the class,
+  // and the one the gate recorded a `display_hash` of on the request. A channel
+  // that assembled its own reading of the same payload would be showing this
+  // approver something no other approver, and no later auditor, can reproduce.
+  if (!rendering.truncated) {
+    const canonical = canonicalRender(rendering.value, request.class.value);
+    assert.ok(
+      (rendered.fullPayloadText ?? "").includes(canonical.text),
+      `the channel's full-payload region is not the canonical rendering for ${request.action_key.value} (APRV-119). Every channel presents ${canonical.display_hash}; this one presented something else.`,
+    );
+    // Claimed material being OUTSIDE the block follows from that equality and
+    // is not checked field by field, deliberately: the canonical text is a pure
+    // function of the payload and the class, so nothing a channel knows about
+    // the summary, the estimate or a model's gloss can reach it. Searching the
+    // block for a claimed field's words would report the opposite — a payload
+    // whose own bytes happen to contain the sentence the agent also wrote about
+    // it, which is the ordinary case for an email and not a defect at all.
+    assert.ok(
+      canonical.text.startsWith(CANONICAL_BEGIN),
+      "the canonical block is not delimited; a channel cannot show where claimed material ends",
+    );
+  }
 
   const summary = request.summary.value;
   if (typeof summary === "string" && summary.length > 0) {

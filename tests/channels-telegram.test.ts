@@ -49,6 +49,7 @@ import {
   markEscapes,
   payloadRegionText,
   rawBytesLine,
+  ABSENT,
   BODY_BEGIN,
   BODY_END,
   CANONICAL_JSON_HEADING,
@@ -61,6 +62,7 @@ import {
   EMAIL_VIEW_HEADING,
   ESCAPE_LEGEND,
   LIVE_QUALIFIER,
+  OPAQUE_VIEW_HEADING,
   PROPOSAL_QUALIFIER,
 } from "../src/channels/payload-view.js";
 import { assembleBatch } from "../src/channels/batch.js";
@@ -120,6 +122,9 @@ const scratch = scratchRoot("channels-telegram");
 const TOKEN = "7654321:AA-approval-md-fake-token-for-tests-only-DO-NOT-USE";
 const CHAT = "9911";
 const OTHER_CHAT = "31337";
+
+/** The class the payload-view tests render under; no view reads it (APRV-119). */
+const VIEW_CLASS = "record.write";
 
 const TASK = "task-100";
 const ACTOR = "agent:drafter";
@@ -516,19 +521,29 @@ test("an email-shaped payload is rendered field by field, body as the human read
 test("only structurally email-shaped payloads leave the JSON rendering", () => {
   const json = (value: unknown): string => JSON.stringify(value, null, 2);
   const view = (value: unknown, truncated = false): string =>
-    payloadRegionText({ value, text: json(value), hash: "h", truncated });
+    payloadRegionText({ value, text: json(value), hash: "h", truncated }, VIEW_CLASS);
 
   // Recognised: the adapter's shape, with `to` as a list or as a bare string.
   assert.notEqual(emailPayloadFields({ to: ["a@b.example"], subject: "s", body: "b" }), null);
   assert.notEqual(emailPayloadFields({ to: "a@b.example", subject: "s", body: "b" }), null);
 
+  // An unrecognised shape renders `opaque` (APRV-119): the canonical block
+  // still surrounds it, still names the renderer and the binding, and carries
+  // the payload's own bytes whole with no structural view over them.
+  const opaque = (value: unknown): void => {
+    const text = view(value);
+    assert.ok(text.includes(OPAQUE_VIEW_HEADING), `no opaque heading for ${json(value)}`);
+    assert.equal(text.includes(EMAIL_VIEW_HEADING), false, `email view for ${json(value)}`);
+    assert.ok(text.includes(json(value)), `the bytes are not shown whole for ${json(value)}`);
+  };
+
   // A self-declared kind buys nothing: it is simply a key this view cannot
-  // show, so the payload falls back to JSON rather than being half-rendered.
+  // show, so the payload stays opaque rather than being half-rendered.
   const declared = { kind: "email", to: ["a@b.example"], subject: "s", body: "b" };
   assert.equal(emailPayloadFields(declared), null);
-  assert.equal(view(declared), json(declared), "a self-declared field changed the rendering");
+  opaque(declared);
 
-  // Wrong types, missing required fields, and non-objects all stay JSON.
+  // Wrong types, missing required fields, and non-objects all stay opaque.
   for (const value of [
     { to: [1], subject: "s", body: "b" },
     { to: ["a@b.example"], subject: "s" },
@@ -540,7 +555,7 @@ test("only structurally email-shaped payloads leave the JSON rendering", () => {
     42,
   ]) {
     assert.equal(emailPayloadFields(value), null, `wrongly recognised ${json(value)}`);
-    assert.equal(view(value), json(value), `rendering changed for ${json(value)}`);
+    opaque(value);
   }
 
   // A truncated rendering keeps today's text: `value` holds more than `text`
@@ -564,12 +579,18 @@ test("only structurally email-shaped payloads leave the JSON rendering", () => {
     ["from", "to", "cc", "bcc", "subject", "content_type", "body"],
   );
 
-  // `cc` is omitted when absent rather than rendered empty.
+  // The shape recogniser reports only the fields the payload carries…
   const noCc = emailPayloadFields({ to: ["c@d.example"], subject: "s", body: "b" });
   assert.equal(
     noCc?.some((field) => field.label === "cc"),
     false,
   );
+  // …and the RENDERING prints the closed set anyway, absent members marked
+  // (APRV-119). An omitted line and an empty value are different facts.
+  const sparse = view({ to: ["c@d.example"], subject: "s", body: "b" });
+  for (const label of ["from", "cc", "bcc", "content_type"]) {
+    assert.ok(sparse.includes(`${label}: ${ABSENT}`), `${label} was omitted rather than marked`);
+  }
 });
 
 test("callback_data is bounded, and the nonce — not the wire's key — is authoritative", () => {
@@ -2347,7 +2368,7 @@ test("listen runs the dispatch hook before every poll, including after a poll er
 test("a file-change payload renders as a diff, and every other shape stays JSON", () => {
   const json = (value: unknown): string => JSON.stringify(value, null, 2);
   const view = (value: unknown, truncated = false): string =>
-    payloadRegionText({ value, text: json(value), hash: "h", truncated });
+    payloadRegionText({ value, text: json(value), hash: "h", truncated }, VIEW_CLASS);
 
   const edit = {
     tool: "Edit",
@@ -2357,14 +2378,14 @@ test("a file-change payload renders as a diff, and every other shape stays JSON"
     after: "  - run: npm test",
   };
   const rendered = view(edit);
-  assert.ok(rendered.startsWith(EDIT_VIEW_HEADING), rendered);
+  assert.ok(rendered.includes(EDIT_VIEW_HEADING), rendered);
   assert.ok(rendered.includes("file: /repo/.github/workflows/ci.yml"), rendered);
   assert.ok(rendered.includes(`note: ${LIVE_QUALIFIER}`), rendered);
   assert.ok(rendered.includes("-  - run: npm run lint"), rendered);
   assert.ok(rendered.includes("+  - run: npm test"), rendered);
   // The exact bytes stay underneath: the diff is an aid, never a replacement.
   assert.ok(rendered.includes(CANONICAL_JSON_HEADING), rendered);
-  assert.ok(rendered.endsWith(json(edit)), rendered);
+  assert.ok(rendered.includes(json(edit)), rendered);
 
   // The proposal tier renders its own qualifier, from the same key.
   assert.ok(view({ ...edit, rule: "protected-path-proposal" }).includes(PROPOSAL_QUALIFIER));
@@ -2374,7 +2395,7 @@ test("a file-change payload renders as a diff, and every other shape stays JSON"
   assert.ok(view(write).includes("the whole file as it will be written (2 lines)"), view(write));
   assert.ok(view(write).includes("+a\n+b"), view(write));
 
-  // Half a change, an unknown key, a wrong type, a truncated rendering: JSON.
+  // Half a change, an unknown key, a wrong type: opaque, never half a diff.
   for (const value of [
     { tool: "Edit", file: "/repo/x", before: "a" },
     { tool: "Edit", file: "/repo/x", after: "a" },
@@ -2387,12 +2408,18 @@ test("a file-change payload renders as a diff, and every other shape stays JSON"
     null,
   ]) {
     assert.equal(changePayloadView(value), null, `wrongly recognised ${json(value)}`);
-    assert.equal(view(value), json(value), `rendering changed for ${json(value)}`);
+    const text = view(value);
+    assert.ok(text.includes(OPAQUE_VIEW_HEADING), `no opaque heading for ${json(value)}`);
+    assert.equal(text.includes(EDIT_VIEW_HEADING), false, `diff view for ${json(value)}`);
+    assert.ok(text.includes(json(value)), `the bytes are not shown whole for ${json(value)}`);
   }
   assert.equal(view(edit, true), json(edit), "a truncated rendering must not be re-expanded");
 
-  // `replace_all` is part of the question and is shown when the call sets it.
+  // `replace_all` is part of the question. Shown when the call sets it, and
+  // marked absent when it does not (APRV-119's closed field set): "replace one"
+  // and "a renderer that does not show this" must not look the same.
   assert.ok(view({ ...edit, replace_all: true }).includes("replace_all: true"));
+  assert.ok(rendered.includes(`replace_all: ${ABSENT}`), rendered);
 });
 
 test("a very long change folds with an explicit marker, never silently", () => {
@@ -2400,12 +2427,10 @@ test("a very long change folds with an explicit marker, never silently", () => {
     "\n",
   );
   const payload = { tool: "Write", rule: "protected-path", file: "/repo/CLAUDE.md", content: after };
-  const text = payloadRegionText({
-    value: payload,
-    text: JSON.stringify(payload, null, 2),
-    hash: "h",
-    truncated: false,
-  });
+  const text = payloadRegionText(
+    { value: payload, text: JSON.stringify(payload, null, 2), hash: "h", truncated: false },
+    VIEW_CLASS,
+  );
   assert.ok(text.includes(`+line ${String(DIFF_LINE_BUDGET - 1)}`), "the budget is spent in full");
   assert.equal(text.includes(`+line ${String(DIFF_LINE_BUDGET)}`), false, "the fold did not happen");
   assert.ok(text.includes("… 25 more lines (hash covers all bytes)"), text);
@@ -2456,7 +2481,7 @@ test("a diff reaches Telegram escaped, chunked and complete", async () => {
 test("a command payload renders over its real lines, with cwd and the store path", () => {
   const json = (value: unknown): string => JSON.stringify(value, null, 2);
   const view = (value: unknown, truncated = false): string =>
-    payloadRegionText({ value, text: json(value), hash: "deadbeef", truncated });
+    payloadRegionText({ value, text: json(value), hash: "deadbeef", truncated }, VIEW_CLASS);
 
   const command = [
     "gh pr create --title 'ship it' --body 'first line",
@@ -2467,7 +2492,7 @@ test("a command payload renders over its real lines, with cwd and the store path
   const payload = { command, cwd: "/repo" };
   const rendered = view(payload);
 
-  assert.ok(rendered.startsWith(COMMAND_VIEW_HEADING), rendered);
+  assert.ok(rendered.includes(COMMAND_VIEW_HEADING), rendered);
   assert.ok(rendered.includes(ESCAPE_LEGEND), rendered);
   assert.ok(rendered.includes("command (4 lines):"), rendered);
   assert.ok(rendered.includes(`${COMMAND_BEGIN}\ngh pr create`), rendered);
@@ -2476,12 +2501,13 @@ test("a command payload renders over its real lines, with cwd and the store path
   assert.ok(rendered.includes("a literal escape: a«\\n»b'"), rendered);
   // cwd on its own line, beneath the command block.
   assert.ok(rendered.includes(`${COMMAND_END}\ncwd: /repo`), rendered);
-  // And where the exact bytes are, said in the prompt itself.
-  assert.ok(rendered.includes(rawBytesLine("deadbeef")), rendered);
+  // And where the exact bytes are, said in the prompt itself, under the hash
+  // the renderer recomputes from the payload rather than one a caller supplied.
+  assert.ok(rendered.includes(rawBytesLine(payloadHash(payload))), rendered);
 
   // The exact bytes stay underneath: the view is an aid, never a replacement.
   assert.ok(rendered.includes(CANONICAL_JSON_HEADING), rendered);
-  assert.ok(rendered.endsWith(json(payload)), rendered);
+  assert.ok(rendered.includes(json(payload)), rendered);
 
   // A payload without a cwd says so rather than rendering an empty line.
   assert.ok(view({ command: "ls" }).includes("cwd: (none declared)"));
@@ -2490,7 +2516,7 @@ test("a command payload renders over its real lines, with cwd and the store path
 test("only structurally command-shaped payloads leave the JSON rendering", () => {
   const json = (value: unknown): string => JSON.stringify(value, null, 2);
   const view = (value: unknown, truncated = false): string =>
-    payloadRegionText({ value, text: json(value), hash: "h", truncated });
+    payloadRegionText({ value, text: json(value), hash: "h", truncated }, VIEW_CLASS);
 
   assert.deepEqual(commandPayloadView({ command: "ls", cwd: "/repo" }), {
     command: "ls",
@@ -2498,9 +2524,9 @@ test("only structurally command-shaped payloads leave the JSON rendering", () =>
   });
   assert.deepEqual(commandPayloadView({ command: "ls" }), { command: "ls", cwd: null });
 
-  // An unknown key, a wrong type, a truncated rendering: JSON, every time. A
-  // key this view cannot show would be a hidden payload wearing a friendlier
-  // face, which is the failure the email view was careful about first.
+  // An unknown key or a wrong type: opaque, every time. A key this view cannot
+  // show would be a hidden payload wearing a friendlier face, which is the
+  // failure the email view was careful about first.
   for (const value of [
     { command: "ls", cwd: "/repo", shell: "zsh" },
     { command: "ls", cwd: 3 },
@@ -2511,7 +2537,10 @@ test("only structurally command-shaped payloads leave the JSON rendering", () =>
     null,
   ]) {
     assert.equal(commandPayloadView(value), null, `wrongly recognised ${json(value)}`);
-    assert.equal(view(value), json(value), `rendering changed for ${json(value)}`);
+    const text = view(value);
+    assert.ok(text.includes(OPAQUE_VIEW_HEADING), `no opaque heading for ${json(value)}`);
+    assert.equal(text.includes(COMMAND_VIEW_HEADING), false, `command view for ${json(value)}`);
+    assert.ok(text.includes(json(value)), `the bytes are not shown whole for ${json(value)}`);
   }
   const whole = { command: "ls", cwd: "/repo" };
   assert.equal(view(whole, true), json(whole), "a truncated rendering must not be re-expanded");
@@ -2571,12 +2600,10 @@ test("a very long command folds with an explicit marker, never silently", () => 
     (_, index) => `echo ${String(index)}`,
   ).join("\n");
   const payload = { command, cwd: "/repo" };
-  const text = payloadRegionText({
-    value: payload,
-    text: JSON.stringify(payload, null, 2),
-    hash: "h",
-    truncated: false,
-  });
+  const text = payloadRegionText(
+    { value: payload, text: JSON.stringify(payload, null, 2), hash: "h", truncated: false },
+    VIEW_CLASS,
+  );
 
   assert.ok(
     text.includes(`echo ${String(COMMAND_LINE_BUDGET - 1)}`),
@@ -2591,7 +2618,10 @@ test("a very long command folds with an explicit marker, never silently", () => 
   // The folded lines are still on screen, in the canonical JSON underneath, and
   // the reader is told where the whole thing lives.
   assert.ok(text.includes(JSON.stringify(command)), "the exact bytes left the message");
-  assert.ok(text.includes(rawBytesLine("h")), text);
+  // The store path names the RECOMPUTED binding (APRV-119): the renderer takes
+  // the payload and derives the hash itself, so a caller cannot label a
+  // rendering with somebody else's content address.
+  assert.ok(text.includes(rawBytesLine(payloadHash(payload))), text);
 });
 
 test("a command reaches Telegram escaped, chunked and complete", async () => {

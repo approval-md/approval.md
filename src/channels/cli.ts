@@ -81,6 +81,7 @@ import type {
   TaggedField,
   TestableChannel,
 } from "./contract.js";
+import { payloadRegionText } from "./payload-view.js";
 
 // ---------------------------------------------------------------------------
 // Injectable I/O
@@ -460,7 +461,12 @@ export class CliChannel implements TestableChannel {
         ? null
         : [
             `${PAYLOAD_BEGIN} (bound sha256 ${rendering.hash}) ---`,
-            rendering.text,
+            // APRV-119. The canonical rendering, the same bytes the other two
+            // channels put in front of a human. Until now this channel printed
+            // the pretty JSON alone, which meant a terminal approver and a
+            // Telegram approver read two different texts for one payload — the
+            // exact divergence WYSIWYS exists to rule out.
+            payloadRegionText(rendering, request.class.value),
             PAYLOAD_END,
             ...(rendering.truncated
               ? ["(TRUNCATED — this is not the whole payload; do not grant on it)"]

@@ -601,7 +601,7 @@ export function renderTelegram(
     payloadText:
       payload === null
         ? null
-        : `--- full payload (sha256 ${payload.hash}${payload.truncated ? ", TRUNCATED" : ""}) ---\n${payloadRegionText(payload)}`,
+        : `--- full payload (sha256 ${payload.hash}${payload.truncated ? ", TRUNCATED" : ""}) ---\n${payloadRegionText(payload, request.class.value)}`,
   };
 }
 

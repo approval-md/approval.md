@@ -359,7 +359,7 @@ export function renderWebRequest(request: ChannelRequest): WebRendering {
       ? null
       : [
           `${PAYLOAD_BEGIN} (bound sha256 ${rendering.hash}) ---`,
-          payloadRegionText(rendering),
+          payloadRegionText(rendering, request.class.value),
           PAYLOAD_END,
           ...(rendering.truncated
             ? ["(TRUNCATED — this is not the whole payload; do not grant on it)"]
