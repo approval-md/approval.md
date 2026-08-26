@@ -120,6 +120,21 @@ const FIXTURES: readonly Fixture[] = [
   { command: "node dist/src/cli/main.js log verify", class: GATE_SELF_CLASS, rule: "node-approval-cli", row: "node" },
   { command: "node ./cli.js status", class: GATE_SELF_CLASS, rule: "node-approval-cli", row: "node" },
   { command: "approval queue --json", class: GATE_SELF_CLASS, rule: "approval" },
+  // APRV-125: the two `approval` invocations that are NOT pass-through. They
+  // move the log FILE and drive git against a shared remote, so they classify
+  // by name and the policy decides. A flag between the words must not hide the
+  // verb, and the long spelling through `node` has to land on the same class —
+  // otherwise the classification would be a spelling test.
+  { command: "approval log sync", class: "log.sync", rule: "approval-log-sync", row: "approval" },
+  { command: "approval log sync --json", class: "log.sync", rule: "approval-log-sync", row: "approval" },
+  { command: "approval --json log sync", class: "log.sync", rule: "approval-log-sync", row: "approval" },
+  { command: "approval log advance --pr", class: "log.advance", rule: "approval-log-advance", row: "approval" },
+  { command: "node ./cli.js log sync", class: "log.sync", rule: "approval-log-sync", row: "node" },
+  { command: "node dist/src/cli/main.js log advance", class: "log.advance", rule: "approval-log-advance", row: "node" },
+  // The neighbours, which stay pass-through: reading the log is the gate's own
+  // business, and `approval log` with no subcommand names no ritual at all.
+  { command: "approval log verify", class: GATE_SELF_CLASS, rule: "approval" },
+  { command: "approval log", class: GATE_SELF_CLASS, rule: "approval" },
   { command: "npx tsx src/tool.ts", class: "files.write.workspace", rule: "workspace-tool" },
   { command: "mkdir -p src/core", class: "files.write.workspace", rule: "workspace-write" },
   { command: "rm dist/stale.js", class: "files.write.workspace", rule: "rm-workspace", row: "rm" },
