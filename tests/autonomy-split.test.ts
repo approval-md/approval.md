@@ -142,7 +142,7 @@ function envelopeFor(
     actions: actions.map((action) => ({
       class: action.cls,
       summary: `do ${action.key}`,
-      est_cost_usd: 0.01,
+      est_cost_usd: "0.01",
       idempotency_key: action.key,
       payload_hash: bindingFor(action.key),
       ...(action.reversible === undefined ? {} : { reversible: action.reversible }),
@@ -227,7 +227,13 @@ function sampleOne(unit: Case, key: string, minutes: number): number {
 
 /** Run one action to completion through the executor, so the chain shows it ran. */
 function runRevert(unit: Case, key: string, minutes: number): void {
-  const started = startExecution(unit.logPath, key, unit.options, at(minutes), "agent:claude");
+  const started = startExecution(
+    unit.logPath,
+    key,
+    { ...unit.options, presentedPayloadHash: bindingFor(key) },
+    at(minutes),
+    "agent:claude",
+  );
   assert.equal(started.ok, true, started.ok ? "" : started.message);
   const finished = finishExecution(unit.logPath, key, 0, at(minutes + 1), "agent:claude");
   assert.equal(finished.ok, true, finished.ok ? "" : finished.message);
@@ -241,7 +247,7 @@ function ask(unit: Case, key: string, cls: string, minutes: number, reversible?:
       task: "task-042",
       actionKey: key,
       cls,
-      est_cost_usd: 0.01,
+      est_cost_usd: "0.01",
       ...(reversible === undefined ? {} : { reversible }),
     },
     at(minutes),
@@ -587,7 +593,13 @@ test("an unsampled supervised-live action proceeds and still enters the retro po
   assert.equal(asked.autonomy, "supervised");
   assert.equal(asked.record, null, "an unsampled action appends no approval event");
 
-  const started = startExecution(unit.logPath, key, unit.options, at(2), "agent:claude");
+  const started = startExecution(
+    unit.logPath,
+    key,
+    { ...unit.options, presentedPayloadHash: bindingFor(key) },
+    at(2),
+    "agent:claude",
+  );
   assert.equal(started.ok, true, started.ok ? "" : started.message);
 
   const load = loadPolicy({ file: unit.policyPath });

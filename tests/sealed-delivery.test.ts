@@ -27,7 +27,6 @@
  */
 
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
@@ -44,6 +43,7 @@ import { after, test } from "node:test";
 
 import { main } from "../src/cli/main.js";
 import type { EventRecord } from "../src/core/log.js";
+import { runPayloadHash } from "../src/core/payload.js";
 import {
   asSealedToken,
   isRecipientKey,
@@ -72,7 +72,17 @@ function at(minutes: number): string {
 }
 
 const KEY = "task-042:chaser";
-const BOUND = createHash("sha256").update("payload:task-042:chaser", "utf8").digest("hex");
+
+/**
+ * The content binding for the one command these scenarios execute (`true`, no
+ * arguments, in the machine's own directory). `approval run` recomputes this
+ * from the argv and cwd it is about to spawn (APRV-140), so the declaration and
+ * the `--payload-hash` flag must both carry the recomputed value, and the value
+ * is per machine because the cwd is.
+ */
+function boundFor(unit: Machine): string {
+  return runPayloadHash(["true"], unit.dir);
+}
 
 /**
  * The policy under test.
@@ -97,20 +107,22 @@ function policyText(delivery: "manual" | "sealed", ttl = false): string {
   ].join("\n");
 }
 
-const ENVELOPE = {
-  origin: { app: "example-capture", created_by: "human:carter" },
-  state: "proposed",
-  actions: [
-    {
-      class: "communicate.email.external",
-      summary: "Send deposit chaser",
-      reversible: false,
-      est_cost_usd: 0.02,
-      idempotency_key: KEY,
-      payload_hash: BOUND,
-    },
-  ],
-};
+function envelopeFor(unit: Machine): Record<string, unknown> {
+  return {
+    origin: { app: "example-capture", created_by: "human:carter" },
+    state: "proposed",
+    actions: [
+      {
+        class: "communicate.email.external",
+        summary: "Send deposit chaser",
+        reversible: false,
+        est_cost_usd: "0.02",
+        idempotency_key: KEY,
+        payload_hash: boundFor(unit),
+      },
+    ],
+  };
+}
 
 interface Machine {
   dir: string;
@@ -143,7 +155,7 @@ function ready(delivery: "manual" | "sealed", label = "m", ttl = false): Machine
   );
   const registered = register(
     unit.logPath,
-    { task: "task-042", envelope: ENVELOPE },
+    { task: "task-042", envelope: envelopeFor(unit) },
     T0,
     "agent:claude",
   );
@@ -158,7 +170,7 @@ function ask(unit: Machine, minutes = 1) {
       task: "task-042",
       actionKey: KEY,
       cls: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       reversible: false,
       summary: "Send deposit chaser",
     },
@@ -196,7 +208,9 @@ function assertClean(unit: Machine): void {
 function runCli(unit: Machine, argv: string[]): { code: number; out: string; err: string } {
   let out = "";
   let err = "";
-  const code = main([...argv, "--log", unit.logPath], {
+  // `--log` goes before any `--` separator: what follows the separator is the
+  // child argv, and `approval run` hashes exactly those bytes (APRV-140).
+  const code = main([argv[0] ?? "", "--log", unit.logPath, ...argv.slice(1)], {
     cwd: unit.dir,
     streams: {
       out: (text) => {
@@ -337,7 +351,7 @@ test("the key file is unlinked when the token is spent", () => {
     "--policy",
     unit.policyPath,
     "--payload-hash",
-    BOUND,
+    boundFor(unit),
     "--",
     "true",
   ]);
@@ -425,7 +439,7 @@ test("request on A, grant on B, wait and run on A: the token never crosses in cl
     "--policy",
     a.policyPath,
     "--payload-hash",
-    BOUND,
+    boundFor(a),
     "--",
     "true",
   ]);
