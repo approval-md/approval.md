@@ -53,7 +53,7 @@
  */
 
 import { tick, type ClockOptions } from "./clock.js";
-import { findDeclaration } from "./execute.js";
+import { declaringTasks, findDeclaration } from "./execute.js";
 import {
   appendEvent,
   type AppendError,
@@ -172,6 +172,9 @@ export function supervisedExecutions(
     const actionKey = record.action_key;
     if (typeof actionKey !== "string" || actionKey.length === 0) continue;
 
+    // A key declared by more than one task is a refused collision (APRV-138);
+    // do not sample from an ambiguous declaration.
+    if (declaringTasks(all, actionKey).length > 1) continue;
     const declared = findDeclaration(all, actionKey);
     if (declared === null) continue;
 

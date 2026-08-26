@@ -779,17 +779,38 @@ export function register(
   const read = readGateRecords(logPath);
   if (!read.ok) return read;
 
+  const envelope = resolved.envelope as { state?: unknown };
+  const actions = actionsOf(resolved.envelope);
+  const incomingKeys = new Set(actions.map((action) => action.idempotency_key));
+
   for (const record of read.records) {
-    if (record.event === "task.registered" && record.task === resolved.task) {
+    if (record.event !== "task.registered") continue;
+    if (record.task === resolved.task) {
       return refuse(
         "task-already-registered",
         `task ${resolved.task} was already registered at seq ${record.seq}; an envelope change is envelope.drift, not a second registration`,
       );
     }
+    // Cross-task idempotency_key collision (APRV-138). An idempotency_key is the
+    // global identity of one side effect (SPEC.md §7); it is owned by exactly one
+    // task. A second declaration under a different task would let a later, weaker
+    // registration shadow the first at execute time — `findDeclaration` resolves
+    // by key alone — disabling the irreversibility floor. Refuse at the write
+    // boundary before anything is appended.
+    const declaredActions = payloadOf(record)["actions"];
+    if (!Array.isArray(declaredActions)) continue;
+    for (const entry of declaredActions) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const key = (entry as Record<string, unknown>)["idempotency_key"];
+      if (typeof key === "string" && incomingKeys.has(key)) {
+        return refuse(
+          "task-already-registered",
+          `action key ${JSON.stringify(key)} was already registered under task ${record.task} at seq ${record.seq}; an idempotency key is the global identity of one side effect and cannot be re-declared under a second task`,
+        );
+      }
+    }
   }
 
-  const envelope = resolved.envelope as { state?: unknown };
-  const actions = actionsOf(resolved.envelope);
   const payload: Record<string, unknown> = { actions };
   if (typeof envelope.state === "string") payload["state"] = envelope.state;
   const budget = budgetOf(resolved.envelope);

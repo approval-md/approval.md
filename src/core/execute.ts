@@ -319,8 +319,13 @@ export interface Declaration {
  * authority, exactly as it is for `approval request`. The search is by action
  * key alone because an execution names a key, not a task: SPEC.md §7 makes the
  * `idempotency_key` the identity of a side effect, and an undeclared key is the
- * one thing that must never execute. The **last** matching registration wins, so
- * that if a log somehow carries two, the later declaration governs.
+ * one thing that must never execute.
+ *
+ * A key must be declared by exactly one task. If a log somehow carries the same
+ * key under two tasks, this returns the last, but callers on an enforcement path
+ * MUST first fail closed via {@link declaringTasks}: the collision is refused at
+ * registration (`core/gate.ts`, APRV-138), so a log that still holds one is
+ * untrustworthy and nothing may execute from the guess.
  */
 export function findDeclaration(
   records: EventRecord[],
@@ -352,6 +357,31 @@ export function findDeclaration(
     }
   }
   return found;
+}
+
+/**
+ * The distinct tasks that declare `actionKey`. More than one is a cross-task
+ * collision (APRV-138): the registration boundary refuses these, so a log that
+ * still holds one cannot be trusted to say which declaration governs. Every
+ * enforcement caller of {@link findDeclaration} guards on this and fails closed
+ * rather than executing the last-registered (possibly weaker) declaration.
+ */
+export function declaringTasks(records: EventRecord[], actionKey: string): string[] {
+  const tasks = new Set<string>();
+  for (const record of records) {
+    if (record.event !== "task.registered") continue;
+    const task = record.task;
+    if (typeof task !== "string" || task.length === 0) continue;
+    const actions = payloadOf(record)["actions"];
+    if (!Array.isArray(actions)) continue;
+    for (const entry of actions) {
+      if (typeof entry !== "object" || entry === null) continue;
+      if ((entry as Record<string, unknown>)["idempotency_key"] === actionKey) {
+        tasks.add(task);
+      }
+    }
+  }
+  return [...tasks];
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +451,13 @@ export function startExecution(
   if (!read.ok) return fromReadRefusal(read);
   const records = read.records;
 
+  const declaring = declaringTasks(records, actionKey);
+  if (declaring.length > 1) {
+    return refuse(
+      "action-not-registered",
+      `action key ${JSON.stringify(actionKey)} is declared by more than one task (${declaring.join(", ")}); the runtime will not guess which governs and refuses rather than execute the later declaration. Registration refuses such collisions (APRV-138); a log that holds one is untrustworthy.`,
+    );
+  }
   const declared = findDeclaration(records, actionKey);
   if (declared === null) {
     return refuse(

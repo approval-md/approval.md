@@ -86,6 +86,7 @@
 
 import {
   EXECUTE_REFUSAL_CODES,
+  declaringTasks,
   finishExecution,
   findDeclaration,
   startExecution,
@@ -596,6 +597,15 @@ export async function executeThroughAdapter(
   );
   if (!read.ok) return refuse(adapter, actionKey, read.code, read.message);
 
+  const declaring = declaringTasks(read.records, actionKey);
+  if (declaring.length > 1) {
+    return refuse(
+      adapter,
+      actionKey,
+      "action-not-registered",
+      `action key ${JSON.stringify(actionKey)} is declared by more than one task (${declaring.join(", ")}); the runtime refuses an ambiguous declaration rather than route the later one. Registration refuses such collisions (APRV-138).`,
+    );
+  }
   const declared = findDeclaration(read.records, actionKey);
   if (declared === null) {
     return refuse(

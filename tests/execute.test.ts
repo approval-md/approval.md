@@ -21,6 +21,7 @@ import { after, test } from "node:test";
 
 import {
   danglingExecutions,
+  declaringTasks,
   EXECUTE_REFUSAL_CODES,
   findDeclaration,
   loopEscalation,
@@ -28,6 +29,7 @@ import {
   type ExecuteOptions,
   type ExecuteRefusal,
 } from "../src/core/execute.js";
+import { appendEvent } from "../src/core/log.js";
 import {
   appendAttestation,
   decide,
@@ -667,4 +669,97 @@ test("findDeclaration reads the class from the log, not from the task file", () 
     summary: "Send deposit chaser",
   });
   assert.equal(findDeclaration(records(unit), "task-042:absent"), null);
+});
+
+// ===========================================================================
+// declaringTasks + cross-task collision fail-closed (APRV-138, red-team F1)
+// ===========================================================================
+
+/**
+ * Append a second `task.registered` for `key` under a different task, through
+ * the real append path. `register` now refuses this at the write boundary
+ * (APRV-138), so the only way a log holds a collision is an older binary or
+ * out-of-band write. These tests prove the runtime fails closed on such a log
+ * instead of trusting the later, weaker declaration.
+ */
+function shadowRegister(unit: Case, task: string, key: string, cls: string, ts: string): void {
+  const appended = appendEvent(unit.logPath, {
+    ts,
+    event: "task.registered",
+    actor: "agent:mallory",
+    task,
+    payload: {
+      actions: [
+        {
+          class: cls,
+          summary: "shadow declaration",
+          reversible: true,
+          est_cost_usd: 0,
+          idempotency_key: key,
+          payload_hash: bindingFor(key),
+        },
+      ],
+    },
+  });
+  assert.equal(appended.ok, true, appended.ok ? "" : appended.error.message);
+}
+
+test("declaringTasks reports one task normally, and every task on a collision", () => {
+  const unit = ready();
+  assert.deepEqual(declaringTasks(records(unit), "task-042:chaser"), ["task-042"]);
+  shadowRegister(unit, "task-099", "task-042:chaser", "read.web", at(1));
+  assert.deepEqual(declaringTasks(records(unit), "task-042:chaser"), ["task-042", "task-099"]);
+});
+
+test("startExecution refuses a collision-shadowed key rather than run the weaker declaration", () => {
+  const unit = ready();
+  // task-042 declared task-042:chaser as communicate.email.external, reversible
+  // false: manual, floor engaged. The shadow re-declares it as read.web
+  // (autonomous) reversible true. Last-wins would execute it with no token, no
+  // human, floor gone. The guard must refuse instead.
+  shadowRegister(unit, "task-099", "task-042:chaser", "read.web", at(1));
+  const before = records(unit).length;
+  const refusal = asRefusal(
+    startExecution(unit.logPath, "task-042:chaser", unit.options, at(2), "agent:mallory"),
+  );
+  assert.equal(refusal.code, "action-not-registered");
+  assert.match(refusal.message, /more than one task/u);
+  assert.match(refusal.message, /task-042/u);
+  assert.match(refusal.message, /task-099/u);
+  assert.equal(records(unit).length, before, "nothing may be appended on the refusal");
+  assertClean(unit);
+});
+
+/**
+ * Residual hole deliberately left open by APRV-138, to be closed by the F3 task
+ * (payload binding on the non-manual execute path). A single legitimate
+ * autonomous registration executes with no token and no presented payload hash:
+ * nothing here binds the executed bytes to the declaration yet. Pinned so F3 has
+ * a failing assertion to flip; if this starts refusing, F3 has landed and this
+ * test should move to asserting the bind.
+ */
+test("RESIDUAL (F3): a lone autonomous key executes with no token and no payload binding", () => {
+  const unit = newCase();
+  attest(unit);
+  const envelope = {
+    origin: { app: "example-capture", created_by: "human:carter" },
+    state: "proposed",
+    actions: [
+      {
+        class: "read.web",
+        summary: "read a page",
+        reversible: true,
+        est_cost_usd: 0,
+        idempotency_key: "task-500:read",
+        payload_hash: bindingFor("task-500:read"),
+      },
+    ],
+  };
+  const registered = register(unit.logPath, { task: "task-500", envelope }, T0, "agent:claude");
+  assert.equal(registered.ok, true, registered.ok ? "" : registered.message);
+  // No token, no presentedPayloadHash: still runs, because the non-manual path
+  // does not bind content yet (F3).
+  const started = startExecution(unit.logPath, "task-500:read", unit.options, at(2), "agent:x");
+  assert.equal(started.ok, true, started.ok ? "" : (started as ExecuteRefusal).message);
+  assertClean(unit);
 });

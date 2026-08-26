@@ -406,6 +406,57 @@ test("register refuses a second registration of the same task id", () => {
   assertClean(unit);
 });
 
+// APRV-138: an idempotency_key is the global identity of one side effect and
+// cannot be re-declared under a second task. The exploit these guard is a
+// weaker registration (reversible flipped true) shadowing the first at execute
+// time, which would disable the irreversibility floor.
+test("register refuses a cross-task reuse of an idempotency_key, floor-flip and all", () => {
+  const unit = newCase();
+  registerTask(unit); // task-042 declares task-042:chaser, reversible:false
+  const shadow = {
+    ...ENVELOPE,
+    actions: [{ ...ENVELOPE.actions[0], reversible: true }],
+  };
+  const refusal = asRefusal(
+    register(unit.logPath, { task: "task-099", envelope: shadow }, at(1), "agent:mallory"),
+  );
+  assert.equal(refusal.code, "task-already-registered");
+  assert.match(refusal.message, /task-042:chaser/u);
+  assert.equal(records(unit).length, 1, "the shadow registration must not be appended");
+  assertClean(unit);
+});
+
+test("register refuses a whole multi-action envelope when any one key collides", () => {
+  const unit = newCase();
+  registerTask(unit); // task-042 owns task-042:chaser
+  const mixed = {
+    ...ENVELOPE,
+    actions: [
+      { ...ENVELOPE.actions[0], idempotency_key: "task-099:fresh" },
+      { ...ENVELOPE.actions[0], idempotency_key: "task-042:chaser" }, // collides
+    ],
+  };
+  const refusal = asRefusal(
+    register(unit.logPath, { task: "task-099", envelope: mixed }, at(1), "agent:mallory"),
+  );
+  assert.equal(refusal.code, "task-already-registered");
+  assert.equal(records(unit).length, 1, "all-or-nothing: the fresh key must not land either");
+  assertClean(unit);
+});
+
+test("register still admits a distinct key under a different task", () => {
+  const unit = newCase();
+  registerTask(unit);
+  const other = {
+    ...ENVELOPE,
+    actions: [{ ...ENVELOPE.actions[0], idempotency_key: "task-099:fresh" }],
+  };
+  const result = register(unit.logPath, { task: "task-099", envelope: other }, at(1), "agent:claude");
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  assert.equal(records(unit).length, 2);
+  assertClean(unit);
+});
+
 test("register refuses a system: actor", () => {
   const unit = newCase();
   const refusal = asRefusal(
