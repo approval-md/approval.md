@@ -108,6 +108,7 @@ import {
   ATTESTATION_REFUSAL,
   attestationRefusal,
   checkAttestation,
+  isPolicySha256,
   POLICY_HASH_FIELD,
   type AttestationRefusalDetail,
 } from "./attest.js";
@@ -1873,6 +1874,25 @@ export function findHarnessCarry(
   return pending;
 }
 
+/**
+ * The policy hash pinned on the `approval.granted` record at `seq`, or `null`.
+ *
+ * `null` covers both shapes that are not a claim about policy: a grant written
+ * before APRV-118 added the field, and a value that is not a SHA-256. A
+ * malformed one reads as absent for the same reason `core/state.ts` reads it
+ * that way — a corrupt byte must not be able to void an authorization, and a
+ * crafted one must not be able to claim agreement it cannot prove.
+ */
+function grantedPolicyHash(records: EventRecord[], seq: number | null): string | null {
+  if (seq === null) return null;
+  for (const record of records) {
+    if (record.seq !== seq) continue;
+    const value = payloadOf(record)[POLICY_HASH_FIELD];
+    return isPolicySha256(value) ? value : null;
+  }
+  return null;
+}
+
 export type ConsumeHarnessResult = { ok: true; record: EventRecord } | GateRefusal;
 
 /**
@@ -1906,7 +1926,11 @@ export type ConsumeHarnessResult = { ok: true; record: EventRecord } | GateRefus
  * enforcement path that reaches a harness `allow` without passing through
  * {@link request} (that happened in an earlier process, possibly against
  * earlier policy bytes). A policy that changed since the human attested it
- * cannot answer anything, so it answers nothing.
+ * cannot answer anything, so it answers nothing. `policy-drift` is the second
+ * half of the same idea and is APRV-134: attested is not enough when what is
+ * attested is a DIFFERENT policy from the one the approver decided under, and
+ * the gap between a tap and a retry's spend is exactly where a re-attestation
+ * fits.
  *
  * Everything else follows the derivation: `not-requested` when the key has no
  * request, `expired` when the TTL lapsed (judged from the request's own `ts`,
@@ -1986,6 +2010,35 @@ export function consumeHarnessGrant(
     return refuse(
       "not-registered",
       `action ${actionKey} has a grant but no task on its request record; an execution event names both (SPEC.md §8) and nothing here invents one`,
+      { state: derivation.state },
+    );
+  }
+
+  // APRV-134: the spend-time half of APRV-118's comparison. `decide` refuses a
+  // grant whose request was routed under a policy that is no longer in force;
+  // this path is the remaining consumer that could still spend one under
+  // different rules, because a harness grant is spent by a LATER PROCESS —
+  // a retry after the first invocation's wait timed out, minutes later. A human
+  // re-attesting in that gap changes the autonomy, the limits and the TTL that
+  // put the question in front of them, and the command about to run is the one
+  // they answered under the old rules. Refused with APRV-118's own
+  // `policy-drift`, and deliberately the same code: the fact is the same fact
+  // (the file is attested and is a different file), the remedy is the same
+  // remedy (request it again under the policy that governs now), and a second
+  // code for one condition would be a distinction an agent has to learn without
+  // being able to act on it differently.
+  //
+  // The grant's own pinned hash is read first and the request's is the
+  // fallback, so a log in which only one of the pair carries the field is
+  // judged by whichever one does. Absence on both is not a mismatch: the field
+  // is additive per SPEC.md §8, and reading its absence as drift would strand
+  // every grant in a log written before APRV-118.
+  const pinned =
+    grantedPolicyHash(read.records, derivation.decisionSeq) ?? derivation.declared.policy_sha256;
+  if (pinned !== null && pinned !== attested.sha256) {
+    return refuse(
+      "policy-drift",
+      `action ${actionKey} was approved under policy ${pinned} and the attested policy is now ${attested.sha256}; a human re-attested between the decision and this spend, so the rules the approver saw are not the rules this command would run under. Nothing was appended: the grant is void and the action must be requested again, which re-resolves its autonomy, limits and TTL under the current policy.`,
       { state: derivation.state },
     );
   }
