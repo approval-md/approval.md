@@ -243,6 +243,32 @@ test("batch_delivery_id is a first-class decision payload field (SPEC.md §10.3)
   }
 });
 
+test("display_hash is optional on approval.requested, and shaped where present (APRV-119)", () => {
+  const record = fixture("approval.requested");
+  const payload = (record["payload"] ?? {}) as Record<string, unknown>;
+
+  // Additive: a record written before WYSIWYS existed still validates, which is
+  // what an append-only log requires of every field this project ever adds.
+  assert.equal(validate("event", record).ok, true, "the fixture carries no display_hash and failed");
+
+  const digest = "a".repeat(64);
+  assert.equal(
+    validate("event", { ...record, payload: { ...payload, display_hash: digest } }).ok,
+    true,
+    "approval.requested rejected a well-formed display hash",
+  );
+
+  // Shape is constrained where it IS present: a truncated or upper-case digest
+  // is one an auditor re-rendering the payload could not compare against.
+  for (const value of ["", "a".repeat(63), "A".repeat(64), 7, null]) {
+    assert.equal(
+      validate("event", { ...record, payload: { ...payload, display_hash: value } }).ok,
+      false,
+      `approval.requested accepted display_hash ${JSON.stringify(value)}`,
+    );
+  }
+});
+
 test("prev accepts a 64-hex link or null, and nothing else", () => {
   const record = fixture("approval.granted");
   assert.equal(validate("event", { ...record, prev: null }).ok, true);

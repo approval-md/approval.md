@@ -357,6 +357,12 @@ function setUp(
       : { apiBase: stringFlag(flags, "--api-base") as string }),
     ...(pollFlag === null ? {} : { pollTimeoutSeconds: Number.parseInt(pollFlag, 10) }),
     log: (message: string) => streams.err(`${message}\n`),
+    // APRV-135. The policy is already loaded above for the variable names; the
+    // TTL rides along so the listener can forget delivery bookkeeping no
+    // callback can still be honoured against. The channel reads no policy file
+    // of its own, and a policy that failed to load declares no TTL, which makes
+    // the sweep narrower rather than wider.
+    approvalTtlMs: policyLoad.ok ? policyLoad.durations.approvalTtlMs : null,
   };
 
   return {

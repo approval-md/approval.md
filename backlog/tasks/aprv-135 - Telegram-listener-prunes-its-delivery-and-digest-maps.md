@@ -1,9 +1,10 @@
 ---
 id: APRV-135
 title: Telegram listener prunes its delivery and digest maps
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-25 12:43'
+updated_date: '2026-08-26 17:43'
 labels:
   - channels
   - telegram
@@ -20,7 +21,19 @@ Born 2026-08-25 from the APRV-115 builder's out-of-scope observation. The listen
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Terminal-and-past-TTL delivery and digest entries are dropped on a periodic sweep; a callback arriving for a dropped entry answers with the existing stale-callback path, tested
-- [ ] #2 Memory does not grow across a long simulated run of decided prompts, tested with a bounded-size assertion
-- [ ] #3 npm test passes; lint clean
+- [x] #1 Terminal-and-past-TTL delivery and digest entries are dropped on a periodic sweep; a callback arriving for a dropped entry answers with the existing stale-callback path, tested
+- [x] #2 Memory does not grow across a long simulated run of decided prompts, tested with a bounded-size assertion
+- [x] #3 npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Built 2026-08-26, merged in PR #128. Sweep condition: every member terminal AND older than the policy approval TTL (the gate refuses all decisions past the TTL, which is what makes an unannotated delivery droppable); no declared TTL means only observed settlements drop, against a stated 24h floor — an undecided prompt keeps its button forever, correctly. Runs from pollOnce before the long poll, rate-limited to once a minute, injectable clock, digests and their all-nonces go with the entry, log untouched. Bounded-size assertion over a long simulated run of decided prompts.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The listener's delivery and digest maps sweep settled entries past the TTL, so week-long listeners hold memory proportional to open work rather than to history. Merged in PR #128.
+<!-- SECTION:FINAL_SUMMARY:END -->

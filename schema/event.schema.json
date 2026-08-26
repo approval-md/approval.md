@@ -345,6 +345,35 @@
       }
     },
     {
+      "$comment": "SPEC.md §9/§10.3 (amended, APRV-119, WYSIWYS): `display_hash` is the SHA-256 of the canonical rendering every channel MUST present for this request's payload — the digest of what the approver READ, beside `payload_hash`, the digest of what the approval BINDS to. The runtime assigns it at the write boundary from the deterministic renderer (`core/wysiwys.ts`), exactly as it assigns `ts` and `policy_sha256`; a requester cannot supply it, so it can never name a rendering that was not produced from the bound bytes. Optional, and deliberately: the field is additive, so records written before it existed still validate and still verify, and a request whose bytes this runtime does not hold records none rather than inventing one. Only its SHAPE is constrained here — a 64-character lowercase hex digest. Whether it equals a re-render of the stored payload is not expressible in a schema that sees one record, and is a check any reader with the payload store can make for itself.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "approval.requested"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "display_hash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "description": "SPEC.md §9/§10.3 (APRV-119): SHA-256 (lowercase hex) over the UTF-8 text of the canonical rendering of this request's payload, as produced by the versioned deterministic renderer named inside that text."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "SPEC.md §8/§9 (amended, APRV-38): `payload.pruned` records that the daemon removed a payload file from `.approval/payloads/` under `payload_retention`. Two constraints, both about who and what: the actor is `system:` because pruning is a retention rule executing on a schedule rather than anyone's decision (a `human:` or `agent:` pruner would be a party under oversight deleting the evidence its approval bound to), and the payload names the removed bytes by their SHA-256, which is the store's own key and the same value a grant binds to. The log therefore states exactly what the store no longer holds.",
       "if": {
         "type": "object",

@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-119-channels && mv gate-resolved.tmp tests/gate.test.ts && rm -f /tmp/gate-resolved.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/remote-control-f54e71"}

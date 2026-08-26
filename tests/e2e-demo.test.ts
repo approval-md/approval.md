@@ -49,6 +49,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { runPayloadHash } from "../src/core/payload.js";
+import { canonicalRender } from "../src/core/wysiwys.js";
 import {
   assertLocal,
   callbackUpdate,
@@ -323,6 +324,9 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
       reversible: false,
       // APRV-118: the attested policy this request was routed by.
       policy_sha256: policySha256(),
+      // APRV-119 (WYSIWYS): the digest of the canonical rendering every channel
+      // presents for these bytes, stamped by the runtime at the write boundary.
+      display_hash: canonicalRender(PAYLOAD, "communicate.email.external").display_hash,
     });
     assert.equal(recordAt(3)["actor"], AGENT);
 

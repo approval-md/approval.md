@@ -38,8 +38,10 @@ import {
   type GateRefusal,
 } from "../src/core/gate.js";
 import { appendEvent, type EventRecord } from "../src/core/log.js";
+import { payloadHash } from "../src/core/payload.js";
 import { tokenHash } from "../src/core/token.js";
 import { verify } from "../src/core/verify.js";
+import { canonicalRender } from "../src/core/wysiwys.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "approval-md-gate-"));
 let counter = 0;
@@ -2157,5 +2159,115 @@ test("an unreadable policy read is a refusal, not a pass", () => {
   // failure would have been a proceed:true. It is a refusal instead.
   assert.equal(refusal.code, "policy-not-attested");
   assert.equal(refusal.detail, "unreadable");
+  assertClean(unit);
+});
+
+
+// ===========================================================================
+// display_hash: the rendering the approver was shown (APRV-119, WYSIWYS)
+// ===========================================================================
+
+/** A material payload and the envelope that binds to it. */
+const WYSIWYS_PAYLOAD = { to: ["agency@example.co.uk"], subject: "Deposit", body: "a\nb" };
+const WYSIWYS_HASH = payloadHash(WYSIWYS_PAYLOAD);
+
+function registerBound(unit: Case): void {
+  const result = register(
+    unit.logPath,
+    {
+      task: "task-119",
+      envelope: {
+        ...ENVELOPE,
+        actions: [
+          {
+            ...ENVELOPE.actions[0],
+            idempotency_key: "task-119:chaser",
+            payload_hash: WYSIWYS_HASH,
+          },
+        ],
+      },
+    },
+    T0,
+    "agent:claude",
+  );
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+}
+
+function requestBound(unit: Case, payload?: { value: unknown }): EventRecord {
+  const result = request(
+    unit.logPath,
+    {
+      task: "task-119",
+      actionKey: "task-119:chaser",
+      cls: "communicate.email.external",
+      est_cost_usd: 0.02,
+      reversible: false,
+      summary: "Send deposit chaser",
+      ...(payload === undefined ? {} : { payload }),
+    },
+    at(1),
+    "agent:claude",
+    unit.options,
+  );
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  if (!result.ok || result.record === null) throw new Error("expected an approval.requested record");
+  return result.record;
+}
+
+test("approval.requested records the display hash of the canonical rendering", () => {
+  const unit = newCase();
+  attest(unit);
+  registerBound(unit);
+
+  const requested = requestBound(unit, { value: WYSIWYS_PAYLOAD });
+  assert.equal(
+    payloadFieldOf(requested, "display_hash"),
+    canonicalRender(WYSIWYS_PAYLOAD, "communicate.email.external").display_hash,
+    "the recorded display hash is not the one a channel will render",
+  );
+  // Beside the binding, never instead of it: one names the bytes, the other the
+  // reading of them, and an auditor with the payload store can check both.
+  assert.equal(payloadFieldOf(requested, "payload_hash"), WYSIWYS_HASH);
+  assertClean(unit);
+});
+
+test("the display hash is the runtime's, never the requester's", () => {
+  const unit = newCase();
+  attest(unit);
+  registerBound(unit);
+
+  // `RequestInput` has no `display_hash` field. This cast reaches past the type
+  // to prove the runtime half: a value arriving anyway is not what is recorded,
+  // so a requester cannot claim a benign reading of a malicious payload.
+  const smuggled = {
+    task: "task-119",
+    actionKey: "task-119:chaser",
+    cls: "communicate.email.external",
+    est_cost_usd: 0.02,
+    reversible: false,
+    payload: { value: WYSIWYS_PAYLOAD },
+    display_hash: "0".repeat(64),
+  } as unknown as Parameters<typeof request>[1];
+
+  const result = request(unit.logPath, smuggled, at(1), "agent:claude", unit.options);
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  if (!result.ok || result.record === null) throw new Error("expected a record");
+  assert.equal(
+    payloadFieldOf(result.record, "display_hash"),
+    canonicalRender(WYSIWYS_PAYLOAD, "communicate.email.external").display_hash,
+  );
+  assertClean(unit);
+});
+
+test("a request whose bytes nobody holds records no display hash rather than a guess", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+
+  // `PAYLOAD_HASH` is a placeholder no store holds and no caller supplied, so
+  // there is no material to render. Absence is the honest answer; a hash over
+  // material nobody has would name a rendering nobody made.
+  const requested = requestChaser(unit);
+  assert.equal(payloadFieldOf(requested, "display_hash"), undefined);
   assertClean(unit);
 });
