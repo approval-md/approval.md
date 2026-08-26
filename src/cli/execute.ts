@@ -71,7 +71,9 @@ import { isPayloadHash, runPayloadHash } from "../core/payload.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
 import { withdraw } from "../core/gate.js";
+import { keyStoreDirFor } from "../core/seal.js";
 import { readVerifiedRecords, requestState } from "../core/state.js";
+import { deliveredToken } from "../core/token.js";
 import type { EventRecord } from "../core/log.js";
 import { loadPolicy, parseDuration, POLICY_FILENAMES } from "../core/policy-load.js";
 import { verify } from "../core/verify.js";
@@ -481,6 +483,14 @@ interface WaitedAction {
   action_key: string;
   state: string;
   seq: number | null;
+  /**
+   * The raw execution token, when sealed delivery put one within this process's
+   * reach (APRV-105). Present ONLY in `--json`: the human render is a terminal,
+   * and a token printed there is the paste this feature exists to remove.
+   * Absent under the default `token_delivery: manual`, absent on a machine that
+   * did not open the request, and absent once the token has been spent.
+   */
+  token?: string;
 }
 
 /**
@@ -615,10 +625,21 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
     let pending = false;
     for (const key of requestedKeysOf(read.records, task)) {
       const derivation = requestState(read.records, key, ts, ttlMs);
+      // APRV-105. The token, when this machine can open it: the grant sealed it
+      // to the ephemeral public key this action's request published, and the
+      // private half is in the key store beside the log. Attached only to a
+      // GRANTED action, and only in `--json` below — a `null` on every other
+      // state would be a field consumers have to ignore, and a token on a
+      // rejected action would be a value with nothing behind it.
+      const token =
+        json && derivation.state === "granted"
+          ? deliveredToken(read.records, key, keyStoreDirFor(logPath))
+          : null;
       actions.push({
         action_key: key,
         state: derivation.state,
         seq: derivation.decisionSeq ?? derivation.requestSeq,
+        ...(token === null ? {} : { token }),
       });
       if (derivation.state === "requested") pending = true;
     }

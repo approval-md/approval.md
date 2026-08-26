@@ -100,6 +100,12 @@ import {
 import { isPayloadHash } from "./payload.js";
 import { loadPolicy, type LoadPolicyOptions } from "./policy-load.js";
 import {
+  asSealedToken,
+  openSealedToken,
+  readPrivateKey,
+  SEALED_TOKEN_FIELD,
+} from "./seal.js";
+import {
   readVerifiedRecords,
   requestState,
   type LogReadRefusal,
@@ -438,6 +444,52 @@ export function tokenStatus(
     payloadHash: isPayloadHash(bytes) ? bytes : derivation.declared.payload_hash,
     requestTs: derivation.requestTs,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Sealed delivery (amended SPEC.md §10.4 — APRV-105)
+// ---------------------------------------------------------------------------
+
+/**
+ * The raw token for `actionKey`, recovered from the log's `token_sealed` with
+ * the private key this machine holds — or `null`.
+ *
+ * `null` means "no token was delivered here", and it means it for every reason
+ * at once: the policy is `manual` and nothing was sealed, this is a different
+ * machine from the one that requested, the key file has already been unlinked
+ * because the token was spent, or the ciphertext does not authenticate. The
+ * caller's response is identical in all four cases — fall back to the raw token
+ * the granting surface printed — and distinguishing them would be an oracle for
+ * a decryption capability nobody should be probing.
+ *
+ * Recovering a minted token is not minting one. The token still exists only
+ * because a human granted it, still binds to the payload, and is still spendable
+ * exactly once; what this function replaces is the human carrying it in a
+ * clipboard. Nothing here consults, relaxes, or substitutes for
+ * {@link verifyToken}: the value returned goes on to be verified against the
+ * log's digest like any pasted one.
+ *
+ * Pure with respect to the LOG (it appends nothing) and reads exactly one file.
+ * Never throws.
+ */
+export function deliveredToken(
+  records: readonly EventRecord[],
+  actionKey: string,
+  keyDir: string,
+): string | null {
+  let grant: EventRecord | null = null;
+  for (const record of records) {
+    if (record.event === "approval.granted" && record.action_key === actionKey) grant = record;
+  }
+  if (grant === null) return null;
+
+  const sealed = asSealedToken(payloadOf(grant)[SEALED_TOKEN_FIELD]);
+  if (sealed === null) return null;
+
+  const privateKey = readPrivateKey(keyDir, actionKey);
+  if (privateKey === null) return null;
+
+  return openSealedToken(sealed, privateKey, actionKey);
 }
 
 // ---------------------------------------------------------------------------

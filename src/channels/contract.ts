@@ -247,6 +247,24 @@ export interface ChannelRequest {
   /** The content binding recorded on `approval.requested` (SPEC.md §6.2). */
   payload_hash: TaggedField<string>;
   /**
+   * The delivery address for the token this grant would mint (APRV-105):
+   * `sealed to x25519:<first 16 hex of the key's digest>`.
+   *
+   * **Computed**, and present only when the request published a
+   * `token_recipient_key` — that is, only under `token_delivery: sealed`. It is
+   * on this side of the boundary because the runtime reads the key off the
+   * verified log and digests it here; the requester supplies a key, not this
+   * line, and cannot make the line say anything else.
+   *
+   * It is shown because an approver is entitled to know that granting will put a
+   * readable token in the requesting process's hands rather than only on this
+   * screen. It changes nothing about the decision's authority: the key ADDRESSES
+   * and does not AUTHORIZE, so a grant still mints, still binds to the payload,
+   * and is still single-use. Absent for every manual-delivery request, which is
+   * every request until an operator amends the policy.
+   */
+  token_delivery?: TaggedField<string>;
+  /**
    * The bytes the approval binds to (SPEC.md §10.4). Non-null is enforced at
    * construction for `manual` autonomy: see {@link createChannelRequest}.
    */

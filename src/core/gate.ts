@@ -131,6 +131,7 @@ import {
   loadPolicyText,
   policyUnreadable,
   POLICY_FILENAMES,
+  tokenDeliveryOf,
   type Autonomy,
   type PolicyLoadResult,
 } from "./policy-load.js";
@@ -140,6 +141,16 @@ import {
   resolveLiveSelector,
   type LiveSelectorUnavailableReason,
 } from "./sampler.js";
+import {
+  forgetPrivateKey,
+  isRecipientKey,
+  keyStoreDirFor,
+  mintRecipientKeypair,
+  RECIPIENT_KEY_FIELD,
+  sealToken,
+  SEALED_TOKEN_FIELD,
+  writePrivateKey,
+} from "./seal.js";
 import {
   payloadOf,
   readVerifiedRecords,
@@ -396,6 +407,12 @@ export interface GateOptions extends ClockOptions {
    * `core/payload-store.ts` defines: `.approval/payloads/`, beside the log.
    */
   payloadStoreDir?: string;
+  /**
+   * Where per-request private keys live (APRV-105). Defaults to the convention
+   * `core/seal.ts` defines: `.approval/keys/`, beside the log. Under the default
+   * `token_delivery: manual` nothing here is ever written or read.
+   */
+  keyStoreDir?: string;
   /**
    * The environment the operator's sampling secret is read from (APRV-127).
    * Injected by tests; defaults to `process.env`. The secret is never read from
@@ -1063,6 +1080,22 @@ export interface LiveVerdict {
   secretEnv: string | null;
 }
 
+/**
+ * The LATEST `approval.requested` for an action key, or an empty stand-in.
+ *
+ * Latest, because an action key may be requested again after a rejection or an
+ * expiry, and the grant being recorded answers the live cycle. Returns a bare
+ * object rather than `null` so the one caller can read a field off it without a
+ * branch; there is nothing on it to mistake for a real value.
+ */
+function requestRecord(records: EventRecord[], actionKey: string): EventRecord {
+  let found: EventRecord | null = null;
+  for (const record of records) {
+    if (record.event === "approval.requested" && record.action_key === actionKey) found = record;
+  }
+  return found ?? ({ payload: {} } as EventRecord);
+}
+
 export type RequestResult =
   | {
       ok: true;
@@ -1469,6 +1502,32 @@ export function request(
     // cannot name the rules it claims to have been routed by.
     [POLICY_HASH_FIELD]: attested.sha256,
   };
+  // APRV-105. Sealed delivery publishes an ADDRESS for the token this request
+  // may earn: an ephemeral X25519 public key whose private half is written 0600
+  // beside the log and never leaves this machine. Minted HERE, at the last check
+  // before the append, so a refused request leaves no key file behind.
+  //
+  // Guarded by the policy, and by the policy alone: under the default
+  // `manual` no key is minted, no field is added, and the record this call
+  // appends is byte-identical to the one it appended before this feature
+  // existed. `RequestInput` carries no field for the key, so a caller cannot
+  // opt itself in — the operator's policy decides, exactly as it decides
+  // autonomy. A key that cannot be written is not a reason to refuse a request:
+  // the delivery is a convenience, the human's decision is not, and a request
+  // that recorded a key it cannot open would be worse than one that recorded
+  // none. So a failed write drops the field and the paste path stands.
+  if (
+    tokenDeliveryOf(load) === "sealed" &&
+    input.execution !== "harness" // a harness grant mints no token to deliver
+  ) {
+    const keypair = mintRecipientKeypair();
+    const written = writePrivateKey(
+      options.keyStoreDir ?? keyStoreDirFor(logPath),
+      input.actionKey,
+      keypair.privateKey,
+    );
+    if (written.ok) payload[RECIPIENT_KEY_FIELD] = keypair.publicKey;
+  }
   if (input.summary !== undefined) payload["summary"] = input.summary;
   if (input.reversible !== undefined) payload["reversible"] = input.reversible;
   // APRV-106. Both are recorded here rather than derived later because the log
@@ -1834,7 +1893,32 @@ export function decide(
     } else {
       token = mintToken();
       payload[TOKEN_HASH_FIELD] = tokenHash(token);
+      // APRV-105. Sealed delivery, decided by the REQUEST rather than by this
+      // site's own policy read: the recipient key exists only because the
+      // requester's policy said `sealed`, and this grant may be happening on
+      // another machine entirely — the listener on a laptop, the requester
+      // elsewhere, the log synced through git. Reading the key off the request
+      // is what makes the handover work across that gap, and it widens nothing:
+      // the key can only receive a token, never mint, forge, rebind or respend
+      // one. Under `manual` no request carries a key and no grant is sealed, so
+      // the record here is byte-identical to a pre-APRV-105 grant.
+      //
+      // The raw token is STILL returned to this caller and still printed once on
+      // the granting surface. Sealing adds a second reader; it removes none.
+      const recipient = payloadOf(requestRecord(read.records, actionKey))[RECIPIENT_KEY_FIELD];
+      if (isRecipientKey(recipient)) {
+        const sealed = sealToken(token, recipient, actionKey);
+        // An unusable recipient key drops the convenience and never the grant:
+        // a human's yes must not be voidable by a malformed delivery address.
+        if (sealed !== null) payload[SEALED_TOKEN_FIELD] = { ...sealed };
+      }
     }
+  }
+  if (decision === "revoke") {
+    // APRV-105. The authorization is dead, so its delivery address dies with it.
+    // A key file that outlived its grant would be a standing decryption
+    // capability for a ciphertext the log keeps forever, held for no reason.
+    forgetPrivateKey(options.keyStoreDir ?? keyStoreDirFor(logPath), actionKey);
   }
 
   const appended = append(
@@ -2637,5 +2721,15 @@ export function expire(
     );
   }
 
-  return appendExpiry(logPath, derivation, load, ts, options, read.head);
+  const expired = appendExpiry(logPath, derivation, load, ts, options, read.head);
+  if (expired.ok) {
+    // APRV-105, the third and last death of a delivery address. A lapsed request
+    // can never be granted, so the private key that would have opened its token
+    // opens nothing; keeping it would be keeping a decryption capability for a
+    // ciphertext that may not even exist. Best effort and never fatal: the
+    // expiry is the record that matters, and a key file that survives a failed
+    // unlink is inert.
+    forgetPrivateKey(options.keyStoreDir ?? keyStoreDirFor(logPath), actionKey);
+  }
+  return expired;
 }

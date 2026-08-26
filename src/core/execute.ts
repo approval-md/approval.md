@@ -84,7 +84,8 @@ import { isLoopEscalated } from "./loop.js";
 import { loadPolicy, POLICY_FILENAMES, type Autonomy, type LoadPolicyOptions } from "./policy-load.js";
 import { resolve } from "./policy-match.js";
 import { readVerifiedRecords, type LogReadRefusal } from "./state.js";
-import { consumeToken, type TokenRefusal } from "./token.js";
+import { forgetPrivateKey, keyStoreDirFor } from "./seal.js";
+import { consumeToken, deliveredToken, type TokenRefusal } from "./token.js";
 
 export {
   isLoopEscalated,
@@ -211,6 +212,12 @@ export interface ExecuteOptions extends ClockOptions {
   schemaDir?: string;
   /** Lock tuning for the append path. */
   append?: AppendOptions;
+  /**
+   * Where per-request private keys live (APRV-105). Defaults to `.approval/keys/`
+   * beside the log. Read when no `token` is passed and a grant carries a
+   * `token_sealed`; unlinked once the token is spent.
+   */
+  keyStoreDir?: string;
 }
 
 function refuse(
@@ -515,7 +522,21 @@ export function startExecution(
   // action with no `approval.requested` never reaches this branch.
   const gatedByCycle = hasApprovalCycle(records, actionKey);
   if (resolution.autonomy === "manual" || gatedByCycle) {
-    const token = options.token;
+    // APRV-105. With no token in hand, look for one delivered to this machine:
+    // the grant sealed it to the ephemeral public key this action's request
+    // published, and the private half is in the key store beside the log. Under
+    // the default `token_delivery: manual` nothing was sealed and this returns
+    // null, so the refusal below is exactly the one it always was.
+    //
+    // An explicitly passed token always wins. A caller that names a token is
+    // making a claim this runtime then checks against the grant's digest, and
+    // silently substituting a different one would answer a question nobody
+    // asked.
+    const keyDir = options.keyStoreDir ?? keyStoreDirFor(logPath);
+    const token =
+      options.token !== undefined && options.token.length > 0
+        ? options.token
+        : (deliveredToken(records, actionKey, keyDir) ?? undefined);
     if (token === undefined || token.length === 0) {
       return refuse(
         "token-required",
@@ -540,6 +561,10 @@ export function startExecution(
       clock: () => ts,
     });
     if (!consumed.ok) return fromTokenRefusal(consumed);
+    // APRV-105. The token is spent, so its delivery address is finished. Done
+    // AFTER the append rather than before: an unlink before a failed spend would
+    // destroy the only local copy of a token that is still live.
+    forgetPrivateKey(keyDir, actionKey);
     const payload = payloadOf(consumed.record);
     const cost = payload["est_cost_usd"];
     return {

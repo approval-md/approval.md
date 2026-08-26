@@ -33,6 +33,13 @@
           "description": "SPEC.md §5.1: how long a pending request stays actionable before it expires. Duration string, `<positive integer><unit>` with unit in ms|s|m|h|d|w (e.g. \"24h\"). Integer-only and single-unit by design: compound forms (\"1h30m\") and fractional values (\"1.5h\") are rejected so every implementation parses the same string to the same number of milliseconds.",
           "examples": ["24h"]
         },
+        "token_delivery": {
+          "type": "string",
+          "enum": ["manual", "sealed"],
+          "description": "SPEC.md §10.4 (amended, APRV-105): how the raw execution token reaches the process that will spend it. `manual` (THE DEFAULT, and what an absent key means): the token is printed once on the granting surface and carried to the spender by a human. `sealed`: `approval request` also mints an ephemeral X25519 keypair per request, keeps the private half 0600 beside the log, and publishes the public half on `approval.requested` as `token_recipient_key`; the grant then seals the raw token to that key and records the ciphertext as `token_sealed`, so `approval wait` can hand the token back to the process that asked for it — across machines, with the log synced through git. The default is `manual` because the fail-closed reading of an absent key is the behaviour that requires a human, and because sealed delivery puts ciphertext in a public, permanent log. The keypair ADDRESSES and does not AUTHORIZE: a token still exists only after a human grant, still binds to the exact payload bytes, and is still single-use. What sealing changes is who can READ a minted token, which is the human's clipboard today.",
+          "default": "manual",
+          "examples": ["manual", "sealed"]
+        },
         "on_expiry": {
           "type": "string",
           "enum": ["reject"],

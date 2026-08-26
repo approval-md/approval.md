@@ -128,6 +128,24 @@ export type DeclaredAutonomy = Autonomy | "supervised-live" | "supervised-retro"
  */
 export type DefaultAutonomy = Exclude<DeclaredAutonomy, "supervised-live">;
 
+/**
+ * Amended SPEC.md §10.4 (APRV-105): how the raw execution token travels from the
+ * mint site to the spend site.
+ *
+ * - `manual` — printed once on the granting surface and carried by a human.
+ *   THE DEFAULT, and what an absent key means.
+ * - `sealed` — additionally sealed to the requester's ephemeral public key and
+ *   recorded as ciphertext, so `approval wait` can return it to the process
+ *   that asked, across machines.
+ */
+export type TokenDelivery = "manual" | "sealed";
+
+/** The delivery mode in force. Fail-closed: anything unusable is `manual`. */
+export function tokenDeliveryOf(load: PolicyLoadResult): TokenDelivery {
+  if (!load.ok) return "manual";
+  return load.policy.defaults?.token_delivery === "sealed" ? "sealed" : "manual";
+}
+
 /** A class rule (SPEC.md §5.1); shape mirrors `policy.schema.json`. */
 export interface PolicyClassRule {
   autonomy: DeclaredAutonomy;
@@ -165,6 +183,12 @@ export interface Policy {
     autonomy?: DefaultAutonomy;
     channel?: string;
     approval_ttl?: string;
+    /**
+     * Amended SPEC.md §10.4 (APRV-105): how the raw execution token reaches the
+     * process that will spend it. Absent means `manual`, and under `manual`
+     * nothing about the pre-APRV-105 behaviour changes byte for byte.
+     */
+    token_delivery?: TokenDelivery;
     on_expiry?: "reject";
   };
   /**

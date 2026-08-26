@@ -356,6 +356,77 @@
       }
     },
     {
+      "$comment": "SPEC.md §6.3/§10.4 (amended, APRV-105): sealed token delivery. `token_recipient_key` on `approval.requested` is the PUBLIC half of an ephemeral X25519 keypair the requester minted for this one request; the private half never leaves the requesting machine. `token_sealed` on `approval.granted` is the raw execution token encrypted to that key. Both are optional and additive: under the default `token_delivery: manual` neither appears and a record is byte-identical to one written before the field existed. Note what `token_sealed` does NOT weaken. §11.1 invariant 3 is reworded rather than relaxed: what appears in the log is a hash, or ciphertext sealed to a recipient key the log does not hold. The log carries no private key and no plaintext, so an attacker with a copy of the log — the one artifact this system deliberately makes durable, copyable and auditable — gains nothing, exactly as before. `token_sha256` remains present and remains what possession is proven against; the seal is a delivery mechanism, never an authorization.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "enum": [
+              "approval.requested",
+              "approval.granted"
+            ]
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "token_recipient_key": {
+                "type": "string",
+                "minLength": 20,
+                "maxLength": 600,
+                "pattern": "^[A-Za-z0-9+/]+={0,2}$",
+                "description": "The requester's ephemeral X25519 PUBLIC key, base64 DER SPKI. An ADDRESS, not a credential: it can receive a token and cannot mint, forge, rebind or respend one. Channels render it as a COMPUTED field so an approver can see that a delivery address was published and by whom."
+              },
+              "token_sealed": {
+                "type": "object",
+                "required": [
+                  "alg",
+                  "epk",
+                  "nonce",
+                  "ct",
+                  "tag"
+                ],
+                "description": "The raw token sealed to `token_recipient_key`: X25519 ECDH to a fresh ephemeral sender key, HKDF-SHA-256 to a 32-byte key, AES-256-GCM with a fresh nonce. The HKDF info binds the ciphertext to the scheme and to the action key, so a seal cannot be replayed as another action's.",
+                "properties": {
+                  "alg": {
+                    "const": "x25519-hkdf-sha256/aes-256-gcm",
+                    "description": "The scheme identifier. One value in v0.1, present so no reader has to guess; a differing value MUST be refused rather than attempted."
+                  },
+                  "epk": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The sender's ephemeral X25519 public key, base64 DER SPKI."
+                  },
+                  "nonce": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The AES-GCM nonce, base64. Fresh for every seal."
+                  },
+                  "ct": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Ciphertext, base64."
+                  },
+                  "tag": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The GCM authentication tag, base64."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "SPEC.md §9/§10.3 (amended, APRV-119, WYSIWYS): `display_hash` is the SHA-256 of the canonical rendering every channel MUST present for this request's payload — the digest of what the approver READ, beside `payload_hash`, the digest of what the approval BINDS to. The runtime assigns it at the write boundary from the deterministic renderer (`core/wysiwys.ts`), exactly as it assigns `ts` and `policy_sha256`; a requester cannot supply it, so it can never name a rendering that was not produced from the bound bytes. Optional, and deliberately: the field is additive, so records written before it existed still validate and still verify, and a request whose bytes this runtime does not hold records none rather than inventing one. Only its SHAPE is constrained here — a 64-character lowercase hex digest. Whether it equals a re-render of the stored payload is not expressible in a schema that sees one record, and is a check any reader with the payload store can make for itself.",
       "if": {
         "type": "object",
