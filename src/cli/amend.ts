@@ -434,11 +434,11 @@ const MERGE_COMMIT_LINE =
  * This line replaces a `git reset --hard origin/<branch>` that the recovery
  * used to end on. With an uncommitted working log, a hard reset rewinds
  * `events.jsonl` underneath the daemon that is appending to it: the fork
- * mechanism, printed as advice. Until the log sync exists (APRV-125) the safe
- * sequence is written down rather than automated, so this points at it.
+ * mechanism, printed as advice. APRV-125 turned the safe sequence into a verb,
+ * so what this points at is a command now rather than a runbook.
  */
 const LOG_SAFE_PULL_LINE =
-  "then pull with the log set aside: docs/dogfood-cutover.md shows the safe sequence (a hard reset would rewind the working log under the daemon)";
+  "then `approval log sync` rather than a pull: it holds the append lock, snapshots the log, fast-forwards and reconciles the chain (a hard reset would rewind the working log under the daemon)";
 
 /** Is `gh` runnable at all? Used to decide whether the PR is opened or printed. */
 function ghAvailable(root: string): boolean {
@@ -1317,7 +1317,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
               "push-rejected",
               `\`git branch ${recovery}\` failed, so the recovery branch does not exist`,
               branched,
-              `${preamble}, and \`git branch ${recovery}\` failed: ${pushFailureText(branched)}. STATE: the amendment is committed LOCALLY on ${target} and is NOT on origin, so origin still carries the previous policy and your ${target} is one commit ahead of it. Next: \`git branch ${recovery} && git push -u origin ${recovery} && ${prCreateCommand(recovery)}\`. Merge it with a merge commit, then pull with the log set aside; docs/dogfood-cutover.md shows the safe sequence`,
+              `${preamble}, and \`git branch ${recovery}\` failed: ${pushFailureText(branched)}. STATE: the amendment is committed LOCALLY on ${target} and is NOT on origin, so origin still carries the previous policy and your ${target} is one commit ahead of it. Next: \`git branch ${recovery} && git push -u origin ${recovery} && ${prCreateCommand(recovery)}\`. Merge it with a merge commit, then run \`approval log sync\` rather than a pull`,
               state("NOT on origin: origin still carries the previous policy"),
               owed,
               0,
@@ -1336,7 +1336,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
               "push-rejected",
               `the remote REJECTED \`git push -u origin ${recovery}\``,
               branchPush,
-              `${preamble}; \`git push -u origin ${recovery}\` was REJECTED too: ${pushFailureText(branchPush)}. STATE: the amendment is committed LOCALLY on ${target} and is NOT on origin, so origin still carries the previous policy and your ${target} is one commit ahead of it. Next: \`git push -u origin ${recovery} && ${prCreateCommand(recovery)}\`. Merge it with a merge commit, then pull with the log set aside; docs/dogfood-cutover.md shows the safe sequence`,
+              `${preamble}; \`git push -u origin ${recovery}\` was REJECTED too: ${pushFailureText(branchPush)}. STATE: the amendment is committed LOCALLY on ${target} and is NOT on origin, so origin still carries the previous policy and your ${target} is one commit ahead of it. Next: \`git push -u origin ${recovery} && ${prCreateCommand(recovery)}\`. Merge it with a merge commit, then run \`approval log sync\` rather than a pull`,
               state("NOT on origin: origin still carries the previous policy"),
               owed,
               1,
@@ -1354,7 +1354,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
               "pr-failed",
               "gh is not available, so the pull request was not opened",
               { ok: false, stdout: "", stderr: "gh is not on PATH" },
-              `${preamble}, and ${recovery} is on origin, but \`gh\` is not available so the pull request was not opened: open it by hand and merge it with a merge commit. STATE: the amendment is committed LOCALLY on ${target} and is on origin as ${recovery}; origin's ${probe.defaultBranch ?? "default branch"} still carries the previous policy. Next: \`${prCreateCommand(recovery)}\`; docs/dogfood-cutover.md shows the safe sequence for pulling afterwards`,
+              `${preamble}, and ${recovery} is on origin, but \`gh\` is not available so the pull request was not opened: open it by hand and merge it with a merge commit. STATE: the amendment is committed LOCALLY on ${target} and is on origin as ${recovery}; origin's ${probe.defaultBranch ?? "default branch"} still carries the previous policy. Next: \`${prCreateCommand(recovery)}\`; and \`approval log sync\` rather than a pull afterwards`,
               state(`on origin as ${recovery}: no pull request carries it yet`),
               owed,
               2,
@@ -1368,7 +1368,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
               "pr-failed",
               "`gh pr create` failed; the branch is already on origin",
               pr,
-              `${preamble}, and ${recovery} is on origin, but \`gh pr create\` failed: ${pushFailureText(pr)}; open the pull request by hand and merge it with a merge commit. STATE: the amendment is committed LOCALLY on ${target} and is on origin as ${recovery}; origin's ${probe.defaultBranch ?? "default branch"} still carries the previous policy. Next: \`${prCreateCommand(recovery)}\`; docs/dogfood-cutover.md shows the safe sequence for pulling afterwards`,
+              `${preamble}, and ${recovery} is on origin, but \`gh pr create\` failed: ${pushFailureText(pr)}; open the pull request by hand and merge it with a merge commit. STATE: the amendment is committed LOCALLY on ${target} and is on origin as ${recovery}; origin's ${probe.defaultBranch ?? "default branch"} still carries the previous policy. Next: \`${prCreateCommand(recovery)}\`; and \`approval log sync\` rather than a pull afterwards`,
               state(`on origin as ${recovery}: no pull request carries it yet`),
               owed,
               2,

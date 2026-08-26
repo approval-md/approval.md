@@ -178,21 +178,26 @@ approval run "aprv-51:deps-refresh:2026-08-05" --token <token> --as agent:fable 
 approval log verify
 ```
 
-Then the human lands the log advance and the lockfile diff on main. The rule is
-unchanged: log commits are the human's, made by hand in the primary checkout,
-and they never ride a feature branch that carries other work. Main is protected,
-so "by hand on main" now means one commit on a short-lived branch and a pull
-request that carries only it:
+Then the log advance lands on main. The rule is unchanged: log commits are made
+in the primary checkout and never ride a feature branch that carries other work.
+Main is protected, so that means one commit on a short-lived records branch and a
+pull request carrying only it — which is a verb now rather than a sequence
+(APRV-125):
 
 ```sh
 cd /Users/carter/dev/approval-md
-git checkout -b log-advance-aprv-51
-git add .approval/log/events.jsonl package-lock.json
-git commit -m "APRV-51: log advance + lockfile from the granted deps.add"
-git push -u origin log-advance-aprv-51
-gh pr create --title "APRV-51: log advance" \
-  --body "One commit: the log advance and the lockfile diff it authorized. Merge with a merge commit."
+approval log advance --pr
 ```
+
+`log advance` verifies the chain under the append lock, stages EXACTLY
+`.approval/log/events.jsonl`, `.approval/QUEUE.md` and `.approval/payloads/`,
+commits on the branch you are standing on with the seq range in the message, and
+pushes that commit by refspec to `records-log-<date>`. It checks out nothing, and
+any other staged path is refused (`log-advance-dirty-stage`) rather than
+unstaged. Something that is not a log file and still needs committing —
+`package-lock.json` from a granted `deps.add`, say — gets its own commit, made by
+hand, because an advance that carried it would be the mixed branch the rule
+forbids.
 
 Merge it with a **merge commit**. A branch that exists for one commit and is
 merged the moment CI passes is not a feature branch in the sense the rule
@@ -200,6 +205,44 @@ forbids: nothing else appends to the log while it is open, so no second chain
 is ever created, which is the property the rule protects. What the rule still
 forbids is a branch that accumulates work alongside the log commit, and two
 branches appending to the log at once.
+
+## Coming back the other way: `approval log sync`
+
+Once the pull request merges, the primary checkout has to catch up, and that step
+used to be a hand-run stash-pull-pop. It is a verb now, for three reasons the old
+ritual handed us: it rewound the working log through git while the daemon held
+that file open for append (fork 2 of 2026-08-20), it reached the phone labelled
+`policy.edit` over a protected path, and `git stash pop` conflicted once and left
+conflict markers inside the log mid-ceremony.
+
+```sh
+cd /Users/carter/dev/approval-md
+approval log sync
+```
+
+It holds the append lockfile for the WHOLE operation, so nothing can append
+mid-sync; verifies the chain; snapshots `events.jsonl` aside inside `.approval/`
+(never `git stash`); fast-forwards, refusing anything that is not a fast-forward;
+and then reconciles. The committed chain must be a prefix of the snapshot, equal
+to it, or an extension of it. Prefix means the snapshot goes back, extension
+means the pulled file stays, and anything else is a fork it refuses as
+`log-diverged`, naming both heads and the first divergent seq. It never merges
+and never re-chains, because hash chains do not merge and re-chaining is
+fabrication. `QUEUE.md` and the index are rebuilt from the reconciled log rather
+than restored, and any failure at any step puts the snapshot back before exiting.
+
+Neither verb appends an event. Both move the file the log lives in, and the log
+records decisions rather than its own housekeeping.
+
+`approval doctor`'s `log-drift` check answers the same question standing still —
+ahead-by-N, equal, behind, or DIVERGED at seq N — sharing one implementation with
+sync's reconcile, so the two can never disagree about whether this repository has
+forked.
+
+Both verbs run in the PRIMARY checkout only and refuse elsewhere with their own
+codes (`log-sync-not-primary`, `log-advance-not-primary`), and both carry their
+own action classes (`log.sync`, `log.advance`), so a prompt about one says what
+it is instead of `policy.edit`.
 
 Policy amendments take the same shape and the CLI runs it for you:
 `approval policy amend --commit` detects a protected default branch and switches

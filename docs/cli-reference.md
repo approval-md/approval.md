@@ -443,7 +443,7 @@ too, so the runbook owes the three steps that are left.
     3. gh pr merge policy-amend-2 --merge  # or merge it in the web UI
 
   why a MERGE COMMIT: the policy edit and its attestation stay one commit on main …
-  then pull with the log set aside: docs/dogfood-cutover.md shows the safe sequence …
+  then `approval log sync` rather than a pull: it holds the append lock, snapshots the log …
 ```
 
 (Step 2's `--title` and `--body` are shown elided here; the CLI prints them in
@@ -453,7 +453,8 @@ branch is on origin, so only the PR and the merge are owed. The recovery does no
 end
 on a hard reset onto `origin/main`, as it once did: with an uncommitted working
 log a hard reset rewinds `events.jsonl` underneath the daemon appending to it,
-which is a fork, so the last line points at the log-safe sequence instead. The
+which is a fork, so the last line names `approval log sync` instead (APRV-125,
+which turned that pointer from a runbook reference into a verb). The
 same shape carries `git-failed` (what broke, and the commands still owed) and
 `pr-failed` (the branch is on origin; the pull request is not). The refusal
 codes, the exit codes and the `--json` shapes are unchanged by any of this: it

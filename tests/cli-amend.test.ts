@@ -1608,7 +1608,8 @@ test("push-rejected renders a headline, YOUR STATE, and numbered NEXT STEPS", ()
     .filter((line) => line.includes("MERGE COMMIT") && !/^ *\d+\. /u.test(line));
   assert.equal(rationale.length, 1, run.stderr);
   assert.match(rationale[0] ?? "", /docs\/cli-reference\.md/u);
-  assert.match(run.stderr, /docs\/dogfood-cutover\.md/u);
+  // The log-safe line names the verb that replaced the runbook (APRV-125).
+  assert.match(run.stderr, /approval log sync/u);
 });
 
 test("no recovery output anywhere reaches for reset --hard", () => {
@@ -1616,7 +1617,8 @@ test("no recovery output anywhere reaches for reset --hard", () => {
   assert.doesNotMatch(run.stderr, /reset --hard/u);
   assert.doesNotMatch(run.stdout, /reset --hard/u);
   // The log-safe pointer is what stands where the destructive command stood.
-  assert.match(run.stderr, /pull with the log set aside/u);
+  // APRV-125 turned that pointer from a runbook reference into a verb.
+  assert.match(run.stderr, /approval log sync/u);
 });
 
 test("the runbook survives NO_COLOR and ASCII mode with its structure intact", () => {
@@ -1649,7 +1651,8 @@ test("push-rejected keeps its machine surface: same code, exit, and message fact
   assert.match(error.message, /committed LOCALLY on main and is NOT on origin/u);
   assert.match(error.message, /git push -u origin policy-amend-2/u);
   assert.doesNotMatch(error.message, /reset --hard/u);
-  assert.match(error.message, /docs\/dogfood-cutover\.md/u);
+  // APRV-125: the machine message names the verb, where it named the runbook.
+  assert.match(error.message, /approval log sync/u);
 });
 
 test("a rejected BRANCH push renders the same runbook shape", () => {
