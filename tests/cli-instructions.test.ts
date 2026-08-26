@@ -374,6 +374,9 @@ const HUMAN_ONLY: readonly string[] = [
   "expire",
   "execution resolve",
   "audit review",
+  // APRV-127: closing a reconciliation obligation is a human's act by the same
+  // rule that makes reviewing one human's. Reading the backlog is not.
+  "audit reconcile",
   "channel cli",
   "channel web",
   "channel telegram listen",
@@ -427,6 +430,7 @@ const AGENT_FACING: readonly string[] = [
   "render",
   "import agents-md",
   "audit list",
+  "audit obligations",
   "channel telegram health",
   "adapter email",
   "hook claude-code",

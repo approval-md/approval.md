@@ -248,6 +248,14 @@ test("the audit refusal-code union is frozen public API", () => {
       "not-sampled",
       "already-reviewed",
       "ambiguous-subject",
+      // APRV-127's reconciliation codes. Additive: every code above kept its
+      // name and its meaning, so a supervisor branching on the pre-split union
+      // is unaffected, and the new ones only ever come from the new verbs.
+      "not-obliged",
+      "already-satisfied",
+      "note-required",
+      "revert-required",
+      "obligation-not-appended",
       "log-unreadable",
       "log-torn-tail",
       "log-corrupt",

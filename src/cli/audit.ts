@@ -20,10 +20,13 @@
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import {
+  openObligations,
   openSamples,
   parseSubjectRef,
+  reconciliationObligations,
   reviewSample,
   sampledSubjects,
+  satisfyObligation,
   type AuditRefusal,
 } from "../core/audit.js";
 import { resolveHumanActor, HUMAN_ACTOR_ENV } from "../core/attest.js";
@@ -38,7 +41,13 @@ import {
   EXIT_TORN_TAIL,
   EXIT_USAGE,
 } from "./exit-codes.js";
-import { AUDIT_HELP, AUDIT_LIST_HELP, AUDIT_REVIEW_HELP } from "./help.js";
+import {
+  AUDIT_HELP,
+  AUDIT_LIST_HELP,
+  AUDIT_OBLIGATIONS_HELP,
+  AUDIT_RECONCILE_HELP,
+  AUDIT_REVIEW_HELP,
+} from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
 import { refusal as renderRefusal, style } from "./style.js";
@@ -264,7 +273,14 @@ export function commandAuditList(argv: string[], streams: Streams, cwd: string):
 export function commandAuditReview(argv: string[], streams: Streams, cwd: string): number {
   const outcome = front(
     argv,
-    { ...COMMON_FLAGS, "--note": "string", "--as": "string", "--policy": "string", "--dir": "string" },
+    {
+      ...COMMON_FLAGS,
+      "--note": "string",
+      "--deny": "boolean",
+      "--as": "string",
+      "--policy": "string",
+      "--dir": "string",
+    },
     AUDIT_REVIEW_HELP,
     streams,
     cwd,
@@ -299,6 +315,7 @@ export function commandAuditReview(argv: string[], streams: Streams, cwd: string
 
   const policyFlag = stringFlag(flags, "--policy");
   const dirFlag = stringFlag(flags, "--dir");
+  const deny = boolFlag(flags, "--deny");
   const result = reviewSample(
     logPath,
     parseSubjectRef(subject),
@@ -309,10 +326,14 @@ export function commandAuditReview(argv: string[], streams: Streams, cwd: string
         policyFlag !== null
           ? { file: absolute(policyFlag, cwd) }
           : { dir: dirFlag === null ? cwd : absolute(dirFlag, cwd) },
+      // Explicit rather than defaulted through: the ABSENCE of --deny is "ok",
+      // and it must be this file that says so, once, where a reader can see it.
+      verdict: deny ? "denied" : "ok",
     },
   );
   if (!result.ok) return emitRefusal(streams, json, result);
 
+  const obligation = result.obligation;
   if (json) {
     emitJson(streams, {
       ok: true,
@@ -320,19 +341,201 @@ export function commandAuditReview(argv: string[], streams: Streams, cwd: string
       sample_seq: result.subject.seq,
       action_key: result.subject.actionKey,
       task: result.subject.task,
+      verdict: deny ? "denied" : "ok",
+      obligation_seq: obligation === null ? null : obligation.seq,
       actor,
     });
   } else {
     streams.out(
       `reviewed sample at seq ${String(result.subject.seq)} (action ${
         result.subject.actionKey ?? "-"
-      }) at seq ${String(result.record.seq)} by ${actor}\n`,
+      }) at seq ${String(result.record.seq)} by ${actor}${deny ? " — DENIED" : ""}\n`,
+    );
+    if (obligation !== null) {
+      const shape = String((obligation.payload as Record<string, unknown> | undefined)?.["obligation"] ?? "");
+      streams.out(
+        shape === "gated-revert"
+          ? `reconciliation obligation at seq ${String(obligation.seq)}: GATED REVERT. The action was declared reversible, so undo it through the gate and close this with \`approval audit reconcile ${String(obligation.seq)} --revert <action-key> --note "…"\`.\n`
+          : `reconciliation obligation at seq ${String(obligation.seq)}: POLICY FINDING. Nothing can be reverted, so what is owed is a review of the class that permitted this. Close it with \`approval audit reconcile ${String(obligation.seq)} --note "…"\` once that review has happened.\n`,
+      );
+    }
+  }
+  return EXIT_OK;
+}
+
+// ===========================================================================
+// approval audit obligations
+// ===========================================================================
+
+/**
+ * The open reconciliation backlog: `reconciliation.required` records with no
+ * later `reconciliation.satisfied`.
+ *
+ * Reads a verified log and writes nothing. The same projection `status` and
+ * `doctor` read, so the three can never disagree about what is outstanding.
+ */
+export function commandAuditObligations(argv: string[], streams: Streams, cwd: string): number {
+  const outcome = front(argv, { ...COMMON_FLAGS, "--all": "boolean" }, AUDIT_OBLIGATIONS_HELP, streams, cwd);
+  if (outcome.kind === "handled") return outcome.code;
+  const { flags, positionals, json, logPath } = outcome;
+
+  const extra = positionals[0];
+  if (extra !== undefined) {
+    return usageError(
+      streams,
+      json,
+      `unexpected argument ${JSON.stringify(extra)}`,
+      AUDIT_OBLIGATIONS_HELP,
+    );
+  }
+
+  const check = preflightLog(logPath);
+  if (!check.ok) return ioError(streams, json, check.message);
+
+  const read = readVerifiedRecords(logPath);
+  if (!read.ok) {
+    return emitRefusal(streams, json, { ok: false, code: read.code, message: read.message });
+  }
+
+  const all = boolFlag(flags, "--all");
+  const items = all ? reconciliationObligations(read.records) : openObligations(read.records);
+  const rows = items.map((item) => ({
+    seq: item.seq,
+    ts: item.ts,
+    action_key: item.actionKey,
+    task: item.task,
+    class: item.class,
+    review_seq: item.reviewSeq,
+    obligation: item.obligation,
+    reversible: item.reversible,
+    satisfied_seq: item.satisfiedSeq,
+  }));
+
+  if (json) {
+    emitJson(streams, {
+      ok: true,
+      open: rows.filter((row) => row.satisfied_seq === null).length,
+      obligations: rows,
+    });
+    return EXIT_OK;
+  }
+
+  if (rows.length === 0) {
+    streams.out(
+      all
+        ? "no reconciliation.required records in this log\n"
+        : "reconciliation backlog: empty (no retrospective denial is waiting to be reconciled)\n",
+    );
+    return EXIT_OK;
+  }
+  for (const row of rows) {
+    streams.out(
+      `${String(row.seq)}\t${row.ts}\t${row.action_key}\t${row.class}\t${row.obligation}\t${
+        row.satisfied_seq === null ? "OPEN" : `satisfied at seq ${String(row.satisfied_seq)}`
+      }\n`,
     );
   }
   return EXIT_OK;
 }
 
-/** `approval audit <subcommand>` — `list` and `review`. */
+// ===========================================================================
+// approval audit reconcile
+// ===========================================================================
+
+/**
+ * `approval audit reconcile <obligation-seq> --note "<text>" [--revert <key>]`
+ *
+ * HUMAN-ONLY, enforced in `core/audit.ts` and again by the event schema, and
+ * checked here first so a malformed invocation never reaches the log.
+ */
+export function commandAuditReconcile(argv: string[], streams: Streams, cwd: string): number {
+  const outcome = front(
+    argv,
+    { ...COMMON_FLAGS, "--note": "string", "--revert": "string", "--as": "string" },
+    AUDIT_RECONCILE_HELP,
+    streams,
+    cwd,
+  );
+  if (outcome.kind === "handled") return outcome.code;
+  const { flags, positionals, json, logPath } = outcome;
+
+  const subject = positionals[0];
+  if (subject === undefined) {
+    return usageError(streams, json, "missing <obligation-seq> argument", AUDIT_RECONCILE_HELP);
+  }
+  const extra = positionals[1];
+  if (extra !== undefined) {
+    return usageError(
+      streams,
+      json,
+      `unexpected argument ${JSON.stringify(extra)}`,
+      AUDIT_RECONCILE_HELP,
+    );
+  }
+  if (!/^[1-9][0-9]*$/u.test(subject)) {
+    return usageError(
+      streams,
+      json,
+      `<obligation-seq> is the SEQ of the reconciliation.required record, a positive integer, got ${JSON.stringify(subject)}; run \`approval audit obligations\` for the open ones`,
+      AUDIT_RECONCILE_HELP,
+    );
+  }
+
+  const asFlag = stringFlag(flags, "--as");
+  const actor = resolveHumanActor(asFlag === null ? {} : { actor: asFlag });
+  if (actor === null) {
+    return usageError(
+      streams,
+      json,
+      asFlag === null
+        ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>`
+        : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; satisfying an obligation records that a PERSON discharged it, and an agent: or system: actor cannot perform it`,
+      AUDIT_RECONCILE_HELP,
+    );
+  }
+
+  const note = stringFlag(flags, "--note");
+  if (note === null || note.trim().length === 0) {
+    return usageError(
+      streams,
+      json,
+      `--note is required: this record asserts that an obligation was discharged, and a discharge nobody described is one no auditor can check`,
+      AUDIT_RECONCILE_HELP,
+    );
+  }
+
+  const check = preflightLog(logPath);
+  if (!check.ok) return ioError(streams, json, check.message);
+
+  const revert = stringFlag(flags, "--revert");
+  const result = satisfyObligation(logPath, Number(subject), actor, {
+    note,
+    ...(revert === null ? {} : { revertActionKey: revert }),
+  });
+  if (!result.ok) return emitRefusal(streams, json, result);
+
+  if (json) {
+    emitJson(streams, {
+      ok: true,
+      seq: result.record.seq,
+      obligation_seq: result.obligation.seq,
+      action_key: result.obligation.actionKey,
+      task: result.obligation.task,
+      class: result.obligation.class,
+      obligation: result.obligation.obligation,
+      actor,
+    });
+  } else {
+    streams.out(
+      `reconciled the obligation at seq ${String(result.obligation.seq)} (${
+        result.obligation.obligation
+      } for ${result.obligation.actionKey}) at seq ${String(result.record.seq)} by ${actor}\n`,
+    );
+  }
+  return EXIT_OK;
+}
+
+/** `approval audit <subcommand>` — `list`, `review`, `obligations`, `reconcile`. */
 export function commandAudit(argv: string[], streams: Streams, cwd: string): number {
   const sub = argv[0];
   const rest = argv.slice(1);
@@ -347,6 +550,8 @@ export function commandAudit(argv: string[], streams: Streams, cwd: string): num
   }
   if (sub === "list") return commandAuditList(rest, streams, cwd);
   if (sub === "review") return commandAuditReview(rest, streams, cwd);
+  if (sub === "obligations") return commandAuditObligations(rest, streams, cwd);
+  if (sub === "reconcile") return commandAuditReconcile(rest, streams, cwd);
   return usageError(
     streams,
     json,

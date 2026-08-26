@@ -55,6 +55,7 @@ import { constants as osConstants } from "node:os";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
+import { openObligations } from "../core/audit.js";
 import { evaluateBudgets, type BudgetVerdict } from "../core/budgets.js";
 import {
   danglingExecutions,
@@ -1007,6 +1008,21 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       consecutive_failures: state.consecutiveFailures,
       escalated: true,
     }));
+  // APRV-127. The reconciliation backlog: obligations opened by a retrospective
+  // DENIAL and not yet discharged by a person. It counts toward `healthy` for
+  // the same reason a dangling execution does — an unreconciled denial is a "no"
+  // that has so far changed nothing, and a "no" nobody can see is the failure
+  // the whole retrospective path exists to prevent. Quiet here would mean a
+  // human said an action should not have happened and the system moved on.
+  const obligations = openObligations(records).map((item) => ({
+    seq: item.seq,
+    ts: item.ts,
+    action_key: item.actionKey,
+    task: item.task,
+    class: item.class,
+    obligation: item.obligation,
+    review_seq: item.reviewSeq,
+  }));
   const budgets = budgetHeadroom(records, flags, cwd, now());
   // Informational: the store's state never moves `healthy` or the exit code.
   // A repo that has never made a `--payload` request has no store, and an
@@ -1040,7 +1056,8 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
     attestation.status === "attested" &&
     verification.status === "clean" &&
     dangling.length === 0 &&
-    escalations.length === 0;
+    escalations.length === 0 &&
+    obligations.length === 0;
 
   if (json) {
     emitJson(streams, {
@@ -1057,6 +1074,7 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       dangling,
       budgets,
       loop_escalations: escalations,
+      reconciliation: obligations,
       payload_store: payloadStore,
       ...(anomalies.length === 0 ? {} : { anomalies }),
     });
@@ -1144,6 +1162,21 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
               under: escalations.map(
                 (entry) =>
                   `${entry.task} (${entry.consecutive_failures} consecutive execution.failed) — escalated to manual`,
+              ),
+            }),
+      },
+      {
+        left: "reconciliation",
+        right:
+          obligations.length === 0
+            ? st.muted("none open")
+            : st.fail(`${obligations.length} UNRECONCILED DENIAL(S)`),
+        ...(obligations.length === 0
+          ? {}
+          : {
+              under: obligations.map(
+                (item) =>
+                  `seq ${item.seq}  ${item.action_key}  ${item.class}  ${item.obligation} — close with \`approval audit reconcile ${item.seq}\``,
               ),
             }),
       },

@@ -1038,7 +1038,14 @@ const VERBS: VerbSpec[] = [
         ],
         1,
       ),
-      flags: { "--note": "string", ...AS_FLAG, ...LOG_FLAG, ...JSON_FLAG, ...HELP_FLAGS },
+      flags: {
+        "--note": "string",
+        "--deny": "boolean",
+        ...AS_FLAG,
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
     }),
     output: object(
       {
@@ -1047,9 +1054,74 @@ const VERBS: VerbSpec[] = [
         sample_seq: INTEGER,
         action_key: STRING,
         task: STRING,
+        verdict: { enum: ["ok", "denied"] },
+        obligation_seq: nullable(INTEGER),
         actor: STRING,
       },
-      ["ok", "seq", "sample_seq", "action_key", "task", "actor"],
+      ["ok", "seq", "sample_seq", "action_key", "task", "verdict", "obligation_seq", "actor"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
+    name: "audit",
+    subcommand: "obligations",
+    purpose:
+      "The open reconciliation backlog: reconciliation.required records with no reconciliation.satisfied after them. An obligation is opened by a retrospective DENIAL and closed only by a person, because a runtime that could close its own obligations would be a backlog that empties itself. It reads a verified log and writes nothing.",
+    human_only: false,
+    input: input({
+      flags: { "--all": "boolean", ...LOG_FLAG, ...JSON_FLAG, ...HELP_FLAGS },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        open: INTEGER,
+        obligations: arrayOf(OPEN_OBJECT),
+      },
+      ["ok", "open", "obligations"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
+    name: "audit",
+    subcommand: "reconcile",
+    purpose:
+      "Record that a human discharged one reconciliation obligation. A retrospective denial cannot undo anything, so what it creates is an obligation: revert a reversible action THROUGH THE GATE, or review the class that permitted an irreversible one. A gated-revert obligation is checked against the chain rather than the claim — without an execution.completed for the named revert this refuses and appends nothing.",
+    human_only: true,
+    input: input({
+      positionals: positionals(
+        [
+          {
+            name: "obligation-seq",
+            description: "the seq of the reconciliation.required record, from `audit obligations`",
+          },
+        ],
+        1,
+      ),
+      flags: {
+        "--note": "string",
+        "--revert": "string",
+        ...AS_FLAG,
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        seq: INTEGER,
+        obligation_seq: INTEGER,
+        action_key: STRING,
+        task: nullable(STRING),
+        class: STRING,
+        obligation: { enum: ["gated-revert", "policy-finding"] },
+        actor: STRING,
+      },
+      ["ok", "seq", "obligation_seq", "action_key", "class", "obligation", "actor"],
     ),
     error: ERROR_SCHEMA,
     exit_codes: BASE_EXIT_CODES,
@@ -1152,6 +1224,9 @@ const VERBS: VerbSpec[] = [
         dangling: arrayOf(OPEN_OBJECT),
         budgets: arrayOf(OPEN_OBJECT),
         loop_escalations: arrayOf(OPEN_OBJECT),
+        // APRV-127: reconciliation obligations opened by a retrospective denial
+        // and not yet discharged. Counts toward `healthy`, like `dangling`.
+        reconciliation: arrayOf(OPEN_OBJECT),
         payload_store: OPEN_OBJECT,
         anomalies: arrayOf(OPEN_OBJECT),
       },
@@ -1163,6 +1238,7 @@ const VERBS: VerbSpec[] = [
         "dangling",
         "budgets",
         "loop_escalations",
+        "reconciliation",
         "payload_store",
       ],
     ),

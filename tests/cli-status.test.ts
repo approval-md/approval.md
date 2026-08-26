@@ -268,6 +268,11 @@ test("status --json on a healthy repo emits the frozen shape and exits 0", () =>
       },
     ],
     loop_escalations: [],
+    // Additive (APRV-127): reconciliation obligations opened by a retrospective
+    // denial and not yet discharged. Empty here, and — unlike the payload store
+    // — a non-empty list DOES move `healthy` and the exit code, because an
+    // unreconciled denial is a "no" that has so far changed nothing.
+    reconciliation: [],
     // Additive (APRV-35). This fixture binds hashes but never supplies bytes,
     // so nothing was ever stored and the directory does not exist, which is
     // the normal state of a repo that has made no request carrying --payload,
