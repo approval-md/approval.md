@@ -297,6 +297,10 @@ approval token     <action-key>    # report execution-token status (the token it
 approval run -- <cmd…>             # gate arbitrary commands: mints token, runs, logs
 approval queue [--json]            # pending requests
 approval log verify | tail | export
+approval log sync                  # fast-forward the committed log under the append
+                                   #   lock, with a snapshot and a chain reconcile
+approval log advance [--pr]        # commit the log's new records onto a records
+                                   #   branch; neither verb appends an event
 approval policy check|test <class> # explain what policy does with a class
 approval env [--check] [--json]    # resolve .approval/env and print an export block
                                    #   for a shell to evaluate; the ONLY reader of
@@ -321,7 +325,15 @@ approval mcp serve                 # the §10.5 MCP server over stdio, in the
 
 Machine-readable output: every command supports `--json`; schemas for inputs and outputs are printed by `approval instructions --schemas`.
 
-Five lines in this block are amendments awaiting sign-off: `setup` (Amended APRV-79, pending sign-off), `env` (Amended APRV-73, pending sign-off), `mcp serve` (Amended APRV-103, pending sign-off), `hook claude-code` (Amended APRV-82, pending sign-off), and `hook cursor` (Amended APRV-133, pending sign-off).
+Six entries in this block are amendments awaiting sign-off: `setup` (Amended APRV-79, pending sign-off), `env` (Amended APRV-73, pending sign-off), `mcp serve` (Amended APRV-103, pending sign-off), `hook claude-code` (Amended APRV-82, pending sign-off), `hook cursor` (Amended APRV-133, pending sign-off), and the `log sync` / `log advance` pair described immediately below.
+
+**Moving the log file: `log sync` and `log advance`.** The log is append-only, and a repository that carries one still has to pull it, commit it, and push it. Those two operations are part of the runtime rather than of the operator's shell, because performing them by hand rewinds the log file through git state while an appender holds it open, which produces two chains where there was one. Both verbs run in the primary checkout only and refuse elsewhere with a distinct machine-readable code. Both hold the append lockfile for the whole of their operation rather than for a single append: an append landing partway through either one is the interleaving that forks a chain.
+
+`log sync` verifies the chain, copies the log aside inside the approval home (implementations MUST NOT route the log through `git stash` or any other git state mutation), fast-forwards the checkout (refusing anything that is not a fast-forward), and then **reconciles**: the committed chain MUST be a prefix of the snapshot, equal to it, or an extension of it. A prefix means the snapshot is restored, since the longer chain contains the shorter one whole; an extension means the pulled file is kept, for the same reason in the other direction; equality means there is nothing to do. Anything else is a fork, and the verb MUST refuse it, naming both heads and the first sequence number at which the chains disagree. Implementations MUST NOT merge or re-chain two chains under any circumstance: re-chaining fabricates records nobody wrote. Projections are rebuilt from the reconciled log and never restored from before the pull. Every failure at every step restores the snapshot before the verb exits, so a working log is never left in a partial state.
+
+`log advance` verifies the chain, stages exactly the log, the queue projection, and the payload store, refusing when any other path is staged rather than unstaging it; commits on the currently checked-out branch with the sequence range in the message; and pushes that commit to a records branch. It MUST NOT check anything out: a branch switch with an uncommitted log rewinds the log file underneath its appender.
+
+**Neither verb appends an event.** The log records decisions with real-world consequence. Moving the file the log is stored in is housekeeping on the container rather than a decision about the world, and an event for it would be the log narrating its own filesystem. Implementations MUST NOT append a record for either operation. (Amended APRV-125, pending sign-off.)
 
 ### 10.2 Daemon
 
