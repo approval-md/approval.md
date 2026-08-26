@@ -384,6 +384,27 @@ export function declaringTasks(records: EventRecord[], actionKey: string): strin
   return [...tasks];
 }
 
+/**
+ * Has a human ever been asked about this action key (amended SPEC.md §6.3,
+ * APRV-127)?
+ *
+ * True as soon as the log holds one `approval.requested` for the key, and it
+ * stays true: a rejected, expired or withdrawn cycle is still a cycle, and an
+ * action that could shed its gate by being refused would be an action that
+ * profits from a "no".
+ *
+ * Pure, and derived from the log alone — never from a payload field a requester
+ * wrote about itself. Two callers: {@link startExecution}, which requires the
+ * token of any action that went through the gate, and `core/audit.ts`, which
+ * leaves such actions out of the retrospective pool because a human already
+ * looked.
+ */
+export function hasApprovalCycle(records: readonly EventRecord[], actionKey: string): boolean {
+  return records.some(
+    (record) => record.event === "approval.requested" && record.action_key === actionKey,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // start
 // ---------------------------------------------------------------------------
@@ -473,12 +494,34 @@ export function startExecution(
     declared.reversible === null ? {} : { reversible: declared.reversible },
   );
 
-  if (resolution.autonomy === "manual") {
+  // APRV-127. An action that went through the gate is spent through the gate,
+  // whatever its class resolves to now.
+  //
+  // The case this exists for is a `supervised-live` action the live draw
+  // selected: `core/gate.ts` sent it down the manual path and recorded an
+  // `approval.requested`, but its CLASS still resolves `supervised`, so without
+  // this line `approval run` would take the unsupervised branch and start it
+  // without spending the token a human minted. The rule is stated as a property
+  // of the log rather than of the class deliberately — this process cannot
+  // recompute the live draw (the secret is the operator's, and deliberately not
+  // an agent's to read), so it asks the one question it can answer from the
+  // records it already holds: was a human asked about this action?
+  //
+  // It is also strictly scrutiny-raising in every other case it can fire. A
+  // class relaxed from `manual` to `supervised` after a request was opened would
+  // otherwise let the pending question be bypassed by simply running the action;
+  // now the token is still required, and `core/token.ts` answers `not-granted`
+  // until a human decides. Nothing here can make an ungated action gated: an
+  // action with no `approval.requested` never reaches this branch.
+  const gatedByCycle = hasApprovalCycle(records, actionKey);
+  if (resolution.autonomy === "manual" || gatedByCycle) {
     const token = options.token;
     if (token === undefined || token.length === 0) {
       return refuse(
         "token-required",
-        `action ${actionKey} resolves to manual (${resolution.provenance}${resolution.floorApplied ? ", irreversibility floor" : ""}) and cannot execute without the single-use token minted at grant. Request the action, have a human grant it, and pass the token that grant printed.`,
+        resolution.autonomy === "manual"
+          ? `action ${actionKey} resolves to manual (${resolution.provenance}${resolution.floorApplied ? ", irreversibility floor" : ""}) and cannot execute without the single-use token minted at grant. Request the action, have a human grant it, and pass the token that grant printed.`
+          : `action ${actionKey} resolves to ${resolution.autonomy} but the log already carries an approval.requested for it, so a human was asked about this action and it executes on their answer. This is what a supervised-live draw looks like from the executor's side: the gate selected this action into the live fraction and it now follows the manual path. Wait for the decision and pass the token the grant printed.`,
       );
     }
     const consumed = consumeToken(logPath, actionKey, token, actor, {

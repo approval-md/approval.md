@@ -189,10 +189,10 @@
               "verdict": {
                 "type": "string",
                 "enum": [
-                  "accepted",
+                  "ok",
                   "denied"
                 ],
-                "description": "SPEC.md §5.2 (amended, APRV-127): what the reviewer concluded. `accepted`: the action should have happened. `denied`: it should not have, and the runtime appends a `reconciliation.required` naming the obligation the denial creates. Optional and additive — a review written before the split carries none and reads as the observation it was, which is why the ABSENCE of this field is never read as a denial."
+                "description": "SPEC.md §5.2 (amended, APRV-127): what the reviewer concluded. `ok`: the action should have happened — the spelling the v0.1 fixtures already used, kept rather than renamed, because a second word for a verdict already in logs is the drift this vocabulary exists to avoid. `denied`: it should not have, and the runtime appends a `reconciliation.required` naming the obligation the denial creates. Optional and additive — a review written before the split carries none and reads as the observation it was, which is why the ABSENCE of this field is never read as a denial."
               }
             }
           }

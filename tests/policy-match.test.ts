@@ -379,6 +379,9 @@ test("a failed load makes every class manual with provenance fail-closed", () =>
     const result = resolve(failed, actionClass);
     assert.deepEqual(result, {
       autonomy: "manual",
+      declaredAutonomy: "manual",
+      supervision: null,
+      liveRate: null,
       provenance: "fail-closed",
       matched: null,
       approvers: null,

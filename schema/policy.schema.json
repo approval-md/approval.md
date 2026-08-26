@@ -187,6 +187,13 @@
       "description": "SPEC.md §5.2 (amended, APRV-127): autonomy level, strictest first — `manual` (human sign-off before every action) > `supervised-live` (a policy-declared fraction of actions blocks on the human gate exactly as `manual` does; the rest proceed) > `supervised-retro` (executes immediately, sampled for retrospective review) > `autonomous` (executes freely). `supervised` is the pre-APRV-127 spelling and is an ALIAS OF `supervised-retro`, so every policy written before the split keeps the meaning its author gave it; the runtime records a load-time note naming the alias rather than silently reinterpreting it. The enum is closed: an unrecognised level cannot be ordered against the others, so it must fail validation rather than be guessed at.",
       "examples": ["manual", "supervised-live", "supervised-retro"]
     },
+    "liveRate": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "description": "SPEC.md §5.2 (amended, APRV-127): the fraction of `supervised-live` actions in a class that BLOCK on the human gate before executing, as a proportion in (0, 1]. Selection is HMAC-SHA-256 over the action's `payload_hash` under the operator-held secret named by `audit.sampling_secret_env` — the same construction `audit.supervised_sample_rate` uses, reused rather than reinvented, so an agent cannot predict its own luck and an operator holding the secret can verify every selection after the fact. Determinism is a required property, not an implementation detail: identical payload bytes always select identically, so a retry cannot re-roll until it comes up unsampled. Zero is excluded because \"never gate live\" is spelled `autonomy: supervised-retro`, and 1 is admitted because \"gate every one of them\" is a legitimate, if verbose, way to say `manual` for a class an author expects to relax later.",
+      "examples": [0.01, 0.1]
+    },
     "defaultAutonomy": {
       "type": "string",
       "enum": ["manual", "supervised", "supervised-retro", "autonomous"],
@@ -220,8 +227,15 @@
             "properties": { "autonomy": { "const": "supervised-live" } },
             "required": ["autonomy"]
           },
-          "then": { "type": "object", "required": ["live_rate"] },
-          "else": { "type": "object", "not": { "required": ["live_rate"] } }
+          "then": {
+            "type": "object",
+            "properties": { "live_rate": { "$ref": "#/$defs/liveRate" } },
+            "required": ["live_rate"]
+          },
+          "else": {
+            "type": "object",
+            "properties": { "live_rate": false }
+          }
         }
       ],
       "properties": {
@@ -229,13 +243,7 @@
           "$ref": "#/$defs/autonomy",
           "description": "SPEC.md §5.2: autonomy for actions matching this class pattern."
         },
-        "live_rate": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "maximum": 1,
-          "description": "SPEC.md §5.2 (amended, APRV-127): the fraction of `supervised-live` actions in this class that BLOCK on the human gate before executing, as a proportion in (0, 1]. Selection is HMAC-SHA-256 over the action's `payload_hash` under the operator-held secret named by `audit.sampling_secret_env` — the same construction `audit.supervised_sample_rate` uses, reused rather than reinvented, so an agent cannot predict its own luck and an operator holding the secret can verify every selection after the fact. Determinism is a required property, not an implementation detail: identical payload bytes always select identically, so a retry cannot re-roll until it comes up unsampled. Zero is excluded because \"never gate live\" is spelled `autonomy: supervised-retro`, and 1 is admitted because \"gate every one of them\" is a legitimate, if verbose, way to say `manual` for a class an author expects to relax later.",
-          "examples": [0.01, 0.1]
-        },
+        "live_rate": { "$ref": "#/$defs/liveRate" },
         "approvers": {
           "type": "array",
           "minItems": 1,

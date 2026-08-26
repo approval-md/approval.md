@@ -53,7 +53,7 @@
  */
 
 import { tick, type ClockOptions } from "./clock.js";
-import { declaringTasks, findDeclaration } from "./execute.js";
+import { declaringTasks, findDeclaration, hasApprovalCycle } from "./execute.js";
 import {
   appendEvent,
   type AppendError,
@@ -175,6 +175,15 @@ export function supervisedExecutions(
     // A key declared by more than one task is a refused collision (APRV-138);
     // do not sample from an ambiguous declaration.
     if (declaringTasks(all, actionKey).length > 1) continue;
+
+    // APRV-127. An action a human was already asked about is not a candidate for
+    // review of an unreviewed decision — there was a decision. The case is a
+    // `supervised-live` action the live draw selected: it executed on a grant,
+    // through the manual path, and its class still resolves `supervised`, so
+    // without this line it would be drawn a second time into a backlog asking a
+    // person to review the answer they themselves gave. Costs nothing for every
+    // other supervised action, which never carries an approval cycle.
+    if (hasApprovalCycle(all, actionKey)) continue;
     const declared = findDeclaration(all, actionKey);
     if (declared === null) continue;
 

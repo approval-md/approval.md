@@ -38,6 +38,8 @@ const EVENT_TYPES = [
   "envelope.drift",
   "audit.sampled",
   "audit.reviewed",
+  "reconciliation.required",
+  "reconciliation.satisfied",
   "payload.pruned",
 ] as const;
 
@@ -59,6 +61,12 @@ const EXTRA_REQUIRED: Record<string, readonly string[]> = {
   "envelope.drift": ["task"],
   "audit.sampled": [],
   "audit.reviewed": [],
+  // APRV-127. The obligation must name the action it concerns, in the record
+  // AND in the payload: a reconciliation nobody can attach to an action is one
+  // nobody can discharge. The satisfaction names the obligation by seq instead,
+  // which lives in the payload alone.
+  "reconciliation.required": ["action_key", "payload"],
+  "reconciliation.satisfied": ["payload"],
   // Not `task`/`action_key`: an orphaned payload (bytes with no recorded
   // binding) is prunable and has no task or action to name. `payload` is the
   // required one, because the event's whole content is which bytes went.
