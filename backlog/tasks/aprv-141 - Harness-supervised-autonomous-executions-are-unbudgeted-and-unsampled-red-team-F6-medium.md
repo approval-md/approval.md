@@ -3,9 +3,10 @@ id: APRV-141
 title: >-
   Harness supervised/autonomous executions are unbudgeted and unsampled
   (red-team F6, medium)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-25 13:41'
+updated_date: '2026-08-26 17:40'
 labels:
   - security
   - observability
@@ -32,9 +33,25 @@ Decide-and-document: either (a) append a lightweight record on harness supervise
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A written decision records option a or b with the log-volume vs blind-spot tradeoff
-- [ ] #2 If a: harness supervised/autonomous allow appends a record that budget consumption and audit sampling both count; tests assert a harness autonomous action is charged and is sampleable
+- [x] #1 A written decision records option a or b with the log-volume vs blind-spot tradeoff
+- [x] #2 If a: harness supervised/autonomous allow appends a record that budget consumption and audit sampling both count; tests assert a harness autonomous action is charged and is sampleable
 - [ ] #3 If b: SPEC states harness-executed non-manual actions are out of budget/audit scope, marked for human sign-off, and cross-references APRV-137 GAP-4
-- [ ] #4 One sentence added (here or in APRV-137) stating the verifier byte-format/duplicate-key/tail-truncation boundary (F7)
-- [ ] #5 npm test passes; lint clean
+- [x] #4 One sentence added (here or in APRV-137) stating the verifier byte-format/duplicate-key/tail-truncation boundary (F7)
+- [x] #5 npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+DECISION 2026-08-26 (Carter, in session): option (a). The hook appends a lightweight execution record on supervised and autonomous allows so budget consumption and audit sampling both count harness-executed actions. The log-volume cost (one line per harness action, the majority of real activity under Claude Code) is accepted; a budget and sampler that cannot see most activity is the worse deal. AC 1 satisfied by this note; build AC 2, skip AC 3.
+
+Builder observation 2026-08-26: a two-class autonomous command appends its two execution.started records sequentially, so a refusal on the second leaves the first standing as a charge for a command that did not run. Consistent with SPEC's 'budgets meter authorization, not completion'; revisit only if over-charging ever matters in practice.
+
+Built 2026-08-26 per Carter's option (a), merged in PR #127 (commit 10c4ccd). startHarnessExecution appends execution.started with execution:'harness' (the APRV-117 shape — no new event type, no schema change) BEFORE the hook allows on both unattended paths; refuses on attestation, loop-escalation, already-started, manual class, and the budget verdict the record is the charge for. Autonomous classes record with no task.registered behind them, deliberately (the sampler reads supervised only; a declaration would double the volume for no oversight). Tested: a second identical autonomous command denies budget-exceeded; a supervised one appears in supervisedExecutions as a sampler candidate. F7's verifier-boundary sentence landed in verify.ts's module doc (AC 4 satisfied there rather than SPEC). AC 3 skipped per the decision (option b not taken).
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Harness supervised and autonomous executions are charged against budgets and visible to the audit sampler via execution:'harness' records appended before the allow. Merged in PR #127.
+<!-- SECTION:FINAL_SUMMARY:END -->
