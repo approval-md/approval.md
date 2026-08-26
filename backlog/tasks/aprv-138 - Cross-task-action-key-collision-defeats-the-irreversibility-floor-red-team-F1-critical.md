@@ -3,10 +3,10 @@ id: APRV-138
 title: >-
   Cross-task action-key collision defeats the irreversibility floor (red-team
   F1, critical)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-25 13:40'
-updated_date: '2026-08-25 17:51'
+updated_date: '2026-08-26 10:53'
 labels:
   - security
   - gate
@@ -66,3 +66,9 @@ Deliberately out of scope (tracked as APRV-140 / F3): binding payload_hash on th
 
 Tests: 3 in tests/gate.test.ts (cross-task reuse incl. floor-flip refused; multi-action partial collision refused whole; distinct key under a different task still admitted) and 3 in tests/execute.test.ts (declaringTasks one-vs-many; startExecution refuses a collision-shadowed key; RESIDUAL F3 pin). Full suite 2035 pass / 0 fail; lint clean. Backward compat: committed .approval/log/events.jsonl has no cross-task key collisions, so neither lever rejects historical records and verify stays clean.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed the F1 critical floor-bypass at both boundaries: register (src/core/gate.ts) refuses cross-task reuse of an idempotency_key; declaringTasks + fail-closed guards in startExecution (src/core/execute.ts), audit sampling, and the adapter contract refuse an ambiguous key rather than taking last-wins. Reused existing refusal codes (task-already-registered, action-not-registered), no frozen-union change. Verified with 6 new tests (3 gate, 3 execute) plus full suite 2035 pass / 0 fail, lint clean; committed log verifies clean (no cross-task collisions historically). Code merged in PR #119; SPEC 6.2 global-uniqueness amendment signed off by the maintainer via PR #121 (suffix removed). Residual non-manual payload binding is deliberately out of scope and tracked as APRV-140 (F3), pinned by a RESIDUAL test.
+<!-- SECTION:FINAL_SUMMARY:END -->
