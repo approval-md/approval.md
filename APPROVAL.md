@@ -41,6 +41,8 @@ classes:
   network.call:              { autonomy: manual }       # mutating/ambiguous only; reads classify read.* and flow
   release.publish:           { autonomy: manual }       # npm, tags, versions
   policy.edit:               { autonomy: manual }       # this file, CLAUDE.md, CI config
+  log.sync:                  { autonomy: manual }       # ff-pull with chain reconcile; APRV-125
+  log.advance:               { autonomy: manual }       # records commit to a records branch; APRV-125
 
 budgets:
   global: { daily_actions: 200 }

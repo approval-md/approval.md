@@ -122,6 +122,18 @@ const EXPECTATIONS: readonly Expectation[] = [
   { actionClass: "policy.edit", autonomy: "manual", provenance: "rule" },
   { actionClass: "vcs.history.rewrite", autonomy: "manual", provenance: "rule" },
   { actionClass: "files.delete.out_of_scope", autonomy: "manual", provenance: "rule" },
+  {
+    actionClass: "log.sync",
+    autonomy: "manual",
+    provenance: "rule",
+    note: "declared 2026-08-26 (attested seq 513); the APRV-125 sign-off names sync=autonomous as the candidate end state once trust builds",
+  },
+  {
+    actionClass: "log.advance",
+    autonomy: "manual",
+    provenance: "rule",
+    note: "declared 2026-08-26 (attested seq 513); the APRV-125 sign-off names advance=supervised as the candidate end state once trust builds",
+  },
 
   // autonomous — reads and in-workspace/branch-local writes
   {
@@ -149,24 +161,6 @@ const EXPECTATIONS: readonly Expectation[] = [
     autonomy: "manual",
     provenance: "default",
     note: "undeclared class: the absence of a grant is not a grant",
-  },
-  // APRV-125. The classifier emits these two, and the live policy does not
-  // declare them YET: agents may not edit APPROVAL.md, so the rules are added by
-  // the human's own `approval policy amend`. Until then the unknown-class path
-  // covers them, which is exactly the fail-close this task relies on — the two
-  // verbs ship gated at manual rather than ungated. When the human lands the
-  // rules, these rows move up to the declared block with provenance "rule".
-  {
-    actionClass: "log.sync",
-    autonomy: "manual",
-    provenance: "default",
-    note: "undeclared until the human amends APPROVAL.md: unknown-class fail-close",
-  },
-  {
-    actionClass: "log.advance",
-    autonomy: "manual",
-    provenance: "default",
-    note: "undeclared until the human amends APPROVAL.md: unknown-class fail-close",
   },
   {
     actionClass: "read",
