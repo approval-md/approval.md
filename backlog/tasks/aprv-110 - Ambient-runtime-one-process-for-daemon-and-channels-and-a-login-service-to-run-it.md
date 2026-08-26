@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-20 08:55'
+updated_date: '2026-08-25 10:35'
 labels:
   - ux
   - daemon
@@ -29,3 +30,9 @@ Human question 2026-08-20: "will users always need to create a listener and daem
 - [ ] #3 approval setup service writes a launchd plist or systemd user unit for review before installing, names variables and never copies secret values, and can uninstall; human-only, interactive by refusal
 - [ ] #4 SPEC 10.2/10.3 amendment drafted and flagged; docs (README harness section, dogfood runbook, mcp-demo prerequisites) updated to one process; npm test and lint clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+DESIGN SIGN-OFF 2026-08-25 (Carter, in session): approved as designed. approval up (daemon + channels in one supervised process, per-part crash isolation with backoff, clean signal shutdown, byte-compatible decision/token/restart semantics) and approval setup service (launchd/systemd user unit at login, human-only, prints the unit for review, names variables never values, uninstallable). Fail-closed on missing channel credentials: report and run the parts that can. SPEC 10.2/10.3 drafting (AC 4) may proceed. Consumes APRV-125's verbs for automatic log sync once both exist.
+<!-- SECTION:NOTES:END -->

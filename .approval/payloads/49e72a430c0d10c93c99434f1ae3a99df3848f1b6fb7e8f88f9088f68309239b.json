@@ -1,0 +1,1 @@
+{"command":"sed -i.bak 's/Two agent-facing verbs are withheld/Three agent-facing verbs are withheld/' SPEC.md && rm -f SPEC.md.bak","cwd":"/Users/carter/dev/approval-md"}

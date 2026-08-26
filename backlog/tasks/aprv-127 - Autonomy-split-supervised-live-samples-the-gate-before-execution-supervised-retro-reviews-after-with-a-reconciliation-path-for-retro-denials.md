@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-20 17:01'
-updated_date: '2026-08-20 19:34'
+updated_date: '2026-08-25 10:04'
 labels:
   - policy
   - gate
@@ -48,4 +48,6 @@ Vocabulary and migration: policy grammar gains the two modes; bare supervised pa
 
 <!-- SECTION:NOTES:BEGIN -->
 Rate calibration from the human (2026-08-20): for proposal-tier protected-path edits (worktree drafts whose merge is separately gated) they want rates as low as 0.01. The design should state the layered-control argument that justifies very low live rates on proposal-tier actions: sampling thins the draft taps, never the merge tap. Depends on APRV-124's proposal-tier/live-tier distinction to express that split.
+
+DESIGN SIGN-OFF 2026-08-25 (Carter, in session): approved as designed. The supervised-live/supervised-retro split, HMAC(secret, payload hash) selection (deterministic, agent-unpredictable, no re-roll), reconciliation obligations (gated revert for reversible, policy-finding for irreversible, human-only satisfaction, loud while open), and the reversible=false retro refusal stated as a floor rather than a proof. Policy rates land via the ordinary amendment ceremony after the mechanism ships; Carter's stated target for proposal-tier policy.edit is supervised-live 0.01. SPEC 5/7/11.1 drafting (AC 6) may proceed.
 <!-- SECTION:NOTES:END -->

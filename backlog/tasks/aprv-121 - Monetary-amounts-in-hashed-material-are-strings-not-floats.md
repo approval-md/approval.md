@@ -4,6 +4,7 @@ title: 'Monetary amounts in hashed material are strings, not floats'
 status: To Do
 assignee: []
 created_date: '2026-08-20 14:48'
+updated_date: '2026-08-25 12:02'
 labels:
   - schema
   - budgets
@@ -33,3 +34,9 @@ Reference: emiliaprotocol/emilia-protocol packages/verify/src/index.ts isCanonic
 - [ ] #4 SPEC amended for the representation and the compatibility rule, marked for human sign-off
 - [ ] #5 npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Clean-room lane built against pre-121 (float) semantics — 2026-08-25 (from Carter). A clean-room Python second implementation now exists at ../approval-md-cleanroom (external to the repo, no git/source access). Its frozen hashing vectors encode monetary amounts as JSON floats under the current scheme: schema/fixtures/hash/known-answer.json (e.g. est_cost_usd: 0) and extracted/jcs-vectors.json (the record-shape vector carries amount: 0.5). When this task changes the representation to string-decimal or integer minor units, those vectors become a second migration surface and must be regenerated; the historical-compatibility rule (AC #2) applies to the committed corpus/events.jsonl shipped in that kit too. Upside: the float-serialization divergence this task exists to prevent is exactly what a cross-language (Python vs TS) implementation surfaces, so the clean-room result is a real-world check on the decision — but only if 121 lands first, or the clean-room baseline is explicitly scoped as pre-121 and re-run afterward. Recommend deciding which before treating the clean-room output as any kind of conformance signal.
+<!-- SECTION:NOTES:END -->

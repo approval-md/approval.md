@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-20 15:12'
+updated_date: '2026-08-25 09:54'
 labels:
   - log
   - cli
@@ -60,3 +61,9 @@ INVARIANTS TOUCHED (implementation notes must say so): enforcement paths read on
 - [ ] #9 SPEC section 10 amendment drafted and flagged for sign-off before implementation; the no-event decision recorded
 - [ ] #10 The dogfood runbook (docs/dogfood-cutover.md) rewritten to use the verbs; the stash dance removed from every doc
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+DESIGN SIGN-OFF 2026-08-25 (Carter, in session): approved as designed. Both verbs, the no-event decision (sync and advance append nothing; the log records decisions, not its own housekeeping), and the autonomy path: both classes start manual, candidate end state sync=autonomous / advance=supervised once trust builds. SPEC section 10 amendment (AC 9) may now be drafted; implementation may be scheduled.
+<!-- SECTION:NOTES:END -->
