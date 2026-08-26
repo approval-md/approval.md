@@ -1,0 +1,14 @@
+{
+  "manifest_version": "1.0.0",
+  "description": "SHA-256 of every conformance vector file and of the reference runner, so a suite cannot change without the change being visible in one place. `npm test` fails on drift (tests/conformance.test.ts). Regenerate with scripts/regen-conformance-vectors.mjs, and review the diff: an expectation that moved is a behaviour change.",
+  "files": {
+    "conformance/run.mjs": "6b1b58c6e190244b0ace06ac7f2ae272b8161c267d8ce2e192f2eab219f19457",
+    "conformance/vectors/chain-verification.v1.json": "4b567bac245af0eaf039af51a88598496e917e65b87b7e56b288cf9b66bf5212",
+    "conformance/vectors/gate-verdicts.v1.json": "265166aa91b2f6d1caf42870a1556fd554d65263755ff5b67c324cd8c2ec34c6",
+    "conformance/vectors/jcs-canonicalization.v1.json": "c077cfc2c7712e747dbff261a7e1f5f12d63323b943a9a898134215d4ffac37f",
+    "conformance/vectors/policy-resolution.v1.json": "cc8e1448be4bd5dd28cfdcb78487e4db8f0ffc5f749bdbabc598f989b8a7aaa8",
+    "conformance/vectors/refusal-unions.v1.json": "f163c3f58fb5224404262a698208a61324ccff412172ff54fc468cea57887412",
+    "conformance/vectors/schema-validation.v1.json": "fac548ec41e4e90e128c07673460e26c54c7e35ea7fedfc95615aff3febcbd61",
+    "tests/conformance-harness.ts": "cfc3d2b169f0b7abcc0271a4c47939e55ea4deba8b0ec3bcc0de50ae0ebaf3d6"
+  }
+}
