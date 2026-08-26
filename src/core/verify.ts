@@ -95,6 +95,12 @@ function isGateTyped(event: string): boolean {
     event.startsWith("execution.") ||
     event.startsWith("budget.") ||
     event.startsWith("audit.") ||
+    // Amended SPEC.md §8 (APRV-127): `reconciliation.*` is written through the
+    // gate for the same reason `audit.*` is. The obligation is appended by the
+    // runtime as a consequence of a human's denial and the satisfaction is a
+    // human's act recorded at the write boundary; neither takes a caller's
+    // clock, so both may be held to the runtime's.
+    event.startsWith("reconciliation.") ||
     event === "policy.updated"
   );
 }

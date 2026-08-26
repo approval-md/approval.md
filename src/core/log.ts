@@ -75,6 +75,9 @@ export const GENESIS_PREV = null;
  * `payload_retention`, so a log states what its payload store no longer holds.
  * `approval.withdrawn` (APRV-106) is the second: the requester's retraction of
  * a request nobody has answered yet (amended SPEC.md §6.3).
+ * `reconciliation.required` / `reconciliation.satisfied` (APRV-127) are the
+ * third and fourth: the obligation a retrospective DENIAL creates, and the
+ * human act that discharges it (amended SPEC.md §5.2).
  */
 export type EventType =
   | "task.registered"
@@ -94,6 +97,8 @@ export type EventType =
   | "envelope.drift"
   | "audit.sampled"
   | "audit.reviewed"
+  | "reconciliation.required"
+  | "reconciliation.satisfied"
   | "payload.pruned";
 
 /** Caller-supplied content of an event. Chain fields are not accepted. */

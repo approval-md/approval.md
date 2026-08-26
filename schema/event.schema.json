@@ -45,9 +45,11 @@
         "envelope.drift",
         "audit.sampled",
         "audit.reviewed",
+        "reconciliation.required",
+        "reconciliation.satisfied",
         "payload.pruned"
       ],
-      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of eighteen event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen and `approval.withdrawn` (APRV-106) the second: a reader of a v0.1 log may encounter either, and a verifier written against the draft enum must be updated to accept both."
+      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of twenty event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, and `reconciliation.required` / `reconciliation.satisfied` (APRV-127) the third and fourth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept them all."
     },
     "actor": {
       "type": "string",
@@ -180,6 +182,19 @@
           "actor": {
             "type": "string",
             "pattern": "^human:"
+          },
+          "payload": {
+            "type": "object",
+            "properties": {
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "accepted",
+                  "denied"
+                ],
+                "description": "SPEC.md §5.2 (amended, APRV-127): what the reviewer concluded. `accepted`: the action should have happened. `denied`: it should not have, and the runtime appends a `reconciliation.required` naming the obligation the denial creates. Optional and additive — a review written before the split carries none and reads as the observation it was, which is why the ABSENCE of this field is never read as a denial."
+              }
+            }
           }
         },
         "required": [
@@ -363,6 +378,133 @@
                 "type": "string",
                 "pattern": "^[a-f0-9]{64}$",
                 "description": "SPEC.md §9/§10.3 (APRV-119): SHA-256 (lowercase hex) over the UTF-8 text of the canonical rendering of this request's payload, as produced by the versioned deterministic renderer named inside that text."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §5.2/§8 (amended, APRV-127): `reconciliation.required` records the obligation a RETROSPECTIVE DENIAL creates. The runtime cannot undo anything — the action already executed — so what it can do is oblige and record, and this is that record. The actor is `system:` because the obligation is mechanical: it follows from a human's denial by a rule, and an obligation an agent or a human could author by hand is an obligation the party under oversight could word into something it prefers. Every field named here is REQUIRED, because an obligation that does not say which action, under which class, denied by which review, and in which shape is an obligation nobody can discharge or audit.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "reconciliation.required"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "action_key",
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "action_key": {
+            "$ref": "#/properties/action_key"
+          },
+          "actor": {
+            "type": "string",
+            "pattern": "^system:"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "action_key",
+              "class",
+              "review_seq",
+              "obligation"
+            ],
+            "properties": {
+              "action_key": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The denied action's idempotency key, restated in the payload so the obligation and the action it concerns travel together for a reader who has only the payload."
+              },
+              "class": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The side-effect class the action was declared under. The class, not the action, is what a policy-was-wrong finding tightens."
+              },
+              "review_seq": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The seq of the `audit.reviewed` record that denied. The denial is the fact; this obligation is its consequence, and the two are joined here rather than by proximity in the chain."
+              },
+              "obligation": {
+                "type": "string",
+                "enum": [
+                  "gated-revert",
+                  "policy-finding"
+                ],
+                "description": "The shape the declared reversibility selects. `gated-revert`: the action can be undone, so the obligation is to undo it THROUGH THE GATE — the revert is itself a side-effecting action, and routing it through the gate is what closes the loop in the log. `policy-finding`: the action cannot be undone (or nobody declared that it could), so there is nothing to revert and the obligation is the review of the class that permitted it. Which one applies is decided by the runtime from the declaration the log already holds; see the reversibility floor note in `core/audit.ts` on why a self-reported `reversible: true` may select the SHAPE of an obligation and may never remove one."
+              },
+              "reversible": {
+                "description": "The action's declared reversibility, as the `task.registered` record carried it, or `null` when the declaration named none. Recorded so a reader can see which claim selected the obligation shape. SELF-REPORTED: it is evidence about the claim, never a permission.",
+                "oneOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §5.2/§8 (amended, APRV-127): `reconciliation.satisfied` closes one obligation, and it is HUMAN-ONLY by the same rule that governs grant, reject, revoke and `audit.reviewed`. The whole content of the record is that a person judged the obligation discharged; a runtime that could satisfy its own obligations would be a reconciliation backlog that empties itself, which is exactly the failure an unreconciled denial exists to make visible. `note` is required and not optional: `audit.reviewed` may record only \"seen\", but this record asserts that something was DONE, and an assertion with no statement of what was done is one no auditor can check.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "reconciliation.satisfied"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^human:"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "obligation_seq",
+              "note"
+            ],
+            "properties": {
+              "obligation_seq": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The seq of the `reconciliation.required` record being closed. Named by seq rather than by action key because one action may accumulate more than one obligation, and a satisfaction that could mean either would close the wrong one."
+              },
+              "note": {
+                "type": "string",
+                "minLength": 1,
+                "description": "What the human did. Required: this record asserts a discharge, and a discharge nobody described is one nobody can check."
+              },
+              "revert_action_key": {
+                "type": "string",
+                "minLength": 1,
+                "description": "For a `gated-revert` obligation, the idempotency key of the action that performed the revert. The runtime refuses the satisfaction unless the log carries an `execution.completed` for that key, so the loop closes in the chain rather than in a sentence."
               }
             }
           }
