@@ -900,6 +900,43 @@ function isGateEntrypoint(path: string): boolean {
 }
 
 /**
+ * The two `approval` invocations that are NOT pass-through (APRV-125).
+ *
+ * Everything else this CLI does is the enforcement path itself, and gating the
+ * gate with the gate deadlocks or recurses (see {@link GATE_SELF_CLASS}). `log
+ * sync` and `log advance` are different in kind: they move the log FILE and
+ * they drive git against a shared remote, which is a real-world effect, and the
+ * policy has to be able to hold them at manual while trust builds and to relax
+ * them independently later.
+ *
+ * Naming them here is also what stops the prompt lying. Performed by hand, the
+ * ritual reached the approver's phone as `policy.edit` over a protected path —
+ * true, and useless. Classified by name it arrives as what it is.
+ *
+ * `positionals` is read rather than `args`, so a flag between the words cannot
+ * hide the verb: `approval --json log sync` is the same invocation.
+ */
+function refineApprovalVerb(positionals: readonly string[]): Refinement | null {
+  if (positionals[0] !== "log") return null;
+  const sub = positionals[1];
+  if (sub === "sync") return { class: "log.sync", rule: "approval-log-sync" };
+  if (sub === "advance") return { class: "log.advance", rule: "approval-log-advance" };
+  return null;
+}
+
+/**
+ * `approval …` — the gate's own CLI, minus the two verbs that move the log.
+ *
+ * Never returns `null`: in this table a `null` refinement means "opaque, I
+ * cannot read this command" (see `refineNode`'s inline-source branch), and
+ * every `approval` invocation is readable. Everything that is not one of the
+ * two log verbs keeps the pass-through class and the row's own rule id.
+ */
+function refineApproval(ctx: RuleContext): Refinement {
+  return refineApprovalVerb(ctx.positionals) ?? { class: GATE_SELF_CLASS, rule: "approval" };
+}
+
+/**
  * `node` — an inline script is opaque, the gate's own entry point is
  * pass-through, and anything else is a workspace script.
  */
@@ -907,7 +944,14 @@ function refineNode(ctx: RuleContext): Refinement | null {
   if (hasFlag(ctx.args, ["-e", "--eval", "-p", "--print"])) return null;
   const script = ctx.positionals[0];
   if (script !== undefined && isGateEntrypoint(script)) {
-    return { class: GATE_SELF_CLASS, rule: "node-approval-cli" };
+    // `node cli.js log sync` is `approval log sync` spelled the long way, and
+    // it must classify identically or the classification is a spelling test.
+    return (
+      refineApprovalVerb(ctx.positionals.slice(1)) ?? {
+        class: GATE_SELF_CLASS,
+        rule: "node-approval-cli",
+      }
+    );
   }
   return { class: "files.write.workspace", rule: "node-script" };
 }
@@ -919,7 +963,8 @@ function refineNode(ctx: RuleContext): Refinement | null {
  * are grouped by binary, strictest interpretation first within a binary, and
  * every class named here is one SPEC.md §7 declares (§7's developer-workstation
  * namespaces, plus `read.shell` / `read.vcs.remote` / `read.web` under
- * `read.*`).
+ * `read.*`), with one addition: the `log.*` namespace of the two verbs that
+ * move the log file, introduced by SPEC §10.1's APRV-125 amendment.
  */
 export const COMMAND_RULES: readonly CommandRule[] = [
   // -- git -----------------------------------------------------------------
@@ -1029,8 +1074,20 @@ export const COMMAND_RULES: readonly CommandRule[] = [
   { id: "npm-script", bins: ["npm", "pnpm", "yarn", "bun"], subs: ["run", "run-script", "test", "start", "build", "lint", "exec"], class: "files.write.workspace" },
 
   // -- workspace tools -----------------------------------------------------
-  { id: "node", bins: ["node"], class: "files.write.workspace", emits: [GATE_SELF_CLASS], refine: refineNode },
-  { id: "approval", bins: ["approval"], class: GATE_SELF_CLASS },
+  {
+    id: "node",
+    bins: ["node"],
+    class: "files.write.workspace",
+    emits: [GATE_SELF_CLASS, "log.sync", "log.advance"],
+    refine: refineNode,
+  },
+  {
+    id: "approval",
+    bins: ["approval"],
+    class: GATE_SELF_CLASS,
+    emits: ["log.sync", "log.advance"],
+    refine: refineApproval,
+  },
   {
     id: "workspace-tool",
     bins: ["npx", "tsx", "ts-node", "tsc", "oxlint", "eslint", "prettier", "vitest", "jest", "backlog", "make"],

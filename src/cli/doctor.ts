@@ -75,6 +75,7 @@ import {
 } from "../core/env-file.js";
 import { readTaskFile } from "../core/frontmatter.js";
 import type { EventRecord } from "../core/log.js";
+import { compareChains, describeDrift, describeHead } from "../core/log-reconcile.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
 import { DEFAULT_TASKS_DIR, latestRegistration } from "../core/registration.js";
@@ -91,6 +92,7 @@ import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { policyWebPort } from "./channel-web.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
+import { repoPath, repoRoot, showBlob } from "./git-scope.js";
 import { DOCTOR_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
@@ -1248,6 +1250,107 @@ function checkEnvironment(logPath: string, dir: string, load: PolicyLoadResult):
   };
 }
 
+// ---------------------------------------------------------------------------
+// 12. log-drift (APRV-125)
+// ---------------------------------------------------------------------------
+
+/**
+ * How the working log stands against the committed one.
+ *
+ * This is the doctor mitigation named in APRV-104's fork-2 notes: the fork that
+ * incident produced was invisible until something tried to append onto it, and
+ * the instrument a person reaches for first is `approval doctor`. So the
+ * comparison lives here too, and it is the SAME comparison `approval log sync`
+ * runs before deciding whether to restore its snapshot
+ * (`core/log-reconcile.ts`). Two implementations would be two chances to
+ * disagree about whether a repository has forked, and that is the one question
+ * where disagreement is intolerable.
+ *
+ * Reads only. It never fetches, never pulls and never writes: the committed
+ * side comes out of git's object store with `git show`.
+ */
+function checkLogDrift(logPath: string): DoctorCheck {
+  const root = repoRoot(dirname(logPath));
+  if (root === null) {
+    return {
+      check: "log-drift",
+      status: "skip",
+      detail: `${logPath} is not inside a git repository, so there is no committed copy to compare it against`,
+    };
+  }
+  const relative = repoPath(root, logPath);
+  const blob = showBlob(root, "HEAD", relative);
+  if (blob === null) {
+    return {
+      check: "log-drift",
+      status: "skip",
+      detail: `git has no HEAD:${relative} blob: this log has never been committed, so every record in it is uncommitted by definition`,
+      fix: "approval log advance --dry-run — what a first advance would carry",
+    };
+  }
+
+  let workingText: string;
+  try {
+    workingText = readFileSync(logPath, "utf8");
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") workingText = "";
+    else {
+      return {
+        check: "log-drift",
+        status: "fail",
+        detail: `${logPath} could not be read: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+        fix: "approval log verify — the chain report, once the file is readable",
+      };
+    }
+  }
+
+  const compared = compareChains(
+    { label: `the working log ${logPath}`, text: workingText },
+    { label: `HEAD:${relative}`, text: blob.toString("utf8") },
+  );
+  if (!compared.ok) {
+    return {
+      check: "log-drift",
+      status: "fail",
+      detail: `the two copies cannot be compared: ${oneLine(compared.message)}`,
+      fix: "approval log verify — nothing is decided from a log that does not verify",
+    };
+  }
+
+  const drift = compared.drift;
+  switch (drift.relation) {
+    case "equal":
+      return {
+        check: "log-drift",
+        status: "pass",
+        detail: `working and committed are the same chain (${describeHead(drift.workingHead)})`,
+      };
+    case "ahead":
+      return {
+        check: "log-drift",
+        status: "pass",
+        detail: `${describeDrift(drift)} — the ordinary state of a checkout that has been recording decisions`,
+        fix: "approval log advance — commit those records onto a records branch",
+      };
+    case "behind":
+      return {
+        check: "log-drift",
+        status: "pass",
+        detail: `${describeDrift(drift)} — the committed copy carries records this working file does not`,
+        fix: "approval log sync — fast-forward, then reconcile the chain",
+      };
+    case "diverged":
+      return {
+        check: "log-drift",
+        status: "fail",
+        detail: `${describeDrift(drift)} — two chains, not one. Hash chains do not merge and nothing in this runtime will re-chain them: which of these is the log is a human decision`,
+        fix: "approval log verify — then `git log -- .approval/log/events.jsonl` for who committed the other chain",
+      };
+  }
+}
+
 /** The Backlog.md board key a task file's name begins with (`task-3 - Slug.md`). */
 function taskIdFromFileName(name: string): string | null {
   const match = /^([A-Za-z][A-Za-z0-9_]*-\d+)/u.exec(name);
@@ -1398,6 +1501,9 @@ export function commandDoctor(
       // APRV-75: appended, for the third time and the same reason — the check
       // list is a frozen shape that grows only at the end.
       checkEnvironment(logPath, dir, policyLoad),
+      // APRV-125: appended, fourth time, same reason. The fork this reports is
+      // the one APRV-104 could only find by hand.
+      checkLogDrift(logPath),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");
