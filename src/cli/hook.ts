@@ -80,6 +80,7 @@ import {
   findHarnessCarry,
   register,
   request,
+  startHarnessExecution,
   withdraw,
   type GateOptions,
 } from "../core/gate.js";
@@ -1029,6 +1030,47 @@ function unattendedGuard(
 }
 
 /**
+ * Charge and record every class of an unattended allow (APRV-141).
+ *
+ * One `execution.started` per class, through `core/gate.ts`, before the allow
+ * is printed. Until this, a supervised or autonomous harness verdict appended
+ * nothing at all, so `core/budgets.ts` charged it nothing (`daily_actions`
+ * included) and `core/audit.ts` could never sample it — under Claude Code, on
+ * the path that carries most of the traffic. The comment that path used to
+ * carry was right that a record per agent action fills the log; APRV-141's
+ * recorded decision is that an uncharged, unsampleable majority is the worse
+ * of the two, and the record is kept as small as the contract allows.
+ *
+ * **The order is record-then-allow, and the failure is a deny.** A verdict
+ * printed before the charge landed is a command that ran outside every budget,
+ * which is the hole this closes. A refusal here (a budget ceiling, a head that
+ * moved) therefore denies, and reaches the caller as the gate's own code.
+ *
+ * The autonomous classes are recorded with no `task.registered` behind them,
+ * deliberately: `core/audit.ts` samples supervised executions only, so a
+ * declaration would buy no oversight and would double the volume of exactly the
+ * traffic this is trying not to drown the log in. The supervised classes are
+ * registered already, by the caller, which is what makes them sampleable.
+ */
+function recordUnattended(
+  run: HookRun,
+  task: string,
+  classes: readonly string[],
+  hash: string,
+): { code: string; message: string } | null {
+  for (const cls of classes) {
+    const started = startHarnessExecution(
+      run.logPath,
+      { task, actionKey: `${task}:${cls}`, cls, payload_hash: hash },
+      run.actor,
+      run.options,
+    );
+    if (!started.ok) return { code: started.code, message: `${cls}: ${started.message}` };
+  }
+  return null;
+}
+
+/**
  * The gated half: find what is already open for these bytes, request whatever
  * is not, wait for the decisions, spend the grants. Returns the exit code of
  * whatever verdict it printed.
@@ -1194,6 +1236,13 @@ function gateAndWait(
     if (spendKeys.length === 0) {
       // Every class resolved supervised: intake recorded no request (amended
       // SPEC.md §6.3), so there is nothing to wait for and nothing to spend.
+      // What there is, since APRV-141, is something to charge: the start event
+      // is this execution's authorization, and the registration `fresh` just
+      // wrote is what makes it a sampleable one.
+      const charged = recordUnattended(run, task, classes, hash);
+      if (charged !== null) {
+        return sayDeny(`hook-gate-refused:${charged.code}`, charged.message);
+      }
       return sayAllow(
         `granted: ${classes.join(", ")} needs no approval under this policy${note}`,
       );
@@ -1487,6 +1536,17 @@ function runHarnessHook(
   // check below and any registration that follows must name the same task.
   const task = `hook:${input.sessionId}:${input.toolUseId ?? randomBytes(8).toString("hex")}`;
 
+  const run: HookRun = {
+    logPath,
+    options,
+    actor,
+    timeoutMs,
+    intervalMs,
+    ttlMs: load.durations.approvalTtlMs,
+    harness: adapter.kind,
+    originApp: adapter.originApp,
+  };
+
   const autonomies = classes.map((cls) => resolvePolicy(load, cls).autonomy);
   /** No class here needs a human, so nothing downstream will ask for one. */
   const unattended = autonomies.every((autonomy) => autonomy !== "manual");
@@ -1496,9 +1556,15 @@ function runHarnessHook(
   }
 
   if (autonomies.every((autonomy) => autonomy === "autonomous")) {
-    // Nothing is appended: an autonomous action has no approval lifecycle
-    // (amended SPEC.md §6.3), and writing one here would fill the log with the
-    // agent's every `ls`.
+    // No approval lifecycle: an autonomous action has none (amended SPEC.md
+    // §6.3), so nothing is requested, decided or granted here. What IS appended
+    // since APRV-141 is the execution record itself — the moment the policy
+    // authorized this command — because a budget the busiest path does not
+    // charge is not a budget. See `recordUnattended`.
+    const charged = recordUnattended(run, task, classes, payloadHash(payload));
+    if (charged !== null) {
+      return deny(streams, `hook-gate-refused:${charged.code}`, charged.message, adapter.kind);
+    }
     return allow(streams, `autonomous: ${classes.join(", ")}${note}`, adapter.kind);
   }
 
@@ -1510,16 +1576,7 @@ function runHarnessHook(
   // missing one (see `preflightLog`) — and `register` appends the first line.
   return gateAndWait(
     streams,
-    {
-      logPath,
-      options,
-      actor,
-      timeoutMs,
-      intervalMs,
-      ttlMs: load.durations.approvalTtlMs,
-      harness: adapter.kind,
-      originApp: adapter.originApp,
-    },
+    run,
     classes,
     payload,
     headline,

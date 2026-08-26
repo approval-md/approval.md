@@ -39,8 +39,12 @@ import {
 } from "../src/channels/payload-view.js";
 import { buildPendingQueue } from "../src/channels/tagging.js";
 import { renderTelegram } from "../src/channels/telegram.js";
+import { supervisedExecutions } from "../src/core/audit.js";
 import { CLASSIFIER_CLASSES, COMMAND_RULES } from "../src/core/command-class.js";
+import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
+import { loadPolicy } from "../src/core/policy-load.js";
+import { readVerifiedRecords } from "../src/core/state.js";
 import { HOOK_DENY_CODES, SUMMARY_LIMIT } from "../src/cli/hook.js";
 
 /** dist/tests/cli-hook.test.js -> dist/src/cli/main.js */
@@ -107,17 +111,23 @@ const POLICY = [
   "",
 ].join("\n");
 
-function caseDir(): string {
+/** One autonomous action a day: the second harness execution must be refused. */
+const POLICY_ONE_ACTION = POLICY.replace(
+  "```\n",
+  "budgets:\n  global:\n    daily_actions: 1\n```\n",
+);
+
+function caseDir(policyText: string = POLICY): string {
   counter += 1;
   const dir = join(scratch, `case-${counter}`);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "APPROVAL.md"), POLICY, "utf8");
+  writeFileSync(join(dir, "APPROVAL.md"), policyText, "utf8");
   return dir;
 }
 
 /** A case directory whose policy a human has attested. */
-function ready(): string {
-  const dir = caseDir();
+function ready(policyText: string = POLICY): string {
+  const dir = caseDir(policyText);
   const attested = runCli(["policy", "attest", "--as", "human:alice"], dir);
   assert.equal(attested.code, 0, attested.stderr);
   return dir;
@@ -128,6 +138,19 @@ const LOG = ".approval/log/events.jsonl";
 function rawLog(dir: string): string {
   const path = join(dir, LOG);
   return existsSync(path) ? readFileSync(path, "utf8") : "";
+}
+
+/** Every record the log grew by since `before`, parsed. */
+function recordsSince(dir: string, before: string): Record<string, unknown>[] {
+  return rawLog(dir)
+    .slice(before.length)
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+function payloadOf(record: Record<string, unknown>): Record<string, unknown> {
+  return (record["payload"] ?? {}) as Record<string, unknown>;
 }
 
 function assertClean(dir: string): void {
@@ -311,14 +334,32 @@ test("an ordinary file edit passes through; a policy file does not", () => {
   assertClean(dir);
 });
 
-test("an autonomous command is allowed with no log growth", () => {
+test("an autonomous command is allowed and records only its execution", () => {
   const dir = ready();
   const before = rawLog(dir);
-  const run = runCli(["hook", "claude-code"], dir, bashEvent("ls -la && git status"));
+  const run = runCli(["hook", "claude-code"], dir, bashEvent("ls -la && git status", "tu-auto"));
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "allow");
   assert.match(verdict.reason, /^autonomous: /u);
-  assert.equal(rawLog(dir), before, "an autonomous action has no approval lifecycle");
+
+  // APRV-141: the approval lifecycle is still absent — nothing is requested,
+  // decided or granted — and the execution record is present, because that is
+  // the moment the policy authorized the command and the moment budgets charge.
+  const named = verdict.reason.replace(/^autonomous: /u, "").split(", ");
+  const written = recordsSince(dir, before);
+  assert.deepEqual(
+    written.map((record) => record["event"]),
+    named.map(() => "execution.started"),
+  );
+  assert.deepEqual(
+    written.map((record) => payloadOf(record)["class"]),
+    named,
+  );
+  for (const record of written) {
+    assert.equal(payloadOf(record)["execution"], "harness", "no completion will follow");
+    assert.equal(record["task"], "hook:sess-1:tu-auto");
+  }
+  assertClean(dir);
 });
 
 test("a GET-shaped fetch runs unattended, and a POST-shaped one does not", () => {
@@ -331,7 +372,11 @@ test("a GET-shaped fetch runs unattended, and a POST-shaped one does not", () =>
   const verdict = verdictOf(read);
   assert.equal(verdict.permission, "allow", verdict.reason);
   assert.match(verdict.reason, /^autonomous: /u);
-  assert.equal(rawLog(dir), before, "a read fetch has no approval lifecycle");
+  assert.deepEqual(
+    recordsSince(dir, before).map((record) => record["event"]),
+    ["execution.started"],
+    "a read fetch has no approval lifecycle, only the execution APRV-141 charges",
+  );
 
   const write = runCli(
     ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
@@ -515,6 +560,56 @@ test("a loop-escalated harness task may not run unattended", () => {
   // escalation is per task, exactly as `core/loop.ts` computes it.
   const other = runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-fresh"));
   assert.equal(verdictOf(other).permission, "allow");
+  assertClean(dir);
+});
+
+// ===========================================================================
+// APRV-141: harness executions are charged and sampleable
+// ===========================================================================
+
+test("a harness autonomous action is charged against daily_actions", () => {
+  // Red-team F6. Before APRV-141 the hook appended nothing for an autonomous
+  // verdict, so `core/budgets.ts` — which reads consumption from
+  // approval.granted and execution.started and from nothing else — charged the
+  // busiest execution path in the system zero.
+  const dir = ready(POLICY_ONE_ACTION);
+  const first = runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-one"));
+  assert.equal(verdictOf(first).permission, "allow");
+
+  const before = rawLog(dir);
+  const second = runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-two"));
+  const verdict = verdictOf(second);
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /^hook-gate-refused:budget-exceeded: /u);
+  assert.match(verdict.reason, /daily_actions/u);
+  assert.deepEqual(
+    recordsSince(dir, before).map((record) => record["event"]),
+    ["budget.exceeded"],
+    "the refusal is recorded and the execution is not",
+  );
+  assertClean(dir);
+});
+
+test("a harness supervised action is a candidate the audit sampler can draw", () => {
+  // The other half of F6: `core/audit.ts` draws its retrospective sample from
+  // execution.started records whose action a task.registered declares, and only
+  // for supervised classes. The hook registers the class already; APRV-141 adds
+  // the start event, which is what makes the pair a candidate at all.
+  const dir = ready();
+  const run = runCli(["hook", "claude-code"], dir, bashEvent("git push origin main", "tu-push"));
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "allow", verdict.reason);
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  const candidates = supervisedExecutions(
+    (read as { ok: true; records: EventRecord[] }).records,
+    loadPolicy({ dir }),
+  );
+  assert.deepEqual(
+    candidates.map((candidate) => [candidate.actionKey, candidate.class]),
+    [["hook:sess-1:tu-push:vcs.push.main", "vcs.push.main"]],
+  );
   assertClean(dir);
 });
 

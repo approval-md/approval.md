@@ -2023,6 +2023,172 @@ export function consumeHarnessGrant(
 }
 
 // ---------------------------------------------------------------------------
+// startHarnessExecution
+// ---------------------------------------------------------------------------
+
+/** What the harness is about to run, as one class of one command. */
+export interface HarnessStartInput {
+  task: string;
+  actionKey: string;
+  cls: string;
+  /** The bytes the verdict was computed over, when the caller has a hash. */
+  payload_hash?: string;
+  est_cost_usd?: number;
+}
+
+export type HarnessStartResult = { ok: true; record: EventRecord } | GateRefusal;
+
+/**
+ * Charge and record a harness execution that no human was asked about
+ * (APRV-141).
+ *
+ * ## The blind spot this closes
+ *
+ * `core/budgets.ts` computes consumption from `approval.granted` and
+ * `execution.started`, and `core/audit.ts` draws its retrospective sample from
+ * `execution.started` alone. The harness hook wrote neither for a supervised or
+ * autonomous verdict — the comment said, correctly, that writing one per agent
+ * action fills the log — so under Claude Code the majority of real activity
+ * consumed no budget, `daily_actions` included, and was invisible to the
+ * overseer that exists to read a sample of it. A budget that the busiest
+ * execution path does not charge is not a budget, and the decision recorded on
+ * APRV-141 is that the log volume is the lesser cost.
+ *
+ * ## Why this record and not a new event type
+ *
+ * It is the same `execution.started` {@link consumeHarnessGrant} appends, with
+ * the same `execution: "harness"` marker saying why no `execution.completed` or
+ * `execution.failed` will ever follow: the harness runs the command and this
+ * runtime never observes an exit status. Reusing the shape means budgets and
+ * audit count these without learning a second vocabulary, and the gate's
+ * existing single-use rule (a key with an `execution.started` is
+ * `already-executed`) applies unchanged. What differs is only the authorization
+ * being recorded: there, a human's grant; here, the policy itself.
+ *
+ * ## What it refuses
+ *
+ * The same two facts the hook's own guard checks and `core/execute.ts` checks
+ * before an unattended start — attestation and loop-escalation — re-checked at
+ * the write boundary against the records this append is authorized by, plus the
+ * budget verdict this record is the charge for. A class that resolves `manual`
+ * is refused outright: a manual action is authorized by a grant and spent
+ * through {@link consumeHarnessGrant} or a token, and admitting one here would
+ * be a second, unapproved spender.
+ */
+export function startHarnessExecution(
+  logPath: string,
+  input: HarnessStartInput,
+  actor: string,
+  options: GateOptions = {},
+): HarnessStartResult {
+  const ts = tick(options);
+  if (!PRINCIPAL_ACTOR.test(actor)) {
+    return refuse(
+      "actor-invalid",
+      `recording a harness execution requires a human: or agent: actor, got ${JSON.stringify(actor)}`,
+    );
+  }
+
+  const read = readGateRecords(logPath);
+  if (!read.ok) return read;
+
+  const attested = requireAttestation(read.records, options);
+  if (!attested.ok) return attested;
+
+  const load = loadPolicy(loadOptionsOf(options));
+  const resolution = resolve(load, input.cls);
+  if (resolution.autonomy === "manual") {
+    return refuse(
+      "not-granted",
+      `class ${input.cls} resolves to manual (${resolution.provenance}), and a manual action is authorized by a human's grant rather than by the policy. Request it and spend the grant; this path records only the executions the policy itself authorized.`,
+    );
+  }
+
+  if (isLoopEscalated(read.records, input.task)) {
+    return refuse(
+      "loop-escalated",
+      `task ${input.task} has three consecutive execution.failed events and is escalated to manual (SPEC.md §10.2), so its ${resolution.autonomy} actions may not start unsupervised. The streak clears when an execution.completed for the task lands.`,
+    );
+  }
+
+  for (const record of read.records) {
+    if (record.action_key !== input.actionKey) continue;
+    if (record.event !== "execution.started") continue;
+    return refuse(
+      "already-executed",
+      `action ${input.actionKey} already started at seq ${record.seq}; an idempotency key is single-use`,
+    );
+  }
+
+  const cost = costOf(input.est_cost_usd);
+  const budget = evaluateBudgetsWithTask(
+    read.records,
+    budgetScopeOf(load, resolution),
+    { class: input.cls, est_cost_usd: cost },
+    ts,
+    input.task,
+  );
+  if (!budget.pass) {
+    const failed = budget.verdicts.filter((verdict) => !verdict.pass);
+    const logged = append(
+      logPath,
+      {
+        ts,
+        event: "budget.exceeded",
+        actor,
+        task: input.task,
+        action_key: input.actionKey,
+        payload: {
+          class: input.cls,
+          est_cost_usd: cost,
+          stage: "execution",
+          verdicts: budget.verdicts,
+        },
+      },
+      options,
+      read.head,
+    );
+    const message = `budget refused the execution: ${failed
+      .map((verdict) => `${verdict.limit} (${verdict.scope})`)
+      .join(", ")}`;
+    return logged.ok
+      ? refuse("budget-exceeded", message, { verdicts: failed, record: logged.record })
+      : refuse(
+          "budget-exceeded",
+          `${message}; the budget.exceeded event could not be appended: ${logged.message}`,
+          { verdicts: failed },
+        );
+  }
+
+  const payload: Record<string, unknown> = {
+    // The budgets contract: class and est_cost_usd on every start event.
+    class: input.cls,
+    est_cost_usd: cost,
+    // Why no completion will ever follow (see `consumeHarnessGrant`).
+    execution: "harness",
+  };
+  if (isPayloadHash(input.payload_hash)) payload["payload_hash"] = input.payload_hash;
+
+  const appended = append(
+    logPath,
+    {
+      ts,
+      event: "execution.started",
+      actor,
+      task: input.task,
+      action_key: input.actionKey,
+      payload,
+    },
+    options,
+    // The head read at the top: attestation, escalation, single-use and the
+    // budget verdict were all judged against exactly that log.
+    read.head,
+  );
+  if (!appended.ok) return appended;
+  return { ok: true, record: appended.record };
+}
+
+// ---------------------------------------------------------------------------
 // expire
 // ---------------------------------------------------------------------------
 

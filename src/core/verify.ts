@@ -36,6 +36,14 @@
  * - the optional per-event git commits of SPEC.md §8, where the daemon commits
  *   each record under its own identity, giving signed, distributed evidence.
  *
+ * Three questions that keep arriving separately have one answer (APRV-141, F7):
+ * the digest covers each record's CANONICAL CONTENT, its RFC 8785
+ * serialization, and never the bytes of the line it was read from, so a
+ * re-serialization that changes only byte format verifies clean, a line
+ * carrying a duplicate key is settled by the JSON parse that precedes
+ * canonicalization rather than by the chain, and an unanchored tail truncation
+ * leaves a valid prefix that nothing inside the file can contradict.
+ *
  * **Anomalies, which are reported and never enforced (APRV-40).** SPEC.md §8
  * requires that "verification treats gate-type events with implausible skew
  * relative to their neighbors as a reportable anomaly, never silently accepted".

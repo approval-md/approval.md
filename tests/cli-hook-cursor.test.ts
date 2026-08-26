@@ -155,7 +155,13 @@ test("Shell uses the same classifier as Bash, and Bash itself is not a gated Cur
   const lsVerdict = verdictOf(ls);
   assert.equal(lsVerdict.permission, "allow");
   assert.match(lsVerdict.reason, /^autonomous: /u);
-  assert.equal(rawLog(dir), before);
+  // APRV-141: an autonomous allow records the execution it authorized, and
+  // nothing else — no request, no decision, no grant.
+  assert.match(
+    rawLog(dir).slice(before.length),
+    /^\{[^\n]*"event":"execution\.started"[^\n]*\n$/u,
+  );
+  const afterLs = rawLog(dir);
 
   const opaque = runCli(["hook", "cursor"], dir, shellEvent("bash -c 'git push --force'"));
   assert.equal(verdictOf(opaque).permission, "deny");
@@ -168,7 +174,7 @@ test("Shell uses the same classifier as Bash, and Bash itself is not a gated Cur
   );
   assert.equal(verdictOf(bash).permission, "allow");
   assert.match(verdictOf(bash).reason, /is not a gated tool/u);
-  assert.equal(rawLog(dir), before);
+  assert.equal(rawLog(dir), afterLs, "a deny and a pass-through both write nothing");
 });
 
 test("a Cursor Write to an ordinary file passes through; a protected path does not", () => {
