@@ -402,6 +402,122 @@ test("an unattested policy denies with the gate's own refusal code", () => {
   assert.match(verdict.reason, /^hook-gate-refused:policy-not-attested: /u);
 });
 
+// ===========================================================================
+// APRV-139: an unattended verdict is checked against the verified log first
+// ===========================================================================
+
+test("an edited-but-unattested policy no longer runs an autonomous command", () => {
+  // The red-team's F2, reproduced end to end. Whoever can write APPROVAL.md
+  // reclassifies a manual class to autonomous; before APRV-139 the hook read
+  // the edited file, resolved `autonomous`, and allowed, and because the
+  // HARNESS executes on an allow the runtime's own attestation check was never
+  // reached. `deps.add` is the class chosen because the baseline policy holds
+  // it at manual, so the edit is unmistakably a widening.
+  const dir = ready();
+  const before = rawLog(dir);
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    POLICY.replace("  deps.add:\n    autonomy: manual", "  deps.add:\n    autonomy: autonomous"),
+    "utf8",
+  );
+
+  const run = runCli(["hook", "claude-code"], dir, bashEvent("npm install left-pad"));
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /^hook-gate-refused:policy-not-attested: /u);
+  assert.match(verdict.reason, /re-attests it/u);
+  assert.equal(rawLog(dir), before, "a refused unattended verdict appends nothing");
+});
+
+test("an edited policy stops the supervised fast path too", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  writeFileSync(join(dir, "APPROVAL.md"), `${POLICY}\n<!-- edited, not re-attested -->\n`, "utf8");
+
+  const run = runCli(["hook", "claude-code"], dir, bashEvent("git push origin main"));
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /^hook-gate-refused:policy-not-attested: /u);
+  assert.equal(rawLog(dir), before, "nothing is registered under an inoperative policy");
+});
+
+test("an unreachable log denies an autonomous command, not just a gated one", () => {
+  // The check moved above the fast paths (APRV-139): attestation and
+  // loop-escalation are facts about the log, so a hook that cannot reach the
+  // log cannot establish them and must not allow.
+  const dir = caseDir();
+  const run = runCli(["hook", "claude-code"], dir, bashEvent("ls -la"));
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /^hook-log-unreachable: /u);
+});
+
+test("a loop-escalated harness task may not run unattended", () => {
+  // SPEC.md §10.2, the half `core/execute.ts` has always enforced and the hook
+  // did not. The streak is built through the real verbs — register, then three
+  // supervised `approval run`s that exit non-zero — under the very task id the
+  // hook mints for this session and tool-use id.
+  const dir = ready();
+  const task = "hook:sess-1:tu-loop";
+  const actions = ["one", "two", "three"];
+  writeFileSync(
+    join(dir, "loop-task.md"),
+    [
+      "---",
+      `id: ${task}`,
+      "title: A harness task that keeps failing",
+      "status: In Progress",
+      "approval:",
+      "  origin:",
+      "    app: claude-code-hook",
+      '    created_by: "agent:claude-code"',
+      "  state: proposed",
+      "  actions: ",
+      ...actions.flatMap((name) => [
+        "    - class: vcs.push.main",
+        `      summary: "attempt ${name}"`,
+        "      est_cost_usd: 0",
+        `      idempotency_key: "${task}:${name}"`,
+      ]),
+      "---",
+      "",
+      "## Description",
+      "Body.",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  assert.equal(runCli(["register", "loop-task.md", "--as", "agent:claude-code"], dir).code, 0);
+  for (const name of actions) {
+    const failed = runCli(
+      [
+        "run",
+        `${task}:${name}`,
+        "--as",
+        "agent:claude-code",
+        "--",
+        process.execPath,
+        "-e",
+        "process.exit(1)",
+      ],
+      dir,
+    );
+    assert.equal(failed.code, 1, `${name}: ${failed.stderr}`);
+  }
+
+  const run = runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-loop"));
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /^hook-gate-refused:loop-escalated: /u);
+  assert.match(verdict.reason, /§10\.2/u);
+
+  // A different tool-use id is a different task, and is unaffected: the
+  // escalation is per task, exactly as `core/loop.ts` computes it.
+  const other = runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-fresh"));
+  assert.equal(verdictOf(other).permission, "allow");
+  assertClean(dir);
+});
+
 test("an unloadable policy denies with hook-policy-unavailable", () => {
   const dir = ready();
   const run = runCli(

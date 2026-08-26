@@ -34,7 +34,9 @@
  * **Fail closed on every axis.** An unreadable policy, an unreachable log, a
  * command the classifier cannot read, a wait that times out: all deny. A hook
  * that fell back to allow when it could not reach the gate would be worst
- * precisely when it mattered.
+ * precisely when it mattered. Since APRV-139 that includes an unattested
+ * policy: a verdict nobody is asked about is checked against the verified log
+ * first, exactly as `core/execute.ts` checks one (see `unattendedGuard`).
  *
  * **The harness executes, not the runtime.** The hook decides *before* the tool
  * runs and never spawns anything, so it never writes an `execution.completed`
@@ -66,6 +68,7 @@ import {
   sep,
 } from "node:path";
 
+import { attestationRefusal, checkAttestation } from "../core/attest.js";
 import {
   classifyCommand,
   GATE_SELF_CLASS,
@@ -80,6 +83,7 @@ import {
   withdraw,
   type GateOptions,
 } from "../core/gate.js";
+import { isLoopEscalated } from "../core/loop.js";
 import { payloadHash } from "../core/payload.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
 import { resolve as resolvePolicy } from "../core/policy-match.js";
@@ -952,6 +956,78 @@ function consumeGrants(
   return null;
 }
 
+/** A refusal the unattended guard raises, shaped like every other hook deny. */
+interface UnattendedRefusal {
+  code: string;
+  detail: string;
+}
+
+/**
+ * What the runtime must establish from the VERIFIED log before the hook lets a
+ * command run with no human anywhere in the loop (APRV-139).
+ *
+ * The hole this closes. Until this check the hook's autonomous verdict was
+ * computed from the on-disk policy alone: `loadPolicy`, `resolve`, allow. No
+ * attestation, no loop-escalation, nothing appended, nothing read. Because the
+ * harness — not this runtime — executes the tool call on an allow,
+ * `core/execute.ts`'s own guards were never reached either, so whoever could
+ * write APPROVAL.md (a merge, a second agent, a branch checkout) could
+ * reclassify any class to `autonomous` and the hook would let the command
+ * through. SPEC.md §11.1 says the opposite: an edited policy is inoperative
+ * until a human re-attests it, and the hook is an enforcement surface like any
+ * other.
+ *
+ * The two facts checked here are exactly the two `core/execute.ts`'s
+ * supervised/autonomous branch checks before it starts one, and they are
+ * checked in the same order, against a log read the same way:
+ *
+ *  1. the live policy bytes match the latest attestation (`core/attest.ts`);
+ *  2. the task is not loop-escalated (SPEC.md §10.2, `core/loop.ts`).
+ *
+ * **Where a failure lands.** Both refusals are the gate's own frozen codes,
+ * emitted through the `hook-gate-refused:` family, and they are the verdict the
+ * gated path would have printed for these classes anyway: `core/gate.ts`'s
+ * `request` checks attestation before it resolves anything, and refuses a
+ * non-manual class for an escalated task. Checking here rather than there means
+ * the deny costs no `task.registered` — under an unattested policy every
+ * autonomous command an agent runs would otherwise append one, which is a log
+ * full of registrations written under rules nobody is enforcing.
+ *
+ * **Only where nobody is asked.** The caller runs this when EVERY class resolves
+ * non-manual. A command with a manual class keeps its existing path: escalation
+ * escalates *to* manual rather than closing the task (`core/loop.ts`), and
+ * refusing the human's question too would leave an escalated task with no way
+ * back.
+ */
+function unattendedGuard(
+  logPath: string,
+  policyPath: string,
+  task: string,
+): UnattendedRefusal | null {
+  // The VERIFIED log, as every enforcement path reads it (SPEC.md §11.1): an
+  // attestation or a failure streak read off unverified bytes is whatever the
+  // last writer of the file wanted it to be.
+  const read = readVerifiedRecords(logPath);
+  if (!read.ok) return { code: "hook-io", detail: read.message };
+
+  const refusal = attestationRefusal(checkAttestation(read.records, policyPath));
+  if (refusal !== null) {
+    return {
+      code: `hook-gate-refused:${refusal.code}`,
+      detail: `${refusal.message}. Until then the hook decides nothing unattended: this command would have run with no human in the loop under rules no human has vouched for.`,
+    };
+  }
+
+  if (isLoopEscalated(read.records, task)) {
+    return {
+      code: "hook-gate-refused:loop-escalated",
+      detail: `task ${task} has three consecutive execution.failed events and is escalated to manual (SPEC.md §10.2), so its unattended classes may not run. The escalation clears when an execution.completed for the task lands.`,
+    };
+  }
+
+  return null;
+}
+
 /**
  * The gated half: find what is already open for these bytes, request whatever
  * is not, wait for the decisions, spend the grants. Returns the exit code of
@@ -993,7 +1069,6 @@ function consumeGrants(
 function gateAndWait(
   streams: Streams,
   run: HookRun,
-  input: HookInput,
   classes: string[],
   /**
    * The bytes the grant binds to: `{command, cwd}` for a Bash call, the change
@@ -1003,11 +1078,16 @@ function gateAndWait(
    */
   payload: unknown,
   headline: string,
+  /**
+   * The task id this invocation acts under, minted once by the caller
+   * (APRV-139) so the loop-escalation check and the registration it may lead to
+   * name the same task. Deriving it twice would mint two ids whenever
+   * `tool_use_id` is absent and the random fallback runs.
+   */
+  task: string,
   /** The history-rewrite refinement's own words, or `""` (APRV-108). */
   note = "",
 ): number {
-  const nonce = input.toolUseId ?? randomBytes(8).toString("hex");
-  const task = `hook:${input.sessionId}:${nonce}`;
   const hash = payloadHash(payload);
   const summary = truncate(headline, SUMMARY_LIMIT);
   const sayAllow = (reason: string): number => allow(streams, reason, run.harness);
@@ -1388,10 +1468,34 @@ function runHarnessHook(
   /** Appended to every verdict this invocation prints, when it refined one. */
   const note = notes.length === 0 ? "" : ` (${notes.join("; ")})`;
 
-  const autonomous = classes.every(
-    (cls) => resolvePolicy(load, cls).autonomy === "autonomous",
-  );
-  if (autonomous) {
+  // Every path from here needs the log, the fast paths included (APRV-139):
+  // attestation and loop-escalation are facts about the log, so the
+  // log-unreachable deny now sits above the autonomous verdict rather than
+  // below it. A hook that could not reach the log used to allow whatever the
+  // on-disk policy called autonomous; it now denies, which is the same answer
+  // it already gave every other class.
+  if (!existsSync(logPath) && !existsSync(dirname(logPath))) {
+    return deny(
+      streams,
+      "hook-log-unreachable",
+      `no log at ${logPath}; the hook writes to an existing log and never creates one. Run \`approval init\` (then \`approval policy attest\`) in ${root}, or pass --log <path> to point the hook at the log that already exists`,
+      adapter.kind,
+    );
+  }
+
+  // Minted once, here, and carried into `gateAndWait`: the loop-escalation
+  // check below and any registration that follows must name the same task.
+  const task = `hook:${input.sessionId}:${input.toolUseId ?? randomBytes(8).toString("hex")}`;
+
+  const autonomies = classes.map((cls) => resolvePolicy(load, cls).autonomy);
+  /** No class here needs a human, so nothing downstream will ask for one. */
+  const unattended = autonomies.every((autonomy) => autonomy !== "manual");
+  if (unattended) {
+    const refused = unattendedGuard(logPath, load.source.path, task);
+    if (refused !== null) return deny(streams, refused.code, refused.detail, adapter.kind);
+  }
+
+  if (autonomies.every((autonomy) => autonomy === "autonomous")) {
     // Nothing is appended: an autonomous action has no approval lifecycle
     // (amended SPEC.md §6.3), and writing one here would fill the log with the
     // agent's every `ls`.
@@ -1404,15 +1508,6 @@ function runHarnessHook(
   // do not survive a merge. An initialized-but-empty `.approval/log/` counts as
   // reachable — an audit trail that has recorded nothing is an empty log, not a
   // missing one (see `preflightLog`) — and `register` appends the first line.
-  if (!existsSync(logPath) && !existsSync(dirname(logPath))) {
-    return deny(
-      streams,
-      "hook-log-unreachable",
-      `no log at ${logPath}; the hook writes to an existing log and never creates one. Run \`approval init\` (then \`approval policy attest\`) in ${root}, or pass --log <path> to point the hook at the log that already exists`,
-      adapter.kind,
-    );
-  }
-
   return gateAndWait(
     streams,
     {
@@ -1425,10 +1520,10 @@ function runHarnessHook(
       harness: adapter.kind,
       originApp: adapter.originApp,
     },
-    input,
     classes,
     payload,
     headline,
+    task,
     note,
   );
 }
