@@ -25,6 +25,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { indeterminateExecution } from "../src/core/execute.js";
 import { runPayloadHash } from "../src/core/payload.js";
 
 /** dist/tests/cli-resolve.test.js -> dist/src/cli/main.js */
@@ -659,11 +660,169 @@ test("resolve needs NO attested policy: it exercises no policy authority", () =>
 test("`approval execution` alone, and an unknown subcommand, are usage errors", () => {
   const unit = ready();
   assert.equal(runCli(["execution"], unit.dir).code, 2);
-  assert.equal(runCli(["execution", "reconcile"], unit.dir).code, 2);
+  assert.equal(runCli(["execution", "close"], unit.dir).code, 2);
   assert.equal(runCli(["execution", "--help"], unit.dir).code, 0);
   const help = runCli(["execution", "resolve", "--help"], unit.dir);
   assert.equal(help.code, 0);
   // The reason no attestation is required is in the help, not only in the code.
   assert.match(help.stdout, /NO ATTESTATION IS REQUIRED/u);
   assert.match(help.stdout, /exercises no policy authority/u);
+});
+
+// ---------------------------------------------------------------------------
+// execution reconcile (APRV-120)
+// ---------------------------------------------------------------------------
+
+/**
+ * An execution whose side effect was attempted and whose outcome is unknown.
+ *
+ * No CLI verb produces this state, deliberately: it is written by the adapter
+ * contract, in process, when `act` raises after it has been entered
+ * (`tests/adapters-contract.test.ts` pins that boundary). So the fixture calls
+ * the same core function the contract calls, which is the real append path with
+ * write-boundary validation and compare-and-append — not a hand-written line.
+ */
+function indeterminateCase(): Case {
+  const unit = danglingCase();
+  const unknown = indeterminateExecution(
+    join(unit.dir, ".approval", "log", "events.jsonl"),
+    "task-042:chaser",
+    "act-threw",
+    "agent:claude",
+    { policy: { dir: unit.dir } },
+  );
+  assert.equal(unknown.ok, true, unknown.ok ? "" : unknown.message);
+  return unit;
+}
+
+test("status reports an indeterminate execution as its own kind, and is unhealthy", () => {
+  const unit = indeterminateCase();
+  const status = runCli(["status", "--json"], unit.dir);
+  assert.equal(status.code, 1);
+  const body = JSON.parse(status.stdout) as Record<string, unknown>;
+  assert.equal(body["healthy"], false);
+  // It left `dangling`, which is the state it is NOT: nobody needs to look at
+  // what this runtime did, they need to establish what the far side did.
+  assert.deepEqual(body["dangling"], []);
+  const indeterminate = body["indeterminate"] as Record<string, unknown>[];
+  assert.equal(indeterminate.length, 1);
+  assert.equal(indeterminate[0]?.["action_key"], "task-042:chaser");
+  assert.equal(indeterminate[0]?.["reason"], "act-threw");
+
+  const text = runCli(["status"], unit.dir);
+  assert.match(text.stdout, /^indeterminate executions {2,}1$/mu);
+  assert.match(text.stdout, /execution reconcile/u);
+});
+
+test("reconcile records the evidence, names the record it resolves, and rewrites nothing", () => {
+  const unit = indeterminateCase();
+  const before = logRecords(unit.dir);
+  const indeterminateSeq = before.find(
+    (record) => record["event"] === "execution.indeterminate",
+  )?.["seq"];
+
+  const run = runCli(
+    [
+      "execution",
+      "reconcile",
+      "task-042:chaser",
+      "--resolution",
+      "executed",
+      "--note",
+      "the provider console shows message id 8f21c accepted at 09:14:02",
+      "--as",
+      "human:carter",
+      "--json",
+    ],
+    unit.dir,
+  );
+  assert.equal(run.code, 0, run.stderr);
+  assert.deepEqual(JSON.parse(run.stdout), {
+    ok: true,
+    action_key: "task-042:chaser",
+    task: "task-042",
+    event: "execution.reconciled",
+    resolution: "executed",
+    indeterminate_seq: indeterminateSeq,
+    seq: 7,
+    attested_by_human: true,
+    actor: "human:carter",
+  });
+
+  const after = logRecords(unit.dir);
+  assert.deepEqual(after.slice(0, before.length), before, "reconcile rewrote an existing record");
+  assert.equal(runCli(["status", "--json"], unit.dir).code, 0, "status is still unhealthy");
+  assertClean(unit.dir);
+});
+
+test("reconcile refuses an agent, an empty note, a second answer, and the wrong state", () => {
+  const unit = indeterminateCase();
+  const before = logRecords(unit.dir).length;
+
+  const agent = runCli(
+    ["execution", "reconcile", "task-042:chaser", "--resolution", "executed", "--note", "saw it", "--as", "agent:claude", "--json"],
+    unit.dir,
+  );
+  assert.equal(agent.code, 2, agent.stderr);
+
+  const silent = runCli(
+    ["execution", "reconcile", "task-042:chaser", "--resolution", "executed", "--note", "  ", "--as", "human:carter", "--json"],
+    unit.dir,
+  );
+  assert.equal(silent.code, 2, silent.stderr);
+
+  const guessed = runCli(
+    ["execution", "reconcile", "task-042:chaser", "--resolution", "probably", "--note", "saw it", "--as", "human:carter", "--json"],
+    unit.dir,
+  );
+  assert.equal(guessed.code, 2, guessed.stderr);
+  assert.equal(logRecords(unit.dir).length, before, "a usage error appended something");
+
+  // A key with no indeterminate record: the operator wanted `resolve`.
+  const wrongVerb = runCli(
+    ["execution", "reconcile", "task-042:draft", "--resolution", "executed", "--note", "saw it", "--as", "human:carter", "--json"],
+    unit.dir,
+  );
+  assert.equal(wrongVerb.code, 1, wrongVerb.stderr);
+  const error = (JSON.parse(wrongVerb.stderr.trim()) as Record<string, unknown>)["error"] as Record<
+    string,
+    unknown
+  >;
+  assert.equal(error["code"], "not-indeterminate");
+
+  assert.equal(
+    runCli(
+      ["execution", "reconcile", "task-042:chaser", "--resolution", "executed", "--note", "saw it", "--as", "human:carter"],
+      unit.dir,
+    ).code,
+    0,
+  );
+  const twice = runCli(
+    ["execution", "reconcile", "task-042:chaser", "--resolution", "not-executed", "--note", "on reflection, no", "--as", "human:carter", "--json"],
+    unit.dir,
+  );
+  assert.equal(twice.code, 1, twice.stderr);
+  assert.equal(
+    (
+      (JSON.parse(twice.stderr.trim()) as Record<string, unknown>)["error"] as Record<
+        string,
+        unknown
+      >
+    )["code"],
+    "already-reconciled",
+  );
+  assertClean(unit.dir);
+});
+
+test("execution --help names both verbs and the two states they answer to", () => {
+  const unit = ready();
+  const index = runCli(["execution", "--help"], unit.dir);
+  assert.equal(index.code, 0);
+  assert.match(index.stdout, /DANGLING EXECUTION/u);
+  assert.match(index.stdout, /INDETERMINATE EXECUTION/u);
+
+  const help = runCli(["execution", "reconcile", "--help"], unit.dir);
+  assert.equal(help.code, 0);
+  assert.match(help.stdout, /executed\|not-executed/u);
+  assert.match(help.stdout, /never\nrewriting it/u);
 });

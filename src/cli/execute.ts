@@ -59,7 +59,10 @@ import { evaluateBudgets, type BudgetVerdict } from "../core/budgets.js";
 import {
   danglingExecutions,
   finishExecution,
+  indeterminateExecutions,
+  isReconcileResolution,
   loopEscalation,
+  reconcileExecution,
   resolveExecution,
   startExecution,
   type ExecuteOptions,
@@ -87,6 +90,7 @@ import {
 import {
   EXECUTION_HELP,
   QUEUE_HELP,
+  RECONCILE_HELP,
   RESOLVE_HELP,
   RUN_HELP,
   STATUS_HELP,
@@ -1015,11 +1019,25 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
   const records = read.ok ? read.records : [];
 
   const attestation = checkAttestation(records, policyPathFor(flags, cwd));
+  // APRV-120. `dangling` is now the `open` custody state only: a harness
+  // execution is terminal by design and never gains an outcome, so listing it
+  // as debris trained operators to ignore this list (the reference repository's
+  // own log carried dozens). Indeterminate outcomes are reported beside it
+  // rather than inside it, because the two ask a person for different things:
+  // look at what our runtime did, against establish whether the far side
+  // committed.
   const dangling = danglingExecutions(records).map((entry) => ({
     action_key: entry.actionKey,
     task: entry.task,
     ts: entry.ts,
     seq: entry.seq,
+  }));
+  const indeterminate = indeterminateExecutions(records).map((entry) => ({
+    action_key: entry.actionKey,
+    task: entry.task,
+    ts: entry.ts,
+    seq: entry.indeterminateSeq,
+    reason: entry.reason,
   }));
   const escalations = loopEscalation(records)
     .filter((state) => state.escalated)
@@ -1061,6 +1079,9 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
     attestation.status === "attested" &&
     verification.status === "clean" &&
     dangling.length === 0 &&
+    // An unreconciled indeterminate outcome is a side effect nobody has
+    // established the fate of, and a repo carrying one is not healthy.
+    indeterminate.length === 0 &&
     escalations.length === 0;
 
   if (json) {
@@ -1076,6 +1097,10 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       },
       verification: verificationSummary,
       dangling,
+      // Present only when there is something to report, exactly as `anomalies`
+      // is: every existing consumer sees a byte-identical object on a log that
+      // carries no indeterminate outcome.
+      ...(indeterminate.length === 0 ? {} : { indeterminate }),
       budgets,
       loop_escalations: escalations,
       payload_store: payloadStore,
@@ -1133,6 +1158,21 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
           : {
               under: dangling.map(
                 (entry) => `${entry.action_key}  started ${entry.ts}  seq ${entry.seq}`,
+              ),
+            }),
+      },
+      {
+        // Its own row, never folded into the one above: the repair is a
+        // different verb answering a different question (APRV-120).
+        left: "indeterminate executions",
+        right:
+          indeterminate.length === 0 ? st.muted("none") : st.fail(String(indeterminate.length)),
+        ...(indeterminate.length === 0
+          ? {}
+          : {
+              under: indeterminate.map(
+                (entry) =>
+                  `${entry.action_key}  ${entry.reason ?? "unknown reason"}  seq ${String(entry.seq)} — outcome unknown; \`approval execution reconcile\``,
               ),
             }),
       },
@@ -1290,7 +1330,132 @@ export function commandResolve(argv: string[], streams: Streams, cwd: string): n
   return EXIT_OK;
 }
 
-/** `approval execution <subcommand>` — one subcommand at v0.1: `resolve`. */
+// ===========================================================================
+// approval execution reconcile
+// ===========================================================================
+
+/**
+ * `approval execution reconcile <action-key> --resolution executed|not-executed
+ * --note …`
+ *
+ * The human resolution of an INDETERMINATE execution (APRV-120): the side
+ * effect was attempted, the runtime could not tell whether it committed, and a
+ * person went and looked at the far side.
+ *
+ * It is a separate verb from `resolve` rather than a third `--outcome` value,
+ * because the two answer different questions from different evidence. `resolve`
+ * asks "what did our runtime do?" and is answered from this machine. This asks
+ * "did the provider commit?" and is answered from the provider's own console,
+ * inbox or ledger. An operator who reached for the wrong one is told so
+ * (`not-indeterminate`, `already-finished`) rather than quietly writing the
+ * wrong record into an append-only log.
+ *
+ * The same three rules `resolve` enforces, enforced here before core is called:
+ * the resolution is one of two closed values and nothing is inferred, the note
+ * is mandatory and non-empty because it is the evidence, and the actor must be
+ * a human — the daemon never auto-resolves, and an agent reconciling its own
+ * unknown outcome is the executing party reporting on itself.
+ */
+export function commandReconcile(argv: string[], streams: Streams, cwd: string): number {
+  const outcomeFront = front(
+    argv,
+    { ...COMMON_FLAGS, "--resolution": "string", "--note": "string", "--as": "string" },
+    RECONCILE_HELP,
+    streams,
+    cwd,
+  );
+  if (outcomeFront.kind === "handled") return outcomeFront.code;
+  const { flags, positionals, json, logPath } = outcomeFront;
+
+  const actionKey = positionals[0];
+  if (actionKey === undefined) {
+    return usageError(streams, json, "missing <action-key> argument", RECONCILE_HELP);
+  }
+  const extra = positionals[1];
+  if (extra !== undefined) {
+    return usageError(
+      streams,
+      json,
+      `unexpected argument ${JSON.stringify(extra)}`,
+      RECONCILE_HELP,
+    );
+  }
+
+  const resolutionFlag = stringFlag(flags, "--resolution");
+  if (resolutionFlag === null) {
+    return usageError(
+      streams,
+      json,
+      "missing --resolution executed|not-executed",
+      RECONCILE_HELP,
+    );
+  }
+  if (!isReconcileResolution(resolutionFlag)) {
+    return usageError(
+      streams,
+      json,
+      `--resolution expects executed or not-executed, got ${JSON.stringify(resolutionFlag)}; nothing is inferred about an outcome the runtime could not observe`,
+      RECONCILE_HELP,
+    );
+  }
+
+  const note = stringFlag(flags, "--note");
+  if (note === null || note.trim().length === 0) {
+    return usageError(
+      streams,
+      json,
+      note === null
+        ? 'missing --note "<the evidence>": reconcile records what a person established about an unknown outcome, and an unexplained resolution cannot be told apart from a guess'
+        : "--note must not be empty: reconcile records what a person established about an unknown outcome, and an unexplained resolution cannot be told apart from a guess",
+      RECONCILE_HELP,
+    );
+  }
+
+  const asFlag = stringFlag(flags, "--as");
+  const actor = resolveHumanActor(asFlag === null ? {} : { actor: asFlag });
+  if (actor === null) {
+    if (asFlag !== null) {
+      return usageError(
+        streams,
+        json,
+        `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; reconcile records what a person established and an agent: or system: actor cannot perform it`,
+        RECONCILE_HELP,
+      );
+    }
+    return usageError(
+      streams,
+      json,
+      `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>`,
+      RECONCILE_HELP,
+    );
+  }
+
+  const result = reconcileExecution(logPath, actionKey, resolutionFlag, note, actor, {
+    policy: policyLocation(flags, cwd),
+  });
+  if (!result.ok) return emitRefusal(streams, json, result);
+
+  if (json) {
+    emitJson(streams, {
+      ok: true,
+      action_key: actionKey,
+      task: result.task,
+      event: "execution.reconciled",
+      resolution: result.resolution,
+      indeterminate_seq: result.indeterminateSeq,
+      seq: result.record.seq,
+      attested_by_human: true,
+      actor,
+    });
+  } else {
+    streams.out(
+      `reconciled ${actionKey} as ${result.resolution} at seq ${result.record.seq} by ${actor}, resolving the indeterminate outcome at seq ${result.indeterminateSeq} (human-attested; the idempotency key stays spent)\n`,
+    );
+  }
+  return EXIT_OK;
+}
+
+/** `approval execution <subcommand>`: `resolve` and `reconcile`. */
 export function commandExecution(argv: string[], streams: Streams, cwd: string): number {
   const sub = argv[0];
   const rest = argv.slice(1);
@@ -1304,6 +1469,7 @@ export function commandExecution(argv: string[], streams: Streams, cwd: string):
     return EXIT_OK;
   }
   if (sub === "resolve") return commandResolve(rest, streams, cwd);
+  if (sub === "reconcile") return commandReconcile(rest, streams, cwd);
   return usageError(
     streams,
     json,

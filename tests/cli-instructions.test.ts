@@ -371,6 +371,7 @@ const HUMAN_ONLY: readonly string[] = [
   "revoke",
   "expire",
   "execution resolve",
+  "execution reconcile",
   "audit review",
   "channel cli",
   "channel web",

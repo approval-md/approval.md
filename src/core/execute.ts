@@ -28,7 +28,11 @@
  *    Between `started` and its outcome the log honestly says "this began and we
  *    do not know how it ended". {@link danglingExecutions} surfaces that state
  *    distinctly — `approval status` reports it, `approval queue` does not,
- *    because a dangling execution is not a pending decision.
+ *    because a dangling execution is not a pending decision. It is one of five
+ *    custody states {@link executionCustody} distinguishes (APRV-120), and the
+ *    other four matter for the same reason: a harness execution is terminal by
+ *    design rather than debris, and an attempt whose outcome is unknown is
+ *    neither a failure nor a thing to retry.
  * 4. **Nothing auto-repairs.** No function here closes a dangling execution as a
  *    side effect of anything else. A second `approval run` for the same key does
  *    not "recover" the first; it refuses (`token-consumed` on the manual path,
@@ -40,6 +44,9 @@
  *    by `approval run`, which watched the child exit.) An automatic
  *    reconciliation would have to *guess* whether the email went out, and a
  *    guess written into an append-only log is indistinguishable from a fact.
+ *    The same rule governs an INDETERMINATE outcome, more strictly:
+ *    {@link reconcileExecution} is human-only, appends beside the record rather
+ *    than over it, and nothing anywhere converts one into completed or failed.
  * 5. **The budgets contract is honored at the documented charge point.**
  *    `core/budgets.ts` charges the manual path at `approval.granted` and the
  *    supervised/autonomous paths at `execution.started`. This module is that
@@ -153,6 +160,27 @@ export const EXECUTE_REFUSAL_CODES = [
    * caller, not the state.
    */
   "actor-not-human",
+  /**
+   * The key's execution ended in an unknown outcome (APRV-120) and has not been
+   * reconciled. INDETERMINATE IS A CUSTODY STATE: the token stays spent, the
+   * idempotency key stays burned, and a re-run is refused here rather than
+   * anywhere else, because "we do not know whether this happened" is a
+   * different fact from "this already happened" and calls for a different
+   * repair — a person establishing which it was, with `execution reconcile`.
+   */
+  "execution-indeterminate",
+  /**
+   * `reconcileExecution` found no unreconciled `execution.indeterminate` for
+   * the key. There is nothing whose outcome is in doubt, so there is nothing to
+   * resolve; a dangling execution is closed with `execution resolve` instead.
+   */
+  "not-indeterminate",
+  /**
+   * The indeterminate outcome already carries a resolution. A second one would
+   * be a second answer to a question a person already answered, and the first
+   * record is never rewritten.
+   */
+  "already-reconciled",
   /** The log could not be read, or holds a line that is not a record. */
   "log-unreadable",
   /** The log's final line is unterminated (a crashed write). */
@@ -485,6 +513,22 @@ export function startExecution(
     );
   }
 
+  // Custody before authorization (APRV-120). A key whose execution ended in an
+  // unknown outcome is BURNED, and it is burned on both paths: the manual one
+  // would otherwise say `token-consumed`, which is true and unhelpful, and the
+  // non-manual one `already-executed`, which is the assertion nobody can make.
+  // Checked before the policy is even read, because the fact is about the key
+  // rather than about its autonomy, and a blind retry is what the state exists
+  // to refuse.
+  const custody = executionCustody(records).find((entry) => entry.actionKey === actionKey);
+  if (custody?.state === "indeterminate") {
+    return refuse(
+      "execution-indeterminate",
+      `action ${actionKey}'s execution ended in an unknown outcome (execution.indeterminate at seq ${String(custody.indeterminateSeq)}${custody.reason === null ? "" : `, ${custody.reason}`}): the side effect was attempted and nobody knows whether it committed. Running it again would be a blind double-execution, so it is refused, and the token and the idempotency key stay spent. Establish what actually happened and record it with \`approval execution reconcile\`; if it did not happen, declare a fresh action and request that.`,
+      { seq: custody.indeterminateSeq ?? custody.seq },
+    );
+  }
+
   const load = loadPolicy(loadOptionsOf(options));
   const resolution = resolve(
     load,
@@ -734,10 +778,17 @@ export function finishExecution(
  * The one dangling execution for `actionKey`, or a refusal explaining why there
  * is none to close.
  *
- * Shared by {@link finishExecution} and {@link resolveExecution} so the two
- * verbs cannot drift about what "still open" means. Returns the head observed
- * at the read, which the caller passes as `expectedHead`: the not-started and
- * already-finished checks were made against a log ending exactly there.
+ * Shared by {@link finishExecution}, {@link resolveExecution} and
+ * {@link indeterminateExecution} so the three verbs cannot drift about what
+ * "still open" means. Returns the head observed at the read, which the caller
+ * passes as `expectedHead`: the not-started and already-finished checks were
+ * made against a log ending exactly there.
+ *
+ * An `execution.indeterminate` closes a cycle here like any other outcome
+ * (APRV-120). It is not an invitation to try again: a second outcome for a key
+ * whose effect may already have happened is exactly the blind double-execution
+ * the state exists to refuse, and the repair is `execution reconcile`, which
+ * appends beside the record rather than closing it a second time.
  */
 function openExecution(
   logPath: string,
@@ -759,7 +810,11 @@ function openExecution(
       finished = null;
       continue;
     }
-    if (record.event === "execution.completed" || record.event === "execution.failed") {
+    if (
+      record.event === "execution.completed" ||
+      record.event === "execution.failed" ||
+      record.event === "execution.indeterminate"
+    ) {
       if (started !== null) finished = record;
     }
   }
@@ -773,7 +828,9 @@ function openExecution(
   if (finished !== null) {
     return refuse(
       "already-finished",
-      `action ${actionKey} was already closed by ${finished.event} at seq ${finished.seq}; an execution has exactly one outcome`,
+      finished.event === "execution.indeterminate"
+        ? `action ${actionKey} ended in an unknown outcome (execution.indeterminate at seq ${finished.seq}); its side effect was attempted and nobody knows whether it committed, so no outcome may be written over it. Establish what happened and record it with \`approval execution reconcile\`, which appends beside that record and never rewrites it.`
+        : `action ${actionKey} was already closed by ${finished.event} at seq ${finished.seq}; an execution has exactly one outcome`,
       { seq: finished.seq },
     );
   }
@@ -884,8 +941,281 @@ export function resolveExecution(
 }
 
 // ---------------------------------------------------------------------------
-// dangling
+// indeterminate — the outcome nobody knows
 // ---------------------------------------------------------------------------
+
+export type IndeterminateResult =
+  | { ok: true; record: EventRecord; reason: IndeterminateReason; task: string }
+  | ExecuteRefusal;
+
+/**
+ * Close an execution as INDETERMINATE: the side effect was attempted and
+ * nobody knows whether it committed (APRV-120).
+ *
+ * `execution.failed` used to carry this case, and conflating the two is what
+ * made a retry look safe. An adapter that times out mid-send reads, in a log
+ * that only knows `failed`, exactly like one that never opened a socket; a
+ * caller reading the second reasonably tries again, and against the first that
+ * is a double send. So the runtime writes down which it is, and the difference
+ * is positional rather than a judgment: the adapter contract records
+ * `execution.failed` for everything that goes wrong BEFORE `act` is entered
+ * (provably not committed) and this for anything after (provably nothing).
+ *
+ * Three properties, all deliberate:
+ *
+ * 1. **The consumption is burned.** The token was spent at
+ *    `execution.started` and stays spent; the idempotency key stays used; the
+ *    budget stays charged. Refunding an attempt whose outcome is unknown would
+ *    be the runtime deciding the effect did not happen, which is the one thing
+ *    nobody here knows.
+ * 2. **No exception text.** `reason` is a closed code and nothing else is
+ *    recorded. An error message is where a credential rides into the log with
+ *    a plausible excuse, and §11.1's third invariant does not have an
+ *    exception for diagnostics. The caller still receives the message, redacted,
+ *    from the adapter contract.
+ * 3. **Nothing auto-resolves.** No function here, and nothing in the daemon,
+ *    ever converts this into completed or failed. Only
+ *    {@link reconcileExecution} does, on a person's evidence.
+ */
+export function indeterminateExecution(
+  logPath: string,
+  actionKey: string,
+  reason: IndeterminateReason,
+  actor: string,
+  options: ExecuteOptions = {},
+): IndeterminateResult {
+  const open = openExecution(logPath, actionKey, options);
+  if (!open.ok) return open;
+
+  const appended = append(
+    logPath,
+    {
+      ts: tick(options),
+      event: "execution.indeterminate",
+      actor,
+      task: open.task,
+      action_key: actionKey,
+      // `exit_code: null` for the reason `resolve` writes it: nobody watched a
+      // process exit, and a fabricated number would read like a measured one.
+      payload: { reason, exit_code: null },
+    },
+    options,
+    // The head read above, when the not-started / already-finished checks ran.
+    open.head,
+  );
+  if (!appended.ok) return appended;
+
+  return { ok: true, record: appended.record, reason, task: open.task };
+}
+
+// ---------------------------------------------------------------------------
+// reconcile — the explicit resolution of an unknown outcome
+// ---------------------------------------------------------------------------
+
+export type ReconcileResult =
+  | {
+      ok: true;
+      record: EventRecord;
+      resolution: ReconcileResolution;
+      task: string;
+      /** The `execution.indeterminate` record this resolves. */
+      indeterminateSeq: number;
+    }
+  | ExecuteRefusal;
+
+/**
+ * Record what a person established about an indeterminate execution.
+ *
+ * The counterpart of {@link resolveExecution}, and deliberately a separate verb
+ * with separate refusals: `resolve` closes an execution nobody watched finish,
+ * and this resolves one whose effect may or may not have landed. The questions
+ * are different ("what did the runtime do?" against "did the far side commit?"),
+ * the evidence is different (this repo's log against the relying party's), and
+ * an operator who reached for the wrong one should be told so rather than
+ * quietly write the wrong record.
+ *
+ * Four properties:
+ *
+ * 1. **The original is never rewritten.** This appends a record that NAMES the
+ *    indeterminate one by seq. The observation "we did not know" survives its
+ *    own resolution, which is the whole reason the log is append-only, and an
+ *    auditor can see both the doubt and its answer.
+ * 2. **Human-only, and never the daemon.** An agent reconciling its own unknown
+ *    outcome is the executing party reporting on itself; a daemon doing it on a
+ *    schedule is a guess with a cron entry. The mandatory note is the evidence,
+ *    in the reconciler's own words.
+ * 3. **The two resolutions are distinct in the log.** `executed` and
+ *    `not-executed` are separate closed values, not two readings of one
+ *    sentence, because everything downstream of the record turns on which.
+ * 4. **The key stays burned either way.** Resolving `not-executed` re-opens the
+ *    possibility of the EFFECT, not of this action: an `idempotency_key` is the
+ *    global identity of one side effect (§6.2) and a used one is used. The
+ *    repair is to declare a fresh action and request it, which is a new
+ *    question with a new answer, and the reconciliation is what makes asking it
+ *    honest.
+ */
+export function reconcileExecution(
+  logPath: string,
+  actionKey: string,
+  resolution: ReconcileResolution,
+  note: string,
+  actor: string,
+  options: ExecuteOptions = {},
+): ReconcileResult {
+  if (!HUMAN_ACTOR.test(actor)) {
+    return refuse(
+      "actor-not-human",
+      `reconcile is human-only: it records what a person established about an execution whose outcome the runtime could not observe, and an agent-attested resolution would be the executing party reporting on itself. The actor must match human:<id>, got ${JSON.stringify(actor)}.`,
+    );
+  }
+  if (note.trim().length === 0) {
+    return refuse(
+      "actor-not-human",
+      `reconcile requires a non-empty note: the record's value is the evidence behind it, and an unexplained resolution of an unknown outcome cannot be told apart from a guess`,
+    );
+  }
+
+  const read = readVerifiedRecords(
+    logPath,
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+  );
+  if (!read.ok) return fromReadRefusal(read);
+
+  const cycle = executionCustody(read.records).find((entry) => entry.actionKey === actionKey);
+  if (cycle === undefined || cycle.indeterminateSeq === null) {
+    return refuse(
+      "not-indeterminate",
+      `action ${actionKey} has no execution.indeterminate record, so there is no unknown outcome to resolve. A started execution with no outcome at all is a dangling execution and is closed with \`approval execution resolve\`.`,
+    );
+  }
+  if (cycle.state === "reconciled") {
+    return refuse(
+      "already-reconciled",
+      `action ${actionKey}'s indeterminate outcome at seq ${cycle.indeterminateSeq} was already reconciled at seq ${String(cycle.closedSeq)}; a second resolution would be a second answer to a question a person already answered, and neither record is rewritten`,
+      { seq: cycle.closedSeq ?? cycle.indeterminateSeq },
+    );
+  }
+
+  const task = cycle.task;
+  if (task === null || task.length === 0) {
+    // Unreachable through the real append path: event.schema.json requires
+    // `task` on every execution event. Kept as a fail-closed backstop.
+    return refuse(
+      "not-indeterminate",
+      `the execution.started record for ${actionKey} at seq ${cycle.seq} names no task; the reconciliation event requires one`,
+      { seq: cycle.seq },
+    );
+  }
+
+  const appended = append(
+    logPath,
+    {
+      ts: tick(options),
+      event: "execution.reconciled",
+      actor,
+      task,
+      action_key: actionKey,
+      payload: {
+        indeterminate_seq: cycle.indeterminateSeq,
+        resolution,
+        note,
+        attested_by_human: true,
+      },
+    },
+    options,
+    // Compare-and-append: the "is there an unreconciled indeterminate here"
+    // check above was made against the log ending exactly at this head, so two
+    // reconcilers of one record cannot both land.
+    read.head,
+  );
+  if (!appended.ok) return appended;
+
+  return {
+    ok: true,
+    record: appended.record,
+    resolution,
+    task,
+    indeterminateSeq: cycle.indeterminateSeq,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// custody
+// ---------------------------------------------------------------------------
+
+/**
+ * What the log knows about one started execution (APRV-120).
+ *
+ * The word is custody rather than status because the question is not "did it
+ * work" but "who is holding this, and what may still be done with it". Five
+ * states, and the two that are easy to confuse are the reason the vocabulary
+ * exists:
+ *
+ * - `settled` — an `execution.completed` or `execution.failed` closed it. The
+ *   runtime watched the outcome and wrote down what it saw.
+ * - `open` — a start with no outcome, written by a runtime that MEANT to watch
+ *   one. This is the dangling execution: a crash between `execution.started`
+ *   and its outcome, repairable by a person with `execution resolve`. It is
+ *   debris, and `approval status` says so.
+ * - `delegated` — a start carrying `payload.execution: "harness"` (APRV-117,
+ *   APRV-141). **Terminal by design, and never debris.** The harness runs the
+ *   command and this runtime never observes an exit status, so no outcome event
+ *   will ever follow; the record is complete as written. Reporting these as
+ *   dangling — which is what happened before this state existed, to every
+ *   harness execution in the reference repository's own log — trains operators
+ *   to ignore the one list that is supposed to mean something.
+ * - `indeterminate` — an `execution.indeterminate`: the side effect was
+ *   attempted and nobody knows whether it committed. The token is spent and the
+ *   key is burned, and a re-run is refused, because a retry against an unknown
+ *   outcome is a blind double-execution.
+ * - `reconciled` — a person established which it was, and said so in an
+ *   `execution.reconciled` that sits beside the indeterminate record rather
+ *   than over it.
+ */
+export const CUSTODY_STATES = [
+  "settled",
+  "open",
+  "delegated",
+  "indeterminate",
+  "reconciled",
+] as const;
+
+export type CustodyState = (typeof CUSTODY_STATES)[number];
+
+/** Where an indeterminate outcome's unknowing began. Closed (schema §8). */
+export const INDETERMINATE_REASONS = ["act-threw"] as const;
+export type IndeterminateReason = (typeof INDETERMINATE_REASONS)[number];
+
+/** What a reconciliation established. Closed, and the two are distinct. */
+export const RECONCILE_RESOLUTIONS = ["executed", "not-executed"] as const;
+export type ReconcileResolution = (typeof RECONCILE_RESOLUTIONS)[number];
+
+export function isIndeterminateReason(value: unknown): value is IndeterminateReason {
+  return typeof value === "string" && (INDETERMINATE_REASONS as readonly string[]).includes(value);
+}
+
+export function isReconcileResolution(value: unknown): value is ReconcileResolution {
+  return typeof value === "string" && (RECONCILE_RESOLUTIONS as readonly string[]).includes(value);
+}
+
+/** One action key's latest execution cycle, and what may still be done with it. */
+export interface ExecutionCustody {
+  actionKey: string;
+  task: string | null;
+  state: CustodyState;
+  /** The `execution.started` record's timestamp, position and actor. */
+  ts: string;
+  seq: number;
+  actor: string;
+  /** The closing record's position: the outcome, or the reconciliation. */
+  closedSeq: number | null;
+  /** The `execution.indeterminate` record's position, when there is one. */
+  indeterminateSeq: number | null;
+  /** Its closed reason, when there is one. */
+  reason: IndeterminateReason | null;
+  /** What a reconciliation established, when `state` is `reconciled`. */
+  resolution: ReconcileResolution | null;
+}
 
 /** An execution that began and whose outcome the log does not know. */
 export interface DanglingExecution {
@@ -897,38 +1227,101 @@ export interface DanglingExecution {
   actor: string;
 }
 
+/** Does this `execution.started` record say the harness ran the command? */
+function isDelegatedStart(record: EventRecord): boolean {
+  return payloadOf(record)["execution"] === "harness";
+}
+
 /**
- * Executions that started and never finished, in log order.
+ * The custody state of every started execution, in log order.
  *
  * Pure: no I/O, no clock. Per action key, only the **latest cycle** counts — a
  * start followed by an outcome is closed, and a later start reopens the key.
  * (The gate refuses a second start for a key anyway; this function does not
  * assume that, because a projection that only works on well-formed logs is a
  * projection that goes quiet exactly when something has gone wrong.)
+ */
+export function executionCustody(records: EventRecord[]): ExecutionCustody[] {
+  const cycles = new Map<string, ExecutionCustody>();
+  for (const record of records) {
+    const actionKey = record.action_key;
+    if (typeof actionKey !== "string" || actionKey.length === 0) continue;
+
+    if (record.event === "execution.started") {
+      cycles.set(actionKey, {
+        actionKey,
+        task: record.task ?? null,
+        // The marker is read once, here: a harness start is complete as
+        // written, and every later reader asks this projection rather than
+        // re-deriving the rule from a payload field.
+        state: isDelegatedStart(record) ? "delegated" : "open",
+        ts: record.ts,
+        seq: record.seq,
+        actor: record.actor,
+        closedSeq: null,
+        indeterminateSeq: null,
+        reason: null,
+        resolution: null,
+      });
+      continue;
+    }
+
+    const cycle = cycles.get(actionKey);
+    if (cycle === undefined) continue;
+
+    if (record.event === "execution.completed" || record.event === "execution.failed") {
+      cycle.state = "settled";
+      cycle.closedSeq = record.seq;
+      continue;
+    }
+    if (record.event === "execution.indeterminate") {
+      const reason = payloadOf(record)["reason"];
+      cycle.state = "indeterminate";
+      cycle.closedSeq = record.seq;
+      cycle.indeterminateSeq = record.seq;
+      cycle.reason = isIndeterminateReason(reason) ? reason : null;
+      continue;
+    }
+    if (record.event === "execution.reconciled") {
+      const resolution = payloadOf(record)["resolution"];
+      cycle.state = "reconciled";
+      cycle.closedSeq = record.seq;
+      cycle.resolution = isReconcileResolution(resolution) ? resolution : null;
+    }
+  }
+  return [...cycles.values()].sort((a, b) => a.seq - b.seq);
+}
+
+/**
+ * Executions that started, were meant to be watched, and never finished.
  *
  * This is the state a crash between `execution.started` and its outcome leaves
  * behind, and it is reported as itself: not as completed, not as failed, not as
  * clean. `approval status` lists it; `approval queue` does not, because nobody
  * is being asked to decide anything.
+ *
+ * A `delegated` start is NOT here (APRV-120). The harness ran the command and
+ * this runtime never sees an exit status, so its record was never going to gain
+ * an outcome; listing it as debris says something false about a log that is
+ * exactly right.
  */
 export function danglingExecutions(records: EventRecord[]): DanglingExecution[] {
-  const open = new Map<string, DanglingExecution>();
-  for (const record of records) {
-    const actionKey = record.action_key;
-    if (typeof actionKey !== "string" || actionKey.length === 0) continue;
-    if (record.event === "execution.started") {
-      open.set(actionKey, {
-        actionKey,
-        task: record.task ?? null,
-        ts: record.ts,
-        seq: record.seq,
-        actor: record.actor,
-      });
-      continue;
-    }
-    if (record.event === "execution.completed" || record.event === "execution.failed") {
-      open.delete(actionKey);
-    }
-  }
-  return [...open.values()].sort((a, b) => a.seq - b.seq);
+  return executionCustody(records)
+    .filter((cycle) => cycle.state === "open")
+    .map(({ actionKey, task, ts, seq, actor }) => ({ actionKey, task, ts, seq, actor }));
+}
+
+/**
+ * Executions whose side effect was attempted and whose outcome nobody knows,
+ * and which no one has reconciled yet.
+ *
+ * Distinct from {@link danglingExecutions} in what it asks of a person. A
+ * dangling execution needs someone to look at what the runtime did; an
+ * indeterminate one needs someone to establish, from the relying party's own
+ * evidence, whether the effect happened at all. Both are debris and both make
+ * `approval status` unhealthy; only one of them is repaired with
+ * `execution resolve`.
+ */
+export function indeterminateExecutions(records: EventRecord[]): ExecutionCustody[] {
+  return executionCustody(records).filter((cycle) => cycle.state === "indeterminate");
 }
