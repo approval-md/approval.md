@@ -397,18 +397,6 @@ function originOf(field: TaggedField<unknown>): string {
   return field.kind === "computed" ? field.source : field.author;
 }
 
-function formatTtl(ms: number | null): string {
-  if (ms === null) return "no TTL (the policy declares none)";
-  if (ms <= 0) return "EXPIRED";
-  const totalSeconds = Math.floor(ms / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) return `${hours}h ${minutes}m left`;
-  if (minutes > 0) return `${minutes}m ${seconds}s left`;
-  return `${seconds}s left`;
-}
-
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -499,6 +487,20 @@ export function renderTelegram(
 
   const computedLines: Line[] = [
     line("class", request.class, "class", request.class.value),
+    // APRV-143, immediately under the class it explains: `class: policy.edit`
+    // on its own tells the approver that some rule fired and leaves them to
+    // find the file. Derived from the bound bytes by the same classifier the
+    // hook decided with.
+    ...(request.protected_path === undefined
+      ? []
+      : [
+          line(
+            "protected_path",
+            request.protected_path,
+            "protected path",
+            request.protected_path.value,
+          ),
+        ]),
     line("autonomy", request.autonomy, "autonomy", request.autonomy.value),
     line("provenance", request.provenance, "resolved by", request.provenance.value),
     line("payload_hash", request.payload_hash, "payload sha256", request.payload_hash.value),
@@ -509,12 +511,11 @@ export function renderTelegram(
     // human-readable form of the same fact plus the one thing the raw
     // timestamp does not say: whether an answer now still reaches anyone.
     line("waiting", request.waiting, "waiting", request.waiting.value),
-    line(
-      "ttl_remaining_ms",
-      request.ttl_remaining_ms,
-      "ttl",
-      formatTtl(request.ttl_remaining_ms.value),
-    ),
+    // No `ttl` line (APRV-143). `expires 13:09 UTC` on the line above IS the
+    // TTL, stated as the instant a reader acts on rather than as a duration
+    // they would have to add to a timestamp; two renderings of one fact cost a
+    // metadata row on a phone screen and buy nothing. `ttl_remaining_ms` stays
+    // on the request, so `--json` and every other channel still carry it.
     line(
       "chain",
       request.chain,

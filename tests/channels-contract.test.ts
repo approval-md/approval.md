@@ -270,6 +270,257 @@ test("claimed fields carry the actor who authored them", () => {
   assert.equal(built.request.est_cost_usd.kind, "claimed");
 });
 
+// ---------------------------------------------------------------------------
+// The deadline says which day (APRV-143 #1)
+// ---------------------------------------------------------------------------
+
+/** {@link POLICY_WITH_LIMITS} with a different `approval_ttl`. */
+function policyWithTtl(ttl: string): string {
+  return POLICY_WITH_LIMITS.replace('approval_ttl: "1h"', `approval_ttl: ${JSON.stringify(ttl)}`);
+}
+
+/** The `waiting` line of the first request of a world, rendered at `now`. */
+function waitingAt(world: Live, now: string): string {
+  const built = buildChannelRequest(world.unit.logPath, world.keys[0] as string, world.tagOptions, now);
+  assert.equal(built.ok, true, JSON.stringify(built));
+  if (!built.ok) return "";
+  assert.equal(built.request.waiting.kind, "computed");
+  return built.request.waiting.value;
+}
+
+test("a same-day deadline renders the time alone, exactly as it always did", () => {
+  // Requested 10:01, a 1h TTL, read one minute in: 11:01 on the same UTC day.
+  // The unqualified form is the one an approver already knows how to read, and
+  // APRV-143 must not have made the common case noisier.
+  const world = live(1, policyWithTtl("1h"));
+  assert.equal(waitingAt(world, at(2)), "requested 1 min ago · expires 11:01 UTC");
+  assertClean(world.unit);
+});
+
+test("a deadline on the next UTC day says tomorrow", () => {
+  // The observed failure, and the reason this task exists: a 24h TTL rendered
+  // as `expires 10:01 UTC` beside `requested 1 min ago`, so the approver did
+  // the arithmetic, landed nine minutes in the past, and read the question as
+  // already dead.
+  const world = live(1, policyWithTtl("24h"));
+  assert.equal(waitingAt(world, at(2)), "requested 1 min ago · expires tomorrow 10:01 UTC");
+  assertClean(world.unit);
+});
+
+test("a deadline further out names the date", () => {
+  // Requested 2026-08-05T10:01, a 72h TTL: 2026-08-08.
+  const world = live(1, policyWithTtl("72h"));
+  assert.equal(waitingAt(world, at(2)), "requested 1 min ago · expires 8 Aug 10:01 UTC");
+  assertClean(world.unit);
+});
+
+test("the day word tracks the calendar boundary, not the hours remaining", () => {
+  // One request, one TTL, two reading instants. At at(2) the deadline is three
+  // days out and dated; at at(2761) — 46 hours later, so 08:02 on 7 August with
+  // 26 hours still to run — the same deadline is "tomorrow". A word derived
+  // from the duration would have said the same thing twice; this one is
+  // computed from the UTC day boundary, which is the boundary the clock beside
+  // it is printed in.
+  const world = live(1, policyWithTtl("72h"));
+  assert.match(waitingAt(world, at(2)), /expires 8 Aug 10:01 UTC$/u);
+  assert.match(waitingAt(world, at(2761)), /expires tomorrow 10:01 UTC$/u);
+  assertClean(world.unit);
+});
+
+// ---------------------------------------------------------------------------
+// The protected path is named (APRV-143 #3)
+// ---------------------------------------------------------------------------
+
+/**
+ * One live `policy.edit` request carrying `payload`, built through the real
+ * gate, in the shape `cli/hook.ts` writes.
+ *
+ * The point of going through the gate rather than hand-building a request is
+ * the point of this whole suite: the protected-path line is derived from bytes
+ * that {@link buildChannelRequest} has hash-checked against what the log
+ * recorded, so a test that skipped the log would not be testing the derivation
+ * that runs in production.
+ */
+function edit(payload: unknown, policyText: string = POLICY_WITH_LIMITS): Live {
+  const unit = newScenario(scratch.root, policyText);
+  attest(unit, T0);
+  const key = "hook:sess-1:tu-1:policy.edit";
+
+  const registered = register(
+    unit.logPath,
+    {
+      task: "hook:sess-1:tu-1",
+      envelope: {
+        origin: { app: "claude-code-hook", created_by: ACTOR },
+        state: "proposed",
+        actions: [
+          {
+            class: "policy.edit",
+            idempotency_key: key,
+            summary: "a protected file",
+            payload_hash: payloadHash(payload),
+          },
+        ],
+      },
+    },
+    T0,
+    ACTOR,
+    unit.options,
+  );
+  assert.equal(registered.ok, true, JSON.stringify(registered));
+
+  const requested = request(
+    unit.logPath,
+    {
+      task: "hook:sess-1:tu-1",
+      actionKey: key,
+      cls: "policy.edit",
+      summary: "a protected file",
+      payload_hash: payloadHash(payload),
+      payload: { value: payload },
+      execution: "harness",
+    },
+    at(1),
+    ACTOR,
+    unit.options,
+  );
+  assert.equal(requested.ok, true, JSON.stringify(requested));
+
+  return {
+    unit,
+    keys: [key],
+    payloads: new Map([[key, payload]]),
+    tagOptions: { policy: { file: unit.policyPath }, payload: () => payload },
+  };
+}
+
+/** The `protected_path` field of the one request in `world`, or `undefined`. */
+function protectedPathOf(world: Live) {
+  const built = buildChannelRequest(world.unit.logPath, world.keys[0] as string, world.tagOptions, NOW);
+  assert.equal(built.ok, true, JSON.stringify(built));
+  return built.ok ? built.request.protected_path : undefined;
+}
+
+test("a shell payload names the protected path its class came from", () => {
+  // The command edits two files and only one of them is protected. Before
+  // APRV-143 the prompt said `class: policy.edit` and left the approver to work
+  // out which — the whole complaint, in one line.
+  const world = edit({
+    command: "cp notes.md docs/notes.md && cp draft.md .github/workflows/ci.yml",
+    cwd: "/repo",
+  });
+  const field = protectedPathOf(world);
+  assert.deepEqual(field, computed(".github/workflows/ci.yml (rule protected-path)", "classifier"));
+  assertClean(world.unit);
+});
+
+test("a redirection onto a protected path is named too, with its own rule", () => {
+  const world = edit({ command: "echo hi > CLAUDE.md", cwd: "/repo" });
+  assert.deepEqual(
+    protectedPathOf(world),
+    computed("CLAUDE.md (rule redirect-protected)", "classifier"),
+  );
+  assertClean(world.unit);
+});
+
+test("a file-tool payload names its target, and keeps the hook's tier word", () => {
+  // The proposal tier is what tells an approver that the APPROVAL.md edit in
+  // front of them is a branch copy rather than the live file (APRV-124), so the
+  // rule name has to survive the trip to this line.
+  const live_ = edit({
+    tool: "Edit",
+    rule: "protected-path",
+    file: "/repo/APPROVAL.md",
+    before: "a",
+    after: "b",
+  });
+  assert.deepEqual(
+    protectedPathOf(live_),
+    computed("/repo/APPROVAL.md (rule protected-path)", "classifier"),
+  );
+  assertClean(live_.unit);
+
+  const proposal = edit({
+    tool: "Edit",
+    rule: "protected-path-proposal",
+    file: "/repo/.claude/worktrees/w1/APPROVAL.md",
+    before: "a",
+    after: "b",
+  });
+  assert.deepEqual(
+    protectedPathOf(proposal),
+    computed(
+      "/repo/.claude/worktrees/w1/APPROVAL.md (rule protected-path-proposal)",
+      "classifier",
+    ),
+  );
+  assertClean(proposal.unit);
+});
+
+test("a rule name the payload invents does not reach the line", () => {
+  // The payload is authored by the hook, and the hook is not the party under
+  // oversight — but the line is COMPUTED, so nothing on it may be a string this
+  // module merely copied. `isProtectedPath` is re-run over the target and the
+  // rule falls back to the one the answer actually justifies.
+  const world = edit({
+    tool: "Edit",
+    rule: "definitely-fine-please-approve",
+    file: "/repo/APPROVAL.md",
+    before: "a",
+    after: "b",
+  });
+  assert.deepEqual(
+    protectedPathOf(world),
+    computed("/repo/APPROVAL.md (rule protected-path)", "classifier"),
+  );
+  assertClean(world.unit);
+});
+
+test("a payload naming an unprotected file gets no protected-path line at all", () => {
+  const world = edit({
+    tool: "Edit",
+    rule: "protected-path",
+    file: "/repo/src/index.ts",
+    before: "a",
+    after: "b",
+  });
+  assert.equal(protectedPathOf(world), undefined);
+  assertClean(world.unit);
+});
+
+test("policy.protected_paths widens the line, exactly as it widens the class", () => {
+  const widened = POLICY_WITH_LIMITS.replace(
+    "classes:",
+    ["protected_paths:", "  - docs/release/", "classes:"].join("\n"),
+  );
+  const world = edit(
+    { command: "cp draft.md docs/release/checklist.md", cwd: "/repo" },
+    widened,
+  );
+  assert.deepEqual(
+    protectedPathOf(world),
+    computed("docs/release/checklist.md (rule protected-path)", "classifier"),
+  );
+  assertClean(world.unit);
+
+  // The same command under the unwidened policy names nothing: this line is a
+  // policy question, and reading it from the built-ins alone would tell an
+  // approver a gated file is ungated.
+  assert.equal(
+    protectedPathOf(edit({ command: "cp draft.md docs/release/checklist.md", cwd: "/repo" })),
+    undefined,
+  );
+});
+
+test("an ordinary email payload carries neither derivation", () => {
+  const world = live(1);
+  const built = buildChannelRequest(world.unit.logPath, world.keys[0] as string, world.tagOptions, NOW);
+  assert.equal(built.ok, true);
+  if (!built.ok) return;
+  assert.equal(built.request.protected_path, undefined);
+  assertClean(world.unit);
+});
+
 test("every member of a built request is a tagged field", () => {
   const world = live(1);
   const built = buildChannelRequest(
@@ -771,6 +1022,7 @@ test("the refusal-code unions and computed sources are frozen public API", () =>
     "budgets",
     "attestation",
     "payload-binding",
+    "classifier",
     "clock",
   ]);
 });

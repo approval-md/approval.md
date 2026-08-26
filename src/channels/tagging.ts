@@ -75,6 +75,7 @@ import {
   type ChannelRequest,
   type PayloadRendering,
 } from "./contract.js";
+import { protectedPathView } from "./payload-view.js";
 
 // ---------------------------------------------------------------------------
 // Options and refusals
@@ -367,6 +368,7 @@ function withStore(options: TagOptions, logPath: string): TagOptions {
  * | `budgets` | `evaluateBudgetsWithTask()` at `now` | `budgets` |
  * | `attestation` | `checkAttestation()` against the live policy file | `attestation` |
  * | `fullPayload` | supplied material, hash-checked | `payload-binding` |
+ * | `protected_path` | the classifier, re-run over the hash-checked material | `classifier` |
  * | `ttl_remaining_ms`, `waiting` | arithmetic on `now` | `clock` |
  *
  * Claimed, and who authored each: `summary` and `est_cost_usd` carry the actor
@@ -402,12 +404,56 @@ export function buildChannelRequest(
   );
 }
 
-/** `HH:MM UTC` for an instant, or `null` when it does not parse. */
-function clockText(ms: number): string {
+/** Month names for the dated form of {@link clockText}. UTC, like everything here. */
+const MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+] as const;
+
+/** Whole UTC days since the epoch. The day boundary is the displayed zone's. */
+function utcDay(ms: number): number {
+  return Math.floor(ms / 86_400_000);
+}
+
+/**
+ * A deadline, said the way a reader on a phone can act on it (APRV-143).
+ *
+ * ```
+ * 13:09 UTC            the deadline is later today
+ * tomorrow 13:09 UTC   the deadline is the next UTC day
+ * 27 Aug 13:09 UTC     anything further out, and anything already past
+ * ```
+ *
+ * The observed failure is a 24h TTL rendering as `expires 13:09 UTC` beside
+ * `requested 1 min ago`: a reader does the arithmetic, gets "nine minutes ago",
+ * and concludes the question is dead. Time of day alone can only be read
+ * against a day the line never states.
+ *
+ * Day boundaries are computed in UTC because the clock is printed in UTC, and a
+ * "tomorrow" measured in one zone against a time printed in another is worse
+ * than no word at all. `now` unreadable degrades to the time-only form: a
+ * renderer that cannot place today must not name a relative day.
+ */
+function clockText(ms: number, nowMs: number): string {
   const at = new Date(ms);
   const hh = String(at.getUTCHours()).padStart(2, "0");
   const mm = String(at.getUTCMinutes()).padStart(2, "0");
-  return `${hh}:${mm} UTC`;
+  const clock = `${hh}:${mm} UTC`;
+  if (Number.isNaN(nowMs)) return clock;
+  const days = utcDay(ms) - utcDay(nowMs);
+  if (days === 0) return clock;
+  if (days === 1) return `tomorrow ${clock}`;
+  return `${String(at.getUTCDate())} ${MONTHS[at.getUTCMonth()] ?? "?"} ${clock}`;
 }
 
 /** `just now`, `4 min ago`, `2h 05m ago` — how long the question has waited. */
@@ -443,14 +489,46 @@ function waitingLine(
 
   const waitMs = waitUntil === null ? Number.NaN : Date.parse(waitUntil);
   if (!Number.isNaN(waitMs)) {
-    return `${age} · requester waits until ${clockText(waitMs)}`;
+    return `${age} · requester waits until ${clockText(waitMs, nowMs)}`;
   }
   if (ttlRemainingMs !== null && !Number.isNaN(nowMs)) {
-    return `${age} · expires ${clockText(nowMs + ttlRemainingMs)}`;
+    return `${age} · expires ${clockText(nowMs + ttlRemainingMs, nowMs)}`;
   }
   // No TTL and no declared wait: the policy bounded nothing, and inventing a
   // deadline here would be the renderer stating a fact the log does not carry.
   return `${age} · no deadline (the policy declares no approval_ttl)`;
+}
+
+/**
+ * `policy.protected_paths`, or nothing when the policy did not load.
+ *
+ * Narrower on a failed load, never wider: an unreadable policy under-reports
+ * which paths are protected rather than inventing a protection, and autonomy
+ * has already failed closed to `manual` by the time this is read.
+ */
+function protectedPathsOf(load: PolicyLoadResult): readonly string[] {
+  return load.ok ? (load.policy.protected_paths ?? []) : [];
+}
+
+/**
+ * The payload-derived computed line of APRV-143 #3: which protected path
+ * selected the class.
+ *
+ * Derived from the payload material this function was already handed — material
+ * that {@link renderPayload} has hash-checked against the recorded binding — and
+ * it re-runs the classifier rather than reading a claim off it. A payload nobody
+ * holds, or one of a shape the derivation does not recognise, produces no line:
+ * an aid that cannot be derived is absent, never guessed.
+ */
+function payloadDerivations(
+  rendering: PayloadRendering | null,
+  load: PolicyLoadResult,
+): Partial<Pick<ChannelRequest, "protected_path">> {
+  if (rendering === null) return {};
+
+  const guarded = protectedPathView(rendering.value, protectedPathsOf(load));
+  if (guarded === null) return {};
+  return { protected_path: computed(`${guarded.path} (rule ${guarded.rule})`, "classifier") };
 }
 
 /** The shared body of {@link buildChannelRequest} and {@link buildPendingQueue}. */
@@ -551,6 +629,7 @@ function tagDerivation(
     provenance: computed(explanation.provenance, "policy-match"),
     est_cost_usd: claimed(cost, requestRecord.actor),
     summary: claimed(derivation.declared.summary, requestRecord.actor),
+    ...payloadDerivations(rendering, load),
     payload_hash: computed(boundHash, "log"),
     fullPayload: computed(rendering, "payload-binding"),
     budgets: computed(budgets, "budgets"),

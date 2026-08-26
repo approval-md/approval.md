@@ -1378,14 +1378,34 @@ test("the prompt carries the age and the deadline an answer has to beat", async 
   channel.onDecision(handlerFor(world, at(32)));
   await channel.notify(request_);
 
-  // Requested at at(1), rendered at at(32): 31 minutes of a 1h TTL gone, so an
-  // answer has until 10:01 UTC. A COMPUTED line, under the computed heading.
+  // Requested at at(1), rendered at at(32): 31 minutes of a 24h TTL gone, so an
+  // answer has until 10:01 UTC on the FOLLOWING day. A COMPUTED line, under the
+  // computed heading.
+  //
+  // APRV-143 lives in the word "tomorrow". This assertion used to read `expires
+  // 10:01 UTC`, which is the bug: a deadline 23½ hours away rendered as a time
+  // thirty minutes in the past, and an approver doing the arithmetic on their
+  // phone concluded the question was already dead.
   const sent = mock.sentTexts().join("\n");
-  assert.match(sent, /waiting:<\/b> requested 31 min ago · expires 10:01 UTC/u);
+  assert.match(sent, /waiting:<\/b> requested 31 min ago · expires tomorrow 10:01 UTC/u);
   const rendered = channel.lastRendered()[0];
   assert.equal(
     rendered?.fields.find((field) => field.field === "waiting")?.kind,
     "computed",
+  );
+  // APRV-143: the `ttl:` line is gone. `expires` above carries the same fact,
+  // as the instant a reader acts on rather than as a duration they must add to
+  // a timestamp, and the value itself stays on the request for `--json`.
+  assert.doesNotMatch(sent, /<b>ttl:<\/b>/u);
+  assert.equal(
+    rendered?.fields.find((field) => field.field === "ttl_remaining_ms"),
+    undefined,
+    "the prompt still renders a ttl line",
+  );
+  assert.equal(request_.ttl_remaining_ms.kind, "computed");
+  assert.ok(
+    (request_.ttl_remaining_ms.value ?? 0) > 0,
+    "the TTL left the request as well as the prompt",
   );
   assertClean(world.unit);
 });
@@ -1418,13 +1438,87 @@ test("a hook request's declared wait deadline is shown instead of the TTL", asyn
   assertClean(world.unit);
 });
 
+test("the requester's own deadline gets the same day word the TTL does", async () => {
+  // APRV-143 #1: both waiting-line variants share one implementation, so the
+  // `requester waits until` branch gains "tomorrow" without a second copy of
+  // the day arithmetic that could disagree with the first.
+  const world = live(1);
+  hookedRequest(world, { waitUntil: at(1_500) });
+  const [, hooked] = queueOf(world, at(2));
+  assert.ok(hooked !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(hooked);
+
+  // at(1500) is 25 hours after T0: 11:00 UTC on 6 August, the next UTC day.
+  assert.match(
+    mock.sentTexts().join("\n"),
+    /waiting:<\/b> requested 1 min ago · requester waits until tomorrow 11:00 UTC/u,
+  );
+  assertClean(world.unit);
+});
+
+test("the prompt names the protected path that earned the class", async () => {
+  // APRV-143 #3, end to end through the renderer: the approver reads WHICH
+  // file, as a computed line, without opening the payload block.
+  const world = live(1);
+  hookedRequest(world, { command: "cp draft.md .github/workflows/ci.yml" });
+  const [, hooked] = queueOf(world, at(2));
+  assert.ok(hooked !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(hooked);
+
+  const sent = mock.sentTexts().join("\n");
+  assert.match(
+    sent,
+    /<b>protected path:<\/b> \.github\/workflows\/ci\.yml \(rule protected-path\) <i>\(classifier\)<\/i>/u,
+  );
+  assert.equal(
+    channel.lastRendered()[0]?.fields.find((field) => field.field === "protected_path")?.kind,
+    "computed",
+  );
+  assertClean(world.unit);
+});
+
+test("a prompt with no protected path carries no protected-path line", async () => {
+  const world = live(1);
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(request_);
+
+  // `mock.sentTexts()` accumulates across the file, so the absence is asserted
+  // on THIS prompt's own rendering report rather than on the whole transcript.
+  const fields = channel.lastRendered()[0]?.fields ?? [];
+  assert.equal(
+    fields.find((field) => field.field === "protected_path"),
+    undefined,
+    "an email payload was given a protected-path line",
+  );
+  assertClean(world.unit);
+});
+
+/** What a {@link hookedRequest} may vary. Everything else is the hook's shape. */
+interface HookedOptions {
+  /** The requester's own declared deadline. Defaults to `at(10)`. */
+  waitUntil?: string;
+  /** The command in the bound payload. Defaults to a local amend. */
+  command?: string;
+}
+
 /**
  * Register and request one harness-executed action carrying a `wait_until`,
  * the way `approval hook claude-code` does. Returns its action key.
  */
-function hookedRequest(world: Live): string {
+function hookedRequest(world: Live, options: HookedOptions = {}): string {
+  const command = options.command ?? "git commit --amend";
+  const waitUntil = options.waitUntil ?? at(10);
   const key = "task-101:amend";
-  const payload = { command: "git commit --amend", cwd: "/repo" };
+  const payload = { command, cwd: "/repo" };
   const registered = register(
     world.unit.logPath,
     {
@@ -1436,7 +1530,7 @@ function hookedRequest(world: Live): string {
           {
             class: "communicate.email.external",
             idempotency_key: key,
-            summary: "git commit --amend",
+            summary: command,
             reversible: false,
             est_cost_usd: 0,
             payload_hash: payloadHash(payload),
@@ -1458,11 +1552,11 @@ function hookedRequest(world: Live): string {
       cls: "communicate.email.external",
       est_cost_usd: 0,
       reversible: false,
-      summary: "git commit --amend",
+      summary: command,
       payload_hash: payloadHash(payload),
       payload: { value: payload },
       execution: "harness",
-      wait_until: at(10),
+      wait_until: waitUntil,
     },
     at(1),
     ACTOR,

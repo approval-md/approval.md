@@ -81,6 +81,17 @@ export const COMPUTED_SOURCES = [
   "attestation",
   /** Recomputed from the payload bytes and checked against the bound hash. */
   "payload-binding",
+  /**
+   * Re-derived from the hash-checked payload bytes by `core/command-class.ts`
+   * — the same module whose answer selected the class (APRV-143).
+   *
+   * Distinct from `payload-binding`, which names the hash agreement itself.
+   * This names the classifier's reading OF those bytes, which is a second
+   * derivation over the same material and can be wrong in ways the hash cannot
+   * catch: a channel that labelled it `payload-binding` would be borrowing the
+   * binding's authority for an answer the binding does not cover.
+   */
+  "classifier",
   /** Arithmetic on the display-time instant (TTL remaining). */
   "clock",
 ] as const;
@@ -192,6 +203,17 @@ export interface ChannelRequest {
   rationale?: TaggedField<string>;
   /** `route.confidence`, when the log carries one. Claimed, and never a gate. */
   confidence?: TaggedField<number>;
+  /**
+   * The protected path that selected `policy.edit`, and the rule that matched
+   * it (APRV-143): `.github/workflows/ci.yml (rule protected-path)`.
+   *
+   * **Computed.** For a shell payload the classifier is re-run over the bound
+   * command; for a file-tool payload `isProtectedPath` is re-run over the bound
+   * target. Either way the answer is recomputed from the bytes the approval
+   * binds to rather than read off a claim, which is what puts it on this side
+   * of the boundary. Absent when no protected path selected the class.
+   */
+  protected_path?: TaggedField<string>;
   /** The content binding recorded on `approval.requested` (SPEC.md §6.2). */
   payload_hash: TaggedField<string>;
   /**

@@ -651,3 +651,31 @@ test("reading a protected path is still a read", () => {
   assert.ok(result.ok);
   assert.deepEqual(result.classes, ["read.shell"]);
 });
+
+test("a policy.edit segment reports WHICH path earned it (APRV-143)", () => {
+  // The word the matcher matched, verbatim, so a channel can name it without a
+  // second search of its own. Only the segment that took `policy.edit` carries
+  // one: a segment classified by its binary names no path, because no path
+  // decided it.
+  const result = classifyCommand("cp notes.md docs/notes.md && cp draft.md CLAUDE.md");
+  assert.ok(result.ok);
+  assert.equal(result.segments[0]?.class, "files.write.workspace");
+  assert.equal(result.segments[0]?.path, undefined);
+  assert.equal(result.segments[1]?.class, "policy.edit");
+  assert.equal(result.segments[1]?.rule, "protected-path");
+  assert.equal(result.segments[1]?.path, "CLAUDE.md");
+});
+
+test("a redirection onto a protected path reports its target as the path", () => {
+  const result = classifyCommand("echo hi > .github/workflows/ci.yml");
+  assert.ok(result.ok);
+  assert.equal(result.segments[0]?.rule, "redirect-protected");
+  assert.equal(result.segments[0]?.path, ".github/workflows/ci.yml");
+});
+
+test("a path protected only by policy.protected_paths is reported as written", () => {
+  const result = classifyCommand("mv old.md design/new.md", EXTRA);
+  assert.ok(result.ok);
+  assert.equal(result.segments[0]?.class, "policy.edit");
+  assert.equal(result.segments[0]?.path, "design/new.md");
+});

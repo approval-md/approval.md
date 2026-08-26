@@ -68,6 +68,7 @@
  * their own `<pre>`, so the injection surface is exactly what it was before.
  */
 
+import { classifyCommand, isProtectedPath } from "../core/command-class.js";
 import type { PayloadRendering } from "./contract.js";
 
 /** Keys the email adapter's payload may carry (`adapters/email.ts`). */
@@ -429,6 +430,63 @@ function commandRegionText(view: CommandView, hash: string): string[] {
   lines.push(`cwd: ${view.cwd === null ? "(none declared)" : markEscapes(view.cwd)}`);
   lines.push(rawBytesLine(hash));
   return lines;
+}
+
+// ---------------------------------------------------------------------------
+// The protected path (APRV-143)
+// ---------------------------------------------------------------------------
+
+/** The rule names a file-tool touch of a protected path reports (`cli/hook.ts`). */
+const PROTECTED_RULE_NAMES: readonly string[] = ["protected-path", "protected-path-proposal"];
+
+/** The path that made an action `policy.edit`, and the rule that matched it. */
+export interface ProtectedPathView {
+  path: string;
+  rule: string;
+}
+
+/**
+ * Which protected path selected this payload's class, when one did (APRV-143).
+ *
+ * A prompt that says `class: policy.edit` and stops there tells the approver
+ * that *some* rule fired and leaves them to find the file. Both gated shapes
+ * can say which:
+ *
+ * - a shell payload is re-classified here, by the same
+ *   {@link classifyCommand} the hook decided with, and the segment that took
+ *   `policy.edit` carries the word it matched (`ClassifiedSegment.path`);
+ * - a file-tool payload names its target in `file`, and
+ *   {@link isProtectedPath} is re-run over it rather than trusted: the answer
+ *   is recomputed from the bound bytes, so this stays a computed field. The
+ *   payload's own `rule` is used as the label only when it is one of the two
+ *   the hook writes, which is what keeps the worktree-proposal tier legible.
+ *
+ * `extra` is `policy.protected_paths`, passed exactly as every enforcement path
+ * passes it; omitting it narrows the answer and never widens it.
+ */
+export function protectedPathView(
+  value: unknown,
+  extra: readonly string[] = [],
+): ProtectedPathView | null {
+  const command = commandPayloadView(value);
+  if (command !== null) {
+    const classified = classifyCommand(command.command, extra);
+    if (!classified.ok) return null;
+    for (const segment of classified.segments) {
+      if (segment.path !== undefined) return { path: segment.path, rule: segment.rule };
+    }
+    return null;
+  }
+
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const file = record["file"];
+  if (typeof file !== "string" || !isProtectedPath(file, extra)) return null;
+  const rule = record["rule"];
+  return {
+    path: file,
+    rule: typeof rule === "string" && PROTECTED_RULE_NAMES.includes(rule) ? rule : "protected-path",
+  };
 }
 
 /**

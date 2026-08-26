@@ -49,6 +49,18 @@ export interface ClassifiedSegment {
   class: string;
   /** Which rule decided it, for `hook classify` output and for tests. */
   rule: string;
+  /**
+   * The protected path that selected the class, present only when one did
+   * (APRV-143).
+   *
+   * `policy.edit` is the one class a segment can take because of a *value* in
+   * it rather than because of its binary, and until this field the value was
+   * discarded the moment the rule fired: an approver was told the class and
+   * left to guess which of six arguments earned it. It is the word the
+   * classifier matched, verbatim, so a channel can name it without a second
+   * search of its own.
+   */
+  path?: string;
 }
 
 export type CommandClassification =
@@ -1222,7 +1234,7 @@ function matchRule(bin: string, sub: string | null): CommandRule | null {
 }
 
 type SegmentOutcome =
-  | { ok: true; class: string; rule: string }
+  | { ok: true; class: string; rule: string; path?: string }
   | { ok: false; code: ClassifierFailureCode; detail: string };
 
 function classifySegment(segment: LexSegment, protectedPaths: readonly string[]): SegmentOutcome {
@@ -1263,7 +1275,7 @@ function classifySegment(segment: LexSegment, protectedPaths: readonly string[])
     .map((redirect) => redirect.target.text);
   const protectedTarget = writeTargets.find((target) => isProtectedPath(target, protectedPaths));
   if (protectedTarget !== undefined) {
-    return { ok: true, class: "policy.edit", rule: "redirect-protected" };
+    return { ok: true, class: "policy.edit", rule: "redirect-protected", path: protectedTarget };
   }
 
   const bin = words[cursor];
@@ -1316,7 +1328,9 @@ function classifySegment(segment: LexSegment, protectedPaths: readonly string[])
   // command is editing the rules, whatever else it is doing.
   if (!cls.startsWith("read.") && cls !== GATE_SELF_CLASS) {
     const named = positionals.find((arg) => isProtectedPath(arg, protectedPaths));
-    if (named !== undefined) return { ok: true, class: "policy.edit", rule: "protected-path" };
+    if (named !== undefined) {
+      return { ok: true, class: "policy.edit", rule: "protected-path", path: named };
+    }
   }
 
   // A read command with a write redirection writes. `ls > out.txt` creates a
@@ -1361,7 +1375,12 @@ export function classifyCommand(
     if (!outcome.ok) {
       return { ok: false, code: outcome.code, segment: segment.text, detail: outcome.detail };
     }
-    segments.push({ text: segment.text, class: outcome.class, rule: outcome.rule });
+    segments.push({
+      text: segment.text,
+      class: outcome.class,
+      rule: outcome.rule,
+      ...(outcome.path === undefined ? {} : { path: outcome.path }),
+    });
     if (!classes.includes(outcome.class)) classes.push(outcome.class);
   }
   return { ok: true, segments, classes };

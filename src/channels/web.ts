@@ -278,6 +278,7 @@ const FIELD_ORDER: string[] = [
   "action_key",
   "task",
   "class",
+  "protected_path",
   "autonomy",
   "provenance",
   "state",
