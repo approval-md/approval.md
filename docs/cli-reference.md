@@ -955,6 +955,14 @@ must pass `--payload-hash` with that content's hash. If the grant bound to
 different bytes the spend is refused `payload-mismatch`, nothing is appended,
 and the token stays live. A grant approves specific bytes.
 
+**`--token` is optional under sealed delivery** (APRV-105). With policy
+`defaults.token_delivery: sealed` and no `--token`, run opens the grant's
+`token_sealed` with the private key `approval request` wrote beside the log and
+spends what it finds; the key file is unlinked once the token is spent. A pasted
+`--token` still wins where one is given. Under the default `manual` delivery
+nothing was sealed, the lookup finds nothing, and a missing token refuses
+`token-required` exactly as it always did.
+
 Exit 5 is an addition to the frozen table, emitted by this verb alone, and it is
 distinct from 1 because the repair is distinct: request the action, have a human
 grant it, and pass the token that grant printed once.
@@ -1057,6 +1065,31 @@ decided  {"ok":true,"task":"task-042",
 timeout  {"ok":false,"task":"task-042","status":"timeout",
           "actions":[{"action_key":"...","state":"requested","seq":3}]}
 ```
+
+**Sealed token delivery** (APRV-105). Under policy `defaults.token_delivery:
+sealed`, a granted action's entry additionally carries `token`, the raw
+execution token:
+
+```
+{"action_key":"...","state":"granted","seq":4,"token":"<64 hex>"}
+```
+
+It is present only in `--json`, only on a `granted` action, only when this
+machine holds the private key `approval request` wrote when it opened the
+request, and only until the token is spent — the key file is unlinked at consume,
+at expiry and at revocation. The human render never prints it: that render goes
+to a terminal, and a token on a terminal is the paste this exists to remove.
+
+`approval run` reads the same seal, so the ordinary flow needs no token in any
+argv at all: request, wait, run. A pasted `--token` still wins where one is
+given, because a caller naming a token is making a claim the runtime then checks
+against the grant's digest, and silently substituting a different one would
+answer a question nobody asked.
+
+What this does NOT change: the token exists only because a human granted it, it
+binds to the exact payload bytes, and it is single-use. The keypair addresses; it
+does not authorize. The raw token is still printed once on the granting surface,
+so the paste path is preserved rather than replaced.
 
 `withdrawn` is added to the timeout object only when `--withdraw-on-timeout` was
 passed, listing the keys actually retracted; the default shape is unchanged.
