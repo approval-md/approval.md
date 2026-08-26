@@ -55,6 +55,7 @@ import { constants as osConstants } from "node:os";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
+import { openObligations } from "../core/audit.js";
 import { evaluateBudgets, type BudgetVerdict } from "../core/budgets.js";
 import {
   danglingExecutions,
@@ -73,7 +74,9 @@ import { isPayloadHash, runPayloadHash } from "../core/payload.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
 import { withdraw } from "../core/gate.js";
+import { keyStoreDirFor } from "../core/seal.js";
 import { readVerifiedRecords, requestState } from "../core/state.js";
+import { deliveredToken } from "../core/token.js";
 import type { EventRecord } from "../core/log.js";
 import { loadPolicy, parseDuration, POLICY_FILENAMES } from "../core/policy-load.js";
 import { verify } from "../core/verify.js";
@@ -505,6 +508,14 @@ interface WaitedAction {
   action_key: string;
   state: string;
   seq: number | null;
+  /**
+   * The raw execution token, when sealed delivery put one within this process's
+   * reach (APRV-105). Present ONLY in `--json`: the human render is a terminal,
+   * and a token printed there is the paste this feature exists to remove.
+   * Absent under the default `token_delivery: manual`, absent on a machine that
+   * did not open the request, and absent once the token has been spent.
+   */
+  token?: string;
 }
 
 /**
@@ -639,10 +650,21 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
     let pending = false;
     for (const key of requestedKeysOf(read.records, task)) {
       const derivation = requestState(read.records, key, ts, ttlMs);
+      // APRV-105. The token, when this machine can open it: the grant sealed it
+      // to the ephemeral public key this action's request published, and the
+      // private half is in the key store beside the log. Attached only to a
+      // GRANTED action, and only in `--json` below — a `null` on every other
+      // state would be a field consumers have to ignore, and a token on a
+      // rejected action would be a value with nothing behind it.
+      const token =
+        json && derivation.state === "granted"
+          ? deliveredToken(read.records, key, keyStoreDirFor(logPath))
+          : null;
       actions.push({
         action_key: key,
         state: derivation.state,
         seq: derivation.decisionSeq ?? derivation.requestSeq,
+        ...(token === null ? {} : { token }),
       });
       if (derivation.state === "requested") pending = true;
     }
@@ -1047,6 +1069,21 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       consecutive_failures: state.consecutiveFailures,
       escalated: true,
     }));
+  // APRV-127. The reconciliation backlog: obligations opened by a retrospective
+  // DENIAL and not yet discharged by a person. It counts toward `healthy` for
+  // the same reason a dangling execution does — an unreconciled denial is a "no"
+  // that has so far changed nothing, and a "no" nobody can see is the failure
+  // the whole retrospective path exists to prevent. Quiet here would mean a
+  // human said an action should not have happened and the system moved on.
+  const obligations = openObligations(records).map((item) => ({
+    seq: item.seq,
+    ts: item.ts,
+    action_key: item.actionKey,
+    task: item.task,
+    class: item.class,
+    obligation: item.obligation,
+    review_seq: item.reviewSeq,
+  }));
   const budgets = budgetHeadroom(records, flags, cwd, now());
   // Informational: the store's state never moves `healthy` or the exit code.
   // A repo that has never made a `--payload` request has no store, and an
@@ -1081,9 +1118,11 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
     verification.status === "clean" &&
     dangling.length === 0 &&
     // An unreconciled indeterminate outcome is a side effect nobody has
-    // established the fate of, and a repo carrying one is not healthy.
+    // established the fate of, and a repo carrying one is not healthy; an open
+    // reconciliation obligation is a denial nobody has answered for yet.
     indeterminate.length === 0 &&
-    escalations.length === 0;
+    escalations.length === 0 &&
+    obligations.length === 0;
 
   if (json) {
     emitJson(streams, {
@@ -1104,6 +1143,7 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       ...(indeterminate.length === 0 ? {} : { indeterminate }),
       budgets,
       loop_escalations: escalations,
+      reconciliation: obligations,
       payload_store: payloadStore,
       ...(anomalies.length === 0 ? {} : { anomalies }),
     });
@@ -1206,6 +1246,21 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
               under: escalations.map(
                 (entry) =>
                   `${entry.task} (${entry.consecutive_failures} consecutive execution.failed) — escalated to manual`,
+              ),
+            }),
+      },
+      {
+        left: "reconciliation",
+        right:
+          obligations.length === 0
+            ? st.muted("none open")
+            : st.fail(`${obligations.length} UNRECONCILED DENIAL(S)`),
+        ...(obligations.length === 0
+          ? {}
+          : {
+              under: obligations.map(
+                (item) =>
+                  `seq ${item.seq}  ${item.action_key}  ${item.class}  ${item.obligation} — close with \`approval audit reconcile ${item.seq}\``,
               ),
             }),
       },

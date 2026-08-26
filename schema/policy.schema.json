@@ -19,8 +19,8 @@
       "description": "SPEC.md §5.1/§5.2: fallbacks applied to any action whose class matches no rule in `classes`.",
       "properties": {
         "autonomy": {
-          "$ref": "#/$defs/autonomy",
-          "description": "SPEC.md §5.2: autonomy for actions matching no class rule. Fail-closed policies set this to `manual`."
+          "$ref": "#/$defs/defaultAutonomy",
+          "description": "SPEC.md §5.2 (amended, APRV-127): autonomy for actions matching no class rule. Fail-closed policies set this to `manual`. `supervised-live` is NOT admitted here: it is meaningless without a `live_rate`, there is no place on `defaults` to declare one, and a default rate this schema invented would be a gating fraction no author ever wrote. A policy that wants live sampling declares it on the class rules it means it for."
         },
         "channel": {
           "type": "string",
@@ -32,6 +32,13 @@
           "$ref": "#/$defs/duration",
           "description": "SPEC.md §5.1: how long a pending request stays actionable before it expires. Duration string, `<positive integer><unit>` with unit in ms|s|m|h|d|w (e.g. \"24h\"). Integer-only and single-unit by design: compound forms (\"1h30m\") and fractional values (\"1.5h\") are rejected so every implementation parses the same string to the same number of milliseconds.",
           "examples": ["24h"]
+        },
+        "token_delivery": {
+          "type": "string",
+          "enum": ["manual", "sealed"],
+          "description": "SPEC.md §10.4 (amended, APRV-105): how the raw execution token reaches the process that will spend it. `manual` (THE DEFAULT, and what an absent key means): the token is printed once on the granting surface and carried to the spender by a human. `sealed`: `approval request` also mints an ephemeral X25519 keypair per request, keeps the private half 0600 beside the log, and publishes the public half on `approval.requested` as `token_recipient_key`; the grant then seals the raw token to that key and records the ciphertext as `token_sealed`, so `approval wait` can hand the token back to the process that asked for it — across machines, with the log synced through git. The default is `manual` because the fail-closed reading of an absent key is the behaviour that requires a human, and because sealed delivery puts ciphertext in a public, permanent log. The keypair ADDRESSES and does not AUTHORIZE: a token still exists only after a human grant, still binds to the exact payload bytes, and is still single-use. What sealing changes is who can READ a minted token, which is the human's clipboard today.",
+          "default": "manual",
+          "examples": ["manual", "sealed"]
         },
         "on_expiry": {
           "type": "string",
@@ -183,8 +190,21 @@
   "$defs": {
     "autonomy": {
       "type": "string",
-      "enum": ["manual", "supervised", "autonomous"],
-      "description": "SPEC.md §5.2: autonomy level, strictest first — `manual` (human sign-off before execution) > `supervised` (executes immediately, sampled for review) > `autonomous` (executes freely). The enum is closed: an unrecognised level cannot be ordered against the others, so it must fail validation rather than be guessed at."
+      "enum": ["manual", "supervised-live", "supervised", "supervised-retro", "autonomous"],
+      "description": "SPEC.md §5.2 (amended, APRV-127): autonomy level, strictest first — `manual` (human sign-off before every action) > `supervised-live` (a policy-declared fraction of actions blocks on the human gate exactly as `manual` does; the rest proceed) > `supervised-retro` (executes immediately, sampled for retrospective review) > `autonomous` (executes freely). `supervised` is the pre-APRV-127 spelling and is an ALIAS OF `supervised-retro`, so every policy written before the split keeps the meaning its author gave it; the runtime records a load-time note naming the alias rather than silently reinterpreting it. The enum is closed: an unrecognised level cannot be ordered against the others, so it must fail validation rather than be guessed at.",
+      "examples": ["manual", "supervised-live", "supervised-retro"]
+    },
+    "liveRate": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "description": "SPEC.md §5.2 (amended, APRV-127): the fraction of `supervised-live` actions in a class that BLOCK on the human gate before executing, as a proportion in (0, 1]. Selection is HMAC-SHA-256 over the action's `payload_hash` under the operator-held secret named by `audit.sampling_secret_env` — the same construction `audit.supervised_sample_rate` uses, reused rather than reinvented, so an agent cannot predict its own luck and an operator holding the secret can verify every selection after the fact. Determinism is a required property, not an implementation detail: identical payload bytes always select identically, so a retry cannot re-roll until it comes up unsampled. Zero is excluded because \"never gate live\" is spelled `autonomy: supervised-retro`, and 1 is admitted because \"gate every one of them\" is a legitimate, if verbose, way to say `manual` for a class an author expects to relax later.",
+      "examples": [0.01, 0.1]
+    },
+    "defaultAutonomy": {
+      "type": "string",
+      "enum": ["manual", "supervised", "supervised-retro", "autonomous"],
+      "description": "SPEC.md §5.2 (amended, APRV-127): the autonomy levels a policy may name as its DEFAULT. Identical to `autonomy` less `supervised-live`, which carries a required `live_rate` that `defaults` has nowhere to declare."
     },
     "duration": {
       "type": "string",
@@ -206,11 +226,31 @@
       "additionalProperties": false,
       "required": ["autonomy"],
       "description": "SPEC.md §5.1: a class rule. The shorthand form is `{ autonomy }` alone; the full form adds `approvers` and `limits`. Both are this one shape — `autonomy` is always REQUIRED, since a rule without it cannot decide anything, and unknown keys are rejected so a typo'd constraint is never silently ignored.",
+      "allOf": [
+        {
+          "$comment": "SPEC.md §5.2 (amended, APRV-127): `live_rate` belongs to `supervised-live` and to nothing else. Required there, because a live mode with no fraction declares a control without saying how much of it runs, and the runtime would have to invent the number an author did not write. Forbidden everywhere else, because a rate sitting on a `manual`, `supervised-retro` or `autonomous` rule is a fraction its author believes is in force that nothing reads — the same silent no-op this schema's closed shape exists to prevent.",
+          "if": {
+            "type": "object",
+            "properties": { "autonomy": { "const": "supervised-live" } },
+            "required": ["autonomy"]
+          },
+          "then": {
+            "type": "object",
+            "properties": { "live_rate": { "$ref": "#/$defs/liveRate" } },
+            "required": ["live_rate"]
+          },
+          "else": {
+            "type": "object",
+            "properties": { "live_rate": false }
+          }
+        }
+      ],
       "properties": {
         "autonomy": {
           "$ref": "#/$defs/autonomy",
           "description": "SPEC.md §5.2: autonomy for actions matching this class pattern."
         },
+        "live_rate": { "$ref": "#/$defs/liveRate" },
         "approvers": {
           "type": "array",
           "minItems": 1,

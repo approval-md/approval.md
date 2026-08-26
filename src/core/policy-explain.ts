@@ -38,11 +38,18 @@
 
 import type {
   Autonomy,
+  DeclaredAutonomy,
   PolicyClassRule,
   PolicyLoadErrorCode,
   PolicyLoadResult,
+  SupervisionMode,
 } from "./policy-load.js";
-import { resolve, type Provenance, type Specificity } from "./policy-match.js";
+import {
+  resolve,
+  STRICTNESS,
+  type Provenance,
+  type Specificity,
+} from "./policy-match.js";
 
 /**
  * Action-class grammar for a *concrete* class (not a pattern).
@@ -78,6 +85,16 @@ export type TieBreak =
 /** The resolved grant, flattened for consumers that only want the answer. */
 export interface ExplanationOutcome {
   autonomy: Autonomy;
+  /**
+   * Amended SPEC.md §5.2 (APRV-127): the level the winning rule actually wrote.
+   * Equals `autonomy` except for the two supervised spellings, where it is the
+   * word the policy uses and `autonomy` is what is enforced.
+   */
+  declaredAutonomy: DeclaredAutonomy;
+  /** `"live"` / `"retro"` for a supervised outcome, `null` otherwise. */
+  supervision: SupervisionMode | null;
+  /** The live fraction, for a `supervised-live` outcome only. */
+  liveRate: number | null;
   /** Approvers carried from the matched rule; `null` when unset or unmatched. */
   approvers: string[] | null;
   /** Limits carried from the matched rule; `null` when unset or unmatched. */
@@ -89,7 +106,8 @@ export interface ExplanationCandidate {
   pattern: string;
   /** `[literalSegments, wildcardSegments, totalSegments]` (SPEC.md §5.2). */
   specificity: Specificity;
-  autonomy: Autonomy;
+  /** The level the rule WROTE (APRV-127): `supervised-live` stays itself here. */
+  autonomy: DeclaredAutonomy;
   winner: boolean;
   /** Present only for the winner and for candidates tied with it. */
   tieBreak?: TieBreak;
@@ -116,7 +134,7 @@ export interface Explanation {
    * it. `pattern` is `null` when the grant came from `defaults.autonomy` rather
    * than a rule. `null` overall when the floor did not apply.
    */
-  overridden: { pattern: string | null; autonomy: Autonomy } | null;
+  overridden: { pattern: string | null; autonomy: DeclaredAutonomy } | null;
   /** Every matching rule, most specific first (order from `resolve()`). */
   candidates: ExplanationCandidate[];
   /** Ordered human sentences narrating the decision; what the CLI prints. */
@@ -129,12 +147,6 @@ export interface ExplainOptions {
   reversible?: boolean;
 }
 
-/** Strictness order, strictest first — mirrors `policy-match.ts`. */
-const STRICTNESS: Readonly<Record<Autonomy, number>> = {
-  manual: 0,
-  supervised: 1,
-  autonomous: 2,
-};
 
 function quote(text: string): string {
   return JSON.stringify(text);
@@ -176,7 +188,14 @@ export function explain(
     return {
       class: actionClass,
       reversible,
-      outcome: { autonomy: "manual", approvers: null, limits: null },
+      outcome: {
+        autonomy: "manual",
+        declaredAutonomy: "manual",
+        supervision: null,
+        liveRate: null,
+        approvers: null,
+        limits: null,
+      },
       provenance: "fail-closed",
       manualBecause: "load-failure",
       loadFailure: { code: load.code, message: load.message },
@@ -194,16 +213,28 @@ export function explain(
   describeWinner(decisionPath, load, base.provenance, base.autonomy, candidates);
 
   const overridden = final.floorApplied
-    ? { pattern: final.matched?.pattern ?? null, autonomy: base.autonomy }
+    ? { pattern: final.matched?.pattern ?? null, autonomy: base.declaredAutonomy }
     : null;
   describeFloor(decisionPath, reversible, final.floorApplied, overridden);
-  decisionPath.push(`final: ${final.autonomy}`);
+  // APRV-127: name the mode, because "supervised" no longer says enough. A
+  // reader deciding whether to expect a prompt needs to know whether a fraction
+  // of this class stops first, and at what rate.
+  decisionPath.push(
+    final.supervision === "live"
+      ? `final: supervised-live at rate ${String(final.liveRate ?? 1)} — that fraction of this class STOPS at the human gate before executing (selected by HMAC over the payload hash under the operator's secret); the rest proceed and are still eligible for retrospective review`
+      : final.supervision === "retro"
+        ? `final: supervised-retro — executes immediately, sampled for review AFTERWARDS at audit.supervised_sample_rate`
+        : `final: ${final.autonomy}`,
+  );
 
   return {
     class: actionClass,
     reversible,
     outcome: {
       autonomy: final.autonomy,
+      declaredAutonomy: final.declaredAutonomy,
+      supervision: final.supervision,
+      liveRate: final.liveRate,
       approvers: final.approvers,
       limits: final.limits,
     },
@@ -329,7 +360,7 @@ function describeFloor(
   decisionPath: string[],
   reversible: boolean | null,
   floorApplied: boolean,
-  overridden: { pattern: string | null; autonomy: Autonomy } | null,
+  overridden: { pattern: string | null; autonomy: DeclaredAutonomy } | null,
 ): void {
   if (reversible !== false) return;
   if (!floorApplied || overridden === null) {

@@ -79,6 +79,9 @@ export const GENESIS_PREV = null;
  * and fourth: a side effect that was attempted and whose outcome is unknown, and
  * the human resolution that later says which it was (amended SPEC.md §6.3,
  * §10.4).
+ * `reconciliation.required` / `reconciliation.satisfied` (APRV-127) are the
+ * fifth and sixth: the obligation a retrospective DENIAL creates, and the
+ * human act that discharges it (amended SPEC.md §5.2).
  */
 export type EventType =
   | "task.registered"
@@ -100,6 +103,8 @@ export type EventType =
   | "envelope.drift"
   | "audit.sampled"
   | "audit.reviewed"
+  | "reconciliation.required"
+  | "reconciliation.satisfied"
   | "payload.pruned";
 
 /** Caller-supplied content of an event. Chain fields are not accepted. */

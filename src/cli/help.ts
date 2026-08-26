@@ -939,23 +939,26 @@ ${why("doctor")}`;
 export const AUDIT_HELP = `approval audit — the retrospective review of sampled supervised actions
 
 Usage:
-  approval audit list   [--all] [--log <path>] [--json]
-  approval audit review <seq|action-key> [--note "<text>"] [--as human:<id>]
-                        [--log <path>] [--json]
+  approval audit list        [--all] [--log <path>] [--json]
+  approval audit review      <seq|action-key> [--deny] [--note "<text>"] […]
+  approval audit obligations [--all] [--log <path>] [--json]
+  approval audit reconcile   <obligation-seq> --note "<text>" [--revert <key>] […]
 
 Subcommands:
-  list      the open sampled-audit backlog: audit.sampled with no audit.reviewed
-  review    record that a HUMAN looked at one sampled action
+  list         the open sampled-audit backlog
+  review       record that a HUMAN looked at one sampled action (--deny says no)
+  obligations  the open reconciliation backlog created by denials
+  reconcile    record that a HUMAN discharged one obligation
 
-SUPERVISED actions execute immediately and are audited AFTERWARDS: the daemon
-samples a fraction of them into a backlog a person works through.
+SUPERVISED-RETRO actions execute immediately and are sampled AFTERWARDS. A
+SUPERVISED-LIVE class stops its declared fraction at the gate BEFORE executing;
+those are answered as manual requests and never reach this backlog.
 
-THERE IS NO "approval audit sample". Selection is the runtime's, derived with an
-operator-held secret, because a caller who could sample — or decline to sample —
-an action of its choosing would hold the control that exists to oversee it. If
-no secret is configured, SAMPLING IS OFF and this backlog stays empty; "audit
-list" reports that beside the backlog.
+A DENIAL CANNOT UNDO ANYTHING. "review --deny" obliges and records instead: an
+obligation loud in status and doctor until a person closes it with "reconcile".
 
+THERE IS NO "approval audit sample". Selection is the runtime's, from an
+operator-held secret. No secret means SAMPLING IS OFF; "audit list" says so.
 ${EXIT_CODES_POINTER}
 ${why("audit")}`;
 
@@ -985,27 +988,74 @@ ${why("audit-list")}`;
 export const AUDIT_REVIEW_HELP = `approval audit review — record that a human reviewed a sample
 
 Usage:
-  approval audit review <seq|action-key> [--note "<text>"] [--as human:<id>]
-                        [--log <path>] [--json]
+  approval audit review <seq|action-key> [--deny] [--note "<text>"]
+                        [--as human:<id>] [--log <path>] [--json]
 
 Arguments:
   <seq|action-key> a bare integer is the SEQ OF THE audit.sampled RECORD; any
-                   other value is an action key with exactly one open sample
-
+                   other value is an action key with one open sample
 Flags:
+  --deny           this action should NOT have happened. Opens an obligation
   --note <text>    what you concluded. OPTIONAL
   --as human:<id>  the reviewer; else APPROVAL_HUMAN. HUMAN-ONLY
   --log <path>     log file to read and append to
   --json           machine-readable output
   -h, --help       this text
 
-Appends audit.reviewed with payload {"subject_seq":<seq>,"reviewed":true,
-"note"?:"…"}. NO ATTESTATION IS REQUIRED. Refuses (exit 1) not-sampled,
-already-reviewed, ambiguous-subject, actor-not-human, leaving the log untouched.
-
+Appends audit.reviewed. NO ATTESTATION IS REQUIRED. Refuses (exit 1) not-sampled,
+already-reviewed, ambiguous-subject, actor-not-human, log untouched. --deny ALSO
+appends reconciliation.required (system:audit), shaped by the action's DECLARED
+reversible and never by you. JSON: docs/cli-reference.md#audit-review
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("audit-review")}`;
+
+export const AUDIT_OBLIGATIONS_HELP = `approval audit obligations — the open reconciliation backlog
+
+Usage:
+  approval audit obligations [--all] [--log <path>] [--json]
+
+Flags:
+  --all           include obligations that have already been satisfied
+  --log <path>    log file to read
+  --json          machine-readable output
+  -h, --help      this text
+
+Reads a VERIFIED log and writes nothing. An obligation is opened by a
+retrospective DENIAL ("approval audit review --deny") and closed only by a
+person ("approval audit reconcile"). While one is open, "approval status" and
+"approval doctor" both say so: an unreconciled denial that nobody can see is a
+"no" that changed nothing.
+
+JSON shape: docs/cli-reference.md#audit-obligations
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("audit-obligations")}`;
+
+export const AUDIT_RECONCILE_HELP = `approval audit reconcile — record that a human discharged an obligation
+
+Usage:
+  approval audit reconcile <obligation-seq> --note "<text>" [--revert <key>]
+                           [--as human:<id>] [--log <path>] [--json]
+
+Arguments:
+  <obligation-seq> the SEQ of the reconciliation.required record, from
+                   "audit obligations". Not the action, not the review
+Flags:
+  --note <text>    what you did. REQUIRED
+  --revert <key>   the revert's action key. REQUIRED for a gated-revert
+  --as human:<id>  who discharged it; else APPROVAL_HUMAN. HUMAN-ONLY
+  --log <path>     log file to read and append to
+  --json           machine-readable output
+  -h, --help       this text
+
+HUMAN-ONLY, in code and in the event schema. A gated-revert obligation is checked
+against the CHAIN, not the claim: without an execution.completed for the named
+revert this refuses revert-required and appends nothing.
+JSON shape: docs/cli-reference.md#audit-reconcile
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("audit-reconcile")}`;
 
 export const EXECUTION_HELP = `approval execution — recovery verbs for executions the runtime could not close
 

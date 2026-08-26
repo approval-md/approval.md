@@ -964,6 +964,14 @@ authorizes it: run presents the recomputed hash, `execution.started` records it,
 and a declaration carrying no `payload_hash` (or an executor whose bytes differ
 from it) is refused `payload-mismatch` with the log untouched.
 
+**`--token` is optional under sealed delivery** (APRV-105). With policy
+`defaults.token_delivery: sealed` and no `--token`, run opens the grant's
+`token_sealed` with the private key `approval request` wrote beside the log and
+spends what it finds; the key file is unlinked once the token is spent. A pasted
+`--token` still wins where one is given. Under the default `manual` delivery
+nothing was sealed, the lookup finds nothing, and a missing token refuses
+`token-required` exactly as it always did.
+
 Exit 5 is an addition to the frozen table, emitted by this verb alone, and it is
 distinct from 1 because the repair is distinct: request the action, have a human
 grant it, and pass the token that grant printed once.
@@ -1066,6 +1074,31 @@ decided  {"ok":true,"task":"task-042",
 timeout  {"ok":false,"task":"task-042","status":"timeout",
           "actions":[{"action_key":"...","state":"requested","seq":3}]}
 ```
+
+**Sealed token delivery** (APRV-105). Under policy `defaults.token_delivery:
+sealed`, a granted action's entry additionally carries `token`, the raw
+execution token:
+
+```
+{"action_key":"...","state":"granted","seq":4,"token":"<64 hex>"}
+```
+
+It is present only in `--json`, only on a `granted` action, only when this
+machine holds the private key `approval request` wrote when it opened the
+request, and only until the token is spent — the key file is unlinked at consume,
+at expiry and at revocation. The human render never prints it: that render goes
+to a terminal, and a token on a terminal is the paste this exists to remove.
+
+`approval run` reads the same seal, so the ordinary flow needs no token in any
+argv at all: request, wait, run. A pasted `--token` still wins where one is
+given, because a caller naming a token is making a claim the runtime then checks
+against the grant's digest, and silently substituting a different one would
+answer a question nobody asked.
+
+What this does NOT change: the token exists only because a human granted it, it
+binds to the exact payload bytes, and it is single-use. The keypair addresses; it
+does not authorize. The raw token is still printed once on the granting surface,
+so the paste path is preserved rather than replaced.
 
 `withdrawn` is added to the timeout object only when `--withdraw-on-timeout` was
 passed, listing the keys actually retracted; the default shape is unchanged.
@@ -1172,6 +1205,10 @@ does not know the flag exists.
   each was recorded under.
 - `budgets` — headroom per configured GLOBAL limit, from a zero-cost probe.
 - `loop_escalations` — tasks with three consecutive `execution.failed` events.
+- `reconciliation` — obligations opened by a retrospective denial and not yet
+  discharged by a person. Counts toward `healthy`, exactly as `dangling` does: an
+  unreconciled denial is a "no" that has so far changed nothing, and a "no"
+  nobody can see is the failure the retrospective path exists to prevent.
 - `payload_store` — whether `.approval/payloads/` exists, how many files it holds,
   how many the log records as pruned, and how many are unbound. Informational.
 - `anomalies` — additive and present only when non-empty: gate-typed events whose
@@ -1189,6 +1226,8 @@ does not know the flag exists.
    "pass":true}],
  "loop_escalations":[{"task":"task-042","consecutive_failures":3,
    "escalated":true}],
+ "reconciliation":[{"seq":18,"ts":"...","action_key":"...","task":"...",
+   "class":"records.write","obligation":"gated-revert","review_seq":17}],
  "payload_store":{"present":true,"files":2,"pruned":0,"orphans":0,
    "note":"..."}}
 ```
@@ -1297,6 +1336,15 @@ working directory.
 
 ## audit
 
+Since APRV-127 the policy grammar splits `supervised` in two, and only one half
+reaches this backlog. A `supervised-live` class puts a declared `live_rate`
+fraction of its actions through the human gate BEFORE they run; those are
+ordinary manual requests with ordinary grants and tokens, a person has already
+answered them, and they are not drawn a second time for retrospective review. A
+`supervised-retro` class — and the bare `supervised`, which is now an alias for
+it — is what this page is about. `approval policy check` names the mode in its
+final line and in `outcome.supervision`.
+
 Supervised actions execute immediately and are audited afterwards. The daemon
 samples a fraction of them (`audit.supervised_sample_rate`) into a backlog a
 person works through; SPEC.md §12 calls the human's attention the audit budget,
@@ -1361,9 +1409,92 @@ An action key with several open samples refuses `ambiguous-subject`.
 
 ```
 success  {"ok":true,"seq":11,"sample_seq":9,"action_key":"...","task":"...",
+          "verdict":"ok","obligation_seq":null,"actor":"human:alice"}
+refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
+```
+
+`--deny` says the action should not have happened. It cannot undo it — the action
+already ran, and a runtime that pretended otherwise would be lying to the person
+who denied it — so what it does is oblige and record: a second event,
+`reconciliation.required`, authored by `system:audit` and naming the action, its
+class, this review, and the obligation the denial creates. `obligation_seq` is
+that record's seq.
+
+Which obligation is the runtime's derivation from the action's DECLARED
+`reversible`, never the reviewer's choice: `true` obliges a revert THROUGH THE
+GATE (`gated-revert`), and `false` or unstated records a policy-was-wrong finding
+whose sanctioned response is tightening the class (`policy-finding`). Unstated
+takes the second shape deliberately — obliging a revert of something nobody said
+could be reverted would record an obligation that may be impossible to discharge,
+and an impossible obligation is one that gets closed dishonestly.
+
+`reversible` is self-reported, so it is worth being explicit about what it can
+and cannot do. It selects the SHAPE of an obligation that exists either way; it
+cannot remove one, delay one, or decide whether the denial happened. The only
+thing a false `reversible: true` buys is the shape whose discharge this runtime
+checks against the chain, which makes the claimant's own exit harder rather than
+easier. The same reading applies to the irreversibility floor that keeps a
+`reversible: false` action out of `supervised-retro` entirely: it is a floor, not
+a proof — it acts on the acting party's own claim, so it catches the honest
+declaration and never the lie. What answers the lie is writing `manual` for the
+class, which no declaration can loosen.
+
+## audit obligations
+
+The open reconciliation backlog: `reconciliation.required` records with no
+`reconciliation.satisfied` after them. Reads a verified log and writes nothing.
+The same projection `approval status` and `approval doctor` read, so the three
+cannot disagree about what is outstanding — an unreconciled denial that nobody
+can see is a "no" that changed nothing.
+
+A satisfaction closes an obligation only when it comes AFTER it in the chain and
+names its seq, by the same rule that governs a review closing a sample.
+
+**`--json`** (one object on stdout):
+
+```
+{"ok":true,
+ "open":1,
+ "obligations":[{"seq":18,"ts":"...","action_key":"...","task":"...",
+                 "class":"records.write","review_seq":17,
+                 "obligation":"gated-revert","reversible":true,
+                 "satisfied_seq":null}]}
+```
+
+## audit reconcile
+
+Human-only, in code and in the event schema. A runtime that could close its own
+obligations would be a reconciliation backlog that empties itself, which is
+precisely the silence an unreconciled denial exists to break.
+
+`--note` is required — unlike `audit review`, whose whole content may be "a
+person looked", this record asserts that something was DONE, and a discharge
+nobody described is one no auditor can check.
+
+A `gated-revert` obligation additionally requires `--revert <action-key>`, and
+the log must carry an `execution.completed` for that key. The runtime checks the
+CHAIN rather than the claim: without it the verb refuses `revert-required` and
+appends nothing. That is what closes the loop inside the log — the revert is
+itself a side-effecting action, so it went through the gate too. A
+`policy-finding` obligation has no such artifact (the sanctioned response is a
+policy amendment, its own human ceremony with its own `policy.updated` record),
+so there the note is the discharge.
+
+No attestation is required, for the reason `audit review` and `execution resolve`
+state: this record exercises no policy authority, authorizes nothing, spends no
+budget, and mints no token.
+
+**`--json`** (one object on stdout):
+
+```
+success  {"ok":true,"seq":24,"obligation_seq":18,"action_key":"...",
+          "task":"...","class":"records.write","obligation":"gated-revert",
           "actor":"human:alice"}
 refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
 ```
+
+Refusals: `not-obliged` (no such obligation), `already-satisfied`,
+`note-required`, `revert-required`, `actor-not-human`.
 
 ## execution
 

@@ -1,0 +1,17 @@
+{
+  "seq": 24,
+  "ts": "2026-08-04T11:02:17Z",
+  "event": "reconciliation.satisfied",
+  "task": "task-049",
+  "action_key": "task-049:archive:2026-08-04",
+  "actor": "human:carter",
+  "channel": "cli",
+  "payload": {
+    "obligation_seq": 17,
+    "note": "restored the archived records; the revert went through the gate as task-049:restore:2026-08-04",
+    "revert_action_key": "task-049:restore:2026-08-04"
+  },
+  "alg": "sha256/jcs",
+  "prev": "1b4f2d0c1a7f4d6de1c0ad2ff9b5a4c3e2d1908f7a6b5c4d3e2f1a0b9c8d7e6f",
+  "hash": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b"
+}

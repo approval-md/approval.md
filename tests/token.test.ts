@@ -27,6 +27,14 @@ import { evaluateBudgets } from "../src/core/budgets.js";
 import { type GateOptions } from "../src/core/gate.js";
 import { appendEvent, type EventRecord } from "../src/core/log.js";
 import {
+  asSealedToken,
+  keyStoreDirFor,
+  mintRecipientKeypair,
+  openSealedToken,
+  readPrivateKey,
+  SEALED_TOKEN_FIELD,
+} from "../src/core/seal.js";
+import {
   digestsEqual,
   mintToken,
   TOKEN_BYTES,
@@ -74,6 +82,26 @@ const POLICY = [
   "```",
   "",
 ].join("\n");
+
+/**
+ * The same policy with sealed token delivery turned on (APRV-105). The knob is
+ * the ONLY difference: everything else about this file's flows is unchanged, so
+ * a sweep that passes under both is a sweep that pins the amended invariant.
+ */
+const SEALED_POLICY = [
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: manual",
+  '  approval_ttl: "1h"',
+  "  on_expiry: reject",
+  "  token_delivery: sealed",
+  "```",
+  "",
+].join("\n");
+
+/** The action key this file's flows use. */
+const SEALED_KEY = "task-042:chaser";
 
 /** Same policy with no TTL: nothing lapses, so no token dies of old age. */
 const POLICY_NO_TTL = [
@@ -331,6 +359,44 @@ test("grant mints a token, logs ONLY its sha256, and the raw token never reaches
   assert.equal(payload["est_cost_usd"], "0.02");
 
   assertTokenAbsentFromLog(unit, token);
+  assertClean(unit);
+});
+
+test("under sealed delivery the raw token STILL reaches no byte of the log", () => {
+  // APRV-105 reworded §11.1 invariant 3 to "a hash, or ciphertext sealed to a
+  // recipient key the log does not hold". This is the sweep that pins both
+  // halves: the plaintext is still absent, and the ciphertext that replaced the
+  // human's clipboard does not open without a private key the log never carries.
+  const unit = newCase(SEALED_POLICY);
+  const token = granted(unit);
+
+  const grantRecord = records(unit).find((record) => record.event === "approval.granted");
+  const payload = (grantRecord?.payload ?? {}) as Record<string, unknown>;
+  // The digest is unchanged and is still what possession is proven against; the
+  // seal is delivery, never authorization.
+  assert.equal(payload["token_sha256"], tokenHash(token));
+
+  const sealed = asSealedToken(payload[SEALED_TOKEN_FIELD]);
+  assert.notEqual(sealed, null, "sealed delivery recorded no ciphertext");
+  if (sealed === null) return;
+
+  assertTokenAbsentFromLog(unit, token);
+
+  // A reader with the whole log and no key file gets nothing. The stranger's key
+  // is a well-formed X25519 private key, so this is the real attack — someone
+  // who thought to bring their own key — and not a parse failure.
+  const stranger = mintRecipientKeypair();
+  assert.equal(openSealedToken(sealed, stranger.privateKey, SEALED_KEY), null);
+
+  // And the seal is bound to the action it was minted for: the right key on the
+  // wrong action key derives a different AEAD key and fails to authenticate.
+  const rightKey = readPrivateKey(keyStoreDirFor(unit.logPath), SEALED_KEY);
+  assert.notEqual(rightKey, null, "the requester's private key was not written");
+  if (rightKey === null) return;
+  assert.equal(openSealedToken(sealed, rightKey, "task-042:some-other-action"), null);
+
+  // With the key AND the action key, the requesting process gets its token back.
+  assert.equal(openSealedToken(sealed, rightKey, SEALED_KEY), token);
   assertClean(unit);
 });
 

@@ -25,9 +25,17 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { after, test } from "node:test";
 
 import { appendEvent } from "../src/core/log.js";
+import {
+  asSealedToken,
+  keyStoreDirFor,
+  readPrivateKey,
+  RECIPIENT_KEY_FIELD,
+  SEALED_TOKEN_FIELD,
+} from "../src/core/seal.js";
 import { decide, register, request, type GateRefusal } from "../src/core/gate.js";
 import {
   consumeToken,
@@ -58,6 +66,32 @@ const OTHER = "b".repeat(64);
 
 const MANUAL_KEY = "task-042:chaser";
 const SUPERVISED_KEY = "task-042:draft";
+
+/**
+ * `tests/scenario.ts`'s policy with sealed token delivery turned on (APRV-105).
+ * The knob is the only difference, so a sweep that passes under both pins the
+ * amended invariant rather than a rewritten scenario.
+ */
+const SEALED_POLICY = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: manual",
+  '  approval_ttl: "1h"',
+  "  on_expiry: reject",
+  "  token_delivery: sealed",
+  "classes:",
+  "  read.*:",
+  "    autonomy: autonomous",
+  "  files.write.*:",
+  "    autonomy: supervised",
+  "  communicate.email.external:",
+  "    autonomy: manual",
+  "```",
+  "",
+].join("\n");
 
 /** An envelope whose manual action may or may not declare a binding. */
 function envelope(bind: boolean): unknown {
@@ -353,6 +387,58 @@ test("a grant on a request with no usable class is refused, not recorded with an
   assert.equal(refusal.code, "grant-classless-request");
   assert.match(refusal.message, /no usable payload\.class/u);
   assert.deepEqual(eventTypes(unit), before, "a classless grant reached the log");
+  assertClean(unit);
+});
+
+test("the binding travels intact under sealed delivery, and the token still does not", () => {
+  // APRV-105 added a second field to the grant. Content binding is the property
+  // this file exists to defend, so the sweep is repeated with sealing on: the
+  // chain from request to grant is unchanged, and the plaintext token appears in
+  // no byte of the log while the ciphertext does.
+  const unit = newScenario(root, SEALED_POLICY);
+  attest(unit);
+  const registered = register(
+    unit.logPath,
+    { task: "task-042", envelope: envelope(true) },
+    "agent:claude",
+    { ...unit.options, clock: fixedClock(T0) },
+  );
+  assert.equal(registered.ok, true, registered.ok ? "" : registered.message);
+
+  const token = grantManual(unit);
+  const requestRecord = records(unit).find((record) => record.event === "approval.requested");
+  const grantRecord = records(unit).find((record) => record.event === "approval.granted");
+  assert.notEqual(requestRecord, undefined);
+  assert.notEqual(grantRecord, undefined);
+  if (requestRecord === undefined || grantRecord === undefined) return;
+
+  // Unchanged: the binding is still copied from request to grant.
+  assert.equal(payloadOf(requestRecord)["payload_hash"], BOUND);
+  assert.equal(payloadOf(grantRecord)["payload_hash"], BOUND);
+  // Added: an address on the request, ciphertext on the grant.
+  assert.equal(typeof payloadOf(requestRecord)[RECIPIENT_KEY_FIELD], "string");
+  assert.notEqual(asSealedToken(payloadOf(grantRecord)[SEALED_TOKEN_FIELD]), null);
+
+  // §11.1 invariant 3, as APRV-105 reworded it: a hash, or ciphertext sealed to
+  // a recipient key the log does not hold. Never the token, never the key.
+  const raw = readFileSync(unit.logPath, "utf8");
+  assert.equal(raw.includes(token), false, "the RAW TOKEN reached the log");
+  for (const line of raw.split("\n")) {
+    assert.equal(line.includes(token), false, `raw token found in: ${line.slice(0, 120)}`);
+  }
+  const privateKey = readPrivateKey(keyStoreDirFor(unit.logPath), MANUAL_KEY);
+  assert.notEqual(privateKey, null);
+  assert.equal(raw.includes(privateKey ?? "never"), false, "the PRIVATE KEY reached the log");
+
+  // The spend still checks the bytes, and the seal changed nothing about that:
+  // a mismatch is refused and the token stays live.
+  const mismatch = consumeToken(unit.logPath, MANUAL_KEY, token, "agent:claude", {
+    policyFile: unit.policyPath,
+    presentedPayloadHash: OTHER,
+    clock: fixedClock(at(3)),
+  }) as TokenRefusal;
+  assert.equal(mismatch.ok, false);
+  assert.equal(mismatch.code, "payload-mismatch");
   assertClean(unit);
 });
 

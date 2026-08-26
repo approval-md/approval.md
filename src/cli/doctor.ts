@@ -80,6 +80,7 @@ import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
 import { DEFAULT_TASKS_DIR, latestRegistration } from "../core/registration.js";
 import { POLICY_FILENAMES, loadPolicy, type PolicyLoadResult } from "../core/policy-load.js";
+import { openObligations } from "../core/audit.js";
 import { resolveSampler } from "../core/sampler.js";
 import {
   checkVault,
@@ -773,6 +774,47 @@ function checkSampling(load: PolicyLoadResult): DoctorCheck {
       sampler.reason === "secret-unset" && sampler.secretEnv !== null
         ? `approval setup sampling — or set it yourself: export ${sampler.secretEnv} with the operator-held sampling secret in the environment that runs the daemon`
         : "approval policy attest --as human:<id> — after setting audit.supervised_sample_rate and audit.sampling_secret_env in the policy; then export the named variable where the daemon runs",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 12. reconciliation obligations (amended SPEC.md §5.2 — APRV-127)
+// ---------------------------------------------------------------------------
+
+/**
+ * Is any retrospective denial still unreconciled?
+ *
+ * A denial cannot undo the action it denies. What it does is open an obligation,
+ * and the obligation is worth nothing unless somebody is told about it — so
+ * doctor FAILS while one is open, in the same voice it uses for a half-configured
+ * sampler. This is the "loud" half of the design: a human said an action should
+ * not have happened, and until a person records what was done about it, the
+ * system has not responded to that at all.
+ *
+ * **It repairs nothing.** Satisfaction is human-only, in code and in the event
+ * schema; a doctor that could close an obligation would be the runtime closing
+ * its own homework. The `fix` is the command a person runs after they have
+ * actually done the thing.
+ */
+function checkReconciliation(records: EventRecord[]): DoctorCheck {
+  const open = openObligations(records);
+  if (open.length === 0) {
+    return {
+      check: "reconciliation",
+      status: "pass",
+      detail: "no retrospective denial is waiting to be reconciled",
+    };
+  }
+  const first = open[0] as (typeof open)[number];
+  return {
+    check: "reconciliation",
+    status: "fail",
+    detail: `${String(open.length)} unreconciled retrospective denial(s): ${open
+      .map((item) => `seq ${String(item.seq)} ${item.actionKey} (${item.obligation})`)
+      .join(", ")}. A denial cannot undo what already ran, so what it leaves is this obligation, and it stays open until a PERSON records what was done.`,
+    fix: `approval audit obligations — then, once you have done it: approval audit reconcile ${String(first.seq)} --note "<what you did>"${
+      first.obligation === "gated-revert" ? " --revert <action-key>" : ""
+    }`,
   };
 }
 
@@ -1504,6 +1546,8 @@ export function commandDoctor(
       // APRV-125: appended, fourth time, same reason. The fork this reports is
       // the one APRV-104 could only find by hand.
       checkLogDrift(logPath),
+      // APRV-127: appended, fifth time, same reason.
+      checkReconciliation(verified.records),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

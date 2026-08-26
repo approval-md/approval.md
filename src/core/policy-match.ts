@@ -42,13 +42,33 @@
  *
  * ## Fail-closed
  *
+ * ## The autonomy split (amended SPEC.md §5.2, APRV-127)
+ *
+ * A rule may declare `supervised-live` (with a `live_rate`) or `supervised-retro`
+ * as well as the pre-split `supervised`. Both collapse onto the one enforced
+ * `supervised` autonomy, and the difference travels beside it as
+ * `Resolution.supervision`: `"live"` means a `live_rate` fraction of the class's
+ * actions stop at the human gate BEFORE executing, `"retro"` means every action
+ * proceeds and a fraction is reviewed AFTERWARDS. Bare `supervised` is `"retro"`,
+ * with a load-time note from `policy-load.ts` naming the alias.
+ *
+ * Nothing about the SELECTION lives here: this module is pure, and selection
+ * needs an operator-held secret. `core/sampler.ts` derives it, and `core/gate.ts`
+ * applies it at intake.
+ *
  * A not-ok {@link PolicyLoadResult} resolves **every** class to `manual` with
  * provenance `"fail-closed"` — see `policy-load.ts`. An absent
  * `defaults.autonomy` is likewise `manual` (provenance `"default"`): the schema
  * permits omitting `defaults`, and the absence of a grant is not a grant.
  */
 
-import type { Autonomy, PolicyClassRule, PolicyLoadResult } from "./policy-load.js";
+import type {
+  Autonomy,
+  DeclaredAutonomy,
+  PolicyClassRule,
+  PolicyLoadResult,
+  SupervisionMode,
+} from "./policy-load.js";
 
 /** Where a {@link Resolution}'s autonomy came from. */
 export type Provenance =
@@ -83,6 +103,28 @@ export interface Candidate {
  */
 export interface Resolution {
   autonomy: Autonomy;
+  /**
+   * Amended SPEC.md §5.2 (APRV-127): what the winning rule (or the default)
+   * actually WROTE, before the split was collapsed onto {@link Autonomy}. A
+   * reader that wants to echo the policy's own word — `explain`, the amendment
+   * differ, a channel's provenance line — uses this; a reader that wants to
+   * know what is enforced uses `autonomy`.
+   */
+  declaredAutonomy: DeclaredAutonomy;
+  /**
+   * `"live"` or `"retro"` when `autonomy` is `supervised`, `null` otherwise.
+   * Bare `supervised` is `"retro"` — see `policy-load.ts`'s alias note.
+   */
+  supervision: SupervisionMode | null;
+  /**
+   * The declared `live_rate` for a `supervised-live` class, else `null`.
+   *
+   * Never `null` for a live class that reached here through the schema, which
+   * requires the key. A live class that somehow carries no usable rate resolves
+   * to `1` rather than to `null`: see {@link supervisionOf} for why the missing
+   * rate is read as "gate all of them".
+   */
+  liveRate: number | null;
   provenance: Provenance;
   matched: { pattern: string; rule: PolicyClassRule } | null;
   approvers: string[] | null;
@@ -100,12 +142,64 @@ export interface ResolveOptions {
   reversible?: boolean;
 }
 
-/** Strictness order, strictest first (SPEC.md §5.2 "deny beats allow"). */
-const STRICTNESS: Readonly<Record<Autonomy, number>> = {
+/**
+ * Strictness order, strictest first (SPEC.md §5.2 "deny beats allow"), over the
+ * DECLARED vocabulary.
+ *
+ * `supervised-live` sits between `manual` and the retrospective modes because it
+ * is the only supervised mode that can stop an action before it happens: at rate
+ * 1 it is `manual`, at any lower rate it is strictly more scrutiny than review
+ * after the fact. `supervised` and `supervised-retro` share a rank because they
+ * are the same level under two spellings; the lexicographic tie-break in
+ * {@link compareCandidates} then decides between two equally specific rules that
+ * spell it differently, deterministically and without preferring either word.
+ *
+ * Exported because `core/policy-explain.ts` needs the same order to name the
+ * tie-break in its trace, and a private mirror of this table there is exactly
+ * the drift a decision trace must never have from the decision.
+ *
+ * The RATE is not part of the order. A tie between `supervised-live 0.5` and
+ * `supervised-live 0.01` is a tie between two equally specific rules that
+ * disagree about a fraction, and ordering by rate would let a policy author move
+ * a rule's precedence by editing a number they were only tuning. The
+ * lexicographic tie-break settles it, exactly as it settles every other tie.
+ */
+export const STRICTNESS: Readonly<Record<DeclaredAutonomy, number>> = {
   manual: 0,
-  supervised: 1,
-  autonomous: 2,
+  "supervised-live": 1,
+  supervised: 2,
+  "supervised-retro": 2,
+  autonomous: 3,
 };
+
+/**
+ * Collapse a declared level onto the enforced {@link Autonomy} plus its
+ * supervision mode and live rate.
+ *
+ * Pure and total. A `supervised-live` rule whose `live_rate` is absent, or is
+ * not a usable proportion, resolves to **1** — every action in the class is
+ * gated. `policy.schema.json` requires the key, so this branch is unreachable
+ * for a policy that loaded; it is here as the fail-closed backstop, and the
+ * direction is the one the rest of this runtime takes everywhere else. The
+ * alternative reading, "a rate we could not understand means gate none of them",
+ * would turn a typo into a silently disabled control, which is the failure this
+ * project exists to prevent.
+ */
+export function supervisionOf(declared: DeclaredAutonomy, rule: PolicyClassRule | null): {
+  autonomy: Autonomy;
+  supervision: SupervisionMode | null;
+  liveRate: number | null;
+} {
+  if (declared === "manual" || declared === "autonomous") {
+    return { autonomy: declared, supervision: null, liveRate: null };
+  }
+  if (declared !== "supervised-live") {
+    return { autonomy: "supervised", supervision: "retro", liveRate: null };
+  }
+  const rate = rule?.live_rate;
+  const usable = typeof rate === "number" && Number.isFinite(rate) && rate > 0 && rate <= 1;
+  return { autonomy: "supervised", supervision: "live", liveRate: usable ? rate : 1 };
+}
 
 const WILDCARD = "*";
 
@@ -182,6 +276,9 @@ function compareCandidates(a: Candidate, b: Candidate): number {
 
 const FAIL_CLOSED: Readonly<Resolution> = {
   autonomy: "manual",
+  declaredAutonomy: "manual",
+  supervision: null,
+  liveRate: null,
   provenance: "fail-closed",
   matched: null,
   approvers: null,
@@ -237,11 +334,13 @@ function fromDefaults(
   load: Extract<PolicyLoadResult, { ok: true }>,
   candidates: Candidate[],
 ): Resolution {
+  // Absent `defaults.autonomy` is `manual`: the schema allows omitting
+  // `defaults` entirely, and by the fail-closed principle the absence of a
+  // grant is not a grant.
+  const declared = load.policy.defaults?.autonomy ?? "manual";
   return {
-    // Absent `defaults.autonomy` is `manual`: the schema allows omitting
-    // `defaults` entirely, and by the fail-closed principle the absence of a
-    // grant is not a grant.
-    autonomy: load.policy.defaults?.autonomy ?? "manual",
+    ...supervisionOf(declared, null),
+    declaredAutonomy: declared,
     provenance: "default",
     matched: null,
     approvers: null,
@@ -270,7 +369,8 @@ function fromRules(candidates: Candidate[]): Resolution {
   }
 
   return {
-    autonomy: winner.rule.autonomy,
+    ...supervisionOf(winner.rule.autonomy, winner.rule),
+    declaredAutonomy: winner.rule.autonomy,
     provenance: "rule",
     matched: { pattern: winner.pattern, rule: winner.rule },
     approvers: winner.rule.approvers ?? null,
@@ -286,6 +386,29 @@ function fromRules(candidates: Candidate[]): Resolution {
  * `supervised`. Retrospective sampling cannot undo an irreversible action, so
  * the floor resolves to `manual` and records that it, rather than the matched
  * rule, determined the outcome.
+ *
+ * ## The floor is a floor, not a proof (amended SPEC.md §7, APRV-127)
+ *
+ * This is the enforcement point for APRV-127's rule that `supervised-retro`
+ * REFUSES an action declaring `reversible: false`: such an action never resolves
+ * supervised at all, in either mode, so there is no retrospective path for it to
+ * take. Retrospective review of an irreversible action is regret with a paper
+ * trail, and the grammar must not offer it.
+ *
+ * What the floor is NOT is evidence that anything else is reversible.
+ * `reversible` is SELF-REPORTED by the action's own declaration. A truthful
+ * `false` raises scrutiny to `manual`, which is the safe direction and the only
+ * direction this field is allowed to move anything (global invariant 4). A false
+ * claim of `reversible: true` — or an omitted claim — simply fails to raise it,
+ * leaving the class's declared autonomy in force. So the floor catches the
+ * honest declaration of irreversibility; it cannot catch a lie, and no code here
+ * pretends otherwise. The control that answers the lie is the class rule: an
+ * author who does not trust a class's declarations writes `manual` for the
+ * class, which no declaration can loosen.
+ *
+ * The floor also clears `supervision` and `liveRate`. An action pushed to
+ * `manual` is not a supervised action with a mode; it is gated, and leaving a
+ * live rate on it would tell a downstream reader a fraction still applies.
  */
 function applyFloor(resolution: Resolution, options: ResolveOptions): Resolution {
   if (options.reversible !== false) return resolution;
@@ -293,6 +416,15 @@ function applyFloor(resolution: Resolution, options: ResolveOptions): Resolution
   return {
     ...resolution,
     autonomy: "manual",
+    // Every field says manual, including the declared one. A resolution whose
+    // `autonomy` read `manual` while its `declaredAutonomy` still read
+    // `autonomous` would be one field a consumer could read and get the
+    // pre-floor answer. What the rule actually said is not lost: it is in
+    // `matched.rule.autonomy`, and `core/policy-explain.ts` records it as the
+    // grant the floor overrode.
+    declaredAutonomy: "manual",
+    supervision: null,
+    liveRate: null,
     provenance: "floor",
     floorApplied: true,
   };

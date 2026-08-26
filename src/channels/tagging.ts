@@ -42,6 +42,7 @@
  * replayable exactly as it was rendered.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -63,6 +64,7 @@ import {
   type PolicyLoadResult,
 } from "../core/policy-load.js";
 import { resolve, type Resolution } from "../core/policy-match.js";
+import { isRecipientKey, RECIPIENT_KEY_FIELD } from "../core/seal.js";
 import {
   payloadOf,
   readVerifiedRecords,
@@ -522,6 +524,29 @@ function protectedPathsOf(load: PolicyLoadResult): readonly string[] {
  * derivation recognises, produces neither line: an aid that cannot be derived
  * is absent, never guessed.
  */
+/**
+ * The `token_delivery` line, for a request that published a delivery address
+ * (APRV-105), and nothing at all for one that did not.
+ *
+ * Computed from `log`: the key comes off the verified `approval.requested`
+ * record and is digested here. A malformed value produces no line rather than a
+ * line saying something is wrong — the delivery address is a convenience, and a
+ * broken one costs the requester its own convenience and costs the approver
+ * nothing they need for the decision.
+ */
+function deliveryDerivation(
+  recipientKey: unknown,
+): Partial<Pick<ChannelRequest, "token_delivery">> {
+  if (!isRecipientKey(recipientKey)) return {};
+  const digest = createHash("sha256").update(recipientKey, "utf8").digest("hex").slice(0, 16);
+  return {
+    token_delivery: computed(
+      `sealed to x25519:${digest} — granting delivers the token to the requesting process, not only to this screen`,
+      "log",
+    ),
+  };
+}
+
 function payloadDerivations(
   rendering: PayloadRendering | null,
   load: PolicyLoadResult,
@@ -647,6 +672,13 @@ function tagDerivation(
     summary: claimed(derivation.declared.summary, requestRecord.actor),
     ...payloadDerivations(rendering, load),
     payload_hash: computed(boundHash, "log"),
+    // APRV-105. Present only when the request published a delivery address, so
+    // an approver is told when granting will hand a readable token to the
+    // requesting process rather than only to this screen. Digested rather than
+    // printed whole: the key is public and harmless, but several hundred
+    // characters of base64 in a prompt is several hundred characters nobody
+    // reads, and a digest is enough to tell two requests' addresses apart.
+    ...deliveryDerivation(payloadOf(requestRecord)[RECIPIENT_KEY_FIELD]),
     fullPayload: computed(rendering, "payload-binding"),
     budgets: computed(budgets, "budgets"),
     attestation: computed(attestation, "attestation"),

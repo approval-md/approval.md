@@ -94,23 +94,101 @@ const MS_PER_UNIT: Readonly<Record<string, number>> = {
   w: 604_800_000,
 };
 
-/** SPEC.md §5.2 autonomy levels, strictest first. */
+/**
+ * SPEC.md §5.2 autonomy levels, strictest first — the RESOLVED vocabulary.
+ *
+ * Deliberately unchanged by APRV-127. The autonomy split is a split of
+ * *supervision*, not of autonomy: both supervised modes execute under
+ * supervision, both are metered by the same budgets, and both are eligible for
+ * the same retrospective review. Every consumer that asks "is this action
+ * supervised?" keeps asking one question and getting one answer, and the mode
+ * travels beside it as {@link SupervisionMode}. Widening this union instead
+ * would have put a third case into every `switch` in the runtime, and a
+ * `switch` that forgot it would have failed open.
+ */
 export type Autonomy = "manual" | "supervised" | "autonomous";
+
+/**
+ * Amended SPEC.md §5.2 (APRV-127): how far a supervised class is supervised.
+ *
+ * - `live`: a declared fraction of the class's actions BLOCK on the human gate
+ *   before executing, exactly as `manual` does. The rest proceed.
+ * - `retro`: the pre-split behaviour. Every action proceeds immediately and a
+ *   fraction is drawn afterwards into a human's review backlog.
+ */
+export type SupervisionMode = "live" | "retro";
+
+/** What a class rule may WRITE. See {@link Autonomy} for what it resolves to. */
+export type DeclaredAutonomy = Autonomy | "supervised-live" | "supervised-retro";
+
+/**
+ * What `defaults.autonomy` may write: {@link DeclaredAutonomy} less
+ * `supervised-live`, which is meaningless without a `live_rate` and has nowhere
+ * on `defaults` to declare one. Enforced by `policy.schema.json`.
+ */
+export type DefaultAutonomy = Exclude<DeclaredAutonomy, "supervised-live">;
+
+/**
+ * Amended SPEC.md §10.4 (APRV-105): how the raw execution token travels from the
+ * mint site to the spend site.
+ *
+ * - `manual` — printed once on the granting surface and carried by a human.
+ *   THE DEFAULT, and what an absent key means.
+ * - `sealed` — additionally sealed to the requester's ephemeral public key and
+ *   recorded as ciphertext, so `approval wait` can return it to the process
+ *   that asked, across machines.
+ */
+export type TokenDelivery = "manual" | "sealed";
+
+/** The delivery mode in force. Fail-closed: anything unusable is `manual`. */
+export function tokenDeliveryOf(load: PolicyLoadResult): TokenDelivery {
+  if (!load.ok) return "manual";
+  return load.policy.defaults?.token_delivery === "sealed" ? "sealed" : "manual";
+}
 
 /** A class rule (SPEC.md §5.1); shape mirrors `policy.schema.json`. */
 export interface PolicyClassRule {
-  autonomy: Autonomy;
+  autonomy: DeclaredAutonomy;
+  /**
+   * Amended SPEC.md §5.2 (APRV-127): the fraction of `supervised-live` actions
+   * that block on the human gate, in (0, 1]. Required by the schema for
+   * `supervised-live` and forbidden for every other level.
+   */
+  live_rate?: number;
   approvers?: string[];
   limits?: Record<string, number>;
+}
+
+/**
+ * A load-time observation about a policy that PARSED and VALIDATED.
+ *
+ * Not an error, and never a refusal: a policy carrying notes is fully in force.
+ * The notes exist because APRV-127 gave an existing spelling a new name, and a
+ * reinterpretation nobody is told about is the failure mode this project exists
+ * to prevent. `approval policy check` and `doctor` print them; nothing branches
+ * on them.
+ */
+export interface PolicyNote {
+  /** Machine-readable and closed, so a reader can branch without regex. */
+  code: "supervised-alias";
+  /** Where the note applies: a class pattern, or `defaults.autonomy`. */
+  where: string;
+  message: string;
 }
 
 /** Parsed policy document. Structurally guaranteed by `policy.schema.json`. */
 export interface Policy {
   version: string;
   defaults?: {
-    autonomy?: Autonomy;
+    autonomy?: DefaultAutonomy;
     channel?: string;
     approval_ttl?: string;
+    /**
+     * Amended SPEC.md §10.4 (APRV-105): how the raw execution token reaches the
+     * process that will spend it. Absent means `manual`, and under `manual`
+     * nothing about the pre-APRV-105 behaviour changes byte for byte.
+     */
+    token_delivery?: TokenDelivery;
     on_expiry?: "reject";
   };
   /**
@@ -209,6 +287,11 @@ export type PolicyLoadResult =
       policy: Policy;
       source: PolicySource;
       durations: PolicyDurations;
+      /**
+       * Amended SPEC.md §5.2 (APRV-127): observations about a policy that is in
+       * force. Empty for almost every policy. Never a reason to fail closed.
+       */
+      notes: PolicyNote[];
     }
   | {
       ok: false;
@@ -591,7 +674,39 @@ export function loadPolicyText(
     policy,
     source: { path: resolved.path, filename: basename(resolved.path) },
     durations: { approvalTtlMs, skewToleranceMs },
+    notes: aliasNotes(policy),
   };
+}
+
+/**
+ * Amended SPEC.md §5.2 (APRV-127): one note per place a policy still writes the
+ * bare `supervised`.
+ *
+ * The alias keeps every pre-split policy meaning exactly what its author meant:
+ * `supervised` was retrospective sampling, and `supervised-retro` is that same
+ * behaviour under its honest name. What the alias must never be is quiet. An
+ * author reading the split for the first time can reasonably believe `supervised`
+ * now means "supervised somehow, possibly live"; the note says, in the one place
+ * a reader is already looking, that it does not.
+ *
+ * Pure, total, and ordered: `defaults` first, then class patterns in sorted
+ * order, so the notes of one policy are byte-stable across runs.
+ */
+function aliasNotes(policy: Policy): PolicyNote[] {
+  const notes: PolicyNote[] = [];
+  const say = (where: string): PolicyNote => ({
+    code: "supervised-alias",
+    where,
+    message: `${where} declares the bare \`supervised\`, which parses as \`supervised-retro\`: the action executes immediately and is sampled for review AFTERWARDS. Nothing about it changed with the autonomy split — this is the same behaviour under its honest name. Write \`supervised-retro\` to say so explicitly, or \`supervised-live: <rate>\` to have a fraction of the class stop for a human FIRST.`,
+  });
+
+  if (policy.defaults?.autonomy === "supervised") notes.push(say("defaults.autonomy"));
+  for (const pattern of Object.keys(policy.classes ?? {}).sort()) {
+    if (policy.classes?.[pattern]?.autonomy === "supervised") {
+      notes.push(say(`classes.${pattern}`));
+    }
+  }
+  return notes;
 }
 
 /**

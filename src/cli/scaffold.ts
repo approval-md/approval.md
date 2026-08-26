@@ -100,6 +100,13 @@ export const GITIGNORE_MARKER = "# approval.md";
  *   plaintext literal, an operator will eventually paste one in, and the day
  *   they do must not be the day a bot token lands in a commit. Ignoring it also
  *   states the intent — the environment is per-machine, not per-repository.
+ * - `.approval/keys/` — the per-request X25519 private keys of sealed token
+ *   delivery (APRV-105). Per-machine by construction: the whole design is that
+ *   the log, which IS shared, carries only ciphertext, and a key committed to a
+ *   shared history would hand every reader of that history the ability to open
+ *   an unspent token inside its TTL. Written whether or not a policy has opted
+ *   into `token_delivery: sealed`, because the line an operator needs is the one
+ *   that is already there on the day they turn the knob.
  * - `.approval/**\/*.tmp-*` — the atomic-write temp files. Both writers that
  *   rename into place (`channels/render-queue.ts`, `core/payload-store.ts`) name
  *   their temp `.<basename>.tmp-<pid>-<counter>`, so this pattern is written to
@@ -115,6 +122,7 @@ export const GITIGNORE_ENTRIES: readonly string[] = [
   ".approval/*.sqlite",
   ".approval/vault.enc",
   ".approval/env",
+  ".approval/keys/",
   ".approval/**/*.tmp-*",
 ];
 

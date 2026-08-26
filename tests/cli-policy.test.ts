@@ -116,7 +116,14 @@ test("a clean rule match answers with the full explanation object", () => {
   assert.deepEqual(JSON.parse(run.stdout), {
     class: "read.web",
     reversible: null,
-    outcome: { autonomy: "autonomous", approvers: null, limits: null },
+    outcome: {
+      autonomy: "autonomous",
+      declaredAutonomy: "autonomous",
+      supervision: null,
+      liveRate: null,
+      approvers: null,
+      limits: null,
+    },
     provenance: "rule",
     manualBecause: null,
     loadFailure: null,
@@ -151,7 +158,14 @@ test("--reversible false engages the floor and records what it overrode", () => 
   assert.deepEqual(JSON.parse(run.stdout), {
     class: "read.web",
     reversible: false,
-    outcome: { autonomy: "manual", approvers: null, limits: null },
+    outcome: {
+      autonomy: "manual",
+      declaredAutonomy: "manual",
+      supervision: null,
+      liveRate: null,
+      approvers: null,
+      limits: null,
+    },
     provenance: "floor",
     manualBecause: "irreversibility-floor",
     loadFailure: null,
@@ -187,7 +201,14 @@ test("an unmatched class falls to defaults.autonomy", () => {
   assert.deepEqual(JSON.parse(run.stdout), {
     class: "physical.order",
     reversible: null,
-    outcome: { autonomy: "supervised", approvers: null, limits: null },
+    outcome: {
+      autonomy: "supervised",
+      declaredAutonomy: "supervised",
+      supervision: "retro",
+      liveRate: null,
+      approvers: null,
+      limits: null,
+    },
     provenance: "default",
     manualBecause: null,
     loadFailure: null,
@@ -199,7 +220,7 @@ test("an unmatched class falls to defaults.autonomy", () => {
       `policy loaded from ${path}`,
       'no class rule matched "physical.order"',
       "no rule matched; defaults.autonomy -> supervised",
-      "final: supervised",
+      "final: supervised-retro — executes immediately, sampled for review AFTERWARDS at audit.supervised_sample_rate",
     ],
   });
 });
@@ -215,6 +236,9 @@ test("a missing policy is answered, not errored: exit 0 and load-failure", () =>
   assert.equal(answer["manualBecause"], "load-failure");
   assert.deepEqual(answer["outcome"], {
     autonomy: "manual",
+    declaredAutonomy: "manual",
+    supervision: null,
+    liveRate: null,
     approvers: null,
     limits: null,
   });
@@ -429,7 +453,14 @@ test("this repo's APPROVAL.md gates its own classes as written", () => {
   };
 
   const deps = ask("deps.add");
-  assert.deepEqual(deps["outcome"], { autonomy: "manual", approvers: null, limits: null });
+  assert.deepEqual(deps["outcome"], {
+    autonomy: "manual",
+    declaredAutonomy: "manual",
+    supervision: null,
+    liveRate: null,
+    approvers: null,
+    limits: null,
+  });
   assert.equal(deps["manualBecause"], "matched-rule");
   assert.deepEqual(deps["matched"], { pattern: "deps.add", rule: { autonomy: "manual" } });
   assert.ok(
@@ -447,6 +478,61 @@ test("this repo's APPROVAL.md gates its own classes as written", () => {
   assert.deepEqual(push["matched"], {
     pattern: "vcs.push.main",
     rule: { autonomy: "supervised" },
+  });
+  // APRV-127 pins the migration promise on the repo's OWN policy: this file
+  // still writes the bare `supervised`, and the split must not have changed
+  // what it means. Retro, no live rate, nothing gated before execution. The
+  // rates the human wants land later, through the ordinary amendment ceremony;
+  // shipping the mechanism must not move the policy by itself.
+  assert.deepEqual(push["outcome"], {
+    autonomy: "supervised",
+    declaredAutonomy: "supervised",
+    supervision: "retro",
+    liveRate: null,
+    approvers: null,
+    limits: null,
+  });
+});
+
+test("the supervised-live grammar is available to this repo's policy, unused", () => {
+  const cwd = caseDir();
+  // The grammar the amendment ceremony will reach for. Proved here against a
+  // scratch policy rather than against APPROVAL.md, because APRV-127 ships the
+  // MECHANISM and the human sets the RATES: an agent that edited the live rates
+  // into the attested policy would be an agent choosing its own supervision.
+  const { dir } = policyDir(
+    [
+      'version: "0.1"',
+      "defaults:",
+      "  autonomy: manual",
+      "audit:",
+      "  sampling_secret_env: APPROVAL_SAMPLING_SECRET",
+      "classes:",
+      "  policy.edit: { autonomy: supervised-live, live_rate: 0.01 }",
+      "  records.write: { autonomy: supervised-retro }",
+    ].join("\n"),
+  );
+
+  const live = runCli(["policy", "check", "policy.edit", "--dir", dir, "--json"], cwd);
+  assert.equal(live.code, 0, live.stderr);
+  assert.deepEqual(JSON.parse(live.stdout).outcome, {
+    autonomy: "supervised",
+    declaredAutonomy: "supervised-live",
+    supervision: "live",
+    liveRate: 0.01,
+    approvers: null,
+    limits: null,
+  });
+
+  const retro = runCli(["policy", "check", "records.write", "--dir", dir, "--json"], cwd);
+  assert.equal(retro.code, 0, retro.stderr);
+  assert.deepEqual(JSON.parse(retro.stdout).outcome, {
+    autonomy: "supervised",
+    declaredAutonomy: "supervised-retro",
+    supervision: "retro",
+    liveRate: null,
+    approvers: null,
+    limits: null,
   });
 });
 

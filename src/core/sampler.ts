@@ -256,3 +256,123 @@ export function resolveSampler(
     toJSON: () => ({ enabled: true, rate, secret_env: secretEnv }),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Live selection (amended SPEC.md §5.2, §6.3 — APRV-127)
+// ---------------------------------------------------------------------------
+
+/**
+ * The selection algorithm recorded for a live decision, so a reproducing
+ * operator knows what to recompute and over which input.
+ *
+ * Distinct from the retrospective sampler's `hmac-sha256/event-hash` because the
+ * INPUT is different, and deliberately so. Retrospective sampling happens after
+ * an execution exists, so it can key on that record's chain hash. A live
+ * decision happens at intake, before any record exists, so it keys on the one
+ * identifier that already binds the action to its bytes: the `payload_hash` the
+ * registration declared.
+ *
+ * That choice is what buys the no-re-roll property. The payload hash is a pure
+ * function of the payload, so an action retried with the same bytes gets the
+ * same verdict every time, on every machine, forever. An agent that dislikes its
+ * luck cannot retry until the verdict changes; it can only change the bytes,
+ * which changes the action.
+ */
+export const LIVE_SELECTION = "hmac-sha256/payload-hash";
+
+/** Why live selection could not be derived from a secret. */
+export const LIVE_SELECTOR_UNAVAILABLE_REASONS = [
+  /** The policy could not be loaded, so it names no sampling secret. */
+  "policy-unreadable",
+  /** The policy carries no `audit.sampling_secret_env`. */
+  "secret-env-unnamed",
+  /** The named environment variable is unset or empty in this process. */
+  "secret-unset",
+] as const;
+
+export type LiveSelectorUnavailableReason = (typeof LIVE_SELECTOR_UNAVAILABLE_REASONS)[number];
+
+/** A live selector that can answer, or one that cannot and says why. */
+export type LiveSelector =
+  | {
+      available: true;
+      /** The NAME of the environment variable the secret was read from. */
+      secretEnv: string;
+      /** Is this payload hash in the live fraction at this rate? */
+      selects(payloadHash: string, rate: number): boolean;
+    }
+  | {
+      available: false;
+      reason: LiveSelectorUnavailableReason;
+      message: string;
+      secretEnv: string | null;
+    };
+
+/**
+ * Build the live selector for a policy and an environment.
+ *
+ * ## Why this one FAILS CLOSED where the retrospective sampler fails open
+ *
+ * {@link resolveSampler} above documents the runtime's single deliberate
+ * fail-open: with no secret, retrospective sampling stops rather than sampling
+ * everything, because "sample everything" would need a selection function and
+ * the only available seed — event content — is one the authoring agent controls.
+ * A control that looks like it is running while the party under oversight steers
+ * it is worse than no control.
+ *
+ * None of that reasoning transfers here, because the strict reading of a live
+ * class needs no selection function at all. "Gate every action in this class" is
+ * fully specified, needs no seed, and is exactly `manual`. So an unavailable
+ * secret makes every live action gated: the caller ({@link
+ * import("./gate.js").request}) reads `available: false` as "selected", and a
+ * class an operator asked to sample at 1% is gated at 100% until the secret is
+ * exported. That is loud, safe, self-repairing, and the same direction every
+ * other refusal in this runtime takes.
+ *
+ * The secret is closed over and never returned, logged, or serialized, exactly
+ * as in {@link resolveSampler}.
+ */
+export function resolveLiveSelector(
+  load: PolicyLoadResult,
+  env: NodeJS.ProcessEnv = process.env,
+): LiveSelector {
+  if (!load.ok) {
+    return {
+      available: false,
+      reason: "policy-unreadable",
+      message: `the policy could not be loaded (${load.code}), so it names no audit.sampling_secret_env and no live selection can be derived. Every supervised-live action is gated until it can be.`,
+      secretEnv: null,
+    };
+  }
+
+  const secretEnv =
+    typeof load.policy.audit?.sampling_secret_env === "string" &&
+    load.policy.audit.sampling_secret_env.length > 0
+      ? load.policy.audit.sampling_secret_env
+      : null;
+  if (secretEnv === null) {
+    return {
+      available: false,
+      reason: "secret-env-unnamed",
+      message: `${load.source.filename} declares a supervised-live class but names no audit.sampling_secret_env. Live selection needs an operator-held secret: seeding it from the payload alone is forbidden by SPEC.md §5.2, because the agent authoring the payload controls those bytes and could search them until its action falls outside the fraction. Every supervised-live action is gated until the variable is named.`,
+      secretEnv: null,
+    };
+  }
+
+  const secret = env[secretEnv];
+  if (typeof secret !== "string" || secret.length === 0) {
+    return {
+      available: false,
+      reason: "secret-unset",
+      message: `${load.source.filename} names ${secretEnv} as the sampling secret's environment variable, and it is unset or empty in this process. Every supervised-live action is gated until it is exported. The value is never read from the policy file or the repository by design.`,
+      secretEnv,
+    };
+  }
+
+  return {
+    available: true,
+    secretEnv,
+    selects: (payloadHash: string, rate: number): boolean =>
+      isSampled(secret, payloadHash, rate),
+  };
+}

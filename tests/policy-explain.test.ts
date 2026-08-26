@@ -140,7 +140,14 @@ test("manualBecause is load-failure when the policy file is missing", () => {
   assert.ok((explanation.loadFailure?.message.length ?? 0) > 0);
   assert.equal(explanation.matched, null);
   assert.deepEqual(explanation.candidates, []);
-  assert.deepEqual(explanation.outcome, { autonomy: "manual", approvers: null, limits: null });
+  assert.deepEqual(explanation.outcome, {
+    autonomy: "manual",
+    declaredAutonomy: "manual",
+    supervision: null,
+    liveRate: null,
+    approvers: null,
+    limits: null,
+  });
 });
 
 test("manualBecause is load-failure for a schema-invalid policy too", () => {
@@ -286,7 +293,13 @@ test("decisionPath is non-empty and names the winning pattern", () => {
     explanation.decisionPath.some((line) => line.startsWith("winner: vcs.push.main")),
     "the winner line must be present",
   );
-  assert.equal(explanation.decisionPath.at(-1), "final: supervised");
+  // APRV-127: the final line names the MODE, because "supervised" alone no
+  // longer says whether a fraction of the class stops before executing.
+  assert.match(
+    explanation.decisionPath.at(-1) ?? "",
+    /^final: supervised-retro\b/u,
+    "a bare `supervised` rule resolves retro and the trace must say so",
+  );
 });
 
 test("approvers and limits ride along from the matched rule", () => {
@@ -297,6 +310,9 @@ test("approvers and limits ride along from the matched rule", () => {
 
   assert.deepEqual(explanation.outcome, {
     autonomy: "manual",
+    declaredAutonomy: "manual",
+    supervision: null,
+    liveRate: null,
     approvers: ["carter"],
     limits: { daily_usd: 100 },
   });

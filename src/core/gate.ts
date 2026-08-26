@@ -132,10 +132,26 @@ import {
   loadPolicyText,
   policyUnreadable,
   POLICY_FILENAMES,
+  tokenDeliveryOf,
   type Autonomy,
   type PolicyLoadResult,
 } from "./policy-load.js";
 import { resolve, type Resolution } from "./policy-match.js";
+import {
+  LIVE_SELECTION,
+  resolveLiveSelector,
+  type LiveSelectorUnavailableReason,
+} from "./sampler.js";
+import {
+  forgetPrivateKey,
+  isRecipientKey,
+  keyStoreDirFor,
+  mintRecipientKeypair,
+  RECIPIENT_KEY_FIELD,
+  sealToken,
+  SEALED_TOKEN_FIELD,
+  writePrivateKey,
+} from "./seal.js";
 import {
   payloadOf,
   readVerifiedRecords,
@@ -392,6 +408,18 @@ export interface GateOptions extends ClockOptions {
    * `core/payload-store.ts` defines: `.approval/payloads/`, beside the log.
    */
   payloadStoreDir?: string;
+  /**
+   * Where per-request private keys live (APRV-105). Defaults to the convention
+   * `core/seal.ts` defines: `.approval/keys/`, beside the log. Under the default
+   * `token_delivery: manual` nothing here is ever written or read.
+   */
+  keyStoreDir?: string;
+  /**
+   * The environment the operator's sampling secret is read from (APRV-127).
+   * Injected by tests; defaults to `process.env`. The secret is never read from
+   * the policy file or from anywhere else inside the repository.
+   */
+  env?: NodeJS.ProcessEnv;
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,6 +1052,55 @@ function declaredPayloadHash(
   return found;
 }
 
+/**
+ * Why a `supervised-live` action was, or was not, sent to the human gate
+ * (amended SPEC.md §5.2/§6.3, APRV-127).
+ *
+ * Returned to the caller and **never written to the log**. See
+ * {@link liveVerdict} for why the log carries no trace of the selection.
+ */
+export interface LiveVerdict {
+  /** The class's declared `live_rate`, as `policy-match.ts` resolved it. */
+  rate: number;
+  /** True when this action must stop for a human before it may execute. */
+  gated: boolean;
+  /**
+   * Machine-readable and closed, because a supervisor branches on it:
+   *
+   * - `selected` — the HMAC fell under the rate. This is the fraction working.
+   * - `not-selected` — it did not. The action proceeds, and still enters the
+   *   retrospective pool.
+   * - `payload-hash-absent` — the registration declared no `payload_hash`, so
+   *   there is nothing to select over. Gated: an action whose bytes nobody
+   *   named cannot be shown to have been fairly sampled, and the manual path
+   *   refuses it by name a moment later.
+   * - the three {@link LiveSelectorUnavailableReason}s — no usable secret.
+   *   Gated. See `core/sampler.ts` on why live selection fails closed where
+   *   retrospective sampling fails open.
+   */
+  reason: "selected" | "not-selected" | "payload-hash-absent" | LiveSelectorUnavailableReason;
+  /** The algorithm an operator holding the secret recomputes to check this. */
+  selection: typeof LIVE_SELECTION;
+  /** The NAME of the secret's environment variable. Never the secret. */
+  secretEnv: string | null;
+}
+
+/**
+ * The LATEST `approval.requested` for an action key, or an empty stand-in.
+ *
+ * Latest, because an action key may be requested again after a rejection or an
+ * expiry, and the grant being recorded answers the live cycle. Returns a bare
+ * object rather than `null` so the one caller can read a field off it without a
+ * branch; there is nothing on it to mistake for a real value.
+ */
+function requestRecord(records: EventRecord[], actionKey: string): EventRecord {
+  let found: EventRecord | null = null;
+  for (const record of records) {
+    if (record.event === "approval.requested" && record.action_key === actionKey) found = record;
+  }
+  return found ?? ({ payload: {} } as EventRecord);
+}
+
 export type RequestResult =
   | {
       ok: true;
@@ -1033,8 +1110,97 @@ export type RequestResult =
       resolution: Resolution;
       /** The `approval.requested` record, or `null` off the manual path. */
       record: EventRecord | null;
+      /**
+       * The live-selection verdict, for a `supervised-live` class only
+       * (APRV-127). Absent for every other class: there was no fraction to fall
+       * inside or outside of.
+       */
+      live?: LiveVerdict;
     }
   | GateRefusal;
+
+/**
+ * Decide whether one `supervised-live` action stops at the human gate.
+ *
+ * Selected **iff** `HMAC-SHA-256(operator secret, payload_hash)`, read as a
+ * uniform value in [0, 1), falls below the class's `live_rate` — the identical
+ * construction `core/sampler.ts` already uses for retrospective sampling, reused
+ * rather than reinvented so there is one selection mechanism in this runtime and
+ * one thing to get right.
+ *
+ * The four properties the design asks for, and where each comes from:
+ *
+ * - **Deterministic.** HMAC over the payload hash is a pure function. Same
+ *   secret, same bytes, same rate, same verdict — on every machine, forever.
+ * - **Agent-unpredictable.** The secret is operator-held and named only by
+ *   `audit.sampling_secret_env`. An agent that cannot read it cannot compute its
+ *   own luck, and seeding from content alone is forbidden by SPEC.md §5.2 for
+ *   exactly that reason.
+ * - **No re-roll.** The input is the payload hash, not a nonce, a timestamp, or
+ *   an attempt counter. A refused, retried, or duplicated request over identical
+ *   bytes gets identical treatment, so "ask again until it comes up unsampled"
+ *   is not a strategy — there is nothing to re-roll. Changing the bytes changes
+ *   the verdict, but bytes are the action, so that is a different request.
+ * - **Post-hoc verifiable.** An operator holding the secret can recompute the
+ *   verdict for any request in the log from its `payload_hash` and the `live_rate`
+ *   of the policy the request pinned in `policy_sha256`.
+ *
+ * ## Nothing about the selection is written to the log
+ *
+ * A sampled action's `approval.requested` is byte-for-byte what a `manual`
+ * class's would have been: same fields, same values, same order. That is
+ * deliberate, and it is what "follows the manual path bit for bit" means at the
+ * level of the record.
+ *
+ * Two reasons. First, the selection VALUE in the log would be a free oracle: an
+ * agent that could read a corpus of (payload hash, value) pairs learns about the
+ * secret it is not supposed to hold. `core/audit.ts` omits it from `audit.sampled`
+ * for the same reason. Second, a "this one was sampled live" marker would be a
+ * distinction a channel, an approver, or a later reader could act on — treating
+ * the sampled request as a lesser question than a manual one — and the whole
+ * value of the mechanism is that a sampled action is answered exactly as a
+ * manual one is. The verdict travels to the CALLER, which needs it to explain
+ * itself on stderr, and stops there.
+ *
+ * Nothing is lost to audit: the verdict is recomputable from the request's own
+ * `payload_hash` plus the secret, which is strictly better evidence than a
+ * self-reported field, because it cannot be forged by whoever wrote the record.
+ */
+function liveVerdict(
+  load: PolicyLoadResult,
+  resolution: Resolution,
+  payloadHash: string | null,
+  env: NodeJS.ProcessEnv | undefined,
+): LiveVerdict {
+  const rate = resolution.liveRate ?? 1;
+  const selector = resolveLiveSelector(load, env ?? process.env);
+  if (!selector.available) {
+    return {
+      rate,
+      gated: true,
+      reason: selector.reason,
+      selection: LIVE_SELECTION,
+      secretEnv: selector.secretEnv,
+    };
+  }
+  if (payloadHash === null) {
+    return {
+      rate,
+      gated: true,
+      reason: "payload-hash-absent",
+      selection: LIVE_SELECTION,
+      secretEnv: selector.secretEnv,
+    };
+  }
+  const selected = selector.selects(payloadHash, rate);
+  return {
+    rate,
+    gated: selected,
+    reason: selected ? "selected" : "not-selected",
+    selection: LIVE_SELECTION,
+    secretEnv: selector.secretEnv,
+  };
+}
 
 /**
  * `est_cost_usd` as the budgets contract wants it recorded: always a canonical
@@ -1093,10 +1259,14 @@ function displayHashField(
  * 3. **Policy resolution** (`loadPolicy` + `resolve`, including the §7
  *    irreversibility floor). A failed load resolves everything to `manual` —
  *    that is `policy-match.ts`'s contract, and this module does not soften it.
- * 4. **Off the manual path, stop.** `supervised`/`autonomous` append **no
- *    event** (amended SPEC.md §6.3) and return `proceed: true`. Their budget is
- *    charged at `execution.started`, which APRV-18 appends — checking budgets
- *    here as well would charge them twice or, worse, pass here and fail there.
+ * 4. **Off the manual path, stop — unless the live fraction says otherwise.**
+ *    `supervised`/`autonomous` append **no event** (amended SPEC.md §6.3) and
+ *    return `proceed: true`. Their budget is charged at `execution.started`,
+ *    which APRV-18 appends — checking budgets here as well would charge them
+ *    twice or, worse, pass here and fail there. A `supervised-live` class
+ *    (APRV-127) draws its declared fraction here: an action the draw selects
+ *    falls through into everything below and is treated as `manual` from this
+ *    line on, and an action it does not proceeds exactly as before.
  * 5. **Content binding** (amended SPEC.md §6.2, A1). A manual action whose
  *    registered declaration carries no `payload_hash` is refused
  *    `payload-hash-required` and nothing is appended. This is the first check
@@ -1148,6 +1318,22 @@ export function request(
     input.reversible === undefined ? {} : { reversible: input.reversible },
   );
 
+  // Amended SPEC.md §6.2/§10 (A1): a manual grant binds to bytes. The log's
+  // declaration wins over anything the caller passed — `register` wrote it from
+  // the envelope, and a request that could name its own hash could approve one
+  // payload and execute another, which is the property this exists to remove.
+  //
+  // Read BEFORE the autonomy branch since APRV-127, because a `supervised-live`
+  // class selects over exactly this value. A caller-supplied fallback is
+  // accepted here on the same terms the manual path always accepted it, and it
+  // cannot be used to steer the selection: an agent that changes the hash it
+  // presents changes which bytes it is asking to have approved, and the
+  // registration's own declaration wins whenever there is one.
+  const payloadHash =
+    declaredPayloadHash(read.records, input.task, input.actionKey) ??
+    (isPayloadHash(input.payload_hash) ? input.payload_hash : null);
+
+  let live: LiveVerdict | null = null;
   if (resolution.autonomy !== "manual") {
     // SPEC.md §10.2 loop safety, the gate's half (APRV-18). Three consecutive
     // execution.failed events for a task escalate it to manual "regardless of
@@ -1164,21 +1350,40 @@ export function request(
         `task ${input.task} has three consecutive execution.failed events and is escalated to manual (SPEC.md §10.2); its ${resolution.autonomy} action ${input.actionKey} may not proceed unsupervised. The task's manual actions are unaffected — escalation puts a human in the loop, it does not close the task — and the streak clears when an execution.completed for the task lands.`,
       );
     }
-    // Amended SPEC.md §6.3: no approval.* event exists off the manual path.
-    return { ok: true, autonomy: resolution.autonomy, proceed: true, resolution, record: null };
+    // APRV-127. A `supervised-live` class puts a declared fraction of its
+    // actions through the human gate before they run. This is where that
+    // fraction is drawn, and the drawing is the LAST check on the non-manual
+    // path: loop escalation above already refuses to let an escalated task
+    // proceed unsupervised, and asking whether an action is in the live
+    // fraction only matters once it would otherwise have been allowed through.
+    if (resolution.supervision === "live") {
+      live = liveVerdict(load, resolution, payloadHash, options.env);
+    }
+    if (live === null || !live.gated) {
+      // Amended SPEC.md §6.3: no approval.* event exists off the manual path.
+      // An UNSAMPLED supervised-live action leaves by exactly this door, so it
+      // proceeds as a supervised action always has and enters the retrospective
+      // pool on its `execution.started` like any other.
+      return {
+        ok: true,
+        autonomy: resolution.autonomy,
+        proceed: true,
+        resolution,
+        record: null,
+        ...(live === null ? {} : { live }),
+      };
+    }
+    // Sampled. Fall through into the manual path — the same code, in the same
+    // order, producing the same record. Nothing below this line knows or asks
+    // how the action got here.
   }
 
-  // Amended SPEC.md §6.2/§10 (A1): a manual grant binds to bytes. The log's
-  // declaration wins over anything the caller passed — `register` wrote it from
-  // the envelope, and a request that could name its own hash could approve one
-  // payload and execute another, which is the property this exists to remove.
-  const payloadHash =
-    declaredPayloadHash(read.records, input.task, input.actionKey) ??
-    (isPayloadHash(input.payload_hash) ? input.payload_hash : null);
   if (payloadHash === null) {
     return refuse(
       "payload-hash-required",
-      `action ${input.actionKey} resolves to manual and its registered declaration carries no payload_hash. Amended SPEC.md §6.2 makes the hash MUST for manual actions: an approval binds to the exact bytes it approves, so a request with nothing to bind to would ask a human to authorize a payload that could still change afterwards. Declare payload_hash (SHA-256 over the RFC 8785 canonical serialization of the concrete payload) on the action and register the task again.`,
+      live === null
+        ? `action ${input.actionKey} resolves to manual and its registered declaration carries no payload_hash. Amended SPEC.md §6.2 makes the hash MUST for manual actions: an approval binds to the exact bytes it approves, so a request with nothing to bind to would ask a human to authorize a payload that could still change afterwards. Declare payload_hash (SHA-256 over the RFC 8785 canonical serialization of the concrete payload) on the action and register the task again.`
+        : `action ${input.actionKey} resolves to supervised-live at rate ${String(live.rate)} and its registered declaration carries no payload_hash, so there is nothing to draw the live fraction over and nothing an approval could bind to. Amended SPEC.md §5.2 selects the live fraction by HMAC over the payload hash precisely so that identical bytes always select identically; an action with no declared bytes is gated rather than waved through, because a sample nobody can reproduce is not a sample. Declare payload_hash (SHA-256 over the RFC 8785 canonical serialization of the concrete payload) on the action and register the task again.`,
     );
   }
 
@@ -1309,6 +1514,32 @@ export function request(
     // cannot name the rules it claims to have been routed by.
     [POLICY_HASH_FIELD]: attested.sha256,
   };
+  // APRV-105. Sealed delivery publishes an ADDRESS for the token this request
+  // may earn: an ephemeral X25519 public key whose private half is written 0600
+  // beside the log and never leaves this machine. Minted HERE, at the last check
+  // before the append, so a refused request leaves no key file behind.
+  //
+  // Guarded by the policy, and by the policy alone: under the default
+  // `manual` no key is minted, no field is added, and the record this call
+  // appends is byte-identical to the one it appended before this feature
+  // existed. `RequestInput` carries no field for the key, so a caller cannot
+  // opt itself in — the operator's policy decides, exactly as it decides
+  // autonomy. A key that cannot be written is not a reason to refuse a request:
+  // the delivery is a convenience, the human's decision is not, and a request
+  // that recorded a key it cannot open would be worse than one that recorded
+  // none. So a failed write drops the field and the paste path stands.
+  if (
+    tokenDeliveryOf(load) === "sealed" &&
+    input.execution !== "harness" // a harness grant mints no token to deliver
+  ) {
+    const keypair = mintRecipientKeypair();
+    const written = writePrivateKey(
+      options.keyStoreDir ?? keyStoreDirFor(logPath),
+      input.actionKey,
+      keypair.privateKey,
+    );
+    if (written.ok) payload[RECIPIENT_KEY_FIELD] = keypair.publicKey;
+  }
   if (input.summary !== undefined) payload["summary"] = input.summary;
   if (input.reversible !== undefined) payload["reversible"] = input.reversible;
   // APRV-106. Both are recorded here rather than derived later because the log
@@ -1337,10 +1568,16 @@ export function request(
 
   return {
     ok: true,
+    // `manual` because that is the path this action took and the rules it is now
+    // under: it has a request, it needs a grant, and it will spend a token. The
+    // CLASS may still be supervised-live — `resolution` says so, unchanged — and
+    // `live` says how it got here. What a caller must not read back is
+    // "supervised, proceed", so the field a caller branches on says `manual`.
     autonomy: "manual",
     proceed: false,
     resolution,
     record: appended.record,
+    ...(live === null ? {} : { live }),
   };
 }
 
@@ -1668,7 +1905,32 @@ export function decide(
     } else {
       token = mintToken();
       payload[TOKEN_HASH_FIELD] = tokenHash(token);
+      // APRV-105. Sealed delivery, decided by the REQUEST rather than by this
+      // site's own policy read: the recipient key exists only because the
+      // requester's policy said `sealed`, and this grant may be happening on
+      // another machine entirely — the listener on a laptop, the requester
+      // elsewhere, the log synced through git. Reading the key off the request
+      // is what makes the handover work across that gap, and it widens nothing:
+      // the key can only receive a token, never mint, forge, rebind or respend
+      // one. Under `manual` no request carries a key and no grant is sealed, so
+      // the record here is byte-identical to a pre-APRV-105 grant.
+      //
+      // The raw token is STILL returned to this caller and still printed once on
+      // the granting surface. Sealing adds a second reader; it removes none.
+      const recipient = payloadOf(requestRecord(read.records, actionKey))[RECIPIENT_KEY_FIELD];
+      if (isRecipientKey(recipient)) {
+        const sealed = sealToken(token, recipient, actionKey);
+        // An unusable recipient key drops the convenience and never the grant:
+        // a human's yes must not be voidable by a malformed delivery address.
+        if (sealed !== null) payload[SEALED_TOKEN_FIELD] = { ...sealed };
+      }
     }
+  }
+  if (decision === "revoke") {
+    // APRV-105. The authorization is dead, so its delivery address dies with it.
+    // A key file that outlived its grant would be a standing decryption
+    // capability for a ciphertext the log keeps forever, held for no reason.
+    forgetPrivateKey(options.keyStoreDir ?? keyStoreDirFor(logPath), actionKey);
   }
 
   const appended = append(
@@ -2472,5 +2734,15 @@ export function expire(
     );
   }
 
-  return appendExpiry(logPath, derivation, load, ts, options, read.head);
+  const expired = appendExpiry(logPath, derivation, load, ts, options, read.head);
+  if (expired.ok) {
+    // APRV-105, the third and last death of a delivery address. A lapsed request
+    // can never be granted, so the private key that would have opened its token
+    // opens nothing; keeping it would be keeping a decryption capability for a
+    // ciphertext that may not even exist. Best effort and never fatal: the
+    // expiry is the record that matters, and a key file that survives a failed
+    // unlink is inert.
+    forgetPrivateKey(options.keyStoreDir ?? keyStoreDirFor(logPath), actionKey);
+  }
+  return expired;
 }
