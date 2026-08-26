@@ -57,7 +57,7 @@ function envelope(state = "awaiting"): Record<string, unknown> {
         class: "communicate.email.external",
         summary: "Send the chaser",
         reversible: false,
-        est_cost_usd: 0.02,
+        est_cost_usd: "0.02",
         idempotency_key: "task-1:chaser",
       },
     ],

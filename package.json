@@ -25,7 +25,8 @@
     "test": "tsc -p tsconfig.json && node scripts/run-tests.mjs",
     "lint": "oxlint src tests",
     "check:tier": "node scripts/classify-tier.mjs",
-    "check:changed": "node scripts/classify-tier.mjs --working-tree --run"
+    "check:changed": "node scripts/classify-tier.mjs --working-tree --run",
+    "conformance": "tsc -p tsconfig.json && node conformance/run.mjs"
   },
   "devDependencies": {
     "@types/better-sqlite3": "9.6.0",

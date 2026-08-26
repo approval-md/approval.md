@@ -33,7 +33,8 @@
  * `execution.started` is counted only when the window contains no
  * `approval.granted` bearing the same `action_key`.
  *
- * **The gate MUST record `payload.est_cost_usd` (a number, USD) and
+ * **The gate MUST record `payload.est_cost_usd` (a decimal USD string since
+ * APRV-121, a JSON number in records written before it) and
  * `payload.class` (the action's dotted class string) on every
  * `approval.granted` and `execution.started` event it appends.** Those two
  * payload fields are the entire input to USD accounting and class scoping.
@@ -78,6 +79,12 @@
 
 import type { Policy } from "./policy-load.js";
 import type { EventRecord } from "./log.js";
+import {
+  microsToUsdString,
+  usdNumberToMicros,
+  usdToMicros,
+  type UsdInput,
+} from "./money.js";
 import { matchesPattern } from "./policy-match.js";
 
 /** Length of the rolling `daily` window: 24 hours, in milliseconds. */
@@ -107,10 +114,16 @@ export interface BudgetScope {
   globalBudgets: Policy["budgets"] | null;
 }
 
-/** The action being admitted. `est_cost_usd` absent means "no declared cost". */
+/**
+ * The action being admitted. `est_cost_usd` absent means "no declared cost".
+ *
+ * The amount is a canonical decimal string (APRV-121, `core/money.ts`). A JSON
+ * number is accepted here as the historical form — records written before that
+ * change carry one, and this evaluator must read them identically to before.
+ */
 export interface BudgetAction {
   class: string;
-  est_cost_usd?: number;
+  est_cost_usd?: UsdInput;
 }
 
 /**
@@ -138,14 +151,22 @@ export type BudgetVerdictScope = "class" | "global" | "task";
  * action, so a `pass: false` verdict shows how far over the line it is.
  * `note` is present only when the verdict needs explaining, which at v0.1 means
  * only fail-closed refusals.
+ *
+ * The three figures are **decimal strings** (APRV-121). A failing verdict is
+ * copied verbatim into the `budget.exceeded` payload, which is hashed material,
+ * and a float there would be exactly the cross-language serialization hazard
+ * this project removed from `est_cost_usd`. Money is reported in canonical USD
+ * (`"0.3"`), counts as integers (`"3"`); a negative `remaining` — headroom
+ * already spent — is spelled with a leading `-`, so it is a decimal string but
+ * not a canonical amount, which only ever describes money being declared.
  */
 export interface BudgetVerdict {
   limit: string;
   scope: BudgetVerdictScope;
   window: BudgetWindow;
-  consumed: number;
-  requested: number;
-  remaining: number;
+  consumed: string;
+  requested: string;
+  remaining: string;
   pass: boolean;
   note?: string;
 }
@@ -165,16 +186,19 @@ const DAILY_ACTIONS = "daily_actions";
 export const TASK_MAX_COST_USD = "budget.max_cost_usd";
 
 /**
- * Round monetary arithmetic to 1e-6 USD.
+ * The unit a verdict's three figures are counted in.
  *
- * Sums of IEEE-754 doubles drift (`0.1 + 0.2 !== 0.3`), and an action refused
- * because a sum landed a nanocent over its ceiling would be both wrong and
- * unexplainable. Six decimals is far finer than any real currency amount and
- * far coarser than the drift. Applied identically to every reported number and
- * to the comparison itself, so the verdict always agrees with its own figures.
+ * Both are exact integers internally: `usd` counts micro-USD (1e-6 USD, the
+ * resolution of `core/money.ts`), `count` counts authorizations. No monetary
+ * arithmetic in this module passes through a double, so no sum drifts and no
+ * action is ever refused because a total landed a nanocent over its ceiling —
+ * the comparison and the reported figures are derived from the same integers.
  */
-function round(value: number): number {
-  return Math.round(value * 1e6) / 1e6;
+type BudgetUnit = "usd" | "count";
+
+/** An internal figure as the string a verdict reports. */
+function render(value: number, unit: BudgetUnit): string {
+  return unit === "usd" ? microsToUsdString(value) : String(Math.round(value));
 }
 
 /** A payload field read defensively: the log's payload shape is open at v0.1. */
@@ -183,10 +207,15 @@ function payloadOf(record: EventRecord): Record<string, unknown> {
   return typeof payload === "object" && payload !== null ? payload : {};
 }
 
-/** `payload.est_cost_usd` when it is a usable finite number, else `0`. */
+/**
+ * `payload.est_cost_usd` in micro-USD when it is a usable amount, else `0`.
+ *
+ * Both forms are read: the canonical decimal string a post-APRV-121 gate writes,
+ * and the JSON number every record written before it carries. A historical
+ * record therefore feeds this computation exactly as it did before the change.
+ */
 function costOf(record: EventRecord): number {
-  const value = payloadOf(record)["est_cost_usd"];
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return usdToMicros(payloadOf(record)["est_cost_usd"]) ?? 0;
 }
 
 /** `payload.class` when it is a string, else `null` (invisible to class limits). */
@@ -195,10 +224,9 @@ function classOf(record: EventRecord): string | null {
   return typeof value === "string" ? value : null;
 }
 
-/** The action's declared cost, or `0` when it declares none. */
+/** The action's declared cost in micro-USD, or `0` when it declares none. */
 function requestedCost(action: BudgetAction): number {
-  const value = action.est_cost_usd;
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return usdToMicros(action.est_cost_usd) ?? 0;
 }
 
 /**
@@ -241,6 +269,13 @@ function authorizations(windowed: EventRecord[]): EventRecord[] {
   });
 }
 
+/**
+ * One limit's verdict, computed in integers and reported as strings.
+ *
+ * `consumed`, `requested` and `ceiling` arrive in the verdict's unit —
+ * micro-USD for money, authorizations for counts — so `remaining` is an exact
+ * integer subtraction and `pass` is an exact comparison.
+ */
 function verdict(
   limit: string,
   scope: BudgetVerdictScope,
@@ -248,18 +283,17 @@ function verdict(
   consumed: number,
   requested: number,
   ceiling: number,
+  unit: BudgetUnit,
   note?: string,
 ): BudgetVerdict {
-  const consumedValue = round(consumed);
-  const requestedValue = round(requested);
-  const remaining = round(ceiling - consumedValue - requestedValue);
+  const remaining = ceiling - consumed - requested;
   const base: BudgetVerdict = {
     limit,
     scope,
     window,
-    consumed: consumedValue,
-    requested: requestedValue,
-    remaining,
+    consumed: render(consumed, unit),
+    requested: render(requested, unit),
+    remaining: render(remaining, unit),
     pass: remaining >= 0,
   };
   return note === undefined ? base : { ...base, note };
@@ -271,16 +305,33 @@ function refuse(limit: string, scope: BudgetVerdictScope, note: string): BudgetV
     limit,
     scope,
     window: "per-action",
-    consumed: 0,
-    requested: 0,
-    remaining: 0,
+    consumed: "0",
+    requested: "0",
+    remaining: "0",
     pass: false,
     note,
   };
 }
 
+/**
+ * A policy ceiling as an exact integer in the limit's own unit, or `null` when
+ * the policy wrote something no comparison can be made against.
+ *
+ * The USD conversion is the documented one from `core/money.ts`: policy files
+ * are YAML written by a human (`daily_usd: 100`, `per_action_usd: 0.25`), so
+ * their ceilings are JSON numbers by construction and are pinned to a micro
+ * here, once, before any arithmetic touches them.
+ */
+function ceilingOf(value: number, unit: BudgetUnit): number | null {
+  if (unit === "count") {
+    return Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
+  }
+  return usdNumberToMicros(value);
+}
+
 /** Consumption totals over one filtered set of authorizations. */
 interface Consumption {
+  /** Micro-USD, summed as exact integers. */
   usd: number;
   actions: number;
 }
@@ -288,7 +339,7 @@ interface Consumption {
 function tally(events: EventRecord[]): Consumption {
   let usd = 0;
   for (const record of events) usd += costOf(record);
-  return { usd: round(usd), actions: events.length };
+  return { usd, actions: events.length };
 }
 
 /**
@@ -351,13 +402,25 @@ export function evaluateBudgets(
     const classConsumption = tally(classEvents);
 
     for (const name of classLimitNames) {
-      const ceiling = classLimits[name];
-      if (ceiling === undefined) continue;
-      if (name === PER_ACTION_USD) {
-        verdicts.push(verdict(name, "class", "per-action", 0, requested, ceiling));
-        continue;
-      }
-      if (name === DAILY_USD || name === DAILY_ACTIONS) {
+      const declared = classLimits[name];
+      if (declared === undefined) continue;
+      if (name === PER_ACTION_USD || name === DAILY_USD || name === DAILY_ACTIONS) {
+        const unit: BudgetUnit = name === DAILY_ACTIONS ? "count" : "usd";
+        const ceiling = ceilingOf(declared, unit);
+        if (ceiling === null) {
+          verdicts.push(
+            refuse(
+              name,
+              "class",
+              `class limit "${name}" is not a finite non-negative number; a limit that cannot be compared cannot be proven satisfied`,
+            ),
+          );
+          continue;
+        }
+        if (name === PER_ACTION_USD) {
+          verdicts.push(verdict(name, "class", "per-action", 0, requested, ceiling, unit));
+          continue;
+        }
         if (scope.classPattern === null) {
           verdicts.push(
             refuse(
@@ -370,7 +433,7 @@ export function evaluateBudgets(
         }
         const consumed = name === DAILY_USD ? classConsumption.usd : classConsumption.actions;
         const add = name === DAILY_USD ? requested : 1;
-        verdicts.push(verdict(name, "class", "rolling-24h", consumed, add, ceiling));
+        verdicts.push(verdict(name, "class", "rolling-24h", consumed, add, ceiling, unit));
         continue;
       }
       verdicts.push(
@@ -396,27 +459,38 @@ export function evaluateBudgets(
       if (budget === undefined) continue;
       const record = budget as Record<string, unknown>;
       for (const name of Object.keys(record).sort()) {
-        const ceiling = record[name];
+        const declared = record[name];
         const label = `${scopeName}.${name}`;
-        if (typeof ceiling !== "number" || !Number.isFinite(ceiling)) {
+        const unit: BudgetUnit = name === DAILY_ACTIONS ? "count" : "usd";
+        const ceiling =
+          typeof declared === "number" ? ceilingOf(declared, unit) : null;
+        if (ceiling === null) {
           verdicts.push(
             refuse(
               label,
               "global",
-              `budget "${label}" is not a finite number; a limit that cannot be compared cannot be proven satisfied`,
+              `budget "${label}" is not a finite non-negative number; a limit that cannot be compared cannot be proven satisfied`,
             ),
           );
           continue;
         }
         if (name === DAILY_USD) {
           verdicts.push(
-            verdict(label, "global", "rolling-24h", globalConsumption.usd, requested, ceiling),
+            verdict(
+              label,
+              "global",
+              "rolling-24h",
+              globalConsumption.usd,
+              requested,
+              ceiling,
+              unit,
+            ),
           );
           continue;
         }
         if (name === DAILY_ACTIONS) {
           verdicts.push(
-            verdict(label, "global", "rolling-24h", globalConsumption.actions, 1, ceiling),
+            verdict(label, "global", "rolling-24h", globalConsumption.actions, 1, ceiling, unit),
           );
           continue;
         }
@@ -453,16 +527,16 @@ export function evaluateBudgets(
  * inventing a $0 ceiling for a malformed one would refuse every action of the
  * task with a message about money nobody wrote down.
  */
-export function taskMaxCostUsd(records: EventRecord[], task: string): number | null {
+export function taskMaxCostUsd(records: EventRecord[], task: string): string | null {
   let found: number | null = null;
   for (const record of records) {
     if (record.event !== "task.registered" || record.task !== task) continue;
     const budget = payloadOf(record)["budget"];
     if (typeof budget !== "object" || budget === null) continue;
-    const cap = (budget as Record<string, unknown>)["max_cost_usd"];
-    if (typeof cap === "number" && Number.isFinite(cap) && cap >= 0) found = cap;
+    const cap = usdToMicros((budget as Record<string, unknown>)["max_cost_usd"]);
+    if (cap !== null) found = cap;
   }
-  return found;
+  return found === null ? null : microsToUsdString(found);
 }
 
 /**
@@ -484,10 +558,18 @@ export function taskMaxCostUsd(records: EventRecord[], task: string): number | n
 export function evaluateTaskBudget(
   records: EventRecord[],
   task: string,
-  maxCostUsd: number,
+  maxCostUsd: UsdInput,
   action: BudgetAction,
   _evaluationTs: string,
 ): BudgetVerdict {
+  const ceiling = usdToMicros(maxCostUsd);
+  if (ceiling === null) {
+    return refuse(
+      TASK_MAX_COST_USD,
+      "task",
+      `the task's own \`budget.max_cost_usd\` is not a usable amount; a cap that cannot be compared cannot be proven satisfied`,
+    );
+  }
   const consumed = tally(
     authorizations(records.filter((record) => record.task === task)),
   ).usd;
@@ -497,7 +579,8 @@ export function evaluateTaskBudget(
     "task-total",
     consumed,
     requestedCost(action),
-    maxCostUsd,
+    ceiling,
+    "usd",
   );
 }
 

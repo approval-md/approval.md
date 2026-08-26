@@ -650,8 +650,15 @@ export function verifyText(
   options: VerifyOptions = {},
   prefix: VerifiedPrefix | null = null,
 ): VerifiedLog {
+  // The read boundary, explicitly (APRV-121). A record that was valid when it
+  // was appended stays valid forever: the log is append-only, so a verifier
+  // that refused the monetary representation of its own history would declare
+  // every log written before the change corrupt. The write boundary is
+  // unaffected and stays strict — see `ValidationMode` in `core/validate.ts`.
   const validateOptions: ValidateOptions =
-    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir };
+    options.schemaDir === undefined
+      ? { mode: "historical" }
+      : { schemaDir: options.schemaDir, mode: "historical" };
 
   const start: WalkStart =
     prefix === null

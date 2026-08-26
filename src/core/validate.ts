@@ -73,10 +73,64 @@ export const DEFAULT_SCHEMA_DIR = fileURLToPath(
   new URL("../../../schema/", import.meta.url),
 );
 
+/**
+ * Which boundary a validation is speaking for (APRV-121).
+ *
+ * - `write` — the default, and what SPEC.md §8 means by "validate at the write
+ *   boundary". The schemas as written on disk: a monetary amount is a canonical
+ *   decimal string and nothing else.
+ * - `historical` — the read boundary. The log is append-only, so a verifier
+ *   walking records written before APRV-121 meets JSON-number amounts that were
+ *   valid when they were appended and must stay valid forever. This mode makes
+ *   exactly one substitution, described in {@link WIDENED_DEFS}, and no other.
+ *
+ * The asymmetry is the point: a document only ever gets *more* permissive by a
+ * caller explicitly naming the read boundary, and only `core/verify.ts` does.
+ */
+export type ValidationMode = "write" | "historical";
+
 /** Options accepted by {@link validate}. */
 export interface ValidateOptions {
   /** Directory to load `*.schema.json` from. Injectable for tests. */
   schemaDir?: string;
+  /** Which boundary this validation speaks for. Defaults to `"write"`. */
+  mode?: ValidationMode;
+}
+
+/**
+ * The `$defs` a `historical` validation replaces, as `name -> replacement name`.
+ *
+ * Pinned as a list rather than derived from a naming convention, so widening
+ * the read boundary is always a reviewable diff in this file and never a side
+ * effect of adding a definition to a schema. `usd_amount` is the only entry:
+ * the pre-APRV-121 write boundary typed monetary fields as `{"type": "number",
+ * "minimum": 0}`, and `usd_amount_historical` is exactly that union with the
+ * decimal string.
+ */
+export const WIDENED_DEFS: Readonly<Record<string, string>> = {
+  usd_amount: "usd_amount_historical",
+};
+
+/**
+ * A schema with the {@link WIDENED_DEFS} substitutions applied, or the schema
+ * unchanged when it defines none of them.
+ *
+ * Deterministic and shallow: only the named `$defs` entries are swapped, the
+ * document's own keywords are untouched, and a schema missing a replacement
+ * definition is left strict rather than silently loosened.
+ */
+function widenHistorical(schema: Record<string, unknown>): Record<string, unknown> {
+  const defs = schema["$defs"];
+  if (typeof defs !== "object" || defs === null || Array.isArray(defs)) return schema;
+  const source = defs as Record<string, unknown>;
+  let changed = false;
+  const widened: Record<string, unknown> = { ...source };
+  for (const [name, replacement] of Object.entries(WIDENED_DEFS)) {
+    if (!Object.hasOwn(source, name) || !Object.hasOwn(source, replacement)) continue;
+    widened[name] = source[replacement];
+    changed = true;
+  }
+  return changed ? { ...schema, $defs: widened } : schema;
 }
 
 function failure(
@@ -181,8 +235,23 @@ type CompileOutcome =
  * Build a fresh Ajv 2020-12 instance holding every schema in the directory
  * (so cross-schema `$ref` by `$id` resolves) and compile the requested one.
  */
-function compileSchema(schemaDir: string, schemaId: string): CompileOutcome {
-  const loaded = loadSchemas(schemaDir);
+function compileSchema(
+  schemaDir: string,
+  schemaId: string,
+  mode: ValidationMode,
+): CompileOutcome {
+  const raw = loadSchemas(schemaDir);
+  if (!raw.ok) return raw;
+  const loaded: LoadOutcome =
+    mode === "historical"
+      ? {
+          ok: true,
+          schemas: raw.schemas.map((entry) => ({
+            name: entry.name,
+            schema: widenHistorical(entry.schema),
+          })),
+        }
+      : raw;
   if (!loaded.ok) return loaded;
 
   const target = loaded.schemas.find(
@@ -247,7 +316,7 @@ export function validate(
 ): ValidationResult {
   const schemaDir = options.schemaDir ?? DEFAULT_SCHEMA_DIR;
 
-  const compiled = compileSchema(schemaDir, schemaId);
+  const compiled = compileSchema(schemaDir, schemaId, options.mode ?? "write");
   if (!compiled.ok) return compiled;
 
   let valid: boolean;

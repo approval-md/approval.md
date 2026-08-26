@@ -38,6 +38,7 @@
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
+import { normalizeUsd } from "../core/money.js";
 import { isPayloadHash } from "../core/payload.js";
 import { readVerifiedRecords } from "../core/state.js";
 import {
@@ -319,7 +320,10 @@ export function commandConsume(argv: string[], streams: Streams, cwd: string): n
       token_sha256: result.tokenSha256,
       grant_seq: result.grantSeq,
       class: payload["class"] ?? null,
-      est_cost_usd: payload["est_cost_usd"] ?? null,
+      // Reported exactly as the record spells it (APRV-121): the `--json`
+      // surface is the log in JSON, so the canonical decimal string travels
+      // through unparsed.
+      est_cost_usd: normalizeUsd(payload["est_cost_usd"]),
       payload_hash: payload["payload_hash"] ?? null,
     });
   } else {

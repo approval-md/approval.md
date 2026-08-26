@@ -155,7 +155,7 @@ const ENVELOPE = {
       class: "communicate.email.external",
       summary: "Send deposit chaser",
       reversible: false,
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       idempotency_key: "task-042:chaser",
       payload_hash: bindingFor("task-042:chaser"),
     },
@@ -163,7 +163,7 @@ const ENVELOPE = {
       class: "files.write.local",
       summary: "Write the draft",
       reversible: true,
-      est_cost_usd: 0.01,
+      est_cost_usd: "0.01",
       idempotency_key: "task-042:draft",
       payload_hash: bindingFor("task-042:draft"),
     },
@@ -171,7 +171,7 @@ const ENVELOPE = {
       class: "files.write.local",
       summary: "Write the second draft",
       reversible: true,
-      est_cost_usd: 0.01,
+      est_cost_usd: "0.01",
       idempotency_key: "task-042:draft2",
       payload_hash: bindingFor("task-042:draft2"),
     },
@@ -179,7 +179,7 @@ const ENVELOPE = {
       class: "files.write.local",
       summary: "Write the third draft",
       reversible: true,
-      est_cost_usd: 0.01,
+      est_cost_usd: "0.01",
       idempotency_key: "task-042:draft3",
       payload_hash: bindingFor("task-042:draft3"),
     },
@@ -187,7 +187,7 @@ const ENVELOPE = {
       class: "files.write.local",
       summary: "Write the fourth draft",
       reversible: true,
-      est_cost_usd: 0.01,
+      est_cost_usd: "0.01",
       idempotency_key: "task-042:draft4",
       payload_hash: bindingFor("task-042:draft4"),
     },
@@ -216,7 +216,7 @@ function grantChaser(unit: Case, ts: string = at(1)): string {
       task: "task-042",
       actionKey: "task-042:chaser",
       cls: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       reversible: false,
       summary: "Send deposit chaser",
       payload_hash: bindingFor("task-042:chaser"),
@@ -306,7 +306,7 @@ test("a manual action with its token appends execution.started and spends the to
   assert.equal(started.record.event, "execution.started");
   assert.equal(started.task, "task-042");
   assert.equal(started.class, "communicate.email.external");
-  assert.equal(started.est_cost_usd, 0.02);
+  assert.equal(started.est_cost_usd, "0.02");
   assert.equal(typeof started.tokenSha256, "string");
   assert.equal(readFileSync(unit.logPath, "utf8").includes(token), false, "raw token in the log");
 
@@ -368,7 +368,7 @@ test("a supervised action starts with no token and charges its budget at the sta
   assert.equal(started.tokenSha256, undefined);
   assert.deepEqual(started.record.payload, {
     class: "files.write.local",
-    est_cost_usd: 0.01,
+    est_cost_usd: "0.01",
   });
   assert.deepEqual(eventTypes(unit), ["policy.updated", "task.registered", "execution.started"]);
   assertClean(unit);
@@ -664,7 +664,7 @@ test("findDeclaration reads the class from the log, not from the task file", () 
   assert.deepEqual(findDeclaration(records(unit), "task-042:chaser"), {
     task: "task-042",
     class: "communicate.email.external",
-    est_cost_usd: 0.02,
+    est_cost_usd: "0.02",
     reversible: false,
     summary: "Send deposit chaser",
   });
@@ -694,7 +694,7 @@ function shadowRegister(unit: Case, task: string, key: string, cls: string, ts: 
           class: cls,
           summary: "shadow declaration",
           reversible: true,
-          est_cost_usd: 0,
+          est_cost_usd: "0",
           idempotency_key: key,
           payload_hash: bindingFor(key),
         },
@@ -749,7 +749,7 @@ test("RESIDUAL (F3): a lone autonomous key executes with no token and no payload
         class: "read.web",
         summary: "read a page",
         reversible: true,
-        est_cost_usd: 0,
+        est_cost_usd: "0",
         idempotency_key: "task-500:read",
         payload_hash: bindingFor("task-500:read"),
       },
