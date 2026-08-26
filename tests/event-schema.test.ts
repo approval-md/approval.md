@@ -3,13 +3,16 @@
  *
  * `tests/fixtures.test.ts` already proves every fixture under
  * `schema/fixtures/event/` passes or fails as filed. This suite asserts the
- * rules that fixtures can only sample: that all seventeen v0.1 event types
- * (SPEC.md §8) are accepted, that each type's required fields are actually
- * required, and that the hash-scheme identifier `alg` fails closed.
+ * rules that fixtures can only sample: that every v0.1 event type (SPEC.md §8)
+ * is accepted, that each type's required fields are actually required, and that
+ * the hash-scheme identifier `alg` fails closed.
  *
- * Seventeen, not sixteen: `payload.pruned` (APRV-38) is the first addition
- * after the draft set, and the last two tests here pin the two things that make
- * it safe to write — a `system:` actor and a payload naming the pruned bytes.
+ * More than the draft sixteen: `payload.pruned` (APRV-38) is the first addition,
+ * and the two tests at the end pin the two things that make it safe to write — a
+ * `system:` actor and a payload naming the pruned bytes. `execution.indeterminate`
+ * and `execution.reconciled` (APRV-120) are two more, and the rules that make
+ * THEM safe to write are pinned here too: a closed `reason` rather than an
+ * exception's text, and a `human:` reconciler.
  */
 
 import assert from "node:assert/strict";
@@ -33,6 +36,8 @@ const EVENT_TYPES = [
   "execution.started",
   "execution.completed",
   "execution.failed",
+  "execution.indeterminate",
+  "execution.reconciled",
   "budget.exceeded",
   "policy.updated",
   "envelope.drift",
@@ -54,6 +59,12 @@ const EXTRA_REQUIRED: Record<string, readonly string[]> = {
   "execution.started": ["task", "action_key"],
   "execution.completed": ["task", "action_key"],
   "execution.failed": ["task", "action_key"],
+  // APRV-120: both carry a payload the schema constrains, so `payload` is
+  // required as well as the task and the key — an indeterminate outcome that
+  // does not say where the unknowing began, or a reconciliation that does not
+  // say what was established, is a record nobody can act on.
+  "execution.indeterminate": ["task", "action_key", "payload"],
+  "execution.reconciled": ["task", "action_key", "payload"],
   "budget.exceeded": ["task"],
   "policy.updated": [],
   "envelope.drift": ["task"],
@@ -242,4 +253,62 @@ test("prev accepts a 64-hex link or null, and nothing else", () => {
       `prev ${JSON.stringify(prev)} was accepted`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// APRV-120: the two rules that make an indeterminate outcome safe to write
+// ---------------------------------------------------------------------------
+
+test("execution.indeterminate takes a closed reason and never an exception's text", () => {
+  const record = fixture("execution.indeterminate");
+  assert.equal(validate("event", record).ok, true);
+  // The whole point of the closed set: an open `reason` is where an exception
+  // message, and the credential quoted inside it, would arrive in the log.
+  for (const reason of ["act-failed", "connect ETIMEDOUT smtp.example.com:587", "", null, 3]) {
+    assert.equal(
+      validate("event", { ...record, payload: { reason } }).ok,
+      false,
+      `execution.indeterminate accepted reason ${JSON.stringify(reason)}`,
+    );
+  }
+});
+
+test("execution.indeterminate never carries a number for exit_code", () => {
+  const record = fixture("execution.indeterminate");
+  for (const exitCode of [0, 1, 137]) {
+    assert.equal(
+      validate("event", { ...record, payload: { reason: "act-threw", exit_code: exitCode } }).ok,
+      false,
+      `execution.indeterminate accepted exit_code ${exitCode}; nobody watched a process exit`,
+    );
+  }
+  // Absent is fine; present-and-null is the explicit form.
+  assert.equal(validate("event", { ...record, payload: { reason: "act-threw" } }).ok, true);
+});
+
+test("execution.reconciled is human-only and says which resolution it recorded", () => {
+  const record = fixture("execution.reconciled");
+  assert.equal(validate("event", record).ok, true);
+  const payload = record["payload"] as Record<string, unknown>;
+
+  for (const actor of ["agent:chaser", "system:daemon"]) {
+    assert.equal(
+      validate("event", { ...record, actor }).ok,
+      false,
+      `execution.reconciled accepted a non-human reconciler "${actor}"`,
+    );
+  }
+  assert.equal(
+    validate("event", { ...record, payload: { ...payload, resolution: "not-executed" } }).ok,
+    true,
+  );
+  for (const resolution of ["unknown", "maybe", "", null]) {
+    assert.equal(
+      validate("event", { ...record, payload: { ...payload, resolution } }).ok,
+      false,
+      `execution.reconciled accepted resolution ${JSON.stringify(resolution)}`,
+    );
+  }
+  // An unexplained resolution cannot be told apart from a guess.
+  assert.equal(validate("event", { ...record, payload: { ...payload, note: "" } }).ok, false);
 });
