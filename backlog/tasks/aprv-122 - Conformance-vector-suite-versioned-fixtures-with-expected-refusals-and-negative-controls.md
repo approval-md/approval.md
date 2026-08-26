@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-20 14:48'
+updated_date: '2026-08-25 12:03'
 labels:
   - tests
   - conformance
@@ -37,3 +38,9 @@ Reference: emiliaprotocol/emilia-protocol conformance/run.mjs (three-language ru
 - [ ] #6 SPEC §13 names the suite as the fast-path conformance definition, marked for human sign-off
 - [ ] #7 npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Partial informal extraction already exists — 2026-08-25 (from Carter). The clean-room lane (../approval-md-cleanroom) hand-built two neutral vector files that this task should fold in and supersede, not duplicate: extracted/refusal-unions.json already enumerates the five §11.1 invariant-6 unions (gate/token-verify/token/execute/append) — direct input for AC #2; and extracted/jcs-vectors.json is a ready canonicalization suite already carrying suite/vectors_version/algorithm envelope fields plus RFC 8785 number vectors and rejection cases. FIXTURES.md in that kit documents the current ad-hoc formats (valid/invalid convention, known-answer shape, chain corpus); the runner contract in AC #5 should replace it, and extracted/ should be regenerated into the 122 envelope+manifest+failure_class format so there is one source of truth. Gaps the clean-room did not extract and this task still fully owns: policy matching / specificity / irreversibility-floor vectors, gate-verdict vectors, chain-verification mutation and truncation vectors, and the machine-readable failure_class on the existing schema invalid/ fixtures (which today assert only 'fails somehow'). Those four are the substance of ACs #1–#3.
+<!-- SECTION:NOTES:END -->

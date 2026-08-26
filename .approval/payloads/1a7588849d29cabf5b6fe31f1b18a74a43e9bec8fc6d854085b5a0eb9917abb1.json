@@ -1,0 +1,1 @@
+{"command":"sed -i.bak 's/(`approval hook claude-code`) and the per-tool-call adapters like it/(`approval hook claude-code`, `approval hook cursor`) and the per-tool-call adapters like it/' SPEC.md","cwd":"/Users/carter/dev/approval-md"}

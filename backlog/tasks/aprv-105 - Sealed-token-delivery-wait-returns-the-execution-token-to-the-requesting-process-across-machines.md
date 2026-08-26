@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-19 13:57'
-updated_date: '2026-08-20 12:56'
+updated_date: '2026-08-25 10:05'
 labels:
   - security
   - design
@@ -33,3 +33,9 @@ DESIGN TASK, raised by the human 2026-08-19: the grant-to-run handover needs two
 - [ ] #6 SPEC amendments for §6.3, §10.4, §10.5 and §11.1 invariant 3 drafted, flagged, and signed by the human before the build starts
 - [ ] #7 No new dependency; npm test and lint pass
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+DESIGN SIGN-OFF 2026-08-25 (Carter, in session): approved as designed. Per-request X25519 sealing with Node crypto (no new dependency), token_delivery: manual | sealed defaulting manual, key-file lifecycle (0600, atomic, unlinked on consume/expiry/revoke), the SPEC 11.1 invariant-3 rewording (hash, or ciphertext sealed to a recipient key the log does not hold), and MCP wait returning the token (retiring the APRV-88 sentence; fetching a minted token is not minting one). Dogfood opt-in happens via the ordinary policy amend ceremony after the build proves out. Per AC 6 the SPEC amendment text still gets drafted and signed before the build starts; this note is the design green light for drafting.
+<!-- SECTION:NOTES:END -->

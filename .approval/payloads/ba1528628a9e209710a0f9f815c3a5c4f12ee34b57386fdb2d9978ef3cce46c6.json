@@ -1,0 +1,1 @@
+{"after":"(`approval hook claude-code`, `approval hook cursor`) and the per-tool-call adapters like it","before":"(`approval hook claude-code`) and the per-tool-call adapters like it","file":"/Users/carter/dev/approval-md/SPEC.md","rule":"protected-path","tool":"Edit"}

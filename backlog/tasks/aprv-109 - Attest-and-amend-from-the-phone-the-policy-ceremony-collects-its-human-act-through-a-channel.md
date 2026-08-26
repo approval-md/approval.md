@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-19 22:13'
-updated_date: '2026-08-20 12:56'
+updated_date: '2026-08-25 10:16'
 labels:
   - ux
   - channels
@@ -36,4 +36,6 @@ Human feedback 2026-08-19: "this all feels quite manual - why do i have to run t
 
 <!-- SECTION:NOTES:BEGIN -->
 CLAUDE.md wording drafted for the human (the file is yours): in "Dogfooding", replace "The committed log has one writer: the daemon" paragraph sentence "log-touching commits never ride feature branches" context with an added sentence: "Log-advance commits and APPROVAL.md edit mechanics MAY be performed by an agent: staging .approval/ or the policy file is a protected-path manual action, so the human act is the approval tap; attestation itself remains human-only (via APRV-109 once built, at a terminal until then)." And in the Permissions summary, "Require approval first" already covers it via policy.edit; no change needed there.
+
+DESIGN SIGN-OFF 2026-08-25 (Carter, in session): approved as designed. Attestation requests render through channels with policy hash + semantic diff + load advisory as computed fields; the approve tap appends the attestation under the listener-held human identity exactly as grants land; oversized diffs refuse to the terminal path rather than truncate; fail closed on no channel / timeout / reject. The CLAUDE.md wording change drafted in these notes remains Carter's to commit by hand. SPEC 10.1/10.3/11 drafting (AC 4) may proceed.
 <!-- SECTION:NOTES:END -->

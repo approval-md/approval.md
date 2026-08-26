@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-118-pin && npm test 2>&1 | grep -E \"^ℹ (pass|fail)\" ; git add SPEC.md && git commit -m \"APRV-118: SPEC §5.2 amendment — the pinned policy hash and the policy-drift refusal, pending sign-off\" 2>&1 | tail -1","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/remote-control-f54e71"}
