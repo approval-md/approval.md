@@ -75,6 +75,7 @@ import {
   parseCallbackData,
   payloadShapeKey,
   TelegramChannel,
+  TELEGRAM_DEFAULT_RETENTION_MS,
   TELEGRAM_DIGEST_MAX_MEMBERS,
   TELEGRAM_MAX_CALLBACK_BYTES,
   TELEGRAM_PROMPT_HEADING,
@@ -151,6 +152,15 @@ const POLICY = [
   "",
 ].join("\n");
 
+/**
+ * The same policy with room for a long run (APRV-135).
+ *
+ * The bounded-size test decides dozens of prompts in a row, and the fixture's
+ * five-a-day cap would stop it at the sixth grant — a budget refusal, which is
+ * a different subject entirely.
+ */
+const POLICY_LONG_RUN = POLICY.replace("      daily_actions: 5", "      daily_actions: 500");
+
 let mock: MockBotApi;
 
 before(async () => {
@@ -217,10 +227,12 @@ function live(
   realClock = false,
   /** The payload each request binds to. Overridden by the APRV-124 cases. */
   makePayload: (index: number) => Record<string, unknown> = payloadFor,
+  /** The policy the fixture runs under. Widened by the APRV-135 long run. */
+  policyText: string = POLICY,
 ): Live {
   fixtureCounter += 1;
   const prefix = `chaser${fixtureCounter}`;
-  const unit = newScenario(scratch.root, POLICY);
+  const unit = newScenario(scratch.root, policyText);
 
   if (realClock) {
     const attested = appendAttestation(unit.logPath, unit.policyPath, HUMAN, {});
@@ -2920,4 +2932,160 @@ test("markup in a gloss reaches the chat as text, never as markup", async () => 
     "claimed",
   );
   assertClean(world.unit);
+});
+
+// ---------------------------------------------------------------------------
+// The bookkeeping is swept (APRV-135)
+// ---------------------------------------------------------------------------
+
+/** A one-hour TTL, matching the fixture policy, in milliseconds. */
+const TTL_MS = 60 * 60 * 1000;
+
+/** A channel whose clock is a variable this test moves by hand. */
+function sweepChannel(clock: { ms: number }, ttlMs: number | null = TTL_MS): TelegramChannel {
+  return channelFor({ approvalTtlMs: ttlMs, now: () => clock.ms });
+}
+
+test("a settled-and-lapsed delivery is swept; a live one is not (APRV-135 #1)", async () => {
+  const clock = { ms: 1_000_000 };
+  const world = live(2);
+  const channel = sweepChannel(clock);
+  channel.onDecision(handlerFor(world, at(3)));
+  const requests = queueOf(world, at(3));
+
+  await channel.notify(requests[0] as ChannelRequest);
+  assert.equal(channel.bookkeepingSize().deliveries, 1);
+
+  // Nothing is swept before the window: the request is still answerable, and
+  // forgetting its button would take a live decision away from an approver.
+  clock.ms += TTL_MS - 1;
+  assert.deepEqual(channel.sweep(), { deliveries: 0, digests: 0 });
+  assert.equal(channel.bookkeepingSize().deliveries, 1);
+
+  // Past the TTL the gate refuses every decision on it, so the entry can go.
+  clock.ms += 1;
+  assert.deepEqual(channel.sweep(), { deliveries: 1, digests: 0 });
+  assert.equal(channel.bookkeepingSize().deliveries, 0);
+
+  // A delivery sent just now survives the same sweep: age is per entry.
+  await channel.notify(requests[1] as ChannelRequest);
+  assert.deepEqual(channel.sweep(), { deliveries: 0, digests: 0 });
+  assert.equal(channel.bookkeepingSize().deliveries, 1);
+});
+
+test("a callback for a swept delivery takes the stale-callback path (APRV-135 #1)", async () => {
+  const clock = { ms: 2_000_000 };
+  const world = live(1);
+  const channel = sweepChannel(clock);
+  channel.onDecision(handlerFor(world, at(3)));
+  const request_ = queueOf(world, at(3))[0] as ChannelRequest;
+  const key = request_.action_key.value;
+
+  await channel.notify(request_);
+  const before = channel.anomalyCount("unknown-callback");
+  const events = recordsOf(world.unit.logPath).length;
+
+  clock.ms += TTL_MS;
+  assert.equal(channel.sweep().deliveries, 1);
+
+  // The tap arrives anyway — a message scrolled back to, a button the sweep
+  // could not remove — and is answered exactly as a restarted listener's own
+  // forgotten button is: counted, toasted, never carried to the gate.
+  const outcome = await press(channel, key, "grant");
+  assert.equal(outcome, undefined, "a swept delivery produced a decision");
+  assert.equal(channel.anomalyCount("unknown-callback"), before + 1);
+  assert.equal(recordsOf(world.unit.logPath).length, events, "the log grew on a swept callback");
+});
+
+test("a digest is swept once every member is settled and the window has passed", async () => {
+  const clock = { ms: 3_000_000 };
+  const world = live(3);
+  const channel = sweepChannel(clock);
+  channel.onDecision(handlerFor(world, at(3)));
+  const requests = queueOf(world, at(3));
+
+  const delivered = await channel.notifyBatch({ requests });
+  assert.notEqual(delivered.digestId, null, "the fixture did not produce a digest");
+  assert.equal(channel.bookkeepingSize().digests, 1);
+  assert.equal(channel.bookkeepingSize().allNonces, 1);
+
+  // Every member decided, but inside the window: the digest stays, because an
+  // approver may still tap a button on a message they scrolled back to and the
+  // reply they get should come from this process rather than from nothing.
+  for (const request_ of requests) {
+    await press(channel, request_.action_key.value, "grant");
+  }
+  clock.ms += TTL_MS - 1;
+  assert.equal(channel.sweep().digests, 0, "a digest inside its window was forgotten");
+  assert.equal(channel.bookkeepingSize().digests, 1);
+
+  // Past it, both halves hold and the whole entry goes — the digest, its "all"
+  // nonce, and every member nonce that was issued under it.
+  clock.ms += 1;
+  assert.equal(channel.sweep().digests, 1);
+  assert.deepEqual(channel.bookkeepingSize(), { deliveries: 0, digests: 0, allNonces: 0 });
+});
+
+test("with no approval TTL only settled entries are forgotten (APRV-135)", async () => {
+  const clock = { ms: 4_000_000 };
+  const world = live(4);
+  const channel = sweepChannel(clock, null);
+  channel.onDecision(handlerFor(world, at(3)));
+  const requests = queueOf(world, at(3));
+
+  await channel.notify(requests[0] as ChannelRequest);
+  const digest = await channel.notifyBatch({ requests: requests.slice(1) });
+  assert.notEqual(digest.digestId, null, "the fixture did not produce a digest");
+
+  // A policy that bounds nothing leaves both answerable forever, so neither is
+  // forgotten however old it gets: this is the case where "every member is
+  // terminal" is the whole condition rather than a consequence of the TTL.
+  clock.ms += TELEGRAM_DEFAULT_RETENTION_MS * 10;
+  assert.deepEqual(channel.sweep(), { deliveries: 0, digests: 0 });
+  // One unit delivery plus a nonce per digest member, all still armed.
+  assert.equal(channel.bookkeepingSize().deliveries, 4);
+  assert.equal(channel.bookkeepingSize().digests, 1);
+
+  // Settle the digest's members and it becomes droppable; the undecided unit
+  // delivery beside it stays, because nothing has made it terminal.
+  for (const request_ of requests.slice(1)) {
+    await press(channel, request_.action_key.value, "grant");
+  }
+  clock.ms += TELEGRAM_DEFAULT_RETENTION_MS;
+  assert.deepEqual(channel.sweep(), { deliveries: 0, digests: 1 });
+  assert.equal(channel.bookkeepingSize().deliveries, 1, "a live request lost its button");
+});
+
+test("memory does not grow across a long run of decided prompts (APRV-135 #2)", async () => {
+  const clock = { ms: 5_000_000 };
+  const rounds = 60;
+  const world = live(rounds, false, payloadFor, POLICY_LONG_RUN);
+  const channel = sweepChannel(clock);
+  channel.onDecision(handlerFor(world, at(3)));
+  const requests = queueOf(world, at(3));
+
+  // A week of prompts, one every ten minutes, each decided where it was shown.
+  // The assertion is a CEILING, not an exact size: what must not happen is a
+  // map proportional to every prompt the listener ever sent.
+  let peak = 0;
+  for (const request_ of requests) {
+    clock.ms += 10 * 60 * 1000;
+    await channel.notify(request_);
+    const outcome = await press(channel, request_.action_key.value, "grant");
+    assert.ok(outcome?.ok, `grant refused: ${JSON.stringify(outcome)}`);
+    channel.sweep();
+    const size = channel.bookkeepingSize();
+    peak = Math.max(peak, size.deliveries + size.digests + size.allNonces);
+  }
+
+  assert.ok(peak <= 4, `the bookkeeping grew with the run (peak ${peak} entries over ${rounds})`);
+  // And at rest, once the last window has passed, it is empty.
+  clock.ms += TTL_MS;
+  channel.sweep();
+  assert.deepEqual(channel.bookkeepingSize(), { deliveries: 0, digests: 0, allNonces: 0 });
+  assert.equal(
+    recordsOf(world.unit.logPath).filter((record) => record.event === "approval.granted").length,
+    rounds,
+    "the sweep cost the log a decision",
+  );
 });
