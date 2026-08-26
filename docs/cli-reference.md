@@ -109,6 +109,105 @@ prints nothing and fails. The log is never modified.
 {"records":[...],"warning":"..."}   on a torn tail
 ```
 
+## log sync
+
+The pull half of the log ritual, and the verb that retired the stash dance.
+
+Bringing the committed log up to date used to be run by hand: stash
+`events.jsonl`, pull, pop the stash. It was our own sanctioned runbook and it
+was dangerous three ways. It rewound the working log through git while a daemon
+held that file open for append, which is fork 2 of 2026-08-20 (a rewound file
+under a live appender, and two chains where there was one). It reached the
+approver's phone as `policy.edit` over a protected path, a label that is true
+and tells nobody anything. And `git stash pop` can conflict, which on the day it
+did left conflict markers inside the log mid-ceremony.
+
+So the ritual became deterministic code, on the `policy amend` precedent: when a
+hand-ritual proves dangerous, it becomes a verb the gate can read.
+
+Everything runs inside ONE hold of the append lockfile. The lock is normally
+taken per append; here it spans the whole operation, because an append landing
+between the snapshot and the restore is exactly the interleaving that forks a
+chain.
+
+1. **Primary checkout only.** The committed log has one home, and a worktree is
+   not it: `log-sync-not-primary`.
+2. **Verify before touching anything**, and record the head. Nothing is decided
+   from a log that does not verify.
+3. **Snapshot, not stash.** The working log is copied aside, atomically, inside
+   `.approval/`. `git stash` appears nowhere in the implementation, and the log
+   never routes through git state mutation.
+4. **Baseline.** The working file is set to the bytes git already has at `HEAD`,
+   so the path is clean and a fast-forward can move over it. That is a plain
+   write of bytes we are holding, not a checkout.
+5. **Fetch, a fast-forward CHECK, then the merge.** A non-fast-forward is named
+   and refused (`log-sync-not-fast-forward`): a merge commit over the log would
+   be a merge of two hash chains, and chains do not merge.
+6. **Reconcile.** The committed chain must be a prefix of the snapshot, equal to
+   it, or an extension of it. Prefix: the snapshot goes back, because the longer
+   chain contains the shorter one whole. Extension: the pulled file stays, for
+   the same reason in the other direction. Anything else is a fork:
+   `log-diverged`, both heads, the first divergent seq, snapshot restored,
+   nothing else touched. Re-chaining is fabrication and this verb will not do it.
+7. **Projections are REBUILT, never copied back.** `QUEUE.md` is re-rendered from
+   the reconciled log and the index is reindexed from it. The direction is
+   load-bearing: a projection restored from before the pull would be a
+   screenshot asserting something the log no longer says.
+8. **Post-verify**, and only then is the snapshot removed.
+
+Any failure at any step restores the snapshot before exiting, so the working log
+is never left in a half state, and a restore that itself fails is its own loud
+refusal (`log-sync-restore-failed`) which leaves the snapshot on disk.
+
+**It appends no event.** The log records decisions with real-world consequence.
+A fast-forward pull of the file the log lives in is housekeeping on the
+container, and an event for it would be the log narrating its own filesystem.
+
+```
+{"ok":true,"root":"…","log":"…","remote":"origin","branch":"main",
+ "commit":{"before":"…","after":"…","pulled":2},
+ "head":{"before":{"seq":41,"hash":"…"},"after":{"seq":41,"hash":"…"}},
+ "relation":"ahead","ahead":3,"behind":0,"restored":true,
+ "queue":{"path":"…","bytes":1180},"index":"rebuilt"}
+```
+
+## log advance
+
+The commit-and-push half, and the APRV-92 flow written down. The log's
+uncommitted records are staged, committed with a message naming the seq range
+they cover, and pushed to a short-lived records branch that exists for exactly
+that commit. Main is protected here, so the commit reaches it through a pull
+request; `--pr` opens that pull request through the ordinary `gh` path.
+
+Three refusals are the point of the verb.
+
+`log-advance-dirty-stage`: the staged set must be EXACTLY the log, `QUEUE.md`,
+and `.approval/payloads/`. What this prevents is a log commit riding a branch
+that carries other work. A verb that ran `git add -A` and hoped would be a worse
+version of the hand-ritual it replaces, so anything else already staged is
+refused rather than unstaged — unstaging someone's work is not this verb's
+decision to make.
+
+`log-advance-checkout-required`: this verb checks out nothing. The checkout is
+the footgun, because a branch switch with an uncommitted working log rewinds
+`events.jsonl` under whatever holds it open. It commits on the branch you are
+standing on and pushes THAT commit by refspec, which moves no local ref and
+leaves your checkout where you left it.
+
+`log-advance-not-primary`: sync's rule, unchanged.
+
+**It appends no event**, for the reason sync appends none. The commit is already
+the record of itself, in git, where a reader can see exactly which bytes moved.
+
+```
+{"ok":true,"root":"…","branch":"main","recordsBranch":"records-log-2026-08-26",
+ "remote":"origin","range":{"from":39,"to":41},
+ "head":{"committed":{"seq":38,"hash":"…"},"working":{"seq":41,"hash":"…"}},
+ "staged":[".approval/log/events.jsonl",".approval/QUEUE.md",".approval/payloads"],
+ "message":"Log advance: seq 39..41 (main)","commit":"…","pushed":true,
+ "prUrl":null,"dryRun":false}
+```
+
 ## policy
 
 `policy check` answers the question "what would policy do with this class", and

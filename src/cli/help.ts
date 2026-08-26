@@ -327,29 +327,79 @@ ${EXIT_CODES_POINTER} (instructions uses only 0 and 2)
 ${JSON_ERRORS}
 ${why("instructions")}`;
 
-export const LOG_HELP = `approval log — read the append-only event log
+export const LOG_HELP = `approval log — read the append-only event log, and move it
 
 Usage:
-  approval log verify [--log <path>] [--json]
-  approval log tail   [--log <path>] [-n <count>] [--json]
-  approval log export [--log <path>] [--json]
+  approval log verify  [--log <path>] [--json]
+  approval log tail    [--log <path>] [-n <count>] [--json]
+  approval log export  [--log <path>] [--json]
+  approval log sync    [--remote <name>] [--branch <name>] [--json]
+  approval log advance [--branch <name>] [--pr] [--dry-run] [--json]
 
 Subcommands:
-  verify   walk the hash chain end to end and report clean | torn-tail | corrupt
+  verify   walk the hash chain end to end; clean | torn-tail | corrupt
   tail     print the last N records (default 10)
   export   stream every stored line to stdout, byte for byte
+  sync     fast-forward pull, with a snapshot and a chain reconcile
+  advance  commit the log's new records onto a records branch
 
-All three open the log for reading only.
-Default log path: .approval/log/events.jsonl (relative to the working directory)
-
-JSON shapes (one object per invocation, on stdout):
-  verify  {"status","records","head","intactThroughSeq"?,"firstBadSeq"?,"reason"?,"message"?}
-  tail    {"status":"ok"|"torn-tail","records":[...],"warning"?}
-  export  {"records":[...],"warning"?}
+verify, tail and export open the log for reading only. sync and advance move the
+FILE and never a record: neither appends an event, and neither rewinds a chain.
+Default log: .approval/log/events.jsonl · JSON shapes: docs/cli-reference.md
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("log")}`;
+
+export const LOG_SYNC_HELP = `approval log sync — fast-forward the committed log, safely
+
+Usage:
+  approval log sync [--remote <name>] [--branch <name>] [--json]
+
+Flags:
+  --remote <name>  remote to fetch from (default origin)
+  --branch <name>  branch to fast-forward onto (default: the checked-out one)
+  --json           machine-readable output
+  -h, --help       this text
+
+Holds the append lockfile for the WHOLE operation, verifies the chain, copies
+events.jsonl aside inside .approval/ (never \`git stash\`), fast-forwards, then
+reconciles: the committed chain must be a prefix of the snapshot, equal to it, or
+an extension of it, and anything else is log-diverged with nothing merged.
+QUEUE.md and the index are REBUILT from the reconciled log; any failure at any
+step restores the snapshot first; no event is appended. PRIMARY CHECKOUT ONLY.
+Refusals: log-sync-not-primary, log-sync-unverified, log-sync-not-fast-forward,
+log-diverged, log-sync-locked, log-sync-git-failed, log-sync-projection-failed,
+log-sync-restore-failed, log-sync-io.
+
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("log-sync")}`;
+
+export const LOG_ADVANCE_HELP = `approval log advance — commit and push the log's new records
+
+Usage:
+  approval log advance [--remote <n>] [--branch <n>] [--pr] [--dry-run] [--json]
+
+Flags:
+  --remote <name>  remote to push to (default origin)
+  --branch <name>  records branch (default records-log-<date>); never main
+  --pr / --dry-run   open the pull request through gh / write nothing at all
+  --json           machine-readable output
+  -h, --help       this text
+
+Verifies the chain under the append lock, stages EXACTLY the log, QUEUE.md and
+.approval/payloads/, commits on the branch you are standing on with the seq range
+in the message, and pushes that commit to a records branch by refspec. It CHECKS
+OUT NOTHING and appends no event; any other staged path is refused rather than
+unstaged. PRIMARY CHECKOUT ONLY. Refusals: log-advance-not-primary,
+log-advance-dirty-stage, log-advance-checkout-required, log-advance-unverified,
+log-advance-locked, log-advance-git-failed, log-advance-push-rejected,
+log-advance-pr-failed.
+
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("log-advance")}`;
 
 export const VERIFY_HELP = `approval log verify — verify the log's hash chain
 
@@ -869,11 +919,11 @@ Flags:
   --verbose / --json   never abbreviate a detail / machine-readable output
   -h, --help       this text
 
-Eleven checks, in the order in which their failures cascade: build-freshness,
+Twelve checks, in the order in which their failures cascade: build-freshness,
 identity, attestation, log, telegram, web-port, payload-store, audit-sampling,
-envelope-integrity, vault, environment. APPENDS NOTHING, sends nothing, repairs
-nothing: every failure carries a fix that begins with a command you can paste,
-and no value of any credential appears in the output.
+envelope-integrity, vault, environment, log-drift. APPENDS NOTHING, sends
+nothing, repairs nothing: every failure carries a fix that begins with a command
+you can paste, and no value of any credential appears in the output.
 
 JSON shape: docs/cli-reference.md#doctor
 ${EXIT_CODES_POINTER} (1 when ANY check failed; 4 when doctor could not look)
