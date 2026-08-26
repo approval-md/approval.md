@@ -1385,3 +1385,48 @@ export function classifyCommand(
   }
   return { ok: true, segments, classes };
 }
+
+// ===========================================================================
+// Segment words (APRV-144)
+// ===========================================================================
+
+/** One segment's words, as the classifier's own tokenizer read them. */
+export interface CommandSegmentWords {
+  /** The segment's source text, as written. */
+  text: string;
+  /** The binary, `VAR=value` prefixes already skipped, quotes already removed. */
+  bin: string;
+  /** Every word after the binary, flags included, in order. */
+  args: string[];
+}
+
+/**
+ * The words of each segment, from the SAME parse {@link classifyCommand} uses.
+ *
+ * Exported for the channel-side command breakdown (APRV-144): a prompt that
+ * says what a compound command does needs the verb and the arguments of each
+ * segment, and a display layer that re-split the string itself would be a
+ * second tokenizer, free to disagree with the one that chose the class. This
+ * runs {@link lex} — the tokenizer — and applies the same assignment-prefix
+ * skip `classifySegment` applies, and stops there: it classifies nothing and
+ * decides nothing.
+ *
+ * `null` when the tokenizer refuses the string, which is the same input
+ * `classifyCommand` answers `unparseable` for. Segments carrying no binary (a
+ * bare assignment, a lone redirection) are omitted: they have no verb to show.
+ */
+export function commandSegmentWords(command: string): CommandSegmentWords[] | null {
+  const lexed = lex(command);
+  if (!lexed.ok) return null;
+
+  const out: CommandSegmentWords[] = [];
+  for (const segment of lexed.segments) {
+    const words = segment.words.map((word) => word.text);
+    let cursor = 0;
+    while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+    const bin = words[cursor];
+    if (bin === undefined) continue;
+    out.push({ text: segment.text, bin, args: words.slice(cursor + 1) });
+  }
+  return out;
+}

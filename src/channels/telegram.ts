@@ -397,6 +397,15 @@ function originOf(field: TaggedField<unknown>): string {
   return field.kind === "computed" ? field.source : field.author;
 }
 
+/**
+ * The suffix the model-authored line carries, on the line itself (APRV-144).
+ *
+ * Belt and braces with the `(author)` parenthetical: a reader skimming a wall
+ * of bullets sees the word "model" inside the sentence they are about to
+ * believe, not only in the small italic at the end of it.
+ */
+export const TELEGRAM_GLOSS_SUFFIX = "(model, unverified)";
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -487,10 +496,21 @@ export function renderTelegram(
 
   const computedLines: Line[] = [
     line("class", request.class, "class", request.class.value),
-    // APRV-143, immediately under the class it explains: `class: policy.edit`
-    // on its own tells the approver that some rule fired and leaves them to
-    // find the file. Derived from the bound bytes by the same classifier the
-    // hook decided with.
+    // APRV-144, then APRV-143: what the command actually does, and which
+    // protected path earned the class. Both sit immediately under the class
+    // they explain, because `class: policy.edit` over a truncated path prefix
+    // is the state this pair of tasks exists to end. Both are derived from the
+    // bound bytes by the same classifier the hook decided with.
+    ...(request.command_breakdown === undefined
+      ? []
+      : [
+          line(
+            "command_breakdown",
+            request.command_breakdown,
+            "commands",
+            request.command_breakdown.value,
+          ),
+        ]),
     ...(request.protected_path === undefined
       ? []
       : [
@@ -527,6 +547,15 @@ export function renderTelegram(
   ];
 
   const claimedLines: Line[] = [
+    // APRV-144. Under the CLAIMED heading, because a model's sentence is not
+    // something the runtime derived, and labelled on the line as well: the
+    // `(author)` parenthetical every claimed line already carries is small,
+    // uniform and easy to stop seeing, and this is the one line in the message
+    // that NO party — not the runtime, not even the requesting agent — stands
+    // behind. Nothing here or anywhere else branches on what it says.
+    ...(request.gloss === undefined
+      ? []
+      : [line("gloss", request.gloss, "gloss", `${request.gloss.value} ${TELEGRAM_GLOSS_SUFFIX}`)]),
     line("summary", request.summary, "summary", request.summary.value ?? "(none given)"),
     line(
       "est_cost_usd",

@@ -518,6 +518,40 @@ test("an ordinary email payload carries neither derivation", () => {
   assert.equal(built.ok, true);
   if (!built.ok) return;
   assert.equal(built.request.protected_path, undefined);
+  assert.equal(built.request.command_breakdown, undefined);
+  assertClean(world.unit);
+});
+
+test("a command payload gains both derivations, each labelled classifier", () => {
+  // APRV-144 #1 beside APRV-143 #3: one payload, two computed lines, one
+  // module deriving both from the same hash-checked bytes.
+  const world = edit({
+    command: "npm run build && cp dist/x CLAUDE.md",
+    cwd: "/repo",
+  });
+  const built = buildChannelRequest(world.unit.logPath, world.keys[0] as string, world.tagOptions, NOW);
+  assert.equal(built.ok, true);
+  if (!built.ok) return;
+  assert.deepEqual(
+    built.request.command_breakdown,
+    computed("npm run build · cp dist/x CLAUDE.md", "classifier"),
+  );
+  assert.deepEqual(
+    built.request.protected_path,
+    computed("CLAUDE.md (rule protected-path)", "classifier"),
+  );
+  assertClean(world.unit);
+});
+
+test("the tagger never attaches a gloss", () => {
+  // A model's sentence is not derived from the log, the policy or the bound
+  // bytes, so it has no business on the runtime side of the boundary. The
+  // listener attaches it at render time; nothing here does.
+  const world = edit({ command: "git status", cwd: "/repo" });
+  const built = buildChannelRequest(world.unit.logPath, world.keys[0] as string, world.tagOptions, NOW);
+  assert.equal(built.ok, true);
+  if (!built.ok) return;
+  assert.equal(built.request.gloss, undefined);
   assertClean(world.unit);
 });
 

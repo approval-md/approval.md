@@ -204,6 +204,17 @@ export interface ChannelRequest {
   /** `route.confidence`, when the log carries one. Claimed, and never a gate. */
   confidence?: TaggedField<number>;
   /**
+   * What a compound shell command does, segment by segment (APRV-144):
+   * `git add … · git commit · git push origin main:records-…`.
+   *
+   * **Computed**, and from the payload bytes alone: it is derived by
+   * `core/command-class.ts`'s own tokenizer, the one whose reading chose the
+   * class, so a channel showing it cannot describe a command differently from
+   * the module that gated it. Present only for a command-shaped payload the
+   * tokenizer can read; absent, never guessed, for every other shape.
+   */
+  command_breakdown?: TaggedField<string>;
+  /**
    * The protected path that selected `policy.edit`, and the rule that matched
    * it (APRV-143): `.github/workflows/ci.yml (rule protected-path)`.
    *
@@ -214,6 +225,25 @@ export interface ChannelRequest {
    * of the boundary. Absent when no protected path selected the class.
    */
   protected_path?: TaggedField<string>;
+  /**
+   * A one-sentence description of the action, written by a language model
+   * (APRV-144). **Claimed, and unverified twice over**: nothing checks it, and
+   * its author is not even a party the log knows about.
+   *
+   * Attached at RENDER time by a channel listener and by nothing else. The gate
+   * never sees it, the payload hash does not cover it, the log does not record
+   * it, and no code path anywhere branches on its content — the only thing that
+   * turns on it is whether the line appears. It is a reading aid whose absence
+   * costs nothing but the seconds a human spends parsing the command
+   * themselves, which is why every failure mode of producing one resolves to
+   * absence.
+   *
+   * A tagger never sets this. `channels/tagging.ts` derives fields from the
+   * log, the policy and the bound bytes; a model's sentence is none of those,
+   * and putting it on the runtime side of the boundary would be the exact
+   * defect SPEC.md §9 exists to prevent.
+   */
+  gloss?: TaggedField<string>;
   /** The content binding recorded on `approval.requested` (SPEC.md §6.2). */
   payload_hash: TaggedField<string>;
   /**

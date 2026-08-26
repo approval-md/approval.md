@@ -17,6 +17,7 @@ import { test } from "node:test";
 
 import {
   classifyCommand,
+  commandSegmentWords,
   isProtectedPath,
   CLASSIFIER_CLASSES,
   COMMAND_RULES,
@@ -678,4 +679,50 @@ test("a path protected only by policy.protected_paths is reported as written", (
   assert.ok(result.ok);
   assert.equal(result.segments[0]?.class, "policy.edit");
   assert.equal(result.segments[0]?.path, "design/new.md");
+});
+
+// ---------------------------------------------------------------------------
+// commandSegmentWords (APRV-144)
+// ---------------------------------------------------------------------------
+
+test("commandSegmentWords splits on the same boundaries the classifier does", () => {
+  const command = "git add . && git commit -m 'a msg' | tee log.txt";
+  const words = commandSegmentWords(command);
+  const classified = classifyCommand(command);
+  assert.ok(words !== null);
+  assert.ok(classified.ok);
+  // One tokenizer, so one segmentation: the display aid and the class always
+  // describe the same pieces of the same command.
+  assert.deepEqual(
+    words.map((segment) => segment.text),
+    classified.segments.map((segment) => segment.text),
+  );
+  assert.deepEqual(words[1], {
+    text: "git commit -m 'a msg'",
+    bin: "git",
+    args: ["commit", "-m", "a msg"],
+  });
+});
+
+test("commandSegmentWords skips VAR=value prefixes, as the classifier does", () => {
+  const words = commandSegmentWords("FOO=1 BAR=2 npm run build");
+  assert.ok(words !== null);
+  assert.equal(words[0]?.bin, "npm");
+  assert.deepEqual(words[0]?.args, ["run", "build"]);
+});
+
+test("commandSegmentWords omits a segment with no binary", () => {
+  // A bare assignment and a lone redirection classify (as `assignment` and
+  // `redirect-write`) but have no verb to show, so they are not segments a
+  // breakdown can describe.
+  assert.deepEqual(commandSegmentWords("FOO=1"), []);
+  assert.deepEqual(commandSegmentWords("> out.txt"), []);
+});
+
+test("commandSegmentWords refuses exactly what the tokenizer refuses", () => {
+  const command = "echo 'unterminated";
+  assert.equal(commandSegmentWords(command), null);
+  const classified = classifyCommand(command);
+  assert.equal(classified.ok, false);
+  if (!classified.ok) assert.equal(classified.code, "unparseable");
 });

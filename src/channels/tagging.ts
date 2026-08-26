@@ -75,7 +75,7 @@ import {
   type ChannelRequest,
   type PayloadRendering,
 } from "./contract.js";
-import { protectedPathView } from "./payload-view.js";
+import { commandBreakdown, commandPayloadView, protectedPathView } from "./payload-view.js";
 
 // ---------------------------------------------------------------------------
 // Options and refusals
@@ -368,7 +368,7 @@ function withStore(options: TagOptions, logPath: string): TagOptions {
  * | `budgets` | `evaluateBudgetsWithTask()` at `now` | `budgets` |
  * | `attestation` | `checkAttestation()` against the live policy file | `attestation` |
  * | `fullPayload` | supplied material, hash-checked | `payload-binding` |
- * | `protected_path` | the classifier, re-run over the hash-checked material | `classifier` |
+ * | `command_breakdown`, `protected_path` | the classifier, re-run over the hash-checked material | `classifier` |
  * | `ttl_remaining_ms`, `waiting` | arithmetic on `now` | `clock` |
  *
  * Claimed, and who authored each: `summary` and `est_cost_usd` carry the actor
@@ -511,24 +511,35 @@ function protectedPathsOf(load: PolicyLoadResult): readonly string[] {
 }
 
 /**
- * The payload-derived computed line of APRV-143 #3: which protected path
- * selected the class.
+ * The two payload-derived computed lines: what the command does (APRV-144 #1)
+ * and which protected path selected the class (APRV-143 #3).
  *
- * Derived from the payload material this function was already handed — material
- * that {@link renderPayload} has hash-checked against the recorded binding — and
- * it re-runs the classifier rather than reading a claim off it. A payload nobody
- * holds, or one of a shape the derivation does not recognise, produces no line:
- * an aid that cannot be derived is absent, never guessed.
+ * Both are derived from the payload material this function was already handed —
+ * material that {@link renderPayload} has hash-checked against the recorded
+ * binding — and both go through `core/command-class.ts` rather than reading a
+ * claim off the bytes. A payload nobody holds, or one of a shape neither
+ * derivation recognises, produces neither line: an aid that cannot be derived
+ * is absent, never guessed.
  */
 function payloadDerivations(
   rendering: PayloadRendering | null,
   load: PolicyLoadResult,
-): Partial<Pick<ChannelRequest, "protected_path">> {
+): Partial<Pick<ChannelRequest, "command_breakdown" | "protected_path">> {
   if (rendering === null) return {};
+  const fields: Partial<Pick<ChannelRequest, "command_breakdown" | "protected_path">> = {};
+
+  const command = commandPayloadView(rendering.value);
+  if (command !== null) {
+    const breakdown = commandBreakdown(command.command);
+    if (breakdown !== null) fields.command_breakdown = computed(breakdown, "classifier");
+  }
 
   const guarded = protectedPathView(rendering.value, protectedPathsOf(load));
-  if (guarded === null) return {};
-  return { protected_path: computed(`${guarded.path} (rule ${guarded.rule})`, "classifier") };
+  if (guarded !== null) {
+    fields.protected_path = computed(`${guarded.path} (rule ${guarded.rule})`, "classifier");
+  }
+
+  return fields;
 }
 
 /** The shared body of {@link buildChannelRequest} and {@link buildPendingQueue}. */
