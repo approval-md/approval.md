@@ -111,19 +111,19 @@ function taskFile(binding: string): string {
     "    - class: communicate.email.external",
     '      summary: "Send deposit chaser"',
     "      reversible: false",
-    "      est_cost_usd: 0.02",
+    '      est_cost_usd: "0.02"',
     '      idempotency_key: "task-042:chaser"',
     `      payload_hash: "${binding}"`,
     "    - class: files.write.local",
     '      summary: "Write the draft"',
     "      reversible: true",
-    "      est_cost_usd: 0.01",
+    '      est_cost_usd: "0.01"',
     '      idempotency_key: "task-042:draft"',
     `      payload_hash: "${binding}"`,
     "    - class: files.write.local",
     '      summary: "Write the second draft"',
     "      reversible: true",
-    "      est_cost_usd: 0.01",
+    '      est_cost_usd: "0.01"',
     '      idempotency_key: "task-042:draft2"',
     `      payload_hash: "${binding}"`,
     "---",
@@ -393,7 +393,7 @@ test("a supervised action runs with NO token and its budget is charged at the st
   // the bytes that ran.
   assert.deepEqual(logRecords(dir)[2]?.["payload"], {
     class: "files.write.local",
-    est_cost_usd: 0.01,
+    est_cost_usd: "0.01",
     payload_hash: runPayloadHash(exiting(0), dir),
   });
 
@@ -403,7 +403,7 @@ test("a supervised action runs with NO token and its budget is charged at the st
     string,
     unknown
   >[];
-  assert.equal(budgets.find((entry) => entry["limit"] === "global.daily_usd")?.["consumed"], 0.01);
+  assert.equal(budgets.find((entry) => entry["limit"] === "global.daily_usd")?.["consumed"], "0.01");
   assertClean(dir);
 });
 

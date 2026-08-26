@@ -1,0 +1,11 @@
+{
+  "origin": {
+    "app": "example-capture",
+    "created_by": "human:carter"
+  },
+  "state": "awaiting",
+  "budget": {
+    "max_cost_usd": 25,
+    "max_latency": "6h"
+  }
+}

@@ -99,7 +99,7 @@ function taskFile(payloadHash: string): string {
     "    - class: communicate.email.external",
     '      summary: "Send deposit chaser"',
     "      reversible: false",
-    "      est_cost_usd: 0.02",
+    '      est_cost_usd: "0.02"',
     '      idempotency_key: "task-042:chaser"',
     `      payload_hash: "${payloadHash}"`,
     "---",

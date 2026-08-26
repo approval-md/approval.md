@@ -121,31 +121,31 @@ function taskFile(binding: string): string {
   "    - class: communicate.email.external",
   '      summary: "Send deposit chaser"',
   "      reversible: false",
-  "      est_cost_usd: 0.02",
+  '      est_cost_usd: "0.02"',
   '      idempotency_key: "task-042:chaser"',
   `      payload_hash: "${binding}"`,
   "    - class: communicate.email.external",
   '      summary: "Send the follow-up"',
   "      reversible: false",
-  "      est_cost_usd: 0.02",
+  '      est_cost_usd: "0.02"',
   '      idempotency_key: "task-042:followup"',
   `      payload_hash: "${binding}"`,
   "    - class: files.write.local",
   '      summary: "Write the draft"',
   "      reversible: true",
-  "      est_cost_usd: 0.01",
+  '      est_cost_usd: "0.01"',
   '      idempotency_key: "task-042:draft"',
   `      payload_hash: "${binding}"`,
   "    - class: files.write.local",
   '      summary: "Write the second draft"',
   "      reversible: true",
-  "      est_cost_usd: 0.01",
+  '      est_cost_usd: "0.01"',
   '      idempotency_key: "task-042:draft2"',
   `      payload_hash: "${binding}"`,
   "    - class: files.write.local",
   '      summary: "Write the third draft"',
   "      reversible: true",
-  "      est_cost_usd: 0.01",
+  '      est_cost_usd: "0.01"',
   '      idempotency_key: "task-042:draft3"',
   `      payload_hash: "${binding}"`,
   "---",
@@ -254,18 +254,18 @@ test("status --json on a healthy repo emits the frozen shape and exits 0", () =>
         window: "rolling-24h",
         // One authorization in the window (the grant), plus the zero-cost
         // probe's own action — documented in --help, asserted here.
-        consumed: 1,
-        requested: 1,
-        remaining: 48,
+        consumed: "1",
+        requested: "1",
+        remaining: "48",
         pass: true,
       },
       {
         limit: "global.daily_usd",
         scope: "global",
         window: "rolling-24h",
-        consumed: 0.02,
-        requested: 0,
-        remaining: 9.98,
+        consumed: "0.02",
+        requested: "0",
+        remaining: "9.98",
         pass: true,
       },
     ],
@@ -494,7 +494,7 @@ test("queue lists exactly the live awaiting requests, with the TTL remaining", (
   const first = pending[0] as Record<string, unknown>;
   assert.equal(first["task"], "task-042");
   assert.equal(first["class"], "communicate.email.external");
-  assert.equal(first["est_cost_usd"], 0.02);
+  assert.equal(first["est_cost_usd"], "0.02");
   assert.equal(first["seq"], 3);
   assert.equal(typeof first["requested_ts"], "string");
   const remaining = first["ttl_remaining_ms"] as number;

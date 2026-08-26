@@ -156,7 +156,7 @@ approval:
     - class: exec.local
       summary: "Run \`echo hello\` in the project directory"
       reversible: true
-      est_cost_usd: 0
+      est_cost_usd: "0"
       idempotency_key: "task-mcp-demo:greet"
       payload_hash: "$HASH"
 ---

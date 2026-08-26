@@ -1,0 +1,74 @@
+[
+  {
+    "name": "genesis-task-registered",
+    "note": "SPEC.md §6.1 chaser story, first record of a fresh log: prev is null. `input` is the complete record minus `hash` — exactly the hash input. A change to any value here is a hash-scheme change, not a refactor.",
+    "input": {
+      "seq": 1,
+      "ts": "2026-08-04T09:11:02Z",
+      "event": "task.registered",
+      "actor": "agent:planner",
+      "alg": "sha256/jcs",
+      "prev": null,
+      "task": "task-042",
+      "channel": "cli",
+      "payload": {
+        "title": "Chase the overdue invoice",
+        "envelope": "backlog/task-042.md"
+      }
+    },
+    "expected_canonical": "{\"actor\":\"agent:planner\",\"alg\":\"sha256/jcs\",\"channel\":\"cli\",\"event\":\"task.registered\",\"payload\":{\"envelope\":\"backlog/task-042.md\",\"title\":\"Chase the overdue invoice\"},\"prev\":null,\"seq\":1,\"task\":\"task-042\",\"ts\":\"2026-08-04T09:11:02Z\"}",
+    "expected_hash": "6a076d1e8930f73be61ba514c804ec06516ae4798b5f9c67a0612eec6faae7e6"
+  },
+  {
+    "name": "chained-approval-requested",
+    "note": "Second record: prev is the genesis record's hash, so the digest commits to the chain.",
+    "input": {
+      "seq": 2,
+      "ts": "2026-08-04T09:13:40Z",
+      "event": "approval.requested",
+      "actor": "agent:chaser",
+      "alg": "sha256/jcs",
+      "prev": "6a076d1e8930f73be61ba514c804ec06516ae4798b5f9c67a0612eec6faae7e6",
+      "task": "task-042",
+      "action_key": "task-042:chaser:2026-08-04",
+      "channel": "telegram",
+      "payload": {
+        "class": "communicate.email.external",
+        "est_cost_usd": 0,
+        "reversible": false
+      }
+    },
+    "expected_canonical": "{\"action_key\":\"task-042:chaser:2026-08-04\",\"actor\":\"agent:chaser\",\"alg\":\"sha256/jcs\",\"channel\":\"telegram\",\"event\":\"approval.requested\",\"payload\":{\"class\":\"communicate.email.external\",\"est_cost_usd\":0,\"reversible\":false},\"prev\":\"6a076d1e8930f73be61ba514c804ec06516ae4798b5f9c67a0612eec6faae7e6\",\"seq\":2,\"task\":\"task-042\",\"ts\":\"2026-08-04T09:13:40Z\"}",
+    "expected_hash": "7768c23cf976931643bde54c3e02a18f6ac4706c560b57c4521e76bd4ffabcc3"
+  },
+  {
+    "name": "unicode-numbers-and-unsorted-nested-keys",
+    "note": "RFC 8785 key sorting at two nesting levels, non-ASCII payload text emitted literally, and ECMAScript number formatting (0.5, 100, 1200).",
+    "input": {
+      "seq": 3,
+      "ts": "2026-08-04T09:14:02Z",
+      "event": "approval.granted",
+      "actor": "human:carter",
+      "alg": "sha256/jcs",
+      "prev": "7768c23cf976931643bde54c3e02a18f6ac4706c560b57c4521e76bd4ffabcc3",
+      "task": "task-042",
+      "action_key": "task-042:chaser:2026-08-04",
+      "channel": "telegram",
+      "payload": {
+        "note": "chase the £1,200 déjà-vu invoice ☑",
+        "amounts": {
+          "total_gbp": 1200,
+          "share": 0.5,
+          "retries": 100
+        },
+        "zulu": [
+          "b",
+          "a"
+        ],
+        "Álvaro": "approver"
+      }
+    },
+    "expected_canonical": "{\"action_key\":\"task-042:chaser:2026-08-04\",\"actor\":\"human:carter\",\"alg\":\"sha256/jcs\",\"channel\":\"telegram\",\"event\":\"approval.granted\",\"payload\":{\"amounts\":{\"retries\":100,\"share\":0.5,\"total_gbp\":1200},\"note\":\"chase the £1,200 déjà-vu invoice ☑\",\"zulu\":[\"b\",\"a\"],\"Álvaro\":\"approver\"},\"prev\":\"7768c23cf976931643bde54c3e02a18f6ac4706c560b57c4521e76bd4ffabcc3\",\"seq\":3,\"task\":\"task-042\",\"ts\":\"2026-08-04T09:14:02Z\"}",
+    "expected_hash": "2f4cd2927b66ac9b5bdcb8186c05f521ace5a05ade16048117d1fbbd9d505d20"
+  }
+]

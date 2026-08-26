@@ -1,0 +1,17 @@
+{
+  "seq": 2,
+  "ts": "2026-08-04T09:13:40Z",
+  "event": "approval.requested",
+  "actor": "agent:chaser",
+  "alg": "sha256/jcs",
+  "prev": "6a076d1e8930f73be61ba514c804ec06516ae4798b5f9c67a0612eec6faae7e6",
+  "hash": "7768c23cf976931643bde54c3e02a18f6ac4706c560b57c4521e76bd4ffabcc3",
+  "task": "task-042",
+  "action_key": "task-042:chaser:2026-08-04",
+  "channel": "telegram",
+  "payload": {
+    "class": "communicate.email.external",
+    "est_cost_usd": 0,
+    "reversible": false
+  }
+}

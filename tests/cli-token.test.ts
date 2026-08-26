@@ -103,13 +103,13 @@ const TASK_FILE = [
   "    - class: communicate.email.external",
   '      summary: "Send deposit chaser"',
   "      reversible: false",
-  "      est_cost_usd: 0.02",
+  '      est_cost_usd: "0.02"',
   '      idempotency_key: "task-042:chaser"',
   `      payload_hash: "${PAYLOAD_HASH}"`,
   "    - class: communicate.email.external",
   '      summary: "Send the follow-up"',
   "      reversible: false",
-  "      est_cost_usd: 0.02",
+  '      est_cost_usd: "0.02"',
   '      idempotency_key: "task-042:followup"',
   `      payload_hash: "${PAYLOAD_HASH}"`,
   "---",
@@ -221,7 +221,7 @@ test("grant prints the raw token on stdout, warns it is shown once, and logs onl
   assert.equal(granted["event"], "approval.granted");
   assert.deepEqual(granted["payload"], {
     class: "communicate.email.external",
-    est_cost_usd: 0.02,
+    est_cost_usd: "0.02",
     payload_hash: PAYLOAD_HASH,
     token_sha256: sha256(token),
     // APRV-118: the attested policy the approver decided under.
@@ -272,7 +272,7 @@ test("token --json emits the frozen live shape and writes nothing", () => {
     token_sha256: sha256(token),
     grant_seq: 4,
     class: "communicate.email.external",
-    est_cost_usd: 0.02,
+    est_cost_usd: "0.02",
     payload_hash: PAYLOAD_HASH,
     task: "task-042",
   });
@@ -387,7 +387,7 @@ test("consume --json emits the frozen shape and appends exactly one execution.st
     token_sha256: sha256(token),
     grant_seq: 4,
     class: "communicate.email.external",
-    est_cost_usd: 0.02,
+    est_cost_usd: "0.02",
     payload_hash: PAYLOAD_HASH,
   });
 
@@ -401,7 +401,7 @@ test("consume --json emits the frozen shape and appends exactly one execution.st
   const started = logRecords(dir)[4] as Record<string, unknown>;
   assert.deepEqual(started["payload"], {
     class: "communicate.email.external",
-    est_cost_usd: 0.02,
+    est_cost_usd: "0.02",
     token_sha256: sha256(token),
     payload_hash: PAYLOAD_HASH,
   });

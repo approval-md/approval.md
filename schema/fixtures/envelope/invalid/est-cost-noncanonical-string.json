@@ -1,0 +1,14 @@
+{
+  "origin": {
+    "app": "example-capture",
+    "created_by": "human:carter"
+  },
+  "state": "awaiting",
+  "actions": [
+    {
+      "class": "financial.spend",
+      "est_cost_usd": "0.020",
+      "idempotency_key": "task-042:refund:2026-08-04"
+    }
+  ]
+}

@@ -856,7 +856,7 @@ which of the three deaths applied: execution (`token-consumed`), revocation
 ```
 live     {"ok":true,"action_key":"...","state":"granted","live":true,
           "token_sha256":"<64 hex>","grant_seq":4,"class":"...",
-          "est_cost_usd":0.02,"payload_hash":"<64 hex>"|null,
+          "est_cost_usd":"0.02","payload_hash":"<64 hex>"|null,
           "task":"task-042"}
 refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"...",
           "seq"?:N}}  on stderr
@@ -921,7 +921,7 @@ The appended `execution.started` carries
 ```
 success  {"ok":true,"action_key":"...","event":"execution.started","seq":5,
           "token_sha256":"<64 hex>","grant_seq":4,"class":"...",
-          "est_cost_usd":0.02}
+          "est_cost_usd":"0.02"}
 refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"...",
           "seq"?:N}}  on stderr
 ```
@@ -1094,7 +1094,7 @@ requested, and how much of the TTL is left.
 
 ```
 {"ok":true,"pending":[{"action_key":"task-042:chaser","task":"task-042",
- "class":"communicate.email.external","est_cost_usd":0.02,
+ "class":"communicate.email.external","est_cost_usd":"0.02",
  "requested_ts":"2026-08-06T10:00:00.000Z","seq":3,
  "ttl_remaining_ms":3599000}]}
 ```

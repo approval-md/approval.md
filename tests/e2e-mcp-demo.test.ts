@@ -141,7 +141,7 @@ const TASK_FILE = [
   "    - class: exec.local",
   '      summary: "Run `echo hello` in the demo directory"',
   "      reversible: true",
-  "      est_cost_usd: 0",
+  '      est_cost_usd: "0"',
   `      idempotency_key: "${ACTION}"`,
   `      payload_hash: "${PAYLOAD_HASH}"`,
   "---",
@@ -411,7 +411,7 @@ test("the MCP demo: a client requests, a phone grants, the tool call proceeds", 
       assert.equal(afterRequest[2]?.actor, AGENT, "approval.requested is not the server's agent");
       assert.deepEqual(afterRequest[2]?.payload, {
         class: "exec.local",
-        est_cost_usd: 0,
+        est_cost_usd: "0",
         payload_hash: PAYLOAD_HASH,
         summary: "Run `echo hello` in the demo directory",
         reversible: true,

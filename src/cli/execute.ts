@@ -736,7 +736,8 @@ interface QueueEntry {
   action_key: string;
   task: string | null;
   class: string | null;
-  est_cost_usd: number | null;
+  /** Canonical decimal USD string (APRV-121), as the record spells it. */
+  est_cost_usd: string | null;
   requested_ts: string | null;
   seq: number | null;
   /** Milliseconds until the TTL lapses, or `null` when the policy sets none. */
@@ -914,7 +915,7 @@ function budgetHeadroom(
       classPattern: null,
       globalBudgets: load.ok ? load.policy.budgets ?? null : null,
     },
-    { class: "", est_cost_usd: 0 },
+    { class: "", est_cost_usd: "0" },
     ts,
   ).verdicts;
 }

@@ -425,11 +425,11 @@ approval:
     - class: communicate.email.external
       summary: "Send deposit chaser to the agency"
       reversible: false
-      est_cost_usd: 0.02
+      est_cost_usd: "0.02"
       idempotency_key: "task-042:chaser:2026-08-04"
       payload_hash: "$HASH"
   budget:
-    max_cost_usd: 0.50
+    max_cost_usd: "0.5"
     max_latency: "6h"
 ---
 

@@ -71,30 +71,31 @@ const POLICY_UNLIMITED = [
 interface Action {
   key: string;
   cls: string;
-  cost: number;
+  /** Canonical decimal USD string: the only form the write boundary admits. */
+  cost: string;
   reversible: boolean;
 }
 
 const MANUAL_A: Action = {
   key: "task-042:a",
   cls: "communicate.email.external",
-  cost: 0.3,
+  cost: "0.3",
   reversible: false,
 };
 const MANUAL_B: Action = {
   key: "task-042:b",
   cls: "communicate.email.external",
-  cost: 0.3,
+  cost: "0.3",
   reversible: false,
 };
 const SUPERVISED: Action = {
   key: "task-042:draft",
   cls: "files.write.local",
-  cost: 0.3,
+  cost: "0.3",
   reversible: true,
 };
 
-function envelope(cap: number | null): unknown {
+function envelope(cap: string | null): unknown {
   return {
     origin: { app: "example-capture", created_by: "human:carter" },
     state: "proposed",
@@ -109,7 +110,7 @@ function envelope(cap: number | null): unknown {
   };
 }
 
-function ready(cap: number | null): Scenario {
+function ready(cap: string | null): Scenario {
   const unit = newScenario(root, POLICY_UNLIMITED);
   attest(unit);
   const registered = register(
@@ -149,14 +150,14 @@ function grant(unit: Scenario, action: Action, minute: number) {
 // ---------------------------------------------------------------------------
 
 test("the cap is read from the LOG's registration, not from the task file", () => {
-  const unit = ready(0.5);
-  assert.equal(taskMaxCostUsd(records(unit), "task-042"), 0.5);
+  const unit = ready("0.5");
+  assert.equal(taskMaxCostUsd(records(unit), "task-042"), "0.5");
   assert.equal(taskMaxCostUsd(records(unit), "task-999"), null);
 
   // The whole `budget` block is copied, so the M4/M5 enforcement of
   // `max_latency` reads a log that already carries it.
   const registration = records(unit).find((record) => record.event === "task.registered");
-  assert.deepEqual(payloadOf(registration!)["budget"], { max_cost_usd: 0.5, max_latency: "6h" });
+  assert.deepEqual(payloadOf(registration!)["budget"], { max_cost_usd: "0.5", max_latency: "6h" });
 });
 
 test("a task with no budget block is unaffected", () => {
@@ -177,7 +178,7 @@ test("a task with no budget block is unaffected", () => {
 
 test("the cap refuses at INTAKE, appends budget.exceeded, and names a task verdict", () => {
   // Cap 0.5; A alone is 0.3, so A fits and B (0.3 more) does not.
-  const unit = ready(0.5);
+  const unit = ready("0.5");
   assert.equal(requestAction(unit, MANUAL_A, 1).ok, true);
   assert.equal(grant(unit, MANUAL_A, 2).ok, true);
 
@@ -197,7 +198,7 @@ test("the cap refuses at INTAKE, appends budget.exceeded, and names a task verdi
 });
 
 test("the cap refuses at GRANT, even when intake passed before the queue moved", () => {
-  const unit = ready(0.5);
+  const unit = ready("0.5");
   // Both requested while the task had spent nothing: intake admits both.
   assert.equal(requestAction(unit, MANUAL_A, 1).ok, true);
   assert.equal(requestAction(unit, MANUAL_B, 1).ok, true);
@@ -215,7 +216,7 @@ test("the cap refuses at GRANT, even when intake passed before the queue moved",
 });
 
 test("the cap refuses at EXECUTION START for an action that never passes a grant", () => {
-  const unit = ready(0.5);
+  const unit = ready("0.5");
   assert.equal(requestAction(unit, MANUAL_A, 1).ok, true);
   assert.equal(grant(unit, MANUAL_A, 2).ok, true);
 
@@ -240,13 +241,13 @@ test("the cap refuses at EXECUTION START for an action that never passes a grant
 
 test("a multi-action task sums, and a granted-then-started action is charged once", () => {
   // Cap 0.8 against three $0.30 actions: two fit, the third does not.
-  const unit = ready(0.8);
+  const unit = ready("0.8");
   assert.equal(requestAction(unit, MANUAL_A, 1).ok, true);
   const granted = grant(unit, MANUAL_A, 2);
   assert.equal(granted.ok, true);
   if (!granted.ok || granted.token === undefined) throw new Error("expected a token");
 
-  const probe = { class: MANUAL_A.cls, est_cost_usd: 0 };
+  const probe = { class: MANUAL_A.cls, est_cost_usd: "0" };
   const afterGrant = evaluateBudgetsWithTask(
     records(unit),
     { classLimits: null, classPattern: null, globalBudgets: null },
@@ -254,7 +255,7 @@ test("a multi-action task sums, and a granted-then-started action is charged onc
     at(3),
     "task-042",
   );
-  assert.equal(afterGrant.verdicts[0]?.consumed, 0.3);
+  assert.equal(afterGrant.verdicts[0]?.consumed, "0.3");
 
   // Spend the token: the manual action's start must NOT charge the task again.
   assert.equal(
@@ -278,7 +279,7 @@ test("a multi-action task sums, and a granted-then-started action is charged onc
     at(4),
     "task-042",
   );
-  assert.equal(afterStart.verdicts[0]?.consumed, 0.3, "the manual action was charged twice");
+  assert.equal(afterStart.verdicts[0]?.consumed, "0.3", "the manual action was charged twice");
 
   // A second action still fits (0.6 of 0.8); the third takes it to 0.9.
   assert.equal(requestAction(unit, MANUAL_B, 4).ok, true);
@@ -295,7 +296,7 @@ test("a multi-action task sums, and a granted-then-started action is charged onc
 });
 
 test("the cap is a LIFETIME total: waiting a day does not restore it", () => {
-  const unit = ready(0.5);
+  const unit = ready("0.5");
   assert.equal(requestAction(unit, MANUAL_A, 1).ok, true);
   assert.equal(grant(unit, MANUAL_A, 2).ok, true);
 
@@ -309,7 +310,7 @@ test("the cap is a LIFETIME total: waiting a day does not restore it", () => {
 });
 
 test("the task verdict is conjunctive with the policy verdicts and reported last", () => {
-  const unit = ready(0.5);
+  const unit = ready("0.5");
   const verdicts = evaluateBudgetsWithTask(
     records(unit),
     {
@@ -317,7 +318,7 @@ test("the task verdict is conjunctive with the policy verdicts and reported last
       classPattern: "communicate.email.external",
       globalBudgets: { global: { daily_usd: 10 } },
     },
-    { class: MANUAL_A.cls, est_cost_usd: 0.3 },
+    { class: MANUAL_A.cls, est_cost_usd: "0.3" },
     at(1),
     "task-042",
   );

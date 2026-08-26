@@ -93,13 +93,13 @@ function taskFile(binding: string): string {
     "    - class: communicate.email.external",
     '      summary: "Send deposit chaser"',
     "      reversible: false",
-    "      est_cost_usd: 0.02",
+    '      est_cost_usd: "0.02"',
     '      idempotency_key: "task-042:chaser"',
     `      payload_hash: "${binding}"`,
     "    - class: files.write.local",
     '      summary: "Write the draft"',
     "      reversible: true",
-    "      est_cost_usd: 0.01",
+    '      est_cost_usd: "0.01"',
     '      idempotency_key: "task-042:draft"',
     // APRV-140: the supervised action binds to bytes as well. Off the manual
     // path there is no grant, so the declaration is the whole of what

@@ -90,6 +90,7 @@ import {
   type LogHead,
 } from "./log.js";
 import { isLoopEscalated } from "./loop.js";
+import { usdOrZero } from "./money.js";
 import { isPayloadHash } from "./payload.js";
 import { loadPolicy, POLICY_FILENAMES, type Autonomy, type LoadPolicyOptions } from "./policy-load.js";
 import { resolve } from "./policy-match.js";
@@ -343,7 +344,12 @@ function append(
 export interface Declaration {
   task: string;
   class: string;
-  est_cost_usd: number;
+  /**
+   * The declared cost as a canonical decimal USD string (APRV-121), `"0"` when
+   * the declaration named none. A `task.registered` record written before that
+   * change carries a JSON number and normalizes to the same string here.
+   */
+  est_cost_usd: string;
   reversible: boolean | null;
   summary: string | null;
   /**
@@ -394,7 +400,7 @@ export function findDeclaration(
       found = {
         task,
         class: cls,
-        est_cost_usd: typeof cost === "number" && Number.isFinite(cost) ? cost : 0,
+        est_cost_usd: usdOrZero(cost),
         reversible: typeof reversible === "boolean" ? reversible : null,
         summary: typeof summary === "string" ? summary : null,
         payload_hash: isPayloadHash(binding) ? binding : null,
@@ -442,7 +448,8 @@ export type StartResult =
       autonomy: Autonomy;
       task: string;
       class: string;
-      est_cost_usd: number;
+      /** Canonical decimal USD string (APRV-121). */
+      est_cost_usd: string;
       /** The digest of the spent token, on the manual path only. */
       tokenSha256?: string;
     }
@@ -568,7 +575,7 @@ export function startExecution(
       autonomy: "manual",
       task: declared.task,
       class: typeof payload["class"] === "string" ? payload["class"] : declared.class,
-      est_cost_usd: typeof cost === "number" && Number.isFinite(cost) ? cost : 0,
+      est_cost_usd: usdOrZero(cost),
       tokenSha256: consumed.tokenSha256,
     };
   }

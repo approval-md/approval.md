@@ -59,7 +59,7 @@ const ENVELOPE = {
       class: "communicate.email.external",
       summary: "Send deposit chaser",
       reversible: false,
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       idempotency_key: KEY,
       payload_hash: BOUND,
     },
@@ -124,7 +124,7 @@ test("every gate-typed append stamps the ts the injected clock returned", () => 
   assert.equal(
     request(
       unit.logPath,
-      { task: "task-042", actionKey: KEY, cls: "communicate.email.external", est_cost_usd: 0.02 },
+      { task: "task-042", actionKey: KEY, cls: "communicate.email.external", est_cost_usd: "0.02" },
       "agent:claude",
       { ...unit.options, clock: fixedClock(at(1)) },
     ).ok,
@@ -174,7 +174,7 @@ test("startExecution and the spend it delegates share ONE reading of the clock",
   assert.equal(
     request(
       unit.logPath,
-      { task: "task-042", actionKey: KEY, cls: "communicate.email.external", est_cost_usd: 0.02 },
+      { task: "task-042", actionKey: KEY, cls: "communicate.email.external", est_cost_usd: "0.02" },
       "agent:claude",
       { ...unit.options, clock: fixedClock(at(1)) },
     ).ok,
