@@ -81,6 +81,17 @@ export const COMPUTED_SOURCES = [
   "attestation",
   /** Recomputed from the payload bytes and checked against the bound hash. */
   "payload-binding",
+  /**
+   * Re-derived from the hash-checked payload bytes by `core/command-class.ts`
+   * — the same module whose answer selected the class (APRV-143).
+   *
+   * Distinct from `payload-binding`, which names the hash agreement itself.
+   * This names the classifier's reading OF those bytes, which is a second
+   * derivation over the same material and can be wrong in ways the hash cannot
+   * catch: a channel that labelled it `payload-binding` would be borrowing the
+   * binding's authority for an answer the binding does not cover.
+   */
+  "classifier",
   /** Arithmetic on the display-time instant (TTL remaining). */
   "clock",
 ] as const;
@@ -192,6 +203,47 @@ export interface ChannelRequest {
   rationale?: TaggedField<string>;
   /** `route.confidence`, when the log carries one. Claimed, and never a gate. */
   confidence?: TaggedField<number>;
+  /**
+   * What a compound shell command does, segment by segment (APRV-144):
+   * `git add … · git commit · git push origin main:records-…`.
+   *
+   * **Computed**, and from the payload bytes alone: it is derived by
+   * `core/command-class.ts`'s own tokenizer, the one whose reading chose the
+   * class, so a channel showing it cannot describe a command differently from
+   * the module that gated it. Present only for a command-shaped payload the
+   * tokenizer can read; absent, never guessed, for every other shape.
+   */
+  command_breakdown?: TaggedField<string>;
+  /**
+   * The protected path that selected `policy.edit`, and the rule that matched
+   * it (APRV-143): `.github/workflows/ci.yml (rule protected-path)`.
+   *
+   * **Computed.** For a shell payload the classifier is re-run over the bound
+   * command; for a file-tool payload `isProtectedPath` is re-run over the bound
+   * target. Either way the answer is recomputed from the bytes the approval
+   * binds to rather than read off a claim, which is what puts it on this side
+   * of the boundary. Absent when no protected path selected the class.
+   */
+  protected_path?: TaggedField<string>;
+  /**
+   * A one-sentence description of the action, written by a language model
+   * (APRV-144). **Claimed, and unverified twice over**: nothing checks it, and
+   * its author is not even a party the log knows about.
+   *
+   * Attached at RENDER time by a channel listener and by nothing else. The gate
+   * never sees it, the payload hash does not cover it, the log does not record
+   * it, and no code path anywhere branches on its content — the only thing that
+   * turns on it is whether the line appears. It is a reading aid whose absence
+   * costs nothing but the seconds a human spends parsing the command
+   * themselves, which is why every failure mode of producing one resolves to
+   * absence.
+   *
+   * A tagger never sets this. `channels/tagging.ts` derives fields from the
+   * log, the policy and the bound bytes; a model's sentence is none of those,
+   * and putting it on the runtime side of the boundary would be the exact
+   * defect SPEC.md §9 exists to prevent.
+   */
+  gloss?: TaggedField<string>;
   /** The content binding recorded on `approval.requested` (SPEC.md §6.2). */
   payload_hash: TaggedField<string>;
   /**

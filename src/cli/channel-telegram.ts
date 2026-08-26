@@ -102,12 +102,14 @@ import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
 import type { DecideOptions } from "../core/gate.js";
 import { assembleBatch } from "../channels/batch.js";
 import {
+  claimed,
   recordChannelDecision,
   type ChannelDecision,
   type ChannelRequest,
   type DecisionOutcome,
   type DeliveryId,
 } from "../channels/contract.js";
+import { commandPayloadView } from "../channels/payload-view.js";
 import {
   buildPendingQueue,
   type ChannelTagRefusalCode,
@@ -128,6 +130,7 @@ import {
 import { loadPolicy } from "../core/policy-load.js";
 import { payloadOf, readVerifiedRecords, requestState } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
+import { glossFor, spawnGloss, GLOSS_AUTHOR, type GlossRunner } from "./gloss.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import {
   TELEGRAM_HEALTH_HELP,
@@ -193,6 +196,20 @@ export interface ListenSetup {
   once: boolean;
   gateOptions: DecideOptions;
   tagOptions: TagOptions;
+  /**
+   * How the one-sentence model gloss is obtained (APRV-144).
+   *
+   * OPT-IN, and absent by default. The verb wires in the production runner
+   * (`claude -p --model haiku`, hard timeout, failing toward absence); every
+   * other caller — the test suite above all — gets no gloss unless it hands
+   * over a runner. A default that spawned would make a subprocess an implicit
+   * dependency of anything that drives a dispatch cycle, and would put a model
+   * inside a test suite that must never invoke one.
+   *
+   * Injectable so the tests drive both branches, answered and absent, against
+   * a stub.
+   */
+  gloss?: GlossRunner;
 }
 
 function payloadSource(
@@ -355,6 +372,11 @@ function setUp(
         policy,
         ...(payloads.source === undefined ? {} : { payload: payloads.source }),
       },
+      // APRV-144. The listener is the only place this is wired, and it is
+      // wired here rather than defaulted inside `dispatchPending` so that
+      // "a real subprocess may be spawned" is a decision one verb makes and
+      // every other caller of the dispatch cycle opts into explicitly.
+      gloss: spawnGloss,
     },
   };
 }
@@ -641,9 +663,9 @@ export async function dispatchPending(
   // digest instead of one message each. Nothing waits for more — there is no
   // new latency mechanism here, and a lone request is delivered exactly as it
   // always was.
-  const undelivered = queue.requests.filter(
-    (request) => !state.delivered.has(request.action_key.value),
-  );
+  const undelivered = queue.requests
+    .filter((request) => !state.delivered.has(request.action_key.value))
+    .map((request) => withGloss(setup, request));
 
   for (const group of groupForDigest(undelivered)) {
     if (group.length < 2) {
@@ -699,6 +721,36 @@ export async function dispatchPending(
   }
 
   return result;
+}
+
+/**
+ * The request, plus a model's one-sentence gloss of its command when one can be
+ * had (APRV-144).
+ *
+ * Attached HERE, in the listener, at the last moment before delivery, and to a
+ * request the tagger has already finished building. That placement is the whole
+ * safety argument: the gate resolved the class, the budgets and the payload
+ * binding without this field existing, the payload hash was computed over bytes
+ * that do not contain it, and the log will record a decision that never
+ * mentions it. Losing it costs one line on a message.
+ *
+ * Only command-shaped payloads get one — the complaint this answers is about
+ * reading commands, and spending a subprocess on an email whose body is already
+ * rendered field by field would buy nothing. Once per request, not once per
+ * cycle: a request already in `delivered` never reaches this.
+ *
+ * Returns the request UNCHANGED when there is no runner, no command-shaped
+ * payload, or no answer. Every one of those is silent, because a listener that
+ * complained about a missing reading aid would be teaching an operator to
+ * ignore its stderr.
+ */
+function withGloss(setup: ListenSetup, request: ChannelRequest): ChannelRequest {
+  if (setup.gloss === undefined) return request;
+  const view = commandPayloadView(request.fullPayload.value?.value);
+  if (view === null) return request;
+  const sentence = glossFor(view.command, setup.gloss);
+  if (sentence === null) return request;
+  return { ...request, gloss: claimed(sentence, GLOSS_AUTHOR) };
 }
 
 /** Deliver each request as its own prompt: the pre-digest path, unchanged. */

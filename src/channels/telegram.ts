@@ -397,17 +397,14 @@ function originOf(field: TaggedField<unknown>): string {
   return field.kind === "computed" ? field.source : field.author;
 }
 
-function formatTtl(ms: number | null): string {
-  if (ms === null) return "no TTL (the policy declares none)";
-  if (ms <= 0) return "EXPIRED";
-  const totalSeconds = Math.floor(ms / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) return `${hours}h ${minutes}m left`;
-  if (minutes > 0) return `${minutes}m ${seconds}s left`;
-  return `${seconds}s left`;
-}
+/**
+ * The suffix the model-authored line carries, on the line itself (APRV-144).
+ *
+ * Belt and braces with the `(author)` parenthetical: a reader skimming a wall
+ * of bullets sees the word "model" inside the sentence they are about to
+ * believe, not only in the small italic at the end of it.
+ */
+export const TELEGRAM_GLOSS_SUFFIX = "(model, unverified)";
 
 // ---------------------------------------------------------------------------
 // Rendering
@@ -499,6 +496,31 @@ export function renderTelegram(
 
   const computedLines: Line[] = [
     line("class", request.class, "class", request.class.value),
+    // APRV-144, then APRV-143: what the command actually does, and which
+    // protected path earned the class. Both sit immediately under the class
+    // they explain, because `class: policy.edit` over a truncated path prefix
+    // is the state this pair of tasks exists to end. Both are derived from the
+    // bound bytes by the same classifier the hook decided with.
+    ...(request.command_breakdown === undefined
+      ? []
+      : [
+          line(
+            "command_breakdown",
+            request.command_breakdown,
+            "commands",
+            request.command_breakdown.value,
+          ),
+        ]),
+    ...(request.protected_path === undefined
+      ? []
+      : [
+          line(
+            "protected_path",
+            request.protected_path,
+            "protected path",
+            request.protected_path.value,
+          ),
+        ]),
     line("autonomy", request.autonomy, "autonomy", request.autonomy.value),
     line("provenance", request.provenance, "resolved by", request.provenance.value),
     line("payload_hash", request.payload_hash, "payload sha256", request.payload_hash.value),
@@ -509,12 +531,11 @@ export function renderTelegram(
     // human-readable form of the same fact plus the one thing the raw
     // timestamp does not say: whether an answer now still reaches anyone.
     line("waiting", request.waiting, "waiting", request.waiting.value),
-    line(
-      "ttl_remaining_ms",
-      request.ttl_remaining_ms,
-      "ttl",
-      formatTtl(request.ttl_remaining_ms.value),
-    ),
+    // No `ttl` line (APRV-143). `expires 13:09 UTC` on the line above IS the
+    // TTL, stated as the instant a reader acts on rather than as a duration
+    // they would have to add to a timestamp; two renderings of one fact cost a
+    // metadata row on a phone screen and buy nothing. `ttl_remaining_ms` stays
+    // on the request, so `--json` and every other channel still carry it.
     line(
       "chain",
       request.chain,
@@ -526,6 +547,15 @@ export function renderTelegram(
   ];
 
   const claimedLines: Line[] = [
+    // APRV-144. Under the CLAIMED heading, because a model's sentence is not
+    // something the runtime derived, and labelled on the line as well: the
+    // `(author)` parenthetical every claimed line already carries is small,
+    // uniform and easy to stop seeing, and this is the one line in the message
+    // that NO party — not the runtime, not even the requesting agent — stands
+    // behind. Nothing here or anywhere else branches on what it says.
+    ...(request.gloss === undefined
+      ? []
+      : [line("gloss", request.gloss, "gloss", `${request.gloss.value} ${TELEGRAM_GLOSS_SUFFIX}`)]),
     line("summary", request.summary, "summary", request.summary.value ?? "(none given)"),
     line(
       "est_cost_usd",

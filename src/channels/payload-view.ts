@@ -68,6 +68,11 @@
  * their own `<pre>`, so the injection surface is exactly what it was before.
  */
 
+import {
+  classifyCommand,
+  commandSegmentWords,
+  isProtectedPath,
+} from "../core/command-class.js";
 import type { PayloadRendering } from "./contract.js";
 
 /** Keys the email adapter's payload may carry (`adapters/email.ts`). */
@@ -429,6 +434,141 @@ function commandRegionText(view: CommandView, hash: string): string[] {
   lines.push(`cwd: ${view.cwd === null ? "(none declared)" : markEscapes(view.cwd)}`);
   lines.push(rawBytesLine(hash));
   return lines;
+}
+
+// ---------------------------------------------------------------------------
+// The command breakdown (APRV-144)
+// ---------------------------------------------------------------------------
+
+/** What separates two segments of the breakdown. Exported: the tests pin it. */
+export const BREAKDOWN_SEPARATOR = " · ";
+
+/** Characters one segment of the breakdown may take before it folds. */
+export const BREAKDOWN_SEGMENT_BUDGET = 40;
+
+/** Segments the breakdown shows before it says how many it did not. */
+export const BREAKDOWN_MAX_SEGMENTS = 8;
+
+/**
+ * The words of one segment worth showing: its arguments, minus the flags and
+ * minus the words that are probably flag VALUES.
+ *
+ * The classifier does not know which flags take a value, and neither does this
+ * (`RuleContext.positionals` has the same blind spot, on purpose). What it does
+ * is drop the word after a bare SHORT flag, which is what turns
+ * `git commit -m "APRV-…"` into `git commit` rather than into a segment whose
+ * only visible argument is a commit message.
+ *
+ * Short and not long, deliberately. A short flag that takes a value almost
+ * always takes it as the next word (`-m msg`, `-H header`, `-o file`); a long
+ * one almost always carries it inline (`--message=…`) or takes none at all, so
+ * the word after `--force-with-lease` is `origin` and dropping it would hide
+ * the destination of a push. Both mistakes cost a word on a reading aid whose
+ * raw bytes sit underneath it in full, and nothing reads this back — but the
+ * long-flag case is the one that would have hidden something worth seeing.
+ */
+function salientArgs(args: readonly string[]): string[] {
+  const kept: string[] = [];
+  let afterValueFlag = false;
+  for (const arg of args) {
+    const flag = arg.startsWith("-") && arg !== "-";
+    if (!flag && !afterValueFlag) kept.push(arg);
+    afterValueFlag = flag && !arg.startsWith("--") && !arg.includes("=");
+  }
+  return kept;
+}
+
+/** One segment as `bin sub arg…`, collapsed to one line and folded at the budget. */
+function breakdownSegment(bin: string, args: readonly string[]): string {
+  const text = [bin, ...salientArgs(args)].join(" ").replace(/\s+/gu, " ").trim();
+  return text.length <= BREAKDOWN_SEGMENT_BUDGET
+    ? text
+    : `${text.slice(0, BREAKDOWN_SEGMENT_BUDGET - 1)}…`;
+}
+
+/**
+ * What a compound command does, segment by segment (APRV-144).
+ *
+ * `git add … · git commit · git push origin main:records-… · gh pr create`.
+ *
+ * The observed complaint (Carter, 2026-08-25) is that the claimed summary of a
+ * shell action is `truncate(command, 160)`, which for a chained command is the
+ * first clause and a path prefix: the approver reads where the command starts
+ * and never what it ends by doing. This is the deterministic half of the
+ * answer. It is derived from {@link commandSegmentWords} — the classifier's own
+ * tokenizer, never a second one — so a channel showing it cannot describe a
+ * command differently from the module that chose its class.
+ *
+ * `null` for a string the tokenizer refuses (the same input the classifier
+ * answers `unparseable` for) and for one with no segment carrying a binary: an
+ * aid that cannot be derived is absent, never guessed.
+ */
+export function commandBreakdown(command: string): string | null {
+  const segments = commandSegmentWords(command);
+  if (segments === null || segments.length === 0) return null;
+
+  const shown = segments.slice(0, BREAKDOWN_MAX_SEGMENTS);
+  const parts = shown.map((segment) => breakdownSegment(segment.bin, segment.args));
+  const hidden = segments.length - shown.length;
+  if (hidden > 0) parts.push(`… ${String(hidden)} more`);
+  return parts.join(BREAKDOWN_SEPARATOR);
+}
+
+// ---------------------------------------------------------------------------
+// The protected path (APRV-143)
+// ---------------------------------------------------------------------------
+
+/** The rule names a file-tool touch of a protected path reports (`cli/hook.ts`). */
+const PROTECTED_RULE_NAMES: readonly string[] = ["protected-path", "protected-path-proposal"];
+
+/** The path that made an action `policy.edit`, and the rule that matched it. */
+export interface ProtectedPathView {
+  path: string;
+  rule: string;
+}
+
+/**
+ * Which protected path selected this payload's class, when one did (APRV-143).
+ *
+ * A prompt that says `class: policy.edit` and stops there tells the approver
+ * that *some* rule fired and leaves them to find the file. Both gated shapes
+ * can say which:
+ *
+ * - a shell payload is re-classified here, by the same
+ *   {@link classifyCommand} the hook decided with, and the segment that took
+ *   `policy.edit` carries the word it matched (`ClassifiedSegment.path`);
+ * - a file-tool payload names its target in `file`, and
+ *   {@link isProtectedPath} is re-run over it rather than trusted: the answer
+ *   is recomputed from the bound bytes, so this stays a computed field. The
+ *   payload's own `rule` is used as the label only when it is one of the two
+ *   the hook writes, which is what keeps the worktree-proposal tier legible.
+ *
+ * `extra` is `policy.protected_paths`, passed exactly as every enforcement path
+ * passes it; omitting it narrows the answer and never widens it.
+ */
+export function protectedPathView(
+  value: unknown,
+  extra: readonly string[] = [],
+): ProtectedPathView | null {
+  const command = commandPayloadView(value);
+  if (command !== null) {
+    const classified = classifyCommand(command.command, extra);
+    if (!classified.ok) return null;
+    for (const segment of classified.segments) {
+      if (segment.path !== undefined) return { path: segment.path, rule: segment.rule };
+    }
+    return null;
+  }
+
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const file = record["file"];
+  if (typeof file !== "string" || !isProtectedPath(file, extra)) return null;
+  const rule = record["rule"];
+  return {
+    path: file,
+    rule: typeof rule === "string" && PROTECTED_RULE_NAMES.includes(rule) ? rule : "protected-path",
+  };
 }
 
 /**

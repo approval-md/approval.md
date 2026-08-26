@@ -84,6 +84,13 @@ import {
   newDispatchState,
   type ListenSetup,
 } from "../src/cli/channel-telegram.js";
+import {
+  glossFor,
+  tidyGloss,
+  GLOSS_AUTHOR,
+  GLOSS_MAX_CHARS,
+  type GlossRunner,
+} from "../src/cli/gloss.js";
 import type { Streams } from "../src/cli/main.js";
 import { appendAttestation } from "../src/core/attest.js";
 import { register as registerCore, request as requestCore } from "../src/core/gate.js";
@@ -1378,14 +1385,34 @@ test("the prompt carries the age and the deadline an answer has to beat", async 
   channel.onDecision(handlerFor(world, at(32)));
   await channel.notify(request_);
 
-  // Requested at at(1), rendered at at(32): 31 minutes of a 1h TTL gone, so an
-  // answer has until 10:01 UTC. A COMPUTED line, under the computed heading.
+  // Requested at at(1), rendered at at(32): 31 minutes of a 24h TTL gone, so an
+  // answer has until 10:01 UTC on the FOLLOWING day. A COMPUTED line, under the
+  // computed heading.
+  //
+  // APRV-143 lives in the word "tomorrow". This assertion used to read `expires
+  // 10:01 UTC`, which is the bug: a deadline 23½ hours away rendered as a time
+  // thirty minutes in the past, and an approver doing the arithmetic on their
+  // phone concluded the question was already dead.
   const sent = mock.sentTexts().join("\n");
-  assert.match(sent, /waiting:<\/b> requested 31 min ago · expires 10:01 UTC/u);
+  assert.match(sent, /waiting:<\/b> requested 31 min ago · expires tomorrow 10:01 UTC/u);
   const rendered = channel.lastRendered()[0];
   assert.equal(
     rendered?.fields.find((field) => field.field === "waiting")?.kind,
     "computed",
+  );
+  // APRV-143: the `ttl:` line is gone. `expires` above carries the same fact,
+  // as the instant a reader acts on rather than as a duration they must add to
+  // a timestamp, and the value itself stays on the request for `--json`.
+  assert.doesNotMatch(sent, /<b>ttl:<\/b>/u);
+  assert.equal(
+    rendered?.fields.find((field) => field.field === "ttl_remaining_ms"),
+    undefined,
+    "the prompt still renders a ttl line",
+  );
+  assert.equal(request_.ttl_remaining_ms.kind, "computed");
+  assert.ok(
+    (request_.ttl_remaining_ms.value ?? 0) > 0,
+    "the TTL left the request as well as the prompt",
   );
   assertClean(world.unit);
 });
@@ -1418,13 +1445,87 @@ test("a hook request's declared wait deadline is shown instead of the TTL", asyn
   assertClean(world.unit);
 });
 
+test("the requester's own deadline gets the same day word the TTL does", async () => {
+  // APRV-143 #1: both waiting-line variants share one implementation, so the
+  // `requester waits until` branch gains "tomorrow" without a second copy of
+  // the day arithmetic that could disagree with the first.
+  const world = live(1);
+  hookedRequest(world, { waitUntil: at(1_500) });
+  const [, hooked] = queueOf(world, at(2));
+  assert.ok(hooked !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(hooked);
+
+  // at(1500) is 25 hours after T0: 11:00 UTC on 6 August, the next UTC day.
+  assert.match(
+    mock.sentTexts().join("\n"),
+    /waiting:<\/b> requested 1 min ago · requester waits until tomorrow 11:00 UTC/u,
+  );
+  assertClean(world.unit);
+});
+
+test("the prompt names the protected path that earned the class", async () => {
+  // APRV-143 #3, end to end through the renderer: the approver reads WHICH
+  // file, as a computed line, without opening the payload block.
+  const world = live(1);
+  hookedRequest(world, { command: "cp draft.md .github/workflows/ci.yml" });
+  const [, hooked] = queueOf(world, at(2));
+  assert.ok(hooked !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(hooked);
+
+  const sent = mock.sentTexts().join("\n");
+  assert.match(
+    sent,
+    /<b>protected path:<\/b> \.github\/workflows\/ci\.yml \(rule protected-path\) <i>\(classifier\)<\/i>/u,
+  );
+  assert.equal(
+    channel.lastRendered()[0]?.fields.find((field) => field.field === "protected_path")?.kind,
+    "computed",
+  );
+  assertClean(world.unit);
+});
+
+test("a prompt with no protected path carries no protected-path line", async () => {
+  const world = live(1);
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(request_);
+
+  // `mock.sentTexts()` accumulates across the file, so the absence is asserted
+  // on THIS prompt's own rendering report rather than on the whole transcript.
+  const fields = channel.lastRendered()[0]?.fields ?? [];
+  assert.equal(
+    fields.find((field) => field.field === "protected_path"),
+    undefined,
+    "an email payload was given a protected-path line",
+  );
+  assertClean(world.unit);
+});
+
+/** What a {@link hookedRequest} may vary. Everything else is the hook's shape. */
+interface HookedOptions {
+  /** The requester's own declared deadline. Defaults to `at(10)`. */
+  waitUntil?: string;
+  /** The command in the bound payload. Defaults to a local amend. */
+  command?: string;
+}
+
 /**
  * Register and request one harness-executed action carrying a `wait_until`,
  * the way `approval hook claude-code` does. Returns its action key.
  */
-function hookedRequest(world: Live): string {
+function hookedRequest(world: Live, options: HookedOptions = {}): string {
+  const command = options.command ?? "git commit --amend";
+  const waitUntil = options.waitUntil ?? at(10);
   const key = "task-101:amend";
-  const payload = { command: "git commit --amend", cwd: "/repo" };
+  const payload = { command, cwd: "/repo" };
   const registered = register(
     world.unit.logPath,
     {
@@ -1436,7 +1537,7 @@ function hookedRequest(world: Live): string {
           {
             class: "communicate.email.external",
             idempotency_key: key,
-            summary: "git commit --amend",
+            summary: command,
             reversible: false,
             est_cost_usd: 0,
             payload_hash: payloadHash(payload),
@@ -1458,11 +1559,11 @@ function hookedRequest(world: Live): string {
       cls: "communicate.email.external",
       est_cost_usd: 0,
       reversible: false,
-      summary: "git commit --amend",
+      summary: command,
       payload_hash: payloadHash(payload),
       payload: { value: payload },
       execution: "harness",
-      wait_until: at(10),
+      wait_until: waitUntil,
     },
     at(1),
     ACTOR,
@@ -2051,7 +2152,11 @@ function capture(): { streams: Streams; out: string[]; err: string[] } {
   };
 }
 
-function setupFor(world: Live, channel: TelegramChannel): ListenSetup {
+function setupFor(
+  world: Live,
+  channel: TelegramChannel,
+  gloss?: GlossRunner,
+): ListenSetup {
   return {
     channel,
     logPath: world.unit.logPath,
@@ -2060,6 +2165,9 @@ function setupFor(world: Live, channel: TelegramChannel): ListenSetup {
     once: false,
     gateOptions: world.unit.options,
     tagOptions: world.tagOptions,
+    // Absent unless a test hands one over. No suite in this repository may
+    // invoke a model, so the production runner is never the default here.
+    ...(gloss === undefined ? {} : { gloss }),
   };
 }
 
@@ -2515,4 +2623,271 @@ test("a command reaches Telegram escaped, chunked and complete", async () => {
     assert.ok(text.length <= 4096, "a message exceeded Telegram's 4096-character limit");
   }
   assert.equal(recordsOf(world.unit.logPath).length, 3);
+});
+
+// ---------------------------------------------------------------------------
+// The command summary states what the command does (APRV-144)
+// ---------------------------------------------------------------------------
+
+/** The `commands` breakdown line of a prompt built from `command`. */
+function breakdownLineFor(command: string): string | undefined {
+  const payload = { command, cwd: "/repo" };
+  const world = live(1, false, () => payload);
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+  assert.equal(request_.command_breakdown?.kind, "computed");
+  return request_.command_breakdown?.value;
+}
+
+test("a compound command is broken down segment by segment", () => {
+  // The shape of the real complaint: a records commit, where the summary an
+  // approver used to read was `git add .approval/log/…` and nothing else, so
+  // the push and the PR at the end of the chain were invisible.
+  assert.equal(
+    breakdownLineFor(
+      "git add .approval/log/events.jsonl && git commit -m 'APRV-93: records' && " +
+        "git push origin main:records-2026-08-25 && gh pr create --fill",
+    ),
+    "git add .approval/log/events.jsonl · git commit · " +
+      "git push origin main:records-2026-08-25 · gh pr create",
+  );
+});
+
+test("a flag's value is not mistaken for the segment's argument", () => {
+  // `-m` takes a value, and a breakdown that showed the commit message as the
+  // salient argument would be describing the prose rather than the effect.
+  assert.equal(breakdownLineFor("git commit -m 'a long commit message here'"), "git commit");
+  // A flag carrying its own value leaves the next word alone.
+  assert.equal(breakdownLineFor("git push --force-with-lease origin main"), "git push origin main");
+});
+
+test("a long segment folds with an ellipsis rather than running off the screen", () => {
+  const line = breakdownLineFor(
+    "git push origin main:records-2026-08-25-a-very-long-branch-name-indeed",
+  );
+  assert.ok(line !== undefined);
+  assert.ok(line.endsWith("…"), line);
+  assert.ok(line.length <= 40, `segment budget exceeded: ${line}`);
+  assert.ok(line.startsWith("git push origin main:records-"), line);
+});
+
+test("a breakdown past the segment cap says how many it did not show", () => {
+  const line = breakdownLineFor(Array.from({ length: 11 }, () => "pwd").join(" && "));
+  assert.ok(line !== undefined);
+  assert.equal(line.split(" · ").length, 9, line);
+  assert.ok(line.endsWith("… 3 more"), line);
+});
+
+test("the breakdown comes from the classifier's parse, quotes and all", () => {
+  // One tokenizer, not two: the quoted argument arrives unquoted because that
+  // is how `lex` read it when it chose the class, and a display layer that
+  // re-split the string could disagree.
+  assert.equal(breakdownLineFor("cp 'my notes.md' docs/"), "cp my notes.md docs/");
+});
+
+test("a command the tokenizer refuses gets no breakdown, and no guess", () => {
+  const payload = { command: "echo 'unterminated", cwd: "/repo" };
+  const world = live(1, false, () => payload);
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+  assert.equal(request_.command_breakdown, undefined);
+});
+
+test("a non-command payload carries no breakdown", () => {
+  const world = live(1);
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+  assert.equal(request_.command_breakdown, undefined);
+});
+
+test("the prompt shows the breakdown as computed, above the raw command", async () => {
+  const command = "git add . && git push origin main";
+  const payload = { command, cwd: "/repo" };
+  const world = live(1, false, () => payload);
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = mock.sentTexts().length;
+  await channel.notify(request_);
+  const whole = mock.sentTexts().slice(before).join("\n");
+
+  assert.match(
+    whole,
+    /<b>commands:<\/b> git add \. · git push origin main <i>\(classifier\)<\/i>/u,
+  );
+  assert.equal(
+    channel.lastRendered()[0]?.fields.find((field) => field.field === "command_breakdown")?.kind,
+    "computed",
+  );
+  // APRV-144 #3: the raw-command headline stays, and the breakdown sits above
+  // it rather than replacing it.
+  assert.ok(whole.indexOf("<b>commands:</b>") < whole.indexOf("--- command begins ---"), whole);
+  // The raw command in full, escaped by the channel exactly as it always was:
+  // `&&` is markup-significant in Telegram's HTML mode and reaches the chat as
+  // text. The breakdown is an aid ABOVE the bytes, never a replacement for them.
+  assert.ok(whole.includes("git add . &amp;&amp; git push origin main"), whole);
+  assert.equal(command, "git add . && git push origin main");
+});
+
+// ---------------------------------------------------------------------------
+// The model gloss (APRV-144 #2, #3)
+// ---------------------------------------------------------------------------
+
+/** A world with one pending command-shaped request, and its dispatch setup. */
+function glossWorld(command: string, runner?: GlossRunner) {
+  const payload = { command, cwd: "/repo" };
+  const world = live(1, false, () => payload);
+  const channel = channelFor();
+  return { world, channel, setup: setupFor(world, channel, runner) };
+}
+
+test("a gloss the runner answers is rendered, labelled model-authored", async () => {
+  const asked: string[] = [];
+  const { world, channel, setup } = glossWorld("rm -rf build && npm ci", (prompt) => {
+    asked.push(prompt);
+    return "Removes the build directory and reinstalls dependencies from the lockfile.\n";
+  });
+
+  const before = mock.sentTexts().length;
+  const result = await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
+  assert.equal(result.delivered.length, 1, JSON.stringify(result));
+  const whole = mock.sentTexts().slice(before).join("\n");
+
+  // The command reached the model as data inside the instruction, and the
+  // sentence came back onto the prompt with the label on the line itself.
+  assert.equal(asked.length, 1);
+  assert.match(asked[0] ?? "", /rm -rf build && npm ci/u);
+  assert.match(
+    whole,
+    /<b>gloss:<\/b> Removes the build directory and reinstalls dependencies from the lockfile\. \(model, unverified\) <i>\(model:haiku\)<\/i>/u,
+  );
+
+  // CLAIMED, never computed: a model is not a derivation.
+  const rendered = channel.lastRendered()[0];
+  assert.equal(rendered?.fields.find((field) => field.field === "gloss")?.kind, "claimed");
+  // And it sits in the claimed block, below every computed line.
+  assert.ok(whole.indexOf("CLAIMED") < whole.indexOf("<b>gloss:</b>"), whole);
+  assertClean(world.unit);
+});
+
+test("every way of getting no gloss renders the prompt without one", async () => {
+  const runners: Record<string, GlossRunner> = {
+    "a timeout, or any other silence": () => null,
+    "an empty answer": () => "",
+    "whitespace only": () => "   \n  ",
+    "a subprocess that throws": () => {
+      throw new Error("spawn claude ENOENT");
+    },
+  };
+
+  for (const [why, runner] of Object.entries(runners)) {
+    const { world, channel, setup } = glossWorld("git status", runner);
+    const before = mock.sentTexts().length;
+    const result = await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
+    assert.equal(result.delivered.length, 1, `${why}: the prompt was not delivered`);
+    assert.doesNotMatch(mock.sentTexts().slice(before).join("\n"), /<b>gloss:<\/b>/u, why);
+    assert.equal(
+      channel.lastRendered()[0]?.fields.find((field) => field.field === "gloss"),
+      undefined,
+      why,
+    );
+    assertClean(world.unit);
+  }
+});
+
+test("no runner at all is the default, and spawns nothing", async () => {
+  // Every caller that is not the listener verb gets no gloss, so nothing in
+  // this suite — or in any programmatic driver — depends on a model binary.
+  const { world, channel, setup } = glossWorld("git status");
+  assert.equal(setup.gloss, undefined);
+  const before = mock.sentTexts().length;
+  await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
+  assert.doesNotMatch(mock.sentTexts().slice(before).join("\n"), /<b>gloss:<\/b>/u);
+  assert.equal(
+    channel.lastRendered()[0]?.fields.find((field) => field.field === "gloss"),
+    undefined,
+  );
+  assertClean(world.unit);
+});
+
+test("a non-command payload is never sent to a model at all", async () => {
+  let calls = 0;
+  const world = live(1);
+  const channel = channelFor();
+  const setup = setupFor(world, channel, () => {
+    calls += 1;
+    return "should never be asked";
+  });
+
+  await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
+  assert.equal(calls, 0, "an email payload was sent to a model");
+  assertClean(world.unit);
+});
+
+test("the gloss reaches no log line, no payload hash and no decision record", async () => {
+  // APRV-144 #3. The sentence is deliberately distinctive so a substring scan
+  // over every byte of the log is a real check rather than a formality.
+  const marker = "GLOSSMARKERc0ffee";
+  const { world, channel, setup } = glossWorld("git status", () => `${marker} does a thing.`);
+
+  const hashBefore = queueOf(world, at(2))[0]?.payload_hash.value;
+  await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
+
+  // Decide it through the real gate, so the check covers the decision record
+  // and the execution lifecycle too, not only the request.
+  const key = world.keys[0] as string;
+  const nonce = mock.callbackDataFor(key, "grant");
+  mock.queueUpdate(callbackUpdate({ data: nonce, chatId: CHAT }));
+  channel.onDecision(handlerFor(world, at(3)));
+  const poll = await channel.pollOnce();
+  assert.equal(poll.outcomes.length, 1, JSON.stringify(poll));
+
+  const raw = readFileSync(world.unit.logPath, "utf8");
+  assert.equal(raw.includes(marker), false, "the gloss reached the append-only log");
+  assert.equal(raw.includes("gloss"), false, "the log learned the word");
+
+  // The binding is over the payload bytes and nothing else, so it is the same
+  // hash it was before a model was ever consulted.
+  assert.equal(queueOf(world, at(2)).length, 0, "the request is decided");
+  assert.equal(
+    hashBefore,
+    payloadHash({ command: "git status", cwd: "/repo" }),
+    "the payload hash moved",
+  );
+  assertClean(world.unit);
+});
+
+test("a gloss is untrusted text: escaped, single-lined and capped", () => {
+  // `tidyGloss` is where the shape is enforced; the channel's own `escapeHtml`
+  // is where the markup is, and the rendering test below proves both.
+  assert.equal(tidyGloss("  a\nb\tc  "), "a b c");
+  assert.equal(tidyGloss(""), null);
+  assert.equal(tidyGloss(null), null);
+  const long = tidyGloss("x".repeat(GLOSS_MAX_CHARS * 2));
+  assert.ok(long !== null);
+  assert.equal(long.length, GLOSS_MAX_CHARS);
+  assert.ok(long.endsWith("…"));
+  // The runner is asked once, with the command inside the prompt.
+  assert.equal(glossFor("", () => "never asked"), null, "an empty command asks nothing");
+  assert.equal(GLOSS_AUTHOR, "model:haiku");
+});
+
+test("markup in a gloss reaches the chat as text, never as markup", async () => {
+  const { world, channel, setup } = glossWorld(
+    "git status",
+    () => "Runs <b>git status</b> & shows the tree.",
+  );
+  const before = mock.sentTexts().length;
+  await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
+  const whole = mock.sentTexts().slice(before).join("\n");
+
+  assert.ok(whole.includes("Runs &lt;b&gt;git status&lt;/b&gt; &amp; shows the tree."), whole);
+  assert.equal(whole.includes("<b>git status</b>"), false, "raw markup reached the message");
+  assert.equal(
+    channel.lastRendered()[0]?.fields.find((field) => field.field === "gloss")?.kind,
+    "claimed",
+  );
+  assertClean(world.unit);
 });

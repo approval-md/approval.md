@@ -17,6 +17,7 @@ import { test } from "node:test";
 
 import {
   classifyCommand,
+  commandSegmentWords,
   isProtectedPath,
   CLASSIFIER_CLASSES,
   COMMAND_RULES,
@@ -650,4 +651,78 @@ test("reading a protected path is still a read", () => {
   const result = classifyCommand("cat SPEC.md", EXTRA);
   assert.ok(result.ok);
   assert.deepEqual(result.classes, ["read.shell"]);
+});
+
+test("a policy.edit segment reports WHICH path earned it (APRV-143)", () => {
+  // The word the matcher matched, verbatim, so a channel can name it without a
+  // second search of its own. Only the segment that took `policy.edit` carries
+  // one: a segment classified by its binary names no path, because no path
+  // decided it.
+  const result = classifyCommand("cp notes.md docs/notes.md && cp draft.md CLAUDE.md");
+  assert.ok(result.ok);
+  assert.equal(result.segments[0]?.class, "files.write.workspace");
+  assert.equal(result.segments[0]?.path, undefined);
+  assert.equal(result.segments[1]?.class, "policy.edit");
+  assert.equal(result.segments[1]?.rule, "protected-path");
+  assert.equal(result.segments[1]?.path, "CLAUDE.md");
+});
+
+test("a redirection onto a protected path reports its target as the path", () => {
+  const result = classifyCommand("echo hi > .github/workflows/ci.yml");
+  assert.ok(result.ok);
+  assert.equal(result.segments[0]?.rule, "redirect-protected");
+  assert.equal(result.segments[0]?.path, ".github/workflows/ci.yml");
+});
+
+test("a path protected only by policy.protected_paths is reported as written", () => {
+  const result = classifyCommand("mv old.md design/new.md", EXTRA);
+  assert.ok(result.ok);
+  assert.equal(result.segments[0]?.class, "policy.edit");
+  assert.equal(result.segments[0]?.path, "design/new.md");
+});
+
+// ---------------------------------------------------------------------------
+// commandSegmentWords (APRV-144)
+// ---------------------------------------------------------------------------
+
+test("commandSegmentWords splits on the same boundaries the classifier does", () => {
+  const command = "git add . && git commit -m 'a msg' | tee log.txt";
+  const words = commandSegmentWords(command);
+  const classified = classifyCommand(command);
+  assert.ok(words !== null);
+  assert.ok(classified.ok);
+  // One tokenizer, so one segmentation: the display aid and the class always
+  // describe the same pieces of the same command.
+  assert.deepEqual(
+    words.map((segment) => segment.text),
+    classified.segments.map((segment) => segment.text),
+  );
+  assert.deepEqual(words[1], {
+    text: "git commit -m 'a msg'",
+    bin: "git",
+    args: ["commit", "-m", "a msg"],
+  });
+});
+
+test("commandSegmentWords skips VAR=value prefixes, as the classifier does", () => {
+  const words = commandSegmentWords("FOO=1 BAR=2 npm run build");
+  assert.ok(words !== null);
+  assert.equal(words[0]?.bin, "npm");
+  assert.deepEqual(words[0]?.args, ["run", "build"]);
+});
+
+test("commandSegmentWords omits a segment with no binary", () => {
+  // A bare assignment and a lone redirection classify (as `assignment` and
+  // `redirect-write`) but have no verb to show, so they are not segments a
+  // breakdown can describe.
+  assert.deepEqual(commandSegmentWords("FOO=1"), []);
+  assert.deepEqual(commandSegmentWords("> out.txt"), []);
+});
+
+test("commandSegmentWords refuses exactly what the tokenizer refuses", () => {
+  const command = "echo 'unterminated";
+  assert.equal(commandSegmentWords(command), null);
+  const classified = classifyCommand(command);
+  assert.equal(classified.ok, false);
+  if (!classified.ok) assert.equal(classified.code, "unparseable");
 });
