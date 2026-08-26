@@ -76,6 +76,23 @@ const NUMBER: JsonSchema = { type: "number" };
 const SHA256: JsonSchema = { type: "string", pattern: "^[0-9a-f]{64}$" };
 
 /**
+ * A USD amount as the log holds it since APRV-121: a canonical decimal string.
+ *
+ * The `--json` surface reports what the record says, so it reports the same
+ * spelling. A consumer that wants arithmetic parses it, which is the one thing
+ * a decimal string makes unambiguous across languages.
+ *
+ * The pattern is spelled out rather than imported: this module is deliberately
+ * free of runtime imports so that the frozen output shapes are readable as
+ * data. `tests/money.test.ts` asserts it is character-for-character the
+ * `USD_STRING_PATTERN` of `core/money.ts`, so the copy cannot drift.
+ */
+const USD_AMOUNT: JsonSchema = {
+  type: "string",
+  pattern: "^(0|[1-9][0-9]*)(\\.[0-9]{0,5}[1-9])?$",
+};
+
+/**
  * `anyOf` rather than a union `type`, deliberately: the repo's Ajv runs
  * `strict: true`, which refuses union types unless `allowUnionTypes` is set,
  * and relaxing a strict flag to make a schema compile is the wrong trade.
@@ -846,7 +863,7 @@ const VERBS: VerbSpec[] = [
         token_sha256: SHA256,
         grant_seq: INTEGER,
         class: STRING,
-        est_cost_usd: NUMBER,
+        est_cost_usd: USD_AMOUNT,
         payload_hash: nullable(SHA256),
         task: STRING,
       },
@@ -884,7 +901,7 @@ const VERBS: VerbSpec[] = [
         token_sha256: SHA256,
         grant_seq: INTEGER,
         class: STRING,
-        est_cost_usd: NUMBER,
+        est_cost_usd: USD_AMOUNT,
       },
       ["ok", "action_key", "event", "seq", "token_sha256", "grant_seq", "class", "est_cost_usd"],
     ),
@@ -1114,7 +1131,7 @@ const VERBS: VerbSpec[] = [
               action_key: STRING,
               task: STRING,
               class: STRING,
-              est_cost_usd: nullable(NUMBER),
+              est_cost_usd: nullable(USD_AMOUNT),
               requested_ts: STRING,
               seq: INTEGER,
               ttl_remaining_ms: nullable(INTEGER),

@@ -8,7 +8,7 @@
   "channel": "telegram",
   "payload": {
     "class": "record.write.stage",
-    "est_cost_usd": 0,
+    "est_cost_usd": "0",
     "payload_hash": "bb9c3b1eaaf988bf0b95107c99c4ae23405576fcfff2fce1fb1e5c4cc1e4a3ca",
     "batch_delivery_id": "tg-batch-7",
     "note": "all four look right"

@@ -12,19 +12,19 @@
       "class": "files.write.repo",
       "summary": "Commit the generated cover letter to the workspace",
       "reversible": true,
-      "est_cost_usd": 0,
+      "est_cost_usd": "0",
       "idempotency_key": "task-101:commit:2026-08-04"
     },
     {
       "class": "financial.spend",
       "summary": "Pay the 9 GBP application fee",
       "reversible": false,
-      "est_cost_usd": 11.4,
+      "est_cost_usd": "11.4",
       "idempotency_key": "task-101:fee:2026-08-04"
     }
   ],
   "budget": {
-    "max_cost_usd": 25,
+    "max_cost_usd": "25",
     "max_latency": "30m"
   }
 }

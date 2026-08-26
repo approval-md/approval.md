@@ -88,7 +88,7 @@ const TASK_FILE = [
   "    - class: communicate.email.external",
   '      summary: "Send the chaser"',
   "      reversible: false",
-  "      est_cost_usd: 0.02",
+  '      est_cost_usd: "0.02"',
   '      idempotency_key: "task-mcp:chaser"',
   `      payload_hash: "${"3".repeat(64)}"`,
   "---",

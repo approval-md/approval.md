@@ -222,11 +222,11 @@ function taskFile(hash: string): string {
     "    - class: communicate.email.external",
     '      summary: "Send deposit chaser to agency@example.co.uk"',
     "      reversible: false",
-    "      est_cost_usd: 0.02",
+    '      est_cost_usd: "0.02"',
     `      idempotency_key: "${ACTION}"`,
     `      payload_hash: "${hash}"`,
     "  budget:",
-    "    max_cost_usd: 0.50",
+    '    max_cost_usd: "0.5"',
     '    max_latency: "6h"',
     "---",
     "",
@@ -597,7 +597,7 @@ test("the M7 demo: draft -> telegram -> approve -> mail sent -> chain clean", as
     assert.deepEqual(events(), ["policy.updated", "task.registered", "approval.requested"]);
     assert.deepEqual(payloadOf(recordAt(3)), {
       class: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       payload_hash: PAYLOAD_HASH,
       summary: "Send deposit chaser to agency@example.co.uk",
       reversible: false,

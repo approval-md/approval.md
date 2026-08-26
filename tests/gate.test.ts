@@ -161,7 +161,7 @@ const ENVELOPE = {
       class: "communicate.email.external",
       summary: "Send deposit chaser",
       reversible: false,
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       idempotency_key: "task-042:chaser",
       payload_hash: PAYLOAD_HASH,
     },
@@ -185,7 +185,7 @@ function requestChaser(unit: Case, ts: string = at(1)): EventRecord {
       actionKey: "task-042:chaser",
       payload_hash: PAYLOAD_HASH,
       cls: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       reversible: false,
       summary: "Send deposit chaser",
     },
@@ -211,7 +211,7 @@ function executionStarted(unit: Case, actionKey: string, ts: string): void {
     actor: "agent:claude",
     task: "task-042",
     action_key: actionKey,
-    payload: { class: "communicate.email.external", est_cost_usd: 0.02 },
+    payload: { class: "communicate.email.external", est_cost_usd: "0.02" },
   });
   assert.equal(result.ok, true);
 }
@@ -245,7 +245,7 @@ test("requestState: requested, then each terminal decision", () => {
     assert.equal(live.requestSeq, requested.seq);
     assert.equal(live.requestTs, requested.ts);
     assert.equal(live.declared.class, "communicate.email.external");
-    assert.equal(live.declared.est_cost_usd, 0.02);
+    assert.equal(live.declared.est_cost_usd, "0.02");
     assert.equal(live.declared.reversible, false);
 
     const decided = decide(unit.logPath, "task-042:chaser", verb, "human:carter", at(3), unit.options);
@@ -358,7 +358,7 @@ test("register appends task.registered carrying the declared actions", () => {
         idempotency_key: "task-042:chaser",
         summary: "Send deposit chaser",
         reversible: false,
-        est_cost_usd: 0.02,
+        est_cost_usd: "0.02",
         payload_hash: PAYLOAD_HASH,
       },
     ],
@@ -486,7 +486,7 @@ test("register reads the envelope from a task file's frontmatter", () => {
       "    - class: communicate.email.external",
       '      summary: "Send deposit chaser"',
       "      reversible: false",
-      "      est_cost_usd: 0.02",
+      '      est_cost_usd: "0.02"',
       '      idempotency_key: "task-042:chaser"',
       `      payload_hash: "${PAYLOAD_HASH}"`,
       "---",
@@ -599,7 +599,7 @@ test("request on the manual path appends approval.requested with class and cost"
   assert.equal(record.action_key, "task-042:chaser");
   assert.deepEqual(record.payload, {
     class: "communicate.email.external",
-    est_cost_usd: 0.02,
+    est_cost_usd: "0.02",
     payload_hash: PAYLOAD_HASH,
     summary: "Send deposit chaser",
     reversible: false,
@@ -623,7 +623,7 @@ test("an undeclared cost is recorded as 0, per the budgets consumption contract"
   );
   assert.equal(result.ok, true);
   if (!result.ok || result.record === null) return;
-  assert.equal((result.record.payload as Record<string, unknown>)["est_cost_usd"], 0);
+  assert.equal((result.record.payload as Record<string, unknown>)["est_cost_usd"], "0");
 });
 
 test("supervised and autonomous actions emit NO approval.* events (amended §6.3)", () => {
@@ -742,7 +742,7 @@ test("a failed budget appends budget.exceeded with the verdicts, and refuses", (
         actionKey: "task-042:spend",
         payload_hash: PAYLOAD_HASH,
         cls: "financial.spend",
-        est_cost_usd: 5,
+        est_cost_usd: "5",
         reversible: false,
       },
       at(1),
@@ -762,7 +762,7 @@ test("a failed budget appends budget.exceeded with the verdicts, and refuses", (
   assert.equal(last.action_key, "task-042:spend");
   const payload = last.payload as Record<string, unknown>;
   assert.equal(payload["class"], "financial.spend");
-  assert.equal(payload["est_cost_usd"], 5);
+  assert.equal(payload["est_cost_usd"], "5");
   assert.equal(payload["stage"], "request");
   assert.ok(Array.isArray(payload["verdicts"]));
   // No approval.requested was appended: the refusal is the whole outcome.
@@ -795,7 +795,7 @@ test("grant appends approval.granted carrying class and est_cost_usd (budgets co
   // and APRV-17 adds the minted token's digest — never the token itself.
   assert.deepEqual(result.record.payload, {
     class: "communicate.email.external",
-    est_cost_usd: 0.02,
+    est_cost_usd: "0.02",
     // A1: the grant copies the request's content binding, so the token is bound
     // to the request, its key, AND the bytes.
     payload_hash: PAYLOAD_HASH,
@@ -966,7 +966,7 @@ test("budgets are re-evaluated at grant time, appending budget.exceeded on failu
   for (const key of ["task-100:a", "task-100:b"]) {
     const result = request(
       unit.logPath,
-      { task: "task-100", actionKey: key, payload_hash: PAYLOAD_HASH, cls: "physical.order", est_cost_usd: 0 },
+      { task: "task-100", actionKey: key, payload_hash: PAYLOAD_HASH, cls: "physical.order", est_cost_usd: "0" },
       at(1),
       "agent:claude",
       unit.options,
@@ -1123,7 +1123,7 @@ test("a forged record is refused log-corrupt: the gate verifies what it reads", 
   // precisely what a JSON-parsing reader could not see and a verifying one can.
   const lines = readFileSync(unit.logPath, "utf8").split("\n");
   const forged = JSON.parse(lines[2] as string) as Record<string, unknown>;
-  forged["payload"] = { class: "communicate.email.external", est_cost_usd: 999 };
+  forged["payload"] = { class: "communicate.email.external", est_cost_usd: "999" };
   lines[2] = JSON.stringify(forged);
   writeFileSync(unit.logPath, lines.join("\n"), "utf8");
   const before = readFileSync(unit.logPath, "utf8");
@@ -1155,7 +1155,7 @@ test("a decision appended between the gate's read and its write is refused head-
       actor: "human:carter",
       task: "task-042",
       action_key: "task-042:chaser",
-      payload: { class: "communicate.email.external", est_cost_usd: 0.02 },
+      payload: { class: "communicate.email.external", est_cost_usd: "0.02" },
     },
     { expectedHead: { seq: stale.seq, hash: stale.hash } },
   );
@@ -1396,7 +1396,7 @@ test("a harness-executed request is granted completely and mints no token", () =
       actionKey: "task-042:chaser",
       payload_hash: PAYLOAD_HASH,
       cls: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       reversible: false,
       summary: "Send deposit chaser",
       execution: "harness",
@@ -1430,7 +1430,7 @@ test("a harness-executed request is granted completely and mints no token", () =
   // Still a COMPLETE grant: the budgets contract and the content binding are
   // recorded exactly as they are for a token-bearing one.
   assert.equal(payload["class"], "communicate.email.external");
-  assert.equal(payload["est_cost_usd"], 0.02);
+  assert.equal(payload["est_cost_usd"], "0.02");
   assert.equal(payload["payload_hash"], PAYLOAD_HASH);
   assert.equal(requestState(records(unit), "task-042:chaser", at(3), 3_600_000).state, "granted");
   assertClean(unit);
@@ -1451,7 +1451,7 @@ function harnessGrant(unit: Case, requestedAt = at(1), decidedAt = at(2)): void 
       actionKey: "task-042:chaser",
       payload_hash: PAYLOAD_HASH,
       cls: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       reversible: false,
       summary: "Send deposit chaser",
       execution: "harness",
@@ -1491,7 +1491,7 @@ test("a harness grant is consumed once, and the second consumer is refused", () 
   const payload = first.record.payload as Record<string, unknown>;
   assert.equal(payload["execution"], "harness");
   assert.equal(payload["class"], "communicate.email.external");
-  assert.equal(payload["est_cost_usd"], 0.02);
+  assert.equal(payload["est_cost_usd"], "0.02");
   assert.equal(payload["payload_hash"], PAYLOAD_HASH);
 
   const second = consumeHarnessGrant(
@@ -1814,7 +1814,7 @@ test("the pinned hash is the runtime's, never the caller's", () => {
     actionKey: "task-042:chaser",
     payload_hash: PAYLOAD_HASH,
     cls: "communicate.email.external",
-    est_cost_usd: 0.02,
+    est_cost_usd: "0.02",
     reversible: false,
     policy_sha256: "0".repeat(64),
   } as unknown as Parameters<typeof request>[1];
@@ -1877,7 +1877,7 @@ test("a request written before the field existed still validates, verifies, and 
     action_key: "task-042:chaser",
     payload: {
       class: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       payload_hash: PAYLOAD_HASH,
     },
   });
@@ -1951,7 +1951,7 @@ test("a harness grant with no pinned hash spends as it always did", () => {
       actor: "agent:claude",
       payload: {
         class: "communicate.email.external",
-        est_cost_usd: 0.02,
+        est_cost_usd: "0.02",
         payload_hash: PAYLOAD_HASH,
         execution: "harness",
       },
@@ -1960,7 +1960,7 @@ test("a harness grant with no pinned hash spends as it always did", () => {
       ts: at(2),
       event: "approval.granted" as const,
       actor: "human:carter",
-      payload: { class: "communicate.email.external", est_cost_usd: 0.02 },
+      payload: { class: "communicate.email.external", est_cost_usd: "0.02" },
     },
   ]) {
     const appended = appendEvent(unit.logPath, {
@@ -2050,7 +2050,7 @@ test("a swap after the attestation check cannot change the policy the request is
       actionKey: "task-042:chaser",
       payload_hash: PAYLOAD_HASH,
       cls: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       reversible: false,
       summary: "Send deposit chaser",
     },
@@ -2113,7 +2113,7 @@ test("a swap before the attestation check refuses rather than half-landing", () 
         actionKey: "task-042:chaser",
         payload_hash: PAYLOAD_HASH,
         cls: "communicate.email.external",
-        est_cost_usd: 0.02,
+        est_cost_usd: "0.02",
         reversible: false,
         summary: "Send deposit chaser",
       },
@@ -2142,7 +2142,7 @@ test("an unreadable policy read is a refusal, not a pass", () => {
         actionKey: "task-042:chaser",
         payload_hash: PAYLOAD_HASH,
         cls: "read.file",
-        est_cost_usd: 0,
+        est_cost_usd: "0",
         reversible: true,
         summary: "Read a file",
       },

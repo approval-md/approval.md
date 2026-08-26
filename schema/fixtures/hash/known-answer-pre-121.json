@@ -21,7 +21,7 @@
   },
   {
     "name": "chained-approval-requested",
-    "note": "Second record: prev is the genesis record's hash, so the digest commits to the chain. `est_cost_usd` is the canonical decimal string of APRV-121; the pre-APRV-121 vectors, with the same record carrying the JSON number 0, are frozen alongside in known-answer-pre-121.json.",
+    "note": "Second record: prev is the genesis record's hash, so the digest commits to the chain.",
     "input": {
       "seq": 2,
       "ts": "2026-08-04T09:13:40Z",
@@ -34,23 +34,23 @@
       "channel": "telegram",
       "payload": {
         "class": "communicate.email.external",
-        "est_cost_usd": "0",
+        "est_cost_usd": 0,
         "reversible": false
       }
     },
-    "expected_canonical": "{\"action_key\":\"task-042:chaser:2026-08-04\",\"actor\":\"agent:chaser\",\"alg\":\"sha256/jcs\",\"channel\":\"telegram\",\"event\":\"approval.requested\",\"payload\":{\"class\":\"communicate.email.external\",\"est_cost_usd\":\"0\",\"reversible\":false},\"prev\":\"6a076d1e8930f73be61ba514c804ec06516ae4798b5f9c67a0612eec6faae7e6\",\"seq\":2,\"task\":\"task-042\",\"ts\":\"2026-08-04T09:13:40Z\"}",
-    "expected_hash": "951325fd9756ab9496273602ab4dbb9c13dffb607450744c14f0e64fce81e2bc"
+    "expected_canonical": "{\"action_key\":\"task-042:chaser:2026-08-04\",\"actor\":\"agent:chaser\",\"alg\":\"sha256/jcs\",\"channel\":\"telegram\",\"event\":\"approval.requested\",\"payload\":{\"class\":\"communicate.email.external\",\"est_cost_usd\":0,\"reversible\":false},\"prev\":\"6a076d1e8930f73be61ba514c804ec06516ae4798b5f9c67a0612eec6faae7e6\",\"seq\":2,\"task\":\"task-042\",\"ts\":\"2026-08-04T09:13:40Z\"}",
+    "expected_hash": "7768c23cf976931643bde54c3e02a18f6ac4706c560b57c4521e76bd4ffabcc3"
   },
   {
     "name": "unicode-numbers-and-unsorted-nested-keys",
-    "note": "RFC 8785 key sorting at two nesting levels, non-ASCII payload text emitted literally, and ECMAScript number formatting (0.5, 100, 1200) — the payload's `amounts` block is arbitrary caller data, not a gated monetary field, so it keeps the numbers that make this vector a number-serialization pin.",
+    "note": "RFC 8785 key sorting at two nesting levels, non-ASCII payload text emitted literally, and ECMAScript number formatting (0.5, 100, 1200).",
     "input": {
       "seq": 3,
       "ts": "2026-08-04T09:14:02Z",
       "event": "approval.granted",
       "actor": "human:carter",
       "alg": "sha256/jcs",
-      "prev": "951325fd9756ab9496273602ab4dbb9c13dffb607450744c14f0e64fce81e2bc",
+      "prev": "7768c23cf976931643bde54c3e02a18f6ac4706c560b57c4521e76bd4ffabcc3",
       "task": "task-042",
       "action_key": "task-042:chaser:2026-08-04",
       "channel": "telegram",
@@ -68,7 +68,7 @@
         "Álvaro": "approver"
       }
     },
-    "expected_canonical": "{\"action_key\":\"task-042:chaser:2026-08-04\",\"actor\":\"human:carter\",\"alg\":\"sha256/jcs\",\"channel\":\"telegram\",\"event\":\"approval.granted\",\"payload\":{\"amounts\":{\"retries\":100,\"share\":0.5,\"total_gbp\":1200},\"note\":\"chase the £1,200 déjà-vu invoice ☑\",\"zulu\":[\"b\",\"a\"],\"Álvaro\":\"approver\"},\"prev\":\"951325fd9756ab9496273602ab4dbb9c13dffb607450744c14f0e64fce81e2bc\",\"seq\":3,\"task\":\"task-042\",\"ts\":\"2026-08-04T09:14:02Z\"}",
-    "expected_hash": "819a937c7829ee39afc9b9c48670080208147c9cd78d016f3c43a3653db8e076"
+    "expected_canonical": "{\"action_key\":\"task-042:chaser:2026-08-04\",\"actor\":\"human:carter\",\"alg\":\"sha256/jcs\",\"channel\":\"telegram\",\"event\":\"approval.granted\",\"payload\":{\"amounts\":{\"retries\":100,\"share\":0.5,\"total_gbp\":1200},\"note\":\"chase the £1,200 déjà-vu invoice ☑\",\"zulu\":[\"b\",\"a\"],\"Álvaro\":\"approver\"},\"prev\":\"7768c23cf976931643bde54c3e02a18f6ac4706c560b57c4521e76bd4ffabcc3\",\"seq\":3,\"task\":\"task-042\",\"ts\":\"2026-08-04T09:14:02Z\"}",
+    "expected_hash": "2f4cd2927b66ac9b5bdcb8186c05f521ace5a05ade16048117d1fbbd9d505d20"
   }
 ]

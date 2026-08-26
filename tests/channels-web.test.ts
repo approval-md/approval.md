@@ -160,7 +160,7 @@ function live(count: number): Live {
       idempotency_key: key,
       summary: `chase invoice ${41 + index}`,
       reversible: false,
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       payload_hash: payloadHash(payload),
     });
   }
@@ -188,7 +188,7 @@ function live(count: number): Live {
         task: TASK,
         actionKey: key,
         cls: "communicate.email.external",
-        est_cost_usd: 0.02,
+        est_cost_usd: "0.02",
         reversible: false,
         // The claimed summary of the first request is the injection fixture.
         summary: index === 0 ? FORGERY : `chase invoice ${41 + index}`,

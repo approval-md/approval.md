@@ -139,7 +139,7 @@ function live(count: number, policyText: string = POLICY_WITH_LIMITS): Live {
       idempotency_key: key,
       summary: `chase invoice ${41 + index}`,
       reversible: false,
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       payload_hash: payloadHash(payload),
     });
   }
@@ -167,7 +167,7 @@ function live(count: number, policyText: string = POLICY_WITH_LIMITS): Live {
         task: TASK,
         actionKey: key,
         cls: "communicate.email.external",
-        est_cost_usd: 0.02,
+        est_cost_usd: "0.02",
         reversible: false,
         summary: `chase invoice ${41 + keys.indexOf(key)}`,
       },
@@ -229,7 +229,7 @@ test("computed fields are derived from the engines, not restated", () => {
       classPattern: resolution.matched === null ? null : resolution.matched.pattern,
       globalBudgets: load.ok ? load.policy.budgets ?? null : null,
     },
-    { class: "communicate.email.external", est_cost_usd: 0.02 },
+    { class: "communicate.email.external", est_cost_usd: "0.02" },
     NOW,
     TASK,
   );

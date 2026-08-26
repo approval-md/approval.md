@@ -256,7 +256,7 @@ approval:
     - class: communicate.email.external
       summary: "Send the deposit chaser to agency@example.co.uk"
       reversible: false
-      est_cost_usd: 0.02
+      est_cost_usd: "0.02"
       idempotency_key: "task-demo:chaser"
       payload_hash: "$HASH"
 ---

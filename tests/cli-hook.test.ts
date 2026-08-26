@@ -521,7 +521,7 @@ test("a loop-escalated harness task may not run unattended", () => {
       ...actions.flatMap((name) => [
         "    - class: vcs.push.main",
         `      summary: "attempt ${name}"`,
-        "      est_cost_usd: 0",
+        '      est_cost_usd: "0"',
         `      idempotency_key: "${task}:${name}"`,
       ]),
       "---",

@@ -5,7 +5,7 @@
   },
   "state": "awaiting",
   "budget": {
-    "max_cost_usd": "0.5",
-    "max_latency": "six hours"
+    "max_cost_usd": 25,
+    "max_latency": "6h"
   }
 }

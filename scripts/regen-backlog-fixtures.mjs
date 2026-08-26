@@ -177,10 +177,10 @@ const ENVELOPE_LINES = `approval:
     - class: communicate.email.external
       summary: "Send deposit chaser to agency@example.co.uk"
       reversible: false
-      est_cost_usd: 0.02
+      est_cost_usd: "0.02"
       idempotency_key: "task-3:chaser:2026-08-04"
   budget:
-    max_cost_usd: 0.50
+    max_cost_usd: "0.5"
     max_latency: 6h`.split("\n");
 
 /** Splice `ENVELOPE_LINES` in as the last key of a task file's frontmatter. */

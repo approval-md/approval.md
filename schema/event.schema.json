@@ -92,7 +92,41 @@
     },
     "payload": {
       "type": "object",
-      "description": "SPEC.md §8: event-type-specific detail (the example record carries an approver's note). Shape is deliberately open at v0.1; per-type payload schemas are a later, separate task."
+      "description": "SPEC.md §8: event-type-specific detail (the example record carries an approver's note). Shape is deliberately open at v0.1; per-type payload schemas are a later, separate task. Two names are constrained regardless of event type (APRV-121), because they are the monetary fields the budgets contract reads and the whole payload is hashed material: `est_cost_usd`, and `budget.max_cost_usd` as copied onto `task.registered`. The rest of the payload stays open.",
+      "properties": {
+        "est_cost_usd": {
+          "$ref": "#/$defs/usd_amount",
+          "description": "SPEC.md §5.2 budgets contract (amended, APRV-121): the authorization's declared cost in USD as a decimal string. Recorded on `approval.requested`, `approval.granted`, `execution.started` and `budget.exceeded`; a JSON number is the pre-APRV-121 form and is accepted on read, never on write."
+        },
+        "budget": {
+          "type": "object",
+          "description": "SPEC.md §6.2 `budget`, copied onto `task.registered` at registration so the task's own cap is read from the log rather than from a file that may have been edited since.",
+          "properties": {
+            "max_cost_usd": {
+              "$ref": "#/$defs/usd_amount",
+              "description": "SPEC.md §6.2 (amended, APRV-121): the task's lifetime cap in USD as a decimal string."
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "usd_amount_string": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,5}[1-9])?$",
+      "description": "SPEC.md §8 (amended, APRV-121): a USD amount as a canonical decimal string. No sign, no exponent, no leading zeros, at most six fractional digits, and no trailing zeros beyond the last significant digit — one value has exactly one spelling, so two records carrying the same amount always hash the same way, in any language."
+    },
+    "usd_amount": {
+      "$ref": "#/$defs/usd_amount_string",
+      "description": "The write-boundary form of a USD amount: the decimal string, and nothing else. `validate(..., { mode: \"historical\" })` replaces this definition with `usd_amount_historical` so that records written before APRV-121 keep validating and verifying; nothing else in the runtime relaxes it."
+    },
+    "usd_amount_historical": {
+      "anyOf": [
+        { "$ref": "#/$defs/usd_amount_string" },
+        { "type": "number", "minimum": 0 }
+      ],
+      "description": "The read form: the decimal string, or the pre-APRV-121 JSON number. The log is append-only, so a verifier must accept every shape the write boundary ever admitted. Used only in historical validation mode."
     }
   },
   "allOf": [

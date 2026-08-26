@@ -129,7 +129,7 @@ const TASK_FILE = [
   "    - class: communicate.email.external",
   '      summary: "Send the deposit chaser to agency@example.co.uk"',
   "      reversible: false",
-  "      est_cost_usd: 0.02",
+  '      est_cost_usd: "0.02"',
   `      idempotency_key: "${ACTION}"`,
   `      payload_hash: "${PAYLOAD_HASH}"`,
   "---",
@@ -306,7 +306,7 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
     // were named before a human was.
     assert.deepEqual(payloadOf(recordAt(3)), {
       class: "communicate.email.external",
-      est_cost_usd: 0.02,
+      est_cost_usd: "0.02",
       payload_hash: PAYLOAD_HASH,
       summary: "Send the deposit chaser to agency@example.co.uk",
       reversible: false,
@@ -341,7 +341,7 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
     assert.equal(pending[0]?.["action_key"], ACTION);
     assert.equal(pending[0]?.["task"], TASK);
     assert.equal(pending[0]?.["class"], "communicate.email.external");
-    assert.equal(pending[0]?.["est_cost_usd"], 0.02);
+    assert.equal(pending[0]?.["est_cost_usd"], "0.02");
     assert.ok((pending[0]?.["ttl_remaining_ms"] as number) > 0, "the request is inside its TTL");
 
     const render = runCli(["render", "--json"]);
@@ -497,7 +497,7 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
     assert.equal(granted["action_key"], ACTION);
     const grantPayload = payloadOf(granted);
     assert.equal(grantPayload["class"], "communicate.email.external");
-    assert.equal(grantPayload["est_cost_usd"], 0.02);
+    assert.equal(grantPayload["est_cost_usd"], "0.02");
     // The grant carries the SAME binding the request did: the human approved
     // these bytes, and the token below can only spend them.
     assert.equal(grantPayload["payload_hash"], PAYLOAD_HASH);

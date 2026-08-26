@@ -117,6 +117,7 @@ import { resolve } from "node:path";
 
 import { isPolicySha256, POLICY_HASH_FIELD } from "./attest.js";
 import type { EventRecord, LogHead } from "./log.js";
+import { normalizeUsd } from "./money.js";
 import { isPayloadHash } from "./payload.js";
 import {
   verifyText,
@@ -576,7 +577,14 @@ export function isWithdrawReason(value: unknown): value is WithdrawReason {
  */
 export interface DeclaredAction {
   class: string | null;
-  est_cost_usd: number | null;
+  /**
+   * The declared cost as a canonical decimal USD string (APRV-121), or `null`
+   * when the request declared none. A record written before that change carries
+   * a JSON number and is normalized to the same string here, so every reader
+   * downstream sees one representation regardless of when its record was
+   * written.
+   */
+  est_cost_usd: string | null;
   reversible: boolean | null;
   summary: string | null;
   /**
@@ -674,7 +682,7 @@ function declaredFrom(record: EventRecord): DeclaredAction {
   const policySha256 = payload[POLICY_HASH_FIELD];
   return {
     class: typeof cls === "string" ? cls : null,
-    est_cost_usd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
+    est_cost_usd: normalizeUsd(cost),
     reversible: typeof reversible === "boolean" ? reversible : null,
     summary: typeof summary === "string" ? summary : null,
     payload_hash: isPayloadHash(hash) ? hash : null,

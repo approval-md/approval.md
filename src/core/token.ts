@@ -97,6 +97,7 @@ import {
   type AppendOptions,
   type EventRecord,
 } from "./log.js";
+import { usdOrZero } from "./money.js";
 import { isPayloadHash } from "./payload.js";
 import { loadPolicy, type LoadPolicyOptions } from "./policy-load.js";
 import {
@@ -274,7 +275,13 @@ export interface TokenStatus {
   tokenSha256: string;
   /** Copied from the grant payload, per the budgets consumption contract. */
   class: string;
-  est_cost_usd: number;
+  /**
+   * Canonical decimal USD string (APRV-121), copied from the grant and written
+   * verbatim onto `execution.started`. The value is hashed material at both
+   * ends, so it is carried as the string the grant recorded rather than parsed
+   * into a number and reserialized.
+   */
+  est_cost_usd: string;
   /**
    * The bytes this grant approved (amended SPEC.md §10), or `null` for a grant
    * that recorded none. Unreachable through the gate for a manual action —
@@ -434,7 +441,7 @@ export function tokenStatus(
     grantSeq: grant.seq,
     tokenSha256: recorded,
     class: typeof cls === "string" ? cls : derivation.declared.class ?? "",
-    est_cost_usd: typeof cost === "number" && Number.isFinite(cost) ? cost : 0,
+    est_cost_usd: usdOrZero(cost),
     payloadHash: isPayloadHash(bytes) ? bytes : derivation.declared.payload_hash,
     requestTs: derivation.requestTs,
   };

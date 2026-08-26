@@ -125,6 +125,7 @@ import {
   type LogHead,
 } from "./log.js";
 import { isLoopEscalated } from "./loop.js";
+import { normalizeUsd, usdOrZero, type UsdInput } from "./money.js";
 import { isPayloadHash, payloadHash as hashOfPayload } from "./payload.js";
 import { payloadStoreDirFor, storePayload } from "./payload-store.js";
 import {
@@ -590,7 +591,8 @@ export interface RegisteredAction {
   idempotency_key: string;
   summary?: string;
   reversible?: boolean;
-  est_cost_usd?: number;
+  /** Canonical decimal USD string (APRV-121); see `core/money.ts`. */
+  est_cost_usd?: string;
   /**
    * The content binding of amended SPEC.md §6.2. MUST be present for an action
    * that resolves to `manual`; the enforcement point is {@link request}, not
@@ -628,7 +630,8 @@ function actionsOf(envelope: unknown): RegisteredAction[] {
     const action: RegisteredAction = { class: cls, idempotency_key: key };
     if (typeof item["summary"] === "string") action.summary = item["summary"];
     if (typeof item["reversible"] === "boolean") action.reversible = item["reversible"];
-    if (typeof item["est_cost_usd"] === "number") action.est_cost_usd = item["est_cost_usd"];
+    const declaredCost = normalizeUsd(item["est_cost_usd"]);
+    if (declaredCost !== null) action.est_cost_usd = declaredCost;
     if (isPayloadHash(item["payload_hash"])) action.payload_hash = item["payload_hash"];
     actions.push(action);
   }
@@ -922,7 +925,8 @@ export function registeredAction(
     const action: RegisteredAction = { class: cls, idempotency_key: actionKey };
     if (typeof item["summary"] === "string") action.summary = item["summary"];
     if (typeof item["reversible"] === "boolean") action.reversible = item["reversible"];
-    if (typeof item["est_cost_usd"] === "number") action.est_cost_usd = item["est_cost_usd"];
+    const declaredCost = normalizeUsd(item["est_cost_usd"]);
+    if (declaredCost !== null) action.est_cost_usd = declaredCost;
     if (isPayloadHash(item["payload_hash"])) action.payload_hash = item["payload_hash"];
     return { ok: true, action };
   }
@@ -942,7 +946,8 @@ export interface RequestInput {
   actionKey: string;
   /** The dotted side-effect class (SPEC.md §7). */
   cls: string;
-  est_cost_usd?: number;
+  /** Canonical decimal USD string (APRV-121); a JSON number is read as the historical form. */
+  est_cost_usd?: UsdInput;
   reversible?: boolean;
   summary?: string;
   /**
@@ -1030,9 +1035,16 @@ export type RequestResult =
     }
   | GateRefusal;
 
-/** `est_cost_usd` as the budgets contract wants it recorded: always a number. */
-function costOf(value: number | undefined): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+/**
+ * `est_cost_usd` as the budgets contract wants it recorded: always a canonical
+ * decimal USD string (APRV-121), `"0"` when the caller declared nothing.
+ *
+ * A caller may hand in either form — the string this runtime writes, or the
+ * JSON number a pre-APRV-121 caller (and a historical record) carries — and
+ * both normalize to the one spelling that enters hashed material.
+ */
+function costOf(value: UsdInput | undefined): string {
+  return usdOrZero(value);
 }
 
 /**
@@ -1514,7 +1526,7 @@ export function decide(
     // copied from the request rather than re-derived from a file. A1 adds the
     // content binding on the same terms: copied, never recomputed.
     payload["class"] = derivation.declared.class;
-    payload["est_cost_usd"] = derivation.declared.est_cost_usd ?? 0;
+    payload["est_cost_usd"] = derivation.declared.est_cost_usd ?? "0";
     if (derivation.declared.payload_hash !== null) {
       payload["payload_hash"] = derivation.declared.payload_hash;
     }
@@ -1546,7 +1558,7 @@ export function decide(
     const budget = evaluateBudgetsWithTask(
       read.records,
       budgetScopeOf(load, resolution),
-      { class: cls, est_cost_usd: derivation.declared.est_cost_usd ?? 0 },
+      { class: cls, est_cost_usd: derivation.declared.est_cost_usd ?? "0" },
       ts,
       // S2: the envelope's own cap, re-checked at the moment of commitment for
       // the same reason the policy budgets are — the queue may have moved.
@@ -1564,7 +1576,7 @@ export function decide(
           action_key: actionKey,
           payload: {
             class: cls,
-            est_cost_usd: derivation.declared.est_cost_usd ?? 0,
+            est_cost_usd: derivation.declared.est_cost_usd ?? "0",
             stage: "grant",
             verdicts: budget.verdicts,
           },
@@ -2111,7 +2123,7 @@ export function consumeHarnessGrant(
   const payload: Record<string, unknown> = {
     // The budgets contract: class and est_cost_usd on every start event.
     class: derivation.declared.class ?? "",
-    est_cost_usd: derivation.declared.est_cost_usd ?? 0,
+    est_cost_usd: derivation.declared.est_cost_usd ?? "0",
     // Why no completion will ever follow (see the doc comment).
     execution: "harness",
   };
@@ -2151,7 +2163,8 @@ export interface HarnessStartInput {
   cls: string;
   /** The bytes the verdict was computed over, when the caller has a hash. */
   payload_hash?: string;
-  est_cost_usd?: number;
+  /** Canonical decimal USD string (APRV-121); a JSON number is read as the historical form. */
+  est_cost_usd?: UsdInput;
 }
 
 export type HarnessStartResult = { ok: true; record: EventRecord } | GateRefusal;
