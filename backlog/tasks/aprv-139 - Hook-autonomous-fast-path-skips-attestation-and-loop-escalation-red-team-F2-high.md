@@ -3,9 +3,10 @@ id: APRV-139
 title: >-
   Hook autonomous fast path skips attestation and loop-escalation (red-team F2,
   high)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-25 13:41'
+updated_date: '2026-08-26 17:39'
 labels:
   - security
   - hook
@@ -32,9 +33,23 @@ Fix direction: before the autonomous/supervised allow, verify attestation and lo
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The hook autonomous and supervised allow paths verify policy attestation before allowing, and fail closed (to manual, or deny) on not-attested or hash-mismatch policy
-- [ ] #2 The hook consults loop-escalation before a non-manual allow, matching core/execute.ts
-- [ ] #3 Test reproduces an allow under an edited-unattested policy and asserts it now denies or routes to manual
-- [ ] #4 SPEC section 11.1 scope note: state whether the attestation-required list names the hook enforcement surface, marked for human sign-off
-- [ ] #5 npm test passes; lint clean
+- [x] #1 The hook autonomous and supervised allow paths verify policy attestation before allowing, and fail closed (to manual, or deny) on not-attested or hash-mismatch policy
+- [x] #2 The hook consults loop-escalation before a non-manual allow, matching core/execute.ts
+- [x] #3 Test reproduces an allow under an edited-unattested policy and asserts it now denies or routes to manual
+- [x] #4 SPEC section 11.1 scope note: state whether the attestation-required list names the hook enforcement surface, marked for human sign-off
+- [x] #5 npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Builder observation 2026-08-26, filed as its own task: harness loop-escalation is near-vacuous per-invocation (task id minted per tool call, no failure signal from the harness); session-scoped streaks are the follow-up design. Second observation, recorded here: register does not check attestation (only request/decide/consumeHarnessGrant do), so task.registered can land under an unattested policy via the manual path; harmless today because the request that follows refuses, and it is the asymmetry that justified 139's guard denying directly rather than routing through gateAndWait.
+
+Built 2026-08-26, merged in PR #127 (commit 56a6de2 plus merge 2291438). unattendedGuard verifies attestation and loop-escalation against the VERIFIED log before any non-manual verdict; the log-unreachable deny moved above the fast paths; the task id is minted once so escalation and registration name the same task. Accepted builder deviation, argued on the PR: the guard denies with the gate's frozen codes (hook-gate-refused:policy-not-attested / loop-escalated) instead of routing to gateAndWait, because under an unattested policy the manual path reaches the byte-identical refusal plus a junk task.registered under an inoperative policy; recovery (policy attest) is GATE_SELF_CLASS and unaffected. SPEC §11.1 invariant 1 scope note added (pending sign-off, human-approved through the gate). F2's attack reproduced and pinned: an on-disk reclassification to autonomous under an attested-then-edited policy now denies with nothing appended. Merge note: the conflict with PR #126 forced startHarnessExecution onto the readPolicyOnce pattern, composing 139 with 142.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The hook's unattended verdicts (autonomous and all-supervised allows) verify policy attestation and loop-escalation against the verified log and fail closed; the F2 policy-edit bypass reproduces as a deny. Merged in PR #127.
+<!-- SECTION:FINAL_SUMMARY:END -->

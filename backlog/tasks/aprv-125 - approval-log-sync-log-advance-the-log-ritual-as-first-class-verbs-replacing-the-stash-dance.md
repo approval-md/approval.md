@@ -3,10 +3,10 @@ id: APRV-125
 title: >-
   approval log sync / log advance: the log ritual as first-class verbs,
   replacing the stash dance
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-20 15:12'
-updated_date: '2026-08-25 09:54'
+updated_date: '2026-08-26 10:55'
 labels:
   - log
   - cli
@@ -50,20 +50,28 @@ INVARIANTS TOUCHED (implementation notes must say so): enforcement paths read on
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 approval log sync performs snapshot, ff-only pull, prefix reconcile, projection rebuild, and post-verify under the append lockfile; the working log is byte-identical or strictly-extended afterward, never rewound
-- [ ] #2 A diverged committed log refuses log-diverged with both heads and the first divergent seq named; the snapshot is restored; nothing is merged or re-chained
-- [ ] #3 Any mid-sync failure restores the snapshot; a kill mid-pull leaves the working log as it started (test with an injected failure per step)
-- [ ] #4 git stash appears nowhere in the implementation; the log never routes through git state mutation
-- [ ] #5 approval log advance stages exactly the three .approval paths, commits with the seq range in the message, pushes to a records branch, and refuses any other staged path or any required checkout
-- [ ] #6 Both verbs refuse outside the primary checkout with a distinct code
-- [ ] #7 New classes log.sync and log.advance resolve from the policy; unknown-class fail-close covers policies that predate them; the classifier names the verbs so prompts stop reading policy.edit
-- [ ] #8 doctor gains the log-drift check (ahead-by-N / equal / diverged), sharing the reconcile implementation
-- [ ] #9 SPEC section 10 amendment drafted and flagged for sign-off before implementation; the no-event decision recorded
-- [ ] #10 The dogfood runbook (docs/dogfood-cutover.md) rewritten to use the verbs; the stash dance removed from every doc
+- [x] #1 approval log sync performs snapshot, ff-only pull, prefix reconcile, projection rebuild, and post-verify under the append lockfile; the working log is byte-identical or strictly-extended afterward, never rewound
+- [x] #2 A diverged committed log refuses log-diverged with both heads and the first divergent seq named; the snapshot is restored; nothing is merged or re-chained
+- [x] #3 Any mid-sync failure restores the snapshot; a kill mid-pull leaves the working log as it started (test with an injected failure per step)
+- [x] #4 git stash appears nowhere in the implementation; the log never routes through git state mutation
+- [x] #5 approval log advance stages exactly the three .approval paths, commits with the seq range in the message, pushes to a records branch, and refuses any other staged path or any required checkout
+- [x] #6 Both verbs refuse outside the primary checkout with a distinct code
+- [x] #7 New classes log.sync and log.advance resolve from the policy; unknown-class fail-close covers policies that predate them; the classifier names the verbs so prompts stop reading policy.edit
+- [x] #8 doctor gains the log-drift check (ahead-by-N / equal / diverged), sharing the reconcile implementation
+- [x] #9 SPEC section 10 amendment drafted and flagged for sign-off before implementation; the no-event decision recorded
+- [x] #10 The dogfood runbook (docs/dogfood-cutover.md) rewritten to use the verbs; the stash dance removed from every doc
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 DESIGN SIGN-OFF 2026-08-25 (Carter, in session): approved as designed. Both verbs, the no-event decision (sync and advance append nothing; the log records decisions, not its own housekeeping), and the autonomy path: both classes start manual, candidate end state sync=autonomous / advance=supervised once trust builds. SPEC section 10 amendment (AC 9) may now be drafted; implementation may be scheduled.
+
+Built 2026-08-26 by an Opus subagent (resumed once after a connection drop), reviewed by fable, merged in PR #122 (6 commits). Design addition beyond the signed-off wording, flagged in the PR and the SPEC text: a fourth reconcile relation, behind (working chain a strict prefix of committed → adopt the longer chain; extending never rewinds; a fresh clone or a second machine's advance produces exactly this). INVARIANTS: compareChains verifies both sides before comparing a single seq; neither verb appends (pinned structurally by comment-stripped grep for the append functions and behaviourally by head-seq equality; withAppendLock grants exclusion only, its callback receives no write primitive); projections rebuild from the reconciled log; 19 distinct frozen refusal codes. Snapshot-restore proven by a failure-injection table over all seven post-snapshot steps asserting refusal-with-restored, byte-identical log AND queue, and no surviving snapshot file, with a guard pinning the step list. Classifier resolves both verbs to log.sync/log.advance; doctor gains log-drift sharing compareChains (checks 11→12); docs de-stashed everywhere. SPEC §10.1 amendment human-approved through the gate (proposal tier), pending sign-off suffix per convention. NOT in this task, the human's step: APPROVAL.md rules for the two classes — until Carter amends, unknown-class fail-close holds them at manual-by-default and the hook denies agents the verbs; move the two dogfood rows to the declared block when the rules land. Open question for sign-off: whether SPEC §7's taxonomy should list the log.* namespace. Untested gap noted: the --pr path against a real gh (ghStub pattern exists in cli-amend tests). APRV-110 consumes logSync/logAdvance as exported functions. 2098 tests (+39, real bare remotes, real append path), lint clean.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The stash dance is retired: log sync (snapshot, ff-only pull, prefix/equal/behind reconcile, fork refusal naming first divergent seq, every failure restores the snapshot) and log advance (exact three-path stage, seq range in message, push by refspec, never a checkout) as gated verbs with their own classes, plus doctor's log-drift. Verified by 29 e2e tests over real git remotes incl. per-step failure injection; merged in PR #122.
+<!-- SECTION:FINAL_SUMMARY:END -->

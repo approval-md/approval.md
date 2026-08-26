@@ -1,9 +1,10 @@
 ---
 id: APRV-123
 title: 'Invariant: a gate verdict whose event cannot be appended is a refusal'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-20 14:48'
+updated_date: '2026-08-26 16:37'
 labels:
   - gate
   - invariants
@@ -27,8 +28,20 @@ Reference: emiliaprotocol/emilia-protocol packages/gate/src/index.ts (allow down
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Fault-injection tests exist for every surface returning proceed:true or minting a token, asserting refusal with a stable code when the append fails; the code joins a pinned union
-- [ ] #2 No gate surface returns success before its event is durably appended (ordering audited; any violation found is fixed in this task)
-- [ ] #3 SPEC §11.1 gains the invariant naming its test file, marked for human sign-off; proposed CLAUDE.md list line delivered for the human to commit
+- [x] #1 Fault-injection tests exist for every surface returning proceed:true or minting a token, asserting refusal with a stable code when the append fails; the code joins a pinned union
+- [x] #2 No gate surface returns success before its event is durably appended (ordering audited; any violation found is fixed in this task)
+- [x] #3 SPEC §11.1 gains the invariant naming its test file, marked for human sign-off; proposed CLAUDE.md list line delivered for the human to commit
 - [ ] #4 npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Built 2026-08-26 by an Opus subagent, reviewed by fable, merged in PR #126 (commit 5211d33). The audit found NO ordering violations: every verdict site already refuses append-failed with nothing softened (grant drops its minted token, harness grant stays unspent, hook denies hook-gate-refused:append-failed, budget refusals stay budget refusals with the append failure named). Deliverable is the proof and the promotion: tests/evidence-append.test.ts (13 tests) injects failure through the real write path three ways (held lockfile, schema-struck-enum refusal at the write boundary, unwritable directory); SPEC §11.1 gains invariant 8 (pending sign-off), which also binds the §6.3 paths that write no approval event by naming execution.started as the whole of their accounting. No new refusal codes; the frozen unions already carried append-failed. CLAUDE.md line drafted for Carter (agents never edit that file): 'a gate verdict whose event cannot be appended is a refusal (no surface returns proceed, an allow, or a token before its record lands; append-failed, never a silent success)'. Out of scope, noticed: request's payload-store ordering permits a harmless content-addressed orphan on head-moved (documented deliberate trade).
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The invariant held everywhere it was audited: a verdict whose event cannot be appended is already a refusal at every site. Proven with 13 failure-injection tests through the real write path and promoted to SPEC §11.1 invariant 8; merged in PR #126.
+<!-- SECTION:FINAL_SUMMARY:END -->
