@@ -445,6 +445,39 @@ test("the module exposes no mutation, reorder, or truncate operation", async () 
       "computeRecordHash",
       "serializeRecord",
       "verifyRecordHash",
+      // APRV-125 added the whole-operation lock holder. It hands its callback
+      // no handle and no write primitive: what it grants is EXCLUSION, and a
+      // caller holding it still has only the append-only API everyone else has.
+      // Nothing here mutates, reorders, or truncates.
+      "withAppendLock",
     ],
   );
+});
+
+test("withAppendLock grants exclusion and no write primitive", async () => {
+  const { withAppendLock } = await import("../src/core/log.js");
+  const logPath = freshLog();
+  appendOrThrow(logPath, REGISTERED);
+  const before = readFileSync(logPath);
+
+  // The callback receives nothing at all: exclusion is the whole grant.
+  let argumentCount = -1;
+  const held = withAppendLock(logPath, (...args: unknown[]) => {
+    argumentCount = args.length;
+    // An append attempted from INSIDE the hold cannot take the lock the hold is
+    // already holding, so it refuses rather than interleaving. That refusal is
+    // the property `log sync` depends on for the whole of its ceremony.
+    return appendEvent(logPath, REQUESTED, { lockTimeoutMs: 20, lockRetryMs: 5 });
+  });
+
+  assert.equal(argumentCount, 0);
+  assert.equal(held.ok, true);
+  if (held.ok) {
+    assert.equal(held.value.ok, false);
+    if (!held.value.ok) assert.equal(held.value.error.code, "lock-timeout");
+  }
+  assert.deepEqual(readFileSync(logPath), before, "nothing was written under the hold");
+
+  // The lock is released even though the callback's own result was a refusal.
+  assert.equal(appendEvent(logPath, REQUESTED).ok, true);
 });
