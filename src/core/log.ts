@@ -75,6 +75,10 @@ export const GENESIS_PREV = null;
  * `payload_retention`, so a log states what its payload store no longer holds.
  * `approval.withdrawn` (APRV-106) is the second: the requester's retraction of
  * a request nobody has answered yet (amended SPEC.md §6.3).
+ * `execution.indeterminate` and `execution.reconciled` (APRV-120) are the third
+ * and fourth: a side effect that was attempted and whose outcome is unknown, and
+ * the human resolution that later says which it was (amended SPEC.md §6.3,
+ * §10.4).
  */
 export type EventType =
   | "task.registered"
@@ -89,6 +93,8 @@ export type EventType =
   | "execution.started"
   | "execution.completed"
   | "execution.failed"
+  | "execution.indeterminate"
+  | "execution.reconciled"
   | "budget.exceeded"
   | "policy.updated"
   | "envelope.drift"

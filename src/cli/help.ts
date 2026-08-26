@@ -62,6 +62,9 @@ Usage:
                       [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
   approval execution resolve <action-key> --outcome completed|failed
                       --note "<text>" [--as human:<id>] [--json]
+  approval execution reconcile <action-key>
+                      --resolution executed|not-executed
+                      --note "<evidence>" [--as human:<id>] [--json]
   approval audit list|review [<seq|action-key>] [--note "<text>"]
                       [--as human:<id>] [--all] [--json]
   approval wait       <task> --timeout <duration> [--interval <d>]
@@ -185,10 +188,10 @@ Ask — an agent declares an action and acts on the answer:
   mcp       "mcp serve" is the optional MCP wrapper of SPEC.md §10.5: the same
             verbs as tools, over stdio, sharing the CLI's code paths. It is
             AGENT-FACING ONLY — grant, reject, revoke, attest, amend, vault,
-            setup, audit review, expire, execution resolve and the channels are
-            not published, because an MCP client is an agent's harness and
-            SPEC.md §11 makes the agent the untrusted policy. It runs as ONE
-            agent identity, fixed at startup, that no tool call can change
+            setup, audit review, expire, execution resolve|reconcile and the
+            channels are not published, because an MCP client is an agent's
+            harness and SPEC.md §11 makes the agent the untrusted policy. It
+            runs as ONE agent identity, fixed at startup, that nothing changes
 
 Decide — a human answers, and only a human can:
   queue     the pending-decision INBOX: requests awaiting a human, inside their
@@ -200,9 +203,12 @@ Decide — a human answers, and only a human can:
   execution recovery verbs for executions the runtime could not close itself.
             "execution resolve" records the outcome a HUMAN OBSERVED for a
             dangling execution: mandatory --note, human-only, exit_code null,
-            attested_by_human true. No attestation is required — resolve records
-            a fact a human observed; it exercises no policy authority, so it
-            does not require an attested policy
+            attested_by_human true. "execution reconcile" records what a human
+            ESTABLISHED about an INDETERMINATE one — a side effect that was
+            attempted and whose outcome nobody knows — from the relying party's
+            evidence, naming the record it resolves and rewriting nothing.
+            Neither requires attestation: both record a fact a human observed
+            and exercise no policy authority
   audit     "audit list" is the open sampled-audit backlog and "audit review" is
             the HUMAN-ONLY verb that closes one item of it. Sampling itself has
             no verb: the daemon selects supervised actions with an operator-held
@@ -818,9 +824,9 @@ Usage:
 
 Flags:
   --token <t>      the raw token "approval grant" printed. REQUIRED for manual
-  --payload-hash <64hex>   the content binding. By default run hashes
-                   "the argv array and cwd"; an action whose grant bound to
-                   content MUST pass this flag ("approval payload hash <file>")
+  --payload-hash <64hex>   the content binding, CHECKED and never trusted. run
+                   always hashes "the argv array and cwd" it is about to spawn;
+                   a differing value is refused payload-mismatch, not obeyed
   --as <id>        the executing identity; else APPROVAL_HUMAN
   --policy <p> / --dir <p> / --log <p>   policy, its discovery dir, and the log
   --json / -h, --help   machine-readable summary ON STDERR / this text
@@ -1004,16 +1010,24 @@ ${why("audit-review")}`;
 export const EXECUTION_HELP = `approval execution — recovery verbs for executions the runtime could not close
 
 Usage:
-  approval execution resolve <action-key> --outcome completed|failed
-                            --note "<text>" [--as human:<id>] [--log <path>]
-                            [--json]
+  approval execution resolve   <action-key> --outcome completed|failed …
+  approval execution reconcile <action-key> --resolution executed|not-executed …
 
 Subcommands:
-  resolve   record the outcome a HUMAN OBSERVED for a dangling execution
+  resolve     record the outcome a HUMAN OBSERVED for a dangling execution
+  reconcile   record what a human ESTABLISHED about an unknown outcome
+
+Two different states, two different questions, two different verbs.
 
 A DANGLING EXECUTION is what a crash between execution.started and its outcome
-leaves behind. "approval status" reports it; "approval queue" does not, because
-nobody is being asked to decide anything. Nothing closes one automatically.
+leaves behind: the runtime meant to watch and did not. resolve closes it.
+
+An INDETERMINATE EXECUTION is one whose side effect was ATTEMPTED and whose
+outcome nobody knows. The token stays spent, the key stays burned, and a retry
+is refused. reconcile records what the relying party's evidence showed.
+
+"approval status" reports both; "approval queue" reports neither, because nobody
+is being asked to decide anything. Nothing closes either automatically.
 
 ${EXIT_CODES_POINTER}
 ${why("execution")}`;
@@ -1042,6 +1056,31 @@ JSON shape: docs/cli-reference.md#execution-resolve
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("execution-resolve")}`;
+
+export const RECONCILE_HELP = `approval execution reconcile — resolve an unknown outcome
+
+Usage:
+  approval execution reconcile <action-key> --resolution executed|not-executed
+                              --note "<evidence>" [--as human:<id>]
+                              [--log <path>] [--json]
+
+Flags:
+  --resolution <r>  executed or not-executed. REQUIRED, and nothing is inferred
+  --note <text>     the EVIDENCE: which console, which message id. MANDATORY
+  --as human:<id>   the person recording it; else APPROVAL_HUMAN. HUMAN-ONLY
+  --log <path>      log file to read and append to
+  --json / -h, --help   machine-readable output / this text
+
+For an execution.indeterminate: the effect was ATTEMPTED and nobody knows whether
+it committed. Appends execution.reconciled NAMING that record by seq, never
+rewriting it. not-executed re-opens the EFFECT, not this key, which stays burned:
+declare a fresh action and request that. Refuses (exit 1): not-indeterminate,
+already-reconciled.
+
+JSON shape: docs/cli-reference.md#execution-reconcile
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("execution-reconcile")}`;
 
 export const CHANNEL_HELP = `approval channel — put a pending request in front of a human
 
@@ -1238,7 +1277,7 @@ canonical serialization of the parsed VALUE. Reads no log, writes no file.
 Where the hash goes:
   payload_hash     in a task file's action declaration, and in the log
   approval request --payload <file>|-   hashes, verifies and stores the bytes
-  approval run --payload-hash <64hex>   presents the binding when spending
+  approval run --payload-hash <64hex>   asserts the binding run recomputes
 
 MOST FLOWS NEVER NEED THIS VERB: "approval request --payload" both stores and
 verifies. Bytes that do not parse as JSON are a usage error (exit 2).

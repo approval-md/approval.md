@@ -30,10 +30,16 @@ import {
 } from "../src/core/attest.js";
 import {
   finishExecution as finishExecutionCore,
+  indeterminateExecution as indeterminateExecutionCore,
+  reconcileExecution as reconcileExecutionCore,
   resolveExecution as resolveExecutionCore,
   startExecution as startExecutionCore,
   type ExecuteOptions,
   type FinishResult,
+  type IndeterminateReason,
+  type IndeterminateResult,
+  type ReconcileResolution,
+  type ReconcileResult,
   type ResolveOutcome,
   type ResolveResult,
   type StartResult,
@@ -171,6 +177,29 @@ export function resolveExecution(
   options: ExecuteOptions = {},
 ): ResolveResult {
   return resolveExecutionCore(logPath, actionKey, outcome, note, actor, frozen(options, ts));
+}
+
+export function indeterminateExecution(
+  logPath: string,
+  actionKey: string,
+  reason: IndeterminateReason,
+  ts: string,
+  actor: string,
+  options: ExecuteOptions = {},
+): IndeterminateResult {
+  return indeterminateExecutionCore(logPath, actionKey, reason, actor, frozen(options, ts));
+}
+
+export function reconcileExecution(
+  logPath: string,
+  actionKey: string,
+  resolution: ReconcileResolution,
+  note: string,
+  ts: string,
+  actor: string,
+  options: ExecuteOptions = {},
+): ReconcileResult {
+  return reconcileExecutionCore(logPath, actionKey, resolution, note, actor, frozen(options, ts));
 }
 
 export function appendAttestation(

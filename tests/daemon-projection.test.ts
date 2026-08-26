@@ -32,6 +32,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import type { EventRecord } from "../src/core/log.js";
+import { runPayloadHash } from "../src/core/payload.js";
 import { readVerifiedRecords } from "../src/core/state.js";
 import {
   ENVELOPE_STATES,
@@ -52,7 +53,12 @@ after(() => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
-const PAYLOAD_HASH = "3".repeat(64);
+/**
+ * The command every `run` in this suite spawns, and therefore what the declared
+ * actions bind to (APRV-140: `run` recomputes the hash from the argv and cwd it
+ * is about to spawn, and refuses any other value).
+ */
+const CHILD = [process.execPath, "-e", "process.exit(0)"];
 const HOUR_MS = 3_600_000;
 
 const POLICY = [
@@ -73,7 +79,8 @@ const POLICY = [
   "",
 ].join("\n");
 
-const TASK_FILE = [
+function taskFile(binding: string): string {
+  return [
   "---",
   "id: task-042",
   "title: Chase deposit refund",
@@ -88,23 +95,25 @@ const TASK_FILE = [
   "      reversible: false",
   '      est_cost_usd: "0.02"',
   '      idempotency_key: "task-042:chaser"',
-  `      payload_hash: "${PAYLOAD_HASH}"`,
+  `      payload_hash: "${binding}"`,
   "    - class: communicate.email.external",
   '      summary: "Send the follow-up"',
   "      reversible: false",
   '      est_cost_usd: "0.02"',
   '      idempotency_key: "task-042:followup"',
-  `      payload_hash: "${PAYLOAD_HASH}"`,
+  `      payload_hash: "${binding}"`,
   "    - class: files.write.local",
   '      summary: "Write the draft"',
   "      reversible: true",
   '      est_cost_usd: "0.01"',
   '      idempotency_key: "task-042:draft"',
+  `      payload_hash: "${binding}"`,
   "---",
   "",
   "Body.",
   "",
-].join("\n");
+  ].join("\n");
+}
 
 interface Run {
   code: number;
@@ -136,7 +145,11 @@ function world(): string {
   const dir = join(scratch, `case-${counter}`);
   mkdirSync(join(dir, "backlog", "tasks"), { recursive: true });
   writeFileSync(join(dir, "APPROVAL.md"), POLICY, "utf8");
-  writeFileSync(join(dir, "backlog", "tasks", "task-042.md"), TASK_FILE, "utf8");
+  writeFileSync(
+    join(dir, "backlog", "tasks", "task-042.md"),
+    taskFile(runPayloadHash(CHILD, dir)),
+    "utf8",
+  );
   ok(["policy", "attest", "--as", "human:carter"], dir);
   return dir;
 }
@@ -215,20 +228,7 @@ test("a live request is awaiting; a grant is approved; an execution is executed"
   assert.equal(taskEnvelopeState(records, "task-042", after_(records, 0), HOUR_MS).state, "approved");
 
   ok(
-    [
-      "run",
-      "task-042:chaser",
-      "--token",
-      token,
-      "--payload-hash",
-      PAYLOAD_HASH,
-      "--as",
-      "agent:claude",
-      "--",
-      process.execPath,
-      "-e",
-      "process.exit(0)",
-    ],
+    ["run", "task-042:chaser", "--token", token, "--as", "agent:claude", "--", ...CHILD],
     dir,
   );
   records = verified(dir);

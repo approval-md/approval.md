@@ -1,0 +1,17 @@
+{
+  "seq": 13,
+  "ts": "2026-08-20T16:02:44Z",
+  "event": "execution.reconciled",
+  "task": "task-046",
+  "action_key": "task-046:sync:2026-08-04",
+  "actor": "human:carter",
+  "payload": {
+    "indeterminate_seq": 12,
+    "resolution": "executed",
+    "note": "the provider console shows message id 8f21c accepted at 14:47:02, one second before the client gave up",
+    "attested_by_human": true
+  },
+  "alg": "sha256/jcs",
+  "prev": "5f2b1c8e0a94d3f76b5e2c1d908a7b6c5d4e3f201928374655a4b3c2d1e0f918",
+  "hash": "b7d4e91a2c3f508671e2d3c4b5a69788796a5b4c3d2e1f00918273645546372a"
+}

@@ -89,6 +89,7 @@ import {
   declaringTasks,
   finishExecution,
   findDeclaration,
+  indeterminateExecution,
   startExecution,
   type ExecuteOptions,
   type ExecuteRefusal,
@@ -419,11 +420,17 @@ export const ADAPTER_REFUSAL_CODES = [
    */
   "adapter-failed",
   /**
-   * `act` threw. Recorded exactly like a reported failure, because from the
-   * log's point of view it is one: the execution was attempted and did not
-   * complete. Only the error's `message` is kept — never the stack, which
-   * routinely quotes arguments and would be a credential-shaped leak with a
-   * plausible excuse — and even that message passes the redaction guard.
+   * A throw on the way to `act`, before it was entered: assembling the
+   * credential window, or reading the adapter's own method. Nothing was
+   * attempted, so `execution.failed` is the honest record and the caller may
+   * fix its wiring and try again.
+   *
+   * A throw from INSIDE `act` is a different code (`execution-indeterminate`)
+   * and a different event, because the outcome is then unknown (APRV-120).
+   *
+   * Only the error's `message` is kept — never the stack, which routinely
+   * quotes arguments and would be a credential-shaped leak with a plausible
+   * excuse — and even that message passes the redaction guard.
    */
   "adapter-act-threw",
 ] as const;
@@ -442,8 +449,12 @@ export interface AdapterRefusal {
   acted: boolean;
   /** The `execution.started` seq, when one was appended before the failure. */
   started_seq?: number;
-  /** The outcome event appended, when one was. Only ever `execution.failed`. */
-  outcome?: "execution.failed";
+  /**
+   * The outcome event appended, when one was: `execution.failed` for an
+   * attempt that provably did not commit, `execution.indeterminate` for one
+   * whose outcome nobody knows (APRV-120).
+   */
+  outcome?: "execution.failed" | "execution.indeterminate";
   outcome_seq?: number;
   exit_code?: number;
   /** The adapter's own failure code, when `code` is `adapter-failed`. */
@@ -562,13 +573,22 @@ function refuse(
  *    appends `execution.started`. Any refusal here returns with `acted: false`;
  *    `act` is not called, so no side effect was attempted.
  * 4. **`act`**, inside a credential window that closes the moment it returns.
- * 5. **`finishExecution`** with `0` when `act` reported success and
- *    {@link ADAPTER_FAILURE_EXIT_CODE} when it did not or threw.
+ * 5. **The outcome event**, and WHICH one depends on where things went wrong
+ *    (APRV-120). `act` returning success is `execution.completed`; `act`
+ *    returning a failure is `execution.failed`, because the provider answered
+ *    and the answer was no; a throw on the way INTO `act` is `execution.failed`
+ *    too, because nothing was attempted; and a throw from inside `act` is
+ *    `execution.indeterminate`, because the provider may or may not have
+ *    committed and this runtime cannot tell. The boundary is the invocation
+ *    itself, not a judgment about the error.
  *
  * A refusal from step 5 is returned with `started_seq` set and the log left
  * holding a dangling execution — which is the honest state, since the side
  * effect did happen and its outcome could not be recorded. `approval status`
- * reports it and `approval execution resolve` is how a human closes it.
+ * reports it and `approval execution resolve` is how a human closes it. An
+ * indeterminate outcome is not that: it IS recorded, the consumption stays
+ * burned, a retry is refused, and `approval execution reconcile` is how a
+ * person resolves it from the relying party's own evidence.
  */
 export async function executeThroughAdapter(
   adapter: Adapter,
@@ -633,18 +653,29 @@ export async function executeThroughAdapter(
   const startedSeq = started.record.seq;
 
   // (d) The adapter's own step, inside the credential window.
+  //
+  // `entered` is the custody boundary of APRV-120, and it is positional rather
+  // than a judgment: everything up to and including the read of `adapter.act`
+  // is preparation this runtime performed and can speak for, and the instant
+  // after it the call is the far side's. A throw on the near side is
+  // `execution.failed` — nothing was attempted. A throw on the far side is
+  // `execution.indeterminate` — the provider may or may not have committed, and
+  // saying "failed" about it is the assertion that produces double sends.
   const scope = scopeCredentials(options.credentials ?? NO_CREDENTIALS);
-  const input: ActInput = {
-    actionKey,
-    payload,
-    credentials: scope.provider,
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
-  };
+  let entered = false;
 
   let outcome: ActOutcome;
   let threw: string | null = null;
   try {
-    outcome = await adapter.act(input);
+    const input: ActInput = {
+      actionKey,
+      payload,
+      credentials: scope.provider,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    };
+    const act = adapter.act.bind(adapter);
+    entered = true;
+    outcome = await act(input);
   } catch (error) {
     // The message and nothing else: a stack trace quotes call arguments, and a
     // credential passed as one would ride out of here inside an error report.
@@ -656,8 +687,11 @@ export async function executeThroughAdapter(
 
   // (e) The outcome event, then the redacted result.
   const secrets = scope.issued;
+  const unknown = threw !== null && entered;
   const exitCode = outcome.ok ? 0 : ADAPTER_FAILURE_EXIT_CODE;
-  const finished = finishExecution(logPath, actionKey, exitCode, actor, executeOptions);
+  const finished = unknown
+    ? indeterminateExecution(logPath, actionKey, "act-threw", actor, executeOptions)
+    : finishExecution(logPath, actionKey, exitCode, actor, executeOptions);
 
   const failureCode: AdapterRefusalCode = threw === null ? "adapter-failed" : "adapter-act-threw";
   const rawMessage = outcome.ok ? "" : outcome.message;
@@ -676,9 +710,27 @@ export async function executeThroughAdapter(
       message: `${adapter.name} ${outcome.ok ? "completed" : "did not complete"} action ${actionKey}, and the outcome could not be recorded: ${finished.message}. The side effect was attempted and the log now holds a dangling execution; close it with \`approval execution resolve\`.`,
       adapter: adapter.name,
       action_key: actionKey,
-      acted: true,
+      acted: entered,
       started_seq: startedSeq,
       execute: finished,
+      redactions,
+    };
+  }
+
+  if (unknown) {
+    // The message is the adapter's, redacted, and it reaches the CALLER only:
+    // the record carries the closed reason and nothing else (APRV-120 #3).
+    return {
+      ok: false,
+      code: "execution-indeterminate",
+      message: `${adapter.name} entered act for ${actionKey} and raised, so the log records execution.indeterminate at seq ${finished.record.seq}: the side effect was attempted and nobody knows whether it committed. The token is spent and the idempotency key is burned; a retry is refused. Establish what happened and record it with \`approval execution reconcile\`. The adapter reported: ${message.text}`,
+      adapter: adapter.name,
+      action_key: actionKey,
+      acted: true,
+      started_seq: startedSeq,
+      outcome: "execution.indeterminate",
+      outcome_seq: finished.record.seq,
+      adapter_code: adapterCode.text,
       redactions,
     };
   }
@@ -690,7 +742,9 @@ export async function executeThroughAdapter(
       message: message.text,
       adapter: adapter.name,
       action_key: actionKey,
-      acted: true,
+      // A throw BEFORE act was entered attempted nothing: the credential window
+      // or the adapter's own method raised, and no side effect was reached.
+      acted: entered,
       started_seq: startedSeq,
       outcome: "execution.failed",
       outcome_seq: finished.record.seq,

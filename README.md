@@ -284,8 +284,8 @@ and gone on reload: there the browser is already the surface the human is lookin
 at. In both cases the log holds only the token's SHA-256, it never appears in a
 URL, and nothing can recover it. Lose it, revoke the grant, and request again.
 
-**6. Spend it.** `approval run <action> --token "$TOKEN" --payload-hash "$HASH"
--- <command>` appends `execution.started` before spawning the child and
+**6. Spend it.** `approval run <action> --token "$TOKEN" -- <command>` appends
+`execution.started` before spawning the child and
 `execution.completed` after, and exits with the child's own exit code, so it
 composes with `make`, CI, and `&&` as an unwrapped command would. Run it before
 the approval and it refuses `token-required` at exit 5, writing nothing. Run it

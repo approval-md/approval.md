@@ -225,7 +225,7 @@ test("the cap refuses at EXECUTION START for an action that never passes a grant
   const refusal = startExecution(
     unit.logPath,
     SUPERVISED.key,
-    { ...unit.options, clock: fixedClock(at(3)) },
+    { ...unit.options, presentedPayloadHash: BOUND, clock: fixedClock(at(3)) },
     "agent:claude",
   ) as ExecuteRefusal;
   assert.equal(refusal.ok, false);
@@ -287,7 +287,7 @@ test("a multi-action task sums, and a granted-then-started action is charged onc
   const third = startExecution(
     unit.logPath,
     SUPERVISED.key,
-    { ...unit.options, clock: fixedClock(at(6)) },
+    { ...unit.options, presentedPayloadHash: BOUND, clock: fixedClock(at(6)) },
     "agent:claude",
   ) as ExecuteRefusal;
   assert.equal(third.ok, false);

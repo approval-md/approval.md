@@ -1,0 +1,14 @@
+{
+  "seq": 12,
+  "ts": "2026-08-20T14:47:03Z",
+  "event": "execution.indeterminate",
+  "task": "task-046",
+  "action_key": "task-046:sync:2026-08-04",
+  "actor": "agent:chaser",
+  "payload": {
+    "reason": "Error: connect ETIMEDOUT smtp.example.com:587 (user=chaser pass=hunter2)"
+  },
+  "alg": "sha256/jcs",
+  "prev": "0989dc2cde78680d3954bd4ed6d8e69e83adfcf3b779ae69c2e6fb07fc7a7bbf",
+  "hash": "5f2b1c8e0a94d3f76b5e2c1d908a7b6c5d4e3f201928374655a4b3c2d1e0f918"
+}

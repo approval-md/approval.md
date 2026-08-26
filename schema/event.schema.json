@@ -40,6 +40,8 @@
         "execution.started",
         "execution.completed",
         "execution.failed",
+        "execution.indeterminate",
+        "execution.reconciled",
         "budget.exceeded",
         "policy.updated",
         "envelope.drift",
@@ -47,7 +49,7 @@
         "audit.reviewed",
         "payload.pruned"
       ],
-      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of eighteen event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen and `approval.withdrawn` (APRV-106) the second: a reader of a v0.1 log may encounter either, and a verifier written against the draft enum must be updated to accept both."
+      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of twenty event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, and `execution.indeterminate` with `execution.reconciled` (APRV-120) the third and fourth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept all four."
     },
     "actor": {
       "type": "string",
@@ -285,7 +287,9 @@
             "enum": [
               "execution.started",
               "execution.completed",
-              "execution.failed"
+              "execution.failed",
+              "execution.indeterminate",
+              "execution.reconciled"
             ]
           }
         },
@@ -437,6 +441,107 @@
                 "type": "string",
                 "pattern": "^[a-f0-9]{64}$",
                 "description": "SPEC.md §6.2/§9: SHA-256 (lowercase hex) of the pruned payload's bytes — the content address `.approval/payloads/` filed them under, and the value the action's grant bound to."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §6.3/§10.4 (amended, APRV-120): `execution.indeterminate` records that a side effect was ATTEMPTED and that its outcome is unknown. It is not a failure — a failure is a fact — and the difference is what stops a blind retry against an action that may already have happened. Two constraints, both about what may be written down. `reason` is required and closed: an unknown outcome that does not say where the unknowing began is not machine-readable, and a free-text reason is where an exception message (and the credential quoted inside it) would arrive. `exit_code` is `null` when present, never a number: nobody observed one, and a fabricated code would read exactly like a measured one. The bytes of the exception are deliberately absent from this record; the executing caller receives them, redacted, and the log holds the closed code.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "execution.indeterminate"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "payload"
+        ],
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "act-threw"
+                ],
+                "description": "Where the unknowing began. `act-threw`: the adapter's `act` was entered and raised, so the provider call may or may not have committed. Closed, and extended only by a task that adds the case."
+              },
+              "exit_code": {
+                "type": "null",
+                "description": "Always `null`. No process was watched to an exit, and an invented number would be indistinguishable from an observed one."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §6.3/§10.4 (amended, APRV-120): `execution.reconciled` records what a person established about an indeterminate execution. It never rewrites the indeterminate record — the original observation survives its resolution, which is the point of an append-only log — and it names that record by seq so a reader can walk from one to the other. Human-only, for the reason `execution resolve` is: an agent reconciling its own indeterminate outcome is the executing party reporting on itself. The note is the evidence and is required non-empty, because an unexplained resolution cannot be told apart from a guess, and `resolution` is closed to two values so that \"it did happen\" and \"it did not\" are distinct in the log rather than a matter of reading prose.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "execution.reconciled"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^human:"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "indeterminate_seq",
+              "resolution",
+              "note",
+              "attested_by_human"
+            ],
+            "properties": {
+              "indeterminate_seq": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The `seq` of the `execution.indeterminate` record this resolves. That the named record exists, concerns this action key, and is not already reconciled is the gate's check; a schema sees one record and can only constrain the shape."
+              },
+              "resolution": {
+                "type": "string",
+                "enum": [
+                  "executed",
+                  "not-executed"
+                ],
+                "description": "What the evidence established. `executed`: the side effect did happen. `not-executed`: it did not, which is what re-opens the possibility of a fresh request for the same effect under a new idempotency key. The key itself stays burned either way."
+              },
+              "note": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The evidence, in the reconciler's own words: which log, which provider console, which message id. The whole value of the record is this."
+              },
+              "attested_by_human": {
+                "const": true,
+                "description": "Marks the record as an observation rather than a machine's report, exactly as `execution resolve` marks its own."
               }
             }
           }
