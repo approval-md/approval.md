@@ -411,6 +411,61 @@ test("drift: a file that agrees with the log appends nothing", () => {
   assertClean(dir);
 });
 
+/**
+ * The same task file with pre-APRV-121 monetary fields: JSON numbers where the
+ * write boundary now demands canonical decimal strings. Derived from
+ * {@link taskFile} by unquoting only the amounts, so the repair-preservation
+ * assertions can compare whole files byte for byte.
+ */
+function historicalTaskFile(state: string, dir: string): string {
+  return taskFile(state, dir).replaceAll(/est_cost_usd: "([0-9.]+)"/gu, "est_cost_usd: $1");
+}
+
+test("drift: a pre-121 envelope is scanned at the read boundary, not refused (APRV-148)", () => {
+  const dir = ready(POLICY, "proposed");
+  request(dir, "task-042:chaser");
+
+  // The log says `awaiting`. The file now carries the numeric monetary form a
+  // pre-121 write boundary accepted, still claiming `proposed`: the daemon must
+  // read the claim and record the contradiction, not warn and look away.
+  writeFileSync(taskPath(dir), historicalTaskFile("proposed", dir), "utf8");
+
+  const { run } = daemonOnce(dir);
+  assert.equal(run.code, 0, run.stderr);
+  assert.doesNotMatch(run.stderr, /envelope-invalid/u);
+  assert.equal(eventsOf(dir, "envelope.drift").length, 1);
+
+  // Repair still lands (set-state preserves the fields it did not author, the
+  // numeric amounts included), so the historical file is not stranded in drift.
+  assert.equal(readFileSync(taskPath(dir), "utf8"), historicalTaskFile("awaiting", dir));
+  assertClean(dir);
+});
+
+test("drift: a pre-121 envelope that agrees with the log appends nothing and warns nothing", () => {
+  const dir = ready(POLICY, "proposed");
+  writeFileSync(taskPath(dir), historicalTaskFile("proposed", dir), "utf8");
+  const before = records(dir).length;
+
+  const { run } = daemonOnce(dir);
+  assert.equal(run.code, 0, run.stderr);
+  assert.doesNotMatch(run.stderr, /envelope-invalid/u);
+  assert.equal(records(dir).length, before);
+  assertClean(dir);
+});
+
+test("drift: the write boundary still refuses the numeric form the scan accepts (APRV-148)", () => {
+  const dir = caseDir(POLICY, "proposed");
+  writeFileSync(taskPath(dir), historicalTaskFile("proposed", dir), "utf8");
+  assert.equal(runCli(["policy", "attest", "--as", "human:carter"], dir).code, 0);
+
+  const register = runCli(
+    ["register", join("backlog", "tasks", "task-042.md"), "--as", "agent:claude"],
+    dir,
+  );
+  assert.notEqual(register.code, 0, "register accepted a numeric monetary field");
+  assert.match(`${register.stdout}${register.stderr}`, /envelope-invalid|must be string/u);
+});
+
 test("drift: a schema-invalid envelope warns and appends nothing", () => {
   const dir = ready(POLICY, "proposed");
   writeFileSync(

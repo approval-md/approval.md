@@ -82,7 +82,7 @@ import { stringify } from "yaml";
 
 import { FRONTMATTER_DELIMITER, parseFrontmatter } from "./frontmatter.js";
 import { parseHardenedYaml } from "./policy-load.js";
-import { validate, type ValidateOptions } from "./validate.js";
+import { validate, type ValidateOptions, type ValidationMode } from "./validate.js";
 // Type-only, so nothing in `core/` depends on `daemon/` at runtime. The
 // vocabulary is spelled once, in `daemon/projection.ts`, and the runtime gate on
 // it here is `envelope.schema.json` rather than the type: a caller reaching this
@@ -440,7 +440,19 @@ function rewriteInner(text: string, edit: TaskFileEdit, options: RewriteOptions)
     intended = { ...(existing as Record<string, unknown>), state: edit.state };
   }
 
-  const schemaCheck = validate(ENVELOPE_SCHEMA_ID, intended, options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir } satisfies ValidateOptions);
+  // `set-state` rewrites one field of an envelope an earlier write boundary
+  // already accepted, so the fields it preserves validate at the read boundary:
+  // refusing the pre-APRV-121 monetary form here would leave a historical file
+  // in permanent, unrepairable drift (APRV-148). `set-envelope` authors the
+  // whole claim and stays strict.
+  const mode: ValidationMode = edit.kind === "set-state" ? "historical" : "write";
+  const schemaCheck = validate(
+    ENVELOPE_SCHEMA_ID,
+    intended,
+    options.schemaDir === undefined
+      ? ({ mode } satisfies ValidateOptions)
+      : ({ schemaDir: options.schemaDir, mode } satisfies ValidateOptions),
+  );
   if (!schemaCheck.ok) {
     return failure(
       "invalid-envelope",
