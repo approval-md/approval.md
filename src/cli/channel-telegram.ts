@@ -213,11 +213,9 @@ export interface ListenSetup {
 }
 
 function payloadSource(
-  path: string | null,
-  cwd: string,
+  resolved: string | null,
 ): { ok: true; source: TagOptions["payload"] } | { ok: false; message: string } {
-  if (path === null) return { ok: true, source: undefined };
-  const resolved = absolute(path, cwd);
+  if (resolved === null) return { ok: true, source: undefined };
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(resolved, "utf8"));
@@ -239,13 +237,156 @@ function payloadSource(
   return { ok: true, source: (actionKey: string) => table[actionKey] };
 }
 
+// ---------------------------------------------------------------------------
+// Preparation, shared with the ambient runtime (APRV-110)
+// ---------------------------------------------------------------------------
+
+/**
+ * Why a listener could not be built. A closed union, because more than one
+ * caller now branches on it: the verb turns each into an exit code, and
+ * `approval up` turns each into a part it will not start (SPEC.md §11.1
+ * invariant 6 — a refusal is machine-readable and distinct).
+ */
+export const LISTEN_REFUSAL_CODES = [
+  /** A credential variable the policy names is unset or empty. */
+  "not-configured",
+  /** No `human:<id>` was declared, so nothing could be recorded against one. */
+  "no-identity",
+  /** `--poll-timeout` was not a whole number of seconds. */
+  "poll-timeout",
+  /** The log could not be read (or its directory does not exist). */
+  "log-unreadable",
+  /** `--payloads` did not hold a JSON object of action key -> payload. */
+  "payloads-unreadable",
+] as const;
+
+export type ListenRefusalCode = (typeof LISTEN_REFUSAL_CODES)[number];
+
+/** Everything {@link prepareListen} needs, already resolved to absolute paths. */
+export interface ListenRequest {
+  /** The log to derive the queue from and append decisions to. */
+  logPath: string;
+  /** Policy location, with `loadPolicy`'s semantics. */
+  policy: { dir?: string; file?: string };
+  /** `--as` as typed, or `null` to fall back to `APPROVAL_HUMAN`. */
+  as: string | null;
+  /** `--payloads`, already absolute, or `null` for the payload store alone. */
+  payloads: string | null;
+  /** `--api-base`, or `null` for the Bot API. */
+  apiBase: string | null;
+  /** `--poll-timeout` as typed, or `null` for the channel's own default. */
+  pollTimeout: string | null;
+  once: boolean;
+  json: boolean;
+  /** Where the channel's operational complaints go. Ordinarily stderr. */
+  log(message: string): void;
+  /** The gloss runner, if the caller wants one. See {@link ListenSetup.gloss}. */
+  gloss?: GlossRunner;
+}
+
+export type ListenPreparation =
+  | { ok: true; setup: ListenSetup }
+  | { ok: false; code: ListenRefusalCode; message: string };
+
 /**
  * Everything that can fail without touching the network, in order.
  *
  * Deliberately sequential and deliberately synchronous: an operator who typed
  * the wrong thing learns it before a bot message is sent, and the async half
  * below can then assume its configuration is whole.
+ *
+ * It PRINTS NOTHING and CHOOSES NO EXIT CODE (APRV-110). The verb below turns
+ * each refusal into the usage or I/O error it always was; `approval up` turns
+ * the same refusal into a channel it declines to start, reported in doctor's
+ * vocabulary while the other parts carry on. Two callers, one set of checks,
+ * one set of sentences — which is the only way the two surfaces can agree about
+ * what "telegram is not configured" means.
  */
+export function prepareListen(request: ListenRequest): ListenPreparation {
+  // Configuration is environment-only: policy names the variables, never the
+  // values (SPEC.md §5.1), and there is no flag that would put a bot token in
+  // a shell history or a process listing. A policy that fails to load names
+  // nothing and the reference defaults apply — the load is fail-closed for
+  // autonomy and budgets, and a variable name is not a permission.
+  const policyLoad = loadPolicy(request.policy);
+  const tokenEnv = telegramTokenEnvFor(policyLoad);
+  const chatEnv = telegramChatEnvFor(policyLoad);
+  const token = env(tokenEnv);
+  const chatId = env(chatEnv);
+  if (token === null || chatId === null) {
+    const missing = [
+      token === null ? tokenEnv : null,
+      chatId === null ? chatEnv : null,
+    ].filter((name): name is string => name !== null);
+    return {
+      ok: false,
+      code: "not-configured",
+      message: `telegram is not configured: ${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} unset or empty (both ${tokenEnv} and ${chatEnv} are required; APPROVAL.md carries only their names)`,
+    };
+  }
+
+  const actor = resolveHumanActor(request.as === null ? {} : { actor: request.as });
+  if (actor === null) {
+    return {
+      ok: false,
+      code: "no-identity",
+      message:
+        request.as === null
+          ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>. Every decision this listener records is recorded against it, and nothing here authenticates it`
+          : `--as expects a human identity matching human:<id>, got ${JSON.stringify(request.as)}; approvals are human-only`,
+    };
+  }
+
+  const pollFlag = request.pollTimeout;
+  if (pollFlag !== null && !/^\d+$/u.test(pollFlag)) {
+    return {
+      ok: false,
+      code: "poll-timeout",
+      message: `--poll-timeout expects a whole number of seconds, got ${JSON.stringify(pollFlag)}`,
+    };
+  }
+
+  const check = preflightLog(request.logPath);
+  if (!check.ok) return { ok: false, code: "log-unreadable", message: check.message };
+
+  const payloads = payloadSource(request.payloads);
+  if (!payloads.ok) {
+    return { ok: false, code: "payloads-unreadable", message: payloads.message };
+  }
+
+  const config: TelegramConfig = {
+    token,
+    chatId,
+    ...(request.apiBase === null ? {} : { apiBase: request.apiBase }),
+    ...(pollFlag === null ? {} : { pollTimeoutSeconds: Number.parseInt(pollFlag, 10) }),
+    log: request.log,
+    // APRV-135. The policy is already loaded above for the variable names; the
+    // TTL rides along so the listener can forget delivery bookkeeping no
+    // callback can still be honoured against. The channel reads no policy file
+    // of its own, and a policy that failed to load declares no TTL, which makes
+    // the sweep narrower rather than wider.
+    approvalTtlMs: policyLoad.ok ? policyLoad.durations.approvalTtlMs : null,
+  };
+
+  return {
+    ok: true,
+    setup: {
+      channel: new TelegramChannel(config),
+      logPath: request.logPath,
+      actor,
+      json: request.json,
+      once: request.once,
+      gateOptions: { policy: request.policy },
+      tagOptions: {
+        policy: request.policy,
+        ...(payloads.source === undefined ? {} : { payload: payloads.source }),
+      },
+      ...(request.gloss === undefined ? {} : { gloss: request.gloss }),
+    },
+  };
+}
+
+/** The verb's own front matter: flags in, a prepared listener or an exit code out. */
 function setUp(
   argv: string[],
   streams: Streams,
@@ -276,7 +417,7 @@ function setUp(
   const flags = parsed.flags;
 
   // Resolved here rather than after the log preflight because the policy is
-  // what NAMES the credential variables (below), and a message about a missing
+  // what NAMES the credential variables, and a message about a missing
   // variable must name the one this policy actually asked for.
   const policyFlag = stringFlag(flags, "--policy");
   const dirFlag = stringFlag(flags, "--dir");
@@ -285,106 +426,34 @@ function setUp(
       ? { file: absolute(policyFlag, cwd) }
       : { dir: dirFlag === null ? cwd : absolute(dirFlag, cwd) };
 
-  // Configuration is environment-only: policy names the variables, never the
-  // values (SPEC.md §5.1), and there is no flag that would put a bot token in
-  // a shell history or a process listing. A policy that fails to load names
-  // nothing and the reference defaults apply — the load is fail-closed for
-  // autonomy and budgets, and a variable name is not a permission.
-  const policyLoad = loadPolicy(policy);
-  const tokenEnv = telegramTokenEnvFor(policyLoad);
-  const chatEnv = telegramChatEnvFor(policyLoad);
-  const token = env(tokenEnv);
-  const chatId = env(chatEnv);
-  if (token === null || chatId === null) {
-    const missing = [
-      token === null ? tokenEnv : null,
-      chatId === null ? chatEnv : null,
-    ].filter((name): name is string => name !== null);
-    return {
-      kind: "handled",
-      code: usageError(
-        streams,
-        json,
-        `telegram is not configured: ${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} unset or empty (both ${tokenEnv} and ${chatEnv} are required; APPROVAL.md carries only their names)`,
-        TELEGRAM_LISTEN_HELP,
-      ),
-    };
-  }
-
-  const asFlag = stringFlag(flags, "--as");
-  const actor = resolveHumanActor(asFlag === null ? {} : { actor: asFlag });
-  if (actor === null) {
-    return {
-      kind: "handled",
-      code: usageError(
-        streams,
-        json,
-        asFlag === null
-          ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>. Every decision this listener records is recorded against it, and nothing here authenticates it`
-          : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; approvals are human-only`,
-        TELEGRAM_LISTEN_HELP,
-      ),
-    };
-  }
-
-  const pollFlag = stringFlag(flags, "--poll-timeout");
-  if (pollFlag !== null && !/^\d+$/u.test(pollFlag)) {
-    return {
-      kind: "handled",
-      code: usageError(
-        streams,
-        json,
-        `--poll-timeout expects a whole number of seconds, got ${JSON.stringify(pollFlag)}`,
-        TELEGRAM_LISTEN_HELP,
-      ),
-    };
-  }
-
-  const logPath = resolvePath(stringFlag(flags, "--log"), DEFAULT_LOG_PATH, cwd);
-  const check = preflightLog(logPath);
-  if (!check.ok) return { kind: "handled", code: ioError(streams, json, check.message) };
-
-  const payloads = payloadSource(stringFlag(flags, "--payloads"), cwd);
-  if (!payloads.ok) {
-    return { kind: "handled", code: ioError(streams, json, payloads.message) };
-  }
-
-  const config: TelegramConfig = {
-    token,
-    chatId,
-    ...(stringFlag(flags, "--api-base") === null
-      ? {}
-      : { apiBase: stringFlag(flags, "--api-base") as string }),
-    ...(pollFlag === null ? {} : { pollTimeoutSeconds: Number.parseInt(pollFlag, 10) }),
+  const payloadsFlag = stringFlag(flags, "--payloads");
+  const prepared = prepareListen({
+    logPath: resolvePath(stringFlag(flags, "--log"), DEFAULT_LOG_PATH, cwd),
+    policy,
+    as: stringFlag(flags, "--as"),
+    payloads: payloadsFlag === null ? null : absolute(payloadsFlag, cwd),
+    apiBase: stringFlag(flags, "--api-base"),
+    pollTimeout: stringFlag(flags, "--poll-timeout"),
+    once: boolFlag(flags, "--once"),
+    json,
     log: (message: string) => streams.err(`${message}\n`),
-    // APRV-135. The policy is already loaded above for the variable names; the
-    // TTL rides along so the listener can forget delivery bookkeeping no
-    // callback can still be honoured against. The channel reads no policy file
-    // of its own, and a policy that failed to load declares no TTL, which makes
-    // the sweep narrower rather than wider.
-    approvalTtlMs: policyLoad.ok ? policyLoad.durations.approvalTtlMs : null,
-  };
+    // APRV-144. The listener is the only place this is wired, and it is
+    // wired here rather than defaulted inside `dispatchPending` so that
+    // "a real subprocess may be spawned" is a decision one verb makes and
+    // every other caller of the dispatch cycle opts into explicitly.
+    gloss: spawnGloss,
+  });
 
-  return {
-    kind: "run",
-    setup: {
-      channel: new TelegramChannel(config),
-      logPath,
-      actor,
-      json,
-      once: boolFlag(flags, "--once"),
-      gateOptions: { policy },
-      tagOptions: {
-        policy,
-        ...(payloads.source === undefined ? {} : { payload: payloads.source }),
-      },
-      // APRV-144. The listener is the only place this is wired, and it is
-      // wired here rather than defaulted inside `dispatchPending` so that
-      // "a real subprocess may be spawned" is a decision one verb makes and
-      // every other caller of the dispatch cycle opts into explicitly.
-      gloss: spawnGloss,
-    },
-  };
+  if (!prepared.ok) {
+    // The mapping the verb has always used: a mistyped command line or a
+    // missing variable is usage; a path that could not be read is I/O.
+    const code =
+      prepared.code === "log-unreadable" || prepared.code === "payloads-unreadable"
+        ? ioError(streams, json, prepared.message)
+        : usageError(streams, json, prepared.message, TELEGRAM_LISTEN_HELP);
+    return { kind: "handled", code };
+  }
+  return { kind: "run", setup: prepared.setup };
 }
 
 // ---------------------------------------------------------------------------
@@ -884,7 +953,38 @@ function handlerFor(setup: ListenSetup, streams: Streams): (d: ChannelDecision) 
   };
 }
 
-async function runListener(setup: ListenSetup, streams: Streams): Promise<number> {
+/**
+ * How one run of the listen loop ended (APRV-110).
+ *
+ * `stopped` is the ordinary ending: a signal, or `--once` completing. The two
+ * failures are the ones the startup cycle has always treated as fatal, hoisted
+ * out of the verb so that a supervisor can treat them as a part that fell over
+ * rather than as a process that must exit.
+ */
+export type ListenerOutcome =
+  | { kind: "stopped" }
+  | { kind: "queue-error"; code: ChannelTagRefusalCode; message: string }
+  | { kind: "send-failed"; message: string };
+
+/** A listen loop that is already running. {@link stop} ends it cleanly. */
+export interface RunningListener {
+  /** Settles when the loop ends. Never rejects for a listener-shaped failure. */
+  readonly done: Promise<ListenerOutcome>;
+  /** Stop the loop, now or as soon as it reaches its first poll. */
+  stop(): void;
+}
+
+/**
+ * Start the dispatch-and-poll loop. **Installs no signal handler** and chooses
+ * no exit code (APRV-110): both are the caller's, because `approval up` runs
+ * this beside a daemon loop and a web server under one set of handlers.
+ *
+ * A FRESH {@link DispatchState} per call, which is the whole of the restart
+ * story: a supervisor that restarts a fallen listener re-derives the pending
+ * queue from the verified log and re-sends everything still pending, exactly as
+ * a restarted process would. A duplicate on the phone, never a silence.
+ */
+export function startListener(setup: ListenSetup, streams: Streams): RunningListener {
   const { channel } = setup;
   channel.onDecision(handlerFor(setup, streams));
 
@@ -895,41 +995,71 @@ async function runListener(setup: ListenSetup, streams: Streams): Promise<number
   // a channel's memory surviving a crash is not.
   const state = newDispatchState();
 
-  // The startup cycle. Same call as every later one; only its *failures* are
-  // treated differently, because an operator who has just mistyped a token or
-  // pointed at an unreadable log should get an exit code, not a retry loop.
-  const startup = await dispatchPending(setup, streams, state, new Date().toISOString());
-  if (startup.queueError !== undefined) {
-    return startup.queueError.code === "log-unreadable"
-      ? ioError(streams, setup.json, startup.queueError.message)
-      : integrityError(streams, setup.json, startup.queueError.message);
-  }
-  const firstFailure = startup.failed[0];
-  if (firstFailure !== undefined) {
-    return ioError(streams, setup.json, `telegram sendMessage failed: ${firstFailure.message}`);
-  }
-
-  // Every subsequent cycle: re-derive, send what is new, complain and carry on.
-  // Runs before each `getUpdates`, including the poll after a recovered poll
-  // error, so a request appended mid-run is delivered without a restart.
-  const beforePoll = async (): Promise<void> => {
-    reportCycle(await dispatchPending(setup, streams, state, new Date().toISOString()), streams);
+  let stopping = false;
+  const stop = (): void => {
+    stopping = true;
+    channel.stop();
   };
 
-  const stop = (): void => channel.stop();
+  const done = (async (): Promise<ListenerOutcome> => {
+    // The startup cycle. Same call as every later one; only its *failures* are
+    // treated differently, because an operator who has just mistyped a token or
+    // pointed at an unreadable log should learn it at once rather than watch a
+    // retry loop.
+    const startup = await dispatchPending(setup, streams, state, new Date().toISOString());
+    if (startup.queueError !== undefined) {
+      return { kind: "queue-error", ...startup.queueError };
+    }
+    const firstFailure = startup.failed[0];
+    if (firstFailure !== undefined) {
+      return { kind: "send-failed", message: firstFailure.message };
+    }
+    // A stop that arrived during the startup cycle: `listen()` clears its own
+    // stopped flag on entry, so a loop entered now would ignore it and block.
+    if (stopping) return { kind: "stopped" };
+
+    // Every subsequent cycle: re-derive, send what is new, complain and carry
+    // on. Runs before each `getUpdates`, including the poll after a recovered
+    // poll error, so a request appended mid-run is delivered without a restart.
+    const beforePoll = async (): Promise<void> => {
+      reportCycle(await dispatchPending(setup, streams, state, new Date().toISOString()), streams);
+    };
+
+    await channel.listen(setup.once ? { once: true, beforePoll } : { beforePoll });
+
+    if (setup.json) {
+      streams.out(`${JSON.stringify({ event: "stopped", ...channel.stats() })}\n`);
+    }
+    return { kind: "stopped" };
+  })();
+
+  return { done, stop };
+}
+
+async function runListener(setup: ListenSetup, streams: Streams): Promise<number> {
+  const running = startListener(setup, streams);
+  const stop = (): void => running.stop();
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
+
+  let outcome: ListenerOutcome;
   try {
-    await channel.listen(setup.once ? { once: true, beforePoll } : { beforePoll });
+    outcome = await running.done;
   } finally {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
   }
 
-  if (setup.json) {
-    streams.out(`${JSON.stringify({ event: "stopped", ...channel.stats() })}\n`);
+  switch (outcome.kind) {
+    case "stopped":
+      return EXIT_OK;
+    case "queue-error":
+      return outcome.code === "log-unreadable"
+        ? ioError(streams, setup.json, outcome.message)
+        : integrityError(streams, setup.json, outcome.message);
+    case "send-failed":
+      return ioError(streams, setup.json, `telegram sendMessage failed: ${outcome.message}`);
   }
-  return EXIT_OK;
 }
 
 /**

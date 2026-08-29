@@ -56,6 +56,21 @@ import { probeSmtp, type SmtpTransportOptions } from "../src/adapters/smtp.js";
 import { envFileDestination } from "../src/cli/setup-flow.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "../src/cli/exit-codes.js";
 import { commandSetup } from "../src/cli/setup.js";
+// APRV-110. The login-unit generator: mostly pure, so most of it is tested as a
+// plan in and a unit file out, with no home and no prompter.
+import {
+  armCommand,
+  defaultLogsDir,
+  disarmCommand,
+  execWords,
+  platformFor,
+  renderUnit,
+  unitPathFor,
+  wrapperScript,
+  LAUNCHD_LABEL,
+  SYSTEMD_UNIT,
+  type ServicePlan,
+} from "../src/cli/setup-service.js";
 import type { ChannelSetupDeps } from "../src/cli/setup-channel.js";
 import {
   DEFAULT_SAMPLING_ENV,
@@ -2122,4 +2137,259 @@ test("`approval env --check` reads back exactly what setup wrote", () => {
   assert.match(result.stdout, /APPROVAL_HUMAN/u);
   assert.match(result.stdout, new RegExp(`keychain:${SERVICE_TELEGRAM_TOKEN}`, "u"));
   assert.match(result.stdout, /No value is printed on this path/u);
+});
+
+// ===========================================================================
+// setup service — the login unit (APRV-110)
+// ===========================================================================
+
+/**
+ * The fifth `setup` subcommand, and the only one whose subject is not a
+ * credential. It is deliberately NOT in {@link SUBCOMMANDS}: the two shared
+ * refusal cases assert on the scripted path every other subcommand prints,
+ * which is a keystore command and an `.approval/env` line, and this verb writes
+ * neither. What it shares is the stance, which is asserted here directly.
+ *
+ * Most of the surface is pure: a plan in, a unit file out. Those cases need no
+ * home, no prompter and no filesystem, and they are the ones that matter most,
+ * because "the unit names variables and never carries a value" is a claim about
+ * the bytes and is best made against the bytes.
+ */
+
+/** A plan with a recognisable value for every variable, so a leak would show. */
+function servicePlan(overrides: Partial<ServicePlan> = {}): ServicePlan {
+  return {
+    platform: "launchd",
+    label: LAUNCHD_LABEL,
+    path: "/home/op/Library/LaunchAgents/md.approval.up.plist",
+    workingDir: "/home/op/dev/approval-md",
+    exec: ["approval"],
+    envFile: null,
+    outLog: "/home/op/Library/Logs/approval/approval-up.out.log",
+    errLog: "/home/op/Library/Logs/approval/approval-up.err.log",
+    variables: ["APPROVAL_HUMAN", "APPROVAL_TG_TOKEN", "APPROVAL_TG_CHAT"],
+    ...overrides,
+  };
+}
+
+test("setup service refuses a non-terminal stdin at exit 2 and writes nothing", () => {
+  const home = makeHome();
+  const before = readFileSync(home.logPath, "utf8");
+  const result = spawnCli(["setup", "service"], home.dir);
+
+  assert.equal(result.code, EXIT_USAGE, result.stderr);
+  assert.match(result.stderr, /stdin is not a terminal/u);
+  assert.match(result.stderr, /Nothing was written/u);
+  // The scripted path for THIS verb is "write the unit yourself", and it still
+  // has to say the one thing that makes a hand-written unit safe.
+  assert.match(result.stderr, /approval setup service --platform/u);
+  assert.match(result.stderr, /name variables and never values/u);
+
+  assert.equal(existsSync(home.envPath), false, "a refusal wrote .approval/env");
+  assert.equal(readFileSync(home.logPath, "utf8"), before);
+});
+
+test("setup service refuses --json at exit 2", () => {
+  const home = makeHome();
+  const result = spawnCli(["setup", "service", "--json"], home.dir);
+  assert.equal(result.code, EXIT_USAGE, result.stderr);
+  assert.match(result.stderr, /--json was given/u);
+});
+
+test("setup service --help says it is human-only and does not arm the service", () => {
+  const home = makeHome();
+  const help = spawnCli(["setup", "service", "--help"], home.dir);
+  assert.equal(help.code, EXIT_OK, help.stderr);
+  assert.match(help.stdout, /approval setup service —/u);
+  assert.match(help.stdout, /HUMAN-ONLY/u);
+  assert.match(help.stdout, /NAMES VARIABLES AND NEVER COPIES A VALUE/u);
+  // Wrapped across lines in the 25-line help, so the match spans the break.
+  assert.match(help.stdout, /DOES NOT LOAD THE\s+SERVICE/u);
+});
+
+test("the launchd plist names the variables, carries no value, and logs outside .approval", () => {
+  const unit = renderUnit(servicePlan());
+
+  assert.match(unit, /^<\?xml version="1\.0"/u);
+  assert.match(unit, /<key>Label<\/key><string>md\.approval\.up<\/string>/u);
+  assert.match(unit, /<key>RunAtLoad<\/key><true\/>/u);
+  assert.match(unit, /<key>KeepAlive<\/key><true\/>/u);
+
+  // The variables appear BY NAME, in a comment, and the wrapper resolves them.
+  for (const name of ["APPROVAL_HUMAN", "APPROVAL_TG_TOKEN", "APPROVAL_TG_CHAT"]) {
+    assert.ok(unit.includes(name), `${name} is not named in the unit`);
+  }
+  assert.match(unit, /approval env/u);
+  // And nothing that could be a value: no assignment of any of them.
+  assert.doesNotMatch(unit, /APPROVAL_TG_TOKEN=/u);
+  assert.doesNotMatch(unit, /APPROVAL_TG_CHAT=/u);
+
+  // The claim is about the LOG PATHS, not about the word: the unit's comment
+  // legitimately names `.approval/env` as what `approval env` resolves.
+  const paths = [...unit.matchAll(/Standard(?:Out|Error)Path<\/key><string>([^<]+)</gu)].map(
+    (match) => match[1] ?? "",
+  );
+  assert.equal(paths.length, 2, `expected both log paths in the plist: ${unit}`);
+  for (const path of paths) {
+    assert.match(path, /^\/home\/op\/Library\/Logs\/approval\//u);
+    assert.equal(path.includes(".approval"), false, `a service log goes into .approval: ${path}`);
+  }
+});
+
+test("a working directory with XML metacharacters produces a plist launchd can parse", () => {
+  const unit = renderUnit(servicePlan({ workingDir: "/home/op/dev/a & b" }));
+  assert.match(unit, /<key>WorkingDirectory<\/key><string>\/home\/op\/dev\/a &amp; b<\/string>/u);
+  // The raw ampersand appears nowhere: an unescaped one is a file launchd
+  // refuses outright, which an operator would meet at login and not here.
+  assert.doesNotMatch(unit, / & /u);
+});
+
+test("the systemd unit reads an EnvironmentFile only when the operator authored one", () => {
+  const wrapper = renderUnit(servicePlan({ platform: "systemd", label: SYSTEMD_UNIT }));
+  assert.match(wrapper, /\[Service\]/u);
+  assert.match(wrapper, /WantedBy=default\.target/u);
+  assert.match(wrapper, /Restart=always/u);
+  assert.doesNotMatch(wrapper, /EnvironmentFile=/u);
+  assert.match(wrapper, /approval env/u);
+
+  const sourced = renderUnit(
+    servicePlan({ platform: "systemd", label: SYSTEMD_UNIT, envFile: "/home/op/approval.env" }),
+  );
+  assert.match(sourced, /EnvironmentFile=\/home\/op\/approval\.env/u);
+  assert.match(sourced, /which you wrote/u);
+});
+
+test("the wrapper resolves the environment and never inlines it", () => {
+  const evaluated = wrapperScript(servicePlan());
+  assert.match(evaluated, /^cd '\/home\/op\/dev\/approval-md' && eval "\$\(approval env\)"/u);
+  assert.match(evaluated, /exec approval up --json$/u);
+
+  const sourced = wrapperScript(servicePlan({ envFile: "/home/op/approval.env" }));
+  assert.match(sourced, /\. '\/home\/op\/approval\.env'/u);
+  assert.doesNotMatch(sourced, /approval env/u);
+});
+
+test("unit paths, log homes, and the commands that arm and disarm each platform", () => {
+  assert.equal(platformFor("darwin"), "launchd");
+  assert.equal(platformFor("linux"), "systemd");
+  assert.equal(platformFor("win32"), null);
+
+  assert.equal(
+    unitPathFor("launchd", LAUNCHD_LABEL, "/home/op"),
+    "/home/op/Library/LaunchAgents/md.approval.up.plist",
+  );
+  assert.equal(
+    unitPathFor("systemd", SYSTEMD_UNIT, "/home/op"),
+    "/home/op/.config/systemd/user/approval-up.service",
+  );
+
+  assert.equal(defaultLogsDir("launchd", "/home/op"), "/home/op/Library/Logs/approval");
+  assert.equal(defaultLogsDir("systemd", "/home/op"), "/home/op/.local/state/approval");
+
+  // Printed, never run. The arming command is the operator's own act.
+  assert.match(armCommand("launchd", LAUNCHD_LABEL, "/tmp/u.plist"), /^launchctl bootstrap /u);
+  assert.match(armCommand("systemd", SYSTEMD_UNIT, "/tmp/u.service"), /systemctl --user enable/u);
+  assert.match(disarmCommand("launchd", LAUNCHD_LABEL), /^launchctl bootout /u);
+  assert.match(disarmCommand("systemd", SYSTEMD_UNIT), /systemctl --user disable/u);
+});
+
+test("the unit names the invocation this process actually is", () => {
+  // A unit that named the wrong binary would fail at login rather than here.
+  assert.deepEqual(execWords(null, ["/usr/bin/node", "/opt/approval/dist/main.js"]), [
+    "/usr/bin/node",
+    "/opt/approval/dist/main.js",
+  ]);
+  assert.deepEqual(execWords(null, ["/usr/bin/node", "/usr/local/bin/approval"]), [
+    "/usr/local/bin/approval",
+  ]);
+  assert.deepEqual(execWords("/opt/bin/approval", ["/usr/bin/node", "/x.js"]), [
+    "/opt/bin/approval",
+  ]);
+  assert.deepEqual(execWords(null, []), ["approval"]);
+});
+
+test("setup service prints the whole unit before writing, and writing is the human's yes", async () => {
+  const home = makeHome();
+  const unitPath = join(home.dir, "unit.plist");
+  const logsDir = join(home.dir, "service-logs");
+
+  // Answer NO. The unit is still printed in full, and nothing is written.
+  const refused = await run(
+    ["service", "--platform", "launchd", "--out", unitPath, "--logs", logsDir, "--as", HUMAN],
+    home,
+    { prompter: scriptedPrompter([false]) },
+  );
+  assert.equal(refused.code, EXIT_OK, refused.err);
+  assert.match(refused.out, /Read it before it exists/u);
+  assert.match(refused.out, /<key>RunAtLoad<\/key>/u);
+  assert.match(refused.out, /aborted: nothing was written/u);
+  assert.equal(existsSync(unitPath), false, "a refusal wrote the unit anyway");
+
+  // Answer YES. The file appears, and the verb still does not start it.
+  const written = await run(
+    ["service", "--platform", "launchd", "--out", unitPath, "--logs", logsDir, "--as", HUMAN],
+    home,
+    { prompter: scriptedPrompter([true]) },
+  );
+  assert.equal(written.code, EXIT_OK, written.err);
+  assert.equal(existsSync(unitPath), true, "the unit was not written");
+  assert.match(written.out, /IT IS NOT RUNNING YET/u);
+  assert.match(written.out, /launchctl bootstrap /u);
+
+  // The bytes on disk are the bytes that were shown.
+  const onDisk = readFileSync(unitPath, "utf8");
+  assert.ok(written.out.includes(onDisk.trimEnd()), "the printed unit is not the written one");
+
+  // Uninstall prints the stop command first, then removes it.
+  const removed = await run(
+    ["service", "--platform", "launchd", "--out", unitPath, "--uninstall", "--as", HUMAN],
+    home,
+    { prompter: scriptedPrompter([true]) },
+  );
+  assert.equal(removed.code, EXIT_OK, removed.err);
+  assert.match(removed.out, /STOP IT FIRST/u);
+  assert.match(removed.out, /launchctl bootout /u);
+  assert.equal(existsSync(unitPath), false, "the unit survived --uninstall");
+
+  // And a second uninstall is a sentence rather than an error.
+  const again = await run(
+    ["service", "--platform", "launchd", "--out", unitPath, "--uninstall", "--as", HUMAN],
+    home,
+    { prompter: scriptedPrompter([]) },
+  );
+  assert.equal(again.code, EXIT_OK, again.err);
+  assert.match(again.out, /nothing to remove/u);
+});
+
+test("a service log path inside .approval/ is refused", async () => {
+  const home = makeHome();
+  const inside = join(home.dir, ".approval", "service-logs");
+  const result = await run(
+    [
+      "service",
+      "--platform",
+      "systemd",
+      "--out",
+      join(home.dir, "unit.service"),
+      "--logs",
+      inside,
+      "--as",
+      HUMAN,
+    ],
+    home,
+    { prompter: scriptedPrompter([]) },
+  );
+  assert.equal(result.code, EXIT_USAGE, result.err);
+  assert.match(result.err, /never goes there/u);
+  assert.equal(existsSync(join(home.dir, "unit.service")), false);
+});
+
+test("setup service refuses an identity that is not a human", async () => {
+  const home = makeHome();
+  const result = await run(
+    ["service", "--platform", "systemd", "--as", "agent:claude"],
+    home,
+    { prompter: scriptedPrompter([]) },
+  );
+  assert.equal(result.code, EXIT_USAGE, result.err);
 });

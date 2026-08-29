@@ -64,21 +64,45 @@ is the human's step, which is what makes the human the gate.
 The human runs, in the primary checkout:
 
 ```sh
-eval "$(approval env)"         # APPROVAL_HUMAN, APPROVAL_TG_TOKEN, APPROVAL_TG_CHAT
-approval daemon run &          # watch, drift, TTL, QUEUE.md — the sole writer
+eval "$(approval env)"   # APPROVAL_HUMAN, APPROVAL_TG_TOKEN, APPROVAL_TG_CHAT
+approval up              # the daemon loop AND every configured channel, one process
+```
+
+`approval up` (APRV-110) is the whole gate in one foreground process: the watch
+loop that records drift, expires what lapsed and regenerates `QUEUE.md`, plus the
+Telegram listener that puts requests on the phone and records the taps. It is the
+terminal that prints the execution token, so keep it where you can read it. A
+channel whose credential is unset is not started, is reported the way `approval
+doctor` reports it, and the daemon runs anyway; a channel that falls over is
+restarted with a doubling backoff while the loop keeps ticking.
+
+The two separate processes still work and behave identically, which is what the
+composed test suite asserts. Reach for them when you want to restart one half
+without the other:
+
+```sh
+approval daemon run &              # watch, drift, TTL, QUEUE.md — the sole writer
 approval channel telegram listen   # pushes requests to the phone, records taps
 ```
 
+To have the runtime there without starting it by hand, `approval setup service`
+writes the launchd agent (macOS) or systemd user unit (Linux) that runs
+`approval up` at login. It prints the whole unit for you to read before it writes
+anything, it names the variables and never copies a value, and it does not arm
+the service: it prints the one command that does, because that act is yours.
+
 That eval establishes the identity the human-only verbs read and the bot token
-and chat id the listener needs, from the sources recorded in `.approval/env`.
+and chat id the channels need, from the sources recorded in `.approval/env`.
 `approval setup identity` and `approval setup channel telegram` are what write that file
 (the token goes into the OS keystore, the file records where); `approval env
 --check` prints the whole table with no values in it; and nothing reads the file
 implicitly, which is why the eval is a step a human takes. Exporting the three
 variables by hand still works and is what the eval expands to.
 
-(Foreground processes by design; two terminals or a multiplexer. Backgrounding
-is the operator's business at v0.1.)
+(Foreground by design, whichever spelling you use. `approval up` needs one
+terminal; the separate pair needs two, or a multiplexer. Backgrounding is the
+operator's business at v0.1, and `approval setup service` is how it stops being
+a thing you remember.)
 
 The listener delivers requests **as they arrive**, not only the ones pending
 when it started (APRV-55). Before every `getUpdates` it re-derives the pending
@@ -97,6 +121,13 @@ without an attempt limit, so a phone out of signal or a Bot API outage delays
 delivery rather than dropping it; the stderr warnings thin out after a few
 consecutive failures for the same request. Only a failure during the startup
 send exits non-zero, which is how a mistyped token or chat id announces itself.
+
+Under `approval up` that last sentence reads differently, and deliberately: a
+startup send that fails takes the CHANNEL down rather than the process. The
+supervisor reports it, waits a doubling backoff, and starts the listener again
+with a fresh dispatch state, which re-derives the pending queue from the verified
+log and re-sends. The daemon loop ticks through all of it. So the two behaviours
+above are the same behaviour, reached on a timer instead of by your hand.
 
 `approval channel web` needs no equivalent: it builds the queue from the log on
 every page load, so a refresh shows what is pending now. `approval channel cli`
@@ -166,9 +197,10 @@ printf '{"argv":["npm","update","@types/node"],"cwd":"/Users/carter/dev/approval
 approval wait APRV-51 --timeout 6h
 ```
 
-Human side: daemon and Telegram listener running as above; the request lands on
-the phone with the computed class, the payload bytes, and the claimed summary
-visibly distinguished. Tap **Approve**. The listener prints the token once.
+Human side: `approval up` running as above (or the separate pair); the request
+lands on the phone with the computed class, the payload bytes, and the claimed
+summary visibly distinguished. Tap **Approve**. The runtime prints the token
+once, in the terminal it is running in.
 
 Session side, with the token:
 

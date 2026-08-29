@@ -88,8 +88,13 @@ function ioError(streams: Streams, json: boolean, message: string): number {
   return EXIT_IO;
 }
 
-/** A duration flag, in the policy's own `<n><unit>` vocabulary (SPEC.md §5.2). */
-function durationFlag(
+/**
+ * A duration flag, in the policy's own `<n><unit>` vocabulary (SPEC.md §5.2).
+ *
+ * Exported for `approval up` (APRV-110), which accepts the same three durations
+ * and must refuse a typo in exactly the same words.
+ */
+export function durationFlag(
   flags: Record<string, string | boolean>,
   name: string,
   fallback: number,
@@ -112,7 +117,7 @@ function durationFlag(
  * Warnings go to stderr and everything else to stdout, so `approval daemon run >
  * daemon.log` keeps the narrative and leaves the complaints on the terminal.
  */
-function describe(event: DaemonEvent): { text: string; stderr: boolean } {
+export function describeDaemonEvent(event: DaemonEvent): { text: string; stderr: boolean } {
   switch (event.event) {
     case "started":
       return {
@@ -216,7 +221,7 @@ function describe(event: DaemonEvent): { text: string; stderr: boolean } {
  * is untouched by the opt-in. Failures go to stderr with everything else that
  * complains.
  */
-function describeGitEvidence(event: GitEvidenceEvent): { text: string; stderr: boolean } {
+export function describeGitEvidence(event: GitEvidenceEvent): { text: string; stderr: boolean } {
   if (event.event === "git_evidence_failed") {
     return { text: renderRefusal(style(), "git-evidence", event.message), stderr: true };
   }
@@ -231,7 +236,7 @@ function describeGitEvidence(event: GitEvidenceEvent): { text: string; stderr: b
 }
 
 /** The outcome → frozen exit code mapping, drawn where every other verb draws it. */
-function exitFor(outcome: DaemonOutcome): number {
+export function exitForDaemonOutcome(outcome: DaemonOutcome): number {
   switch (outcome.kind) {
     case "stopped":
       return EXIT_OK;
@@ -254,6 +259,18 @@ export function commandDaemonRun(
   streams: Streams,
   cwd: string,
 ): number | Promise<number> {
+  // APRV-110. `--with-channels` is the same verb as `approval up`, spelled from
+  // the daemon's side for an operator who already has the daemon invocation in a
+  // unit file. Answered BEFORE the flag table below, because the ambient runtime
+  // accepts flags this one does not (an approver identity, a Bot API base, a
+  // port), and a parse against this table would refuse them first. The import is
+  // dynamic so that `cli/up.ts` can go on statically importing this module for
+  // its daemon-event renderers without an ESM cycle between the two.
+  if (argv.includes("--with-channels")) {
+    const rest = argv.filter((word) => word !== "--with-channels");
+    return import("./up.js").then((module) => module.commandUp(rest, streams, cwd));
+  }
+
   const json = argv.includes("--json");
   const parsed = parseFlags(argv, RUN_FLAGS);
   if (!parsed.ok) return usageError(streams, json, parsed.message, DAEMON_RUN_HELP);
@@ -326,7 +343,7 @@ export function commandDaemonRun(
           else streams.out(line);
           return;
         }
-        const rendered = describe(event);
+        const rendered = describeDaemonEvent(event);
         if (rendered.stderr) streams.err(`${rendered.text}\n`);
         else streams.out(`${rendered.text}\n`);
       },
@@ -386,7 +403,7 @@ export function commandDaemonRun(
           streams.err(`approval: ${outcome.message}\n`);
         }
       }
-      return exitFor(outcome);
+      return exitForDaemonOutcome(outcome);
     },
     (cause: unknown) => {
       process.off("SIGINT", stop);
