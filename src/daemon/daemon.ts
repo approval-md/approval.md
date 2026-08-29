@@ -756,10 +756,18 @@ export class Daemon {
       return { appended: false, stop: null };
     }
 
+    // The read boundary, deliberately (APRV-148). This scan validates envelopes
+    // it will never register: a pre-APRV-121 envelope carrying numeric monetary
+    // fields was valid when its task was registered and must keep validating
+    // here, or drift and loss detection turn silently off for exactly the
+    // historical artifacts APRV-121's compatibility rule protects. `approval
+    // register` still validates at the strict write boundary.
     const validation = validate(
       "envelope",
       envelope,
-      this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir },
+      this.options.schemaDir === undefined
+        ? { mode: "historical" }
+        : { schemaDir: this.options.schemaDir, mode: "historical" },
     );
     if (!validation.ok) {
       this.warn(
@@ -1100,10 +1108,15 @@ export class Daemon {
       const id = parsed.data["id"];
       if (typeof id !== "string" || id.length === 0) continue;
 
+      // Read boundary, as in the drift scan above (APRV-148): a historical
+      // envelope the scan just read a claim out of must also be repairable, or
+      // the drift it records stands forever.
       const validation = validate(
         "envelope",
         envelope,
-        this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir },
+        this.options.schemaDir === undefined
+          ? { mode: "historical" }
+          : { schemaDir: this.options.schemaDir, mode: "historical" },
       );
       if (!validation.ok) continue;
 

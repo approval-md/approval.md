@@ -85,7 +85,11 @@ export const DEFAULT_SCHEMA_DIR = fileURLToPath(
  *   exactly one substitution, described in {@link WIDENED_DEFS}, and no other.
  *
  * The asymmetry is the point: a document only ever gets *more* permissive by a
- * caller explicitly naming the read boundary, and only `core/verify.ts` does.
+ * caller explicitly naming the read boundary, and the callers that do are
+ * pinned: `core/verify.ts` (the log walk), the daemon's envelope scan, and the
+ * `set-state` task-file rewrite — paths that read or preserve claims an earlier
+ * write boundary accepted, never ones that author new claims (APRV-121,
+ * APRV-148).
  */
 export type ValidationMode = "write" | "historical";
 
