@@ -64,6 +64,8 @@ import {
 import { commandAudit } from "./audit.js";
 import { commandChannel } from "./channel.js";
 import { commandDaemon } from "./daemon.js";
+// APRV-110. The ambient runtime, imported beside the daemon it supervises.
+import { commandUp } from "./up.js";
 import { commandDoctor } from "./doctor.js";
 import { commandEnv } from "./env.js";
 import { commandHook } from "./hook.js";
@@ -817,6 +819,26 @@ export function main(argv: string[], options: MainOptions = {}): number {
         (cause: unknown) => {
           streams.err(
             `approval: daemon failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+          );
+          process.exitCode = EXIT_IO;
+        },
+      );
+      return EXIT_OK;
+    }
+    // The ambient runtime (APRV-110). `approval up` is the daemon loop and every
+    // channel the policy configures in ONE supervised process, and it is the
+    // fourth LONG-LIVED command here, unwrapped exactly as `channel` and
+    // `daemon` are. `daemon run --with-channels` reaches the same function.
+    case "up": {
+      const outcome = commandUp(rest, streams, cwd);
+      if (typeof outcome === "number") return outcome;
+      void outcome.then(
+        (code) => {
+          process.exitCode = code;
+        },
+        (cause: unknown) => {
+          streams.err(
+            `approval: the ambient runtime failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
           );
           process.exitCode = EXIT_IO;
         },

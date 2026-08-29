@@ -228,8 +228,17 @@ registered envelope rather than from flags, so an agent cannot rename its own
 class between registering and asking. An approval is about specific bytes, never
 about a description of them.
 
-**3. Start the listener and read the message.** `approval channel telegram
-listen` prints `notified task-demo:chaser (message 501)` and your phone has it.
+**3. Start the runtime and read the message.** `approval up` prints
+`notified task-demo:chaser (message 501)` and your phone has it. That one
+foreground process is the whole gate: the daemon loop that records envelope
+drift, expires what lapsed and regenerates the queue, plus every channel the
+policy configures. A channel whose credential variable is unset is not started,
+says so in the words `approval doctor` uses, and the daemon runs anyway; a
+channel that falls over is restarted with a doubling backoff while the loop keeps
+ticking. `approval daemon run` and `approval channel telegram listen` still run
+the halves separately and behave identically, and `approval setup service` writes
+the launchd or systemd user unit that starts the runtime at login (printing the
+whole unit for you to read first, naming variables and never copying a value).
 The message shows the action key, a **COMPUTED** block the runtime derived (class,
 task, state, binding, budget verdicts, chain head), a **CLAIMED** block naming the
 agent and marked unverified, the **FULL PAYLOAD**, and two buttons. It also says
@@ -274,8 +283,8 @@ granted task-demo:chaser at seq 4 by human:alice
 ─────────────────────────────────────────────────────────────
 ```
 
-For a tap on your phone the same panel appears on the listener's own terminal,
-and its last line reads `not sent to Telegram`. Delivery differs per channel on
+For a tap on your phone the same panel appears on the terminal running the
+runtime, and its last line reads `not sent to Telegram`. Delivery differs per channel on
 purpose: a chat transcript lives on servers you do not control and is readable by
 anyone later added to that chat, so a credential does not go there, while the
 local **web** channel shows the raw token once in the response page for the grant

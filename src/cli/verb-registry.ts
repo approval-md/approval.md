@@ -1493,6 +1493,41 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "up",
+    purpose:
+      "THE AMBIENT RUNTIME (APRV-110): the `daemon run` watch loop plus every channel this policy configures, in ONE supervised foreground process. `daemon run --with-channels` is the same verb spelled from the other side. A channel whose credential variable is unset is NOT started; the refusal is reported in `approval doctor`'s vocabulary and the parts that can run do. A channel that falls over is restarted with a doubling backoff, re-deriving its pending queue from the verified log, and the daemon loop never dies with it. Credentials and the approver identity come from the environment this process was launched with and from nowhere else. Its --json output is one object per line: every DaemonEvent and every listener line verbatim, plus this verb's own supervision lines.",
+    human_only: true,
+    human_only_note:
+      "Everything `daemon run` is marked human_only for, and one more. It is a long-lived operator process and the runtime's intended sole writer while it runs, so an agent starting one would be starting an unsupervised writer against the log. It also HOLDS THE CHANNEL CREDENTIAL and records every decision against the human identity in its launch environment, which is the authority `channel telegram listen` is withheld for. An agent that could start it could put prompts on a human's phone under an identity it did not authenticate.",
+    input: input({
+      flags: {
+        ...LOG_FLAG,
+        "--tasks": "string",
+        "--out": "string",
+        ...POLICY_FLAGS,
+        "--interval": "string",
+        "--debounce": "string",
+        ...AS_FLAG,
+        "--payloads": "string",
+        "--payload-dir": "string",
+        "--api-base": "string",
+        "--poll-timeout": "string",
+        "--port": "string",
+        "--no-telegram": "boolean",
+        "--no-web": "boolean",
+        "--restart-backoff": "string",
+        "--once": "boolean",
+        "--git-evidence": "boolean",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
     name: "payload",
     subcommand: "hash",
     purpose:
@@ -1607,6 +1642,34 @@ const VERBS: VerbSpec[] = [
     input: input({
       positionals: positionals([{ name: "name", description: "the adapter name, e.g. email" }], 1),
       flags: { ...AS_FLAG, ...LOG_FLAG, ...POLICY_FLAGS, ...HELP_FLAGS },
+    }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
+    name: "setup",
+    subcommand: "service",
+    purpose:
+      "Write the launchd user agent (macOS) or systemd user unit (Linux) that runs `approval up` at login. It PRINTS THE WHOLE UNIT for the operator to read before anything is written, and writes only on confirmation. IT NAMES VARIABLES AND NEVER COPIES A VALUE: the unit either evaluates `approval env` in a wrapper the human reads, or reads an EnvironmentFile the human authored and this verb never opens. It does NOT load the service, printing the one arming command instead. Console output goes where the operator chooses and a path inside .approval/ is refused. --uninstall prints the stop command and removes the file. INTERACTIVE ONLY. Appends nothing to the log.",
+    human_only: true,
+    human_only_note:
+      "It installs a STANDING CAPABILITY on someone's machine: a process that starts at login, holds a channel credential, and can put approval prompts in front of a human. That is the one thing in this repo an agent must never arrange for itself, and the interactive refusal is the enforcement.",
+    input: input({
+      flags: {
+        "--platform": "string",
+        "--label": "string",
+        "--logs": "string",
+        "--env-file": "string",
+        "--exec": "string",
+        "--out": "string",
+        "--uninstall": "boolean",
+        ...AS_FLAG,
+        ...LOG_FLAG,
+        ...POLICY_FLAGS,
+        ...HELP_FLAGS,
+      },
     }),
     output: null,
     error: ERROR_SCHEMA,
