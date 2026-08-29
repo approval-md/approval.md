@@ -10,7 +10,7 @@
  * half-blocks, no box-drawing, no emoji, because those are the characters that
  * break in Terminal.app's default font and in every CI log. And it DEGRADES —
  * with colour off it collapses to a single line, so a pipe, a `NO_COLOR`
- * terminal or an ASCII locale gets `approval.md v0.0.1` and no decoration at
+ * terminal or an ASCII locale gets `approval.md v0.1.0` and no decoration at
  * all. The banner is ornament; the name and the version are the information,
  * and only the information survives the degradation.
  */
@@ -18,7 +18,7 @@
 import { style as processStyle, type Style } from "./style.js";
 
 /** Kept in step with package.json by a test rather than by memory. */
-export const VERSION = "0.0.1";
+export const VERSION = "0.1.0";
 
 export const TAGLINE = "human approval for agent actions";
 
