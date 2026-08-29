@@ -238,13 +238,14 @@ test("specificity level (b): equal literals, fewer wildcards wins", () => {
   );
 });
 
-test("specificity level (c): total segments is a defensive tie-break", () => {
-  // For any pattern, totalSegments === literalSegments + wildcardSegments, so
-  // clause (3) of the SPEC §5.2 specificity rule can never actually decide a
-  // comparison that clauses (1) and (2) left tied. It is implemented for
-  // conformance with the written rule; this test pins the invariant that makes
-  // it unreachable, so a future grammar change (e.g. a `**` segment counted
-  // differently) breaks here loudly rather than silently altering precedence.
+test("specificity level (c): total segments is derived, so it can never break a tie", () => {
+  // For any pattern, totalSegments === literalSegments + wildcardSegments.
+  // SPEC §5.2 used to add a third criterion comparing totals; two keys tying on
+  // literals and again on wildcards have equal totals by that arithmetic, so
+  // the criterion could never separate them and was deleted (APRV-136). This
+  // test pins the invariant the deletion rests on, so a future grammar change
+  // (e.g. a `**` segment counted differently) breaks here loudly rather than
+  // silently reviving a comparison the ordering no longer performs.
   const patterns = [
     "a",
     "*",
@@ -265,9 +266,24 @@ test("specificity level (c): total segments is a defensive tie-break", () => {
     const [literals, wildcards, total] = specificityOf(pattern);
     assert.equal(literals + wildcards, total, `${pattern}: literals + wildcards === total`);
   }
+
+  // The consequence, stated directly: any two patterns agreeing on the first
+  // two elements agree on the third, so their keys are identical and no
+  // ordering leg is left that could rank one above the other.
+  for (const left of patterns) {
+    for (const right of patterns) {
+      const a = specificityOf(left);
+      const b = specificityOf(right);
+      if (a[0] !== b[0] || a[1] !== b[1]) continue;
+      assert.deepEqual(a, b, `${left} and ${right} tie on literals and wildcards, so keys are equal`);
+    }
+  }
 });
 
 test("specificity level (d): a full tie is broken by the strictest autonomy", () => {
+  // `a.b.*` and `*.b.c` tie on literals (2) and on wildcards (1). With the old
+  // criterion (3) they also tied on total segments, which is why it decided
+  // nothing; they are equally specific and the strictest autonomy takes it.
   const loaded = classesPolicy([
     ["a.b.*", "autonomous"], // [2, 1, 3]
     ["*.b.c", "manual"], //     [2, 1, 3]
@@ -280,6 +296,38 @@ test("specificity level (d): a full tie is broken by the strictest autonomy", ()
   assert.equal(result.matched?.pattern, "*.b.c");
   assert.equal(result.autonomy, "manual");
   assert.equal(result.provenance, "rule");
+});
+
+test("a literal/wildcard tie is equal specificity and falls through to strictest autonomy", () => {
+  // AC3 stated directly, and in both declaration orders so the fall-through is
+  // a property of the tie rather than of YAML key order. `a.*.c` and `*.b.c`
+  // both key [2, 1, 3]: equal literals, equal wildcards, hence equal totals.
+  assert.deepEqual(specificityOf("a.*.c"), specificityOf("*.b.c"));
+
+  for (const rules of [
+    [
+      ["a.*.c", "autonomous"],
+      ["*.b.c", "manual"],
+    ],
+    [
+      ["*.b.c", "manual"],
+      ["a.*.c", "autonomous"],
+    ],
+  ] as ReadonlyArray<ReadonlyArray<[string, string]>>) {
+    const result = resolve(classesPolicy([...rules]), "a.b.c");
+    assert.equal(result.candidates.length, 2, "both patterns match and compete");
+    assert.deepEqual(
+      result.candidates.map((candidate) => candidate.specificity),
+      [
+        [2, 1, 3],
+        [2, 1, 3],
+      ],
+      "neither pattern outranks the other on any surviving ordering leg",
+    );
+    assert.equal(result.autonomy, "manual", "the strictest autonomy resolves the tie");
+    assert.equal(result.matched?.pattern, "*.b.c");
+    assert.equal(result.provenance, "rule");
+  }
 });
 
 test("equally strict full ties resolve to the lexicographically smallest pattern", () => {

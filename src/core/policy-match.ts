@@ -34,11 +34,11 @@
  *
  * ## Specificity (SPEC.md §5.2, Specificity bullet)
  *
- * Candidates are ordered by the three-part key
- * `(literalSegments DESC, wildcardSegments ASC, totalSegments DESC)`. A trailing
- * `.*` counts as one wildcard segment and contributes no literals. Patterns
- * still tied are equally specific, and then "deny beats allow" decides: the
- * strictest autonomy among the tied rules wins.
+ * Candidates are ordered by the two-part key
+ * `(literalSegments DESC, wildcardSegments ASC)`. A trailing `.*` counts as one
+ * wildcard segment and contributes no literals. Patterns still tied are equally
+ * specific, and then "deny beats allow" decides: the strictest autonomy among
+ * the tied rules wins.
  *
  * ## Fail-closed
  *
@@ -83,7 +83,9 @@ export type Provenance =
 
 /**
  * Specificity key: `[literalSegments, wildcardSegments, totalSegments]`.
- * Compared as literals DESC, wildcards ASC, total DESC.
+ * Ordered on the first two elements only, as literals DESC then wildcards ASC.
+ * `totalSegments` is the sum of the other two, so it can never break a tie they
+ * did not already break; it is carried for the explain trace, which reports it.
  */
 export type Specificity = [number, number, number];
 
@@ -254,11 +256,22 @@ export function specificityOf(pattern: string): Specificity {
   return [patternSegments.length - wildcards, wildcards, patternSegments.length];
 }
 
-/** Compare two specificity keys; negative when `a` is MORE specific. */
+/**
+ * Compare two specificity keys; negative when `a` is MORE specific.
+ *
+ * There are only two ordering legs, not three. Every segment is either a
+ * literal or a wildcard, so `totalSegments === literalSegments +
+ * wildcardSegments` for every pattern. Two keys that tie on literals and again
+ * on wildcards therefore have equal totals by arithmetic, and a third leg
+ * comparing totals could never separate them. SPEC.md §5.2 used to list that
+ * comparison as criterion (3); it was removed as dead text (APRV-136). Keys
+ * reaching the end of this function are genuinely equal, and the caller
+ * resolves them with the strictest-autonomy rule.
+ */
 function compareSpecificity(a: Specificity, b: Specificity): number {
   if (a[0] !== b[0]) return b[0] - a[0]; // more literals first
   if (a[1] !== b[1]) return a[1] - b[1]; // fewer wildcards first
-  return b[2] - a[2]; // more total segments first
+  return 0; // equal literals and wildcards implies equal totals: a real tie
 }
 
 /**
