@@ -851,6 +851,14 @@ to decide whether to fix itself, stop retrying, or ask a human.
   no `defaults.approval_ttl`.
 - `actor-invalid` — the actor is not a well-formed `human:` / `agent:` identity.
 - `actor-not-human` — a human-only verb was attempted by another actor.
+- `actor-not-approver` — a grant was recorded by a person the resolved class
+  rule's `approvers` list does not name. Distinct from `actor-not-human`, and
+  the repair is what separates them: that one says run the verb as a person,
+  this one says ask a person the policy put in front of this class. Grant only;
+  reject and revoke withdraw authority and stay open to any human. A rule that
+  declares no `approvers` restricts nobody. Note for anyone upgrading: the list
+  was parsed and enforced nowhere before, so a policy naming approvers starts
+  binding here, and `approval init`'s scaffolded policy names `alice`.
 - `diff-too-large` — the semantic diff of a proposed policy amendment renders
   larger than a channel prompt can show whole. A refusal, never a truncation: a
   prompt showing two thirds of a policy change would collect a signature for the

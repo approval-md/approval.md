@@ -888,7 +888,11 @@ const SUITES = [
     // proposal-stale, policy-already-attested) and `channel_tag_refusal_codes`
     // gained proposal-stale. An implementation conforming to either earlier
     // version emits a union this suite no longer accepts (conformance/README.md).
-    vectors_version: "3.0.0",
+    // 4.0.0 (APRV-137): `gate_refusal_codes` gained `actor-not-approver`, the
+    // refusal a grant by a person the resolved rule's `approvers` list does not
+    // name now carries. The list was parsed and enforced nowhere before, so this
+    // is a union that grew because a control started existing.
+    vectors_version: "4.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
