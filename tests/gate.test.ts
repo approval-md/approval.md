@@ -39,6 +39,8 @@ import {
 } from "../src/core/gate.js";
 import { appendEvent, type EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
+import { loadPolicy } from "../src/core/policy-load.js";
+import { resolve } from "../src/core/policy-match.js";
 import { tokenHash } from "../src/core/token.js";
 import { verify } from "../src/core/verify.js";
 import { canonicalRender } from "../src/core/wysiwys.js";
@@ -173,6 +175,32 @@ const ENVELOPE = {
 /** Register `ENVELOPE` under `task-042` and return the record. */
 function registerTask(unit: Case, ts: string = T0): EventRecord {
   const result = register(unit.logPath, { task: "task-042", envelope: ENVELOPE }, ts, "agent:claude");
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  if (!result.ok) throw new Error("unreachable");
+  return result.record;
+}
+
+/**
+ * Register `task-042` declaring one action per key, each bound to
+ * {@link PAYLOAD_HASH}.
+ *
+ * SPEC.md §7 as APRV-147 enforces it: intake refuses an action the log has not
+ * declared, so a manual scenario asking about a key other than the canonical
+ * chaser declares it here first.
+ */
+function registerKeys(unit: Case, keys: readonly string[], ts: string = T0): EventRecord {
+  const result = register(
+    unit.logPath,
+    {
+      task: "task-042",
+      envelope: {
+        ...ENVELOPE,
+        actions: keys.map((key) => ({ ...ENVELOPE.actions[0], idempotency_key: key })),
+      },
+    },
+    ts,
+    "agent:claude",
+  );
   assert.equal(result.ok, true, result.ok ? "" : result.message);
   if (!result.ok) throw new Error("unreachable");
   return result.record;
@@ -663,7 +691,9 @@ test("supervised and autonomous actions emit NO approval.* events (amended §6.3
 test("the irreversibility floor pulls an autonomous class back onto the manual path", () => {
   const unit = newCase();
   attest(unit);
-  registerTask(unit);
+  // Declared, because the floor lands this on the manual path and APRV-147
+  // checks the declaration there.
+  registerKeys(unit, ["task-042:read"]);
   const result = request(
     unit.logPath,
     { task: "task-042", actionKey: "task-042:read", payload_hash: PAYLOAD_HASH, cls: "read.web", reversible: false },
@@ -677,6 +707,195 @@ test("the irreversibility floor pulls an autonomous class back onto the manual p
   assert.equal(result.proceed, false);
   assert.equal(result.resolution.floorApplied, true);
   assert.notEqual(result.record, null);
+  assertClean(unit);
+});
+
+// ===========================================================================
+// Intake checks the declaration (APRV-147, SPEC.md §7)
+// ===========================================================================
+
+/** The operator-held secret's variable NAME, test-scoped and never exported. */
+const LIVE_SECRET_ENV = "APPROVAL_TEST_GATE_LIVE_SECRET";
+const LIVE_ENV: NodeJS.ProcessEnv = { [LIVE_SECRET_ENV]: "operator-held-secret-never-in-the-log" };
+
+/** {@link POLICY} with `files.write.*` supervised live at `rate`. */
+function livePolicy(rate: string): string {
+  return POLICY.replace(
+    "classes:\n",
+    `audit:\n  supervised_sample_rate: 1\n  sampling_secret_env: ${LIVE_SECRET_ENV}\nclasses:\n`,
+  ).replace(
+    "  files.write.*:\n    autonomy: supervised\n",
+    `  files.write.*:\n    autonomy: supervised-live\n    live_rate: ${rate}\n`,
+  );
+}
+
+test("a manual request for an unregistered task is refused, and nothing is appended", () => {
+  const unit = newCase();
+  attest(unit);
+  const before = records(unit).length;
+  const refusal = asRefusal(
+    request(
+      unit.logPath,
+      {
+        task: "task-042",
+        actionKey: "task-042:chaser",
+        // The caller names its own binding, which is exactly the shape APRV-147
+        // closes: before it, this recorded an approval.requested for a class the
+        // log never saw declared, and a human was asked to approve it.
+        payload_hash: PAYLOAD_HASH,
+        cls: "communicate.email.external",
+        est_cost_usd: "0.02",
+        reversible: false,
+      },
+      at(1),
+      "agent:claude",
+      unit.options,
+    ),
+  );
+  assert.equal(refusal.code, "not-registered");
+  assert.equal(records(unit).length, before);
+  assert.equal(eventTypes(unit).includes("approval.requested"), false);
+  assertClean(unit);
+});
+
+test("a registered task with an undeclared action key is refused action-not-registered", () => {
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  const before = records(unit).length;
+  const refusal = asRefusal(
+    request(
+      unit.logPath,
+      {
+        task: "task-042",
+        actionKey: "task-042:undeclared",
+        payload_hash: PAYLOAD_HASH,
+        cls: "communicate.email.external",
+      },
+      at(1),
+      "agent:claude",
+      unit.options,
+    ),
+  );
+  assert.equal(refusal.code, "action-not-registered");
+  assert.equal(records(unit).length, before);
+  assertClean(unit);
+});
+
+test("an unregistered task hears not-registered, never payload-hash-required", () => {
+  // The order pin. With no hash anywhere — none declared, because there is no
+  // declaration, and none supplied — the missing binding is a consequence of the
+  // missing registration, so the refusal names the cause and not the symptom.
+  const unit = newCase();
+  attest(unit);
+  const refusal = asRefusal(
+    request(
+      unit.logPath,
+      { task: "task-042", actionKey: "task-042:chaser", cls: "communicate.email.external" },
+      at(1),
+      "agent:claude",
+      unit.options,
+    ),
+  );
+  assert.equal(refusal.code, "not-registered");
+  assert.deepEqual(eventTypes(unit), ["policy.updated"]);
+});
+
+test("a supervised-live class refuses an unregistered task at every rate: the draw never runs", () => {
+  // The no-re-roll closure. The live fraction is drawn over the payload hash, so
+  // an unregistered action drawing over a hash the CALLER chose could be
+  // re-presented until the draw came up unsampled. At a rate this small
+  // essentially nothing is selected, so before APRV-147 this call returned
+  // `proceed: true` with a `not-selected` verdict; the refusal below is the
+  // evidence that the declaration check runs before `liveVerdict` is consulted
+  // at all.
+  for (const rate of ["0.0000001", "0.5", "1"]) {
+    const unit = newCase(livePolicy(rate));
+    attest(unit);
+    // The scenario is only worth anything if the class really is live: a policy
+    // that failed to load would fail closed to manual and refuse for a reason
+    // that has nothing to do with the draw.
+    const load = loadPolicy({ file: unit.policyPath });
+    assert.equal(load.ok, true, `rate ${rate} did not load`);
+    const resolution = resolve(load, "files.write.repo", { reversible: true });
+    assert.equal(resolution.autonomy, "supervised", `rate ${rate} is not supervised`);
+    assert.equal(resolution.supervision, "live", `rate ${rate} is not live`);
+
+    const result = request(
+      unit.logPath,
+      {
+        task: "task-042",
+        actionKey: "task-042:draft",
+        payload_hash: PAYLOAD_HASH,
+        cls: "files.write.repo",
+        reversible: true,
+      },
+      at(1),
+      "agent:claude",
+      { ...unit.options, env: LIVE_ENV },
+    );
+    const refusal = asRefusal(result);
+    assert.equal(refusal.code, "not-registered", `rate ${rate} did not refuse`);
+    assert.deepEqual(eventTypes(unit), ["policy.updated"], `rate ${rate} appended something`);
+    assertClean(unit);
+  }
+});
+
+test("a registered manual request is still recorded exactly as before", () => {
+  // The other side of the check: the ordinary flow is untouched, so the record a
+  // declared action produces is the record it always produced.
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  const record = requestChaser(unit);
+  assert.equal(record.event, "approval.requested");
+  assert.deepEqual(record.payload, {
+    class: "communicate.email.external",
+    est_cost_usd: "0.02",
+    payload_hash: PAYLOAD_HASH,
+    summary: "Send deposit chaser",
+    reversible: false,
+    policy_sha256: policySha256(unit),
+  });
+  assert.deepEqual(eventTypes(unit), ["policy.updated", "task.registered", "approval.requested"]);
+  assertClean(unit);
+});
+
+test("a declaration with no payload_hash still accepts the caller's fallback", () => {
+  // Behaviour APRV-147 preserves rather than adds to: where the registration
+  // declared no binding there is nothing for the log's declaration to win with,
+  // and the caller's hash is taken on the terms it always was — but only now
+  // that a registration exists to be taken on behalf of.
+  const unit = newCase();
+  attest(unit);
+  const unbound = { ...ENVELOPE.actions[0] };
+  delete (unbound as Record<string, unknown>)["payload_hash"];
+  const registered = register(
+    unit.logPath,
+    { task: "task-042", envelope: { ...ENVELOPE, actions: [unbound] } },
+    T0,
+    "agent:claude",
+  );
+  assert.equal(registered.ok, true, registered.ok ? "" : registered.message);
+
+  const caller = "7".repeat(64);
+  const result = request(
+    unit.logPath,
+    {
+      task: "task-042",
+      actionKey: "task-042:chaser",
+      payload_hash: caller,
+      cls: "communicate.email.external",
+      est_cost_usd: "0.02",
+      reversible: false,
+    },
+    at(1),
+    "agent:claude",
+    unit.options,
+  );
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  if (!result.ok || result.record === null) throw new Error("expected an approval.requested record");
+  assert.equal((result.record.payload as Record<string, unknown>)["payload_hash"], caller);
   assertClean(unit);
 });
 
@@ -734,7 +953,7 @@ test("request refuses a non-principal actor", () => {
 test("a failed budget appends budget.exceeded with the verdicts, and refuses", () => {
   const unit = newCase();
   attest(unit);
-  registerTask(unit);
+  registerKeys(unit, ["task-042:spend"]);
 
   const refusal = asRefusal(
     request(

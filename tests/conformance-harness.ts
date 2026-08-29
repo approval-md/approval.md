@@ -474,6 +474,12 @@ function runGateVerdict(input: Record<string, unknown>): Expectation {
   return outcome;
 }
 
+/** How many records the log holds, verified as always; `-1` if it cannot be read. */
+function logRecordCount(logPath: string): number {
+  const read = readVerifiedRecords(logPath, { schemaDir: SCHEMA_DIR });
+  return read.ok ? read.records.length : -1;
+}
+
 function runGateStep(
   logPath: string,
   policyPath: string,
@@ -526,7 +532,16 @@ function runGateStep(
             autonomy: result.resolution.autonomy,
             proceed: result.proceed,
           }
-        : { valid: false, failure_class: result.code };
+        : {
+            valid: false,
+            failure_class: result.code,
+            // What a refused intake LEFT BEHIND, counted from the log rather
+            // than asserted in prose. Most refusals must append nothing, and
+            // `budget-exceeded` must append exactly one `budget.exceeded`; a
+            // failure_class alone cannot tell those two apart, and "nothing was
+            // recorded" is half of what several of these refusals promise.
+            records: logRecordCount(logPath),
+          };
     }
     case "decide": {
       const result = decide(logPath, str(step, "action"), str(step, "decision") as Decision, actor, {

@@ -114,22 +114,34 @@ const POLICY_COUNTED = [
 
 const BOUND = "d".repeat(64);
 
-/** An envelope whose CLAIMED fields are dialed all the way up or all the way down. */
-function envelope(confidence: number, summary: string, cost: string): unknown {
+/**
+ * An envelope whose CLAIMED fields are dialed all the way up or all the way
+ * down, declaring `task-042:chaser` plus any `extraKeys`.
+ *
+ * The extra keys exist because SPEC.md §7 (APRV-147) refuses a manual request
+ * for an action the log has not declared: a scenario that asks about a second
+ * key declares it here, so that what the scenario is testing stays the budget
+ * ratchet rather than the declaration check.
+ */
+function envelope(
+  confidence: number,
+  summary: string,
+  cost: string,
+  extraKeys: readonly string[] = [],
+): unknown {
+  const action = {
+    class: "communicate.email.external",
+    summary,
+    reversible: false,
+    est_cost_usd: cost,
+    idempotency_key: "task-042:chaser",
+    payload_hash: BOUND,
+  };
   return {
     origin: { app: "example-capture", created_by: "agent:claude" },
     route: { assignee: "agent:claude", confidence, rationale: summary },
     state: "proposed",
-    actions: [
-      {
-        class: "communicate.email.external",
-        summary,
-        reversible: false,
-        est_cost_usd: cost,
-        idempotency_key: "task-042:chaser",
-        payload_hash: BOUND,
-      },
-    ],
+    actions: [action, ...extraKeys.map((key) => ({ ...action, idempotency_key: key }))],
   };
 }
 
@@ -188,7 +200,9 @@ test("confidence 0.01 and 0.99 produce identical resolutions and identical refus
 });
 
 test("est_cost_usd: 0 does not buy a free action — daily_actions still charges 1", () => {
-  const unit = ready(envelope(0.99, "free, trivial, already approved in spirit", "0"));
+  const unit = ready(
+    envelope(0.99, "free, trivial, already approved in spirit", "0", ["task-042:second"]),
+  );
 
   const first = request(
     unit.logPath,

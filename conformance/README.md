@@ -108,16 +108,20 @@ writes — MUST:
 | `schema-validation` | Write-boundary validation of every committed schema fixture, with the constraint each refusal violates named — and the APRV-121 read boundary, where a pre-change monetary amount must still validate. |
 | `gate-verdicts` | Scripted gate scenarios: a policy, a sequence of operations, and the verdict of the last one, covering the refusal codes intake and decision can produce. |
 
-Two suites also state a **boundary** rather than a capability, because an
+One suite also states a **boundary** rather than a capability, because an
 implementation that claims more than the design gives is the failure mode a
 conformance suite exists to catch:
 
 - `chain-verification/truncation-unanchored` — records dropped off the tail with
   no external anchor leave a valid chain. Nothing inside the file contradicts it,
   and an implementation reporting corruption here is wrong.
-- `gate-verdicts/intake-does-not-check-registration` — SPEC.md §7's declaration
-  requirement is enforced at execution and at harness consumption, not at
-  intake.
+
+`gate-verdicts` carried a second boundary until APRV-147:
+`intake-does-not-check-registration` said SPEC.md §7's declaration requirement
+was enforced at execution and at harness consumption but not at intake. Intake
+enforces it now, so the vector is `intake-checks-registration` and asserts the
+refusal, and the suite's `vectors_version` is 2.0.0 — an implementation that
+passed 1.0.0 does not pass this.
 
 ## Changing the suite
 
