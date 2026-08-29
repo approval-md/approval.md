@@ -88,7 +88,7 @@ test("APPROVAL.md defaults are fail-closed: manual, expiry rejects", () => {
 test("APPROVAL.md declares the audit sample rate and global budget", () => {
   const { policy } = loadRepoPolicy();
   assert.equal(policy.audit?.supervised_sample_rate, 0.15);
-  assert.equal(policy.budgets?.global?.daily_actions, 200);
+  assert.equal(policy.budgets?.global?.daily_actions, 2000);
 });
 
 test("APPROVAL.md declares approver carter on the cli channel", () => {
