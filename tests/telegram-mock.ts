@@ -350,6 +350,13 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
       sockets.add(socket);
       socket.on("close", () => sockets.delete(socket));
     });
+    // Node's default 5s keep-alive idle close races undici's socket reuse:
+    // when a test pauses longer than the window between two calls (a GC pause
+    // in the APRV-135 long-run test on a slow runner is enough), the server
+    // closes the socket as fetch reuses it and the call dies with
+    // "fetch failed" (#142). The mock holds sockets open for its whole life;
+    // close() destroys every tracked socket, so nothing leaks.
+    created.keepAliveTimeout = 0;
     return created;
   }
 
