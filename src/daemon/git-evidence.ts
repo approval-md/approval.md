@@ -78,7 +78,7 @@ import { PAYLOAD_STORE_DIRNAME } from "../core/payload-store.js";
  * because a module that resolves its own package root differs between the source
  * tree and the build output for no benefit at all.
  */
-export const APPROVALD_VERSION = "0.0.1";
+export const APPROVALD_VERSION = "0.1.0";
 
 /** `user.name` on every commit this module makes. */
 export const GIT_EVIDENCE_AUTHOR_NAME = `approvald ${APPROVALD_VERSION}`;
