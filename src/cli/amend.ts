@@ -69,7 +69,18 @@ import {
   resolveHumanActor,
 } from "../core/attest.js";
 import { diffPolicies, renderDiff, SPEC_NAMESPACES, type PolicyDiff } from "../core/policy-diff.js";
-import { loadPolicy, POLICY_FILENAMES, type PolicyLoadResult } from "../core/policy-load.js";
+import {
+  loadPolicy,
+  parseDuration,
+  POLICY_FILENAMES,
+  type PolicyLoadResult,
+} from "../core/policy-load.js";
+import {
+  proposalState,
+  proposeAttestation,
+  type DiffSummary,
+  type LoadAdvisory,
+} from "../core/policy-proposal.js";
 import { readVerifiedRecords } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
@@ -106,10 +117,40 @@ const FLAGS: Record<string, FlagKind> = {
   "--branch": "string",
   "--direct": "boolean",
   "--yes": "boolean",
+  // APRV-109: the agent path's two knobs. `--wait` is how long this process
+  // holds the ceremony open for the approver's tap, and `--interval` how often
+  // it re-reads the log. Both are ignored under a human identity, where the
+  // human act is the confirmation this process already asks for.
+  "--wait": "string",
+  "--interval": "string",
+  "--note": "string",
   "--json": "boolean",
   "--help": "boolean",
   "-h": "boolean",
 };
+
+/**
+ * How long the agent path waits for a tap when `--wait` is not given
+ * (APRV-109).
+ *
+ * Long enough that a phone left face-down through a meeting still collects the
+ * decision, short enough that a forgotten `amend` does not hold a worktree
+ * open overnight. A lapse attests nothing, so the cost of the timeout being
+ * too short is a re-run.
+ */
+const DEFAULT_ATTESTATION_WAIT_MS = 15 * 60 * 1000;
+
+/** How often the agent path re-reads the log while waiting. */
+const DEFAULT_ATTESTATION_INTERVAL_MS = 2000;
+
+/** An agent identity, the one `--as` form that routes to the channel path. */
+const AGENT_ACTOR = /^agent:.+/u;
+
+/** Synchronous sleep with no dependency and no busy-spin (as `cli/execute.ts`). */
+function sleepSync(ms: number): void {
+  if (ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 
 /** Machine-readable refusal codes. Frozen public API, printed in the help. */
 type AmendErrorCode =
@@ -123,7 +164,18 @@ type AmendErrorCode =
   | "append-failed"
   | "log-unreadable"
   | "log-torn-tail"
-  | "log-corrupt";
+  | "log-corrupt"
+  // APRV-109, the agent path's own four. Each names a ceremony that ended with
+  // NOTHING attested, which is the only outcome an agent-run amendment can have
+  // short of a human's tap.
+  /** No channel is configured, so no prompt could reach an approver. */
+  | "no-channel"
+  /** `core/policy-proposal.ts` refused to propose; its code rides in `detail`. */
+  | "propose-failed"
+  /** The approver said no. */
+  | "attestation-declined"
+  /** `--wait` elapsed with no answer. */
+  | "attestation-timeout";
 
 function detail(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
@@ -511,6 +563,13 @@ interface Baseline {
 interface BaselineOutcome {
   baseline: Baseline;
   load: PolicyLoadResult | null;
+  /**
+   * The recovered baseline BYTES, when a verifiable baseline was found
+   * (APRV-109). `core/policy-proposal.ts` re-hashes them and refuses any that
+   * are not the attested text, so handing them over concedes nothing: this is
+   * the same blob that produced `load`, passed on rather than re-recovered.
+   */
+  bytes: Uint8Array | null;
   /** Temp file holding the recovered bytes, to remove when we are done. */
   scratch: string | null;
 }
@@ -526,6 +585,7 @@ function recoverBaseline(policyPath: string, attestedSha256: string | null): Bas
   const unavailable = (reason: string): BaselineOutcome => ({
     baseline: { mode: "unavailable", reason },
     load: null,
+    bytes: null,
     scratch: null,
   });
 
@@ -557,6 +617,7 @@ function recoverBaseline(policyPath: string, attestedSha256: string | null): Bas
   return {
     baseline: { mode: "git-head", reason: null },
     load: loadPolicy({ file: scratch }),
+    bytes: blob,
     scratch: scratchDir,
   };
 }
@@ -577,6 +638,216 @@ function summarize(policyPath: string, diff: PolicyDiff | null): string {
   if (diff.vocabulary.length > 0) parts.push(`${diff.vocabulary.length} policy key(s)`);
   if (parts.length === 0) return `amend ${name} (no semantic change)`;
   return `amend ${name}: ${parts.join(", ")}`;
+}
+
+// ---------------------------------------------------------------------------
+// The agent path: ask, wait, and attest nothing yourself (APRV-109)
+// ---------------------------------------------------------------------------
+
+/** What the channel ceremony collected, when it collected an attestation. */
+interface CollectedAttestation {
+  ok: true;
+  /** The `policy.updated` the approver's tap appended. */
+  seq: number;
+  /** The `policy.proposed` that tap answered. */
+  proposedSeq: number;
+  sha256: string;
+  diff: DiffSummary;
+  load: LoadAdvisory;
+}
+
+interface CollectRefusal {
+  ok: false;
+  code: AmendErrorCode;
+  message: string;
+  exitCode: number;
+  human?: string;
+}
+
+interface CollectInput {
+  streams: Streams;
+  json: boolean;
+  st: ReturnType<typeof style>;
+  logPath: string;
+  policyPath: string;
+  actor: string;
+  baseline: Uint8Array | null;
+  note: string | null;
+  liveLoad: PolicyLoadResult;
+  waitMs: number;
+  intervalMs: number;
+  cwd: string;
+}
+
+/**
+ * Is there a channel that could carry an attestation prompt to a human?
+ *
+ * FAIL CLOSED, and this is the check that makes the agent path safe to offer at
+ * all. A proposal appended into a repository with no configured channel is a
+ * question nobody will ever be asked, and the verb would then sit through its
+ * whole `--wait` before reporting a timeout that was decidable at the start.
+ * Worse, the proposal would stay in the log looking like an outstanding ask.
+ *
+ * A policy that does not LOAD is the same answer for a stronger reason: the
+ * channel table is in the policy, so an unloadable policy is one whose channel
+ * configuration is unknown, and "unknown" resolves to the stricter path here
+ * exactly as it does everywhere else.
+ */
+function channelConfigured(load: PolicyLoadResult): boolean {
+  if (!load.ok) return false;
+  const channels = load.policy.channels;
+  return channels !== undefined && Object.keys(channels).length > 0;
+}
+
+/**
+ * Ask a human to attest the prepared bytes, and wait for the answer.
+ *
+ * The whole of what APRV-109 adds to this verb. It appends a `policy.proposed`
+ * through `core/policy-proposal.ts` — which computes the hash, the semantic
+ * diff and the load advisory from the bytes, and refuses `diff-too-large`
+ * rather than truncating — and then polls the VERIFIED log until the proposal
+ * reaches a terminal state.
+ *
+ * Only one of those states continues the ceremony. `attested` returns the seq of
+ * the `policy.updated` the tap appended, and the caller's git half proceeds
+ * unchanged, citing that seq in the commit exactly as it cites a terminal
+ * attestation's today. `declined`, `expired`, `superseded` and a lapsed `--wait`
+ * all attest nothing and commit nothing: the policy edit stays in the working
+ * tree, as unattested as it was before the verb ran.
+ *
+ * This process never appends the attestation and never holds a human identity.
+ * The tap does both, in the channel listener, under the human identity that
+ * listener is configured with — the same identity, from the same configuration,
+ * that every grant already lands under (SPEC.md §11, unchanged).
+ */
+function collectAttestation(input: CollectInput): CollectedAttestation | CollectRefusal {
+  const { streams, json, st, logPath, policyPath, cwd } = input;
+
+  if (!channelConfigured(input.liveLoad)) {
+    return {
+      ok: false,
+      code: "no-channel",
+      exitCode: EXIT_USAGE,
+      message: input.liveLoad.ok
+        ? `no channel is configured in ${basename(policyPath)}, so an attestation prompt has nowhere to go; nothing was proposed and nothing was attested. Configure a channel, or attest at a terminal with --as human:<id>`
+        : `the policy does not load (${input.liveLoad.code}), so which channel would carry the attestation prompt is unknown; nothing was proposed and nothing was attested. Fix the policy, or attest at a terminal with --as human:<id>`,
+    };
+  }
+
+  const waitUntil = new Date(Date.now() + input.waitMs).toISOString();
+  const proposed = proposeAttestation(
+    logPath,
+    {
+      policyPath,
+      baseline: input.baseline,
+      waitUntil,
+      ...(input.note === null ? {} : { note: input.note }),
+    },
+    input.actor,
+  );
+  if (!proposed.ok) {
+    // A gate refusal, so exit 1 rather than 4: the command was well-formed and
+    // the runtime said no. `diff-too-large` is the one a caller acts on — read
+    // the diff at a terminal — and it rides in the message with its own code.
+    return {
+      ok: false,
+      code: "propose-failed",
+      exitCode: proposed.code === "append-failed" ? EXIT_IO : EXIT_INTEGRITY,
+      message: `${proposed.code}: ${proposed.message}`,
+    };
+  }
+
+  const proposedSeq = proposed.record.seq;
+  if (!json) {
+    streams.out(
+      `${st.glyph("ok")} proposed seq ${String(proposedSeq)} — an approver has been asked to attest ${relPath(policyPath, cwd)}\n`,
+    );
+    for (const line of st
+      .table([
+        { left: "sha256", right: shortHash(proposed.sha256) },
+        { left: "changes", right: proposed.diff.headline },
+        { left: "loads", right: proposed.load.ok ? "clean" : `NO (${proposed.load.code ?? "?"})` },
+        { left: "waiting until", right: waitUntil },
+      ])
+      .split("\n")) {
+      streams.out(`  ${line}\n`);
+    }
+    streams.out("\n");
+  }
+
+  const deadline = Date.now() + input.waitMs;
+  for (;;) {
+    const read = readVerifiedRecords(logPath);
+    if (!read.ok) {
+      return {
+        ok: false,
+        code: read.code === "log-torn-tail" ? "log-torn-tail" : "log-unreadable",
+        exitCode: read.code === "log-torn-tail" ? EXIT_TORN_TAIL : EXIT_IO,
+        message: `${read.message}; the attestation prompt at seq ${String(proposedSeq)} is unanswered and nothing was attested`,
+      };
+    }
+
+    const derived = proposalState(read.records, proposedSeq, new Date().toISOString());
+    const state = derived?.state ?? "open";
+
+    if (state === "attested") {
+      // The tap's own record, found by the hash it names. `proposalState` proved
+      // one exists; this recovers its seq, which is what the commit cites.
+      const attestation = read.records.find(
+        (entry) =>
+          entry.seq > proposedSeq &&
+          entry.event === "policy.updated" &&
+          typeof entry.payload === "object" &&
+          entry.payload !== null &&
+          (entry.payload as Record<string, unknown>)["sha256"] === proposed.sha256,
+      );
+      if (attestation === undefined) {
+        return {
+          ok: false,
+          code: "log-unreadable",
+          exitCode: EXIT_IO,
+          message: `the attestation prompt at seq ${String(proposedSeq)} derives as attested and no policy.updated naming ${proposed.sha256} could be found; nothing was committed`,
+        };
+      }
+      return {
+        ok: true,
+        seq: attestation.seq,
+        proposedSeq,
+        sha256: proposed.sha256,
+        diff: proposed.diff,
+        load: proposed.load,
+      };
+    }
+
+    if (state === "declined") {
+      return {
+        ok: false,
+        code: "attestation-declined",
+        exitCode: EXIT_INTEGRITY,
+        message: `the approver DECLINED the attestation prompt at seq ${String(proposedSeq)}; nothing was attested and nothing was committed. The policy edit is still in the working tree, and the policy in force is the one that was in force before this ran`,
+      };
+    }
+
+    if (state === "superseded") {
+      return {
+        ok: false,
+        code: "attestation-timeout",
+        exitCode: EXIT_INTEGRITY,
+        message: `the attestation prompt at seq ${String(proposedSeq)} was SUPERSEDED by a later proposal for the same policy; nothing was attested here. Re-run the amendment against the bytes now on disk`,
+      };
+    }
+
+    if (state === "expired" || Date.now() >= deadline) {
+      return {
+        ok: false,
+        code: "attestation-timeout",
+        exitCode: EXIT_INTEGRITY,
+        message: `no answer arrived for the attestation prompt at seq ${String(proposedSeq)} before its deadline (${waitUntil}); nothing was attested and nothing was committed. The prompt retires itself: it leaves every channel queue by derivation, so no stale question is left in front of the approver`,
+      };
+    }
+
+    sleepSync(Math.min(input.intervalMs, Math.max(0, deadline - Date.now())));
+  }
 }
 
 /** `approval policy amend …` — the whole ceremony, in one verb. */
@@ -619,19 +890,61 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     return usageError(streams, json, "--branch expects a branch name");
   }
 
-  // Identity first, before a byte is read: the ceremony is human-only in every
-  // mode, dry runs included. Asking a human to read a diff and only then telling
-  // them their sign-off cannot be attributed wastes the one resource this system
-  // spends. The rules are `policy attest`'s, unchanged.
+  // Identity first, before a byte is read. Asking a human to read a diff and
+  // only then telling them their sign-off cannot be attributed wastes the one
+  // resource this system spends.
+  //
+  // APRV-109 widens WHO may run the verb without widening who may attest. Under
+  // a human identity everything below is byte-for-byte what it was: the diff,
+  // the advisory, the terminal confirmation, `appendAttestation`. Under an
+  // AGENT identity the same preparation runs and then stops at the one act an
+  // agent must not perform — instead of attesting, it appends a `policy.proposed`
+  // and waits for a human's tap to append the attestation under the human
+  // identity the channel listener holds. The agent never holds that identity and
+  // never writes a `policy.updated`; `core/policy-proposal.ts` refuses it in
+  // code and `schema/event.schema.json` refuses it at the write boundary.
   const asFlag = stringFlag(parsed.flags, "--as");
-  const actor = resolveHumanActor(asFlag === null ? {} : { actor: asFlag });
+  const agentActor = asFlag !== null && AGENT_ACTOR.test(asFlag) ? asFlag : null;
+  const actor = agentActor ?? resolveHumanActor(asFlag === null ? {} : { actor: asFlag });
   if (actor === null) {
     return usageError(
       streams,
       json,
       asFlag === null
-        ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>`
-        : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag)}; an amendment is attested, and attestation is the one verb an agent must not perform`,
+        ? `no identity: set ${HUMAN_ACTOR_ENV}=human:<id>, or pass --as human:<id> to attest here or --as agent:<id> to ask an approver to attest through a channel`
+        : `--as expects human:<id> or agent:<id>, got ${JSON.stringify(asFlag)}; an amendment is attested, and under an agent identity the attestation is collected as a tap rather than performed here`,
+    );
+  }
+
+  // APRV-109. The wait knobs are refused outright under a human identity rather
+  // than quietly ignored: an operator who passed `--wait` believes they asked
+  // for the channel ceremony, and a verb that attested on the spot instead would
+  // be answering a question they did not ask.
+  const waitText = stringFlag(parsed.flags, "--wait");
+  const intervalText = stringFlag(parsed.flags, "--interval");
+  const proposalNote = stringFlag(parsed.flags, "--note");
+  if (agentActor === null && (waitText !== null || intervalText !== null)) {
+    return usageError(
+      streams,
+      json,
+      "--wait and --interval belong to the channel ceremony, which runs under --as agent:<id>; under a human identity the amendment is attested here and there is no tap to wait for",
+    );
+  }
+  const waitMs = waitText === null ? DEFAULT_ATTESTATION_WAIT_MS : parseDuration(waitText);
+  if (waitMs === null) {
+    return usageError(
+      streams,
+      json,
+      `--wait expects a duration like 30s, 10m, 6h, got ${JSON.stringify(waitText)}`,
+    );
+  }
+  const intervalMs =
+    intervalText === null ? DEFAULT_ATTESTATION_INTERVAL_MS : parseDuration(intervalText);
+  if (intervalMs === null) {
+    return usageError(
+      streams,
+      json,
+      `--interval expects a duration like 500ms, 2s, got ${JSON.stringify(intervalText)}`,
     );
   }
 
@@ -940,7 +1253,11 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     return EXIT_OK;
   }
 
-  if (!assumeYes) {
+  // (e2) The terminal confirmation belongs to the human path only. Under an
+  // agent identity the confirmation IS the tap, and asking this process's stdin
+  // for one would be asking the party under oversight to confirm its own
+  // amendment.
+  if (agentActor === null && !assumeYes) {
     if (json || process.stdin.isTTY !== true) {
       return usageError(
         streams,
@@ -956,13 +1273,38 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     }
   }
 
-  // (f) The attestation itself, through core's one sanctioned path.
-  const result = appendAttestation(logPath, policyPath, actor);
-  if (!result.ok) {
-    const exitCode = result.error.code === "corrupt-tail" ? EXIT_TORN_TAIL : EXIT_IO;
-    return refuse(streams, json, "append-failed", result.error.message, exitCode);
+  // (f) The attestation itself. One of two doors onto the same act: the human
+  // path performs it here, the agent path asks for it and waits.
+  let seq: number;
+  let collected: CollectedAttestation | null = null;
+  if (agentActor === null) {
+    const result = appendAttestation(logPath, policyPath, actor);
+    if (!result.ok) {
+      const exitCode = result.error.code === "corrupt-tail" ? EXIT_TORN_TAIL : EXIT_IO;
+      return refuse(streams, json, "append-failed", result.error.message, exitCode);
+    }
+    seq = result.record.seq;
+  } else {
+    const asked = collectAttestation({
+      streams,
+      json,
+      st,
+      logPath,
+      policyPath,
+      actor,
+      baseline: recovered.bytes,
+      note: proposalNote,
+      liveLoad,
+      waitMs,
+      intervalMs,
+      cwd,
+    });
+    if (!asked.ok) {
+      return refuse(streams, json, asked.code, asked.message, asked.exitCode, asked.human);
+    }
+    collected = asked;
+    seq = asked.seq;
   }
-  const seq = result.record.seq;
 
   // (f2) SUCCESS FIRST (APRV-130).
   //
@@ -983,6 +1325,12 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       .table([
         { left: "file", right: relPath(policyPath, cwd) },
         { left: "sha256", right: shortHash(liveSha256) },
+        // APRV-109: on the agent path the attestation was collected as a tap, so
+        // the prompt it answered is named here. The seq the commit cites is the
+        // ATTESTATION's, as it has always been.
+        ...(collected === null
+          ? []
+          : [{ left: "attested by tap on", right: `policy.proposed seq ${String(collected.proposedSeq)}` }]),
       ])
       .split("\n")) {
       streams.out(`  ${line}\n`);
@@ -1402,6 +1750,16 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       aborted: false,
       ceremony: { attested: true, seq },
       publishing,
+      ...(collected === null
+        ? {}
+        : {
+            proposal: {
+              seq: collected.proposedSeq,
+              sha256: collected.sha256,
+              diff: collected.diff,
+              load: collected.load,
+            },
+          }),
     });
   } else {
     if (committed) {
@@ -1641,6 +1999,12 @@ interface Report {
    */
   ceremony?: { attested: boolean; seq: number | null };
   publishing?: PublishingReport;
+  /**
+   * The attestation prompt this ceremony collected its tap from (APRV-109).
+   * Present only on the agent path; absent when the operator attested here, so
+   * a machine reading it can tell the two ceremonies apart without a flag.
+   */
+  proposal?: { seq: number; sha256: string; diff: DiffSummary; load: LoadAdvisory };
 }
 
 function emitReport(streams: Streams, report: Report): void {
@@ -1662,6 +2026,9 @@ function emitReport(streams: Streams, report: Report): void {
       // ceremony's own outcome without inferring it from `attestation`.
       ceremony: report.ceremony ?? { attested: report.attestation !== null, seq: null },
       publishing: report.publishing ?? null,
+      // APRV-109, additive and always present: `null` says the attestation was
+      // performed at this terminal, an object says it was collected as a tap.
+      proposal: report.proposal ?? null,
     })}\n`,
   );
 }

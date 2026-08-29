@@ -40,6 +40,8 @@ const EVENT_TYPES = [
   "execution.reconciled",
   "budget.exceeded",
   "policy.updated",
+  "policy.proposed",
+  "policy.declined",
   "envelope.drift",
   "audit.sampled",
   "audit.reviewed",
@@ -69,6 +71,11 @@ const EXTRA_REQUIRED: Record<string, readonly string[]> = {
   "execution.reconciled": ["task", "action_key", "payload"],
   "budget.exceeded": ["task"],
   "policy.updated": [],
+  // APRV-109. A prompt with no payload is a prompt with no hash, no diff and no
+  // advisory, which is the failure this event exists to prevent; an answer with
+  // no payload names neither the bytes nor the prompt it answers.
+  "policy.proposed": ["payload"],
+  "policy.declined": ["payload"],
   "envelope.drift": ["task"],
   "audit.sampled": [],
   "audit.reviewed": [],
@@ -345,4 +352,122 @@ test("execution.reconciled is human-only and says which resolution it recorded",
   }
   // An unexplained resolution cannot be told apart from a guess.
   assert.equal(validate("event", { ...record, payload: { ...payload, note: "" } }).ok, false);
+});
+
+// ---------------------------------------------------------------------------
+// The attestation ceremony (APRV-109)
+// ---------------------------------------------------------------------------
+
+test("policy.proposed is asked by a principal, never by the runtime", () => {
+  const record = fixture("policy.proposed");
+  assert.equal(validate("event", record).ok, true);
+
+  // A person may propose an amendment and so may an agent. `system:` may not:
+  // the runtime has no policy edit of its own to ask about, and a
+  // runtime-originated proposal would be the gate writing its own rules.
+  for (const actor of ["human:carter", "agent:claude-code"]) {
+    assert.equal(
+      validate("event", { ...record, actor }).ok,
+      true,
+      `policy.proposed rejected a principal actor "${actor}"`,
+    );
+  }
+  for (const actor of ["system:daemon", "carter"]) {
+    assert.equal(
+      validate("event", { ...record, actor }).ok,
+      false,
+      `policy.proposed accepted actor "${actor}"`,
+    );
+  }
+});
+
+test("a proposal that shows only a hash is refused at the write boundary", () => {
+  const record = fixture("policy.proposed");
+  const payload = record["payload"] as Record<string, unknown>;
+
+  // The three COMPUTED fields are each required. A prompt missing the diff asks
+  // a human to sign for sixty-four characters; one missing the advisory hides
+  // that the policy fails closed to all-manual; one missing the hash names no
+  // bytes at all.
+  for (const field of ["sha256", "diff", "load", "policy_path"]) {
+    const copy = { ...payload };
+    delete copy[field];
+    assert.equal(
+      validate("event", { ...record, payload: copy }).ok,
+      false,
+      `policy.proposed validated without payload.${field}`,
+    );
+  }
+
+  // And the diff itself must say whether it is available and what it renders as.
+  for (const field of ["available", "lines", "headline"]) {
+    const diff = { ...(payload["diff"] as Record<string, unknown>) };
+    delete diff[field];
+    assert.equal(
+      validate("event", { ...record, payload: { ...payload, diff } }).ok,
+      false,
+      `policy.proposed validated without payload.diff.${field}`,
+    );
+  }
+
+  for (const sha256 of ["", "not-a-hash", "A".repeat(64), "a".repeat(63)]) {
+    assert.equal(
+      validate("event", { ...record, payload: { ...payload, sha256 } }).ok,
+      false,
+      `policy.proposed accepted sha256 ${JSON.stringify(sha256)}`,
+    );
+  }
+});
+
+test("policy.declined is human-only and names the prompt it answers", () => {
+  const record = fixture("policy.declined");
+  assert.equal(validate("event", record).ok, true);
+  const payload = record["payload"] as Record<string, unknown>;
+
+  // Answering an attestation prompt is the human act the ceremony exists to
+  // collect. An agent-authored refusal would be the party under oversight
+  // closing its own question.
+  for (const actor of ["agent:claude-code", "system:daemon"]) {
+    assert.equal(
+      validate("event", { ...record, actor }).ok,
+      false,
+      `policy.declined accepted a non-human actor "${actor}"`,
+    );
+  }
+
+  for (const field of ["sha256", "proposed_seq"]) {
+    const copy = { ...payload };
+    delete copy[field];
+    assert.equal(
+      validate("event", { ...record, payload: copy }).ok,
+      false,
+      `policy.declined validated without payload.${field}`,
+    );
+  }
+  for (const seq of [0, -1, 1.5, "41"]) {
+    assert.equal(
+      validate("event", { ...record, payload: { ...payload, proposed_seq: seq } }).ok,
+      false,
+      `policy.declined accepted proposed_seq ${JSON.stringify(seq)}`,
+    );
+  }
+});
+
+test("an attestation may name the prompt it answers, and need not", () => {
+  const record = fixture("policy.updated");
+  const payload = record["payload"] as Record<string, unknown>;
+
+  // `approval policy attest` at a terminal answers no prompt and carries none.
+  assert.equal(validate("event", record).ok, true);
+  assert.equal(
+    validate("event", { ...record, payload: { ...payload, proposed_seq: 41 } }).ok,
+    true,
+  );
+  for (const seq of [0, -3, "41"]) {
+    assert.equal(
+      validate("event", { ...record, payload: { ...payload, proposed_seq: seq } }).ok,
+      false,
+      `policy.updated accepted proposed_seq ${JSON.stringify(seq)}`,
+    );
+  }
 });

@@ -1,0 +1,16 @@
+{
+  "seq": 42,
+  "ts": "2026-08-25T10:19:41Z",
+  "event": "policy.declined",
+  "action_key": "policy.attest:3d0f1a2b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7",
+  "actor": "human:carter",
+  "payload": {
+    "policy_path": "APPROVAL.md",
+    "sha256": "3d0f1a2b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7",
+    "proposed_seq": 41,
+    "note": "not while the conformance runner is unsupervised; propose it again with the runner pinned"
+  },
+  "alg": "sha256/jcs",
+  "prev": "1c0a4f1d21b57d0f7cd5b1e2a03b9c4d8e7f6051a2b3c4d5e6f708192a3b4c5d",
+  "hash": "7f6051a2b3c4d5e6f708192a3b4c5d1c0a4f1d21b57d0f7cd5b1e2a03b9c4d8e"
+}

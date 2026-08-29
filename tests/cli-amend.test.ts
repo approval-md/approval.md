@@ -315,6 +315,74 @@ const BROKEN = policyText([
   "  autonomy: whenever",
 ]);
 
+/**
+ * BEFORE with a channel declared (APRV-109).
+ *
+ * The agent path fails closed when no channel could carry the attestation
+ * prompt, so the cases that exercise the ask need a policy that names one. The
+ * channel is never contacted here: `amend` appends the prompt and waits on the
+ * log, and it is the listener — a different process — that delivers it.
+ */
+const WITH_CHANNEL = policyText([
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: supervised",
+  "  approval_ttl: 24h",
+  "approvers:",
+  "  carter:",
+  "    channels: [telegram]",
+  "channels:",
+  "  telegram:",
+  "    token_env: TELEGRAM_TOKEN",
+  "    chat_id_env: TELEGRAM_CHAT",
+  "classes:",
+  "  read.*:",
+  "    autonomy: autonomous",
+]);
+
+/** The same, with one class resolution tightened: a diff a phone can hold. */
+const WITH_CHANNEL_AFTER = policyText([
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: supervised",
+  "  approval_ttl: 24h",
+  "approvers:",
+  "  carter:",
+  "    channels: [telegram]",
+  "channels:",
+  "  telegram:",
+  "    token_env: TELEGRAM_TOKEN",
+  "    chat_id_env: TELEGRAM_CHAT",
+  "classes:",
+  "  read.*:",
+  "    autonomy: manual",
+]);
+
+/** WITH_CHANNEL plus eighty classes: a diff no channel prompt can show whole. */
+const WIDE = ((): string => {
+  const classes: string[] = [];
+  for (let index = 0; index < 80; index += 1) {
+    classes.push(`  widget${String(index)}.write:`, "    autonomy: manual");
+  }
+  return policyText([
+    'version: "0.1"',
+    "defaults:",
+    "  autonomy: supervised",
+    "  approval_ttl: 24h",
+    "approvers:",
+    "  carter:",
+    "    channels: [telegram]",
+    "channels:",
+    "  telegram:",
+    "    token_env: TELEGRAM_TOKEN",
+    "    chat_id_env: TELEGRAM_CHAT",
+    "classes:",
+    "  read.*:",
+    "    autonomy: autonomous",
+    ...classes,
+  ]);
+})();
+
 function caseDir(text: string = BEFORE): string {
   counter += 1;
   const dir = join(scratch, `case-${counter}`);
@@ -481,6 +549,9 @@ test("the no-op --json report carries every frozen key", () => {
     "noop",
     "ok",
     "policy",
+    // APRV-109, additive: the attestation prompt this ceremony collected its tap
+    // from. `null` on every human-identity run, which is what this one is.
+    "proposal",
     "publishing",
   ]);
   // `attested` still means the attestation this amendment moved FROM. The new
@@ -2006,15 +2077,107 @@ test("no declared identity is a usage error naming both ways to declare one", ()
   assert.equal(logRecords(dir).length, 1);
 });
 
-test("an agent actor cannot amend", () => {
+// ---------------------------------------------------------------------------
+// The agent path (APRV-109)
+// ---------------------------------------------------------------------------
+
+test("an agent actor cannot attest, and with no channel it cannot even ask", () => {
   const dir = repoDir();
   attest(dir);
   writePolicy(dir, AFTER);
 
+  // BEFORE/AFTER declare no `channels`, so there is nowhere for an attestation
+  // prompt to go. FAIL CLOSED before anything is appended: a proposal in a
+  // repository with no channel is a question nobody will ever be asked.
   const run = runCli(["policy", "amend", "--as", "agent:planner", "--yes"], dir);
   assert.equal(run.code, 2);
-  assert.match(run.stderr, /an agent must not perform/u);
+  assert.match(run.stderr, /no channel is configured/u);
+  assert.match(run.stderr, /nothing was proposed and nothing was attested/u);
   assert.equal(logRecords(dir).length, 1);
+});
+
+test("an agent proposes rather than attests, and a lapsed prompt attests nothing", () => {
+  const dir = repoDir(WITH_CHANNEL);
+  attest(dir);
+  writePolicy(dir, WITH_CHANNEL_AFTER);
+  const before = rawLog(dir);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "agent:planner", "--wait", "1s", "--interval", "200ms", "--json"],
+    dir,
+  );
+  // A gate refusal is 1: the command was well-formed and nothing was attested.
+  assert.equal(run.code, 1, run.stderr);
+  const error = errorOf(run);
+  assert.equal(error.code, "attestation-timeout");
+  assert.match(error.message, /nothing was attested and nothing was committed/u);
+
+  // Exactly one record was added, and it is the ASK, not the attestation.
+  const records = logRecords(dir);
+  assert.equal(records.length, 2);
+  const proposal = records[1] as Record<string, unknown>;
+  assert.equal(proposal["event"], "policy.proposed");
+  assert.equal(proposal["actor"], "agent:planner");
+  assert.notEqual(rawLog(dir), before);
+
+  // The prompt carries the three COMPUTED fields a phone needs, and the hash is
+  // the file's own. No `--as agent:` flag could have authored any of them.
+  const payload = payloadAt(dir, 1);
+  assert.match(String(payload["sha256"]), /^[a-f0-9]{64}$/u);
+  assert.equal(payload["class"], "policy.edit");
+  assert.equal(payload["action_key"], `policy.attest:${String(payload["sha256"])}`);
+  assert.equal((payload["diff"] as { available: boolean }).available, true);
+  assert.equal((payload["load"] as { ok: boolean }).ok, true);
+
+  // And nothing was committed: the policy edit is still a working-tree change.
+  assert.equal(git(["status", "--porcelain"], dir).stdout.trim().length > 0, true);
+});
+
+test("a diff too large for a channel refuses to the terminal path", () => {
+  const dir = repoDir(WITH_CHANNEL);
+  attest(dir);
+  writePolicy(dir, WIDE);
+  const before = rawLog(dir);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "agent:planner", "--wait", "1s", "--json"],
+    dir,
+  );
+  assert.equal(run.code, 1, run.stderr);
+  const error = errorOf(run);
+  assert.equal(error.code, "propose-failed");
+  assert.match(error.message, /diff-too-large/u);
+  assert.match(error.message, /at a terminal/u);
+  assert.equal(rawLog(dir), before, "a refused proposal wrote to the log");
+});
+
+test("--wait belongs to the agent path and is refused under a human identity", () => {
+  const dir = repoDir(WITH_CHANNEL);
+  attest(dir);
+  writePolicy(dir, WITH_CHANNEL_AFTER);
+  const before = rawLog(dir);
+
+  const run = runCli(["policy", "amend", "--as", "human:carter", "--yes", "--wait", "5m"], dir);
+  assert.equal(run.code, 2);
+  assert.match(run.stderr, /--wait and --interval belong to the channel ceremony/u);
+  assert.equal(rawLog(dir), before);
+});
+
+test("under a human identity the verb is what it was: it attests here", () => {
+  const dir = repoDir(WITH_CHANNEL);
+  attest(dir);
+  writePolicy(dir, WITH_CHANNEL_AFTER);
+
+  const run = runCli(["policy", "amend", "--as", "human:carter", "--yes", "--json"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  const parsed = report(run);
+  assert.equal((parsed["ceremony"] as { attested: boolean }).attested, true);
+  // The channel ceremony left no trace on the path that never used it.
+  assert.equal(parsed["proposal"], null);
+  const records = logRecords(dir);
+  assert.equal(records.length, 2);
+  assert.equal(records[1]?.["event"], "policy.updated");
+  assert.equal(records[1]?.["actor"], "human:carter");
 });
 
 test("APPROVAL_HUMAN supplies the identity, as it does for attest", () => {

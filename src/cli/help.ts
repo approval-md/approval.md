@@ -78,7 +78,11 @@ Usage:
                       [--policy <path>] [--dir <path>] [--log <path>] [--json]
   approval channel telegram listen|health [--once] [--as human:<id>] [--json]
   approval daemon run [--tasks <dir>] [--out <path>] [--interval <duration>]
-                      [--debounce <duration>] [--once] [--json]
+                      [--debounce <duration>] [--once] [--with-channels] [--json]
+  approval up         [--as human:<id>] [--port <n>] [--no-telegram] [--no-web]
+                      [--restart-backoff <d>] (plus every daemon run flag)
+  approval setup service [--platform launchd|systemd] [--uninstall]
+                      [--label <name>] [--logs <dir>] [--env-file <path>]
   approval status     [--policy <path>] [--dir <path>] [--json]
   approval doctor     [--log <path>] [--policy <path>] [--dir <path>]
                       [--api-base <url>] [--json]
@@ -249,6 +253,12 @@ Inspect — what the log says, and whether anything needs repair:
             state back into the task files, regenerates QUEUE.md, and surfaces
             loop escalations. It holds no lock; backgrounding is the operator's
             business in v0.1
+  up        the AMBIENT RUNTIME: that same daemon loop plus every channel the
+            policy configures, in ONE supervised foreground process. A channel
+            whose credential is unset is not started and says so in doctor's
+            vocabulary; a channel that falls over is restarted with a doubling
+            backoff and the daemon loop carries on. "approval setup service"
+            writes the launchd or systemd user unit that runs it at login
 
 Defaults:
   log    .approval/log/events.jsonl   (relative to the working directory)
@@ -571,23 +581,23 @@ ${why("policy-attest")}`;
 export const POLICY_AMEND_HELP = `approval policy amend — the whole amendment ceremony, in one verb
 
 Usage:
-  approval policy amend [--policy|--dir|--log <p>] [--as human:<id>] [--require-load]
-      [--dry-run] [--commit] [--no-publish] [--yes] [--json] [--branch <name>|--direct]
+  approval policy amend [--policy|--dir|--log <p>] [--as human:<id>|agent:<id>] [--require-load]
+      [--dry-run] [--commit] [--no-publish] [--yes] [--json] [--branch <n>|--direct] [--wait <d>]
 
 Flags:
   --policy <p> / --dir <p> / --log <p>  policy, its discovery dir, and the log
-  --as human:<id>                 the human amending; else APPROVAL_HUMAN
+  --as human:<id> / agent:<id>    attest HERE, or ask for a TAP (--wait/--interval/--note)
   --require-load                  refuse to attest a policy that does not load
   --dry-run / --commit / --no-publish   write nothing / the ceremony / stop at commit
   --branch <name> / --direct      force the BRANCH or the DIRECT flow
   --yes / --json / -h, --help     skip the prompt / machine-readable / this text
 
-Hashes the live policy, diffs it against the BASELINE (classes AND every policy key),
-attests, then runs a git ceremony of EXACTLY two files, commit-preconditions first
-(git-failed, push-rejected, pr-failed break after the append). Attested TEXT is NOT
-recoverable from the log: no blob means HASH-ONLY MODE. Flows, in PRECEDENCE, highest first:
---branch <name>, --direct. A refused push PUBLISHES ITSELF (branch, push, PR, auto-merge)
-without moving your checkout, dropping to a RUNBOOK at a failed step; merge by MERGE COMMIT.
+Hashes the live policy, diffs it against the BASELINE (classes AND every policy key), attests, then
+runs a git ceremony of EXACTLY two files, commit-preconditions first (git-failed, push-rejected,
+pr-failed break after the append). Attested TEXT is NOT recoverable from the log: no blob means
+HASH-ONLY MODE. Flows, in PRECEDENCE, highest first: --branch <name>, --direct; a refused push
+PUBLISHES ITSELF without moving your checkout, dropping to a RUNBOOK; merge by MERGE COMMIT.
+--as agent: appends policy.proposed; the TAP attests. Fail closed: no-channel, declined, timeout.
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
@@ -1458,7 +1468,7 @@ export const DAEMON_RUN_HELP = `approval daemon run — watch, expire, re-render
 Usage:
   approval daemon run [--log <path>] [--tasks <dir>] [--out <path>]
                       [--policy <path>] [--dir <path>] [--interval <duration>]
-                      [--debounce <duration>] [--once] [--json]
+                      [--debounce <duration>] [--once] [--with-channels] [--json]
 
 Flags:
   --log <path> / --out <path>      the log to append to / the queue to write
@@ -1467,16 +1477,45 @@ Flags:
   --interval <d> / --debounce <d>  tick period (30s) / event settle time (250ms)
   --once / --json  one tick then exit / machine-readable, one object per line
   --git-evidence   OPT-IN: commit the log to the log home's own git repository
+  --with-channels  the channels in this process too: SAME VERB as "approval up"
   -h, --help       this text
 
-Each tick records envelope drift, expires lapsed requests, writes the log's state
-back into the task files, and regenerates the queue. RUNS IN THE FOREGROUND and
-stops on SIGINT/SIGTERM: backgrounding is the operator's business in v0.1.
+Each tick records drift, expires what lapsed, writes state back, re-renders the
+queue. Stops on SIGINT/SIGTERM; backgrounding is the operator's business.
 
 JSON shape: docs/cli-reference.md#daemon-run
 ${EXIT_CODES_POINTER} (a clean stop is 0; 1 when the chain does not verify)
 ${JSON_ERRORS}
 ${why("daemon-run")}`;
+
+// ---------------------------------------------------------------------------
+// The ambient runtime (APRV-110)
+// ---------------------------------------------------------------------------
+
+export const UP_HELP = `approval up — the daemon and every configured channel, in ONE process
+
+Usage:
+  approval up [every "daemon run" flag] [--as human:<id>] [--port <n>]
+              [--payloads <f>] [--payload-dir <d>] [--api-base <url>]
+              [--poll-timeout <s>] [--no-telegram] [--no-web] [--restart-backoff <d>]
+
+Flags (every "daemon run" flag, unchanged, plus):
+  --as human:<id>  the approver every decision is recorded against
+  --payloads <f> / --payload-dir <d>  payload overrides: telegram / web
+  --api-base <url> / --poll-timeout <s>   Bot API base / long-poll seconds
+  --port <n>       queue-page port. Precedence: --port, channels.web.port
+  --no-telegram / --no-web   leave that channel out of this process
+  --restart-backoff <d>      first wait after a channel falls over (1s)
+  -h, --help       this text
+
+Credentials and identity come from THE LAUNCH ENVIRONMENT and nowhere else. A
+channel whose credential is unset is NOT started, is reported in doctor's words,
+and the rest run. One that falls over restarts with backoff; the daemon lives.
+
+JSON shape: docs/cli-reference.md#up
+${EXIT_CODES_POINTER} (a clean stop is 0; the daemon's outcome chooses it)
+${JSON_ERRORS}
+${why("up")}`;
 
 // ---------------------------------------------------------------------------
 // The vault (APRV-68)
@@ -1661,8 +1700,8 @@ export const SETUP_HELP = `approval setup — interactive configuration (SPEC.md
 Usage:
   approval setup identity|vault|sampling [--as human:<id>] [--log <path>]
                                          [--dir <path>] [--policy <path>]
-  approval setup channel <name> [--api-base <url>] [--as human:<id>] …
-  approval setup adapter <name> [--as human:<id>] …
+  approval setup channel|adapter <name> [--api-base <url>] [--as human:<id>] …
+  approval setup service [--platform launchd|systemd] [--uninstall] …
 
 Subcommands:
   identity  declare who the human is (APPROVAL_HUMAN); not human-only
@@ -1670,10 +1709,10 @@ Subcommands:
   sampling  mint the audit sampling secret and print the policy line for it
   channel   configure one CHANNEL's transport credential (OS keystore)
   adapter   fill the VAULT with one ADAPTER's credentials, from its manifest
+  service   write the launchd or systemd unit that runs "approval up" at login
 
 CHANNEL AND ADAPTER ARE TWO NOUNS (SPEC.md §4). EVERY SUBCOMMAND
-REFUSES WHEN STDIN IS NOT A TERMINAL, and when --json is given, and exits 2
-printing the non-interactive commands to run instead.
+REFUSES WHEN STDIN IS NOT A TERMINAL, and --json, exiting 2 with what to run.
   writes  .approval/env (mode 0600) and items in the OS keystore
   never   appends to the log, attests anything, or edits APPROVAL.md
 
@@ -1831,6 +1870,31 @@ HUMAN-ONLY: --as expects a human:<id>.
 ${EXIT_CODES_POINTER} (1 means the far end refused)
 ${JSON_ERRORS}
 ${why("setup-channel-telegram")}`;
+
+export const SETUP_SERVICE_HELP = `approval setup service — run the ambient runtime at login (HUMAN-ONLY)
+
+Usage:
+  approval setup service [--platform launchd|systemd] [--label <name>]
+                         [--logs <dir>] [--env-file <path>] [--exec <path>]
+                         [--out <path>] [--uninstall] [--as human:<id>]
+                         [--log <path>] [--dir <path>] [--policy <path>]
+
+Flags:
+  --platform       launchd (macOS) or systemd (Linux). Default: this machine's
+  --label <name>   the launchd label / systemd unit name
+  --logs <dir>     where the service's stdout and stderr go. NEVER .approval/
+  --env-file <p>   an EnvironmentFile YOU author, instead of the env wrapper
+  --exec <path> / --out <path>   the approval binary / the unit file to write
+  --uninstall      print the unload command and remove the unit file
+  -h, --help       this text
+
+PRINTS THE WHOLE UNIT FOR YOU TO READ BEFORE WRITING, and writes only if you
+confirm. IT NAMES VARIABLES AND NEVER COPIES A VALUE. IT DOES NOT LOAD THE
+SERVICE: it prints the one command that arms it, which is your act to perform.
+
+${EXIT_CODES_POINTER} (2 also means "interactive, and your stdin is not")
+${JSON_ERRORS}
+${why("setup-service")}`;
 
 // ---------------------------------------------------------------------------
 // The MCP wrapper (APRV-87)

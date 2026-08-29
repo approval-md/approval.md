@@ -123,6 +123,10 @@ enforces it now, so the vector is `intake-checks-registration` and asserts the
 refusal, and the suite's `vectors_version` is 2.0.0 — an implementation that
 passed 1.0.0 does not pass this.
 
+`refusal-unions` is 2.0.0 for the same reason, since APRV-146: the execute union
+gained `execution-delegated`, and the vector pins the whole array in definition
+order, so a longer union is a changed expectation rather than a new vector.
+
 ## Changing the suite
 
 The vectors are generated, never hand-edited:

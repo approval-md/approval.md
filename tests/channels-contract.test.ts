@@ -60,6 +60,7 @@ import { payloadHash } from "../src/core/payload.js";
 import { explain } from "../src/core/policy-explain.js";
 import { loadPolicy } from "../src/core/policy-load.js";
 import { resolve } from "../src/core/policy-match.js";
+import { proposeAttestation } from "../src/core/policy-proposal.js";
 import { readVerifiedRecords } from "../src/core/state.js";
 import { decide, register, request } from "./clock-adapters.js";
 import { assertClean, at, attest, fixedClock, newScenario, scratchRoot, T0, type Scenario } from "./scenario.js";
@@ -1050,12 +1051,18 @@ test("the refusal-code unions and computed sources are frozen public API", () =>
     "payload-mismatch",
     "payload-unrenderable",
     "request-invalid",
+    // APRV-109: an attestation prompt whose policy bytes moved after it was
+    // rendered is skipped rather than shown.
+    "proposal-stale",
   ]);
   assert.deepEqual([...COMPUTED_SOURCES], [
     "log",
     "policy-match",
     "budgets",
     "attestation",
+    // APRV-109: the load advisory on an attestation prompt, recomputed from the
+    // live bytes at display time.
+    "policy-load",
     "payload-binding",
     "classifier",
     "clock",
@@ -1182,5 +1189,153 @@ test("the suite goes RED for a channel that drops the full payload", async () =>
   await assert.rejects(
     () => runChannelConformance({}, () => new MockChannel("no-full-payload"), harness),
     /rendered no full payload for manual action/u,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Attestation prompts (APRV-109)
+// ---------------------------------------------------------------------------
+
+/**
+ * A live attestation prompt: the policy is attested, then edited, then proposed.
+ *
+ * The edit is a real one — `read.*` moves from autonomous to manual — so the
+ * semantic diff has something to say, which is the whole point of the prompt
+ * carrying more than a hash.
+ */
+function proposedWorld(): { world: Live; seq: number; actionKey: string } {
+  const world = live(1);
+  const baseline = readFileSync(world.unit.policyPath);
+  writeFileSync(
+    world.unit.policyPath,
+    POLICY_WITH_LIMITS.replace(
+      "  read.*:\n    autonomy: autonomous",
+      "  read.*:\n    autonomy: manual",
+    ),
+    "utf8",
+  );
+  const proposal = proposeAttestation(
+    world.unit.logPath,
+    { policyPath: world.unit.policyPath, baseline, note: "tighten read.*" },
+    ACTOR,
+    { ...world.unit.options, clock: fixedClock(at(2)) },
+  );
+  assert.equal(proposal.ok, true, proposal.ok ? "" : proposal.message);
+  if (!proposal.ok) throw new Error("the proposal fixture could not be built");
+  return { world, seq: proposal.record.seq, actionKey: proposal.record.action_key as string };
+}
+
+test("an attestation prompt renders as an ordinary request, with the diff and the advisory", () => {
+  const { world, actionKey } = proposedWorld();
+  const built = buildChannelRequest(world.unit.logPath, actionKey, world.tagOptions, NOW);
+  assert.equal(built.ok, true, JSON.stringify(built));
+  if (!built.ok) return;
+
+  const request_ = built.request;
+  assert.equal(request_.class.value, "policy.edit");
+  // Manual by FLOOR, not by a rule: attestation is human-only in code and the
+  // act is irreversible, so the prompt reports a floor the policy cannot lower.
+  assert.equal(request_.autonomy.value, "manual");
+  assert.equal(request_.provenance.value, "floor");
+
+  // The two additive members, both COMPUTED. A prompt carrying only a hash is
+  // the failure this task exists to prevent.
+  assert.notEqual(request_.policy_diff, undefined);
+  assert.equal(request_.policy_diff?.kind, "computed");
+  assert.match(String(request_.policy_diff?.value), /read\./u);
+  assert.equal(request_.policy_load?.kind, "computed");
+  assert.match(String(request_.policy_load?.value), /loads clean/u);
+
+  // The proposer's words are the one CLAIMED field on the prompt.
+  assert.equal(request_.summary.kind, "claimed");
+  assert.equal(request_.summary.value, "tighten read.*");
+
+  // And the whole policy text is reachable, which SPEC.md §10.4 requires before
+  // any decision is collected.
+  const rendering = request_.fullPayload.value;
+  assert.notEqual(rendering, null, "an attestation prompt with no policy text to show");
+  assert.equal(rendering?.truncated, false);
+  assert.match(rendering?.text ?? "", /approval-policy/u);
+});
+
+test("the queue carries attestation prompts after the approvals whose rules they change", () => {
+  const { world, actionKey } = proposedWorld();
+  const queue = buildPendingQueue(world.unit.logPath, world.tagOptions, NOW);
+  assert.equal(queue.ok, true, JSON.stringify(queue));
+  if (!queue.ok) return;
+
+  const keys = queue.requests.map((entry) => entry.action_key.value);
+  assert.equal(keys.length, 2);
+  assert.equal(keys[0], world.keys[0]);
+  assert.equal(keys[1], actionKey);
+});
+
+test("a tap on an attestation prompt appends the attestation, not a grant", () => {
+  const { world, actionKey } = proposedWorld();
+  const result = recordChannelDecision(
+    world.unit.logPath,
+    { action_key: actionKey, decision: "grant", deliveryId: "mock-1", note: "yes" },
+    { actor: HUMAN, channel: "mock" },
+    { ...world.unit.options, clock: fixedClock(at(3)) },
+  );
+  assert.equal(result.outcome.ok, true, JSON.stringify(result.outcome));
+  if (!result.outcome.ok) return;
+
+  // No token: an attestation authorizes no side effect, so there is nothing for
+  // one to be spent on.
+  assert.equal(result.outcome.tokenIssued, false);
+  assert.equal(result.token, undefined);
+
+  const record = result.outcome.record;
+  assert.equal(record.event, "policy.updated");
+  // Under the human identity the LISTENER holds, exactly as a grant lands.
+  assert.equal(record.actor, HUMAN);
+  assert.equal(record.ts, at(3));
+
+  // The policy is now attested, and the prompt has left the queue.
+  const queue = buildPendingQueue(world.unit.logPath, world.tagOptions, at(3));
+  assert.equal(queue.ok, true);
+  assert.equal(
+    queue.ok && queue.requests.some((entry) => entry.action_key.value === actionKey),
+    false,
+  );
+});
+
+test("a reject on an attestation prompt attests nothing", () => {
+  const { world, actionKey } = proposedWorld();
+  const result = recordChannelDecision(
+    world.unit.logPath,
+    { action_key: actionKey, decision: "reject", deliveryId: "mock-1", note: "not yet" },
+    { actor: HUMAN, channel: "mock" },
+    { ...world.unit.options, clock: fixedClock(at(3)) },
+  );
+  assert.equal(result.outcome.ok, true, JSON.stringify(result.outcome));
+  if (!result.outcome.ok) return;
+
+  assert.equal(result.outcome.record.event, "policy.declined");
+  assert.equal(result.outcome.record.actor, HUMAN);
+  assert.equal(
+    recordsOf(world.unit.logPath).filter((record) => record.event === "policy.updated").length,
+    1,
+    "a decline appended a second attestation",
+  );
+});
+
+test("a prompt whose policy bytes moved is skipped rather than shown", () => {
+  const { world, actionKey } = proposedWorld();
+  writeFileSync(world.unit.policyPath, `${POLICY_WITH_LIMITS}\n# a later edit\n`, "utf8");
+
+  const built = buildChannelRequest(world.unit.logPath, actionKey, world.tagOptions, NOW);
+  assert.equal(built.ok, false);
+  if (built.ok) return;
+  assert.equal(built.code, "proposal-stale");
+
+  // And in the queue it is reported as skipped, exactly as an approval that
+  // cannot be rendered is.
+  const queue = buildPendingQueue(world.unit.logPath, world.tagOptions, NOW);
+  assert.equal(queue.ok, true);
+  assert.equal(
+    queue.ok && queue.skipped.some((entry) => entry.action_key === actionKey),
+    true,
   );
 });

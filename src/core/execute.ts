@@ -163,6 +163,24 @@ export const EXECUTE_REFUSAL_CODES = [
    */
   "actor-not-human",
   /**
+   * The key's latest `execution.started` is a DELEGATED record (APRV-117,
+   * APRV-120): it carries `payload.execution: "harness"`, so the harness ran the
+   * command and this runtime never observed an exit status. The record is
+   * complete as written and terminal by design, and no outcome may be placed
+   * over it.
+   *
+   * Distinct from the two refusals it sits between, and the distinctions are the
+   * point. `not-started` says nothing began; `already-finished` says something
+   * began and an outcome already exists. This one says the thing that began is
+   * not this runtime's to close: a `completed` or `failed` written here would
+   * report an exit code nobody watched, and an `execution.completed` would
+   * additionally clear the task's loop-escalation streak (SPEC.md §10.2) on the
+   * strength of it. {@link executionCustody} reports these as `delegated` and
+   * {@link danglingExecutions} deliberately leaves them out, so this code is the
+   * enforcement half of a custody state the projections already draw.
+   */
+  "execution-delegated",
+  /**
    * The key's execution ended in an unknown outcome (APRV-120) and has not been
    * reconciled. INDETERMINATE IS A CUSTODY STATE: the token stays spent, the
    * idempotency key stays burned, and a re-run is refused here rather than
@@ -809,9 +827,10 @@ export type FinishResult =
  * Neither event consumes budget: the commitment was charged at authorization
  * time and charging it again would double-count (`core/budgets.ts`).
  *
- * Refuses `not-started` when the key has no `execution.started`, and
+ * Refuses `not-started` when the key has no `execution.started`,
  * `already-finished` when the most recent start already has an outcome after
- * it. Both leave the log untouched.
+ * it, and `execution-delegated` when that start was the harness's rather than
+ * this runtime's (APRV-146). All three leave the log untouched.
  *
  * **This is the human recovery path for a dangling execution**, and it is
  * deliberately the only one. Nothing in this codebase closes a dangling
@@ -856,8 +875,15 @@ export function finishExecution(
  * Shared by {@link finishExecution}, {@link resolveExecution} and
  * {@link indeterminateExecution} so the three verbs cannot drift about what
  * "still open" means. Returns the head observed at the read, which the caller
- * passes as `expectedHead`: the not-started and already-finished checks were
- * made against a log ending exactly there.
+ * passes as `expectedHead`: the not-started, delegated and already-finished
+ * checks were made against a log ending exactly there.
+ *
+ * A DELEGATED start is refused `execution-delegated` (APRV-146). The three verbs
+ * that share this function all write an outcome, and a harness start has none to
+ * write: the record says so on its face (`payload.execution: "harness"`), and
+ * {@link executionCustody} has reported it terminal by design since APRV-120.
+ * Enforcing it in this one place is what keeps the three verbs from disagreeing
+ * about it, which is the reason this function exists.
  *
  * An `execution.indeterminate` closes a cycle here like any other outcome
  * (APRV-120). It is not an invitation to try again: a second outcome for a key
@@ -900,6 +926,20 @@ function openExecution(
       `action ${actionKey} has no execution.started record; an outcome cannot be recorded for an execution that never began`,
     );
   }
+
+  // APRV-146. A delegated start is terminal by design, so there is no open
+  // execution here to close. Checked BEFORE the already-finished branch because
+  // the fact is about this record's custody rather than about what else the log
+  // holds: a harness execution was never going to gain an outcome, whether or
+  // not something has since written one over it.
+  if (isDelegatedStart(started)) {
+    return refuse(
+      "execution-delegated",
+      `action ${actionKey}'s execution.started at seq ${started.seq} carries execution: "harness" (APRV-117): the harness ran the command and this runtime never observed an exit status, so the record is complete as written and terminal by design. No outcome may be written over it — a completed or failed recorded here would report an exit code nobody watched, and an execution.completed would additionally clear the task's loop-escalation streak (SPEC.md §10.2). \`approval status\` lists such a record as delegated rather than dangling for the same reason.`,
+      { seq: started.seq },
+    );
+  }
+
   if (finished !== null) {
     return refuse(
       "already-finished",
@@ -953,7 +993,7 @@ const HUMAN_ACTOR = /^human:.+/u;
  * outcome, so the log honestly says "this began and we do not know how it
  * ended", and only a person who went and looked can say more.
  *
- * Four properties, all deliberate:
+ * Five properties, all deliberate:
  *
  * 1. **The note is mandatory and non-empty.** The whole value of this event is
  *    the observation behind it; an unexplained human-attested outcome is
@@ -966,7 +1006,12 @@ const HUMAN_ACTOR = /^human:.+/u;
  *    is no code to report. A fabricated exit code would read exactly like an
  *    observed one, and `payload.attested_by_human: true` marks the difference
  *    for every reader and every projection.
- * 4. **No attestation requirement.** Resolve records a fact a human observed;
+ * 4. **A harness execution is out of reach** (APRV-146). A delegated start is
+ *    refused `execution-delegated` here as it is in {@link finishExecution}: the
+ *    record is terminal by design, and a person attesting an outcome for a
+ *    command this runtime never watched would be attesting to the one thing the
+ *    log already says nobody observed.
+ * 5. **No attestation requirement.** Resolve records a fact a human observed;
  *    it exercises no policy authority — it authorizes nothing, spends no
  *    budget, mints no token — so it does not require an attested policy. A
  *    dangling execution left unclosable because a policy file was edited would

@@ -380,6 +380,11 @@ const HUMAN_ONLY: readonly string[] = [
   "channel web",
   "channel telegram listen",
   "daemon run",
+  // APRV-110. The ambient runtime is `daemon run` and `channel telegram listen`
+  // in one process, so it inherits both refusals and cannot be weaker than
+  // either: a long-lived writer against the log, holding the channel credential,
+  // recording decisions against the human identity in its launch environment.
+  "up",
   // APRV-87. The MCP wrapper publishes no human-only verb, so an agent that
   // could start one would gain no authority; what it would gain is a second
   // long-lived writer and a choice of the identity every tool call is recorded
@@ -391,6 +396,9 @@ const HUMAN_ONLY: readonly string[] = [
   "setup sampling",
   "setup channel",
   "setup adapter",
+  // APRV-110. It installs a standing capability: a login service holding a
+  // credential that can put prompts in front of a human.
+  "setup service",
   "vault set",
   "vault list",
   "vault remove",

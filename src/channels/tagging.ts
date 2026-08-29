@@ -46,7 +46,11 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { checkAttestation, type AttestationStatus } from "../core/attest.js";
+import {
+  checkAttestation,
+  policyFileHash,
+  type AttestationStatus,
+} from "../core/attest.js";
 import {
   evaluateBudgetsWithTask,
   type BudgetScope,
@@ -64,6 +68,13 @@ import {
   type PolicyLoadResult,
 } from "../core/policy-load.js";
 import { resolve, type Resolution } from "../core/policy-match.js";
+import {
+  ATTESTATION_CLASS,
+  isAttestationActionKey,
+  openProposals,
+  type DiffSummary,
+  type ProposalDerivation,
+} from "../core/policy-proposal.js";
 import { isRecipientKey, RECIPIENT_KEY_FIELD } from "../core/seal.js";
 import {
   payloadOf,
@@ -152,6 +163,17 @@ export const CHANNEL_TAG_REFUSAL_CODES = [
   "payload-unrenderable",
   /** {@link createChannelRequest} refused the assembled request. */
   "request-invalid",
+  /**
+   * An attestation prompt's policy bytes are no longer the bytes on disk
+   * (APRV-109).
+   *
+   * Skipped rather than rendered: the hash, the diff and the advisory the
+   * proposal recorded all describe a file that has since changed, and a prompt
+   * showing them would ask a human to sign for bytes nobody is holding. The
+   * repair is to propose the amendment again, which re-derives all three from
+   * the file as it now stands.
+   */
+  "proposal-stale",
 ] as const;
 
 export type ChannelTagRefusalCode = (typeof CHANNEL_TAG_REFUSAL_CODES)[number];
@@ -396,6 +418,29 @@ export function buildChannelRequest(
   if (!read.ok) return refuse(read.code, read.message);
 
   const load = loadPolicy(loadOptionsOf(options));
+
+  // APRV-109. An attestation prompt has no `approval.requested` to derive from,
+  // so it is resolved from its own open proposal before the approval path runs.
+  if (isAttestationActionKey(actionKey)) {
+    const proposal = openProposals(read.records, now).find(
+      (entry) => entry.actionKey === actionKey,
+    );
+    if (proposal === undefined) {
+      return refuse(
+        "not-awaiting",
+        `${actionKey} has no open policy.proposed record; the attestation prompt was answered, superseded, or its proposer's deadline passed, and a channel may only collect a gesture on a live question`,
+      );
+    }
+    return tagProposal(
+      read.records,
+      read.head?.seq ?? 0,
+      proposal,
+      load,
+      withStore(options, logPath),
+      now,
+    );
+  }
+
   const derivation = requestState(read.records, actionKey, now, ttlOf(load));
   return tagDerivation(
     read.records,
@@ -707,6 +752,162 @@ function tagDerivation(
 }
 
 // ---------------------------------------------------------------------------
+// Attestation prompts (APRV-109)
+// ---------------------------------------------------------------------------
+
+/** The diff summary a proposal recorded, or `null` when it recorded none. */
+function diffSummaryOf(record: EventRecord): DiffSummary | null {
+  const value = payloadOf(record)["diff"];
+  if (typeof value !== "object" || value === null) return null;
+  const summary = value as Record<string, unknown>;
+  const lines = Array.isArray(summary["lines"])
+    ? summary["lines"].filter((line): line is string => typeof line === "string")
+    : [];
+  return {
+    available: summary["available"] === true,
+    reason: typeof summary["reason"] === "string" ? summary["reason"] : null,
+    lines,
+    headline: typeof summary["headline"] === "string" ? summary["headline"] : "",
+    baseline_sha256:
+      typeof summary["baseline_sha256"] === "string" ? summary["baseline_sha256"] : null,
+  };
+}
+
+/** The diff, as the one block of text every channel prints. */
+function diffText(summary: DiffSummary): string {
+  if (!summary.available) {
+    return `HASH-ONLY: no semantic diff. ${summary.reason ?? "no verifiable baseline"}. What changed in MEANING is not shown, so read the file diff at a terminal before deciding.`;
+  }
+  return [`${summary.headline}:`, ...summary.lines].join("\n");
+}
+
+/** The load advisory, recomputed here from the live bytes at display time. */
+function loadText(load: PolicyLoadResult): string {
+  return load.ok
+    ? "loads clean"
+    : `DOES NOT LOAD (${load.code}): ${load.message}. Attesting it is allowed — an attestation records bytes, not correctness — but every class will FAIL CLOSED to manual.`;
+}
+
+/**
+ * Tag one open `policy.proposed` as a manual prompt (APRV-109).
+ *
+ * The prompt is an ordinary {@link ChannelRequest} and that is the whole design:
+ * telegram, web and cli render it through the paths they already have, the
+ * computed/claimed split applies unchanged, and `channels/conformance.ts` checks
+ * it like any other request. Two additive computed members carry what an
+ * attestation needs and an approval does not — the semantic diff and the load
+ * advisory — and everything else lines up with a field that already existed.
+ *
+ * Three of those alignments are worth stating, because a reader will ask:
+ *
+ * - **`autonomy` is `manual` with provenance `floor`.** No `classes` rule
+ *   decides this and none could: attestation is human-only in code (SPEC.md
+ *   §11) and the act is irreversible, since the log is append-only and attested
+ *   bytes are operative from that record onward. The prompt reports a floor the
+ *   policy cannot lower rather than a rule it does not have.
+ * - **`est_cost_usd` is COMPUTED zero, not a claim.** An attestation buys
+ *   nothing and spends nothing; there is no estimate for a proposer to author,
+ *   so there is nothing here to label claimed.
+ * - **`attestation` is the LIVE status**, which on an open prompt is
+ *   `hash-mismatch` or `not-attested`. That is the fact the approver is being
+ *   asked to change, so it belongs on the screen exactly as it belongs on every
+ *   other prompt.
+ *
+ * The live file is re-hashed here and a prompt whose bytes have moved is refused
+ * `proposal-stale` rather than rendered: `core/policy-proposal.ts` would refuse
+ * the tap for the same reason, and a queue that showed the question anyway would
+ * be inviting a gesture the gate has already decided to reject.
+ */
+function tagProposal(
+  records: EventRecord[],
+  headSeq: number,
+  proposal: ProposalDerivation,
+  load: PolicyLoadResult,
+  options: TagOptions,
+  now: string,
+): BuildChannelRequestResult {
+  const record = proposal.record;
+  const payload = payloadOf(record);
+  const policyPath = policyPathOf(options);
+
+  let liveSha256: string;
+  try {
+    liveSha256 = policyFileHash(policyPath);
+  } catch (cause) {
+    return refuse(
+      "proposal-stale",
+      `the attestation prompt at seq ${String(record.seq)} proposes ${proposal.sha256} and ${policyPath} could not be read to confirm it (${cause instanceof Error ? cause.message : String(cause)}); a prompt whose bytes nobody can read is not a prompt anybody can answer`,
+    );
+  }
+  if (liveSha256 !== proposal.sha256) {
+    return refuse(
+      "proposal-stale",
+      `the attestation prompt at seq ${String(record.seq)} proposes ${proposal.sha256} and ${policyPath} now hashes ${liveSha256}; the file changed after the question was asked, so the hash, the diff and the advisory on this prompt all describe bytes that are no longer there. Propose the amendment again.`,
+    );
+  }
+
+  const boundHash = payload["payload_hash"];
+  if (typeof boundHash !== "string" || boundHash.length === 0) {
+    return refuse(
+      "payload-hash-missing",
+      `the policy.proposed record at seq ${String(record.seq)} carries no payload_hash, so the full policy text it binds cannot be located; SPEC.md §10.4 requires the bytes to be presentable before a decision is collected`,
+    );
+  }
+
+  const material = materialFor(options, proposal.actionKey, boundHash);
+  if (material.kind === "refusal") return material.refusal;
+  if (material.kind !== "material") {
+    return refuse(
+      "payload-unavailable",
+      `no policy text is held for the attestation prompt at seq ${String(record.seq)}: the caller supplied none and the payload store has none${
+        material.reason === null ? "" : ` (${material.reason})`
+      }. SPEC.md §10.4 requires a channel to present the full payload before collecting a decision, and for an attestation that payload is the policy file itself.`,
+    );
+  }
+  const rendered = renderPayload(material.value, boundHash, options.maxPayloadChars);
+  if (!rendered.ok) return rendered;
+
+  const summary = diffSummaryOf(record);
+  if (summary === null) {
+    return refuse(
+      "request-invalid",
+      `the policy.proposed record at seq ${String(record.seq)} carries no diff summary; a prompt that showed only a hash would ask a human to sign for sixty-four characters, which is the failure APRV-109 exists to prevent`,
+    );
+  }
+
+  const waitUntil = typeof payload["wait_until"] === "string" ? payload["wait_until"] : null;
+  const nowMs = Date.parse(now);
+  const waitMs = waitUntil === null ? Number.NaN : Date.parse(waitUntil);
+  const remaining =
+    Number.isNaN(waitMs) || Number.isNaN(nowMs) ? null : Math.max(0, waitMs - nowMs);
+
+  const fields: ChannelRequest = {
+    action_key: computed(proposal.actionKey, "log"),
+    task: computed(null, "log"),
+    class: computed(ATTESTATION_CLASS, "log"),
+    autonomy: computed("manual", "attestation"),
+    provenance: computed("floor", "attestation"),
+    est_cost_usd: computed(0, "attestation"),
+    summary: claimed(typeof payload["note"] === "string" ? payload["note"] : null, record.actor),
+    policy_diff: computed(diffText(summary), "log"),
+    policy_load: computed(loadText(load), "policy-load"),
+    payload_hash: computed(boundHash, "log"),
+    fullPayload: computed(rendered.rendering, "payload-binding"),
+    budgets: computed([], "budgets"),
+    attestation: computed(checkAttestation(records, policyPath), "attestation"),
+    requested_ts: computed(record.ts, "log"),
+    ttl_remaining_ms: computed(remaining, "clock"),
+    waiting: computed(waitingLine(record.ts, waitUntil, remaining, now), "clock"),
+    chain: computed({ seq: record.seq, hash: record.hash, head_seq: headSeq }, "log"),
+    state: computed("requested", "log"),
+  };
+
+  const created = createChannelRequest(fields);
+  if (!created.ok) return refuse("request-invalid", created.message);
+  return { ok: true, request: created.request };
+}
+
+// ---------------------------------------------------------------------------
 // buildPendingQueue
 // ---------------------------------------------------------------------------
 
@@ -772,6 +973,20 @@ export function buildPendingQueue(
     const built = tagDerivation(read.records, headSeq, derivation, load, withStoreOptions, now);
     if (built.ok) requests.push(built.request);
     else skipped.push({ action_key: key, code: built.code, message: built.message });
+  }
+
+  // APRV-109. Attestation prompts join the same queue, so every channel that
+  // already dispatches pending approvals dispatches these too — no channel
+  // learns a second verb, and the one that cannot render a prompt reports it in
+  // `skipped` exactly as it reports an approval it cannot render. They come
+  // AFTER the approvals: a policy amendment changes the rules the entries above
+  // it were routed by, and an approver reading top to bottom should answer the
+  // questions asked under the current policy before changing what the current
+  // policy is.
+  for (const proposal of openProposals(read.records, now)) {
+    const built = tagProposal(read.records, headSeq, proposal, load, withStoreOptions, now);
+    if (built.ok) requests.push(built.request);
+    else skipped.push({ action_key: proposal.actionKey, code: built.code, message: built.message });
   }
 
   return { ok: true, requests, skipped };

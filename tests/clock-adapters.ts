@@ -51,6 +51,7 @@ import {
   register as registerCore,
   request as requestCore,
   withdraw as withdrawCore,
+  type ConsumeHarnessOptions,
   type ConsumeHarnessResult,
   type Decision,
   type DecideOptions,
@@ -130,7 +131,7 @@ export function consumeHarnessGrant(
   actionKey: string,
   actor: string,
   ts: string,
-  options: GateOptions = {},
+  options: ConsumeHarnessOptions = {},
 ): ConsumeHarnessResult {
   return consumeHarnessGrantCore(logPath, actionKey, actor, frozen(options, ts));
 }
