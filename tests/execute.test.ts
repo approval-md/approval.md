@@ -282,6 +282,12 @@ test("the execution refusal-code union is frozen public API", () => {
     "payload-mismatch",
     // APRV-20 pass two: `resolveExecution` is human-only and note-mandatory.
     "actor-not-human",
+    // APRV-146: a delegated start is terminal by design, so `finishExecution`
+    // and `resolveExecution` refuse over it rather than fabricating an outcome
+    // for a command this runtime never watched. Its own code, because the two
+    // it sits between say different things: `not-started` that nothing began,
+    // `already-finished` that an outcome exists.
+    "execution-delegated",
     // APRV-120: indeterminate is a custody state, and its three refusals are
     // distinct from the ones that surround them. `execution-indeterminate` is
     // not `already-executed`, because "we do not know whether this happened" is
@@ -764,24 +770,36 @@ test("reconcile is human-only, note-mandatory, once, and only where there is dou
   assertClean(unit);
 });
 
-test("a harness execution is DELEGATED, not dangling: it is terminal by design", () => {
-  // APRV-117/APRV-141: the harness runs the command and this runtime never
-  // observes an exit status, so no outcome event will ever follow. Before
-  // the custody vocabulary these read as debris — dozens of them in the
-  // reference repository's own log — which is how a list an operator is
-  // supposed to act on becomes a list they scroll past.
-  const unit = ready();
-  const cls = "read.web";
-  const key = `hook:sess-1:tu-1:${cls}`;
+/** The task and class a harness verdict is recorded under in these scenarios. */
+const HARNESS_TASK = "hook:sess-1:tu-1";
+const HARNESS_CLASS = "read.web";
+const HARNESS_KEY = `${HARNESS_TASK}:${HARNESS_CLASS}`;
+
+/**
+ * Register the hook's task and start one harness execution, through the real
+ * append path (APRV-141).
+ *
+ * `read.web` is autonomous under this policy, so the start event IS the
+ * authorization: the hook's own verdict, charged and recorded. Returns the
+ * `execution.started` record so a caller can assert on what it says.
+ */
+function delegatedStart(unit: Case, key: string = HARNESS_KEY, minute = 2): EventRecord {
   const registered = register(
     unit.logPath,
     {
-      task: "hook:sess-1:tu-1",
+      task: HARNESS_TASK,
       envelope: {
         origin: { app: "claude-code-hook", created_by: "agent:claude-code" },
         state: "proposed",
         actions: [
-          { class: cls, summary: "ls", reversible: true, est_cost_usd: "0", idempotency_key: key },
+          {
+            class: HARNESS_CLASS,
+            summary: "ls",
+            reversible: true,
+            est_cost_usd: "0",
+            idempotency_key: key,
+            payload_hash: bindingFor(key),
+          },
         ],
       },
     },
@@ -792,16 +810,98 @@ test("a harness execution is DELEGATED, not dangling: it is terminal by design",
 
   const started = startHarnessExecution(
     unit.logPath,
-    { task: "hook:sess-1:tu-1", cls, actionKey: key },
+    { task: HARNESS_TASK, cls: HARNESS_CLASS, actionKey: key, payload_hash: bindingFor(key) },
     "agent:claude-code",
-    { ...unit.options, clock: () => at(2) },
+    { ...unit.options, clock: () => at(minute) },
   );
   assert.equal(started.ok, true, started.ok ? "" : started.message);
+  if (!started.ok) throw new Error("unreachable");
+  return started.record;
+}
 
-  const cycle = executionCustody(records(unit)).find((entry) => entry.actionKey === key);
+test("a harness execution is DELEGATED, not dangling: it is terminal by design", () => {
+  // APRV-117/APRV-141: the harness runs the command and this runtime never
+  // observes an exit status, so no outcome event will ever follow. Before
+  // the custody vocabulary these read as debris — dozens of them in the
+  // reference repository's own log — which is how a list an operator is
+  // supposed to act on becomes a list they scroll past.
+  const unit = ready();
+  delegatedStart(unit);
+
+  const cycle = executionCustody(records(unit)).find((entry) => entry.actionKey === HARNESS_KEY);
   assert.equal(cycle?.state, "delegated");
   assert.deepEqual(danglingExecutions(records(unit)), [], "a harness record was reported as debris");
   assert.deepEqual(indeterminateExecutions(records(unit)), []);
+  assertClean(unit);
+});
+
+test("a harness start REQUIRES the bytes it is about to run, and records them", () => {
+  // APRV-146. The hash used to be recorded only when a caller happened to
+  // supply one, so APRV-140's rule — every execution.started names what ran —
+  // reached `approval run` and stopped at the harness path, which is where most
+  // of this repository's own executions are written. A start event that cannot
+  // say WHAT ran says only that something did.
+  const unit = ready();
+  const before = records(unit).length;
+
+  const bare = startHarnessExecution(
+    unit.logPath,
+    { task: HARNESS_TASK, cls: HARNESS_CLASS, actionKey: HARNESS_KEY },
+    "agent:claude-code",
+    { ...unit.options, clock: () => at(2) },
+  );
+  assert.equal(bare.ok, false);
+  if (bare.ok) throw new Error("unreachable");
+  assert.equal(bare.code, "payload-hash-required");
+  assert.equal(records(unit).length, before, "a refused start appended something");
+
+  // With the hash, the record names the bytes beside the price and the marker.
+  const record = delegatedStart(unit, HARNESS_KEY, 3);
+  const payload = record.payload as Record<string, unknown>;
+  assert.equal(payload["payload_hash"], bindingFor(HARNESS_KEY));
+  assert.equal(payload["execution"], "harness");
+  assert.equal(payload["class"], HARNESS_CLASS);
+  assertClean(unit);
+});
+
+test("no outcome may be written over a delegated record", () => {
+  // APRV-146. Both verbs would have closed a harness start, which by design
+  // never gains an outcome from this runtime: a `completed` recorded here
+  // reports an exit code nobody watched, and it would additionally clear the
+  // task's loop-escalation streak (SPEC.md §10.2) on the strength of it.
+  const unit = ready();
+  const record = delegatedStart(unit);
+  const before = records(unit).length;
+
+  const finished = asRefusal(
+    finishExecution(unit.logPath, HARNESS_KEY, 0, at(3), "agent:claude-code"),
+  );
+  assert.equal(finished.code, "execution-delegated");
+  assert.equal(finished.seq, record.seq);
+  assert.match(finished.message, /harness/u);
+
+  // Human-attested resolution is refused for the same reason, and it is a
+  // stricter case: a person attesting an outcome for a command this runtime
+  // never watched attests to the one thing the log says nobody observed.
+  const resolved = asRefusal(
+    resolveExecution(
+      unit.logPath,
+      HARNESS_KEY,
+      "completed",
+      "the command ran in my terminal",
+      at(4),
+      "human:carter",
+    ),
+  );
+  assert.equal(resolved.code, "execution-delegated");
+  assert.equal(records(unit).length, before, "a refusal appended something");
+
+  // The projection and the enforcement path say the same thing about the record.
+  assert.equal(
+    executionCustody(records(unit)).find((entry) => entry.actionKey === HARNESS_KEY)?.state,
+    "delegated",
+  );
+  assert.deepEqual(danglingExecutions(records(unit)), []);
   assertClean(unit);
 });
 

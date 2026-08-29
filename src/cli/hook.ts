@@ -945,13 +945,22 @@ function withdrawPending(
  * and authorizes nothing. The reverse ordering — allow first, record later —
  * would trade that for a grant the harness used and the log never saw, so the
  * cheap failure is the correct one.
+ *
+ * `hash` is the binding the caller already computed over the bytes this verdict
+ * is about (APRV-146). The gate requires it and compares it against what the
+ * human answered: the same value keyed the carryover that found these grants, so
+ * presenting it states, at the spend, the fact the match was made on.
  */
 function consumeGrants(
   run: HookRun,
   keys: readonly string[],
+  hash: string,
 ): { code: string; message: string } | null {
   for (const key of keys) {
-    const spent = consumeHarnessGrant(run.logPath, key, run.actor, run.options);
+    const spent = consumeHarnessGrant(run.logPath, key, run.actor, {
+      ...run.options,
+      presentedPayloadHash: hash,
+    });
     if (!spent.ok) return { code: spent.code, message: `${key}: ${spent.message}` };
   }
   return null;
@@ -1249,7 +1258,7 @@ function gateAndWait(
     }
     // Every gated class carried an unspent grant: a human already answered this
     // exact question about these exact bytes, and nobody is asked again.
-    const failed = consumeGrants(run, spendKeys);
+    const failed = consumeGrants(run, spendKeys, hash);
     if (failed !== null) {
       return sayDeny(`hook-gate-refused:${failed.code}`, failed.message);
     }
@@ -1320,7 +1329,7 @@ function gateAndWait(
         if (states.every((state) => state === "granted")) {
           // The grants are spent before the allow is printed, so this exact
           // command cannot ride the same authorization twice.
-          const failed = consumeGrants(run, spendKeys);
+          const failed = consumeGrants(run, spendKeys, hash);
           if (failed !== null) {
             return sayDeny(`hook-gate-refused:${failed.code}`, failed.message);
           }
