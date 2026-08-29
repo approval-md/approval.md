@@ -19,6 +19,7 @@
  * setup sampling                 # the audit sampling secret, in this file
  * setup channel <name>           # cli/setup-channel.ts  (keystore + .approval/env)
  * setup adapter <name>           # cli/setup-adapter.ts  (the vault)
+ * setup service                  # cli/setup-service.ts  (a launchd/systemd unit)
  * ```
  *
  * The last two are **two nouns and not one list**, and the split is SPEC.md
@@ -174,6 +175,7 @@ import {
 } from "./help.js";
 import { commandSetupAdapter } from "./setup-adapter.js";
 import { RENAMED_NOTICE, commandSetupChannel } from "./setup-channel.js";
+import { commandSetupService } from "./setup-service.js";
 import {
   DEFAULT_SAMPLING_ENV,
   SERVICE_SAMPLING_SECRET,
@@ -610,6 +612,10 @@ export function commandSetup(
   // own: the name selects the entry, so it is a positional and not a flag.
   if (sub === "channel") return commandSetupChannel(rest, streams, cwd, deps);
   if (sub === "adapter") return commandSetupAdapter(rest, streams, cwd, deps);
+  // APRV-110. The one subcommand whose subject is neither a value this runtime
+  // mints nor a credential the operator holds: it writes the unit file that
+  // starts `approval up` at login, and it never copies a value into it.
+  if (sub === "service") return commandSetupService(rest, streams, cwd, deps);
   // The one former spelling that gets a sentence rather than "unknown
   // subcommand". It is NOT an alias: it refuses at exit 2 and says what to run.
   // See {@link RENAMED_NOTICE} and this file's module doc.

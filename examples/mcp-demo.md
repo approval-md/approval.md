@@ -107,19 +107,27 @@ agent-facing verbs that are withheld for transport reasons (`consume`, which
 and `hook claude-code` / `hook cursor`, which each read a pre-tool event from a stdin
 this transport already owns).
 
-## Step 2: start the daemon and the listener
+## Step 2: start the runtime
 
-In the project directory, in two terminals, exactly as
+In the project directory, in one terminal, exactly as
 [docs/dogfood-cutover.md](../docs/dogfood-cutover.md) describes:
 
 ```sh
-eval "$(approval env)"             # APPROVAL_HUMAN, APPROVAL_TG_TOKEN, APPROVAL_TG_CHAT
+eval "$(approval env)"   # APPROVAL_HUMAN, APPROVAL_TG_TOKEN, APPROVAL_TG_CHAT
+approval up              # the daemon loop AND every configured channel, one process
+```
+
+That is the watch loop (drift, TTL, `QUEUE.md`) and the Telegram listener
+together. It is a foreground process by design, and it is the terminal that will
+print the execution token, so keep it where you can read it.
+
+The older two-terminal form still works and behaves identically, if you would
+rather watch the halves separately:
+
+```sh
 approval daemon run                # watch, drift, TTL, QUEUE.md
 approval channel telegram listen   # pushes requests to the phone, records taps
 ```
-
-Both are foreground processes by design. The listener is the terminal that will
-print the execution token, so keep it where you can read it.
 
 ## Step 3: the task file and the payload
 
@@ -341,6 +349,6 @@ seq range on APRV-88 points at.
 | A tool call is refused `mcp-stdin-unavailable` | An argument was `-`, which means "read from stdin" everywhere in this CLI, and on a stdio server stdin is the JSON-RPC stream. Write the bytes to a file and pass its path. |
 | `unknown tool "grant"` | Working as designed. The overseer's verbs are not published to an agent's harness. |
 | `policy-not-attested` or `hash-mismatch` from every tool | `APPROVAL.md` changed since it was attested. Run `approval policy attest` again, at a human's terminal. |
-| The request never reaches the phone | The listener is not running, or `APPROVAL_TG_TOKEN` / `APPROVAL_TG_CHAT` is unset in *its* shell. See the troubleshooting table in [examples/telegram-demo.md](telegram-demo.md). |
+| The request never reaches the phone | `approval up` is not running, or `APPROVAL_TG_TOKEN` / `APPROVAL_TG_CHAT` is unset in *its* shell — in which case it printed a `part_unavailable` line naming the variable when it started. See the troubleshooting table in [examples/telegram-demo.md](telegram-demo.md). |
 | `payload-mismatch` from `run` | The trailing argv or the working directory is not the one the envelope declared and the human approved. The binding is over `{argv, cwd}`. |
 | `token-required` from `run` | No token was passed, or the agent invented one. The token comes from the listener's terminal, by way of you. |

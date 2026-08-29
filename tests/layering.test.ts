@@ -31,8 +31,14 @@ const CLI_DIR = join(REPO_ROOT, "src", "cli");
 /**
  * CLI modules allowed to import from `src/daemon/`, pinned as a list so that
  * widening the exception is itself a reviewable diff.
+ *
+ * `up.ts` joined it in APRV-110. It is the second spelling of the same verb: the
+ * ambient runtime runs the very `Daemon` that `daemon.ts` runs, under one set of
+ * signal handlers, and `daemon run --with-channels` reaches it. Making it import
+ * the loop through a third module would have hidden that identity rather than
+ * removed the dependency.
  */
-const DAEMON_IMPORTERS_ALLOWED: readonly string[] = ["daemon.ts"];
+const DAEMON_IMPORTERS_ALLOWED: readonly string[] = ["daemon.ts", "up.ts"];
 
 /** `import ... from "<specifier>"` and `export ... from "<specifier>"`, static form. */
 const IMPORT_SPECIFIER = /(?:^|\n)\s*(?:import|export)\b[^;]*?from\s*["']([^"']+)["']/gu;

@@ -2163,6 +2163,81 @@ rather than inferred from the queue's backlog. `rendered` is emitted when the qu
 CHANGES; the file itself is rewritten every tick, because TTL countdowns move even
 when the log does not.
 
+## up
+
+**The ambient runtime: the daemon loop and every configured channel in one
+supervised foreground process.** `approval daemon run --with-channels` is the
+same verb spelled from the other side, and it reaches the same function before
+either flag table is parsed, so there is one code path and two spellings.
+
+**No logic lives in this verb.** The loop is the same `Daemon`, the dispatch
+cycle is the same `dispatchPending`, and the queue page is the same
+`startWebChannel`. What `up` adds is supervision: which parts to start, what to
+do when one falls over, and how to stop them all at once. That is why the tests
+for it compose the daemon and telegram suites rather than restating them: the
+question is whether the parts behave identically in one process, and a test that
+described new behaviour would be answering a different question.
+
+**The daemon settles the verb; a channel never does.** A channel is a network
+client and the daemon is not. A Bot API that starts refusing sends must not stop
+TTL expiry, write-back or the queue projection, so a channel that falls over is
+reported and restarted after a doubling backoff (from `--restart-backoff`,
+default 1s, capped at 60s) while the daemon loop carries on. There is no attempt
+limit, for the reason `dispatchPending` has no send limit: giving up would turn
+an outage into a pending request no human ever sees. A part that ran for a minute
+before failing is counted as a fresh failure rather than the next rung of a crash
+loop, so an hour-old listener that hits a network blip retries in a second.
+
+The daemon's own failure does stop everything. An unreadable log, a torn tail or
+a chain that does not verify ends the channels too: a queue page and a chat
+prompt derived from a log nobody could verify would be a statement to a human
+about facts the runtime disowns.
+
+**A restart re-sends; it never silently drops.** Each attempt builds a fresh
+dispatch state, so a restarted listener re-derives the pending queue from the
+verified log and sends everything still pending, exactly as a restarted process
+would. Delivery bookkeeping is in-process memory by design, and a duplicate
+prompt on a phone is a recoverable annoyance where a silence is not.
+
+**Fail closed, then carry on.** A channel that cannot start at all is not
+started: a credential variable the policy names is unset, or no human identity
+was declared. The refusal is reported in `approval doctor`'s own vocabulary (a
+`check`, a `skip`, a `detail`, a `fix`) rather than in a second vocabulary for
+the same fact, and the parts that can run do. Refusing to run the daemon because
+Telegram was unconfigured would withhold the projection over a channel nobody
+asked for; starting a half-armed runtime that said nothing would be the failure
+this project exists to prevent. A mistyped `--poll-timeout` or an unreadable
+`--payloads` is a different thing and is refused outright: that is an operator
+error, not an unconfigured machine.
+
+**Credentials come from the launch environment and from nowhere else.** SPEC.md
+§11.1 invariant 7 holds here as everywhere: nothing loads `.approval/env`
+implicitly. The bot token, the chat id and the approver identity are read from
+the environment the operator started this process with, through the same
+resolvers the separate listener uses. `approval setup service` writes a unit that
+either evaluates `approval env` in a wrapper the human reads or names an
+`EnvironmentFile` the human wrote.
+
+**The `--json` stream is an additive union.** Every line is one of three kinds: a
+`DaemonEvent` verbatim, a listener line verbatim (`notified`, `decision`,
+`annotated`, `listening`, `stopped`), or one of this verb's own supervision lines
+(`up_started`, `part_started`, `part_unavailable`, `part_failed`,
+`part_restarted`, `part_stopped`, `up_stopped`). No field is added to a shape
+that already existed, so the decision object and the token panel are byte-
+identical to the ones the separate processes print, because the same functions
+print them. The one shape that appears twice is `stopped`: the daemon's carries
+tick counters and a channel's carries delivery counters, and renaming either
+would have broken a stream an operator already parses.
+
+`--once` is one daemon tick and one poll cycle. The daemon's tick finishes in
+milliseconds and the channel's poll takes as long as the long poll does, so the
+fast part waits for the slow one rather than cutting it short. The queue page is
+a pull channel with no cycle to run, so `--once` does not serve one.
+
+Like `daemon run`, it does not fork, write a pidfile, or manage its own
+lifecycle. `launchd` and `systemd` do that better, and `approval setup service`
+is the verb that hands them the unit.
+
 ## vault
 
 **There is no `approval vault get`**, and it is not an oversight. A verb that
@@ -2657,6 +2732,43 @@ and enforced: it stores a credential and writes `.approval/env`, so `--as` expec
 a `human:<id>` and an `agent:` or `system:` actor is refused at exit 2. Exit 1
 means the far end refused: an invalid token, a 409 from a running listener, or no
 message reaching the bot before the deadline.
+
+## setup service
+
+**It writes one file: the launchd user agent or the systemd user unit that runs
+`approval up` at login.** It is the fifth member of the `setup` family and obeys
+the family's rules (interactive by refusal, human-only, appending nothing to the
+log, editing no policy) with two of its own.
+
+**It never copies a value.** A unit file is world-readable configuration that
+survives reboots and gets backed up, so a bot token in one is a bot token in a
+backup. The unit names where the environment comes from and never carries it. By
+default it runs a wrapper the human reads in the printed unit: `eval "$(approval
+env)"` and then `exec approval up`, so keystore references stay in the keystore
+and `approval env` stays the only thing that resolves them. With `--env-file` it
+points at a file the operator authored, which this verb neither writes nor reads.
+
+**It prints the unit before it writes it, and it does not arm it.** The whole
+file goes to stdout first and nothing is written until the operator confirms.
+Loading it is a separate act: the verb prints the exact `launchctl bootstrap` or
+`systemctl --user enable --now` line and stops there. A login service is a
+standing capability on someone's machine, one that starts a process holding a
+credential that can put prompts on a phone, and a wizard that armed one as a side
+effect of writing a file would be making that decision on the operator's behalf.
+Printing the command costs one paste and buys an explicit act. `--uninstall`
+mirrors it: the stop command first, then the file removed on confirmation.
+
+**Console output never goes into `.approval/`.** The service's stdout and stderr
+go where the operator chooses, defaulting to the platform's own log home
+(`~/Library/Logs/approval` or `~/.local/state/approval`). A `--logs` path inside
+the approval home is refused. That directory holds the log, the queue projection,
+the payload store, the vault and the environment source map, and unverifiable
+console text beside them is what makes a directory stop meaning something.
+
+A path carrying a quote or a newline is refused rather than escaped into the
+unit's shell wrapper, because the safe thing to do with a path that cannot be
+single-quoted is to say so. The plist is XML-escaped, so a working directory with
+an `&` in it produces a file launchd can parse.
 
 ## mcp serve
 

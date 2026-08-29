@@ -228,8 +228,17 @@ registered envelope rather than from flags, so an agent cannot rename its own
 class between registering and asking. An approval is about specific bytes, never
 about a description of them.
 
-**3. Start the listener and read the message.** `approval channel telegram
-listen` prints `notified task-demo:chaser (message 501)` and your phone has it.
+**3. Start the runtime and read the message.** `approval up` prints
+`notified task-demo:chaser (message 501)` and your phone has it. That one
+foreground process is the whole gate: the daemon loop that records envelope
+drift, expires what lapsed and regenerates the queue, plus every channel the
+policy configures. A channel whose credential variable is unset is not started,
+says so in the words `approval doctor` uses, and the daemon runs anyway; a
+channel that falls over is restarted with a doubling backoff while the loop keeps
+ticking. `approval daemon run` and `approval channel telegram listen` still run
+the halves separately and behave identically, and `approval setup service` writes
+the launchd or systemd user unit that starts the runtime at login (printing the
+whole unit for you to read first, naming variables and never copying a value).
 The message shows the action key, a **COMPUTED** block the runtime derived (class,
 task, state, binding, budget verdicts, chain head), a **CLAIMED** block naming the
 agent and marked unverified, the **FULL PAYLOAD**, and two buttons. It also says
@@ -274,8 +283,8 @@ granted task-demo:chaser at seq 4 by human:alice
 ─────────────────────────────────────────────────────────────
 ```
 
-For a tap on your phone the same panel appears on the listener's own terminal,
-and its last line reads `not sent to Telegram`. Delivery differs per channel on
+For a tap on your phone the same panel appears on the terminal running the
+runtime, and its last line reads `not sent to Telegram`. Delivery differs per channel on
 purpose: a chat transcript lives on servers you do not control and is readable by
 anyone later added to that chat, so a credential does not go there, while the
 local **web** channel shows the raw token once in the response page for the grant
@@ -594,7 +603,7 @@ Checks come in three tiers.
 | --- | --- | --- |
 | light | `README.md`, `docs/**/*.md`, `examples/**/*.md` | the documentation guard (`tests/docs-guard.test.ts`) |
 | records | `backlog/**`, `MILESTONES.md` | the tests that read records (`milestones-guard`, `backlog-fixtures`, `docs-guard`), on Node 20 |
-| full | anything else, or a mix of the above | `npm test && npm run lint && npm run typecheck`, on Node 20 and 22 |
+| full | anything else, or a mix of the above | the whole suite in three shards plus `npm run lint`, on Node 22; the Node 20 floor runs unsharded on the merge queue and on pushes to `main` |
 
 A denylist forces the full tier regardless of file extension: `APPROVAL.md`,
 `CLAUDE.md`, `.claude/**`, `SPEC.md`, `schema/**`, `**/fixtures/**`,
@@ -613,6 +622,19 @@ Classification is computed from the changed paths by
 `scripts/classify-tier.mjs`, never asserted by the author of the change. Every
 merge to `main` runs the full suite unconditionally, and anything ambiguous, an
 empty path set included, resolves to full.
+
+A full-tier CI job compiles once. It builds, then runs `node
+scripts/run-tests.mjs` over what it built, because `npm test` and `npm run
+typecheck` would each recompile the same tree and neither pass can fail where
+the build passed. `npm test` keeps its build-then-run shape for anyone running
+it by hand. `scripts/run-tests.mjs --shard <k>/<n>` takes shard `k` of the
+sorted file list, where the file at position `i` belongs to shard `(i mod n) +
+1`, so the shards of a matrix are a partition of the suite: every file in
+exactly one shard, and the matrix covers all of them. An out-of-range index, an
+empty shard, and `--shard` combined with `--only` are refused rather than run.
+The Node 20 floor moved to the merge queue and to pushes to `main` because the
+queue candidate is what stands between a change and the branch, and a pull
+request now gets its verdict from the shards alone.
 
 ## Exit codes
 

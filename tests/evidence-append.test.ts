@@ -520,13 +520,19 @@ test("harness consumption: a grant whose spend cannot be recorded stays unspent"
   const refused = underHeldLock(unit, () =>
     consumeHarnessGrant(unit.logPath, "task-042:chaser", "agent:claude", at(4), {
       ...unit.options,
+      // APRV-146: a spend states the bytes it holds, so this reaches the append
+      // it is here to interrupt rather than stopping at the content binding.
+      presentedPayloadHash: PAYLOAD_HASH,
       append: { ...IMPATIENT },
     }),
   );
   assertAppendRefusal(refused, "lock-timeout", "harness-consume");
   assert.equal(rawLog(unit), before, "a refused spend writes nothing");
 
-  const spent = consumeHarnessGrant(unit.logPath, "task-042:chaser", "agent:claude", at(5), unit.options);
+  const spent = consumeHarnessGrant(unit.logPath, "task-042:chaser", "agent:claude", at(5), {
+    ...unit.options,
+    presentedPayloadHash: PAYLOAD_HASH,
+  });
   assert.equal(spent.ok, true, spent.ok ? "" : spent.message);
   assertClean(unit);
 });

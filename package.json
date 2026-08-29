@@ -1,6 +1,6 @@
 {
   "name": "approval-md",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Human approval for agent actions. CLI runtime for the approval.md convention (pre-release).",
   "type": "module",
   "bin": {
@@ -9,6 +9,7 @@
   "files": [
     "cli.js",
     "dist",
+    "schema",
     "docs/cli-reference.md",
     "SPEC.md",
     "README.md"

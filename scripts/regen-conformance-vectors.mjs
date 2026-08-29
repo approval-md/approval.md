@@ -879,13 +879,16 @@ const SUITES = [
   {
     file: "refusal-unions.v1.json",
     suite: "refusal-unions",
-    // 2.0.0 (APRV-109): a MAJOR bump, because a pinned expectation moved rather
-    // than a vector being added. `gate_refusal_codes` gained the four codes the
+    // 3.0.0: two MAJOR bumps in sequence, each a pinned expectation moving
+    // rather than a vector being added, because the vector pins each whole
+    // array in definition order and a longer union is a changed expectation.
+    // 2.0.0 (APRV-146): `execution-delegated` joined the execute union.
+    // 3.0.0 (APRV-109): `gate_refusal_codes` gained the four codes the
     // attestation ceremony refuses with (diff-too-large, proposal-not-found,
     // proposal-stale, policy-already-attested) and `channel_tag_refusal_codes`
-    // gained proposal-stale, so a second implementation conforming to 1.0.0
-    // emits a union this suite no longer accepts (conformance/README.md).
-    vectors_version: "2.0.0",
+    // gained proposal-stale. An implementation conforming to either earlier
+    // version emits a union this suite no longer accepts (conformance/README.md).
+    vectors_version: "3.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",

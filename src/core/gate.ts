@@ -260,6 +260,14 @@ export const GATE_REFUSAL_CODES = [
    * envelope alone determines. A manual action with nothing to bind to would
    * give a human a decision about bytes nobody committed to, so intake refuses
    * and nothing is appended.
+   *
+   * Since APRV-146 the same code answers the same fact at the harness write
+   * boundary: {@link startHarnessExecution} refuses a start that names no
+   * payload hash, and {@link consumeHarnessGrant} refuses a spend that presents
+   * none (or a grant whose request recorded none). The fact is identical at both
+   * ends — a binding is required here and there is none — and the repair is the
+   * same shape: state the bytes, or request the action again so the record does.
+   * `payload-mismatch` stays the code for bytes that are stated and wrong.
    */
   "payload-hash-required",
   /**
@@ -2352,6 +2360,25 @@ function grantedPolicyHash(records: EventRecord[], seq: number | null): string |
   return null;
 }
 
+/**
+ * `GateOptions` plus the one thing a harness spend states about itself
+ * (APRV-146).
+ */
+export interface ConsumeHarnessOptions extends GateOptions {
+  /**
+   * The hash of the payload the harness is about to run (amended SPEC.md §10.4).
+   *
+   * REQUIRED for every spend. It is never read from the log: a value read from
+   * the log would prove nothing, and the whole point is that the process about
+   * to run the command states, independently, what it holds so the runtime can
+   * compare it against what the human approved. Optional in the type and
+   * enforced at the write boundary, exactly as `core/execute.ts` enforces
+   * `presentedPayloadHash`, so omitting it is a machine-readable refusal rather
+   * than a compile error a caller could silence with a placeholder.
+   */
+  presentedPayloadHash?: string;
+}
+
 export type ConsumeHarnessResult = { ok: true; record: EventRecord } | GateRefusal;
 
 /**
@@ -2395,7 +2422,10 @@ export type ConsumeHarnessResult = { ok: true; record: EventRecord } | GateRefus
  * request, `expired` when the TTL lapsed (judged from the request's own `ts`,
  * event or no event, exactly as {@link decide} judges it), `already-executed`
  * when something already spent it, `not-granted` for every other state and for
- * a grant that is not harness-executed. Budgets are not re-evaluated: the
+ * a grant that is not harness-executed. The content binding is checked last and
+ * refuses twice over (APRV-146): `payload-hash-required` when the grant records
+ * no bytes or the consumer states none, `payload-mismatch` when the bytes stated
+ * are not the bytes approved. Budgets are not re-evaluated: the
  * authorization was charged at `approval.granted`, and `core/budgets.ts`'s
  * consumption contract already dedupes a start event against a grant carrying
  * the same `action_key`.
@@ -2404,7 +2434,7 @@ export function consumeHarnessGrant(
   logPath: string,
   actionKey: string,
   actor: string,
-  options: GateOptions = {},
+  options: ConsumeHarnessOptions = {},
 ): ConsumeHarnessResult {
   const ts = tick(options);
   if (!PRINCIPAL_ACTOR.test(actor)) {
@@ -2503,16 +2533,55 @@ export function consumeHarnessGrant(
     );
   }
 
+  // Content binding at the spend (APRV-146), reading APRV-140's rule the way
+  // `core/execute.ts` reads it. A harness grant approves specific bytes: the
+  // request recorded their hash, the human answered about them, and
+  // `findHarnessCarry` matched a retry to this grant on that hash alone. So the
+  // process about to run the command states the bytes it holds and they must be
+  // the ones the grant carries.
+  //
+  // Neither absence is waved through. A request that recorded no binding is a
+  // record this gate could not have written — `request` refuses
+  // `payload-hash-required` for every manual action — so accepting it would make
+  // the binding bypassable by log construction. A consumer that presents none
+  // has not shown that it is running the approved command, which is the same
+  // fact stated by omission. Ambiguity resolves to the stricter path, and the
+  // grant stays live either way: nothing here is appended.
+  const declaredHash = derivation.declared.payload_hash;
+  if (declaredHash === null) {
+    return refuse(
+      "payload-hash-required",
+      `action ${actionKey}'s request records no payload_hash, so there is nothing for this spend to be checked against. Amended SPEC.md §6.2 makes the binding MUST for a manual action, and a harness request is one; a grant carrying none reached the log some other way. Request the action again, which binds it to the payload the harness is about to run.`,
+      { state: derivation.state },
+    );
+  }
+  const presented = options.presentedPayloadHash;
+  if (!isPayloadHash(presented)) {
+    return refuse(
+      "payload-hash-required",
+      `the grant for ${actionKey} binds to payload_hash ${declaredHash} and this consumer presented ${presented === undefined ? "none" : JSON.stringify(presented)}. Amended SPEC.md §10.4: an executor MUST recompute the hash of the payload it is about to execute, so a spend that cannot state its bytes cannot be shown to be running the approved ones. Nothing was appended and the grant is still live.`,
+      { state: derivation.state },
+    );
+  }
+  if (presented !== declaredHash) {
+    return refuse(
+      "payload-mismatch",
+      `the payload presented for ${actionKey} is not the one approved: the grant binds to ${declaredHash}, this consumer presented ${JSON.stringify(presented)}. A grant approves specific bytes; changing them after the decision requires a new request. Nothing was appended and the grant is still live.`,
+      { state: derivation.state },
+    );
+  }
+
   const payload: Record<string, unknown> = {
     // The budgets contract: class and est_cost_usd on every start event.
     class: derivation.declared.class ?? "",
     est_cost_usd: derivation.declared.est_cost_usd ?? "0",
     // Why no completion will ever follow (see the doc comment).
     execution: "harness",
+    // APRV-146: unconditional, because a grant with no binding and a consumer
+    // that states none were both refused above. Every execution.started this
+    // module writes names the bytes that ran.
+    payload_hash: declaredHash,
   };
-  if (derivation.declared.payload_hash !== null) {
-    payload["payload_hash"] = derivation.declared.payload_hash;
-  }
   if (derivation.decisionSeq !== null) payload["grant_seq"] = derivation.decisionSeq;
 
   const appended = append(
@@ -2544,7 +2613,18 @@ export interface HarnessStartInput {
   task: string;
   actionKey: string;
   cls: string;
-  /** The bytes the verdict was computed over, when the caller has a hash. */
+  /**
+   * The hash of the bytes the verdict was computed over, and which are about to
+   * run (amended SPEC.md §6.2/§10.4, APRV-140).
+   *
+   * REQUIRED. A start event that cannot say WHAT ran records only that something
+   * did, which is the whole of what APRV-140 set out to fix and is exactly the
+   * state the harness path was left in. Optional in the type and enforced at the
+   * write boundary, on the reading `core/execute.ts` gives
+   * `presentedPayloadHash`: a caller that omits it is refused
+   * `payload-hash-required` and told what to compute, rather than turned away by
+   * the compiler and left to satisfy it with a placeholder.
+   */
   payload_hash?: string;
   /** Canonical decimal USD string (APRV-121); a JSON number is read as the historical form. */
   est_cost_usd?: UsdInput;
@@ -2588,6 +2668,11 @@ export type HarnessStartResult = { ok: true; record: EventRecord } | GateRefusal
  * is refused outright: a manual action is authorized by a grant and spent
  * through {@link consumeHarnessGrant} or a token, and admitting one here would
  * be a second, unapproved spender.
+ *
+ * Since APRV-146 the content binding is refused here too. `payload-hash-required`
+ * says the caller named no bytes, and it is a refusal rather than an omitted
+ * field because a start event with no `payload_hash` is a record that says
+ * something ran without saying what — the state APRV-140 closed everywhere else.
  */
 export function startHarnessExecution(
   logPath: string,
@@ -2637,6 +2722,21 @@ export function startHarnessExecution(
     );
   }
 
+  // The content binding, REQUIRED (APRV-146). Until this it was recorded only
+  // when a caller happened to supply one, so APRV-140's rule — every
+  // `execution.started` names the bytes that ran — reached `approval run` and
+  // stopped at the harness path, which is where most of the executions in this
+  // repository's own log are written. Checked after the free checks and BEFORE
+  // the budget evaluation, because a budget refusal WRITES and this one must
+  // leave the log exactly as it found it.
+  const bytes = input.payload_hash;
+  if (!isPayloadHash(bytes)) {
+    return refuse(
+      "payload-hash-required",
+      `recording a harness execution of ${input.actionKey} requires the payload_hash of what is about to run (amended SPEC.md §6.2, APRV-140), and this caller presented ${bytes === undefined ? "none" : JSON.stringify(bytes)}. A start event that cannot state its bytes says only that something ran; the harness computes the hash of the payload it is about to execute and passes it here. Nothing was appended.`,
+    );
+  }
+
   const cost = costOf(input.est_cost_usd);
   const budget = evaluateBudgetsWithTask(
     read.records,
@@ -2683,8 +2783,10 @@ export function startHarnessExecution(
     est_cost_usd: cost,
     // Why no completion will ever follow (see `consumeHarnessGrant`).
     execution: "harness",
+    // APRV-146: unconditional, because a caller that states no bytes was refused
+    // above. The record says what ran, not only that something did.
+    payload_hash: bytes,
   };
-  if (isPayloadHash(input.payload_hash)) payload["payload_hash"] = input.payload_hash;
 
   const appended = append(
     logPath,

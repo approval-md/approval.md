@@ -158,33 +158,85 @@ jobs:
       - run: node scripts/run-tests.mjs --only milestones-guard backlog-fixtures docs-guard
 
   full:
-    name: full gate (node ${{ matrix.node-version }})
+    # The full gate's bulk, sharded (APRV-149). Three jobs run a third of the
+    # suite each, so the tier's wall clock is the slowest shard rather than one
+    # `node --test` pool on two runner cores. The assignment lives in
+    # scripts/run-tests.mjs: the file at sorted position i belongs to shard
+    # (i mod 3) + 1, so every discovered file is in exactly one shard and the
+    # matrix covers all of them. The runner refuses an out-of-range index or an
+    # empty shard rather than exiting green over a slice nothing ran.
+    #
+    # One compile per job. The build step compiles and the runner runs what it
+    # built; `npm test` would compile a second time and `npm run typecheck` a
+    # third, and neither pass can fail where the build passed. `npm test` keeps
+    # its build-then-run shape for humans, who have not already built.
+    #
+    # Lint runs in every shard on purpose. oxlint takes about a second on this
+    # tree, and a shard that lints is a complete verdict on what it built
+    # instead of a job whose meaning depends on a sibling.
+    name: full gate (node 22, shard ${{ matrix.shard }}/3)
     needs: classify
     if: needs.classify.outputs.tier == 'full'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node-version: [20, 22]
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: npm test
+      - run: node scripts/run-tests.mjs --shard ${{ matrix.shard }}/3
       - run: npm run lint
-      - run: npm run typecheck
+
+  full-floor:
+    # The Node floor, proven where it decides something (APRV-149).
+    # `engines.node` is >=20 and the floor is the version nobody develops on,
+    # so it stays in the gate; what changed is when it runs. A pull_request run
+    # is feedback for an author, and the merge-queue candidate is what stands
+    # between a change and main, so the floor runs on the queue and on a push
+    # to main. A pull request no longer waits for a second whole suite to
+    # repeat what the shards above already said, and nothing becomes main
+    # without the floor having run on it.
+    #
+    # Unsharded, and it compiles once as the shards do. One version running
+    # once needs no matrix to coordinate, and the aggregator below reads its
+    # single result. No lint step: oxlint's verdict does not vary by Node
+    # major, and every shard above already has it.
+    name: full gate (node 20 floor)
+    needs: classify
+    if: >-
+      needs.classify.outputs.tier == 'full' &&
+      (github.event_name == 'merge_group' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/run-tests.mjs
 
   ci:
     # The one required check. `classify` alone passes regardless of tier
     # outcome, so branch protection requiring it would protect nothing; this
     # job succeeds only when the tier that was chosen actually ran and
     # succeeded. Skipped-when-required is a failure here, not a pass.
+    #
+    # `full` is the whole shard matrix: GitHub reports one result for a matrix
+    # job and it is `success` only when every shard succeeded, so requiring
+    # that result requires all three. The floor leg is conditional (APRV-149),
+    # so this job decides which events owe a floor result rather than letting a
+    # skipped job read as a pass on the events that must prove the floor.
     name: ci
-    needs: [classify, doc-guard, records, full]
+    needs: [classify, doc-guard, records, full, full-floor]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -195,9 +247,11 @@ jobs:
           DOC_RESULT: ${{ needs['doc-guard'].result }}
           RECORDS_RESULT: ${{ needs.records.result }}
           FULL_RESULT: ${{ needs.full.result }}
+          FULL_FLOOR_RESULT: ${{ needs['full-floor'].result }}
+          FLOOR_REQUIRED: ${{ github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         run: |
           set -euo pipefail
-          echo "classify=$CLASSIFY_RESULT tier=$TIER doc-guard=$DOC_RESULT records=$RECORDS_RESULT full=$FULL_RESULT"
+          echo "classify=$CLASSIFY_RESULT tier=$TIER doc-guard=$DOC_RESULT records=$RECORDS_RESULT full=$FULL_RESULT full-floor=$FULL_FLOOR_RESULT floor-required=$FLOOR_REQUIRED"
           if [ "$CLASSIFY_RESULT" != "success" ]; then
             echo "classify did not succeed; nothing downstream is trustworthy"
             exit 1
@@ -210,7 +264,12 @@ jobs:
               [ "$RECORDS_RESULT" = "success" ] || { echo "records tier required the records guards to succeed, got $RECORDS_RESULT"; exit 1; }
               ;;
             full)
-              [ "$FULL_RESULT" = "success" ] || { echo "full tier required the full gate to succeed, got $FULL_RESULT"; exit 1; }
+              [ "$FULL_RESULT" = "success" ] || { echo "full tier required every shard of the full gate to succeed, got $FULL_RESULT"; exit 1; }
+              if [ "$FLOOR_REQUIRED" = "true" ]; then
+                [ "$FULL_FLOOR_RESULT" = "success" ] || { echo "this event must prove the Node 20 floor before anything becomes main, got $FULL_FLOOR_RESULT"; exit 1; }
+              else
+                [ "$FULL_FLOOR_RESULT" = "skipped" ] || [ "$FULL_FLOOR_RESULT" = "success" ] || { echo "the Node 20 floor leg neither was skipped nor succeeded on an event that does not require it, got $FULL_FLOOR_RESULT"; exit 1; }
+              fi
               ;;
             *)
               echo "unrecognized tier '$TIER'"

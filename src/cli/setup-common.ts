@@ -474,9 +474,19 @@ export function front(
   deps: SetupDeps,
   helpText: string,
   nonInteractiveHint: (context: HintContext) => string,
+  /**
+   * Flags this subcommand accepts on top of the shared table (APRV-110).
+   *
+   * `setup service` is the first subcommand whose subject is not a credential,
+   * so it needs words the other four have no use for (a platform, a unit label,
+   * a log directory). They are passed in rather than added to {@link FLAGS},
+   * because a flag every subcommand silently accepts is a flag an operator will
+   * eventually pass to the one that ignores it.
+   */
+  extraFlags: Record<string, FlagKind> = {},
 ): FrontOutcome {
   const json = argv.includes("--json");
-  const parsed = parseFlags(argv, FLAGS);
+  const parsed = parseFlags(argv, { ...FLAGS, ...extraFlags });
   if (!parsed.ok) return { kind: "handled", code: usageError(streams, json, parsed.message, helpText) };
   if (boolFlag(parsed.flags, "--help") || boolFlag(parsed.flags, "-h")) {
     streams.out(`${helpText}\n`);

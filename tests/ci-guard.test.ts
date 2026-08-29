@@ -35,6 +35,7 @@ import { parseHardenedYaml } from "../src/core/policy-load.js";
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 const CLASSIFIER = join(REPO_ROOT, "scripts", "classify-tier.mjs");
+const RUNNER = join(REPO_ROOT, "scripts", "run-tests.mjs");
 
 const WORKFLOW_TEXT = readFileSync(WORKFLOW_PATH, "utf8");
 
@@ -122,10 +123,71 @@ test("the CI workflow runs on push, on pull_request and on merge_group", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The full tier's matrix
+// The full tier's jobs
 // ---------------------------------------------------------------------------
+//
+// The full tier is two jobs since APRV-149: `full`, a shard matrix on Node 22
+// that every event runs, and `full-floor`, the unsharded Node 20 leg the merge
+// queue and pushes to main run. What the tests below hold to is the pair of
+// properties that made the single matrix worth having: both Node majors are
+// still exercised before anything becomes main, and the whole suite still runs.
 
-test("the full gate runs on both supported Node majors", () => {
+/** The `run:` commands of a job, in declaration order. */
+function commandsOf(name: string): string[] {
+  const steps = job(name)["steps"];
+  assert.ok(Array.isArray(steps), `the \`${name}\` job declares no steps`);
+  return steps
+    .map((step) => (typeof step === "object" && step !== null ? (step as Record<string, unknown>)["run"] : undefined))
+    .filter((run): run is string => typeof run === "string");
+}
+
+/** The Node major a job's setup-node step asks for. */
+function nodeVersionOf(name: string): number {
+  const steps = job(name)["steps"] as Array<Record<string, unknown>>;
+  const setup = steps.find((step) => String(step["uses"] ?? "").startsWith("actions/setup-node"));
+  assert.ok(setup !== undefined, `the \`${name}\` job does not set up Node`);
+  return Number((setup["with"] as Record<string, unknown>)["node-version"]);
+}
+
+test("the full tier still runs on both supported Node majors", () => {
+  assert.equal(
+    nodeVersionOf("full"),
+    22,
+    "the sharded full gate runs on something other than the current Node major",
+  );
+  assert.equal(
+    nodeVersionOf("full-floor"),
+    20,
+    "the floor leg no longer runs Node 20. `engines.node` is >=20, and the floor is the version nobody develops on — dropping it from CI means the floor is untested and therefore untrue.",
+  );
+});
+
+test("each full-tier job compiles TypeScript exactly once (APRV-149)", () => {
+  for (const name of ["full", "full-floor"]) {
+    const commands = commandsOf(name);
+    assert.ok(
+      commands.some((run) => run.includes("npm run build")),
+      `the \`${name}\` job no longer builds`,
+    );
+    assert.ok(
+      commands.some((run) => run.includes("scripts/run-tests.mjs")),
+      `the \`${name}\` job no longer runs the test runner`,
+    );
+    for (const redundant of ["npm test", "npm run typecheck"]) {
+      assert.ok(
+        !commands.some((run) => run.includes(redundant)),
+        `the \`${name}\` job runs \`${redundant}\` after \`npm run build\`. Both recompile the tree the build step just compiled, and a second or third tsc pass cannot fail where the first passed; the job builds once and runs what it built. \`npm test\` keeps its build-then-run shape for humans, who have not already built.`,
+      );
+    }
+  }
+  assert.ok(commandsOf("full").some((run) => run.includes("npm ci")), "the `full` job no longer runs `npm ci`");
+  assert.ok(
+    commandsOf("full").some((run) => run.includes("npm run lint")),
+    "the `full` job no longer lints, and it is the job every event runs",
+  );
+});
+
+test("the full gate's shards are a partition the matrix actually covers (APRV-149)", () => {
   const strategy = job("full")["strategy"];
   assert.ok(
     typeof strategy === "object" && strategy !== null,
@@ -136,27 +198,58 @@ test("the full gate runs on both supported Node majors", () => {
     typeof matrix === "object" && matrix !== null,
     "the `full` job's strategy declares no matrix",
   );
-  const versions = (matrix as Record<string, unknown>)["node-version"];
-  assert.ok(Array.isArray(versions), "the `full` job's matrix declares no node-version axis");
+  const shards = (matrix as Record<string, unknown>)["shard"];
+  assert.ok(Array.isArray(shards), "the `full` job's matrix declares no shard axis");
+  const count = shards.length;
   assert.deepEqual(
-    [...versions].map(Number).sort((a, b) => a - b),
-    [20, 22],
-    "the `full` job's Node matrix is not [20, 22]. `engines.node` is >=20, and the floor is the version nobody develops on — dropping it from CI means the floor is untested and therefore untrue.",
+    [...shards].map(Number),
+    Array.from({ length: count }, (_entry, position) => position + 1),
+    "the `full` job's shard axis must be 1..n exactly. run-tests.mjs assigns the file at sorted position i to shard (i mod n) + 1, so an index the matrix never runs is a set of test files nothing runs.",
+  );
+  const command = commandsOf("full").find((run) => run.includes("--shard"));
+  assert.ok(command !== undefined, "no step of the `full` job passes a shard to the runner");
+  const passed = /scripts\/run-tests\.mjs --shard \$\{\{ matrix\.shard \}\}\/(\d+)/u.exec(command);
+  assert.ok(
+    passed !== null,
+    `the \`full\` job's runner command (${command.trim()}) does not pass its own matrix entry as the shard index`,
+  );
+  assert.equal(
+    Number(passed[1]),
+    count,
+    "the shard denominator passed to the runner differs from the number of matrix entries, so the matrix runs a partition of a size it does not have jobs for",
   );
 });
 
-test("the full gate runs the whole standing gate, not a subset", () => {
-  const steps = job("full")["steps"];
-  assert.ok(Array.isArray(steps), "the `full` job declares no steps");
-  const commands = steps
-    .map((step) => (typeof step === "object" && step !== null ? (step as Record<string, unknown>)["run"] : undefined))
-    .filter((run): run is string => typeof run === "string");
-  for (const command of ["npm ci", "npm test", "npm run lint", "npm run typecheck"]) {
-    assert.ok(
-      commands.some((run) => run.includes(command)),
-      `the \`full\` job no longer runs \`${command}\``,
-    );
-  }
+test("the Node floor is proven in the queue, and no longer blocks pull_request feedback (APRV-149)", () => {
+  const floor = job("full-floor");
+  assert.equal(floor["needs"], "classify", "the `full-floor` job no longer depends on `classify`");
+  const condition = String(floor["if"] ?? "");
+  assert.ok(
+    condition.includes("needs.classify.outputs.tier == 'full'"),
+    "the floor leg no longer reads the computed tier",
+  );
+  assert.ok(
+    condition.includes("github.event_name == 'merge_group'"),
+    "the floor leg no longer runs on merge_group. The queue candidate is what stands between a change and main; if the floor is not proven there, it is not proven at all.",
+  );
+  assert.ok(
+    condition.includes("github.event_name == 'push'") && condition.includes("github.ref == 'refs/heads/main'"),
+    "the floor leg no longer runs on a push to main, which is the other way a commit reaches the branch the protection guards",
+  );
+  assert.equal(
+    floor["strategy"],
+    undefined,
+    "the floor leg declares a matrix. It runs one version once, and the aggregator reads its single result.",
+  );
+  const commands = commandsOf("full-floor");
+  assert.ok(
+    commands.some((run) => run.trim() === "node scripts/run-tests.mjs"),
+    "the floor leg no longer runs the whole suite unsharded; it is the one run that proves the floor before a candidate becomes main",
+  );
+  assert.ok(
+    !commands.some((run) => run.includes("--shard")),
+    "the floor leg runs a shard rather than the suite",
+  );
 });
 
 test("the light tier's job runs the documentation guard", () => {
@@ -217,7 +310,7 @@ test("the records job runs on the Node floor", () => {
 test("run-tests --only refuses a name that matches no built test file", () => {
   const result = spawnSync(
     process.execPath,
-    [join(REPO_ROOT, "scripts", "run-tests.mjs"), "--only", "milestones-guard", "no-such-guard"],
+    [RUNNER, "--only", "milestones-guard", "no-such-guard"],
     { encoding: "utf8" },
   );
   assert.notEqual(
@@ -226,6 +319,134 @@ test("run-tests --only refuses a name that matches no built test file", () => {
     "run-tests.mjs ran a smaller suite than asked for. A renamed test file must fail the tier that exists to run it, never disappear from it.",
   );
   assert.match(result.stderr, /no-such-guard/u);
+});
+
+// ---------------------------------------------------------------------------
+// Shard selection (APRV-149)
+// ---------------------------------------------------------------------------
+//
+// The full gate's wall clock is now the slowest shard, which is only sound
+// while the shards of a matrix are a partition of the suite: every discovered
+// file in exactly one shard, no file in two, no shard empty. A scheme that
+// drops a file turns a green matrix into no evidence at all, so the property is
+// tested against the real discovered list as well as synthetic ones, and every
+// way of asking for a slice that is not part of a partition is refused.
+
+type Runner = {
+  discoverTestFiles: () => string[];
+  selectShard: (files: readonly string[], index: number, count: number) => string[];
+  parseRunnerArgs: (argv: readonly string[]) => {
+    only: string[] | null;
+    shard: { index: number; count: number } | null;
+    error: string | null;
+  };
+};
+
+/** The runner as a module. Importing it must not run the suite it selects. */
+async function runner(): Promise<Runner> {
+  return (await import(pathToFileURL(RUNNER).href)) as unknown as Runner;
+}
+
+test("the shards of a matrix partition the real discovered suite", async () => {
+  const { discoverTestFiles, selectShard } = await runner();
+  const discovered = discoverTestFiles();
+  assert.ok(
+    discovered.length > 0,
+    "discovery found no built test files, from inside one of them; the runner and this test disagree about where the suite is",
+  );
+  for (const count of [1, 2, 3, 4, 5, 7]) {
+    const seen = new Set<string>();
+    for (let index = 1; index <= count; index += 1) {
+      const shard = selectShard(discovered, index, count);
+      assert.ok(
+        shard.length > 0,
+        `shard ${index}/${count} of ${discovered.length} files is empty; the full gate's matrix must never contain a job that proves nothing`,
+      );
+      for (const file of shard) {
+        assert.ok(!seen.has(file), `${file} is claimed by more than one shard of ${count}`);
+        seen.add(file);
+      }
+    }
+    assert.deepEqual(
+      [...seen].sort(),
+      [...discovered].sort(),
+      `the ${count} shards together did not run every discovered test file`,
+    );
+  }
+});
+
+test("shard assignment is exhaustive, disjoint, and deterministic for any list", async () => {
+  const { selectShard } = await runner();
+  for (let size = 0; size <= 12; size += 1) {
+    const files = Array.from({ length: size }, (_entry, position) => `f${position}.test.js`);
+    for (let count = 1; count <= 6; count += 1) {
+      const shards = Array.from({ length: count }, (_entry, position) =>
+        selectShard(files, position + 1, count),
+      );
+      assert.deepEqual(
+        shards.flat().sort(),
+        [...files].sort(),
+        `shards of ${count} over ${size} files are not a partition`,
+      );
+      assert.equal(
+        new Set(shards.flat()).size,
+        size,
+        `shards of ${count} over ${size} files claim a file twice`,
+      );
+      // Deterministic: the same question twice, the same answer, and the answer
+      // does not depend on which sibling shard asked first.
+      assert.deepEqual(shards[0], selectShard(files, 1, count));
+    }
+  }
+});
+
+test("run-tests refuses every shard request that is not part of a partition", () => {
+  const cases: Array<{ args: string[]; expected: RegExp }> = [
+    { args: ["--shard", "4/3"], expected: /outside 1\.\.3/u },
+    { args: ["--shard", "0/3"], expected: /outside 1\.\.3/u },
+    { args: ["--shard", "1/0"], expected: /at least 1/u },
+    { args: ["--shard", "two/three"], expected: /not of the form/u },
+    { args: ["--shard"], expected: /requires a <k>\/<n>/u },
+    // In range and well formed, and still empty: 1000 shards over ~100 files
+    // leaves most of them with nothing to run. An empty shard exits green
+    // having proved nothing, which is the failure this refusal exists for.
+    { args: ["--shard", "999/1000"], expected: /selected none/u },
+    // The records tier names an exact set and depends on getting all of it.
+    { args: ["--only", "docs-guard", "--shard", "1/3"], expected: /cannot be combined/u },
+  ];
+  for (const { args, expected } of cases) {
+    const result = spawnSync(process.execPath, [RUNNER, ...args], { encoding: "utf8" });
+    assert.notEqual(
+      result.status,
+      0,
+      `run-tests.mjs ${args.join(" ")} exited 0; it must refuse rather than run a slice nothing else covers`,
+    );
+    assert.match(result.stderr, expected);
+  }
+});
+
+test("the runner's argument parser accepts exactly the shard specs the matrix passes", async () => {
+  const { parseRunnerArgs } = await runner();
+  for (const argv of [["--shard", "2/3"], ["--shard=2/3"]]) {
+    const parsed = parseRunnerArgs(argv);
+    assert.equal(parsed.error, null, `${argv.join(" ")} was refused: ${String(parsed.error)}`);
+    assert.deepEqual(parsed.shard, { index: 2, count: 3 });
+    assert.equal(parsed.only, null);
+  }
+  const whole = parseRunnerArgs([]);
+  assert.equal(whole.error, null);
+  assert.equal(whole.shard, null);
+  assert.equal(whole.only, null, "a bare invocation must still mean the whole suite");
+  const only = parseRunnerArgs(["--only", "docs-guard", "milestones-guard"]);
+  assert.equal(only.error, null);
+  assert.deepEqual(only.only, ["docs-guard", "milestones-guard"]);
+  for (const argv of [["--only"], ["--shard", "1/3", "--only"], ["--jobs", "4"], ["docs-guard"]]) {
+    assert.notEqual(
+      parseRunnerArgs(argv).error,
+      null,
+      `${argv.join(" ") || "(no arguments)"} was accepted; an argument the runner does not understand must never resolve to a smaller run`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -449,7 +670,7 @@ test("the ci aggregator requires the active tier to have succeeded (APRV-44)", (
   const jobs = doc["jobs"] as Record<string, Record<string, unknown>>;
   const ci = jobs["ci"];
   assert.ok(ci !== undefined, "an aggregator job named ci must exist for branch protection");
-  assert.deepEqual(ci["needs"], ["classify", "doc-guard", "records", "full"]);
+  assert.deepEqual(ci["needs"], ["classify", "doc-guard", "records", "full", "full-floor"]);
   assert.equal(ci["if"], "always()", "the aggregator must run even when tier jobs are skipped");
   const steps = ci["steps"] as Array<Record<string, unknown>>;
   const script = String((steps[steps.length - 1] as Record<string, unknown>)["run"]);
@@ -469,6 +690,49 @@ test("the ci aggregator requires the active tier to have succeeded (APRV-44)", (
   assert.equal(env["DOC_RESULT"], "${{ needs['doc-guard'].result }}");
   assert.equal(env["RECORDS_RESULT"], "${{ needs.records.result }}");
   assert.equal(env["FULL_RESULT"], "${{ needs.full.result }}");
+  assert.equal(env["FULL_FLOOR_RESULT"], "${{ needs['full-floor'].result }}");
+});
+
+test("the aggregator requires the floor leg exactly on the events that must prove it (APRV-149)", () => {
+  // The floor leg is conditional now, and a conditional job whose absence is
+  // never checked is a job that can quietly stop running. So the aggregator
+  // decides for itself which events owe a floor result: the queue and pushes to
+  // main require success, and every other event requires the leg to have been
+  // skipped or to have succeeded. A `failure`, a `cancelled`, or a floor leg
+  // that vanished from an event that needs it all fail the required check.
+  const steps = job("ci")["steps"] as Array<Record<string, unknown>>;
+  const step = steps[steps.length - 1] as Record<string, unknown>;
+  const env = step["env"] as Record<string, string>;
+  const required = String(env["FLOOR_REQUIRED"] ?? "");
+  assert.ok(
+    required.includes("github.event_name == 'merge_group'"),
+    "the aggregator's floor requirement no longer covers merge_group",
+  );
+  assert.ok(
+    required.includes("github.event_name == 'push'") && required.includes("github.ref == 'refs/heads/main'"),
+    "the aggregator's floor requirement no longer covers a push to main",
+  );
+  const script = String(step["run"]);
+  for (const needle of [
+    'if [ "$FLOOR_REQUIRED" = "true" ]',
+    '[ "$FULL_FLOOR_RESULT" = "success" ]',
+    '[ "$FULL_FLOOR_RESULT" = "skipped" ]',
+  ]) {
+    assert.ok(script.includes(needle), `aggregator script must contain ${JSON.stringify(needle)}`);
+  }
+  // The condition the aggregator enforces and the condition the job runs under
+  // must be the same condition, or one of them is dead.
+  const floorCondition = String(job("full-floor")["if"] ?? "").replace(/\s+/gu, " ");
+  for (const clause of [
+    "github.event_name == 'merge_group'",
+    "github.event_name == 'push'",
+    "github.ref == 'refs/heads/main'",
+  ]) {
+    assert.ok(
+      floorCondition.includes(clause) && required.includes(clause),
+      `the floor leg's own condition and the aggregator's FLOOR_REQUIRED disagree about ${clause}`,
+    );
+  }
 });
 
 // --------------------------------------------------------------------------
