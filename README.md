@@ -594,7 +594,7 @@ Checks come in three tiers.
 | --- | --- | --- |
 | light | `README.md`, `docs/**/*.md`, `examples/**/*.md` | the documentation guard (`tests/docs-guard.test.ts`) |
 | records | `backlog/**`, `MILESTONES.md` | the tests that read records (`milestones-guard`, `backlog-fixtures`, `docs-guard`), on Node 20 |
-| full | anything else, or a mix of the above | `npm test && npm run lint && npm run typecheck`, on Node 20 and 22 |
+| full | anything else, or a mix of the above | the whole suite in three shards plus `npm run lint`, on Node 22; the Node 20 floor runs unsharded on the merge queue and on pushes to `main` |
 
 A denylist forces the full tier regardless of file extension: `APPROVAL.md`,
 `CLAUDE.md`, `.claude/**`, `SPEC.md`, `schema/**`, `**/fixtures/**`,
@@ -613,6 +613,19 @@ Classification is computed from the changed paths by
 `scripts/classify-tier.mjs`, never asserted by the author of the change. Every
 merge to `main` runs the full suite unconditionally, and anything ambiguous, an
 empty path set included, resolves to full.
+
+A full-tier CI job compiles once. It builds, then runs `node
+scripts/run-tests.mjs` over what it built, because `npm test` and `npm run
+typecheck` would each recompile the same tree and neither pass can fail where
+the build passed. `npm test` keeps its build-then-run shape for anyone running
+it by hand. `scripts/run-tests.mjs --shard <k>/<n>` takes shard `k` of the
+sorted file list, where the file at position `i` belongs to shard `(i mod n) +
+1`, so the shards of a matrix are a partition of the suite: every file in
+exactly one shard, and the matrix covers all of them. An out-of-range index, an
+empty shard, and `--shard` combined with `--only` are refused rather than run.
+The Node 20 floor moved to the merge queue and to pushes to `main` because the
+queue candidate is what stands between a change and the branch, and a pull
+request now gets its verdict from the shards alone.
 
 ## Exit codes
 
