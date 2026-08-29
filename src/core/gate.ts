@@ -344,6 +344,35 @@ export const GATE_REFUSAL_CODES = [
    */
   "log-corrupt",
   /**
+   * The rendered semantic diff of a proposed policy is larger than a channel
+   * prompt can show whole (APRV-109, amended SPEC.md §10.3).
+   *
+   * A refusal rather than a truncation, and its own code so a caller can tell
+   * "this amendment is too big for a phone" from every other reason a proposal
+   * fails. A prompt that showed two thirds of a policy change would collect a
+   * signature for the third it did not show; the repair is to read the diff at
+   * a terminal and attest there, which the message names.
+   */
+  "diff-too-large",
+  /** No `policy.proposed` record at the named seq (APRV-109). */
+  "proposal-not-found",
+  /**
+   * The policy bytes changed after the attestation prompt was rendered
+   * (APRV-109).
+   *
+   * Distinct from `policy-drift`, which is about a pending approval routed
+   * under superseded rules. This one says the human is looking at a hash the
+   * file no longer has, so attesting would name bytes the approver was never
+   * shown. Nothing is appended and the amendment is proposed again.
+   */
+  "proposal-stale",
+  /**
+   * An attestation was proposed for a policy file that already matches its
+   * attestation (APRV-109). There is no amendment to sign, and a prompt for one
+   * would ask a human to re-attest bytes already in force.
+   */
+  "policy-already-attested",
+  /**
    * The append itself failed; `append` carries the underlying error. Its
    * `code` is `head-moved` when the log grew between this module's read and its
    * append: every check that authorized the write was made against an older log,

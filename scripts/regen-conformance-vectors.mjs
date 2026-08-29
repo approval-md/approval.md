@@ -879,6 +879,13 @@ const SUITES = [
   {
     file: "refusal-unions.v1.json",
     suite: "refusal-unions",
+    // 2.0.0 (APRV-109): a MAJOR bump, because a pinned expectation moved rather
+    // than a vector being added. `gate_refusal_codes` gained the four codes the
+    // attestation ceremony refuses with (diff-too-large, proposal-not-found,
+    // proposal-stale, policy-already-attested) and `channel_tag_refusal_codes`
+    // gained proposal-stale, so a second implementation conforming to 1.0.0
+    // emits a union this suite no longer accepts (conformance/README.md).
+    vectors_version: "2.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
@@ -903,6 +910,9 @@ const SUITES = [
   {
     file: "schema-validation.v1.json",
     suite: "schema-validation",
+    // 1.1.0 (APRV-109): a MINOR bump. The five `policy.proposed` /
+    // `policy.declined` fixtures are new vectors; no existing expectation moved.
+    vectors_version: "1.1.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

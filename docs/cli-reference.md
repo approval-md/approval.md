@@ -363,6 +363,29 @@ pushed, no pull request is opened, and the push (with the pull request, on the
 branch flow) is printed as still to run. That is the behaviour `--commit` had
 before the publishing half existed, kept for operators who want it.
 
+**`--as agent:<id>`: attest from the phone (APRV-109).** The verb runs
+identically up to the attestation, which an agent must not perform. Instead of
+attesting it appends a `policy.proposed` record carrying the policy SHA-256, the
+semantic diff and the load advisory, all three COMPUTED by the runtime from the
+bytes: there is no flag for any of them, so a proposal cannot show an approver
+one story and attest a different file. Channels render it as an ordinary manual
+prompt, the approver taps, and the tap appends the attestation under the human
+identity the listener holds, exactly as a grant lands. The git ceremony then
+proceeds agent-side and the commit cites the attestation seq, as it always has.
+`--wait` (default 15m) is how long the process holds the ceremony open,
+`--interval` (default 2s) how often it re-reads the log, and `--note` is the
+proposer's own words, rendered CLAIMED. `--json` gains a `proposal` object,
+which is `null` on every run that attested at the terminal.
+
+Fail closed, in the ceremony's own vocabulary: `no-channel` when the policy
+configures no channel (a proposal nobody could be asked about), `propose-failed`
+carrying the core code (`diff-too-large` for a diff bigger than a prompt can show
+whole), `attestation-declined` when the approver says no, and
+`attestation-timeout` when `--wait` elapses or a later amendment supersedes the
+prompt. Every one of them attests nothing and commits nothing: the policy edit
+stays in the working tree, and a lapsed prompt leaves every channel queue by
+derivation, so no stale question is left in front of the approver.
+
 **Success first.** The attestation is the ceremony: it is the act only a human
 can perform, and everything after it is logistics. So the first line printed
 after the confirmation is the achievement, and the publishing status prints
@@ -828,6 +851,19 @@ to decide whether to fix itself, stop retrying, or ask a human.
   no `defaults.approval_ttl`.
 - `actor-invalid` — the actor is not a well-formed `human:` / `agent:` identity.
 - `actor-not-human` — a human-only verb was attempted by another actor.
+- `diff-too-large` — the semantic diff of a proposed policy amendment renders
+  larger than a channel prompt can show whole. A refusal, never a truncation: a
+  prompt showing two thirds of a policy change would collect a signature for the
+  third it did not show. Read the diff at a terminal and attest there, or split
+  the amendment into changes a phone can hold.
+- `proposal-not-found` — no `policy.proposed` record at the named seq, so there
+  is no attestation prompt to answer.
+- `proposal-stale` — the policy bytes changed after the prompt was rendered, so
+  the hash on the approver's screen is not the hash on disk. Distinct from
+  `policy-drift`, which is about a pending approval routed under superseded
+  rules. Nothing is attested; propose the amendment again.
+- `policy-already-attested` — an attestation was proposed for a policy file that
+  already matches its attestation. There is no amendment to sign.
 - `log-unreadable` (exit 4) / `log-torn-tail` (exit 3) / `log-corrupt` (exit 1):
   nothing is authorized from a log that does not verify.
 - `append-failed` — the append itself failed; the exit code follows the cause.

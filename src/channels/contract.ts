@@ -53,9 +53,18 @@ import type { AttestationStatus } from "../core/attest.js";
 import type { BudgetVerdict } from "../core/budgets.js";
 import { decide, type DecideOptions, type GateRefusal } from "../core/gate.js";
 import type { EventRecord } from "../core/log.js";
+import {
+  attestationKeySha256,
+  decideAttestation,
+  isAttestationActionKey,
+  openProposalFor,
+  proposalPolicyPath,
+  type DecideAttestationOptions,
+} from "../core/policy-proposal.js";
 import type { Autonomy } from "../core/policy-load.js";
 import type { Provenance } from "../core/policy-match.js";
-import type { RequestState } from "../core/state.js";
+import { readVerifiedRecords, type RequestState } from "../core/state.js";
+import { tick } from "../core/clock.js";
 
 // ---------------------------------------------------------------------------
 // Truth labelling
@@ -79,6 +88,12 @@ export const COMPUTED_SOURCES = [
   "budgets",
   /** Compared against the latest attestation (`core/attest.ts`). */
   "attestation",
+  /**
+   * Loaded and validated by `core/policy-load.ts` at display time (APRV-109) —
+   * the advisory on an attestation prompt, recomputed from the live policy
+   * bytes rather than read back off the proposal that recorded one.
+   */
+  "policy-load",
   /** Recomputed from the payload bytes and checked against the bound hash. */
   "payload-binding",
   /**
@@ -244,6 +259,31 @@ export interface ChannelRequest {
    * defect SPEC.md §9 exists to prevent.
    */
   gloss?: TaggedField<string>;
+  /**
+   * What a proposed policy amendment changes about class resolution, in
+   * before -> after form (APRV-109).
+   *
+   * **Computed**, by `core/policy-diff.ts` over two policy documents whose
+   * bytes the runtime hashed itself: the live file, and a baseline accepted
+   * only when its own SHA-256 equals the latest attestation. Present on an
+   * attestation prompt and absent everywhere else.
+   *
+   * A prompt that carried only a hash would ask a human to sign for sixty-four
+   * characters. The rule this field exists to enforce is in
+   * `core/policy-proposal.ts`: a diff too large for the channel REFUSES the
+   * ceremony to the terminal path rather than arriving here truncated.
+   */
+  policy_diff?: TaggedField<string>;
+  /**
+   * Whether a proposed policy loads, and what breaks when it does not
+   * (APRV-109).
+   *
+   * **Computed**, by `core/policy-load.ts` over the same bytes. It is on the
+   * prompt because a policy that does not load fails closed to all-manual for
+   * every class, and the incident that produced `policy amend` was an operator
+   * attesting bytes whose consequences nobody had shown them.
+   */
+  policy_load?: TaggedField<string>;
   /** The content binding recorded on `approval.requested` (SPEC.md §6.2). */
   payload_hash: TaggedField<string>;
   /**
@@ -665,6 +705,20 @@ export function recordChannelDecision(
   actorOptions: ChannelActorOptions,
   gateOptions: DecideOptions = {},
 ): ChannelDecisionResult {
+  // APRV-109. A gesture becomes one of TWO human-only gate verbs, chosen by the
+  // request's own key and by nothing a channel says. An attestation prompt's key
+  // is `policy.attest:<sha256>` — derived from the policy bytes by
+  // `core/policy-proposal.ts` — so a channel cannot steer a gesture from one
+  // verb to the other, and neither can a caller: the key comes off the verified
+  // log with the request it was rendered from.
+  //
+  // The routing lives here rather than in each channel runner for the reason
+  // this function exists at all: there is one place a reported gesture becomes a
+  // log event, and adding a second would be adding a second decision path.
+  if (isAttestationActionKey(decision.action_key)) {
+    return recordAttestationDecision(logPath, decision, actorOptions, gateOptions);
+  }
+
   const options: DecideOptions = { ...gateOptions };
   if (decision.note !== undefined) options.note = decision.note;
   if (decision.batchDeliveryId !== undefined) {
@@ -690,4 +744,112 @@ export function recordChannelDecision(
     tokenIssued: result.token !== undefined,
   };
   return result.token === undefined ? { outcome } : { outcome, token: result.token };
+}
+
+/**
+ * Turn a tap on an attestation prompt into the attestation itself (APRV-109).
+ *
+ * The half of {@link recordChannelDecision} that answers a `policy.proposed`.
+ * Approve appends `policy.updated` under the human identity the listener holds,
+ * which is the same identity, from the same configuration, that a grant lands
+ * under today: the trust boundary of SPEC.md §11 is unchanged, and what this
+ * adds is that the human act it collects is a tap rather than a terminal
+ * session. Reject appends `policy.declined` and attests nothing.
+ *
+ * Every refusal `core/policy-proposal.ts` can make surfaces verbatim, and three
+ * of them are the fail-closed ones this ceremony turns on:
+ *
+ * - `proposal-stale` — the file changed after the prompt was rendered, so the
+ *   hash on the approver's screen is not the hash on disk. Nothing is attested.
+ * - `already-decided` — the duplicate-callback case every push channel has. The
+ *   first human answer stands.
+ * - `expired` — the proposer stopped waiting. Nothing is attested, and nothing
+ *   is appended: a lapsed prompt leaves the policy as unattested as it was.
+ *
+ * No token is minted on any path. An attestation authorizes no side effect; it
+ * says which rules are in force, so there is nothing for a token to be spent on
+ * and `tokenIssued` is always false.
+ */
+/**
+ * Where THIS process believes `APPROVAL.md` is (APRV-109).
+ *
+ * `policy.file` names it outright; `policy.dir` is discovery, run through the
+ * same walk `loadPolicy` uses so the attested file and the enforced file are
+ * never two different files. Neither present means the caller has not said, and
+ * `core/policy-proposal.ts` falls back to its own default.
+ */
+function listenerPolicyPath(options: DecideOptions): string | null {
+  const policy = options.policy;
+  if (policy === undefined) return null;
+  if (policy.file !== undefined) return policy.file;
+  return policy.dir === undefined ? null : proposalPolicyPath(policy.dir);
+}
+
+export function recordAttestationDecision(
+  logPath: string,
+  decision: ChannelDecision,
+  actorOptions: ChannelActorOptions,
+  gateOptions: DecideOptions = {},
+): ChannelDecisionResult {
+  const sha256 = attestationKeySha256(decision.action_key);
+  if (sha256 === null) {
+    return {
+      outcome: {
+        ok: false,
+        code: "proposal-not-found",
+        message: `${JSON.stringify(decision.action_key)} is not a well-formed attestation key (policy.attest:<64 hex>); no attestation prompt could be resolved from it and nothing was appended`,
+      },
+    };
+  }
+
+  const now = tick(gateOptions);
+  const read = readVerifiedRecords(
+    logPath,
+    gateOptions.schemaDir === undefined ? {} : { schemaDir: gateOptions.schemaDir },
+  );
+  if (!read.ok) return { outcome: { ok: false, code: read.code, message: read.message } };
+
+  const proposal = openProposalFor(read.records, sha256, now);
+  if (proposal === null) {
+    return {
+      outcome: {
+        ok: false,
+        code: "proposal-not-found",
+        message: `no open policy.proposed record proposes ${sha256}; the prompt was answered, superseded, or its proposer's deadline passed. Nothing was appended.`,
+      },
+    };
+  }
+
+  const options: DecideAttestationOptions = { ...gateOptions };
+  if (decision.note !== undefined) options.note = decision.note;
+  if (decision.batchDeliveryId !== undefined) options.batchDeliveryId = decision.batchDeliveryId;
+  // The FILE the tap re-hashes, resolved from the listener's own policy
+  // location rather than from the proposal. A proposal records the policy's
+  // BASENAME (a log is meant to be copied, and an absolute path would name the
+  // proposer's home directory), so resolving from the record would make the
+  // check depend on this process's working directory. `core/policy-proposal.ts`
+  // refuses `proposal-stale` when it cannot read the file, so the wrong path
+  // fails closed either way; this is what makes it the RIGHT path.
+  const policyPath = listenerPolicyPath(gateOptions);
+  if (policyPath !== null) options.policyPath = policyPath;
+
+  const result = decideAttestation(
+    logPath,
+    proposal.seq,
+    decision.decision === "grant" ? "attest" : "decline",
+    actorOptions.actor,
+    options,
+  );
+  if (!result.ok) return { outcome: result };
+
+  return {
+    outcome: {
+      ok: true,
+      action_key: decision.action_key,
+      decision: decision.decision,
+      state: decision.decision === "grant" ? "granted" : "rejected",
+      record: result.record,
+      tokenIssued: false,
+    },
+  };
 }
