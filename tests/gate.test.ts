@@ -34,6 +34,7 @@ import {
   GATE_REFUSAL_CODES,
   registeredAction,
   requestState,
+  type ConsumeHarnessOptions,
   type GateOptions,
   type GateRefusal,
 } from "../src/core/gate.js";
@@ -1693,6 +1694,18 @@ function harnessGrant(unit: Case, requestedAt = at(1), decidedAt = at(2)): void 
   assert.equal(granted.ok, true, granted.ok ? "" : granted.message);
 }
 
+/**
+ * `unit.options` plus the binding a harness spend must now state (APRV-146).
+ *
+ * The gate requires it: a process proceeding on a grant says which bytes it
+ * holds, and they must be the ones the human answered about. Every spend meant
+ * to SUCCEED goes through here; the cases passing bare `unit.options` are the
+ * ones pinning what happens when a consumer states nothing.
+ */
+function spending(unit: Case, hash: string = PAYLOAD_HASH): ConsumeHarnessOptions {
+  return { ...unit.options, presentedPayloadHash: hash };
+}
+
 test("a harness grant is consumed once, and the second consumer is refused", () => {
   const unit = newCase();
   harnessGrant(unit);
@@ -1702,7 +1715,7 @@ test("a harness grant is consumed once, and the second consumer is refused", () 
     "task-042:chaser",
     "agent:claude",
     at(3),
-    unit.options,
+    spending(unit),
   );
   assert.equal(first.ok, true, first.ok ? "" : first.message);
   if (!first.ok) throw new Error("unreachable");
@@ -1720,7 +1733,7 @@ test("a harness grant is consumed once, and the second consumer is refused", () 
     "task-042:chaser",
     "agent:claude",
     at(4),
-    unit.options,
+    spending(unit),
   );
   assert.equal(second.ok, false);
   if (second.ok) throw new Error("unreachable");
@@ -1729,6 +1742,106 @@ test("a harness grant is consumed once, and the second consumer is refused", () 
     eventTypes(unit).filter((event) => event === "execution.started"),
     ["execution.started"],
   );
+  assertClean(unit);
+});
+
+test("a harness spend that states no bytes is refused, and the grant stays live", () => {
+  // APRV-146. A harness grant approves specific bytes: the request recorded
+  // their hash and the carryover matched a retry on it, so the process about to
+  // run the command states which bytes it holds. `payload-hash-required` rather
+  // than `payload-mismatch` — nothing was presented to mismatch, and the repair
+  // is to compute and present the hash.
+  const unit = newCase();
+  harnessGrant(unit);
+  const before = eventTypes(unit);
+
+  const bare = asRefusal(
+    consumeHarnessGrant(unit.logPath, "task-042:chaser", "agent:claude", at(3), unit.options),
+  );
+  assert.equal(bare.code, "payload-hash-required");
+  assert.deepEqual(eventTypes(unit), before, "a refused spend appended something");
+
+  // The grant is untouched, so a consumer that does state the approved bytes
+  // still spends it — and the start event names them.
+  const spent = consumeHarnessGrant(
+    unit.logPath,
+    "task-042:chaser",
+    "agent:claude",
+    at(4),
+    spending(unit),
+  );
+  assert.equal(spent.ok, true, spent.ok ? "" : spent.message);
+  if (!spent.ok) throw new Error("unreachable");
+  assert.equal(
+    (spent.record.payload as Record<string, unknown>)["payload_hash"],
+    PAYLOAD_HASH,
+    "the start event must name the bytes that ran",
+  );
+  assertClean(unit);
+});
+
+test("a harness spend for different bytes is payload-mismatch and appends nothing", () => {
+  const unit = newCase();
+  harnessGrant(unit);
+  const before = eventTypes(unit);
+
+  const other = asRefusal(
+    consumeHarnessGrant(
+      unit.logPath,
+      "task-042:chaser",
+      "agent:claude",
+      at(3),
+      spending(unit, "2".repeat(64)),
+    ),
+  );
+  // A different word from the absence above, because the repair is different:
+  // "you are the approved party and that is not what was approved" sends the
+  // caller back to request the new payload, not to state the old one.
+  assert.equal(other.code, "payload-mismatch");
+  assert.deepEqual(eventTypes(unit), before);
+  assertClean(unit);
+});
+
+test("a harness grant whose request recorded no binding can never be spent", () => {
+  // The record this gate could not have written: `request` refuses
+  // `payload-hash-required` for every manual action, so a harness request with
+  // no binding reached the log some other way. Accepting it would make content
+  // binding bypassable by log construction, so it fails closed permanently.
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  for (const event of [
+    {
+      ts: at(1),
+      event: "approval.requested" as const,
+      actor: "agent:claude",
+      payload: {
+        class: "communicate.email.external",
+        est_cost_usd: "0.02",
+        execution: "harness",
+      },
+    },
+    {
+      ts: at(2),
+      event: "approval.granted" as const,
+      actor: "human:carter",
+      payload: { class: "communicate.email.external", est_cost_usd: "0.02", execution: "harness" },
+    },
+  ]) {
+    const appended = appendEvent(unit.logPath, {
+      ...event,
+      task: "task-042",
+      action_key: "task-042:chaser",
+    });
+    assert.equal(appended.ok, true, `${event.event} must pass the write boundary`);
+  }
+
+  const before = eventTypes(unit);
+  const unbound = asRefusal(
+    consumeHarnessGrant(unit.logPath, "task-042:chaser", "agent:claude", at(3), spending(unit)),
+  );
+  assert.equal(unbound.code, "payload-hash-required");
+  assert.deepEqual(eventTypes(unit), before);
   assertClean(unit);
 });
 
@@ -1836,7 +1949,7 @@ test("findHarnessCarry: the bounds are bytes, class, harness, unspent, live", ()
 
   // And once spent, it carries nothing either.
   assert.equal(
-    consumeHarnessGrant(unit.logPath, "task-042:chaser", "agent:claude", at(3), unit.options).ok,
+    consumeHarnessGrant(unit.logPath, "task-042:chaser", "agent:claude", at(3), spending(unit)).ok,
     true,
   );
   assert.equal(
@@ -2202,7 +2315,7 @@ test("a harness grant with no pinned hash spends as it always did", () => {
     "task-042:chaser",
     "agent:claude",
     at(4),
-    unit.options,
+    spending(unit),
   );
   assert.equal(spent.ok, true, spent.ok ? "" : spent.message);
   if (!spent.ok) throw new Error("unreachable");

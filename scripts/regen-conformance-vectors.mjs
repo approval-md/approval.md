@@ -879,6 +879,11 @@ const SUITES = [
   {
     file: "refusal-unions.v1.json",
     suite: "refusal-unions",
+    // 2.0.0, not 1.1.0: APRV-146 added `execution-delegated` to the execute
+    // union, and the vector pins the whole array in definition order. A longer
+    // union is a changed expectation, so an implementation that passed 1.0.0
+    // does not pass this.
+    vectors_version: "2.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
