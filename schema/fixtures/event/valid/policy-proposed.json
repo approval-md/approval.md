@@ -1,0 +1,35 @@
+{
+  "seq": 41,
+  "ts": "2026-08-25T10:16:04Z",
+  "event": "policy.proposed",
+  "action_key": "policy.attest:3d0f1a2b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7",
+  "actor": "agent:claude-code",
+  "payload": {
+    "policy_path": "APPROVAL.md",
+    "sha256": "3d0f1a2b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7",
+    "action_key": "policy.attest:3d0f1a2b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7",
+    "class": "policy.edit",
+    "payload_hash": "5b1e2a03b9c4d8e7f6051a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f",
+    "diff": {
+      "available": true,
+      "reason": null,
+      "lines": [
+        "class resolutions:",
+        "  network.call: manual (rule network.*) -> supervised (rule network.call)"
+      ],
+      "headline": "1 class resolution(s)",
+      "baseline_sha256": "92f55b985ad964c052e5e7b500f56ede98efa49473bb32bca236896317fa5da7"
+    },
+    "load": {
+      "ok": true,
+      "code": null,
+      "message": null
+    },
+    "policy_sha256": "92f55b985ad964c052e5e7b500f56ede98efa49473bb32bca236896317fa5da7",
+    "note": "APRV-140 asked for network.call to be supervised while the conformance runner is exercised",
+    "wait_until": "2026-08-25T10:31:04Z"
+  },
+  "alg": "sha256/jcs",
+  "prev": "92f55b985ad964c052e5e7b500f56ede98efa49473bb32bca236896317fa5da7",
+  "hash": "1c0a4f1d21b57d0f7cd5b1e2a03b9c4d8e7f6051a2b3c4d5e6f708192a3b4c5d"
+}

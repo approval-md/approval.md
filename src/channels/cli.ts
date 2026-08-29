@@ -189,6 +189,12 @@ const FIELD_ORDER: string[] = [
   "class",
   "command_breakdown",
   "protected_path",
+  // APRV-109: on an attestation prompt these two ARE the decision, so they sit
+  // with the resolution lines rather than after the claimed block. Absent on
+  // every ordinary request, and `orderedFields` skips a name the request does
+  // not carry.
+  "policy_diff",
+  "policy_load",
   "autonomy",
   "provenance",
   "state",

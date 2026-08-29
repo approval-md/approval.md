@@ -82,6 +82,10 @@ export const GENESIS_PREV = null;
  * `reconciliation.required` / `reconciliation.satisfied` (APRV-127) are the
  * fifth and sixth: the obligation a retrospective DENIAL creates, and the
  * human act that discharges it (amended SPEC.md §5.2).
+ * `policy.proposed` / `policy.declined` (APRV-109) are the seventh and eighth:
+ * an agent asking a human to attest prepared policy bytes, and the human's
+ * refusal (amended SPEC.md §10.1, §10.3). The acceptance is `policy.updated`,
+ * which already existed and is still the only event an attestation is.
  */
 export type EventType =
   | "task.registered"
@@ -100,6 +104,8 @@ export type EventType =
   | "execution.reconciled"
   | "budget.exceeded"
   | "policy.updated"
+  | "policy.proposed"
+  | "policy.declined"
   | "envelope.drift"
   | "audit.sampled"
   | "audit.reviewed"

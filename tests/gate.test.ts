@@ -2098,6 +2098,18 @@ test("the refusal-code union is frozen public API", () => {
     // from it, so "the log does not verify" needs a code of its own. An addition
     // to the union, not a rename.
     "log-corrupt",
+    // APRV-109, four additions for the attestation ceremony a channel collects.
+    // `diff-too-large` is the one that carries a policy decision rather than a
+    // state: a prompt showing two thirds of a policy change would collect a
+    // signature for the third it did not show, so the ceremony refuses to the
+    // terminal path instead of truncating. `proposal-stale` is deliberately not
+    // folded into `policy-drift`: that one is about a pending approval routed
+    // under superseded rules, this one about a human looking at a hash the file
+    // no longer has.
+    "diff-too-large",
+    "proposal-not-found",
+    "proposal-stale",
+    "policy-already-attested",
     "append-failed",
   ]);
 });

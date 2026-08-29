@@ -44,6 +44,8 @@
         "execution.reconciled",
         "budget.exceeded",
         "policy.updated",
+        "policy.proposed",
+        "policy.declined",
         "envelope.drift",
         "audit.sampled",
         "audit.reviewed",
@@ -51,7 +53,7 @@
         "reconciliation.satisfied",
         "payload.pruned"
       ],
-      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of twenty-two event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, `execution.indeterminate` with `execution.reconciled` (APRV-120) the third and fourth, and `reconciliation.required` / `reconciliation.satisfied` (APRV-127) the fifth and sixth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept them all."
+      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of twenty-four event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, `execution.indeterminate` with `execution.reconciled` (APRV-120) the third and fourth, `reconciliation.required` / `reconciliation.satisfied` (APRV-127) the fifth and sixth, and `policy.proposed` / `policy.declined` (APRV-109) the seventh and eighth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept them all."
     },
     "actor": {
       "type": "string",
@@ -287,6 +289,208 @@
               "note": {
                 "type": "string",
                 "description": "The requester's free-text elaboration. Claimed, never a control."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §10.1/§10.3/§11 (amended, APRV-109): an attestation prompt. An agent that has prepared a policy edit appends this to ask a human to attest the bytes; a channel renders it like a manual action prompt and the tap appends `policy.updated`. The actor is the party that prepared the edit, so `agent:` is expected and `human:` is allowed (a person can propose too); `system:` is refused, because the runtime has no policy edit of its own to ask about and a runtime-originated proposal would be the gate writing its own rules. Every payload field the schema requires is COMPUTED by the runtime from the policy bytes — the SHA-256, the semantic diff summary and the load advisory — and the proposing caller has no parameter for any of them, so a proposal cannot show an approver one story and attest a different file. `note` and `wait_until` are the proposer's own and are rendered claimed. A diff too large for a channel to show whole is refused (`diff-too-large`) before this record is written, so `diff.lines` is what a channel prints and never a truncation of it.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "policy.proposed"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^(human|agent):",
+            "description": "The party that prepared the policy edit. `system:` is refused: the runtime proposes no policy of its own."
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "policy_path",
+              "sha256",
+              "diff",
+              "load"
+            ],
+            "properties": {
+              "policy_path": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The policy file's BASENAME, as `policy.updated` records it: the log is meant to be copied and read on other machines, and an absolute path would leak the writer's home directory while saying nothing a reader can use."
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "description": "SHA-256 (lowercase hex) of the proposed policy file's exact bytes, computed by the runtime. The hash a channel displays, and the only hash a tap can attest."
+              },
+              "payload_hash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "description": "SPEC.md §10.4: the binding for the full policy text stored beside the log, so an approver can read the whole file and not only the summary."
+              },
+              "diff": {
+                "type": "object",
+                "required": [
+                  "available",
+                  "lines",
+                  "headline"
+                ],
+                "description": "The semantic diff summary, computed from the proposed bytes against a baseline whose own SHA-256 equals the latest attestation. `available: false` is hash-only mode and carries the reason; it is never a truncated diff.",
+                "properties": {
+                  "available": {
+                    "type": "boolean"
+                  },
+                  "reason": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "lines": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "headline": {
+                    "type": "string"
+                  },
+                  "baseline_sha256": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                }
+              },
+              "load": {
+                "type": "object",
+                "required": [
+                  "ok"
+                ],
+                "description": "The load advisory for the proposed bytes. A policy that does not load fails closed to all-manual for every class; the prompt says so before the tap rather than after it.",
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "code": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "message": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              },
+              "note": {
+                "type": "string",
+                "description": "The proposer's own words. Claimed, never a control."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §10.1/§11 (amended, APRV-109): a human refused to attest the proposed policy bytes. Human-only for the same reason `approval.rejected` is: the answer to an attestation prompt is the human act the whole ceremony exists to collect, and an agent-authored refusal would be the party under oversight closing its own question. `proposed_seq` names the prompt this answers, so a reader of the decline alone can find the hash, the diff and the advisory the approver was shown. Nothing about a decline attests anything: the policy stays exactly as unattested as it was.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "policy.declined"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^human:",
+            "description": "The approver. Answering an attestation prompt is human-only, in the schema as well as in the code."
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "sha256",
+              "proposed_seq"
+            ],
+            "properties": {
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "description": "The proposed policy hash that was refused."
+              },
+              "proposed_seq": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The `policy.proposed` record this answers."
+              },
+              "note": {
+                "type": "string",
+                "description": "The approver's free-text reason."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §5.2/§10.1 (amended, APRV-109): an attestation that answers a channel prompt names the prompt it answers. Optional and additive — `approval policy attest` at a terminal answers no prompt and carries none — and only its SHAPE is constrained here: that the seq names a `policy.proposed` record the log actually carries is not expressible in a schema that sees one record, and is the runtime's check.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "policy.updated"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "proposed_seq": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The `policy.proposed` record this attestation answers."
               }
             }
           }

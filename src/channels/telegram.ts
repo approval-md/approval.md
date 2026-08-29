@@ -578,6 +578,16 @@ export function renderTelegram(
             request.protected_path.value,
           ),
         ]),
+    // APRV-109. On an attestation prompt these two are the decision: a hash
+    // alone would ask a human to sign for sixty-four characters. They sit above
+    // `autonomy` because they are what the approver reads, and they are absent
+    // on every ordinary request rather than rendered empty.
+    ...(request.policy_diff === undefined
+      ? []
+      : [line("policy_diff", request.policy_diff, "policy diff", request.policy_diff.value)]),
+    ...(request.policy_load === undefined
+      ? []
+      : [line("policy_load", request.policy_load, "policy loads", request.policy_load.value)]),
     line("autonomy", request.autonomy, "autonomy", request.autonomy.value),
     line("provenance", request.provenance, "resolved by", request.provenance.value),
     line("payload_hash", request.payload_hash, "payload sha256", request.payload_hash.value),

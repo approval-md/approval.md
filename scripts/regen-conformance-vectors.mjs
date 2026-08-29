@@ -879,11 +879,16 @@ const SUITES = [
   {
     file: "refusal-unions.v1.json",
     suite: "refusal-unions",
-    // 2.0.0, not 1.1.0: APRV-146 added `execution-delegated` to the execute
-    // union, and the vector pins the whole array in definition order. A longer
-    // union is a changed expectation, so an implementation that passed 1.0.0
-    // does not pass this.
-    vectors_version: "2.0.0",
+    // 3.0.0: two MAJOR bumps in sequence, each a pinned expectation moving
+    // rather than a vector being added, because the vector pins each whole
+    // array in definition order and a longer union is a changed expectation.
+    // 2.0.0 (APRV-146): `execution-delegated` joined the execute union.
+    // 3.0.0 (APRV-109): `gate_refusal_codes` gained the four codes the
+    // attestation ceremony refuses with (diff-too-large, proposal-not-found,
+    // proposal-stale, policy-already-attested) and `channel_tag_refusal_codes`
+    // gained proposal-stale. An implementation conforming to either earlier
+    // version emits a union this suite no longer accepts (conformance/README.md).
+    vectors_version: "3.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
@@ -908,6 +913,9 @@ const SUITES = [
   {
     file: "schema-validation.v1.json",
     suite: "schema-validation",
+    // 1.1.0 (APRV-109): a MINOR bump. The five `policy.proposed` /
+    // `policy.declined` fixtures are new vectors; no existing expectation moved.
+    vectors_version: "1.1.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

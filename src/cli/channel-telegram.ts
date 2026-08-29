@@ -128,6 +128,11 @@ import {
   type TelegramTerminalState,
 } from "../channels/telegram.js";
 import { loadPolicy } from "../core/policy-load.js";
+import {
+  isAttestationActionKey,
+  proposalRecords,
+  proposalState,
+} from "../core/policy-proposal.js";
 import { payloadOf, readVerifiedRecords, requestState } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { glossFor, spawnGloss, GLOSS_AUTHOR, type GlossRunner } from "./gloss.js";
@@ -588,6 +593,50 @@ function terminalDeliveries(
 
   const settled: TerminalDelivery[] = [];
   for (const [actionKey, deliveryId] of state.delivered) {
+    // APRV-109. An attestation prompt has no `approval.requested` behind it, so
+    // `requestState` can say nothing about it and the message would stay armed
+    // forever — the exact stale prompt APRV-106 added this pass to retire. Its
+    // own derivation answers instead, and the four terminal proposal states map
+    // onto headlines this channel already has: an attested proposal reads
+    // `granted`, a declined one `rejected`, a superseded one `withdrawn`
+    // (a newer proposal is the live question now), and a lapsed one `expired`.
+    if (isAttestationActionKey(actionKey)) {
+      const proposal = proposalRecords(read.records).find(
+        (entry) => entry.action_key === actionKey,
+      );
+      const derived =
+        proposal === undefined ? null : proposalState(read.records, proposal.seq, now);
+      if (derived === null || derived.state === "open") continue;
+      const outcome: TelegramTerminalState =
+        derived.state === "attested"
+          ? "granted"
+          : derived.state === "declined"
+            ? "rejected"
+            : derived.state === "superseded"
+              ? "withdrawn"
+              : "expired";
+      const answer = read.records.find(
+        (entry) =>
+          entry.seq > derived.seq &&
+          (entry.event === "policy.updated" || entry.event === "policy.declined") &&
+          payloadOf(entry)["sha256"] === derived.sha256,
+      );
+      settled.push({
+        actionKey,
+        deliveryId,
+        outcome,
+        detail:
+          derived.state === "superseded"
+            ? [`a later amendment of the same policy replaced this prompt · nothing to do`]
+            : derived.state === "expired"
+              ? [`no answer arrived before the proposer's deadline · nothing was attested`]
+              : answer === undefined
+                ? [`recorded at ${utcClock(now)}`]
+                : [decidedLine(answer.actor, answer.ts, answer.seq)],
+      });
+      continue;
+    }
+
     // `ttlMs: null` is correct here rather than lazy, and it is the reason this
     // pass annotates the daemon's `approval.expired` but not a TTL that has
     // merely lapsed by arithmetic: an annotation states what the LOG says, and
