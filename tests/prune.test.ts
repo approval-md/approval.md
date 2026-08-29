@@ -319,19 +319,36 @@ test("non-terminal payloads survive a 1ms retention evaluated years later", () =
 test("planPrune: one live binding among settled ones keeps the payload", () => {
   const unit = setup("1ms");
   settled(unit, "reject", at(2));
-  // A second action declaring the SAME bytes, still awaiting a decision.
+  // A second action declaring the SAME bytes, still awaiting a decision. It is
+  // declared under a task of its own: SPEC.md §7 (APRV-147) refuses a request
+  // for an action the log has not registered, and `TASK` is already registered,
+  // so a second key cannot be added to it.
+  const secondTask = `${TASK}-again`;
+  const declared = register(
+    unit.logPath,
+    {
+      task: secondTask,
+      envelope: {
+        ...ENVELOPE,
+        actions: [{ ...ENVELOPE.actions[0], idempotency_key: `${secondTask}:chaser` }],
+      },
+    },
+    at(3),
+    AGENT,
+  );
+  assert.equal(declared.ok, true, declared.ok ? "" : declared.message);
   const second = request(
     unit.logPath,
     {
-      task: TASK,
-      actionKey: `${TASK}:chaser-2`,
+      task: secondTask,
+      actionKey: `${secondTask}:chaser`,
       payload_hash: HASH,
       cls: "communicate.email.external",
       est_cost_usd: "0.02",
       reversible: false,
       summary: "Send deposit chaser again",
     },
-    at(3),
+    at(4),
     AGENT,
     unit.options,
   );

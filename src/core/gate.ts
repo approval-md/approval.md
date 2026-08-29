@@ -1259,6 +1259,14 @@ function displayHashField(
  * 3. **Policy resolution** (`loadPolicy` + `resolve`, including the §7
  *    irreversibility floor). A failed load resolves everything to `manual` —
  *    that is `policy-match.ts`'s contract, and this module does not soften it.
+ * 3b. **Declaration** (SPEC.md §7, APRV-147), for a `manual` resolution and for
+ *    a `supervised-live` one. The log must carry a `task.registered` for the
+ *    task and an action with this idempotency key, or the request is refused
+ *    `not-registered` / `action-not-registered` and nothing is appended. Before
+ *    the live draw and before the binding below, so an undeclared action never
+ *    reaches a human's queue, never has the live fraction drawn over a hash it
+ *    chose for itself, and hears the real reason rather than
+ *    `payload-hash-required`.
  * 4. **Off the manual path, stop — unless the live fraction says otherwise.**
  *    `supervised`/`autonomous` append **no event** (amended SPEC.md §6.3) and
  *    return `proceed: true`. Their budget is charged at `execution.started`,
@@ -1318,6 +1326,38 @@ export function request(
     input.reversible === undefined ? {} : { reversible: input.reversible },
   );
 
+  // SPEC.md §7's first invariant, enforced at intake since APRV-147: "an
+  // action's class MUST be declared before an execution token can be requested
+  // for it". Asked of the LOG, before the live draw, before the binding is
+  // derived, and before anything is appended, on every path that can put a
+  // question in front of a human or select one to put there.
+  //
+  // Three things the check buys, in the order they bite:
+  //
+  // - A request for an action nobody registered can no longer reach a human's
+  //   queue. Without it, a caller supplying its own `payload_hash` recorded an
+  //   `approval.requested` for a class the log never saw declared, and the
+  //   approver was shown a prompt whose class, cost, and summary came from the
+  //   requester alone.
+  // - The refusal a caller hits is the real one. The registration failure used
+  //   to surface as `payload-hash-required`, which names the second-order
+  //   symptom and sends the reader to fix the wrong thing. `registeredAction`
+  //   answers `not-registered` before `action-not-registered`, and both land
+  //   before the binding check below.
+  // - The live fraction is drawn over a declared hash or not at all. §5.2's
+  //   no-re-roll property rests on the selection input being the registration's
+  //   own bytes; over a caller-supplied hash there is nothing to lose, so an
+  //   agent could vary what it presents until the draw came up unsampled. An
+  //   unregistered action is now refused before `liveVerdict` runs at all.
+  //
+  // Deliberately not on the plain `supervised`/`autonomous` proceed path: those
+  // answers record nothing and mint nothing, and SPEC.md §7 is enforced for them
+  // where they acquire consequence, in `core/execute.ts` at start time.
+  if (resolution.autonomy === "manual" || resolution.supervision === "live") {
+    const declared = registeredAction(read.records, input.task, input.actionKey);
+    if (!declared.ok) return declared;
+  }
+
   // Amended SPEC.md §6.2/§10 (A1): a manual grant binds to bytes. The log's
   // declaration wins over anything the caller passed — `register` wrote it from
   // the envelope, and a request that could name its own hash could approve one
@@ -1328,7 +1368,11 @@ export function request(
   // accepted here on the same terms the manual path always accepted it, and it
   // cannot be used to steer the selection: an agent that changes the hash it
   // presents changes which bytes it is asking to have approved, and the
-  // registration's own declaration wins whenever there is one.
+  // registration's own declaration wins whenever there is one. Since APRV-147
+  // the fallback is reachable only for a REGISTERED action whose declaration
+  // carries no hash — the check above has already refused the unregistered
+  // case, which is where "the declaration wins" used to have no declaration to
+  // win with.
   const payloadHash =
     declaredPayloadHash(read.records, input.task, input.actionKey) ??
     (isPayloadHash(input.payload_hash) ? input.payload_hash : null);

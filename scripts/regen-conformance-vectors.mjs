@@ -616,14 +616,42 @@ const gateVectors = [
     },
   },
   {
-    id: "intake-does-not-check-registration",
+    id: "intake-checks-registration",
     description:
-      "A BOUNDARY VECTOR, stating where the declaration requirement is NOT enforced: intake admits a manual request whose caller supplies its own binding for an action the log has not registered. SPEC.md §7 is enforced at execution (`action-not-registered`) and at harness consumption, not at intake, so a conforming implementation must place the check there and must not report intake as the enforcement point",
+      "SPEC.md §7 at INTAKE (APRV-147): a manual request naming its own binding, for an action the log has never registered, is refused `not-registered` and appends nothing. A caller-supplied `payload_hash` is not a substitute for a declaration — admitting one would put a class, a cost and a summary the requester alone wrote in front of a human approver — so a conforming implementation refuses here, before the request is recorded, as well as at execution and at harness consumption",
+    control: true,
     input: {
       policy: POLICY,
       steps: [
         { op: "attest", actor: "human:carter" },
         { ...REQUEST_EMAIL, payload_hash: BOUND_HASH },
+      ],
+    },
+  },
+  {
+    id: "intake-not-registered-outranks-payload-hash-required",
+    description:
+      "the refusal ORDER at intake (APRV-147): with no registration and no binding anywhere, the answer is `not-registered` rather than `payload-hash-required`. The missing hash is a consequence of the missing declaration, and a refusal naming the symptom sends the caller to declare bytes for an action nothing knows about",
+    control: true,
+    input: {
+      policy: POLICY,
+      steps: [
+        { op: "attest", actor: "human:carter" },
+        { ...REQUEST_EMAIL, payload: undefined },
+      ],
+    },
+  },
+  {
+    id: "intake-action-not-registered",
+    description:
+      "the same check one level in (APRV-147): the task IS registered and the requested idempotency key is not among its declared actions, so intake refuses `action-not-registered` and appends nothing",
+    control: true,
+    input: {
+      policy: POLICY,
+      steps: [
+        { op: "attest", actor: "human:carter" },
+        REGISTER_EMAIL,
+        { ...REQUEST_EMAIL, action: "task-042:undeclared", payload_hash: BOUND_HASH },
       ],
     },
   },
@@ -883,6 +911,10 @@ const SUITES = [
   {
     file: "gate-verdicts.v1.json",
     suite: "gate-verdicts",
+    // 2.0.0, not 1.1.0: APRV-147 moved an expectation. The vector that said
+    // intake does not check registration now says it does, and a second
+    // implementation that passed 1.0.0 does not pass this.
+    vectors_version: "2.0.0",
     algorithm: "SPEC.md §6.3/§7/§10: the gate's admission, decision, and refusal paths",
     description:
       "Scripted scenarios over a scratch log: each is a policy, a sequence of gate operations, and the verdict of the last one. A step before the last that refuses is a broken vector and is reported as such rather than counted as a result.",
@@ -905,7 +937,9 @@ for (const definition of SUITES) {
   });
   const body = {
     suite: definition.suite,
-    vectors_version: "1.0.0",
+    // A suite file carries its own version: a new vector is a minor bump and a
+    // changed expectation a major one (conformance/README.md).
+    vectors_version: definition.vectors_version ?? "1.0.0",
     algorithm: definition.algorithm,
     description: definition.description,
     provenance:
