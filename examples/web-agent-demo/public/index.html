@@ -5,8 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>approval.md — live gate</title>
     <!--
-      Self-contained on purpose: no CDN, no external font, no analytics. The
-      page reads one endpoint, GET /api/state, and it has nothing to POST to.
+      Self-contained on purpose: no CDN, no external font, no analytics. The page
+      reads GET /api/state, /api/templates and /api/task/:id, and POSTs to exactly
+      one route, /api/task, which submits a task for the gated agent to attempt.
+      There is no endpoint here that decides anything.
     -->
     <style>
       :root {
@@ -86,18 +88,63 @@
       .actor-agent { color: #7cc4ff; }
       .ttl { color: var(--warn); }
       .ttl.gone { color: var(--bad); }
-      /* ---- disabled placeholder ---- */
-      .soon { opacity: 0.55; }
-      .soon input, .soon button {
+      /* ---- task desk ---- */
+      .templates { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+      .tpl {
+        font: inherit;
+        font-family: var(--mono);
+        font-size: 14px;
+        text-align: left;
+        background: #0f1216;
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 14px;
+        cursor: pointer;
+        max-width: 300px;
+      }
+      .tpl:hover { border-color: var(--muted); }
+      .tpl:disabled { opacity: 0.5; cursor: default; }
+      .tpl .cls { display: block; font-size: 12px; margin-top: 4px; }
+      .tpl .blurb { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+      .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+      #task-input, #task-send {
         font: inherit;
         font-family: var(--mono);
         background: #0f1216;
-        color: var(--muted);
+        color: var(--ink);
         border: 1px solid var(--line);
         border-radius: 8px;
         padding: 12px 16px;
       }
-      .soon input { width: min(560px, 100%); }
+      #task-input { width: min(560px, 100%); }
+      #task-send { cursor: pointer; }
+      #task-send:disabled { opacity: 0.5; cursor: default; }
+      #task-note { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+      #task-note.bad { color: var(--bad); }
+      .feed { margin-top: 18px; }
+      .feed .line {
+        font-family: var(--mono);
+        font-size: 14px;
+        padding: 8px 0 8px 14px;
+        border-left: 2px solid var(--line);
+      }
+      .feed .line.text { border-left-color: var(--muted); white-space: pre-wrap; }
+      .feed .line.tool_use { border-left-color: #7cc4ff; color: #7cc4ff; }
+      .feed .line.tool_use.gate { border-left-color: var(--warn); color: var(--warn); }
+      .feed .line.tool_result { border-left-color: var(--line); color: var(--muted); }
+      .feed .line.tool_result.err { border-left-color: var(--bad); color: var(--bad); }
+      .feed .line.result { border-left-color: var(--ok); color: var(--ok); white-space: pre-wrap; }
+      .feed .line.result.err { border-left-color: var(--bad); color: var(--bad); }
+      .feed .line.system, .feed .line.raw { border-left-color: var(--line); color: var(--muted); }
+      .waiting {
+        margin-top: 14px;
+        border: 1px solid var(--warn);
+        border-radius: 8px;
+        padding: 12px 16px;
+        color: var(--warn);
+        font-family: var(--mono);
+      }
       .pill {
         display: inline-block;
         border: 1px solid var(--line);
@@ -133,21 +180,33 @@
       <div class="panel wrap" id="tail-panel"><div class="empty">loading…</div></div>
     </section>
 
-    <section class="soon">
-      <h2>Give the agent a task <span class="pill">coming soon</span></h2>
+    <section>
+      <h2>Give the agent a task</h2>
       <div class="panel">
         <p class="empty" style="margin-top: 0">
-          Typing a task here will hand it to an agent running behind this gate. Not wired
-          up yet — this page is read-only today, and it holds no authority to decide
-          anything either way.
+          Pick one, or type your own. The agent runs behind this gate: its only way to
+          touch the world is to ask, and a person decides on their phone. Submitting a
+          task decides nothing — this page still holds no authority either way.
         </p>
-        <input id="task-input" type="text" placeholder="e.g. email the organisers the schedule" disabled />
-        <button id="task-send" type="button" disabled>Send</button>
+        <div class="templates" id="templates"></div>
+        <div class="row">
+          <input
+            id="task-input"
+            type="text"
+            maxlength="500"
+            placeholder="e.g. what is waiting for approval right now?"
+          />
+          <button id="task-send" type="button">Send</button>
+          <span id="task-chars" class="empty">500 left</span>
+        </div>
+        <div id="task-note"></div>
+        <div id="task-view"></div>
       </div>
     </section>
 
     <footer>
-      Read-only view. Decisions happen on the approver's own channel, never here.
+      You can ask the agent for things here. You cannot approve anything here: decisions
+      happen on the approver's own channel, and this page has no route to one.
     </footer>
 
     <script>
@@ -290,6 +349,166 @@
 
       poll();
       setInterval(poll, POLL_MS);
+
+      // ---- the task desk -------------------------------------------------
+      // Three endpoints: GET /api/templates once, POST /api/task on submit,
+      // GET /api/task/:id every TASK_POLL_MS while a run is in flight.
+
+      const TASK_POLL_MS = 2000;
+      const TEXT_MAX = 500;
+      let currentTaskId = null;
+      let taskTimer = null;
+
+      function note(message, bad) {
+        const box = el("task-note");
+        box.textContent = message;
+        box.classList.toggle("bad", bad === true);
+      }
+
+      function setBusy(busy) {
+        el("task-send").disabled = busy;
+        for (const button of document.querySelectorAll(".tpl")) button.disabled = busy;
+      }
+
+      async function loadTemplates() {
+        try {
+          const response = await fetch("/api/templates", { cache: "no-store" });
+          const data = await response.json();
+          el("templates").innerHTML = (data.templates || [])
+            .map(
+              (t) => `<button class="tpl" type="button" data-id="${esc(t.id)}">
+                ${esc(t.label)}
+                ${t.class ? `<span class="cls">${esc(t.class)}</span>` : ""}
+                <span class="blurb">${esc(t.blurb)}</span>
+              </button>`,
+            )
+            .join("");
+          for (const button of document.querySelectorAll(".tpl")) {
+            button.addEventListener("click", () => submit({ template_id: button.dataset.id }));
+          }
+        } catch (error) {
+          note(`templates unavailable (${error})`, true);
+        }
+      }
+
+      async function submit(body) {
+        setBusy(true);
+        note("submitting…", false);
+        try {
+          const response = await fetch("/api/task", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            note(data.error || `refused (${response.status})`, true);
+            setBusy(false);
+            return;
+          }
+          currentTaskId = data.id;
+          note(
+            data.state === "queued" && data.position > 1
+              ? `queued — position ${data.position} of ${data.queue_max}`
+              : "accepted — the agent is starting",
+            false,
+          );
+          el("task-input").value = "";
+          countChars();
+          pollTask();
+        } catch (error) {
+          note(`could not submit (${error})`, true);
+          setBusy(false);
+        }
+      }
+
+      function renderFeed(task) {
+        const entries = Array.isArray(task.entries) ? task.entries : [];
+        const lines = entries
+          .map((entry) => {
+            const classes = [
+              "line",
+              entry.kind,
+              entry.gate ? "gate" : "",
+              entry.is_error ? "err" : "",
+            ]
+              .filter(Boolean)
+              .join(" ");
+            const prefix =
+              entry.kind === "tool_use"
+                ? entry.gate
+                  ? "→ gate "
+                  : "→ "
+                : entry.kind === "tool_result"
+                  ? "← "
+                  : "";
+            return `<div class="${classes}">${esc(prefix)}${esc(entry.text)}</div>`;
+          })
+          .join("");
+        const waiting = task.awaiting_approval
+          ? '<div class="waiting">⏳ waiting for human approval — the request is on a phone, and the agent is doing nothing until it is answered</div>'
+          : "";
+        const head = `<div class="empty" style="margin-top:18px">
+          ${esc(task.id)} · ${esc(task.label)}${task.class ? ` · ${esc(task.class)}` : ""} · ${esc(task.state)}${
+            task.state === "queued" && task.position ? ` (position ${esc(task.position)})` : ""
+          }${task.note ? ` · ${esc(task.note)}` : ""}
+        </div>`;
+        el("task-view").innerHTML = `${head}${waiting}<div class="feed">${
+          lines || '<div class="line system">no output yet…</div>'
+        }</div>`;
+      }
+
+      async function pollTask() {
+        if (currentTaskId === null) return;
+        try {
+          const response = await fetch(`/api/task/${encodeURIComponent(currentTaskId)}`, {
+            cache: "no-store",
+          });
+          if (!response.ok) {
+            note("that task is no longer being kept", true);
+            currentTaskId = null;
+            setBusy(false);
+            return;
+          }
+          const task = await response.json();
+          renderFeed(task);
+          const live = task.state === "queued" || task.state === "running";
+          setBusy(live);
+          if (live) {
+            clearTimeout(taskTimer);
+            taskTimer = setTimeout(pollTask, TASK_POLL_MS);
+          } else {
+            note(
+              task.state === "done" ? "the run finished" : `the run failed${task.note ? `: ${task.note}` : ""}`,
+              task.state !== "done",
+            );
+          }
+        } catch (error) {
+          note(`transcript unavailable (${error})`, true);
+          setBusy(false);
+        }
+      }
+
+      function countChars() {
+        const left = TEXT_MAX - el("task-input").value.length;
+        el("task-chars").textContent = `${left} left`;
+      }
+
+      el("task-input").addEventListener("input", countChars);
+      el("task-input").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") el("task-send").click();
+      });
+      el("task-send").addEventListener("click", () => {
+        const text = el("task-input").value.trim();
+        if (text === "") {
+          note("type something first", true);
+          return;
+        }
+        submit({ text });
+      });
+
+      loadTemplates();
+      countChars();
     </script>
   </body>
 </html>
