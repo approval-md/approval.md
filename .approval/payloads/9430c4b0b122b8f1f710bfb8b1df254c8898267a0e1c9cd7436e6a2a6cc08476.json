@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md && approval log advance --pr 2>&1 | tail -10","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-127-autonomy && sed -n '130p' SPEC.md | grep '^<<<<<<<' > /dev/null && sed -i '' '392d;390d;386d;138d;134,136d;130d' SPEC.md 2>/dev/null; grep -n '^<<<<<<<\\|^=======$\\|^>>>>>>>' SPEC.md | head -4","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
