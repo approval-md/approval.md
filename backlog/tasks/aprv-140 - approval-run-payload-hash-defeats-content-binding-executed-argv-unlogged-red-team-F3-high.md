@@ -3,9 +3,10 @@ id: APRV-140
 title: >-
   approval run --payload-hash defeats content binding; executed argv unlogged
   (red-team F3, high)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-25 13:41'
+updated_date: '2026-08-26 20:27'
 labels:
   - security
   - execute
@@ -35,9 +36,21 @@ Fix direction: always recompute runPayloadHash and require any --payload-hash to
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 approval run recomputes the payload hash from the argv and cwd it will spawn and refuses when a supplied --payload-hash differs, or the override is gated behind a distinct adapter path not reachable as a plain agent invocation
-- [ ] #2 execution.started records the executed argv and cwd (or a hash the operator can reproduce), so the log reflects what actually ran
-- [ ] #3 The non-manual execute path requires and binds payload_hash, reusing payload-mismatch; the APRV-138 residual test that pinned arbitrary-argv execution is flipped to assert refusal
-- [ ] #4 SPEC section 10.4 and section 6.2 amended (recompute on every execute path; payload_hash MUST beyond manual), marked for human sign-off
-- [ ] #5 npm test passes; lint clean
+- [x] #1 approval run recomputes the payload hash from the argv and cwd it will spawn and refuses when a supplied --payload-hash differs, or the override is gated behind a distinct adapter path not reachable as a plain agent invocation
+- [x] #2 execution.started records the executed argv and cwd (or a hash the operator can reproduce), so the log reflects what actually ran
+- [x] #3 The non-manual execute path requires and binds payload_hash, reusing payload-mismatch; the APRV-138 residual test that pinned arbitrary-argv execution is flipped to assert refusal
+- [x] #4 SPEC section 10.4 and section 6.2 amended (recompute on every execute path; payload_hash MUST beyond manual), marked for human sign-off
+- [x] #5 npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Built 2026-08-26, merged in PR #130. Direction chosen for AC 1: strict recomputation, adapter door DELETED from approval run — adapters hash their own bytes and call core directly, were never reachable as a plain run invocation, so the flag was pure hole. run always computes runPayloadHash(argv, cwd); a supplied --payload-hash is a check refused payload-mismatch before spawn and before any append. Non-manual path requires and binds payload_hash against the registered declaration (undeclared refuses); APRV-138's residual test flipped to four refusal-plus-bind assertions. AC 2 satisfied by the hash rather than raw argv, deliberately: command lines carry secrets and §11.1 keeps them out of the log; the recomputation guarantee makes the recorded hash operator-reproducible. SPEC §6.2/§10.4 amended pending sign-off, human-approved through the gate. The e2e-demo test was itself modelling the hole and now approves the command it runs. Merge note: reconciled twice (WYSIWYS, then string-money+conformance); the conformance vectors regenerated for the new codes in the same resolution.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+approval run executes only bytes whose hash it recomputed itself; the override flag is a check, the adapter door is gone, and every execution.started names the hash of what ran. The last red-team high (F3) closed; merged in PR #130.
+<!-- SECTION:FINAL_SUMMARY:END -->

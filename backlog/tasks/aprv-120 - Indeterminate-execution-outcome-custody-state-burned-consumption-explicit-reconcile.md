@@ -3,9 +3,10 @@ id: APRV-120
 title: >-
   Indeterminate execution outcome: custody state, burned consumption, explicit
   reconcile
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-20 14:47'
+updated_date: '2026-08-26 20:27'
 labels:
   - adapters
   - gate
@@ -30,11 +31,23 @@ Reference: emiliaprotocol/emilia-protocol packages/gate/src/proposal-to-effect.t
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Adapter contract distinguishes pre-entry failure (execution.failed) from post-entry unknown (execution.indeterminate); the boundary is the moment act is invoked, pinned by tests that throw on each side
-- [ ] #2 An indeterminate outcome leaves the token consumed and the idempotency key burned; a retry or re-run against it is refused with its own stable reason code
-- [ ] #3 Exception text stays out of the event; only closed machine-readable codes are recorded, and the credential-redaction scan still passes
-- [ ] #4 A reconcile path appends a resolution event referencing the indeterminate event; the original record is never rewritten; resolving as not-executed is recorded distinctly from resolving as executed
-- [ ] #5 Event schemas added and verifiers accept the new types alongside the existing enum per the §8 precedent
+- [x] #1 Adapter contract distinguishes pre-entry failure (execution.failed) from post-entry unknown (execution.indeterminate); the boundary is the moment act is invoked, pinned by tests that throw on each side
+- [x] #2 An indeterminate outcome leaves the token consumed and the idempotency key burned; a retry or re-run against it is refused with its own stable reason code
+- [x] #3 Exception text stays out of the event; only closed machine-readable codes are recorded, and the credential-redaction scan still passes
+- [x] #4 A reconcile path appends a resolution event referencing the indeterminate event; the original record is never rewritten; resolving as not-executed is recorded distinctly from resolving as executed
+- [x] #5 Event schemas added and verifiers accept the new types alongside the existing enum per the §8 precedent
 - [ ] #6 SPEC §6.3/§8/§10.4 amended, marked for human sign-off
 - [ ] #7 npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Built 2026-08-26, merged in PR #130. Custody vocabulary (SPEC §6.3): settled / open / delegated / indeterminate / reconciled. Harness records (execution:'harness') classify delegated, terminal by design — fixing the live bug where status reported 48 harness records as dangling; open is now the 3 real cases. Failed/indeterminate boundary is positional: through the adapter read = failed (nothing attempted); from invocation onward a throw = indeterminate; a returned failure stays failed. Fail-closed choices where the task left them open: unreconciled indeterminate fails health; reconcile never un-burns a key (not-executed re-opens the effect via a fresh action); resolve/finish refuse over indeterminate; indeterminate neither increments nor clears the loop streak; envelope projection stays approved rather than claiming executed; one closed reason value act-threw at v0.1. New human-only verb approval execution reconcile with mandatory evidence note. Three new frozen refusal codes (execution-indeterminate, not-indeterminate, already-reconciled), regenerated into the conformance vectors. Exception text reaches the caller redacted and never the log, pinned. doctor untouched (environment checks only); status is the health surface. Follow-up APRV-146 filed (harness records bind payload_hash; delegated refuses outcomes).
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Executions that end nowhere have a name and a human path out: five custody states, a positional failed/indeterminate boundary, a human-only reconcile verb, and 48 false danglings reclassified delegated. Merged in PR #130.
+<!-- SECTION:FINAL_SUMMARY:END -->
