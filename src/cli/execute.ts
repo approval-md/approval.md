@@ -70,6 +70,7 @@ import {
   type ExecuteRefusal,
   type ResolveOutcome,
 } from "../core/execute.js";
+import { harnessLoopEscalation, harnessOutcomeCoverage } from "../core/loop.js";
 import { isPayloadHash, runPayloadHash } from "../core/payload.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
@@ -1062,13 +1063,35 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
     seq: entry.indeterminateSeq,
     reason: entry.reason,
   }));
-  const escalations = loopEscalation(records)
-    .filter((state) => state.escalated)
-    .map((state) => ({
-      task: state.task,
-      consecutive_failures: state.consecutiveFailures,
-      escalated: true,
-    }));
+  // APRV-145. Three streaks now, one shape. The per-task streak of SPEC.md
+  // §10.2 keeps its `task` field and its meaning; the two harness scopes of the
+  // amended §10.2 report their scope KEY in that same field, so it stays a
+  // non-empty string an operator can grep the log for and every pre-existing
+  // consumer reads the three fields it always read. `scope` is the additive
+  // field that says which derivation produced the key.
+  const escalations = [
+    ...loopEscalation(records)
+      .filter((state) => state.escalated)
+      .map((state) => ({
+        task: state.task,
+        scope: "task",
+        consecutive_failures: state.consecutiveFailures,
+        escalated: true,
+      })),
+    ...harnessLoopEscalation(records)
+      .filter((state) => state.escalated)
+      .map((state) => ({
+        task: state.key,
+        scope: state.scope,
+        consecutive_failures: state.consecutiveFailures,
+        escalated: true,
+      })),
+  ];
+  // Informational, and deliberately outside `healthy` and the exit code, for the
+  // reason the timestamp anomalies below are: this is a coverage measurement,
+  // not an integrity verdict. A persistently high `unreported` is how an
+  // operator learns the post-execution hook is not installed or not firing.
+  const harnessOutcomes = harnessOutcomeCoverage(records);
   // APRV-127. The reconciliation backlog: obligations opened by a retrospective
   // DENIAL and not yet discharged by a person. It counts toward `healthy` for
   // the same reason a dangling execution does — an unreconciled denial is a "no"
@@ -1143,6 +1166,7 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       ...(indeterminate.length === 0 ? {} : { indeterminate }),
       budgets,
       loop_escalations: escalations,
+      harness_outcomes: harnessOutcomes,
       reconciliation: obligations,
       payload_store: payloadStore,
       ...(anomalies.length === 0 ? {} : { anomalies }),
@@ -1243,11 +1267,22 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
         ...(escalations.length === 0
           ? {}
           : {
-              under: escalations.map(
-                (entry) =>
-                  `${entry.task} (${entry.consecutive_failures} consecutive execution.failed) — escalated to manual`,
+              under: escalations.map((entry) =>
+                entry.scope === "task"
+                  ? `${entry.task} (${entry.consecutive_failures} consecutive execution.failed, task) — escalated to manual`
+                  : `${entry.task} (${entry.consecutive_failures} consecutive failed tool calls, ${entry.scope}) — escalated to manual`,
               ),
             }),
+      },
+      {
+        // APRV-145. Its own INFORMATIONAL row, because the append-nothing rule
+        // of the counterpart is otherwise invisible: a harness start with no
+        // outcome is not debris, it is a tool call nobody reported on, and the
+        // number is how an operator sees that the post-execution hook is dark.
+        left: "harness outcomes",
+        right: st.muted(
+          `${harnessOutcomes.started} started, ${harnessOutcomes.reported} reported, ${harnessOutcomes.unreported} unreported`,
+        ),
       },
       {
         left: "reconciliation",

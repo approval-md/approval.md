@@ -1,0 +1,16 @@
+{
+  "seq": 42,
+  "ts": "2026-08-29T11:05:02Z",
+  "event": "execution.completed",
+  "task": "hook:0f3c9a:toolu_01DEF",
+  "action_key": "hook:0f3c9a:toolu_01DEF:vcs.push.branch",
+  "actor": "agent:claude-code",
+  "payload": {
+    "execution": "harness",
+    "reported_by": "post-tool-use",
+    "exit_code": null
+  },
+  "alg": "sha256/jcs",
+  "prev": "3c1d5a7e9042b6f8c1e3d5a7b9c1e3d5f7a9b1c3e5d7f9a1b3c5e7d9f1a3b5c7",
+  "hash": "5e7f9a1b3c5d7e9f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9b1c3d5e7f"
+}

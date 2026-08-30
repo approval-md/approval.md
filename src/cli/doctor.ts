@@ -55,7 +55,15 @@
  */
 
 import { createServer } from "node:net";
-import { closeSync, openSync, readFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+} from "node:fs";
 import { dirname, isAbsolute, join, resolve as resolvePathSegments } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -1393,6 +1401,96 @@ function checkLogDrift(logPath: string): DoctorCheck {
   }
 }
 
+// ---------------------------------------------------------------------------
+// harness hook outcome reporting (APRV-145)
+// ---------------------------------------------------------------------------
+
+/** Where Claude Code keeps the hook registration a human commits. */
+const CLAUDE_SETTINGS = join(".claude", "settings.json");
+
+/** Does any `hooks.<event>` entry run this CLI's harness hook? */
+function registersApprovalHook(hooks: unknown, event: string): boolean {
+  if (typeof hooks !== "object" || hooks === null || Array.isArray(hooks)) return false;
+  const matchers = (hooks as Record<string, unknown>)[event];
+  if (!Array.isArray(matchers)) return false;
+  for (const matcher of matchers) {
+    if (typeof matcher !== "object" || matcher === null) continue;
+    const entries = (matcher as Record<string, unknown>)["hooks"];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const command = (entry as Record<string, unknown>)["command"];
+      if (typeof command === "string" && /\bapproval hook\b/u.test(command)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Is the harness registered for the event that reports outcomes (APRV-145)?
+ *
+ * The configuration this exists to name is the one in which loop escalation
+ * cannot accrue AT ALL: the pre-execution hook registered and the post-execution
+ * one not, so every tool call opens a delegated `execution.started` that nothing
+ * ever closes, the harness streaks of amended SPEC.md §10.2 hold at zero, and
+ * the guard reads as passing because there is nothing for it to see. That is a
+ * silent control, which is worse than an absent one.
+ *
+ * Doctor READS this file and never writes it. `.claude/settings.json` is
+ * `policy.edit` in this taxonomy — a file that configures the gate is part of
+ * the gate — so the repair is a line for a human to commit, printed by
+ * `approval instructions hook`.
+ */
+function checkHarnessOutcomes(dir: string): DoctorCheck {
+  const check = "harness-hook-outcomes";
+  const path = join(dir, CLAUDE_SETTINGS);
+  if (!existsSync(path)) {
+    return {
+      check,
+      status: "skip",
+      detail: `no ${CLAUDE_SETTINGS} in ${dir}: this checkout does not run a Claude Code harness hook`,
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch (cause) {
+    return {
+      check,
+      status: "skip",
+      detail: `${path} is not readable as JSON (${detailOf(cause)}), so which hooks it registers cannot be established here`,
+    };
+  }
+  const hooks =
+    typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)["hooks"]
+      : null;
+  const pre = registersApprovalHook(hooks, "PreToolUse");
+  const post =
+    registersApprovalHook(hooks, "PostToolUse") ||
+    registersApprovalHook(hooks, "PostToolUseFailure");
+  if (!pre && !post) {
+    return {
+      check,
+      status: "skip",
+      detail: `${path} registers no \`approval hook\` entry, so this checkout is not gated by the harness hook at all`,
+    };
+  }
+  if (!post) {
+    return {
+      check,
+      status: "fail",
+      detail: `${path} registers \`approval hook\` for PreToolUse and not for PostToolUse, so no tool call ever reports an outcome: every harness execution.started stays delegated, and the loop escalation of SPEC.md §10.2 cannot accrue on this path`,
+      fix: "approval hook claude-code --help — prints the PostToolUse entry to add, which a human commits (.claude/settings.json is policy.edit)",
+    };
+  }
+  return {
+    check,
+    status: "pass",
+    detail: `${path} registers \`approval hook\` for the ${pre ? "pre-execution and " : ""}post-execution event, so tool call outcomes reach the log and loop escalation can accrue`,
+  };
+}
+
 /** The Backlog.md board key a task file's name begins with (`task-3 - Slug.md`). */
 function taskIdFromFileName(name: string): string | null {
   const match = /^([A-Za-z][A-Za-z0-9_]*-\d+)/u.exec(name);
@@ -1548,6 +1646,8 @@ export function commandDoctor(
       checkLogDrift(logPath),
       // APRV-127: appended, fifth time, same reason.
       checkReconciliation(verified.records),
+      // APRV-145: appended, sixth time, same reason.
+      checkHarnessOutcomes(dir),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

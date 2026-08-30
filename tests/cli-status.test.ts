@@ -270,6 +270,11 @@ test("status --json on a healthy repo emits the frozen shape and exits 0", () =>
       },
     ],
     loop_escalations: [],
+    // Additive (APRV-145): how many harness starts carry an outcome and how
+    // many do not. INFORMATIONAL — a non-zero `unreported` moves neither
+    // `healthy` nor the exit code, for the reason `anomalies` moves neither:
+    // it is a coverage measurement, not an integrity verdict.
+    harness_outcomes: { started: 0, reported: 0, unreported: 0 },
     // Additive (APRV-127): reconciliation obligations opened by a retrospective
     // denial and not yet discharged. Empty here, and — unlike the payload store
     // — a non-empty list DOES move `healthy` and the exit code, because an
@@ -322,6 +327,8 @@ test("status text mode names health, attestation, verification, dangling and bud
   assert.match(run.stdout, /^dangling executions {2,}none$/mu);
   assert.match(run.stdout, /^budget global\.daily_usd {2,}consumed /mu);
   assert.match(run.stdout, /^loop escalations {2,}none$/mu);
+  // APRV-145: informational, and it says so by never moving `health` above.
+  assert.match(run.stdout, /^harness outcomes {2,}0 started, 0 reported, 0 unreported$/mu);
   assert.match(run.stdout, /^payload store {2,}not created yet, 0 pruned, 0 unbound$/mu);
   // The log path is written the way the operator would type it, and piped
   // output carries no escape codes.
@@ -461,9 +468,18 @@ test("three consecutive failures raise a loop escalation in status; a completion
 
   const escalated = statusJson(dir);
   assert.equal(escalated.code, 1);
+  // APRV-145: the entry keeps the three fields every consumer already read and
+  // gains `scope`, which names the derivation that produced the key in `task`.
   assert.deepEqual(escalated.body["loop_escalations"], [
-    { task: "task-042", consecutive_failures: 3, escalated: true },
+    { task: "task-042", scope: "task", consecutive_failures: 3, escalated: true },
   ]);
+  // These executions are `approval run`'s own, so none of them is a harness
+  // start and the coverage row is all zeroes.
+  assert.deepEqual(escalated.body["harness_outcomes"], {
+    started: 0,
+    reported: 0,
+    unreported: 0,
+  });
 
   // The manual path still works for the escalated task — escalation is a floor.
   requestChaser(dir);

@@ -2077,6 +2077,15 @@ test("the refusal-code union is frozen public API", () => {
     // APRV-18 added this one: SPEC.md §10.2 loop safety, refused at intake for
     // the non-manual paths only. An addition to the union, not a rename.
     "loop-escalated",
+    // APRV-145, two additions, both belonging to the completion counterpart.
+    // `not-delegated` is the mirror of `core/execute.ts`'s `execution-delegated`
+    // and the second edge of one carve-out: that code stops a human recovery
+    // verb closing a harness start, this one stops a harness report closing an
+    // execution this runtime watched itself. `already-finished` is spelled
+    // exactly as the executor spells the same fact, so a reader who has met one
+    // has met both.
+    "not-delegated",
+    "already-finished",
     "not-requested",
     "already-decided",
     "not-granted",
