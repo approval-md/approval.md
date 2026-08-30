@@ -892,7 +892,13 @@ const SUITES = [
     // refusal a grant by a person the resolved rule's `approvers` list does not
     // name now carries. The list was parsed and enforced nowhere before, so this
     // is a union that grew because a control started existing.
-    vectors_version: "4.0.0",
+    // 5.0.0 (APRV-145): `gate_refusal_codes` gained `not-delegated` and
+    // `already-finished`, the two refusals the completion counterpart of the
+    // amended §10.2 can produce. `not-delegated` is the mirror of the execute
+    // union's `execution-delegated`: that one stops a human recovery verb
+    // closing a harness start, this one stops a harness report closing an
+    // execution this runtime watched itself.
+    vectors_version: "5.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
@@ -919,7 +925,11 @@ const SUITES = [
     suite: "schema-validation",
     // 1.1.0 (APRV-109): a MINOR bump. The five `policy.proposed` /
     // `policy.declined` fixtures are new vectors; no existing expectation moved.
-    vectors_version: "1.1.0",
+    // 1.2.0 (APRV-145): another MINOR bump. The four harness-counterpart
+    // fixtures (a completion and a failure carrying `reported_by`, an open
+    // `reported_by` string, a non-integer `exit_code`) are new vectors; no
+    // existing expectation moved.
+    vectors_version: "1.2.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

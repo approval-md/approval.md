@@ -817,7 +817,8 @@ test("escalation: three consecutive failures are surfaced by the daemon and by s
   const status = runCli(["status", "--json"], dir);
   assert.equal(status.code, 1);
   assert.deepEqual((JSON.parse(status.stdout) as Record<string, unknown>)["loop_escalations"], [
-    { task: "task-042", consecutive_failures: 3, escalated: true },
+    // APRV-145: `scope` is the additive field; `task` still carries the key.
+    { task: "task-042", scope: "task", consecutive_failures: 3, escalated: true },
   ]);
   assertClean(dir);
 });

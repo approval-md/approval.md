@@ -64,6 +64,57 @@ hook entry could write itself out of it. The hook classifies edits to it as
 }
 ```
 
+**Register the same command for the post-execution event too (APRV-145).**
+Without it the gate answers every tool call and learns the outcome of none, so
+the loop escalation of SPEC.md §10.2 holds at zero however wedged a session is,
+and `approval doctor`'s `harness-hook-outcomes` check fails to say so:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "approval hook claude-code --dir <primary checkout> --as agent:claude-code"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "approval hook claude-code --dir <primary checkout> --as agent:claude-code"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+One binary, two events, dispatched on `hook_event_name`. The post-execution run
+answers no permission question — it cannot, the tool has already run — so it
+prints an empty stdout, one machine-readable JSON line on stderr, and exits 0.
+`--timeout` and `--interval` are meaningless on it; it never waits for anybody.
+
+What it carries, and what it does with it. The event names `session_id` and
+`tool_use_id`, which are the two segments the pre-execution run put in the task
+id, so the task and the action keys are read back out of the VERIFIED log rather
+than out of the report. `tool_response` is an object whose `type` is `text`,
+`base64` or `error`, and the tool's exit code is not exposed to a hook at all: a
+failing Bash call arrives as `PostToolUseFailure` instead. So the reading is
+closed at three cases — `text`/`base64` is a completion, `error` is a failure,
+`PostToolUseFailure` is a failure — and ANYTHING ELSE APPENDS NOTHING. A failure
+nobody observed would trip an escalation on noise; a completion nobody observed
+would clear one on nothing. None of the text inside `tool_response` reaches the
+log, ever (SPEC.md §11.1 invariant 3 has no exception for diagnostics).
+
 A few things about those numbers and paths:
 
 - `--dir <primary checkout>` points policy discovery AND the log at the primary
@@ -403,11 +454,14 @@ so nobody hunts for a token that was deliberately never created.
 - **Self-reported fields are never read.** The event carries the agent's own
   `description` of its command. The hook ignores it (SPEC.md §11.1: a
   self-reported field never reduces scrutiny) and classifies the command text.
-- **No `execution.*` records.** The harness runs the command, not the runtime, so
-  there is nothing the log could truthfully say about how it went. What the hook
-  records is the approval lifecycle only. A PostToolUse companion that closes the
-  loop with an execution record is future work, and would have to reckon with the
-  fact that its report comes from the same untrusted side.
+- **The outcome is a REPORT, not an observation.** The harness runs the command,
+  not the runtime, so nothing the runtime observed can say how it went. Since
+  APRV-141 the hook records the execution itself (`execution.started`, marked
+  `execution: "harness"`), and since APRV-145 the post-execution event closes it
+  with an `execution.completed` or `execution.failed` carrying `reported_by:
+  "post-tool-use"`. That record is an assertion from the untrusted side and says
+  so on its face. It is bounded in one direction (SPEC.md §11.1 invariant 4): a
+  reported failure accrues the loop streak, and only a completion clears one.
 - **A hook that fails to launch is an open gate.** See the install note above.
 - **Latency.** Every gated tool call pays a Node start-up plus a verified read of
   the log. SPEC.md §13's post-v1 Rust fast-path is the accelerator for exactly

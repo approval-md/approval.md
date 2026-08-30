@@ -124,7 +124,7 @@ import {
   type EventRecord,
   type LogHead,
 } from "./log.js";
-import { isLoopEscalated } from "./loop.js";
+import { HARNESS_TASK_PREFIX, harnessLoopFloor, isLoopEscalated } from "./loop.js";
 import { normalizeUsd, usdOrZero, type UsdInput } from "./money.js";
 import { isPayloadHash, payloadHash as hashOfPayload } from "./payload.js";
 import { loadPayload, payloadStoreDirFor, storePayload } from "./payload-store.js";
@@ -328,6 +328,30 @@ export const GATE_REFUSAL_CODES = [
    * refused — see {@link request}.
    */
   "loop-escalated",
+  /**
+   * A harness outcome was reported for an action key whose `execution.started`
+   * carries no `execution: "harness"` marker (APRV-145).
+   *
+   * The mirror image of `core/execute.ts`'s `execution-delegated`, and the pair
+   * is what keeps the two write surfaces from overlapping by one record. That
+   * code refuses a HUMAN recovery verb over a harness start; this one refuses a
+   * HARNESS report over a start this runtime is watching itself. An untrusted
+   * report that could close an `approval run` execution would be reporting an
+   * exit code the runtime was about to observe for itself, and the outcome the
+   * log kept would be whichever one landed first.
+   */
+  "not-delegated",
+  /**
+   * Every harness-marked start the reported tool call opened already carries an
+   * outcome (APRV-145). An execution has exactly one, and a second report would
+   * be a second answer about one command — including a `completed` written over
+   * a `failed`, which is a streak cleared by repetition rather than by recovery.
+   *
+   * Named for the fact rather than for the reporter, and spelled exactly as
+   * `core/execute.ts` spells the same fact, so a reader who has met one has met
+   * both.
+   */
+  "already-finished",
   /** No request to decide. */
   "not-requested",
   /** The request already has a terminal decision. */
@@ -1104,6 +1128,21 @@ export interface RequestInput {
    * policy's `defaults.approval_ttl` remains the only deadline with authority.
    */
   wait_until?: string;
+  /**
+   * The caller has established that loop safety floors this action to `manual`
+   * for this invocation (APRV-145, amended SPEC.md §10.2).
+   *
+   * The THIRD way into the manual path, beside a class that resolves manual and
+   * an action the APRV-127 live draw selected, and it works exactly as that
+   * second one does: the non-manual branch is skipped and everything below it
+   * runs unchanged, so nothing in the manual path knows or asks how the action
+   * got here. The flag is a fact the caller computed from the log
+   * (`core/loop.ts`'s `harnessLoopFloor`) and it can only ever ADD scrutiny: a
+   * caller that sets it wrongly asks a human about a command that did not need
+   * one, and a caller that omits it is refused at the write boundary by
+   * {@link startHarnessExecution}, which re-checks the same streaks.
+   */
+  loopFloor?: boolean;
 }
 
 /**
@@ -1436,7 +1475,11 @@ export function request(
   // Deliberately not on the plain `supervised`/`autonomous` proceed path: those
   // answers record nothing and mint nothing, and SPEC.md §7 is enforced for them
   // where they acquire consequence, in `core/execute.ts` at start time.
-  if (resolution.autonomy === "manual" || resolution.supervision === "live") {
+  if (
+    resolution.autonomy === "manual" ||
+    resolution.supervision === "live" ||
+    input.loopFloor === true
+  ) {
     const declared = registeredAction(read.records, input.task, input.actionKey);
     if (!declared.ok) return declared;
   }
@@ -1461,7 +1504,13 @@ export function request(
     (isPayloadHash(input.payload_hash) ? input.payload_hash : null);
 
   let live: LiveVerdict | null = null;
-  if (resolution.autonomy !== "manual") {
+  // APRV-145: the loop floor's door into the manual path. It is checked here
+  // rather than inside `resolve` for the reason §7's irreversibility floor is
+  // applied after class resolution: `resolve` is pure over policy text, and a
+  // failure streak is a projection over the log. A floored action skips this
+  // whole branch — the per-task `loop-escalated` refusal below included, which
+  // would otherwise refuse the very question the floor exists to ask.
+  if (resolution.autonomy !== "manual" && input.loopFloor !== true) {
     // SPEC.md §10.2 loop safety, the gate's half (APRV-18). Three consecutive
     // execution.failed events for a task escalate it to manual "regardless of
     // policy", so an escalated task may not be told to proceed unsupervised.
@@ -2783,6 +2832,22 @@ export function startHarnessExecution(
     );
   }
 
+  // APRV-145, the harness scopes of the amended §10.2, re-checked at the write
+  // boundary. The hook applies the floor before it gets here — an escalated
+  // session's command is routed to the human gate rather than recorded as
+  // unattended — and this is the belt to that pair of braces: a caller that
+  // reaches this function without asking the hook first must not be able to
+  // record an unattended harness execution for a session or an actor that is
+  // three failed tool calls deep. A check in the hook alone is a check-then-
+  // append with a window in it (§11.1 invariant 5).
+  const floor = harnessLoopFloor(read.records, input.task, actor);
+  if (floor !== null) {
+    return refuse(
+      "loop-escalated",
+      `${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed harness tool calls and is floored to manual (amended SPEC.md §10.2), so ${input.actionKey} may not be recorded as an unattended execution. Route the command through the human gate, or land an execution.completed in the same ${floor.scope} scope: nothing else clears the streak.`,
+    );
+  }
+
   for (const record of read.records) {
     if (record.action_key !== input.actionKey) continue;
     if (record.event !== "execution.started") continue;
@@ -2875,6 +2940,221 @@ export function startHarnessExecution(
   );
   if (!appended.ok) return appended;
   return { ok: true, record: appended.record };
+}
+
+// ---------------------------------------------------------------------------
+// finishHarnessExecution — the completion counterpart (APRV-145)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which untrusted reporter asserted a harness outcome. CLOSED, and extended only
+ * by a task that adds the case.
+ *
+ * It names the reporter and reduces nothing: it is a CLAIMED field in the
+ * computed-versus-claimed vocabulary of SPEC.md §9, recorded so a reader can
+ * tell a report from an observation without reading the record's provenance out
+ * of its shape.
+ */
+export const HARNESS_REPORTERS = ["post-tool-use"] as const;
+export type HarnessReporter = (typeof HARNESS_REPORTERS)[number];
+
+export function isHarnessReporter(value: unknown): value is HarnessReporter {
+  return typeof value === "string" && (HARNESS_REPORTERS as readonly string[]).includes(value);
+}
+
+/** What a harness says happened to one tool call. */
+export interface HarnessFinishInput {
+  /** The harness's identifier for the run of tool calls. */
+  sessionId: string;
+  /** The harness's identifier for this tool call. */
+  toolUseId: string;
+  /** Read from the reporting event by a CLOSED set of readings; never guessed. */
+  outcome: "completed" | "failed";
+  reportedBy: HarnessReporter;
+  /**
+   * The exit code, when the harness stated one, and `null` otherwise.
+   *
+   * Claude Code's post-execution event carries none (`docs/claude-code-hook.md`),
+   * so in practice this is `null` on that adapter. It is `null` rather than
+   * omitted-and-inferred for the reason `execution.indeterminate` carries a null
+   * one: a fabricated number reads exactly like a measured one.
+   */
+  exitCode?: number | null;
+}
+
+export type HarnessFinishResult =
+  | { ok: true; task: string; records: EventRecord[] }
+  | GateRefusal;
+
+/**
+ * Close the delegated starts one harness tool call opened, with the outcome the
+ * harness reported (APRV-145, amended SPEC.md §10.2).
+ *
+ * ## Why this is its own surface and not one of the recovery verbs
+ *
+ * APRV-146 made `finishExecution`, `resolveExecution` and `indeterminateExecution`
+ * refuse `execution-delegated` over a harness start, and the reconciliation
+ * recorded on APRV-145 keeps all three refusing it exactly as merged. Those three
+ * write an outcome the RUNTIME observed, or a person did, and a harness start has
+ * neither. This function writes a third thing — an outcome an untrusted reporter
+ * ASSERTED, marked as such on its face — and it is a separate, marked surface so
+ * that the carve-out is one named function a reader can audit rather than a
+ * condition threaded through the human recovery path.
+ *
+ * ## What it will not do
+ *
+ * - **It resolves task and key from the log, never from the report.** The caller
+ *   names a session and a tool-use id; this function reads the `execution.started`
+ *   records the runtime itself wrote for that task (§11.1 invariant 1). A report
+ *   can therefore only ever close an execution this runtime authorized.
+ * - **It refuses a start with no harness marker** (`not-delegated`), so an
+ *   untrusted report can never close an `approval run` execution it does not own.
+ * - **It records none of the tool's output text.** §11.1 invariant 3 has no
+ *   exception for diagnostics, and a tool's stdout is exactly where a credential
+ *   arrives.
+ * - **It takes no timestamp.** `execution.*` is gate-typed, so the refusal is
+ *   structural: there is no parameter to pass and the clock is read once here,
+ *   as {@link startHarnessExecution} reads it.
+ * - **It requires no attestation and charges no budget.** The counterpart
+ *   authorizes nothing (§11.1 invariant 8 does not bind it), and a report of a
+ *   FAILURE that an unattested policy could block would be a self-reported field
+ *   lowering scrutiny by omission.
+ *
+ * A partial close — some of the tool call's keys settled and some not — is left
+ * as it is found. It over-counts failures and under-counts completions, and both
+ * are the strict direction.
+ */
+export function finishHarnessExecution(
+  logPath: string,
+  input: HarnessFinishInput,
+  actor: string,
+  options: GateOptions = {},
+): HarnessFinishResult {
+  if (!PRINCIPAL_ACTOR.test(actor)) {
+    return refuse(
+      "actor-invalid",
+      `reporting a harness outcome requires a human: or agent: actor, got ${JSON.stringify(actor)}. The runtime did not observe this exit; the party that did must be named on the record.`,
+    );
+  }
+  const task = `${HARNESS_TASK_PREFIX}${input.sessionId}:${input.toolUseId}`;
+
+  const survey = readGateRecords(logPath);
+  if (!survey.ok) return survey;
+
+  /** Every action key this task started, and whether it is delegated and open. */
+  const started = new Map<string, { harness: boolean; open: boolean; seq: number }>();
+  for (const record of survey.records) {
+    const key = record.action_key;
+    if (typeof key !== "string" || key.length === 0) continue;
+    if (record.event === "execution.started") {
+      if (record.task !== task) {
+        started.delete(key);
+        continue;
+      }
+      started.set(key, {
+        harness: payloadOf(record)["execution"] === "harness",
+        open: true,
+        seq: record.seq,
+      });
+      continue;
+    }
+    if (
+      record.event === "execution.completed" ||
+      record.event === "execution.failed" ||
+      record.event === "execution.indeterminate" ||
+      record.event === "execution.reconciled"
+    ) {
+      const entry = started.get(key);
+      if (entry !== undefined) entry.open = false;
+    }
+  }
+
+  const delegated = [...started.entries()].filter(([, entry]) => entry.harness);
+  if (delegated.length === 0) {
+    return refuse(
+      "not-delegated",
+      started.size === 0
+        ? `no execution.started record names task ${task}, so this report closes nothing. A harness outcome may only close an execution this runtime authorized, and the task and the action key are read from the log rather than from the report (SPEC.md §10.2, §11.1 invariant 1). Nothing was appended.`
+        : `task ${task} started ${String(started.size)} execution(s) and none carries execution: "harness", so none of them is a harness's to close. An outcome reported from the harness side may not be written over an execution this runtime is watching itself; \`approval execution resolve\` is the human recovery verb for those. Nothing was appended.`,
+    );
+  }
+
+  const open = delegated.filter(([, entry]) => entry.open).map(([key]) => key);
+  if (open.length === 0) {
+    return refuse(
+      "already-finished",
+      `every delegated execution of task ${task} already carries an outcome; an execution has exactly one. Nothing was appended.`,
+    );
+  }
+
+  const event = input.outcome === "completed" ? "execution.completed" : "execution.failed";
+  const exitCode = input.exitCode ?? null;
+  const appended: EventRecord[] = [];
+  for (const actionKey of open) {
+    // One read per append, and the append carries the head that read observed:
+    // the delegated-and-open judgment above is re-made against exactly the log
+    // this record chains onto (§11.1 invariant 5). The first append moves the
+    // head, so a single head reused across the loop would refuse every record
+    // after the first.
+    const read = readGateRecords(logPath);
+    if (!read.ok) return read;
+    let harness = false;
+    let stillOpen = false;
+    for (const record of read.records) {
+      if (record.action_key !== actionKey) continue;
+      if (record.event === "execution.started") {
+        harness = record.task === task && payloadOf(record)["execution"] === "harness";
+        stillOpen = harness;
+        continue;
+      }
+      if (
+        record.event === "execution.completed" ||
+        record.event === "execution.failed" ||
+        record.event === "execution.indeterminate" ||
+        record.event === "execution.reconciled"
+      ) {
+        stillOpen = false;
+      }
+    }
+    if (!harness) {
+      return refuse(
+        "not-delegated",
+        `action ${actionKey} is no longer a delegated start of task ${task}; the log moved under this report. ${String(appended.length)} counterpart(s) were appended before it and stand.`,
+      );
+    }
+    if (!stillOpen) continue;
+
+    const result = append(
+      logPath,
+      {
+        ts: tick(options),
+        event,
+        actor,
+        task,
+        action_key: actionKey,
+        payload: {
+          // The same marker the start carries: this record is about a command
+          // the harness ran, and says so on its face.
+          execution: "harness",
+          // WHO asserted it. A closed code, and nothing of what the tool printed.
+          reported_by: input.reportedBy,
+          exit_code: exitCode,
+        },
+      },
+      options,
+      read.head,
+    );
+    if (!result.ok) return result;
+    appended.push(result.record);
+  }
+
+  if (appended.length === 0) {
+    return refuse(
+      "already-finished",
+      `every delegated execution of task ${task} already carries an outcome; an execution has exactly one. Nothing was appended.`,
+    );
+  }
+  return { ok: true, task, records: appended };
 }
 
 // ---------------------------------------------------------------------------

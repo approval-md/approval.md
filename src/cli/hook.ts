@@ -78,13 +78,19 @@ import {
 import {
   consumeHarnessGrant,
   findHarnessCarry,
+  finishHarnessExecution,
   register,
   request,
   startHarnessExecution,
   withdraw,
   type GateOptions,
 } from "../core/gate.js";
-import { isLoopEscalated } from "../core/loop.js";
+import {
+  harnessLoopFloor,
+  isLoopEscalated,
+  UNKNOWN_SESSION,
+  type HarnessLoopState,
+} from "../core/loop.js";
 import { payloadHash } from "../core/payload.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
 import { resolve as resolvePolicy } from "../core/policy-match.js";
@@ -319,6 +325,25 @@ interface HookInput {
   toolName: string;
   toolInput: Record<string, unknown>;
   toolUseId: string | null;
+  /**
+   * `hook_event_name`, verbatim, or `null` when the event carries none
+   * (APRV-145).
+   *
+   * Read at last. Until this, nothing in this module looked at it and
+   * `runHarnessHook` assumed a pre-execution event unconditionally, so an
+   * operator who registered this same command for the post-execution event would
+   * have gated every command a second time and doubled every prompt on the
+   * approver's phone.
+   */
+  hookEventName: string | null;
+  /**
+   * `tool_response`, when the event carries one as an object.
+   *
+   * Present only on a post-execution event; the pre-execution path never reads
+   * it, because the tool has not run. Its SHAPE is all that is ever read (see
+   * {@link readReportedOutcome}) — never the text inside it.
+   */
+  toolResponse: Record<string, unknown> | null;
 }
 
 function readString(source: Record<string, unknown>, key: string): string | null {
@@ -359,14 +384,23 @@ function parseHookInput(raw: string): ParsedInput {
     typeof toolInputValue === "object" && toolInputValue !== null && !Array.isArray(toolInputValue)
       ? (toolInputValue as Record<string, unknown>)
       : {};
+  const responseValue = fields["tool_response"];
   return {
     ok: true,
     input: {
-      sessionId: readString(fields, "session_id") ?? "unknown-session",
+      // The ONE shared bucket for an unreadable session (`core/loop.ts`'s
+      // `UNKNOWN_SESSION`): absence accrues faster than a readable id and never
+      // slower, which is the fail-closed direction.
+      sessionId: readString(fields, "session_id") ?? UNKNOWN_SESSION,
       cwd: readString(fields, "cwd") ?? "",
       toolName,
       toolInput,
       toolUseId: readString(fields, "tool_use_id"),
+      hookEventName: readString(fields, "hook_event_name"),
+      toolResponse:
+        typeof responseValue === "object" && responseValue !== null && !Array.isArray(responseValue)
+          ? (responseValue as Record<string, unknown>)
+          : null,
     },
   };
 }
@@ -1038,6 +1072,31 @@ function unattendedGuard(
   return null;
 }
 
+/** The harness loop floor for this invocation, or the read that failed. */
+type FloorLookup =
+  | { ok: true; floor: HarnessLoopState | null }
+  | { ok: false; detail: string };
+
+/**
+ * Is this tool call floored to manual by a harness streak (APRV-145)?
+ *
+ * The VERIFIED log, like every other enforcement read in this module: a failure
+ * streak computed off unverified bytes is whatever the last writer of the file
+ * wanted it to be (§11.1 invariant 1). A log this hook cannot read fails closed
+ * as a deny at the call site rather than as "no floor", because "we could not
+ * establish the streak" is not "there is no streak".
+ *
+ * Both scopes are derived inside `core/loop.ts` from the task id this runtime
+ * minted and the identity this process runs as. Nothing on the event names the
+ * bucket it is counted in, which is what stops an agent shedding a streak by
+ * rotating a string.
+ */
+function harnessFloor(logPath: string, task: string, actor: string): FloorLookup {
+  const read = readVerifiedRecords(logPath);
+  if (!read.ok) return { ok: false, detail: read.message };
+  return { ok: true, floor: harnessLoopFloor(read.records, task, actor) };
+}
+
 /**
  * Charge and record every class of an unattended allow (APRV-141).
  *
@@ -1138,6 +1197,14 @@ function gateAndWait(
   task: string,
   /** The history-rewrite refinement's own words, or `""` (APRV-108). */
   note = "",
+  /**
+   * Loop safety floors every class of this invocation to `manual` (APRV-145).
+   *
+   * Passed into `request` rather than acted on here, so the floored action takes
+   * the identical path a manual class takes — same records, same order, same
+   * wait — and nothing below knows how it got there.
+   */
+  loopFloor = false,
 ): number {
   const hash = payloadHash(payload);
   const summary = truncate(headline, SUMMARY_LIMIT);
@@ -1211,6 +1278,7 @@ function gateAndWait(
         payload_hash: hash,
         payload: { value: payload },
         execution: "harness",
+        ...(loopFloor ? { loopFloor: true } : {}),
       },
       run.actor,
       run.options,
@@ -1375,6 +1443,188 @@ function gateAndWait(
   }
 }
 
+// ===========================================================================
+// The completion counterpart (APRV-145)
+// ===========================================================================
+
+/**
+ * The hook event names that report a tool call's OUTCOME rather than ask about
+ * it, from `docs/claude-code-hook.md`'s pinned contract.
+ *
+ * `PostToolUseFailure` is listed because Claude Code splits the report in two:
+ * a tool call that failed outright fires it instead of `PostToolUse`, and a
+ * counterpart that only knew the success event would record the completions and
+ * silently drop every failure, which is the one direction §11.1 invariant 4
+ * forbids.
+ */
+const POST_TOOL_EVENTS: readonly string[] = ["PostToolUse", "PostToolUseFailure"];
+
+/**
+ * Every line the counterpart can print, closed and machine-readable (§11.1
+ * invariant 7).
+ *
+ * A post-execution hook cannot deny anything — the tool has already run — so
+ * none of these is a verdict, and every one of them exits 0 with an EMPTY
+ * STDOUT: a decision object on that stream would be a second answer about a
+ * command the harness already ran. The line goes to stderr, where the harness
+ * shows it to an operator and to nobody else.
+ */
+export const POST_TOOL_CODES = [
+  /** One or more counterparts were appended. */
+  "post-tool-reported",
+  /** The event names no tool-use id, so no task id can be reconstructed. */
+  "post-tool-unidentified",
+  /** The tool is not one this hook gates, so no start exists to close. */
+  "post-tool-not-gated",
+  /**
+   * The outcome could not be read from the event by the pinned set of readings,
+   * so NOTHING was appended. Recording a failure nobody observed trips an
+   * escalation on noise, and recording a completion nobody observed clears one
+   * on nothing.
+   */
+  "post-tool-unreadable-outcome",
+  /** No log where the hook was pointed; the hook is a writer, never an initializer. */
+  "post-tool-log-unreachable",
+  /** The gate refused the append; its own frozen code follows a colon. */
+  "post-tool-gate-refused",
+  /** Malformed input, or a filesystem fact that stopped the report. */
+  "post-tool-io",
+] as const;
+
+export type PostToolCode = (typeof POST_TOOL_CODES)[number];
+
+/** One machine-readable line on stderr, and exit 0. Never a verdict. */
+function report(
+  streams: Streams,
+  code: string,
+  detail: string,
+  extra: Record<string, unknown> = {},
+): number {
+  streams.err(
+    `${JSON.stringify({ approval: { hook: "post-tool-use", code, detail, ...extra } })}\n`,
+  );
+  return EXIT_OK;
+}
+
+type OutcomeReading =
+  | { ok: true; outcome: "completed" | "failed" }
+  | { ok: false; detail: string };
+
+/**
+ * Read a tool call's outcome off the reporting event, by a CLOSED set of
+ * readings.
+ *
+ * The pinned contract, from the Claude Code hooks reference: `tool_response` is
+ * an object carrying `type`, one of `text`, `error` or `base64`, and it exposes
+ * NO exit code for any tool. A failing tool call arrives as the separate
+ * `PostToolUseFailure` event instead. So there are exactly three readings, and
+ * everything else is unreadable.
+ *
+ * Unreadable means append nothing, and that is the safe answer in both
+ * directions at once. A failure nobody observed would trip an escalation on
+ * noise, and a control that trips on noise is one operators learn to silence
+ * (§8 makes this argument about timestamp anomalies). A completion nobody
+ * observed would clear a streak on nothing, which §11.1 invariant 4 forbids
+ * outright. Appending nothing leaves the path exactly as vacuous as it was
+ * before this verb existed, for that tool, and manufactures neither.
+ *
+ * NOTHING OF THE TOOL'S OUTPUT IS READ. Only the shape: the event name, and the
+ * value of one enumerated field.
+ */
+function readReportedOutcome(input: HookInput): OutcomeReading {
+  if (input.hookEventName === "PostToolUseFailure") return { ok: true, outcome: "failed" };
+  const response = input.toolResponse;
+  if (response === null) {
+    return { ok: false, detail: "the event carries no tool_response object" };
+  }
+  const type = response["type"];
+  if (type === "text" || type === "base64") return { ok: true, outcome: "completed" };
+  if (type === "error") return { ok: true, outcome: "failed" };
+  return {
+    ok: false,
+    detail: `tool_response.type is ${
+      typeof type === "string" ? JSON.stringify(type) : "absent or not a string"
+    }, which is not one of the pinned readings (text, base64, error)`,
+  };
+}
+
+/**
+ * The post-execution half of `approval hook <harness>` (APRV-145).
+ *
+ * It closes the delegated `execution.started` records the pre-execution half
+ * wrote for this same tool call, so that the harness scopes of amended
+ * SPEC.md §10.2 have a failure signal to accrue at all. Everything that makes
+ * that safe lives in `core/gate.ts`'s `finishHarnessExecution`; what lives here
+ * is the reading of the event and nothing else.
+ */
+function runPostToolUse(
+  flags: Record<string, string | boolean>,
+  streams: Streams,
+  cwd: string,
+  input: HookInput,
+  actor: string,
+  adapter: HarnessAdapter,
+): number {
+  if (input.toolName !== adapter.shellTool && !adapter.fileTools.includes(input.toolName)) {
+    return report(
+      streams,
+      "post-tool-not-gated",
+      `${input.toolName} is not a gated tool, so no execution.started was ever written for it`,
+    );
+  }
+  if (input.toolUseId === null) {
+    // The pre-execution half falls back to random bytes when the harness names
+    // no tool-use id, and those bytes are not recoverable from this event. The
+    // start stands, unclosed, and is counted in the coverage row of
+    // `approval status` rather than closed against a guess.
+    return report(
+      streams,
+      "post-tool-unidentified",
+      "the event carries no tool_use_id, so the task id the pre-execution hook minted cannot be reconstructed; nothing was appended",
+    );
+  }
+
+  const reading = readReportedOutcome(input);
+  if (!reading.ok) {
+    return report(streams, "post-tool-unreadable-outcome", `${reading.detail}; nothing was appended`);
+  }
+
+  const { logPath, root } = hookScope(flags, cwd);
+  if (!existsSync(logPath) && !existsSync(dirname(logPath))) {
+    return report(
+      streams,
+      "post-tool-log-unreachable",
+      `no log at ${logPath}; the hook writes to an existing log and never creates one. Run \`approval init\` in ${root}`,
+    );
+  }
+
+  const finished = finishHarnessExecution(
+    logPath,
+    {
+      sessionId: input.sessionId,
+      toolUseId: input.toolUseId,
+      outcome: reading.outcome,
+      // The one member of the closed set at v0.1. It names the untrusted
+      // reporter and reduces nothing.
+      reportedBy: "post-tool-use",
+    },
+    actor,
+  );
+  if (!finished.ok) {
+    return report(
+      streams,
+      `post-tool-gate-refused:${finished.code}`,
+      finished.message,
+    );
+  }
+  return report(
+    streams,
+    "post-tool-reported",
+    `recorded ${reading.outcome} for ${String(finished.records.length)} delegated execution(s) of ${finished.task}`,
+    { task: finished.task, outcome: reading.outcome, appended: finished.records.length },
+  );
+}
+
 /** The verb body, wrapped by {@link commandHarnessHook}'s try/catch. */
 function runHarnessHook(
   argv: string[],
@@ -1430,6 +1680,20 @@ function runHarnessHook(
   const parsedInput = parseHookInput(readStdin());
   if (!parsedInput.ok) return deny(streams, "hook-io", parsedInput.detail, adapter.kind);
   const input = parsedInput.input;
+
+  // APRV-145: WHICH EVENT THIS IS, read first and read at all. One command is
+  // registered for two events, and they do opposite things — one answers before
+  // the tool runs, the other records how it went — so the dispatch is the first
+  // decision the verb makes.
+  //
+  // Anything that is not a post-execution event takes the pre-execution path,
+  // including an event carrying no name at all. That is the strict direction: a
+  // harness whose event this runtime does not recognize is a harness about to
+  // run a command, and treating an unknown name as a no-op would be an ungated
+  // one.
+  if (input.hookEventName !== null && POST_TOOL_EVENTS.includes(input.hookEventName)) {
+    return runPostToolUse(parsed.flags, streams, cwd, input, actor, adapter);
+  }
 
   if (input.toolName !== adapter.shellTool && !adapter.fileTools.includes(input.toolName)) {
     return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind);
@@ -1523,9 +1787,6 @@ function runHarnessHook(
     );
   }
 
-  /** Appended to every verdict this invocation prints, when it refined one. */
-  const note = notes.length === 0 ? "" : ` (${notes.join("; ")})`;
-
   // Every path from here needs the log, the fast paths included (APRV-139):
   // attestation and loop-escalation are facts about the log, so the
   // log-unreachable deny now sits above the autonomous verdict rather than
@@ -1557,14 +1818,45 @@ function runHarnessHook(
   };
 
   const autonomies = classes.map((cls) => resolvePolicy(load, cls).autonomy);
+
+  // APRV-145, amended SPEC.md §10.2: loop safety on a surface that mints a
+  // fresh task id per tool call. The floor is applied AFTER class resolution and
+  // never inside it, exactly as §7's irreversibility floor is: `resolve` is pure
+  // over policy text, and a failure streak is a projection over the log.
+  //
+  // The remedy is a floor and not a deny. Escalation escalates TO manual (§10.2,
+  // and `core/loop.ts`'s own header), and the only thing that clears a streak is
+  // an execution that completes — so a deny would leave an escalated session
+  // with no way back, and a class the policy calls autonomous has no manual
+  // sibling to fall back on. Every class that would otherwise have proceeded is
+  // routed to the human gate for this invocation; a class that already resolves
+  // manual is untouched, because it was already going there.
+  const floored = harnessFloor(logPath, task, actor);
+  if (!floored.ok) return deny(streams, "hook-io", floored.detail, adapter.kind);
+  const floor = floored.floor;
+  if (floor !== null) {
+    // The decision trace: the verdict this invocation prints says that a floor
+    // rather than the matched rule decided it, and names the scope and the
+    // count that tripped, the way `core/execute.ts` names the irreversibility
+    // floor beside a resolution's provenance.
+    notes.push(
+      `loop floor (SPEC.md §10.2): ${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed harness tool calls, so every class of this command is routed to a human for this invocation regardless of policy`,
+    );
+  }
+  /**
+   * Appended to every verdict this invocation prints: the history-rewrite
+   * refinement's own words, and the loop floor's when one applied.
+   */
+  const note = notes.length === 0 ? "" : ` (${notes.join("; ")})`;
+
   /** No class here needs a human, so nothing downstream will ask for one. */
-  const unattended = autonomies.every((autonomy) => autonomy !== "manual");
+  const unattended = floor === null && autonomies.every((autonomy) => autonomy !== "manual");
   if (unattended) {
     const refused = unattendedGuard(logPath, load.source.path, task);
     if (refused !== null) return deny(streams, refused.code, refused.detail, adapter.kind);
   }
 
-  if (autonomies.every((autonomy) => autonomy === "autonomous")) {
+  if (floor === null && autonomies.every((autonomy) => autonomy === "autonomous")) {
     // No approval lifecycle: an autonomous action has none (amended SPEC.md
     // §6.3), so nothing is requested, decided or granted here. What IS appended
     // since APRV-141 is the execution record itself — the moment the policy
@@ -1591,6 +1883,7 @@ function runHarnessHook(
     headline,
     task,
     note,
+    floor !== null,
   );
 }
 

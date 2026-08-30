@@ -1294,7 +1294,13 @@ const VERBS: VerbSpec[] = [
         dangling: arrayOf(OPEN_OBJECT),
         indeterminate: arrayOf(OPEN_OBJECT),
         budgets: arrayOf(OPEN_OBJECT),
+        // APRV-145: each entry gained a `scope` field naming which derivation
+        // produced its key — `task`, `session` or `actor`.
         loop_escalations: arrayOf(OPEN_OBJECT),
+        // APRV-145: how many harness starts carry an outcome and how many do
+        // not. INFORMATIONAL, and outside `healthy` and the exit code for the
+        // reason `anomalies` is: a coverage measurement, not a verdict.
+        harness_outcomes: OPEN_OBJECT,
         // APRV-127: reconciliation obligations opened by a retrospective denial
         // and not yet discharged. Counts toward `healthy`, like `dangling`.
         reconciliation: arrayOf(OPEN_OBJECT),
@@ -1309,6 +1315,7 @@ const VERBS: VerbSpec[] = [
         "dangling",
         "budgets",
         "loop_escalations",
+        "harness_outcomes",
         "reconciliation",
         "payload_store",
       ],
@@ -1320,7 +1327,7 @@ const VERBS: VerbSpec[] = [
   {
     name: "doctor",
     purpose:
-      "Is this MACHINE able to run the system? Eleven checks in cascade order — build freshness, declared identity, policy attestation, chain health, Telegram, the web port, the payload store, audit sampling, envelope integrity, the vault, the environment — each with a concrete repair that begins with a command you can paste. Appends nothing, sends nothing, repairs nothing. `status` reports the system's health; doctor reports whether this machine can run it at all.",
+      "Is this MACHINE able to run the system? Fourteen checks in cascade order — build freshness, declared identity, policy attestation, chain health, Telegram, the web port, the payload store, audit sampling, envelope integrity, the vault, the environment, log drift, reconciliation, harness hook outcomes — each with a concrete repair that begins with a command you can paste. Appends nothing, sends nothing, repairs nothing. `status` reports the system's health; doctor reports whether this machine can run it at all.",
     human_only: false,
     input: input({
       flags: {

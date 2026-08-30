@@ -885,6 +885,17 @@ export function finishExecution(
  * Enforcing it in this one place is what keeps the three verbs from disagreeing
  * about it, which is the reason this function exists.
  *
+ * EXCEPT BY THE MARKED COUNTERPART (APRV-145). One surface may close a delegated
+ * start, and it is not one of these three: `core/gate.ts`'s
+ * `finishHarnessExecution`, which appends the outcome a harness REPORTED, marked
+ * `execution: "harness"` with a closed `reported_by` code naming which untrusted
+ * reporter asserted it. The refusal here is unchanged and deliberately so: these
+ * three write an outcome the runtime observed or a person did, and neither exists
+ * for a harness start. The counterpart writes a third thing and says so on the
+ * record, which is what makes it a carve-out rather than a hole. Amended
+ * SPEC.md §10.2 states the rule; the reconciliation recorded on APRV-145 is that
+ * these three keep refusing exactly as APRV-146 merged them.
+ *
  * An `execution.indeterminate` closes a cycle here like any other outcome
  * (APRV-120). It is not an invitation to try again: a second outcome for a key
  * whose effect may already have happened is exactly the blind double-execution

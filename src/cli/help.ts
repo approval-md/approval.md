@@ -1252,7 +1252,7 @@ Usage:
   approval hook classify [--json] [--policy <p>] [--dir <p>] -- <command…>
 
 Commands:
-  claude-code  Claude PreToolUse JSON in; nested decision JSON out
+  claude-code  Claude Pre/PostToolUse JSON in; decision JSON out. REGISTER BOTH
   cursor       Cursor preToolUse JSON in; native {permission} JSON out
   classify     print what the classifier makes of a command line and exit
 

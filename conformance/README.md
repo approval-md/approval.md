@@ -123,9 +123,12 @@ enforces it now, so the vector is `intake-checks-registration` and asserts the
 refusal, and the suite's `vectors_version` is 2.0.0 — an implementation that
 passed 1.0.0 does not pass this.
 
-`refusal-unions` is 2.0.0 for the same reason, since APRV-146: the execute union
-gained `execution-delegated`, and the vector pins the whole array in definition
-order, so a longer union is a changed expectation rather than a new vector.
+`refusal-unions` bumps for the same reason whenever a union grows: the vector
+pins the whole array in definition order, so a longer union is a changed
+expectation rather than a new vector. It reached 2.0.0 when APRV-146 added
+`execution-delegated` to the execute union, and it is 5.0.0 since APRV-145 added
+`not-delegated` and `already-finished` to the gate union — the two refusals the
+SPEC.md §10.2 completion counterpart can produce.
 
 ## Changing the suite
 

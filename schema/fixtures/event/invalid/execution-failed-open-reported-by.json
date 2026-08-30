@@ -1,0 +1,16 @@
+{
+  "seq": 43,
+  "ts": "2026-08-29T11:06:44Z",
+  "event": "execution.failed",
+  "task": "hook:0f3c9a:toolu_01GHI",
+  "action_key": "hook:0f3c9a:toolu_01GHI:network.call",
+  "actor": "agent:claude-code",
+  "payload": {
+    "execution": "harness",
+    "reported_by": "smtp: connection refused to smtp.example.com:587 (user=chaser pass=hunter2)",
+    "exit_code": null
+  },
+  "alg": "sha256/jcs",
+  "prev": "5e7f9a1b3c5d7e9f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9b1c3d5e7f",
+  "hash": "7a9b1c3d5e7f9a1b3c5d7e9f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9b"
+}

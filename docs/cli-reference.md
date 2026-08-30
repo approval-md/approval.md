@@ -1928,6 +1928,23 @@ token (SPEC.md §10.4). See `docs/claude-code-hook.md` for the Claude Code
 settings.json entry and `docs/cursor-hook.md` for Cursor's `.cursor/hooks.json`.
 A HUMAN commits those files: they are `policy.edit`.
 
+**Register the same command for the post-execution event too (APRV-145).** One
+binary answers two events, dispatched on `hook_event_name`. A `PostToolUse` or
+`PostToolUseFailure` run closes the delegated `execution.started` the
+pre-execution run opened, appending an `execution.completed` or
+`execution.failed` marked `execution: "harness"` with `reported_by:
+"post-tool-use"`. It answers no permission question, since the tool has already
+run: it prints an empty stdout, one machine-readable JSON line on stderr
+(`{"approval":{"hook":"post-tool-use","code":…}}`), and exits 0 whatever happens.
+Task and action keys are resolved from the VERIFIED log rather than from the
+report, and a report against a start carrying no harness marker is refused
+`not-delegated`. The outcome is read from a closed set — `tool_response.type` of
+`text` or `base64` is a completion, `error` is a failure, `PostToolUseFailure` is
+a failure — and anything else appends nothing at all. None of the tool's output
+text reaches the log. Without this registration the harness loop escalation of
+SPEC.md §10.2 holds at zero however wedged a session is, and
+`approval doctor`'s `harness-hook-outcomes` check fails to say so.
+
 **What it decides.**
 
 ```

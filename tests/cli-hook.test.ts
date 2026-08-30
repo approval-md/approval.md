@@ -45,6 +45,7 @@ import { CLASSIFIER_CLASSES, COMMAND_RULES } from "../src/core/command-class.js"
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
 import { loadPolicy } from "../src/core/policy-load.js";
+import { harnessLoopEscalation, loopEscalation } from "../src/core/loop.js";
 import { readVerifiedRecords } from "../src/core/state.js";
 import { HOOK_DENY_CODES, SUMMARY_LIMIT } from "../src/cli/hook.js";
 
@@ -558,6 +559,608 @@ test("a loop-escalated harness task may not run unattended", () => {
   const other = runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-fresh"));
   assert.equal(verdictOf(other).permission, "allow");
   assertClean(dir);
+});
+
+// ===========================================================================
+// APRV-145: the completion counterpart and the harness loop streaks
+// ===========================================================================
+
+/**
+ * Grant `actionKey` from another process as soon as it is pending, retrying
+ * until it lands or the deadline passes.
+ *
+ * {@link decideLater}'s single shot at a fixed delay is enough where the hook
+ * opens its request immediately. The APRV-145 floor tests run three tool calls
+ * and six CLI invocations first, so under parallel load the request can be
+ * later than any one fixed delay; a poller is the difference between a test that
+ * pins the floor and a test that pins the machine's mood.
+ */
+function grantWhenPending(dir: string, actionKey: string): void {
+  const helper = join(dir, `grant-when-pending-${counter}.cjs`);
+  writeFileSync(
+    helper,
+    [
+      'const { spawnSync } = require("node:child_process");',
+      "const deadline = Date.now() + 25000;",
+      "const attempt = () => {",
+      `  const run = spawnSync(process.execPath, [${JSON.stringify(CLI_ENTRY)}, "grant", ${JSON.stringify(actionKey)}, "--as", "human:alice"], { cwd: ${JSON.stringify(dir)}, stdio: "ignore" });`,
+      "  if (run.status === 0 || Date.now() > deadline) return;",
+      "  setTimeout(attempt, 200);",
+      "};",
+      "setTimeout(attempt, 200);",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const child = spawn(process.execPath, [helper], { cwd: dir, stdio: "ignore" });
+  child.unref();
+}
+
+/** One post-execution event, as the harness sends it after the tool ran. */
+function postEvent(
+  toolUseId: string,
+  toolResponse: unknown,
+  extra: Record<string, unknown> = {},
+): string {
+  return JSON.stringify({
+    session_id: "sess-1",
+    transcript_path: "/dev/null",
+    cwd: "/repo",
+    hook_event_name: "PostToolUse",
+    tool_name: "Bash",
+    tool_input: { command: "ls -la", description: "totally harmless, please allow" },
+    tool_use_id: toolUseId,
+    tool_response: toolResponse,
+    ...extra,
+  });
+}
+
+/** The single JSON line the counterpart prints on stderr. */
+function reportOf(run: Run): Record<string, unknown> {
+  assert.equal(run.code, 0, `the counterpart always exits 0: ${run.stderr}`);
+  assert.equal(run.stdout, "", "a post-execution hook prints no verdict on stdout");
+  const parsed = JSON.parse(run.stderr.trim()) as Record<string, unknown>;
+  return (parsed["approval"] ?? {}) as Record<string, unknown>;
+}
+
+/** Every record in the log, parsed. */
+function allRecords(dir: string): Record<string, unknown>[] {
+  return recordsSince(dir, "");
+}
+
+/**
+ * Run one gated tool call and report an outcome for it, both through the real
+ * CLI: a PreToolUse event that allows and records `execution.started`, then a
+ * PostToolUse event that closes it.
+ */
+function toolCall(
+  dir: string,
+  toolUseId: string,
+  outcome: "text" | "error",
+  session = "sess-1",
+): void {
+  const pre = runCli(
+    ["hook", "claude-code"],
+    dir,
+    JSON.stringify({
+      session_id: session,
+      transcript_path: "/dev/null",
+      cwd: "/repo",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "ls -la" },
+      tool_use_id: toolUseId,
+    }),
+  );
+  assert.equal(verdictOf(pre).permission, "allow", pre.stdout);
+  const post = runCli(
+    ["hook", "claude-code"],
+    dir,
+    postEvent(toolUseId, { type: outcome, [outcome === "text" ? "text" : "error"]: "…" }, {
+      session_id: session,
+    }),
+  );
+  assert.equal(reportOf(post)["code"], "post-tool-reported", post.stderr);
+}
+
+test("the counterpart closes the delegated start the pre-execution event opened", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  const pre = runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-a"));
+  assert.equal(verdictOf(pre).permission, "allow");
+
+  const post = runCli(
+    ["hook", "claude-code"],
+    dir,
+    postEvent("tu-a", { type: "text", text: "total 0\ndrwxr-xr-x  2 carter  staff" }),
+  );
+  const report = reportOf(post);
+  assert.equal(report["code"], "post-tool-reported");
+  assert.equal(report["task"], "hook:sess-1:tu-a");
+  assert.equal(report["outcome"], "completed");
+  assert.equal(report["appended"], 1);
+
+  const written = recordsSince(dir, before);
+  assert.deepEqual(
+    written.map((record) => record["event"]),
+    ["execution.started", "execution.completed"],
+  );
+  const closing = written[1] as Record<string, unknown>;
+  assert.equal(closing["task"], "hook:sess-1:tu-a");
+  assert.equal(closing["action_key"], "hook:sess-1:tu-a:read.shell");
+  // An `agent:` actor, never a `system:` one: the runtime did not observe this
+  // exit, the harness did, and the record must say who is asserting it.
+  assert.equal(closing["actor"], "agent:claude-code");
+  assert.deepEqual(payloadOf(closing), {
+    execution: "harness",
+    reported_by: "post-tool-use",
+    exit_code: null,
+  });
+  // SPEC.md §11.1 invariant 3: none of the text the tool produced is in the log.
+  assert.ok(!rawLog(dir).includes("drwxr-xr-x"), "the tool's output must never reach the log");
+  assertClean(dir);
+});
+
+test("an error tool_response and a PostToolUseFailure event both record a failure", () => {
+  for (const [id, event, response] of [
+    ["tu-err", "PostToolUse", { type: "error", error: "command not found" }],
+    ["tu-fail", "PostToolUseFailure", { type: "text", text: "…" }],
+  ] as const) {
+    const dir = ready();
+    assert.equal(verdictOf(runCli(["hook", "claude-code"], dir, bashEvent("ls -la", id))).permission, "allow");
+    const before = rawLog(dir);
+    const post = runCli(
+      ["hook", "claude-code"],
+      dir,
+      postEvent(id, response, { hook_event_name: event }),
+    );
+    assert.equal(reportOf(post)["code"], "post-tool-reported", post.stderr);
+    assert.deepEqual(
+      recordsSince(dir, before).map((record) => record["event"]),
+      ["execution.failed"],
+      `${event} must record a failure`,
+    );
+    assertClean(dir);
+  }
+});
+
+test("THE DEFECT: three failed tool calls accrue nothing per task and escalate the session", () => {
+  // The pin APRV-145 exists for. Each tool call mints its own task id
+  // (`hook:<session>:<tool-use id>`), so the per-task streak of SPEC.md §10.2
+  // sees three tasks with one failure each and escalates NOTHING — the APRV-139
+  // guard is correct and vacuous by construction on this surface. The session
+  // and actor scopes of the amended §10.2 are what see the loop.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+
+  assert.deepEqual(
+    loopEscalation(read.records).filter((state) => state.escalated),
+    [],
+    "three failures across three tool calls escalate no TASK: that is the defect",
+  );
+  assert.deepEqual(
+    harnessLoopEscalation(read.records).map((state) => [
+      state.scope,
+      state.key,
+      state.consecutiveFailures,
+      state.escalated,
+    ]),
+    [
+      ["actor", "agent:claude-code", 3, true],
+      ["session", "hook:sess-1", 3, true],
+    ],
+    "…and both harness scopes see it, sorted byte-stably",
+  );
+  assertClean(dir);
+});
+
+test("an escalated session floors the next autonomous command to the human gate", () => {
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+  // `read.shell` is autonomous under this policy and would have been allowed
+  // with nothing appended. Under the floor it is registered, requested and
+  // waited on like any manual class — and the human's tap authorizes it.
+  const key = "hook:sess-1:tu-4:read.shell";
+  grantWhenPending(dir, key);
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
+    dir,
+    bashEvent("ls -la", "tu-4"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  // The decision trace: the verdict says a FLOOR rather than the matched rule
+  // decided it, and names the scope and the count, the way `core/execute.ts`
+  // names the §7 irreversibility floor beside a resolution's provenance.
+  assert.match(verdict.reason, /loop floor \(SPEC\.md §10\.2\)/u);
+  assert.match(verdict.reason, /session hook:sess-1 has 3 consecutive failed harness tool calls/u);
+
+  const events = allRecords(dir).map((record) => record["event"]);
+  assert.ok(
+    events.includes("approval.requested"),
+    "the floored class asked a human, which the unfloored class never does",
+  );
+  assertClean(dir);
+});
+
+test("the actor scope backstops a rotated session id", () => {
+  // The reason the second scope exists: a session id is authored by the party
+  // under oversight, and a scope key the subject can rotate is a streak the
+  // subject can shed, which SPEC.md §11.1 invariant 4 forbids.
+  const dir = ready();
+  toolCall(dir, "tu-1", "error", "sess-a");
+  toolCall(dir, "tu-2", "error", "sess-b");
+  toolCall(dir, "tu-3", "error", "sess-c");
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  const states = harnessLoopEscalation(read.records).filter((state) => state.escalated);
+  assert.deepEqual(
+    states.map((state) => [state.scope, state.key]),
+    [["actor", "agent:claude-code"]],
+    "no single session tripped; the actor did",
+  );
+
+  // A fourth, fresh session is floored all the same.
+  const key = "hook:sess-d:tu-4:read.shell";
+  grantWhenPending(dir, key);
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
+    dir,
+    JSON.stringify({
+      session_id: "sess-d",
+      cwd: "/repo",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "ls -la" },
+      tool_use_id: "tu-4",
+    }),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /actor agent:claude-code has 3 consecutive failed harness tool calls/u);
+  assertClean(dir);
+});
+
+test("an unreadable session id lands in ONE shared bucket, so absence accrues faster", () => {
+  const dir = ready();
+  // No `session_id` at all: `parseHookInput` substitutes `unknown-session`, and
+  // three such tool calls share one bucket rather than opening three.
+  for (const id of ["tu-1", "tu-2", "tu-3"]) {
+    const pre = runCli(
+      ["hook", "claude-code"],
+      dir,
+      JSON.stringify({
+        cwd: "/repo",
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "ls -la" },
+        tool_use_id: id,
+      }),
+    );
+    assert.equal(verdictOf(pre).permission, "allow");
+    const post = runCli(
+      ["hook", "claude-code"],
+      dir,
+      JSON.stringify({
+        cwd: "/repo",
+        hook_event_name: "PostToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "ls -la" },
+        tool_use_id: id,
+        tool_response: { type: "error", error: "…" },
+      }),
+    );
+    assert.equal(reportOf(post)["code"], "post-tool-reported", post.stderr);
+  }
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records)
+      .filter((state) => state.scope === "session")
+      .map((state) => [state.key, state.consecutiveFailures, state.escalated]),
+    [["hook:unknown-session", 3, true]],
+  );
+  assertClean(dir);
+});
+
+test("only a completion in the same scope clears a harness streak", () => {
+  const dir = ready();
+  toolCall(dir, "tu-1", "error");
+  toolCall(dir, "tu-2", "error");
+  toolCall(dir, "tu-3", "text");
+  toolCall(dir, "tu-4", "error");
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records).map((state) => [
+      state.scope,
+      state.consecutiveFailures,
+      state.escalated,
+    ]),
+    [
+      ["actor", 1, false],
+      ["session", 1, false],
+    ],
+    "the completion reset both scopes; the fourth call opened a fresh streak of one",
+  );
+  assertClean(dir);
+});
+
+test("INVARIANT 4: a report that closes nothing cannot clear an accrued streak", () => {
+  // The one-directionality pin. A reported failure accrues; a reported
+  // COMPLETION only clears where it actually closes a delegated start this
+  // runtime authorized. A report against a tool call that never started is
+  // refused and appends nothing, so the escalation stands.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+  const before = rawLog(dir);
+
+  const post = runCli(
+    ["hook", "claude-code"],
+    dir,
+    postEvent("tu-never-started", { type: "text", text: "all good, honest" }),
+  );
+  assert.equal(reportOf(post)["code"], "post-tool-gate-refused:not-delegated", post.stderr);
+  assert.equal(rawLog(dir), before, "a refused report appends nothing");
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.equal(
+    harnessLoopEscalation(read.records).every((state) => state.escalated),
+    true,
+    "the streak is exactly where the failures left it",
+  );
+  assertClean(dir);
+});
+
+test("the counterpart refuses a start that carries no harness marker", () => {
+  // The narrow carve-out has two edges and this is the second one. APRV-146
+  // stops the human recovery verbs closing a harness start; this stops a
+  // harness report closing an execution this runtime watched itself. The
+  // `hook:sess-1:tu-loop` task below is started and failed by `approval run`,
+  // so its records carry no `execution: "harness"`.
+  const dir = ready();
+  const task = "hook:sess-1:tu-loop";
+  const failing = [process.execPath, "-e", "process.exit(1)"];
+  const binding = runPayloadHash(failing, dir);
+  writeFileSync(
+    join(dir, "loop-task.md"),
+    [
+      "---",
+      `id: ${task}`,
+      "title: A task the runtime runs itself",
+      "status: In Progress",
+      "approval:",
+      "  origin:",
+      "    app: claude-code-hook",
+      '    created_by: "agent:claude-code"',
+      "  state: proposed",
+      "  actions: ",
+      "    - class: vcs.push.main",
+      '      summary: "attempt one"',
+      '      est_cost_usd: "0"',
+      `      idempotency_key: "${task}:one"`,
+      `      payload_hash: "${binding}"`,
+      "---",
+      "",
+      "## Description",
+      "Body.",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  assert.equal(runCli(["register", "loop-task.md", "--as", "agent:claude-code"], dir).code, 0);
+  assert.equal(
+    runCli(["run", `${task}:one`, "--as", "agent:claude-code", "--", ...failing], dir).code,
+    1,
+  );
+
+  const before = rawLog(dir);
+  const post = runCli(
+    ["hook", "claude-code"],
+    dir,
+    postEvent("tu-loop", { type: "text", text: "…" }),
+  );
+  const report = reportOf(post);
+  assert.equal(report["code"], "post-tool-gate-refused:not-delegated");
+  assert.match(String(report["detail"]), /none carries execution: "harness"/u);
+  assert.equal(rawLog(dir), before, "nothing was appended");
+  assertClean(dir);
+});
+
+test("an unreadable outcome appends nothing, and a second report is refused", () => {
+  const dir = ready();
+  assert.equal(verdictOf(runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-x"))).permission, "allow");
+
+  // Unreadable: the pinned readings are text, base64 and error, and nothing else.
+  for (const response of [{ type: "diagnostic" }, {}, "a bare string", null]) {
+    const before = rawLog(dir);
+    const run = runCli(["hook", "claude-code"], dir, postEvent("tu-x", response));
+    assert.equal(
+      reportOf(run)["code"],
+      "post-tool-unreadable-outcome",
+      `${JSON.stringify(response)}: ${run.stderr}`,
+    );
+    assert.equal(rawLog(dir), before, "an unreadable outcome appends nothing");
+  }
+
+  // Readable: it closes, once.
+  assert.equal(
+    reportOf(runCli(["hook", "claude-code"], dir, postEvent("tu-x", { type: "text", text: "" })))[
+      "code"
+    ],
+    "post-tool-reported",
+  );
+  const settled = rawLog(dir);
+  const second = runCli(["hook", "claude-code"], dir, postEvent("tu-x", { type: "error", error: "" }));
+  assert.equal(reportOf(second)["code"], "post-tool-gate-refused:already-finished");
+  assert.equal(rawLog(dir), settled, "an execution has exactly one outcome");
+  assertClean(dir);
+});
+
+test("a report with no tool-use id, and one for an ungated tool, append nothing", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+
+  const anonymous = runCli(
+    ["hook", "claude-code"],
+    dir,
+    JSON.stringify({
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "ls -la" },
+      tool_response: { type: "text", text: "" },
+    }),
+  );
+  assert.equal(reportOf(anonymous)["code"], "post-tool-unidentified");
+
+  const ungated = runCli(
+    ["hook", "claude-code"],
+    dir,
+    JSON.stringify({
+      session_id: "sess-1",
+      hook_event_name: "PostToolUse",
+      tool_name: "Read",
+      tool_input: {},
+      tool_use_id: "tu-r",
+      tool_response: { type: "text", text: "" },
+    }),
+  );
+  assert.equal(reportOf(ungated)["code"], "post-tool-not-gated");
+  assert.equal(rawLog(dir), before);
+});
+
+test("a report may not be filed by a non-principal actor", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  const run = runCli(
+    ["hook", "claude-code", "--as", "system:clock"],
+    dir,
+    postEvent("tu-x", { type: "text", text: "" }),
+  );
+  assert.equal(run.code, 2, run.stderr);
+  assert.match(run.stderr, /--as expects agent:<id> or human:<id>/u);
+  assert.equal(rawLog(dir), before, "nothing was appended");
+});
+
+test("status reports the harness streaks by scope, and counterpart coverage", () => {
+  const dir = ready();
+  // One start that nobody reports on: it is not debris, it is a tool call with
+  // no outcome, and the coverage row is the only place it shows. It runs FIRST,
+  // because after the three failures below the floor sends every command to a
+  // human and this one would sit there waiting for a tap.
+  assert.equal(
+    verdictOf(runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-0"))).permission,
+    "allow",
+  );
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+  const run = runCli(["status", "--json"], dir);
+  const body = JSON.parse(run.stdout) as Record<string, unknown>;
+  assert.deepEqual(body["loop_escalations"], [
+    { task: "agent:claude-code", scope: "actor", consecutive_failures: 3, escalated: true },
+    { task: "hook:sess-1", scope: "session", consecutive_failures: 3, escalated: true },
+  ]);
+  assert.deepEqual(body["harness_outcomes"], { started: 4, reported: 3, unreported: 1 });
+  assert.equal(body["healthy"], false, "an escalated scope is not a healthy repo");
+
+  const human = runCli(["status"], dir);
+  assert.match(human.stdout, /^loop escalations {2,}2$/mu);
+  assert.match(
+    human.stdout,
+    /hook:sess-1 \(3 consecutive failed tool calls, session\) — escalated to manual/u,
+  );
+  assert.match(human.stdout, /^harness outcomes {2,}4 started, 3 reported, 1 unreported$/mu);
+  assertClean(dir);
+});
+
+test("doctor fails its harness check when only the pre-execution hook is registered", () => {
+  const dir = ready();
+  const settingsDir = join(dir, ".claude");
+  mkdirSync(settingsDir, { recursive: true });
+  const settings = join(settingsDir, "settings.json");
+  const entry = (event: string): Record<string, unknown> => ({
+    [event]: [
+      {
+        matcher: "Bash|Edit|Write",
+        hooks: [{ type: "command", command: `approval hook claude-code --dir ${dir}` }],
+      },
+    ],
+  });
+
+  const checkOf = (): Record<string, unknown> => {
+    const run = runCli(["doctor", "--json", "--dir", dir, "--log", join(dir, LOG)], dir);
+    const body = JSON.parse(run.stdout) as Record<string, unknown>;
+    const checks = body["checks"] as Record<string, unknown>[];
+    const found = checks.find((check) => check["check"] === "harness-hook-outcomes");
+    assert.ok(found !== undefined, "doctor lost the harness check");
+    return found;
+  };
+
+  // No settings file at all: not a Claude Code checkout, so nothing to report.
+  assert.equal(checkOf()["status"], "skip");
+
+  // Registered for the pre-execution event only: the exact configuration in
+  // which loop escalation cannot accrue, and the check must say so.
+  writeFileSync(settings, JSON.stringify({ hooks: entry("PreToolUse") }, null, 2), "utf8");
+  const failing = checkOf();
+  assert.equal(failing["status"], "fail");
+  assert.match(String(failing["detail"]), /PreToolUse and not for PostToolUse/u);
+  assert.match(String(failing["detail"]), /§10\.2/u);
+  assert.match(String(failing["fix"]), /^approval /u);
+
+  // Both: the outcome reaches the log, and the check passes.
+  writeFileSync(
+    settings,
+    JSON.stringify({ hooks: { ...entry("PreToolUse"), ...entry("PostToolUse") } }, null, 2),
+    "utf8",
+  );
+  assert.equal(checkOf()["status"], "pass");
+
+  // A file registering no `approval hook` entry at all is not this check's
+  // business: doctor reports on a gate that is installed, never on one nobody
+  // asked for.
+  writeFileSync(settings, JSON.stringify({ hooks: { PreToolUse: [] } }, null, 2), "utf8");
+  assert.equal(checkOf()["status"], "skip");
+});
+
+test("an event whose name this runtime does not know still takes the gated path", () => {
+  // The strict direction, and the reason the dispatch is not a closed match on
+  // "PreToolUse": a harness event this runtime cannot name is a harness about to
+  // run a command, and treating an unknown name as a no-op would be an ungated
+  // one.
+  const dir = ready();
+  const run = runCli(
+    ["hook", "claude-code"],
+    dir,
+    JSON.stringify({
+      session_id: "sess-1",
+      cwd: "/repo",
+      hook_event_name: "SomeFutureEvent",
+      tool_name: "Bash",
+      tool_input: { command: "ls -la" },
+      tool_use_id: "tu-u",
+    }),
+  );
+  assert.equal(verdictOf(run).permission, "allow");
+  assert.deepEqual(
+    allRecords(dir).map((record) => record["event"]).slice(-1),
+    ["execution.started"],
+    "it was gated, not ignored",
+  );
 });
 
 // ===========================================================================

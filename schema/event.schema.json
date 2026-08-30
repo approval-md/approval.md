@@ -865,6 +865,51 @@
       }
     },
     {
+      "$comment": "SPEC.md §10.2 (amended, APRV-145): the completion counterpart. A harness adapter answers before the tool runs and never observes an exit status, so the `execution.started` it writes is terminal by design; an implementation MAY close it from a post-execution harness event, and the record it appends is an ordinary `execution.completed` or `execution.failed` carrying two additive markers. `reported_by` names which untrusted reporter ASSERTED the outcome and is drawn from a closed set, extended only by a task that adds the case: it is a claimed field in the computed-versus-claimed vocabulary of §9 and reduces nothing, and a free-text value is where a tool's output (and the credential quoted inside it) would arrive. `execution` repeats the harness marker the start carries, so a reader can tell an asserted outcome from an observed one without walking back to the start record. Both are OPTIONAL and only their SHAPE is constrained: the field is additive, so every outcome written before it existed still validates and still verifies, and a record's payload is otherwise unchanged. `exit_code` is constrained to an integer or null — a harness that states no code records null rather than a number nobody measured, exactly as `execution.indeterminate` does. Whether the named start actually carries the marker is the gate's check (`not-delegated`); a schema sees one record.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "enum": [
+              "execution.completed",
+              "execution.failed"
+            ]
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "reported_by": {
+                "type": "string",
+                "enum": [
+                  "post-tool-use"
+                ],
+                "description": "Which untrusted reporter asserted this outcome. `post-tool-use`: a harness adapter's post-execution hook event. Closed, and extended only by a task that adds the case. Its presence marks the record as a REPORT rather than an observation; its absence means this runtime watched the process to its exit itself."
+              },
+              "execution": {
+                "const": "harness",
+                "description": "The same marker the `execution.started` carries: the harness ran the command and this runtime never observed the exit status. Present only on a counterpart appended from a harness report."
+              },
+              "exit_code": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "The process exit code where one was observed or stated, and `null` where none was. A harness event exposes no exit code, so a counterpart records `null`: an invented number would be indistinguishable from a measured one."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "SPEC.md §6.3/§10.4 (amended, APRV-120): `execution.indeterminate` records that a side effect was ATTEMPTED and that its outcome is unknown. It is not a failure — a failure is a fact — and the difference is what stops a blind retry against an action that may already have happened. Two constraints, both about what may be written down. `reason` is required and closed: an unknown outcome that does not say where the unknowing began is not machine-readable, and a free-text reason is where an exception message (and the credential quoted inside it) would arrive. `exit_code` is `null` when present, never a number: nobody observed one, and a fabricated code would read exactly like a measured one. The bytes of the exception are deliberately absent from this record; the executing caller receives them, redacted, and the log holds the closed code.",
       "if": {
         "type": "object",
