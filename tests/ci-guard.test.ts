@@ -127,10 +127,12 @@ test("the CI workflow runs on push, on pull_request and on merge_group", () => {
 // ---------------------------------------------------------------------------
 //
 // The full tier is two jobs since APRV-149: `full`, a shard matrix on Node 22
-// that every event runs, and `full-floor`, the unsharded Node 20 leg the merge
-// queue and pushes to main run. What the tests below hold to is the pair of
-// properties that made the single matrix worth having: both Node majors are
-// still exercised before anything becomes main, and the whole suite still runs.
+// that every event runs, and `full-floor`, the Node 20 leg the merge queue and
+// pushes to main run, itself a shard matrix since APRV-159. What the tests
+// below hold to is the pair of properties that made the single matrix worth
+// having: both Node majors are still exercised before anything becomes main,
+// and the whole suite still runs — on each leg, which for a sharded leg means
+// its shard axis is a 1..n the runner's partition covers exactly.
 
 /** The `run:` commands of a job, in declaration order. */
 function commandsOf(name: string): string[] {
@@ -187,36 +189,74 @@ test("each full-tier job compiles TypeScript exactly once (APRV-149)", () => {
   );
 });
 
-test("the full gate's shards are a partition the matrix actually covers (APRV-149)", () => {
-  const strategy = job("full")["strategy"];
+/**
+ * A sharded full-tier job's matrix and runner command agree with each other and
+ * with the partition run-tests.mjs implements. Applied to both legs: since
+ * APRV-159 the Node 20 floor is a shard matrix too, and the property that makes
+ * a green matrix mean something is identical either side.
+ */
+function assertShardMatrix(name: string): void {
+  const strategy = job(name)["strategy"];
   assert.ok(
     typeof strategy === "object" && strategy !== null,
-    "the `full` job no longer declares a matrix strategy",
+    `the \`${name}\` job no longer declares a matrix strategy`,
   );
   const matrix = (strategy as Record<string, unknown>)["matrix"];
   assert.ok(
     typeof matrix === "object" && matrix !== null,
-    "the `full` job's strategy declares no matrix",
+    `the \`${name}\` job's strategy declares no matrix`,
   );
   const shards = (matrix as Record<string, unknown>)["shard"];
-  assert.ok(Array.isArray(shards), "the `full` job's matrix declares no shard axis");
+  assert.ok(Array.isArray(shards), `the \`${name}\` job's matrix declares no shard axis`);
   const count = shards.length;
   assert.deepEqual(
     [...shards].map(Number),
     Array.from({ length: count }, (_entry, position) => position + 1),
-    "the `full` job's shard axis must be 1..n exactly. run-tests.mjs assigns the file at sorted position i to shard (i mod n) + 1, so an index the matrix never runs is a set of test files nothing runs.",
+    `the \`${name}\` job's shard axis must be 1..n exactly. run-tests.mjs assigns the file at sorted position i to shard (i mod n) + 1, so an index the matrix never runs is a set of test files nothing runs.`,
   );
-  const command = commandsOf("full").find((run) => run.includes("--shard"));
-  assert.ok(command !== undefined, "no step of the `full` job passes a shard to the runner");
+  const command = commandsOf(name).find((run) => run.includes("--shard"));
+  assert.ok(command !== undefined, `no step of the \`${name}\` job passes a shard to the runner`);
   const passed = /scripts\/run-tests\.mjs --shard \$\{\{ matrix\.shard \}\}\/(\d+)/u.exec(command);
   assert.ok(
     passed !== null,
-    `the \`full\` job's runner command (${command.trim()}) does not pass its own matrix entry as the shard index`,
+    `the \`${name}\` job's runner command (${command.trim()}) does not pass its own matrix entry as the shard index`,
   );
   assert.equal(
     Number(passed[1]),
     count,
-    "the shard denominator passed to the runner differs from the number of matrix entries, so the matrix runs a partition of a size it does not have jobs for",
+    `the shard denominator passed to the \`${name}\` runner differs from the number of matrix entries, so the matrix runs a partition of a size it does not have jobs for`,
+  );
+}
+
+test("the full gate's shards are a partition the matrix actually covers (APRV-149)", () => {
+  assertShardMatrix("full");
+});
+
+test("the Node floor leg is sharded on the same terms as the Node 22 leg (APRV-159)", () => {
+  // The floor used to be one unsharded run, which made it the merge-queue
+  // candidate's long pole. Sharding it keeps the same guarantee — the three
+  // shards are a partition, so the leg's aggregate result still covers every
+  // test file — and only shortens the wall clock. The matrix axis must be
+  // exactly [1, 2, 3] and the denominator must match it, or the floor is
+  // proven over less than the suite while reporting the same green.
+  assertShardMatrix("full-floor");
+  const shards = ((job("full-floor")["strategy"] as Record<string, unknown>)[
+    "matrix"
+  ] as Record<string, unknown>)["shard"] as unknown[];
+  assert.deepEqual(
+    [...shards].map(Number),
+    [1, 2, 3],
+    "the floor leg's shard axis is no longer [1, 2, 3]",
+  );
+  assert.equal(
+    (job("full-floor")["strategy"] as Record<string, unknown>)["fail-fast"],
+    false,
+    "the floor leg's matrix cancels its siblings on the first failure. A shard that never ran is a slice of the floor nothing proved, and one failure would hide the others.",
+  );
+  assert.equal(
+    job("full-floor")["name"],
+    "full gate (node 20 floor, shard ${{ matrix.shard }}/3)",
+    "the floor leg's name no longer identifies which shard a run is, which is the only way to read a matrix's results",
   );
 });
 
@@ -236,19 +276,10 @@ test("the Node floor is proven in the queue, and no longer blocks pull_request f
     condition.includes("github.event_name == 'push'") && condition.includes("github.ref == 'refs/heads/main'"),
     "the floor leg no longer runs on a push to main, which is the other way a commit reaches the branch the protection guards",
   );
-  assert.equal(
-    floor["strategy"],
-    undefined,
-    "the floor leg declares a matrix. It runs one version once, and the aggregator reads its single result.",
-  );
   const commands = commandsOf("full-floor");
   assert.ok(
-    commands.some((run) => run.trim() === "node scripts/run-tests.mjs"),
-    "the floor leg no longer runs the whole suite unsharded; it is the one run that proves the floor before a candidate becomes main",
-  );
-  assert.ok(
-    !commands.some((run) => run.includes("--shard")),
-    "the floor leg runs a shard rather than the suite",
+    commands.some((run) => run.trim() === "node scripts/run-tests.mjs --shard ${{ matrix.shard }}/3"),
+    "the floor leg no longer runs its shard of the suite through the runner; the three shards together are the one proof of the floor before a candidate becomes main",
   );
 });
 
