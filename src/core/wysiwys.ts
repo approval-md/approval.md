@@ -591,7 +591,11 @@ export function commandBreakdown(command: string): string | null {
 // ---------------------------------------------------------------------------
 
 /** The rule names a file-tool touch of a protected path reports (`cli/hook.ts`). */
-const PROTECTED_RULE_NAMES: readonly string[] = ["protected-path", "protected-path-proposal"];
+const PROTECTED_RULE_NAMES: readonly string[] = [
+  "protected-path",
+  "protected-path-proposal",
+  "protected-name-elsewhere",
+];
 
 /** The path that made an action `policy.edit`, and the rule that matched it. */
 export interface ProtectedPathView {
@@ -612,8 +616,9 @@ export interface ProtectedPathView {
  * - a file-tool payload names its target in `file`, and
  *   {@link isProtectedPath} is re-run over it rather than trusted: the answer
  *   is recomputed from the bound bytes, so this stays a computed field. The
- *   payload's own `rule` is used as the label only when it is one of the two
- *   the hook writes, which is what keeps the worktree-proposal tier legible.
+ *   payload's own `rule` is used as the label only when it is one of the three
+ *   the hook writes, which is what keeps the worktree-proposal and
+ *   protected-name-elsewhere tiers legible (APRV-124, APRV-161).
  *
  * `extra` is `policy.protected_paths`, passed exactly as every enforcement path
  * passes it; omitting it narrows the answer and never widens it.

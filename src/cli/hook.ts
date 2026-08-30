@@ -726,19 +726,23 @@ function truncate(text: string, limit: number): string {
 /**
  * The rule a protected-path file touch reports, on the SAME class.
  *
- * Two tiers, one class. A `policy.edit` inside an agent worktree is a branch
+ * Three tiers, one class. A `policy.edit` inside an agent worktree is a branch
  * PROPOSAL: the file it writes is a copy on a branch, and the merge that makes
  * it real is separately gated (`vcs.push.main`, `gh pr merge`). A `policy.edit`
- * in the live checkout is the file itself. The approver was being told the same
- * thing about both, which is the "truthful label" half of this task.
+ * in the live checkout is the file itself. A protected name that resolves
+ * OUTSIDE the gated checkout altogether (a scratchpad `APPROVAL.md`, a demo
+ * fixture) is neither: the match is on the name, and the name is all it shares
+ * with the live policy (APRV-161). The approver was being told the same thing
+ * about all three, which is the "truthful label" half of this task.
  *
  * The distinction is deliberately NOT a class and NOT an autonomy: policy
- * semantics are untouched here, both tiers resolve exactly as `policy.edit`
+ * semantics are untouched here, every tier resolves exactly as `policy.edit`
  * resolves today, and APRV-127 is where sampling may hang off the difference.
  * What changes is what the human reads.
  */
 const PROTECTED_PATH_RULE = "protected-path";
 const PROTECTED_PATH_PROPOSAL_RULE = "protected-path-proposal";
+const PROTECTED_NAME_ELSEWHERE_RULE = "protected-name-elsewhere";
 
 /** Where agent worktrees live, relative to the primary root. */
 const WORKTREE_DIR = [".claude", "worktrees"] as const;
@@ -774,31 +778,61 @@ function resolveExisting(path: string): string | null {
   }
 }
 
+/** Which of the three tiers a protected file-tool target sits in. */
+interface FileTier {
+  rule: string;
+  /** The agent worktree a proposal lands in; `null` for the other two tiers. */
+  worktree: string | null;
+  /** The gated checkout the tier was decided against, `null` when git could not say. */
+  root: string | null;
+}
+
 /**
- * The agent worktree `target` sits inside, or `null` for everything else.
+ * The tier `target` sits in, resolved once, from the hook's own directory.
  *
  * FAIL CLOSED, on every axis: anything not *provably* inside
- * `<primary>/.claude/worktrees/<name>/…` is live-tier, because a wrong
- * "proposal" tells a human their APPROVAL.md edit is a branch copy when it is
- * the live file, and a wrong "live" costs nothing but a sterner sentence.
+ * `<primary>/.claude/worktrees/<name>/…` and not *provably* outside the primary
+ * root is live-tier. A wrong "proposal" tells a human their APPROVAL.md edit is
+ * a branch copy when it is the live file; a wrong "elsewhere" tells them a
+ * scratch file is being edited when the live policy is; a wrong "live" costs
+ * nothing but a sterner sentence.
+ *
+ * Order matters. The proposal test runs first and against the worktrees
+ * directory's own resolved path, so a worktrees directory reached through a
+ * symlink stays a proposal rather than falling out of the root comparison.
  *
  * The primary root comes from `primaryRoot`, i.e. from git run in the hook's
  * OWN process directory (APRV-108's discipline). The harness-supplied `cwd`
  * field is never consulted: it is authored by the party under oversight, and a
  * tier that could be chosen by the subject of the gate is not a tier.
  */
-function proposalWorktree(target: string, cwd: string): string | null {
+function tierOf(target: string, cwd: string): FileTier {
+  const live = (root: string | null): FileTier => ({
+    rule: PROTECTED_PATH_RULE,
+    worktree: null,
+    root,
+  });
+
   const root = primaryRoot(cwd);
-  if (root === null) return null;
-  const base = resolveExisting(join(root, ...WORKTREE_DIR));
-  if (base === null) return null;
+  if (root === null) return live(null);
   const file = resolveExisting(target);
-  if (file === null || !file.startsWith(`${base}${sep}`)) return null;
-  const rest = file.slice(base.length + 1).split(sep);
-  // `rest[0]` is the worktree; a target that IS the worktrees directory or a
-  // worktree root names no file inside one and stays live-tier.
-  const name = rest[0];
-  return name === undefined || name.length === 0 || rest.length < 2 ? null : name;
+  if (file === null) return live(root);
+
+  const base = resolveExisting(join(root, ...WORKTREE_DIR));
+  if (base !== null && file.startsWith(`${base}${sep}`)) {
+    const rest = file.slice(base.length + 1).split(sep);
+    // `rest[0]` is the worktree; a target that IS the worktrees directory or a
+    // worktree root names no file inside one and stays live-tier.
+    const name = rest[0];
+    if (name !== undefined && name.length > 0 && rest.length >= 2) {
+      return { rule: PROTECTED_PATH_PROPOSAL_RULE, worktree: name, root };
+    }
+  }
+
+  const realRoot = resolveExisting(root);
+  if (realRoot === null) return live(root);
+  if (file === realRoot || file.startsWith(`${realRoot}${sep}`)) return live(realRoot);
+  return { rule: PROTECTED_NAME_ELSEWHERE_RULE, worktree: null, root: realRoot };
 }
 
 /** What a gated file tool call asks for: one class, its bytes, its headline. */
@@ -807,8 +841,10 @@ interface FileGate {
   rule: string;
   /** The target, absolute and resolved from the hook's own directory. */
   file: string;
-  /** The worktree this proposal lands in, or `null` for a live edit. */
+  /** The worktree this proposal lands in, or `null` for the other two tiers. */
   worktree: string | null;
+  /** The gated checkout the tier was decided against, `null` when git could not say. */
+  root: string | null;
   /** The binding bytes: the change, not the touch. */
   payload: Record<string, unknown>;
   summary: string;
@@ -861,8 +897,8 @@ function fileToolGate(
   if (!isProtectedPath(declared, protectedPaths)) return null;
 
   const file = absolute(declared, cwd);
-  const worktree = proposalWorktree(file, cwd);
-  const rule = worktree === null ? PROTECTED_PATH_RULE : PROTECTED_PATH_PROPOSAL_RULE;
+  const tier = tierOf(file, cwd);
+  const rule = tier.rule;
 
   const head = { tool: toolName, rule, file };
   const before = toolInput["old_string"];
@@ -888,16 +924,41 @@ function fileToolGate(
     cls: "policy.edit",
     rule,
     file,
-    worktree,
+    worktree: tier.worktree,
+    root: tier.root,
     payload,
     // The tier leads the headline rather than trailing it: a summary is
     // truncated from the right, and the qualifier is the last thing that may
     // be ellipsized away (a long path is not — the payload carries it whole).
-    summary:
-      worktree === null
-        ? `${toolName} ${file}`
-        : `branch proposal (worktree ${worktree}): ${toolName} ${file}`,
+    summary: summaryFor(tier, toolName, file),
   };
+}
+
+/** The headline for a tier: the qualifier first, the touch after it. */
+function summaryFor(tier: FileTier, toolName: string, file: string): string {
+  if (tier.worktree !== null) {
+    return `branch proposal (worktree ${tier.worktree}): ${toolName} ${file}`;
+  }
+  if (tier.rule === PROTECTED_NAME_ELSEWHERE_RULE) {
+    return `file named like a policy file, outside this gated checkout: ${toolName} ${file}`;
+  }
+  return `${toolName} ${file}`;
+}
+
+/**
+ * The tier, in the verdict's note, so an `allow` says what it authorized.
+ *
+ * The elsewhere arm names the root it was decided against, because "outside the
+ * gated checkout" is only readable next to which checkout that is.
+ */
+function fileTierNote(gated: FileGate): string {
+  if (gated.worktree !== null) {
+    return `${gated.rule}: ${gated.file} is inside agent worktree ${gated.worktree}, so this is a branch proposal and the merge to the live checkout is gated separately`;
+  }
+  if (gated.rule === PROTECTED_NAME_ELSEWHERE_RULE) {
+    return `${gated.rule}: ${gated.file} is NAMED like a policy file but sits outside the gated checkout ${gated.root ?? "(unresolved)"}, so it is not this repository's live policy; it is gated because a protected name is protected wherever it sits`;
+  }
+  return `${gated.rule}: ${gated.file} is the LIVE checkout's copy`;
 }
 
 interface HookRun {
@@ -1772,11 +1833,7 @@ function runHarnessHook(
     headline = gated.summary;
     // The tier rides in the verdict's note as well as in the payload, so an
     // `allow` says which checkout it authorized (APRV-124).
-    notes = [
-      gated.worktree === null
-        ? `${gated.rule}: ${gated.file} is the LIVE checkout's copy`
-        : `${gated.rule}: ${gated.file} is inside agent worktree ${gated.worktree}, so this is a branch proposal and the merge to the live checkout is gated separately`,
-    ];
+    notes = [fileTierNote(gated)];
   }
 
   if (classes.length === 0) {

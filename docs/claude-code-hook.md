@@ -344,13 +344,17 @@ with the same counted marker a diff uses.
 - `protected-path` — the target is the LIVE checkout's file;
 - `protected-path-proposal` — the target resolves inside
   `<primary>/.claude/worktrees/<name>/`, so the edit is a branch proposal and
-  the merge that makes it real is separately gated.
+  the merge that makes it real is separately gated;
+- `protected-name-elsewhere` — the target resolves outside the gated checkout
+  altogether (a scratchpad `APPROVAL.md`, a demo fixture): a file named like a
+  policy file, gated because a protected name is protected wherever it sits.
 
 The tier is resolved from the hook's own process view (`git rev-parse
 --git-common-dir`, then the real paths), never from the `cwd` the harness sends,
-and it fails closed: anything not provably inside an agent worktree is live-tier.
-It changes no policy semantics — both tiers resolve exactly as `policy.edit`
-resolves — only what the prompt says.
+and it fails closed: anything not provably inside an agent worktree and not
+provably outside the checkout is live-tier. It changes no policy semantics —
+every tier resolves exactly as `policy.edit` resolves — only what the prompt
+says.
 
 ## Deny reasons
 

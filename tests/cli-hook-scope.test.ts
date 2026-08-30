@@ -282,8 +282,12 @@ test("a worktree whose primary has no log denies with hook-log-unreachable", (t:
  * primary root's `.claude/worktrees/`", which is where this project's sessions
  * are branched and where the merge back is separately gated.
  */
-function repoWithAgentWorktree(name: string): { primary: string; worktree: string } {
+function repoWithAgentWorktree(
+  name: string,
+  policy: string = POLICY,
+): { primary: string; worktree: string } {
   const primary = caseDir(name);
+  if (policy !== POLICY) writeFileSync(join(primary, "APPROVAL.md"), policy, "utf8");
   assert.equal(git(["init", "-b", "main"], primary).code, 0);
   assert.equal(git(["config", "user.email", "test@example.com"], primary).code, 0);
   assert.equal(git(["config", "user.name", "Test"], primary).code, 0);
@@ -390,5 +394,132 @@ test("a lookalike path outside the primary's worktrees directory stays live-tier
   assert.equal(verdictOf(run).permission, "deny");
   assert.doesNotMatch(rawLog(primary), /branch proposal/u);
   assert.ok(promptFor(primary).includes("rule: protected-path\n"));
+  assertClean(primary);
+});
+
+// ===========================================================================
+// The elsewhere tier (APRV-161)
+// ===========================================================================
+
+test("a protected name outside the gated checkout is labelled elsewhere, still gated", (t: TestContext) => {
+  // The bug: a scratchpad APPROVAL.md classified identically to an edit of the
+  // live policy, so every prompt read as a policy edit. The gate is unchanged
+  // (class policy.edit, manual) and only the label tells the truth.
+  if (!haveGit()) {
+    t.skip("git is not available on this host");
+    return;
+  }
+  const { primary } = repoWithAgentWorktree("tier-elsewhere");
+  const outside = join(scratch, "scratchpad-elsewhere");
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, "APPROVAL.md"), POLICY, "utf8");
+
+  const run = runCli(HOOK, primary, editEvent(join(outside, "APPROVAL.md"), "tu-elsewhere"));
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+
+  const log = rawLog(primary);
+  assert.match(log, /"class":"policy\.edit"/u);
+  // The tier LEADS the headline, so it survives the summary's truncation.
+  assert.match(
+    log,
+    /"summary":"file named like a policy file, outside this gated checkout: Edit /u,
+  );
+  assert.doesNotMatch(log, /branch proposal/u);
+
+  const prompt = promptFor(primary);
+  assert.ok(prompt.includes("rule: protected-name-elsewhere"), prompt);
+  assertClean(primary);
+});
+
+/** The same policy, with `policy.edit` autonomous so a verdict carries its note. */
+const POLICY_EDIT_AUTONOMOUS = POLICY.replace(
+  "classes:",
+  ["classes:", "  policy.edit:", "    autonomy: autonomous"].join("\n"),
+);
+
+test("the elsewhere verdict note names the checkout and what the file is not", (t: TestContext) => {
+  // The note rides on the verdict, which only carries one when the policy lets
+  // the call through, so this case makes `policy.edit` autonomous. The tier
+  // wording is the point; the class and the gate are pinned above.
+  if (!haveGit()) {
+    t.skip("git is not available on this host");
+    return;
+  }
+  const { primary } = repoWithAgentWorktree("tier-elsewhere-note", POLICY_EDIT_AUTONOMOUS);
+  const outside = join(scratch, "scratchpad-note");
+  mkdirSync(outside, { recursive: true });
+  const target = join(outside, "APPROVAL.md");
+  writeFileSync(target, POLICY, "utf8");
+
+  const run = runCli(HOOK, primary, editEvent(target, "tu-elsewhere-note"));
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.ok(
+    verdict.reason.includes(
+      `protected-name-elsewhere: ${target} is NAMED like a policy file but sits outside the gated checkout ${primary}, so it is not this repository's live policy; it is gated because a protected name is protected wherever it sits`,
+    ),
+    verdict.reason,
+  );
+  assertClean(primary);
+});
+
+test("the live verdict note still says LIVE, unchanged by the third tier", (t: TestContext) => {
+  if (!haveGit()) {
+    t.skip("git is not available on this host");
+    return;
+  }
+  const { primary } = repoWithAgentWorktree("tier-live-note", POLICY_EDIT_AUTONOMOUS);
+  const target = join(primary, "APPROVAL.md");
+
+  const run = runCli(HOOK, primary, editEvent(target, "tu-live-note"));
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.ok(
+    verdict.reason.includes(`protected-path: ${target} is the LIVE checkout's copy`),
+    verdict.reason,
+  );
+  assertClean(primary);
+});
+
+test("the elsewhere tier is decided by location, not by which pattern matched", (t: TestContext) => {
+  // Bare protected filenames, `.claude/settings*` and `.approval/` segments all
+  // resolve the same way: the pattern says the name is protected, the location
+  // says which tier.
+  if (!haveGit()) {
+    t.skip("git is not available on this host");
+    return;
+  }
+  for (const [index, tail] of [
+    [".claude", "settings.json"],
+    [".approval", "vault.json"],
+  ].entries()) {
+    const { primary } = repoWithAgentWorktree(`tier-elsewhere-pattern-${String(index)}`);
+    const outside = join(scratch, `scratchpad-pattern-${String(index)}`, ...tail.slice(0, -1));
+    mkdirSync(outside, { recursive: true });
+    const target = join(outside, tail[tail.length - 1] as string);
+    writeFileSync(target, "{}", "utf8");
+
+    const run = runCli(HOOK, primary, editEvent(target, `tu-elsewhere-pattern-${String(index)}`));
+    assert.equal(verdictOf(run).permission, "deny");
+    assert.ok(promptFor(primary).includes("rule: protected-name-elsewhere"), target);
+    assertClean(primary);
+  }
+});
+
+test("with no git to name a root, a protected name falls back to the live tier", () => {
+  // Fail closed: an unresolvable root cannot prove the target is elsewhere, and
+  // the live tier's louder sentence is the safe answer.
+  const primary = attested("tier-nogit");
+  assert.ok(!existsSync(join(primary, ".git")), "this case is deliberately not a repository");
+
+  const run = runCli(HOOK, primary, editEvent(join(primary, "APPROVAL.md"), "tu-nogit"));
+  assert.equal(verdictOf(run).permission, "deny");
+
+  const prompt = promptFor(primary);
+  assert.ok(prompt.includes("rule: protected-path\n"), prompt);
+  assert.equal(prompt.includes("protected-name-elsewhere"), false, prompt);
+  assert.ok(prompt.includes(LIVE_QUALIFIER), prompt);
   assertClean(primary);
 });
