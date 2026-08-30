@@ -445,6 +445,36 @@ export function refusal(
 }
 
 /**
+ * The one shape a legitimate skip is printed in (APRV-153).
+ *
+ *     – web-port  this policy declares no channels.web.port, so no queue page is served
+ *       to enable: approval policy amend
+ *
+ * The counterpart of {@link refusal} for a part that is not wrong. The fact it
+ * reports is doctor's fact (an optional part, absent by configuration), so it
+ * borrows doctor's vocabulary: the skip glyph, the check name in `warn`, the
+ * detail plain. `approval up` used to print these through {@link refusal}, and
+ * the red ✗ taught an operator that a healthy startup had failed; this shape
+ * exists to prevent that mis-reading.
+ *
+ * The second line is labelled `to enable:` rather than `fix:` because nothing
+ * is broken and there is nothing to repair; it is the path to turning the part
+ * on. Like a fix line it exists to be copied and run, so the label is dressed
+ * and the command after it is not (rule 3).
+ *
+ * Returned as text with no trailing newline, like {@link refusal}.
+ */
+export function skipNotice(
+  style: Style,
+  check: string,
+  detail: string,
+  enable?: string,
+): string {
+  const head = `${style.glyph("skip")} ${style.warn(check)}  ${detail}`;
+  return enable === undefined ? head : `${head}\n  ${style.key("to enable:")} ${enable}`;
+}
+
+/**
  * The notice under a printed execution token, on a surface that is not Telegram.
  *
  * Three facts and an instruction, in the order a reader needs them: it works

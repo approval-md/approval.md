@@ -30,6 +30,7 @@ import { renderClassification } from "../src/cli/hook.js";
 import { renderTailHuman } from "../src/cli/main.js";
 import { renderExplainHuman } from "../src/cli/policy.js";
 import { makeStyle, runbook } from "../src/cli/style.js";
+import { describeUpEvent, type UpEvent } from "../src/cli/up.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
@@ -139,6 +140,50 @@ test("doctor: a terminal gets colour, and never inside a hash or a fix command",
   // The same report, minus the dressing, is byte-identical to the piped one.
   assert.equal(undressed(dressed), renderDoctorHuman(CHECKS, PIPED));
   assertValuesUndressed(dressed);
+});
+
+// ===========================================================================
+// up: part_unavailable (APRV-153)
+// ===========================================================================
+
+/** The very skip that was mis-read as a failure: web absent by configuration. */
+const WEB_SKIP = {
+  event: "part_unavailable",
+  part: "web",
+  check: "web-port",
+  status: "skip",
+  detail:
+    "this policy declares no channels.web.port, so no queue page is served — which is a legitimate configuration and not a fault",
+  fix: "pass --port <n> to serve it for this run, or add channels.web.port to APPROVAL.md via approval policy amend (an edited policy is inoperative until it is re-attested)",
+} as const satisfies UpEvent;
+
+test("up: a legitimate skip wears doctor's dash, and its path out says enable", () => {
+  const piped = describeUpEvent(WEB_SKIP, PIPED);
+  assert.equal(piped.stderr, true);
+  assert.equal(piped.text, `– web-port  ${WEB_SKIP.detail}\n  to enable: ${WEB_SKIP.fix}`);
+  // Neither the refusal glyph nor its repair label: nothing here failed.
+  assert.equal(piped.text.includes("✗"), false);
+  assert.equal(piped.text.includes("fix:"), false);
+
+  const dressed = describeUpEvent(WEB_SKIP, TTY);
+  assert.ok(dressed.text.includes(ESC), "a terminal must receive colour");
+  assert.equal(undressed(dressed.text), piped.text);
+  // The enable command is a copyable value: no escape byte may land inside it.
+  assert.ok(
+    dressed.text.replace(SGR, " ").includes(WEB_SKIP.fix),
+    `an escape sequence landed inside the enable command:\n${JSON.stringify(dressed.text)}`,
+  );
+});
+
+test("up: a fix-less skip is one line, with no dangling label", () => {
+  const once: UpEvent = {
+    ...WEB_SKIP,
+    detail: "--once runs one daemon tick and one poll cycle",
+    fix: null,
+  };
+  const piped = describeUpEvent(once, PIPED);
+  assert.equal(piped.text, "– web-port  --once runs one daemon tick and one poll cycle");
+  assert.equal(piped.text.includes("to enable:"), false);
 });
 
 // ===========================================================================
