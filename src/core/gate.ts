@@ -194,6 +194,30 @@ const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
 const HUMAN_ACTOR = /^human:.+/u;
 
 /**
+ * Does an `approvers` list name this actor (APRV-137, amended SPEC.md §5.2)?
+ *
+ * The spelling a valid policy uses is the bare id (`alice`), which is what
+ * `policy.schema.json` admits and what the keys of the top-level `approvers`
+ * map are: its `identifier` pattern is lowercase alphanumerics with `_` and
+ * `-`, so a `human:` prefix inside a roster is a schema violation and never
+ * reaches here. The whole actor string is compared as well, which can only ever
+ * match a loader more permissive than the shipped schema; it widens nothing for
+ * a valid policy, because `alice` and `human:alice` are the same person under
+ * either comparison.
+ *
+ * Comparison is exact and case-sensitive. An identity that matched under
+ * folding would let `human:Alice` and `human:alice` be one approver on one host
+ * and two on another, and a roster is a list of people rather than a pattern
+ * language. An empty list names nobody and therefore matches nobody;
+ * `approvers` carries `minItems: 1`, so a valid policy cannot produce one, and
+ * that branch stays a fail-closed backstop rather than a reachable path.
+ */
+function namesApprover(approvers: readonly string[], actor: string): boolean {
+  const bare = actor.startsWith("human:") ? actor.slice("human:".length) : actor;
+  return approvers.some((name) => name === actor || name === bare);
+}
+
+/**
  * The closed set of gate refusal codes. Agents branch on these, so the union is
  * frozen public API in the same sense the exit codes are: adding a code is a
  * spec change, redefining one is a breaking change.
@@ -341,6 +365,28 @@ export const GATE_REFUSAL_CODES = [
   "actor-invalid",
   /** A human-only verb was attempted by a non-human actor. */
   "actor-not-human",
+  /**
+   * A grant was recorded by a person the resolved rule's `approvers` list does
+   * not name (APRV-137, amended SPEC.md §5.2).
+   *
+   * Distinct from `actor-not-human`, and the distinction is the repair. That
+   * code says the actor is not a person at all, and the fix is to run the verb
+   * as one. This one says the actor IS a person and is not one the policy
+   * named for this class, so the fix is to ask a named approver. Before this
+   * code the list was parsed, surfaced by `policy explain`, and enforced
+   * nowhere: a policy writing `approvers: [alice]` on `financial.spend` bound
+   * nothing while its author believed it bound the class.
+   *
+   * Scope, and its limits. The check is defense in depth inside the trust
+   * boundary §11 states plainly: human identity in v0.1 is config-declared, so
+   * anyone who can set that configuration can present any name on this list.
+   * What it defends is the honest mistake and the wrong-approver routing, not
+   * an actor choosing whose name to wear. The check binds `grant` alone;
+   * reject and revoke withdraw authority rather than confer it, and
+   * restricting them would leave a request standing, or an authorization live,
+   * because the wrong person tried to end it.
+   */
+  "actor-not-approver",
   /** The log could not be read, or holds a line that is not a record. */
   "log-unreadable",
   /** The log's final line is unterminated (a crashed write). */
@@ -1921,6 +1967,30 @@ export function decide(
       cls,
       derivation.declared.reversible === null ? {} : { reversible: derivation.declared.reversible },
     );
+    // APRV-137, and deliberately the last check before budgets: a budget
+    // refusal WRITES a `budget.exceeded` record, so every cheaper refusal must
+    // run first and leave the log untouched. `resolution` is the single winning
+    // rule of SPEC.md §5.2 — the same one rule that contributes the limits the
+    // next call charges against, so the roster enforced here and the ceiling
+    // enforced there always come from the same author's line.
+    //
+    // A rule that declares no `approvers` restricts nobody: the list is a
+    // narrowing, and a narrowing nobody wrote narrows nothing. A `default`- or
+    // `fail-closed`-provenance resolution therefore restricts nobody either, by
+    // carrying `null`, which is the reading that keeps a repository recoverable:
+    // an unparseable policy already resolves every class to `manual`, and one
+    // that ALSO refused every grant would be a gate nobody could pass to fix it.
+    // Attestation is the control on that path.
+    const approvers = resolution.approvers;
+    if (approvers !== null && !namesApprover(approvers, actor)) {
+      return refuse(
+        "actor-not-approver",
+        `${actor} is not named in the approvers list for class ${cls}: the rule ${
+          resolution.matched === null ? "in force" : `\`${resolution.matched.pattern}\``
+        } names ${approvers.length === 0 ? "nobody" : approvers.map((name) => `\`${name}\``).join(", ")}. A grant recorded here would authorize the action on the word of someone the policy did not put in front of this class. Ask a named approver to decide it, or amend the policy and re-attest.`,
+        { state: derivation.state },
+      );
+    }
     const budget = evaluateBudgetsWithTask(
       read.records,
       budgetScopeOf(load, resolution),

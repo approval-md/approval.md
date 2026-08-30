@@ -209,7 +209,14 @@ interface Capture {
 function captureLiveOutputs(): Capture[] {
   const dir = join(scratch, "world");
   mkdirSync(dir, { recursive: true });
-  const env = { APPROVAL_HUMAN: "human:tester" };
+  // `human:alice` rather than `human:tester` since APRV-137. `approval init`
+  // scaffolds a policy whose `communicate.email.external` rule declares
+  // `approvers: [alice]`, and that roster now BINDS the grant: before the
+  // amendment the list was parsed and enforced nowhere, so any identity could
+  // grant, and now one the rule does not name is refused `actor-not-approver`.
+  // This world's whole point is reaching a real token, so it drives the
+  // scaffolded policy as the person that policy names.
+  const env = { APPROVAL_HUMAN: "human:alice" };
   const captures: Capture[] = [];
 
   const capture = (label: string, note: string, run: Run, stream: "out" | "err" = "out"): void => {

@@ -2092,6 +2092,11 @@ test("the refusal-code union is frozen public API", () => {
     "not-expired",
     "actor-invalid",
     "actor-not-human",
+    // APRV-137, one addition. Deliberately not folded into `actor-not-human`:
+    // that code says the actor is not a person, this one says the actor is a
+    // person the policy did not name for this class, and the repairs differ —
+    // run the verb as a human, versus ask a named approver.
+    "actor-not-approver",
     "log-unreadable",
     "log-torn-tail",
     // APRV-20 finding S1: the gate verifies the chain before it derives anything
@@ -2613,5 +2618,105 @@ test("a request whose bytes nobody holds records no display hash rather than a g
   // material nobody has would name a rendering nobody made.
   const requested = requestChaser(unit);
   assert.equal(payloadFieldOf(requested, "display_hash"), undefined);
+  assertClean(unit);
+});
+
+// ===========================================================================
+// approvers bind the grant (APRV-137, amended SPEC.md §5.2)
+// ===========================================================================
+
+/**
+ * `communicate.email.external` names two approvers. The ids are bare, which is
+ * the only spelling `policy.schema.json` admits: its `identifier` pattern is
+ * lowercase alphanumerics with `_` and `-`, so a `human:` prefix written inside
+ * a roster fails the schema and takes the whole policy fail-closed.
+ */
+const POLICY_APPROVERS = POLICY.replace(
+  ["  communicate.email.external:", "    autonomy: manual"].join("\n"),
+  [
+    "  communicate.email.external:",
+    "    autonomy: manual",
+    "    approvers: [alice, bob]",
+  ].join("\n"),
+);
+
+test("the approvers policy loads: the roster is enforced, not fail-closed away", () => {
+  // The guard on every assertion below. A schema-invalid roster would fail the
+  // load, resolve every class to `manual` with `approvers: null`, and let every
+  // one of these tests pass for the wrong reason.
+  const unit = newCase(POLICY_APPROVERS);
+  const load = loadPolicy({ file: unit.policyPath });
+  assert.equal(load.ok, true, load.ok ? "" : JSON.stringify(load));
+  const resolution = resolve(load, "communicate.email.external");
+  assert.deepEqual(resolution.approvers, ["alice", "bob"]);
+});
+
+test("a grant by an actor the resolved rule's approvers do not name is refused, and writes nothing", () => {
+  const unit = newCase(POLICY_APPROVERS);
+  attest(unit);
+  registerTask(unit);
+  requestChaser(unit);
+  const before = eventTypes(unit);
+
+  const refusal = asRefusal(decide(unit.logPath, "task-042:chaser", "grant", "human:carter", at(2), unit.options));
+  assert.equal(refusal.code, "actor-not-approver");
+  assert.match(refusal.message, /human:carter/u);
+  // Distinct from `actor-not-human`: carter IS a person, and is not one this
+  // class was routed to.
+  assert.notEqual(refusal.code, "actor-not-human");
+  // Cheaper than the budget check, so nothing was appended.
+  assert.deepEqual(eventTypes(unit), before);
+  assertClean(unit);
+});
+
+test("a named approver still grants", () => {
+  for (const actor of ["human:alice", "human:bob"]) {
+    const unit = newCase(POLICY_APPROVERS);
+    attest(unit);
+    registerTask(unit);
+    requestChaser(unit);
+
+    const granted = decide(unit.logPath, "task-042:chaser", "grant", actor, at(2), unit.options);
+    assert.equal(granted.ok, true, granted.ok ? "" : granted.message);
+    assert.ok(eventTypes(unit).includes("approval.granted"));
+    assertClean(unit);
+  }
+});
+
+test("a rule that declares no approvers restricts nobody", () => {
+  // The narrowing nobody wrote narrows nothing. POLICY's
+  // `communicate.email.external` carries no roster, so any human grants it —
+  // which is also every other grant test in this file, and the reason this
+  // change breaks none of them.
+  const unit = newCase();
+  attest(unit);
+  registerTask(unit);
+  requestChaser(unit);
+
+  const granted = decide(unit.logPath, "task-042:chaser", "grant", "human:nobody-in-particular", at(2), unit.options);
+  assert.equal(granted.ok, true, granted.ok ? "" : granted.message);
+  assertClean(unit);
+});
+
+test("approvers bind the grant alone: reject and revoke stay open to any human", () => {
+  // Restricting them would leave a request standing, or an authorization live,
+  // because the wrong person tried to end it.
+  const rejected = (() => {
+    const unit = newCase(POLICY_APPROVERS);
+    attest(unit);
+    registerTask(unit);
+    requestChaser(unit);
+    return decide(unit.logPath, "task-042:chaser", "reject", "human:carter", at(2), unit.options);
+  })();
+  assert.equal(rejected.ok, true, rejected.ok ? "" : rejected.message);
+
+  const unit = newCase(POLICY_APPROVERS);
+  attest(unit);
+  registerTask(unit);
+  requestChaser(unit);
+  const granted = decide(unit.logPath, "task-042:chaser", "grant", "human:alice", at(2), unit.options);
+  assert.equal(granted.ok, true, granted.ok ? "" : granted.message);
+  const revoked = decide(unit.logPath, "task-042:chaser", "revoke", "human:carter", at(3), unit.options);
+  assert.equal(revoked.ok, true, revoked.ok ? "" : revoked.message);
   assertClean(unit);
 });

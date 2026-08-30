@@ -64,7 +64,12 @@ function runCli(args: string[], cwd: string): Run {
   const env = { ...process.env };
   delete env["APPROVAL_HUMAN"];
   delete env["APPROVAL_AGENT"];
-  env["APPROVAL_HUMAN"] = "human:tester";
+  // `human:alice` since APRV-137: the scaffolded policy these worlds are built
+  // from declares `approvers: [alice]` on `communicate.email.external`, and
+  // that roster now binds the grant. The human half of these scenarios drives
+  // the policy as the person it names; the agent half is unaffected, since
+  // approvers restrict the grant alone.
+  env["APPROVAL_HUMAN"] = "human:alice";
   const result = spawnSync(process.execPath, [CLI_ENTRY, ...args], {
     cwd,
     encoding: "utf8",

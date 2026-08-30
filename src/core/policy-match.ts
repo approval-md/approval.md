@@ -29,8 +29,11 @@
  *
  * A bare `*` pattern is a single-segment pattern whose only segment is a
  * wildcard, and it is not "trailing `.*`" — it matches any single-segment class
- * (`read`, `deploy`) and nothing deeper. `*.*` is what matches exactly two
- * segments, `*` followed by a trailing wildcard.
+ * (`read`, `deploy`) and nothing deeper. `*.*` is a wildcard followed by a
+ * trailing wildcard, so it matches any class of TWO OR MORE segments. (APRV-137
+ * corrects this line, which read "exactly two". The trailing `.*` consumes one
+ * or more, so `*.*` matches `a.b` and `a.b.c` alike. `matchesPattern` always
+ * behaved this way; only the comment was wrong.)
  *
  * ## Specificity (SPEC.md §5.2, Specificity bullet)
  *
