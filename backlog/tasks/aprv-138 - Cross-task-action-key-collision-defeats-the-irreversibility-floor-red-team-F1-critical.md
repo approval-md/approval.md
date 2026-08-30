@@ -3,10 +3,10 @@ id: APRV-138
 title: >-
   Cross-task action-key collision defeats the irreversibility floor (red-team
   F1, critical)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-25 13:40'
-updated_date: '2026-08-25 17:51'
+updated_date: '2026-08-29 06:59'
 labels:
   - security
   - gate
@@ -66,3 +66,9 @@ Deliberately out of scope (tracked as APRV-140 / F3): binding payload_hash on th
 
 Tests: 3 in tests/gate.test.ts (cross-task reuse incl. floor-flip refused; multi-action partial collision refused whole; distinct key under a different task still admitted) and 3 in tests/execute.test.ts (declaringTasks one-vs-many; startExecution refuses a collision-shadowed key; RESIDUAL F3 pin). Full suite 2035 pass / 0 fail; lint clean. Backward compat: committed .approval/log/events.jsonl has no cross-task key collisions, so neither lever rejects historical records and verify stays clean.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Cross-task action-key collision closed at both boundaries: register refuses a key already declared under a different task (task-already-registered, all-or-nothing for multi-action envelopes), and execution fails closed on a collision-shadowed key (declaringTasks ambiguity refuses action-not-registered; audit skips, adapter contract refuses; last-wins deleted). The reversible-flip floor bypass (red-team F1) is dead; the residual F3 hole was pinned and later closed by APRV-140. Landed on main as 3cd1925; SPEC 6.2 idempotency_key row amended and since ratified. Verified by the six dedicated tests, green in the 2035-suite at build time and still green in the 2304-suite on current main (2026-08-28).
+<!-- SECTION:FINAL_SUMMARY:END -->

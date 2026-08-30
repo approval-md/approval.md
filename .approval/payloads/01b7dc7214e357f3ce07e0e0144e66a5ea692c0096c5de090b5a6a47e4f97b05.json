@@ -1,0 +1,1 @@
+{"command":"git add SPEC.md && git commit -F - <<'MSGEOF'\nplaceholder\nMSGEOF","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/wf_49a904c5-d90-6"}

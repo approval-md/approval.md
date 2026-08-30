@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-127-autonomy && sed -n '131,133p' SPEC.md > /dev/null && sed -i '' '135,137d;130d' SPEC.md 2>/dev/null; grep -n \"^<<<<<<<\\|^=======$\\|^>>>>>>>\" SPEC.md | head -4","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/remote-control-f54e71"}

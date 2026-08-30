@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md/.claude/worktrees/aprv-127-autonomy && node /private/tmp/claude-501/-Users-carter-dev-approval-md--claude-worktrees-remote-control-f54e71/10cbc452-6e7a-412c-a7ec-ac248a3223b0/scratchpad/probe.mjs APPROVAL.md 2>&1 | head -40","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/remote-control-f54e71"}
