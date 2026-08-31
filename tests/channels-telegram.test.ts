@@ -71,7 +71,9 @@ import {
   groupForDigest,
   parseCallbackData,
   payloadShapeKey,
+  renderTelegram,
   PAYLOAD_CHUNK_LABEL_TAIL,
+  TELEGRAM_ANOMALY_MARK,
   TelegramChannel,
   TELEGRAM_DEFAULT_RETENTION_MS,
   TELEGRAM_DIGEST_MAX_MEMBERS,
@@ -94,6 +96,7 @@ import {
 } from "../src/cli/gloss.js";
 import type { Streams } from "../src/cli/main.js";
 import { appendAttestation } from "../src/core/attest.js";
+import type { BudgetVerdict } from "../src/core/budgets.js";
 import { register as registerCore, request as requestCore } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
 import { readVerifiedRecords } from "../src/core/state.js";
@@ -468,6 +471,171 @@ test("computed and claimed are separated, and the payload is sent verbatim", asy
   assert.ok(key.length > 0);
 });
 
+// ---------------------------------------------------------------------------
+// The computed block: what a healthy prompt shows, and what an unhealthy one
+// adds (APRV-163). `renderTelegram` is pure, so these render directly rather
+// than through the mock: the question is which rows exist, not how they ship.
+// ---------------------------------------------------------------------------
+
+/** The `field` of every computed row the renderer produced, in order. */
+function computedFields(request_: ChannelRequest): string[] {
+  return renderTelegram(request_)
+    .lines.filter((entry) => entry.kind === "computed")
+    .map((entry) => entry.field);
+}
+
+/** One live request, healthy: manual autonomy, budgets passing, policy attested. */
+function healthy(): ChannelRequest {
+  const [request_] = queueOf(live(1), at(2));
+  assert.ok(request_ !== undefined);
+  assert.equal(request_.autonomy.value, "manual");
+  assert.equal(request_.attestation.value.status, "attested");
+  assert.ok(
+    request_.budgets.value.every((verdict) => verdict.pass),
+    "the fixture request already fails a budget; the healthy baseline is not healthy",
+  );
+  return request_;
+}
+
+const FAILING_VERDICT: BudgetVerdict = {
+  limit: "daily_usd",
+  scope: "class",
+  window: "rolling-24h",
+  consumed: "9.99",
+  requested: "0.02",
+  remaining: "-0.01",
+  pass: false,
+};
+
+test("a healthy prompt carries only the rows that drive the decision", () => {
+  const request_ = healthy();
+  assert.deepEqual(
+    computedFields(request_),
+    ["class", "waiting"],
+    "the healthy computed block is not the decision-driving set",
+  );
+
+  // The six bookkeeping rows are gone from the message and still on the
+  // request, which is what keeps `--json`, `approval queue` and the web page
+  // whole while the phone screen shrinks.
+  const header = renderTelegram(request_).header;
+  for (const label of ["resolved by", "payload sha256", "requested", "chain", "task", "state"]) {
+    assert.equal(header.includes(`<b>${label}:</b>`), false, `the header still renders ${label}`);
+  }
+  for (const field of [
+    request_.provenance,
+    request_.payload_hash,
+    request_.requested_ts,
+    request_.chain,
+    request_.task,
+    request_.state,
+  ]) {
+    assert.equal(field.kind, "computed", "a dropped row lost its field on the request");
+  }
+});
+
+test("the commands and protected-path rows render under the class they explain", () => {
+  const request_: ChannelRequest = {
+    ...healthy(),
+    command_breakdown: computed("npm test — run the test suite", "classifier"),
+    protected_path: computed("APPROVAL.md", "policy"),
+  };
+  assert.deepEqual(computedFields(request_), [
+    "class",
+    "command_breakdown",
+    "protected_path",
+    "waiting",
+  ]);
+});
+
+test("budgets renders only when a verdict fails, and shouts when it does", () => {
+  const base = healthy();
+  const passing = { ...FAILING_VERDICT, remaining: "5", pass: true };
+
+  assert.equal(
+    computedFields({ ...base, budgets: computed([], "budgets") }).includes("budgets"),
+    false,
+    "a prompt with no limits still spent a row saying so",
+  );
+  assert.equal(
+    computedFields({ ...base, budgets: computed([passing], "budgets") }).includes("budgets"),
+    false,
+    "a passing budget still spent a row saying everything is fine",
+  );
+
+  const over = renderTelegram({
+    ...base,
+    budgets: computed([passing, FAILING_VERDICT], "budgets"),
+  });
+  assert.ok(over.lines.some((entry) => entry.field === "budgets"));
+  assert.ok(
+    over.header.includes(`<b>${TELEGRAM_ANOMALY_MARK}budgets:</b>`),
+    "the failing budget row carries no anomaly mark",
+  );
+  assert.ok(over.header.includes("EXCEEDED class.daily_usd"), over.header);
+});
+
+test("the policy row renders only when the attestation is anything but attested", () => {
+  const base = healthy();
+  assert.equal(computedFields(base).includes("attestation"), false);
+
+  const abnormal = [
+    { status: "not-attested" as const },
+    {
+      status: "hash-mismatch" as const,
+      attestedSha256: "a".repeat(64),
+      liveSha256: "b".repeat(64),
+      seq: 2,
+    },
+    { status: "unreadable" as const, message: "policy file is not YAML" },
+  ];
+  const shouts = ["NOT ATTESTED", "HASH MISMATCH", "UNREADABLE"];
+  for (const [index, status] of abnormal.entries()) {
+    const rendered = renderTelegram({ ...base, attestation: computed(status, "policy") });
+    assert.ok(
+      rendered.lines.some((entry) => entry.field === "attestation"),
+      `${status.status} did not render a policy row`,
+    );
+    assert.ok(
+      rendered.header.includes(`<b>${TELEGRAM_ANOMALY_MARK}policy:</b>`),
+      `${status.status} rendered without the anomaly mark`,
+    );
+    assert.ok(rendered.header.includes(shouts[index] as string), rendered.header);
+  }
+});
+
+test("autonomy renders only when the policy did not say manual", () => {
+  const base = healthy();
+  assert.equal(computedFields(base).includes("autonomy"), false);
+
+  for (const value of ["supervised", "autonomous"] as const) {
+    const rendered = renderTelegram({ ...base, autonomy: computed(value, "policy") });
+    assert.ok(
+      rendered.lines.some((entry) => entry.field === "autonomy"),
+      `${value} did not render an autonomy row`,
+    );
+    assert.ok(
+      rendered.header.includes(`<b>${TELEGRAM_ANOMALY_MARK}autonomy:</b> ${value}`),
+      rendered.header,
+    );
+  }
+});
+
+test("an attestation prompt still shows the diff and the loads it asks about", () => {
+  const rendered = renderTelegram({
+    ...healthy(),
+    policy_diff: computed("-autonomy: manual\n+autonomy: autonomous", "policy"),
+    policy_load: computed("2 rules load; 0 refused", "policy"),
+    attestation: computed({ status: "not-attested" }, "policy"),
+  });
+  assert.deepEqual(
+    rendered.lines.filter((entry) => entry.kind === "computed").map((entry) => entry.field),
+    ["class", "policy_diff", "policy_load", "attestation", "waiting"],
+  );
+  assert.ok(rendered.header.includes("<b>policy diff:</b>"), rendered.header);
+  assert.ok(rendered.header.includes("<b>policy loads:</b>"), rendered.header);
+});
+
 test("an email-shaped payload is rendered field by field, body as the human reads it", async () => {
   const world = live(1);
   const [request_] = queueOf(world, at(2));
@@ -512,11 +680,13 @@ test("an email-shaped payload is rendered field by field, body as the human read
   assert.equal(whole.includes(CANONICAL_JSON_HEADING), false, "the payload was shown twice");
   assert.ok(whole.includes(rawBytesLine(request_.payload_hash.value)), whole);
 
-  // And the binding line — the one computed thing in this region — is intact.
-  assert.match(
-    whole,
-    new RegExp(`payload sha256:</b> ${request_.payload_hash.value}`, "u"),
-    "the computed binding line changed",
+  // The binding is stated once, inside the canonical block (APRV-163): the
+  // header row that repeated it is gone, and the block's own line is the only
+  // place the sha256 has to be, because it is the block it binds.
+  assert.equal(
+    whole.includes(`payload sha256:</b> ${request_.payload_hash.value}`),
+    false,
+    "the header still carries a second copy of the binding",
   );
   // The canonical block states the binding itself, so the region carries no
   // second sha256 prefix above it.

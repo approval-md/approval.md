@@ -3,9 +3,10 @@ id: APRV-164
 title: >-
   Gloss covers file changes and emails: the model sentence for every legible
   payload kind
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-30 21:50'
+updated_date: '2026-08-31 01:17'
 labels: []
 dependencies:
   - APRV-162
@@ -27,3 +28,13 @@ The haiku gloss (APRV-144) is the one human-meaningful sentence in the prompt, b
 - [ ] #5 Every gloss failure mode (timeout, empty, oversized, spawn error) resolves to absence for the new kinds, verified by test with an injected runner that never spawns
 - [ ] #6 The withGloss comment retiring the commands-only rationale is updated
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Read src/cli/gloss.ts and withGloss in src/cli/channel-telegram.ts:850-878 plus gloss tests.
+2. Per-kind instructions (file edit, email) beside the command one; shared pipeline and bounds unchanged.
+3. withGloss derives kind via exported wysiwys view functions; opaque still bails; comment updated.
+4. Cap material handed to the subprocess (~4-8KB of the structural view), marked truncated in the model prompt.
+5. Tests with injected runner: per-kind instruction routing, claimed line renders for file-change/email, opaque absent, failures resolve to absence. npm test + lint.
+<!-- SECTION:PLAN:END -->

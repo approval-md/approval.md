@@ -476,6 +476,15 @@ function originOf(field: TaggedField<unknown>): string {
  */
 export const TELEGRAM_GLOSS_SUFFIX = "(model, unverified)";
 
+/**
+ * The prefix a health row carries when it is the reason to look (APRV-163).
+ *
+ * Only the abnormal state of `autonomy`, `budgets` and the attestation renders
+ * at all, so the mark is never routine: a row bearing it is a row the reader
+ * has not seen on the last twenty prompts.
+ */
+export const TELEGRAM_ANOMALY_MARK = "⚠ ";
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -593,37 +602,66 @@ export function renderTelegram(
         ]),
     // APRV-109. On an attestation prompt these two are the decision: a hash
     // alone would ask a human to sign for sixty-four characters. They sit above
-    // `autonomy` because they are what the approver reads, and they are absent
-    // on every ordinary request rather than rendered empty.
+    // the health rows because they are what the approver reads, and they are
+    // absent on every ordinary request rather than rendered empty.
     ...(request.policy_diff === undefined
       ? []
       : [line("policy_diff", request.policy_diff, "policy diff", request.policy_diff.value)]),
     ...(request.policy_load === undefined
       ? []
       : [line("policy_load", request.policy_load, "policy loads", request.policy_load.value)]),
-    line("autonomy", request.autonomy, "autonomy", request.autonomy.value),
-    line("provenance", request.provenance, "resolved by", request.provenance.value),
-    line("payload_hash", request.payload_hash, "payload sha256", request.payload_hash.value),
-    line("budgets", request.budgets, "budgets", budgetSummary(request)),
-    line("attestation", request.attestation, "policy", attestationSummary(request)),
-    line("requested_ts", request.requested_ts, "requested", request.requested_ts.value),
-    // APRV-106. Placed immediately after the raw timestamp, because it is the
-    // human-readable form of the same fact plus the one thing the raw
-    // timestamp does not say: whether an answer now still reaches anyone.
+    // APRV-163. Three health rows, rendered only when they are abnormal and
+    // shouted when they are. A row that says "everything is fine" on every
+    // ordinary request is a row a reader learns to skip, and the skipping does
+    // not stop on the one request where it says something else; the mark is the
+    // whole reason the line is worth spending at all.
+    ...(request.autonomy.value === "manual"
+      ? []
+      : [
+          line(
+            "autonomy",
+            request.autonomy,
+            `${TELEGRAM_ANOMALY_MARK}autonomy`,
+            request.autonomy.value,
+          ),
+        ]),
+    ...(request.budgets.value.every((verdict) => verdict.pass)
+      ? []
+      : [
+          line(
+            "budgets",
+            request.budgets,
+            `${TELEGRAM_ANOMALY_MARK}budgets`,
+            budgetSummary(request),
+          ),
+        ]),
+    ...(request.attestation.value.status === "attested"
+      ? []
+      : [
+          line(
+            "attestation",
+            request.attestation,
+            `${TELEGRAM_ANOMALY_MARK}policy`,
+            attestationSummary(request),
+          ),
+        ]),
+    // APRV-106. The one time row: the human-readable form of the request
+    // instant, plus the one thing the raw timestamp does not say, whether an
+    // answer now still reaches anyone.
     line("waiting", request.waiting, "waiting", request.waiting.value),
     // No `ttl` line (APRV-143). `expires 13:09 UTC` on the line above IS the
     // TTL, stated as the instant a reader acts on rather than as a duration
     // they would have to add to a timestamp; two renderings of one fact cost a
     // metadata row on a phone screen and buy nothing. `ttl_remaining_ms` stays
     // on the request, so `--json` and every other channel still carry it.
-    line(
-      "chain",
-      request.chain,
-      "chain",
-      `seq ${request.chain.value.seq} (head ${request.chain.value.head_seq})`,
-    ),
-    line("task", request.task, "task", request.task.value ?? "(none)"),
-    line("state", request.state, "state", request.state.value),
+    //
+    // No `resolved by`, `payload sha256`, `requested`, `chain`, `task` or
+    // `state` line either (APRV-163). Six bookkeeping rows on a phone screen
+    // push the class, the command and the deadline off it, and none of them
+    // changes an answer: `provenance`, `requested_ts`, `chain`, `task` and
+    // `state` all stay on the ChannelRequest, so `--json`, `approval queue` and
+    // the web page still show every one, and `payload_hash` is stated where it
+    // binds, on the `payload sha256:` line inside the canonical block below.
   ];
 
   const claimedLines: Line[] = [
