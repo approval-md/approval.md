@@ -110,7 +110,7 @@ import { UP_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
 import { DEFAULT_QUEUE_PATH } from "./render.js";
-import { refusal as renderRefusal, style } from "./style.js";
+import { skipNotice, style, type Style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
 // ---------------------------------------------------------------------------
@@ -165,8 +165,16 @@ export const UP_RESTART_MAX_MS = 60_000;
  */
 export const UP_STABLE_MS = 60_000;
 
-/** One supervision line as a human sentence, and where it belongs. */
-export function describeUpEvent(event: UpEvent): { text: string; stderr: boolean } {
+/**
+ * One supervision line as a human sentence, and where it belongs.
+ *
+ * `st` is injectable for the render tests, exactly as doctor's renderer takes
+ * one; the default asks the process, which is what the verb wants.
+ */
+export function describeUpEvent(
+  event: UpEvent,
+  st: Style = style(),
+): { text: string; stderr: boolean } {
   switch (event.event) {
     case "up_started":
       return {
@@ -176,10 +184,10 @@ export function describeUpEvent(event: UpEvent): { text: string; stderr: boolean
     case "part_started":
       return { text: `up: ${event.part} started — ${event.detail}`, stderr: false };
     case "part_unavailable":
+      // Doctor's skip, not a refusal: the part is absent by configuration, and
+      // nothing failed (APRV-153). The JSON emit path is untouched.
       return {
-        text: `${renderRefusal(style(), `${event.part}-unavailable`, event.detail)}${
-          event.fix === null ? "" : `\n  fix: ${event.fix}`
-        }`,
+        text: skipNotice(st, event.check, event.detail, event.fix ?? undefined),
         stderr: true,
       };
     case "part_failed":
@@ -446,7 +454,7 @@ export function commandUp(
         status: "skip",
         detail:
           "this policy declares no channels.web.port, so no queue page is served — which is a legitimate configuration and not a fault",
-        fix: "approval policy amend — add channels.web.port to APPROVAL.md (an edited policy is inoperative until it is re-attested), or pass --port <n>",
+        fix: "pass --port <n> to serve it for this run, or add channels.web.port to APPROVAL.md via approval policy amend (an edited policy is inoperative until it is re-attested)",
       });
     } else if (webActor === null) {
       unavailable.push({

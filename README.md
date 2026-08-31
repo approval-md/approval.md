@@ -603,7 +603,7 @@ Checks come in three tiers.
 | --- | --- | --- |
 | light | `README.md`, `docs/**/*.md`, `examples/**/*.md` | the documentation guard (`tests/docs-guard.test.ts`) |
 | records | `backlog/**`, `MILESTONES.md` | the tests that read records (`milestones-guard`, `backlog-fixtures`, `docs-guard`), on Node 20 |
-| full | anything else, or a mix of the above | the whole suite in three shards plus `npm run lint`, on Node 22; the Node 20 floor runs unsharded on the merge queue and on pushes to `main` |
+| full | anything else, or a mix of the above | the whole suite in three shards plus `npm run lint`, on Node 22; the Node 20 floor runs the same three shards on the merge queue and on pushes to `main` |
 
 A denylist forces the full tier regardless of file extension: `APPROVAL.md`,
 `CLAUDE.md`, `.claude/**`, `SPEC.md`, `schema/**`, `**/fixtures/**`,
@@ -634,7 +634,9 @@ exactly one shard, and the matrix covers all of them. An out-of-range index, an
 empty shard, and `--shard` combined with `--only` are refused rather than run.
 The Node 20 floor moved to the merge queue and to pushes to `main` because the
 queue candidate is what stands between a change and the branch, and a pull
-request now gets its verdict from the shards alone.
+request now gets its verdict from the shards alone. The floor leg is sharded
+three ways too, so it proves the same whole suite in roughly a third of the
+wall clock it took as one run.
 
 ## Exit codes
 

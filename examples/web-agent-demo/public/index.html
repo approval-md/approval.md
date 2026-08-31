@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>approval.md — live gate</title>
+    <!--
+      Self-contained on purpose: no CDN, no external font, no analytics. The page
+      reads GET /api/state, /api/templates and /api/task/:id, and POSTs to exactly
+      one route, /api/task, which submits a task for the gated agent to attempt.
+      There is no endpoint here that decides anything.
+    -->
+    <style>
+      :root {
+        --bg: #0b0d10;
+        --panel: #14181d;
+        --line: #262d35;
+        --ink: #e8edf2;
+        --muted: #8a97a5;
+        --ok: #3ddc84;
+        --bad: #ff5f57;
+        --warn: #ffbd2e;
+        --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+        padding: 28px clamp(16px, 4vw, 48px) 64px;
+      }
+      header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 16px; margin-bottom: 8px; }
+      h1 { font-size: clamp(28px, 4vw, 44px); margin: 0; letter-spacing: -0.02em; }
+      h1 span { color: var(--muted); font-weight: 400; }
+      h2 {
+        font-size: clamp(18px, 2vw, 24px);
+        margin: 0 0 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+      }
+      .sub { color: var(--muted); font-family: var(--mono); font-size: 14px; }
+      section { margin-top: 32px; }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 18px 20px;
+      }
+      /* ---- verify badge ---- */
+      #badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 14px;
+        border-radius: 999px;
+        padding: 14px 26px;
+        font-size: clamp(20px, 2.4vw, 30px);
+        font-weight: 600;
+        border: 2px solid var(--muted);
+        color: var(--muted);
+      }
+      #badge.ok { border-color: var(--ok); color: var(--ok); }
+      #badge.bad { border-color: var(--bad); color: var(--bad); }
+      #badge .dot { width: 14px; height: 14px; border-radius: 50%; background: currentColor; }
+      #badge .detail { font-family: var(--mono); font-size: 15px; font-weight: 400; opacity: 0.85; }
+      /* ---- tables / lists ---- */
+      table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 15px; }
+      th {
+        text-align: left;
+        color: var(--muted);
+        font-weight: 500;
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        padding: 0 14px 8px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      td { padding: 9px 14px 9px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+      tr:last-child td { border-bottom: none; }
+      .wrap { overflow-x: auto; }
+      .empty { color: var(--muted); font-family: var(--mono); }
+      .err { color: var(--bad); font-family: var(--mono); font-size: 14px; }
+      .key { color: var(--ink); }
+      .cls { color: var(--warn); }
+      .seq { color: var(--muted); }
+      .actor-human { color: var(--ok); }
+      .actor-agent { color: #7cc4ff; }
+      .ttl { color: var(--warn); }
+      .ttl.gone { color: var(--bad); }
+      /* ---- task desk ---- */
+      .templates { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+      .tpl {
+        font: inherit;
+        font-family: var(--mono);
+        font-size: 14px;
+        text-align: left;
+        background: #0f1216;
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 14px;
+        cursor: pointer;
+        max-width: 300px;
+      }
+      .tpl:hover { border-color: var(--muted); }
+      .tpl:disabled { opacity: 0.5; cursor: default; }
+      .tpl .cls { display: block; font-size: 12px; margin-top: 4px; }
+      .tpl .blurb { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+      .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+      #task-input, #task-send {
+        font: inherit;
+        font-family: var(--mono);
+        background: #0f1216;
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px 16px;
+      }
+      #task-input { width: min(560px, 100%); }
+      #task-send { cursor: pointer; }
+      #task-send:disabled { opacity: 0.5; cursor: default; }
+      #task-note { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+      #task-note.bad { color: var(--bad); }
+      .feed { margin-top: 18px; }
+      .feed .line {
+        font-family: var(--mono);
+        font-size: 14px;
+        padding: 8px 0 8px 14px;
+        border-left: 2px solid var(--line);
+      }
+      .feed .line.text { border-left-color: var(--muted); white-space: pre-wrap; }
+      .feed .line.tool_use { border-left-color: #7cc4ff; color: #7cc4ff; }
+      .feed .line.tool_use.gate { border-left-color: var(--warn); color: var(--warn); }
+      .feed .line.tool_result { border-left-color: var(--line); color: var(--muted); }
+      .feed .line.tool_result.err { border-left-color: var(--bad); color: var(--bad); }
+      .feed .line.result { border-left-color: var(--ok); color: var(--ok); white-space: pre-wrap; }
+      .feed .line.result.err { border-left-color: var(--bad); color: var(--bad); }
+      .feed .line.system, .feed .line.raw { border-left-color: var(--line); color: var(--muted); }
+      .waiting {
+        margin-top: 14px;
+        border: 1px solid var(--warn);
+        border-radius: 8px;
+        padding: 12px 16px;
+        color: var(--warn);
+        font-family: var(--mono);
+      }
+      .pill {
+        display: inline-block;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 3px 12px;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--muted);
+        margin-left: 10px;
+        vertical-align: middle;
+      }
+      footer { margin-top: 44px; color: var(--muted); font-family: var(--mono); font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>approval<span>.md</span></h1>
+      <div class="sub" id="meta">connecting…</div>
+    </header>
+
+    <section>
+      <div id="badge"><span class="dot"></span><span id="badge-text">checking…</span
+        ><span class="detail" id="badge-detail"></span></div>
+    </section>
+
+    <section>
+      <h2>Awaiting a human</h2>
+      <div class="panel wrap" id="queue-panel"><div class="empty">loading…</div></div>
+    </section>
+
+    <section>
+      <h2>The log</h2>
+      <div class="panel wrap" id="tail-panel"><div class="empty">loading…</div></div>
+    </section>
+
+    <section>
+      <h2>Give the agent a task</h2>
+      <div class="panel">
+        <p class="empty" style="margin-top: 0">
+          Pick one, or type your own. The agent runs behind this gate: its only way to
+          touch the world is to ask, and a person decides on their phone. Submitting a
+          task decides nothing — this page still holds no authority either way.
+        </p>
+        <div class="templates" id="templates"></div>
+        <div class="row">
+          <input
+            id="task-input"
+            type="text"
+            maxlength="500"
+            placeholder="e.g. what is waiting for approval right now?"
+          />
+          <button id="task-send" type="button">Send</button>
+          <span id="task-chars" class="empty">500 left</span>
+        </div>
+        <div id="task-note"></div>
+        <div id="task-view"></div>
+      </div>
+    </section>
+
+    <footer>
+      You can ask the agent for things here. You cannot approve anything here: decisions
+      happen on the approver's own channel, and this page has no route to one.
+    </footer>
+
+    <script>
+      const POLL_MS = 2500;
+
+      const el = (id) => document.getElementById(id);
+      const esc = (value) =>
+        String(value ?? "").replace(
+          /[&<>"']/g,
+          (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch],
+        );
+
+      function mmss(ms) {
+        if (ms === null || ms === undefined) return "no TTL";
+        if (ms <= 0) return "lapsed";
+        const total = Math.floor(ms / 1000);
+        const h = Math.floor(total / 3600);
+        const m = Math.floor((total % 3600) / 60);
+        const s = total % 60;
+        const mmss = `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+        // mm:ss, with an hours field only when a policy's TTL is long enough to
+        // need one (the canonical policy's is 24h, which as "1439:37" reads as
+        // a typo rather than a day).
+        return h === 0 ? mmss : `${h}:${mmss}`;
+      }
+
+      function renderBadge(verify) {
+        const badge = el("badge");
+        const text = el("badge-text");
+        const detail = el("badge-detail");
+        badge.classList.remove("ok", "bad");
+        if (!verify || verify.error) {
+          badge.classList.add("bad");
+          text.textContent = "chain unverified";
+          detail.textContent = verify && verify.error ? verify.error : "no answer";
+          return;
+        }
+        // Green ONLY on "clean". Anything else — torn-tail, corrupt, an
+        // unexpected shape — is red, because a badge that hedges is worse
+        // than no badge.
+        const clean = verify.status === "clean";
+        badge.classList.add(clean ? "ok" : "bad");
+        text.textContent = clean ? "chain verified" : "chain NOT verified";
+        const records = verify.records === null || verify.records === undefined ? "?" : verify.records;
+        detail.textContent = `status: ${verify.status ?? "unknown"} · ${records} record(s)`;
+      }
+
+      function renderQueue(queue) {
+        const panel = el("queue-panel");
+        if (!queue || queue.error) {
+          panel.innerHTML = `<div class="err">queue: ${esc(queue ? queue.error : "no answer")}</div>`;
+          return;
+        }
+        const pending = Array.isArray(queue.pending) ? queue.pending : [];
+        if (pending.length === 0) {
+          panel.innerHTML = '<div class="empty">nothing pending — the inbox is empty</div>';
+          return;
+        }
+        const rows = pending
+          .map((item) => {
+            const left = item.ttl_remaining_ms;
+            const gone = typeof left === "number" && left <= 0;
+            return `<tr>
+              <td class="key">${esc(item.action_key)}</td>
+              <td class="cls">${esc(item.class)}</td>
+              <td>${esc(item.task)}</td>
+              <td>${esc(item.est_cost_usd ?? "")}</td>
+              <td class="ttl${gone ? " gone" : ""}">${esc(mmss(left))}</td>
+            </tr>`;
+          })
+          .join("");
+        panel.innerHTML = `<table>
+          <thead><tr><th>action</th><th>class</th><th>task</th><th>cost</th><th>ttl</th></tr></thead>
+          <tbody>${rows}</tbody></table>`;
+      }
+
+      function actorClass(actor) {
+        if (typeof actor !== "string") return "";
+        if (actor.startsWith("human:")) return "actor-human";
+        if (actor.startsWith("agent:")) return "actor-agent";
+        return "";
+      }
+
+      function renderTail(tail) {
+        const panel = el("tail-panel");
+        if (!tail || tail.error) {
+          panel.innerHTML = `<div class="err">log tail: ${esc(tail ? tail.error : "no answer")}</div>`;
+          return;
+        }
+        const records = Array.isArray(tail.records) ? tail.records : [];
+        if (records.length === 0) {
+          panel.innerHTML = '<div class="empty">no records yet — nothing has happened</div>';
+          return;
+        }
+        // Newest first: `log tail` returns oldest-first.
+        const rows = records
+          .slice()
+          .reverse()
+          .map(
+            (r) => `<tr>
+              <td class="seq">${esc(r.seq)}</td>
+              <td>${esc(r.event)}</td>
+              <td class="${actorClass(r.actor)}">${esc(r.actor)}</td>
+              <td class="key">${esc(r.action_key ?? r.task ?? "")}</td>
+              <td class="seq">${esc(String(r.ts ?? "").replace("T", " ").replace("Z", ""))}</td>
+            </tr>`,
+          )
+          .join("");
+        const warn =
+          tail.status && tail.status !== "ok"
+            ? `<div class="err">status: ${esc(tail.status)}</div>`
+            : "";
+        panel.innerHTML = `${warn}<table>
+          <thead><tr><th>seq</th><th>event</th><th>actor</th><th>action / task</th><th>when</th></tr></thead>
+          <tbody>${rows}</tbody></table>`;
+      }
+
+      function renderMeta(state) {
+        const healthy = state.status && state.status.healthy;
+        const when = new Date(state.fetched_at_ms || Date.now()).toLocaleTimeString();
+        const attest =
+          state.status && state.status.attestation ? state.status.attestation.state : "unknown";
+        el("meta").textContent = `policy: ${attest} · health: ${
+          healthy === undefined ? "?" : healthy ? "ok" : "attention"
+        } · read ${when}`;
+      }
+
+      async function poll() {
+        try {
+          const response = await fetch("/api/state", { cache: "no-store" });
+          const state = await response.json();
+          renderBadge(state.log_verify);
+          renderQueue(state.queue);
+          renderTail(state.log_tail);
+          renderMeta(state);
+        } catch (error) {
+          el("meta").textContent = `server unreachable (${error})`;
+        }
+      }
+
+      poll();
+      setInterval(poll, POLL_MS);
+
+      // ---- the task desk -------------------------------------------------
+      // Three endpoints: GET /api/templates once, POST /api/task on submit,
+      // GET /api/task/:id every TASK_POLL_MS while a run is in flight.
+
+      const TASK_POLL_MS = 2000;
+      const TEXT_MAX = 500;
+      let currentTaskId = null;
+      let taskTimer = null;
+
+      function note(message, bad) {
+        const box = el("task-note");
+        box.textContent = message;
+        box.classList.toggle("bad", bad === true);
+      }
+
+      function setBusy(busy) {
+        el("task-send").disabled = busy;
+        for (const button of document.querySelectorAll(".tpl")) button.disabled = busy;
+      }
+
+      async function loadTemplates() {
+        try {
+          const response = await fetch("/api/templates", { cache: "no-store" });
+          const data = await response.json();
+          el("templates").innerHTML = (data.templates || [])
+            .map(
+              (t) => `<button class="tpl" type="button" data-id="${esc(t.id)}">
+                ${esc(t.label)}
+                ${t.class ? `<span class="cls">${esc(t.class)}</span>` : ""}
+                <span class="blurb">${esc(t.blurb)}</span>
+              </button>`,
+            )
+            .join("");
+          for (const button of document.querySelectorAll(".tpl")) {
+            button.addEventListener("click", () => submit({ template_id: button.dataset.id }));
+          }
+        } catch (error) {
+          note(`templates unavailable (${error})`, true);
+        }
+      }
+
+      async function submit(body) {
+        setBusy(true);
+        note("submitting…", false);
+        try {
+          const response = await fetch("/api/task", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            note(data.error || `refused (${response.status})`, true);
+            setBusy(false);
+            return;
+          }
+          currentTaskId = data.id;
+          note(
+            data.state === "queued" && data.position > 1
+              ? `queued — position ${data.position} of ${data.queue_max}`
+              : "accepted — the agent is starting",
+            false,
+          );
+          el("task-input").value = "";
+          countChars();
+          pollTask();
+        } catch (error) {
+          note(`could not submit (${error})`, true);
+          setBusy(false);
+        }
+      }
+
+      function renderFeed(task) {
+        const entries = Array.isArray(task.entries) ? task.entries : [];
+        const lines = entries
+          .map((entry) => {
+            const classes = [
+              "line",
+              entry.kind,
+              entry.gate ? "gate" : "",
+              entry.is_error ? "err" : "",
+            ]
+              .filter(Boolean)
+              .join(" ");
+            const prefix =
+              entry.kind === "tool_use"
+                ? entry.gate
+                  ? "→ gate "
+                  : "→ "
+                : entry.kind === "tool_result"
+                  ? "← "
+                  : "";
+            return `<div class="${classes}">${esc(prefix)}${esc(entry.text)}</div>`;
+          })
+          .join("");
+        const waiting = task.awaiting_approval
+          ? '<div class="waiting">⏳ waiting for human approval — the request is on a phone, and the agent is doing nothing until it is answered</div>'
+          : "";
+        const head = `<div class="empty" style="margin-top:18px">
+          ${esc(task.id)} · ${esc(task.label)}${task.class ? ` · ${esc(task.class)}` : ""} · ${esc(task.state)}${
+            task.state === "queued" && task.position ? ` (position ${esc(task.position)})` : ""
+          }${task.note ? ` · ${esc(task.note)}` : ""}
+        </div>`;
+        el("task-view").innerHTML = `${head}${waiting}<div class="feed">${
+          lines || '<div class="line system">no output yet…</div>'
+        }</div>`;
+      }
+
+      async function pollTask() {
+        if (currentTaskId === null) return;
+        try {
+          const response = await fetch(`/api/task/${encodeURIComponent(currentTaskId)}`, {
+            cache: "no-store",
+          });
+          if (!response.ok) {
+            note("that task is no longer being kept", true);
+            currentTaskId = null;
+            setBusy(false);
+            return;
+          }
+          const task = await response.json();
+          renderFeed(task);
+          const live = task.state === "queued" || task.state === "running";
+          setBusy(live);
+          if (live) {
+            clearTimeout(taskTimer);
+            taskTimer = setTimeout(pollTask, TASK_POLL_MS);
+          } else {
+            note(
+              task.state === "done" ? "the run finished" : `the run failed${task.note ? `: ${task.note}` : ""}`,
+              task.state !== "done",
+            );
+          }
+        } catch (error) {
+          note(`transcript unavailable (${error})`, true);
+          setBusy(false);
+        }
+      }
+
+      function countChars() {
+        const left = TEXT_MAX - el("task-input").value.length;
+        el("task-chars").textContent = `${left} left`;
+      }
+
+      el("task-input").addEventListener("input", countChars);
+      el("task-input").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") el("task-send").click();
+      });
+      el("task-send").addEventListener("click", () => {
+        const text = el("task-input").value.trim();
+        if (text === "") {
+          note("type something first", true);
+          return;
+        }
+        submit({ text });
+      });
+
+      loadTemplates();
+      countChars();
+    </script>
+  </body>
+</html>

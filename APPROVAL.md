@@ -19,6 +19,9 @@ defaults:
   channel: telegram        # cli remains a fallback per approvers
   approval_ttl: 24h
   on_expiry: reject
+  token_delivery: sealed   # APRV-166: grant seals to the requester's ephemeral
+                           # key; the channel never carries a usable token and
+                           # no human relays one (was: manual)
 
 approvers:
   carter:
