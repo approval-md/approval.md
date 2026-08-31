@@ -457,6 +457,22 @@ test("a file-tool payload names its target, and keeps the hook's tier word", () 
     ),
   );
   assertClean(proposal.unit);
+
+  // APRV-161: the third tier travels the same way. A file merely NAMED like a
+  // policy file is still gated, and the line has to say which of the three it
+  // is or the approver reads a scratchpad edit as an edit of the live policy.
+  const elsewhere = edit({
+    tool: "Edit",
+    rule: "protected-name-elsewhere",
+    file: "/scratch/demo/APPROVAL.md",
+    before: "a",
+    after: "b",
+  });
+  assert.deepEqual(
+    protectedPathOf(elsewhere),
+    computed("/scratch/demo/APPROVAL.md (rule protected-name-elsewhere)", "classifier"),
+  );
+  assertClean(elsewhere.unit);
 });
 
 test("a rule name the payload invents does not reach the line", () => {

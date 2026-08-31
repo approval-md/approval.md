@@ -193,10 +193,18 @@ function assertFullPayloadPresented(request: ChannelRequest, rendered: RenderedR
     rendered.fullPayloadText !== null,
     `the channel rendered no full payload for manual action ${request.action_key.value} (SPEC.md §10.4)`,
   );
-  assert.ok(
-    (rendered.fullPayloadText ?? "").includes(rendering.text),
-    "the channel's full-payload region does not contain the payload text it was given",
-  );
+  // A TRUNCATED rendering gets no canonical block (APRV-119), so the raw JSON
+  // it carries is the only thing the region can be checked against. For a whole
+  // payload the requirement is the canonical text below, and the raw JSON is
+  // not expected to appear at all: under `approval.md/wysiwys/2` a structured
+  // kind's view IS the rendering, and repeating the JSON beneath it would be
+  // the second reading APRV-162 removed.
+  if (rendering.truncated) {
+    assert.ok(
+      (rendered.fullPayloadText ?? "").includes(rendering.text),
+      "the channel's full-payload region does not contain the truncated payload text it was given",
+    );
+  }
 
   // APRV-119 (WYSIWYS). The region carries the CANONICAL rendering, verbatim:
   // the one text `core/wysiwys.ts` derives from the bound bytes and the class,

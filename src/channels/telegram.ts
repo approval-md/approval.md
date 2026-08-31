@@ -233,6 +233,31 @@ export const TELEGRAM_REJECT_NOTE = "rejected via telegram";
 export const TELEGRAM_PROMPT_HEADING = "APPROVAL REQUIRED";
 
 /**
+ * What the label over the payload chunks names (APRV-162).
+ *
+ * The chunks carry the canonical rendering, which is a deterministic function
+ * of the bytes and not the bytes themselves; calling it "the exact bytes" told
+ * the reader that a diff view and a JSON file were the same object. The
+ * rendering names its own `display_hash`, and the store path inside it is the
+ * route back to the bytes.
+ */
+export const PAYLOAD_CHUNK_LABEL_TAIL =
+  "the canonical rendering this approval's display_hash names; raw bytes at the store path inside";
+export const PAYLOAD_CHUNK_LABEL = `PAYLOAD — ${PAYLOAD_CHUNK_LABEL_TAIL}`;
+
+/**
+ * What the claimed block is headed, and what a second claimed message is headed
+ * when a rationale overflows one (APRV-165).
+ *
+ * Both say CLAIMED and both say NOT verified, because a continuation is a
+ * message a reader may see first, and a claimed line that arrives under no
+ * heading at all reads as the runtime's own.
+ */
+export const TELEGRAM_CLAIMED_HEADING_PREFIX = "WHAT THIS DOES — CLAIMED by";
+export const TELEGRAM_CLAIMED_HEADING_SUFFIX = "NOT verified by the runtime";
+export const TELEGRAM_CLAIMED_CONTINUED_HEADING = `WHAT THIS DOES (continued) — CLAIMED, ${TELEGRAM_CLAIMED_HEADING_SUFFIX}`;
+
+/**
  * The most members one digest may carry (APRV-115).
  *
  * Not a rendering limit — {@link renderDigest} checks the real one against
@@ -252,7 +277,7 @@ export const TELEGRAM_DIGEST_MAX_MEMBERS = 8;
  *
  * Glyphs, not emoji: `✓`/`✗` are the vocabulary `cli/style.ts` uses for the
  * same ok/fail distinction, and every line of *message text* this channel
- * writes ("APPROVAL REQUIRED", "FULL PAYLOAD", "WITHDRAWN") is emoji-free. The
+ * writes ("APPROVAL REQUIRED", "PAYLOAD", "WITHDRAWN") is emoji-free. The
  * emoji live on the button labels, which are a different surface and stay as
  * they are. `withdrawn` keeps the exact wording APRV-106 shipped.
  */
@@ -463,6 +488,15 @@ function originOf(field: TaggedField<unknown>): string {
  */
 export const TELEGRAM_GLOSS_SUFFIX = "(model, unverified)";
 
+/**
+ * The prefix a health row carries when it is the reason to look (APRV-163).
+ *
+ * Only the abnormal state of `autonomy`, `budgets` and the attestation renders
+ * at all, so the mark is never routine: a row bearing it is a row the reader
+ * has not seen on the last twenty prompts.
+ */
+export const TELEGRAM_ANOMALY_MARK = "⚠ ";
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -498,10 +532,26 @@ function line(
 export interface TelegramRendering {
   /** Every line, in the order it appears, tagged as the request tagged it. */
   lines: Line[];
-  /** The header segment: heading, computed block, claimed block. */
+  /** The header segment: heading, action key, computed block. */
   header: string;
   /** The payload region, verbatim, or `null` when the request carries none. */
   payloadText: string | null;
+  /**
+   * The claimed segment, sent LAST so it sits beside the buttons (APRV-165).
+   *
+   * The claimed lines are what the act means to a human — what this sends, to
+   * whom, why — and the approver decides on that, so it is the thing the thumb
+   * should be next to rather than the metadata above it. SPEC §10.3 permits
+   * claimed material around the canonical block on the condition this keeps:
+   * visibly separated, and headed by a label that names the claiming party and
+   * says the runtime did not check them.
+   *
+   * Never empty. A request with no gloss, no summary and no rationale still
+   * gets this message, because an absent description of the act is itself
+   * something the approver has to see, and because the keyboard needs one
+   * message that is always there to ride on.
+   */
+  claimedText: string;
 }
 
 function budgetSummary(request: ChannelRequest): string {
@@ -580,37 +630,66 @@ export function renderTelegram(
         ]),
     // APRV-109. On an attestation prompt these two are the decision: a hash
     // alone would ask a human to sign for sixty-four characters. They sit above
-    // `autonomy` because they are what the approver reads, and they are absent
-    // on every ordinary request rather than rendered empty.
+    // the health rows because they are what the approver reads, and they are
+    // absent on every ordinary request rather than rendered empty.
     ...(request.policy_diff === undefined
       ? []
       : [line("policy_diff", request.policy_diff, "policy diff", request.policy_diff.value)]),
     ...(request.policy_load === undefined
       ? []
       : [line("policy_load", request.policy_load, "policy loads", request.policy_load.value)]),
-    line("autonomy", request.autonomy, "autonomy", request.autonomy.value),
-    line("provenance", request.provenance, "resolved by", request.provenance.value),
-    line("payload_hash", request.payload_hash, "payload sha256", request.payload_hash.value),
-    line("budgets", request.budgets, "budgets", budgetSummary(request)),
-    line("attestation", request.attestation, "policy", attestationSummary(request)),
-    line("requested_ts", request.requested_ts, "requested", request.requested_ts.value),
-    // APRV-106. Placed immediately after the raw timestamp, because it is the
-    // human-readable form of the same fact plus the one thing the raw
-    // timestamp does not say: whether an answer now still reaches anyone.
+    // APRV-163. Three health rows, rendered only when they are abnormal and
+    // shouted when they are. A row that says "everything is fine" on every
+    // ordinary request is a row a reader learns to skip, and the skipping does
+    // not stop on the one request where it says something else; the mark is the
+    // whole reason the line is worth spending at all.
+    ...(request.autonomy.value === "manual"
+      ? []
+      : [
+          line(
+            "autonomy",
+            request.autonomy,
+            `${TELEGRAM_ANOMALY_MARK}autonomy`,
+            request.autonomy.value,
+          ),
+        ]),
+    ...(request.budgets.value.every((verdict) => verdict.pass)
+      ? []
+      : [
+          line(
+            "budgets",
+            request.budgets,
+            `${TELEGRAM_ANOMALY_MARK}budgets`,
+            budgetSummary(request),
+          ),
+        ]),
+    ...(request.attestation.value.status === "attested"
+      ? []
+      : [
+          line(
+            "attestation",
+            request.attestation,
+            `${TELEGRAM_ANOMALY_MARK}policy`,
+            attestationSummary(request),
+          ),
+        ]),
+    // APRV-106. The one time row: the human-readable form of the request
+    // instant, plus the one thing the raw timestamp does not say, whether an
+    // answer now still reaches anyone.
     line("waiting", request.waiting, "waiting", request.waiting.value),
     // No `ttl` line (APRV-143). `expires 13:09 UTC` on the line above IS the
     // TTL, stated as the instant a reader acts on rather than as a duration
     // they would have to add to a timestamp; two renderings of one fact cost a
     // metadata row on a phone screen and buy nothing. `ttl_remaining_ms` stays
     // on the request, so `--json` and every other channel still carry it.
-    line(
-      "chain",
-      request.chain,
-      "chain",
-      `seq ${request.chain.value.seq} (head ${request.chain.value.head_seq})`,
-    ),
-    line("task", request.task, "task", request.task.value ?? "(none)"),
-    line("state", request.state, "state", request.state.value),
+    //
+    // No `resolved by`, `payload sha256`, `requested`, `chain`, `task` or
+    // `state` line either (APRV-163). Six bookkeeping rows on a phone screen
+    // push the class, the command and the deadline off it, and none of them
+    // changes an answer: `provenance`, `requested_ts`, `chain`, `task` and
+    // `state` all stay on the ChannelRequest, so `--json`, `approval queue` and
+    // the web page still show every one, and `payload_hash` is stated where it
+    // binds, on the `payload sha256:` line inside the canonical block below.
   ];
 
   const claimedLines: Line[] = [
@@ -657,18 +736,29 @@ export function renderTelegram(
     "",
     "<b>COMPUTED — derived by the runtime from the log, the policy and the payload bytes</b>",
     ...computedLines.map(render),
-    "",
-    `<b>CLAIMED — authored by ${escapeHtml(author)}, NOT verified by the runtime</b>`,
+  ].join("\n");
+
+  const claimedText = [
+    `<b>${TELEGRAM_CLAIMED_HEADING_PREFIX} ${escapeHtml(author)}, ${TELEGRAM_CLAIMED_HEADING_SUFFIX}</b>`,
     ...claimedLines.map(render),
   ].join("\n");
 
   return {
+    // Computed first, then claimed, whatever order the messages go out in:
+    // `lines` is the conformance suite's view of what was rendered, and the
+    // two-kind split it checks is a property of the fields, not of the layout.
     lines: [...computedLines, ...claimedLines],
     header,
+    claimedText,
+    // A whole payload needs no prefix: the canonical block states its own
+    // renderer, class, kind and `payload sha256` in its first lines, and a
+    // second sha256 above it is one more line between the reader and the
+    // action. A TRUNCATED rendering has no canonical block to say any of that,
+    // so it gets a prefix worded as what it is: a refusal.
     payloadText:
       payload === null
         ? null
-        : `--- full payload (sha256 ${payload.hash}${payload.truncated ? ", TRUNCATED" : ""}) ---\n${payloadRegionText(payload, request.class.value)}`,
+        : `${payload.truncated ? `--- payload TRUNCATED at render (sha256 ${payload.hash}) — no canonical rendering exists; do not grant on this ---\n` : ""}${payloadRegionText(payload, request.class.value)}`,
   };
 }
 
@@ -694,6 +784,54 @@ export function chunkForTelegram(text: string, budget: number = SEGMENT_BUDGET):
     }
     current += character;
     cost += size;
+  }
+  if (current.length > 0 || chunks.length === 0) chunks.push(current);
+  return chunks;
+}
+
+/**
+ * Split an already-marked-up segment so every chunk is valid HTML on its own.
+ *
+ * {@link chunkForTelegram} may cut anywhere because its caller escapes each
+ * chunk and wraps it in `<pre>`; the claimed segment carries markup, so a cut
+ * inside `<b>` or inside `&amp;` would reach Telegram as a parse error, and a
+ * cut between an opening tag and its close would reach it as unbalanced HTML.
+ * Tags and entities are therefore atomic here, and the break is taken at the
+ * last line boundary in the chunk when there is one, which keeps each bullet
+ * whole and balanced. A bullet longer than the budget on its own (a rationale
+ * is unbounded agent text) splits inside its text, between tags, never within
+ * one — and it splits rather than being shortened, for the same reason a
+ * payload does.
+ */
+export function chunkClaimedForTelegram(text: string, budget: number = SEGMENT_BUDGET): string[] {
+  /** One line, as pieces no longer than the budget, cut between atoms only. */
+  const pieces = (input: string): string[] => {
+    if (input.length <= budget) return [input];
+    const out: string[] = [];
+    let piece = "";
+    for (const atom of input.match(/<[^>]*>|&[^;\s]*;|[\s\S]/gu) ?? []) {
+      if (piece.length + atom.length > budget && piece.length > 0) {
+        out.push(piece);
+        piece = "";
+      }
+      piece += atom;
+    }
+    if (piece.length > 0) out.push(piece);
+    return out;
+  };
+
+  const chunks: string[] = [];
+  let current = "";
+  for (const linePieces of text.split("\n").map(pieces)) {
+    for (const piece of linePieces) {
+      const candidate = current.length === 0 ? piece : `${current}\n${piece}`;
+      if (candidate.length > budget) {
+        if (current.length > 0) chunks.push(current);
+        current = piece;
+      } else {
+        current = candidate;
+      }
+    }
   }
   if (current.length > 0 || chunks.length === 0) chunks.push(current);
   return chunks;
@@ -1333,8 +1471,17 @@ export class TelegramChannel implements TestableChannel {
   }
 
   /**
-   * Send one request's messages: the header, then the payload chunks, with
-   * `keyboard` (when there is one) on the last.
+   * Send one request's messages: the computed header, the payload chunks, then
+   * the claimed block, with `keyboard` (when there is one) on the last.
+   *
+   * The claimed block goes last because it is the human-meaningful description
+   * of the act, and the message a reader answers on should be the one that says
+   * what they are answering about; bookkeeping above it is context, not the
+   * question. SPEC §10.3 allows claimed material to sit around the canonical
+   * block while it stays visibly separated and labelled, which the heading on
+   * every claimed message keeps. It is always sent, so a missing summary is a
+   * visible "(none given)" rather than an absent message, and so the keyboard
+   * has one message it can always ride on.
    *
    * Shared by the ordinary prompt and by a digest member, which differ in
    * exactly two things: the heading, and whether anything is armed.
@@ -1352,10 +1499,15 @@ export class TelegramChannel implements TestableChannel {
       for (const [index, chunk] of chunks.entries()) {
         const label =
           chunks.length === 1
-            ? "<b>FULL PAYLOAD — the exact bytes this approval binds to</b>"
-            : `<b>FULL PAYLOAD ${index + 1}/${chunks.length} — the exact bytes this approval binds to</b>`;
+            ? `<b>${PAYLOAD_CHUNK_LABEL}</b>`
+            : `<b>PAYLOAD ${index + 1}/${chunks.length} — ${PAYLOAD_CHUNK_LABEL_TAIL}</b>`;
         segments.push(`${label}\n<pre>${escapeHtml(chunk)}</pre>`);
       }
+    }
+    for (const [index, chunk] of chunkClaimedForTelegram(rendering.claimedText).entries()) {
+      segments.push(
+        index === 0 ? chunk : `<b>${TELEGRAM_CLAIMED_CONTINUED_HEADING}</b>\n${chunk}`,
+      );
     }
 
     let deliveryId = "";

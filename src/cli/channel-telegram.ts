@@ -109,7 +109,11 @@ import {
   type DecisionOutcome,
   type DeliveryId,
 } from "../channels/contract.js";
-import { commandPayloadView } from "../channels/payload-view.js";
+import {
+  changePayloadView,
+  commandPayloadView,
+  emailPayloadFields,
+} from "../channels/payload-view.js";
 import {
   buildPendingQueue,
   type ChannelTagRefusalCode,
@@ -135,7 +139,15 @@ import {
 } from "../core/policy-proposal.js";
 import { payloadOf, readVerifiedRecords, requestState } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
-import { glossFor, spawnGloss, GLOSS_AUTHOR, type GlossRunner } from "./gloss.js";
+import {
+  glossFor,
+  spawnGloss,
+  GLOSS_AUTHOR,
+  GLOSS_EDIT_INSTRUCTION,
+  GLOSS_EMAIL_INSTRUCTION,
+  GLOSS_INSTRUCTION,
+  type GlossRunner,
+} from "./gloss.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import {
   TELEGRAM_HEALTH_HELP,
@@ -858,23 +870,65 @@ export async function dispatchPending(
  * that do not contain it, and the log will record a decision that never
  * mentions it. Losing it costs one line on a message.
  *
- * Only command-shaped payloads get one — the complaint this answers is about
- * reading commands, and spending a subprocess on an email whose body is already
- * rendered field by field would buy nothing. Once per request, not once per
- * cycle: a request already in `delivered` never reaches this.
+ * Every payload kind the renderer can read gets one (APRV-164): a command, a
+ * file change, an email. The kind is derived exactly as the WYSIWYS rendering
+ * derives it, from the structure of the bytes, so the sentence is about the
+ * material the approver is being shown and the two can never be about different
+ * payloads. An opaque payload gets none: there is no material to describe that
+ * the canonical JSON does not already show verbatim. Once per request, not once
+ * per cycle: a request already in `delivered` never reaches this.
  *
- * Returns the request UNCHANGED when there is no runner, no command-shaped
- * payload, or no answer. Every one of those is silent, because a listener that
- * complained about a missing reading aid would be teaching an operator to
- * ignore its stderr.
+ * Returns the request UNCHANGED when there is no runner, no legible payload, or
+ * no answer. Every one of those is silent, because a listener that complained
+ * about a missing reading aid would be teaching an operator to ignore its
+ * stderr.
  */
 function withGloss(setup: ListenSetup, request: ChannelRequest): ChannelRequest {
   if (setup.gloss === undefined) return request;
-  const view = commandPayloadView(request.fullPayload.value?.value);
-  if (view === null) return request;
-  const sentence = glossFor(view.command, setup.gloss);
+  const asked = glossMaterial(request.fullPayload.value?.value);
+  if (asked === null) return request;
+  const sentence = glossFor(asked.instruction, asked.material, setup.gloss);
   if (sentence === null) return request;
   return { ...request, gloss: claimed(sentence, GLOSS_AUTHOR) };
+}
+
+/**
+ * The instruction and the material for one payload, or `null` for an opaque one.
+ *
+ * The material is assembled from the same structural views the canonical
+ * rendering is built from, and it is deliberately plain: labelled lines and the
+ * text itself, in the order the prompt shows them. Nothing here reads a
+ * self-declared kind field, for the reason `core/wysiwys.ts` gives at length —
+ * a payload that chose its own presentation would have chosen its own gloss too.
+ */
+function glossMaterial(value: unknown): { instruction: string; material: string } | null {
+  const command = commandPayloadView(value);
+  if (command !== null) {
+    // Byte for byte what APRV-144 sent: the command alone, under the command
+    // instruction. A prompt that drifted here would change a shipped behaviour
+    // for no reason beyond the refactor that touched it.
+    return { instruction: GLOSS_INSTRUCTION, material: command.command };
+  }
+
+  const change = changePayloadView(value);
+  if (change !== null) {
+    const labels = change.labels.map((field) => `${field.label}: ${field.text}`);
+    const body =
+      change.before === null
+        ? ["new content:", change.after]
+        : ["before:", change.before, "after:", change.after];
+    return { instruction: GLOSS_EDIT_INSTRUCTION, material: [...labels, ...body].join("\n") };
+  }
+
+  const email = emailPayloadFields(value);
+  if (email !== null) {
+    return {
+      instruction: GLOSS_EMAIL_INSTRUCTION,
+      material: email.map((field) => `${field.label}: ${field.text}`).join("\n"),
+    };
+  }
+
+  return null;
 }
 
 /** Deliver each request as its own prompt: the pre-digest path, unchanged. */

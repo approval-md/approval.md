@@ -439,12 +439,12 @@ test("the MCP demo: a client requests, a phone grants, the tool call proceeds", 
       const messages = mock.sentTexts().join("\n");
       assert.match(messages, /APPROVAL REQUIRED/u);
       assert.match(messages, new RegExp(`<code>${ACTION}</code>`, "u"));
-      assert.match(messages, /FULL PAYLOAD/u);
+      assert.match(messages, /PAYLOAD — the canonical rendering/u);
       assert.match(messages, /echo/u, "the approver was not shown the command");
       assert.match(messages, new RegExp(PAYLOAD_HASH, "u"));
       assert.match(
         messages,
-        new RegExp(`CLAIMED — authored by ${AGENT}, NOT verified`, "u"),
+        new RegExp(`WHAT THIS DOES — CLAIMED by ${AGENT}, NOT verified`, "u"),
         "the phone does not name the agent that asked",
       );
       const firstKeyboard = mock.callbackDataFor(ACTION, "grant");
