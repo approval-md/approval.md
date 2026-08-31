@@ -444,7 +444,7 @@ test("the MCP demo: a client requests, a phone grants, the tool call proceeds", 
       assert.match(messages, new RegExp(PAYLOAD_HASH, "u"));
       assert.match(
         messages,
-        new RegExp(`CLAIMED — authored by ${AGENT}, NOT verified`, "u"),
+        new RegExp(`WHAT THIS DOES — CLAIMED by ${AGENT}, NOT verified`, "u"),
         "the phone does not name the agent that asked",
       );
       const firstKeyboard = mock.callbackDataFor(ACTION, "grant");

@@ -246,6 +246,18 @@ export const PAYLOAD_CHUNK_LABEL_TAIL =
 export const PAYLOAD_CHUNK_LABEL = `PAYLOAD — ${PAYLOAD_CHUNK_LABEL_TAIL}`;
 
 /**
+ * What the claimed block is headed, and what a second claimed message is headed
+ * when a rationale overflows one (APRV-165).
+ *
+ * Both say CLAIMED and both say NOT verified, because a continuation is a
+ * message a reader may see first, and a claimed line that arrives under no
+ * heading at all reads as the runtime's own.
+ */
+export const TELEGRAM_CLAIMED_HEADING_PREFIX = "WHAT THIS DOES — CLAIMED by";
+export const TELEGRAM_CLAIMED_HEADING_SUFFIX = "NOT verified by the runtime";
+export const TELEGRAM_CLAIMED_CONTINUED_HEADING = `WHAT THIS DOES (continued) — CLAIMED, ${TELEGRAM_CLAIMED_HEADING_SUFFIX}`;
+
+/**
  * The most members one digest may carry (APRV-115).
  *
  * Not a rendering limit — {@link renderDigest} checks the real one against
@@ -520,10 +532,26 @@ function line(
 export interface TelegramRendering {
   /** Every line, in the order it appears, tagged as the request tagged it. */
   lines: Line[];
-  /** The header segment: heading, computed block, claimed block. */
+  /** The header segment: heading, action key, computed block. */
   header: string;
   /** The payload region, verbatim, or `null` when the request carries none. */
   payloadText: string | null;
+  /**
+   * The claimed segment, sent LAST so it sits beside the buttons (APRV-165).
+   *
+   * The claimed lines are what the act means to a human — what this sends, to
+   * whom, why — and the approver decides on that, so it is the thing the thumb
+   * should be next to rather than the metadata above it. SPEC §10.3 permits
+   * claimed material around the canonical block on the condition this keeps:
+   * visibly separated, and headed by a label that names the claiming party and
+   * says the runtime did not check them.
+   *
+   * Never empty. A request with no gloss, no summary and no rationale still
+   * gets this message, because an absent description of the act is itself
+   * something the approver has to see, and because the keyboard needs one
+   * message that is always there to ride on.
+   */
+  claimedText: string;
 }
 
 function budgetSummary(request: ChannelRequest): string {
@@ -708,14 +736,20 @@ export function renderTelegram(
     "",
     "<b>COMPUTED — derived by the runtime from the log, the policy and the payload bytes</b>",
     ...computedLines.map(render),
-    "",
-    `<b>CLAIMED — authored by ${escapeHtml(author)}, NOT verified by the runtime</b>`,
+  ].join("\n");
+
+  const claimedText = [
+    `<b>${TELEGRAM_CLAIMED_HEADING_PREFIX} ${escapeHtml(author)}, ${TELEGRAM_CLAIMED_HEADING_SUFFIX}</b>`,
     ...claimedLines.map(render),
   ].join("\n");
 
   return {
+    // Computed first, then claimed, whatever order the messages go out in:
+    // `lines` is the conformance suite's view of what was rendered, and the
+    // two-kind split it checks is a property of the fields, not of the layout.
     lines: [...computedLines, ...claimedLines],
     header,
+    claimedText,
     // A whole payload needs no prefix: the canonical block states its own
     // renderer, class, kind and `payload sha256` in its first lines, and a
     // second sha256 above it is one more line between the reader and the
@@ -750,6 +784,54 @@ export function chunkForTelegram(text: string, budget: number = SEGMENT_BUDGET):
     }
     current += character;
     cost += size;
+  }
+  if (current.length > 0 || chunks.length === 0) chunks.push(current);
+  return chunks;
+}
+
+/**
+ * Split an already-marked-up segment so every chunk is valid HTML on its own.
+ *
+ * {@link chunkForTelegram} may cut anywhere because its caller escapes each
+ * chunk and wraps it in `<pre>`; the claimed segment carries markup, so a cut
+ * inside `<b>` or inside `&amp;` would reach Telegram as a parse error, and a
+ * cut between an opening tag and its close would reach it as unbalanced HTML.
+ * Tags and entities are therefore atomic here, and the break is taken at the
+ * last line boundary in the chunk when there is one, which keeps each bullet
+ * whole and balanced. A bullet longer than the budget on its own (a rationale
+ * is unbounded agent text) splits inside its text, between tags, never within
+ * one — and it splits rather than being shortened, for the same reason a
+ * payload does.
+ */
+export function chunkClaimedForTelegram(text: string, budget: number = SEGMENT_BUDGET): string[] {
+  /** One line, as pieces no longer than the budget, cut between atoms only. */
+  const pieces = (input: string): string[] => {
+    if (input.length <= budget) return [input];
+    const out: string[] = [];
+    let piece = "";
+    for (const atom of input.match(/<[^>]*>|&[^;\s]*;|[\s\S]/gu) ?? []) {
+      if (piece.length + atom.length > budget && piece.length > 0) {
+        out.push(piece);
+        piece = "";
+      }
+      piece += atom;
+    }
+    if (piece.length > 0) out.push(piece);
+    return out;
+  };
+
+  const chunks: string[] = [];
+  let current = "";
+  for (const linePieces of text.split("\n").map(pieces)) {
+    for (const piece of linePieces) {
+      const candidate = current.length === 0 ? piece : `${current}\n${piece}`;
+      if (candidate.length > budget) {
+        if (current.length > 0) chunks.push(current);
+        current = piece;
+      } else {
+        current = candidate;
+      }
+    }
   }
   if (current.length > 0 || chunks.length === 0) chunks.push(current);
   return chunks;
@@ -1389,8 +1471,17 @@ export class TelegramChannel implements TestableChannel {
   }
 
   /**
-   * Send one request's messages: the header, then the payload chunks, with
-   * `keyboard` (when there is one) on the last.
+   * Send one request's messages: the computed header, the payload chunks, then
+   * the claimed block, with `keyboard` (when there is one) on the last.
+   *
+   * The claimed block goes last because it is the human-meaningful description
+   * of the act, and the message a reader answers on should be the one that says
+   * what they are answering about; bookkeeping above it is context, not the
+   * question. SPEC §10.3 allows claimed material to sit around the canonical
+   * block while it stays visibly separated and labelled, which the heading on
+   * every claimed message keeps. It is always sent, so a missing summary is a
+   * visible "(none given)" rather than an absent message, and so the keyboard
+   * has one message it can always ride on.
    *
    * Shared by the ordinary prompt and by a digest member, which differ in
    * exactly two things: the heading, and whether anything is armed.
@@ -1412,6 +1503,11 @@ export class TelegramChannel implements TestableChannel {
             : `<b>PAYLOAD ${index + 1}/${chunks.length} — ${PAYLOAD_CHUNK_LABEL_TAIL}</b>`;
         segments.push(`${label}\n<pre>${escapeHtml(chunk)}</pre>`);
       }
+    }
+    for (const [index, chunk] of chunkClaimedForTelegram(rendering.claimedText).entries()) {
+      segments.push(
+        index === 0 ? chunk : `<b>${TELEGRAM_CLAIMED_CONTINUED_HEADING}</b>\n${chunk}`,
+      );
     }
 
     let deliveryId = "";

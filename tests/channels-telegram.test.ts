@@ -77,6 +77,7 @@ import {
   TelegramChannel,
   TELEGRAM_DEFAULT_RETENTION_MS,
   TELEGRAM_DIGEST_MAX_MEMBERS,
+  TELEGRAM_GLOSS_SUFFIX,
   TELEGRAM_MAX_CALLBACK_BYTES,
   TELEGRAM_PROMPT_HEADING,
   type TelegramConfig,
@@ -450,7 +451,7 @@ test("computed and claimed are separated, and the payload is sent verbatim", asy
   const texts = mock.sentTexts().slice(before);
   const whole = texts.join("\n");
   assert.match(whole, /COMPUTED — derived by the runtime/u);
-  assert.match(whole, /CLAIMED — authored by agent:drafter, NOT verified/u);
+  assert.match(whole, /WHAT THIS DOES — CLAIMED by agent:drafter, NOT verified by the runtime/u);
   assert.ok(whole.includes(PAYLOAD_CHUNK_LABEL_TAIL), whole);
   assert.match(whole, new RegExp(`<code>${key}</code>`, "u"), "the action key is shown verbatim");
 
@@ -640,6 +641,231 @@ test("an attestation prompt still shows the diff and the loads it asks about", (
   );
   assert.ok(rendered.header.includes("<b>policy diff:</b>"), rendered.header);
   assert.ok(rendered.header.includes("<b>policy loads:</b>"), rendered.header);
+});
+
+// ---------------------------------------------------------------------------
+// The claimed block beside the buttons (APRV-165)
+// ---------------------------------------------------------------------------
+
+/** Every `sendMessage` the bot has issued, with the markup each carried. */
+function sends(): { text: string; replyMarkup: unknown }[] {
+  return mock.requests
+    .filter((entry) => entry.method === "sendMessage")
+    .map((entry) => ({
+      text: String(entry.body["text"] ?? ""),
+      replyMarkup: entry.body["reply_markup"],
+    }));
+}
+
+const CLAIMED_HEADING = /^<b>WHAT THIS DOES — CLAIMED by [^<]+, NOT verified by the runtime<\/b>/u;
+
+test("the claimed block is the last message of a prompt, and carries the buttons", async () => {
+  const world = live(2);
+  const [request_, second] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined && second !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = sends().length;
+  const deliveryId = await channel.notify(request_);
+
+  const messages = sends().slice(before);
+  assert.ok(messages.length >= 3, `a prompt with a payload is at least three messages: ${messages.length}`);
+
+  // The order the reader meets it in: what the runtime derived, the bytes, then
+  // what the act means — which is the message the thumb is next to.
+  const first = messages[0]?.text ?? "";
+  assert.ok(first.startsWith(`<b>${TELEGRAM_PROMPT_HEADING}</b>`), first);
+  assert.ok(first.includes("COMPUTED — derived by the runtime"), first);
+  assert.equal(first.includes("WHAT THIS DOES"), false, "the claimed block is still in the header");
+
+  const middle = messages.slice(1, -1).map((message) => message.text).join("\n");
+  assert.ok(middle.includes(PAYLOAD_CHUNK_LABEL_TAIL), "the payload is not between the two blocks");
+
+  const last = messages[messages.length - 1] as { text: string; replyMarkup: unknown };
+  assert.match(last.text, CLAIMED_HEADING);
+  assert.ok(last.text.includes(`<b>summary:</b> chase invoice 41`), last.text);
+  assert.ok(last.text.includes("<b>est. cost:</b> $0.02"), last.text);
+
+  // AC1: the keyboard is on that message and on no other, and the delivery id
+  // the channel reports (which the callback arming keys on) is its id.
+  assert.ok(last.replyMarkup !== undefined, "the claimed message carries no buttons");
+  for (const message of messages.slice(0, -1)) {
+    assert.equal(message.replyMarkup, undefined, "a message above the claimed block was buttoned");
+  }
+  // The delivery id is the buttoned message's id, which is the LAST one sent:
+  // a second prompt's id advances by exactly the number of messages it sent.
+  const mark = sends().length;
+  const nextId = await channel.notify(second);
+  assert.equal(
+    Number(nextId) - Number(deliveryId),
+    sends().length - mark,
+    "the delivery id is not the last message of the prompt",
+  );
+
+  // And the buttons on it are this request's: pressing them decides it.
+  assert.equal((await press(channel, world.keys[0] as string, "grant"))?.ok, true);
+  assertClean(world.unit);
+});
+
+test("the gloss leads the claimed block, above the summary", async () => {
+  const world = live(1);
+  const [base] = queueOf(world, at(2));
+  assert.ok(base !== undefined);
+  const request_: ChannelRequest = {
+    ...base,
+    gloss: claimed("Emails a vendor about an overdue invoice.", "model:haiku"),
+  };
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = sends().length;
+  await channel.notify(request_);
+
+  const block = (sends().at(-1) as { text: string }).text;
+  assert.match(block, CLAIMED_HEADING);
+  assert.ok(
+    block.indexOf("<b>gloss:</b>") < block.indexOf("<b>summary:</b>"),
+    `the gloss does not lead the claimed block: ${block}`,
+  );
+  assert.ok(block.includes(`${TELEGRAM_GLOSS_SUFFIX} <i>(model:haiku)</i>`), block);
+  assert.equal(sends().slice(before, -1).some((message) => message.text.includes("gloss:")), false);
+});
+
+test("a request with nothing to say still sends the claimed message, saying so", async () => {
+  // AC4. Absence is a thing the approver must SEE: a prompt whose author wrote
+  // no summary, no rationale and no gloss is exactly the one where a missing
+  // block would read as "nothing to worry about".
+  const world = live(1);
+  const [base] = queueOf(world, at(2));
+  assert.ok(base !== undefined);
+  const request_: ChannelRequest = { ...base, summary: claimed(null, ACTOR) };
+  assert.equal(request_.gloss, undefined);
+  assert.equal(request_.rationale, undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(request_);
+
+  const last = sends().at(-1) as { text: string; replyMarkup: unknown };
+  assert.match(last.text, CLAIMED_HEADING);
+  assert.ok(last.text.includes("<b>summary:</b> (none given)"), last.text);
+  assert.equal(last.text.includes("<b>rationale:</b>"), false, last.text);
+  assert.ok(last.replyMarkup !== undefined, "the keyboard lost its home");
+});
+
+test("an unbounded rationale becomes more claimed messages, buttons on the last", async () => {
+  // AC3. A rationale is agent-authored text with no length bound, so it chunks
+  // exactly as a payload does — split, never shortened — and the split never
+  // lands inside a tag or an entity, which would reach Telegram as a parse
+  // error rather than as a long explanation.
+  const world = live(1);
+  const [base] = queueOf(world, at(2));
+  assert.ok(base !== undefined);
+  const marker = "the vendor & <counsel> both asked. ";
+  const request_: ChannelRequest = {
+    ...base,
+    rationale: claimed(marker.repeat(400), ACTOR),
+  };
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = sends().length;
+  await channel.notify(request_);
+
+  const messages = sends().slice(before);
+  const claimedChunks = messages.filter((message) => message.text.includes("WHAT THIS DOES"));
+  assert.ok(claimedChunks.length >= 2, `the oversized rationale did not chunk: ${claimedChunks.length}`);
+  for (const message of messages) {
+    assert.ok(message.text.length <= 4096, "a claimed chunk exceeded Telegram's limit");
+  }
+  // Every chunk says whose words these are and that nobody checked them.
+  for (const chunk of claimedChunks.slice(1)) {
+    assert.ok(chunk.text.startsWith("<b>WHAT THIS DOES (continued)"), chunk.text);
+  }
+  // Complete, and escaped: the whole rationale arrived, as text. The
+  // continuation headings are dropped first, because they are the only thing
+  // the chunking ADDS to what was rendered.
+  const whole = claimedChunks
+    .map((chunk) => chunk.text.replace(/^<b>WHAT THIS DOES \(continued\)[^\n]*\n/u, ""))
+    .join("");
+  assert.equal(
+    whole.split("the vendor &amp; &lt;counsel&gt; both asked.").length - 1,
+    400,
+    "the rationale was shortened on its way to the phone",
+  );
+  assert.equal(whole.includes("<counsel>"), false, "raw markup reached the message");
+  // No chunk ends mid-tag or mid-entity.
+  for (const chunk of claimedChunks) {
+    assert.equal(/<[^>]*$/u.test(chunk.text), false, chunk.text.slice(-40));
+    assert.equal(/&[^;\s]*$/u.test(chunk.text), false, chunk.text.slice(-40));
+  }
+
+  const last = messages[messages.length - 1] as { text: string; replyMarkup: unknown };
+  assert.ok(last.text.includes("WHAT THIS DOES"), "the keyboard left the claimed block");
+  assert.ok(last.replyMarkup !== undefined, "the keyboard is not on the final chunk");
+  assert.equal(
+    claimedChunks[claimedChunks.length - 2]?.replyMarkup,
+    undefined,
+    "an earlier claimed chunk carried buttons",
+  );
+});
+
+test("a payload-less request is two messages: computed, then claimed with the buttons", async () => {
+  const world = live(1);
+  const [base] = queueOf(world, at(2));
+  assert.ok(base !== undefined);
+  const request_: ChannelRequest = { ...base, fullPayload: computed(null, "payload") };
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = sends().length;
+  await channel.notify(request_);
+
+  const messages = sends().slice(before);
+  assert.equal(messages.length, 2, JSON.stringify(messages.map((message) => message.text)));
+  assert.ok((messages[0] as { text: string }).text.includes("COMPUTED — derived by the runtime"));
+  assert.match((messages[1] as { text: string }).text, CLAIMED_HEADING);
+  assert.ok((messages[1] as { replyMarkup: unknown }).replyMarkup !== undefined);
+});
+
+test("a digest member keeps the same order and no buttons at all", async () => {
+  // AC5: the ordering is the ordering, whether or not the message can be
+  // answered on. A member prompt's answer lives on the digest below it.
+  const world = live(3);
+  const channel = channelFor();
+  const setup = setupFor(world, channel);
+  channel.onDecision(handlerFor(world, at(3)));
+
+  const before = sends().length;
+  const { streams } = capture();
+  const cycle = await dispatchPending(setup, streams, newDispatchState(), at(2));
+  assert.equal(cycle.digests.length, 1, JSON.stringify(cycle.digests));
+
+  const messages = sends().slice(before);
+  const digest = messages[messages.length - 1] as { text: string; replyMarkup: unknown };
+  assert.match(digest.text, /3 REQUESTS AWAITING APPROVAL/u);
+  assert.ok(digest.replyMarkup !== undefined, "the digest lost its keyboard");
+
+  const members = messages.slice(0, -1);
+  for (const message of members) {
+    assert.equal(message.replyMarkup, undefined, "a member prompt was buttoned");
+  }
+  // Each member: its own header, its payload, then its claimed block last.
+  for (const [index, key] of world.keys.entries()) {
+    const start = members.findIndex((message) => message.text.includes(`REQUEST ${index + 1} OF 3`));
+    assert.ok(start >= 0, `${key} was never prompted`);
+    const end = members.findIndex(
+      (message, position) => position > start && message.text.includes("REQUEST "),
+    );
+    const own = members.slice(start, end < 0 ? undefined : end);
+    assert.ok((own[0] as { text: string }).text.includes("COMPUTED — derived by the runtime"));
+    assert.match((own[own.length - 1] as { text: string }).text, CLAIMED_HEADING);
+    assert.ok(
+      own.slice(1, -1).some((message) => message.text.includes(PAYLOAD_CHUNK_LABEL_TAIL)),
+      `${key} lost its payload between the two blocks`,
+    );
+  }
 });
 
 test("an email-shaped payload is rendered field by field, body as the human reads it", async () => {
