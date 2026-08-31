@@ -13,6 +13,32 @@ labels:
   - design
 dependencies: []
 ordinal: 147000
+approval:
+  origin:
+    app: manual
+    created_by: 'agent:fable'
+  route:
+    assignee: 'agent:fable'
+    rationale: >-
+      Branch adapter-credentials carries the APRV-169 + APRV-168 commits,
+      including a SPEC.md 10.4 amendment authored in a spawned agent worktree
+      where protected-path prompts may not fire (APRV-151 gap). Publishing the
+      branch for PR review is routed through the gate explicitly, per the
+      APRV-159 precedent. Verified before request: 2415/2415 tests, lint
+      clean, conformance 106 controls clean.
+  state: proposed
+  actions:
+    - class: policy.edit
+      summary: >-
+        git push origin adapter-credentials from /Users/carter/dev/approval-md:
+        publish APRV-169 (credentials resolve before token consumption) and
+        APRV-168 (scoped vault-passphrase self-resolution inside a consumed
+        token window) with their SPEC 10.4 amendment, pending sign-off, for PR
+        review. Base origin/main 64f9d0a; commits e2784a1, d733677.
+      reversible: true
+      est_cost_usd: '0'
+      idempotency_key: 'aprv-168:publish-adapter-credentials:2026-08-31'
+      payload_hash: '4db66385b232ab385e94371307a98d54441f98c8acd93bb7f6fb84bf6f180fa2'
 ---
 
 ## Description
