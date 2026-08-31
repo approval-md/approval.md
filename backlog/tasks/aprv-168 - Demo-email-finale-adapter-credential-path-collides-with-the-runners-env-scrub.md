@@ -26,7 +26,7 @@ approval:
       branch for PR review is routed through the gate explicitly, per the
       APRV-159 precedent. Verified before request: 2415/2415 tests, lint
       clean, conformance 106 controls clean.
-  state: proposed
+  state: executed
   actions:
     - class: policy.edit
       summary: >-
