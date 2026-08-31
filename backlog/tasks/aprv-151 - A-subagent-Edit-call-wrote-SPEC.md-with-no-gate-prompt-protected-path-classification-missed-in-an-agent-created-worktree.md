@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-29 20:41'
+updated_date: '2026-08-30 23:08'
 labels:
   - security
   - hook
@@ -29,3 +30,19 @@ Observed 2026-08-29 during the APRV-145 design landing. A subagent session worki
 - [ ] #3 The overnight bypass instance is reconstructed in the notes: which commit, which worktree, and the remediation that re-applied the edit through a granted policy.edit
 - [ ] #4 npm test passes; lint clean
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: @claude
+created: 2026-08-30 21:17
+---
+New data point (2026-08-30, APRV-159 build): a spawned Opus agent in an isolated worktree (.claude/worktrees/agent-a3f5d255372d43ac0) edited .github/workflows/ci.yml via the Edit tool and the protected-path hook did not fire — no prompt, no denial, only the security-guidance PostToolUse advisory. Same shape as the original SPEC.md incident: protected-path Edit hooks are not firing in spawned agent sessions. Remediation applied: the change is quarantined on branch aprv-159-floor-shard (not pushed); the orchestrating session is routing an explicit gate request against the primary checkout before the change moves anywhere.
+---
+
+author: @claude
+created: 2026-08-30 23:08
+---
+Correction to my 22:32 comment (the APRV-159 data point stands; this one was mis-filed): the 2026-08-30 22:32 Edit to /Users/carter/dev/approval-md/APPROVAL.md from the orchestrating session was NOT a silent miss. The log shows the full trail: policy.edit registered seq 3057, approval.requested seq 3058, granted by human:carter seq 3064 (22:37), execution.started seq 3065 with grant_seq. The genuine anomaly is ORDERING: the Edit tool returned success and the file was on disk at ~22:32, five minutes before the grant landed (the session even observed the modified policy via a policy-not-attested refusal in between). So the write preceded its authorization; the consent trail is complete but retroactive. That is a different defect class (grant-follows-write carryover semantics, APRV-117/150 adjacent) and may deserve its own task rather than riding this one.
+---
+<!-- COMMENTS:END -->

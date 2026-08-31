@@ -551,6 +551,16 @@ test("the web-agent demo: an attendee submits, the gate holds, a phone decides",
     assert.equal(submitted.body["class"], "exec.local");
     assert.ok(["queued", "running"].includes(String(submitted.body["state"])));
 
+    // A second submission from the same address inside the throttle window is a
+    // 429 and enqueues nothing: the desk's only power is refusal. Probed HERE,
+    // milliseconds after the first 202, because the window is 15s of wall clock
+    // and a probe placed after the granted flow sits right at that edge — green
+    // serially and 202 under a loaded parallel suite. That it enqueued nothing
+    // is carried by (g), which sees exactly one task, and by the final tail of
+    // exactly six events.
+    const throttled = await post("/api/task", { template_id: TEMPLATE });
+    assert.equal(throttled.code, 429, JSON.stringify(throttled.body));
+
     // -----------------------------------------------------------------------
     // (e) the seeded files: the envelope and the payload the server wrote, and
     // the hash it declared, recomputed by the CLI that owns that arithmetic.
@@ -720,11 +730,8 @@ test("the web-agent demo: an attendee submits, the gate holds, a phone decides",
       ],
     );
 
-    // A second submission from the same address inside the throttle window is a
-    // 429 and enqueues nothing: the desk's only power is refusal.
-    const throttled = await post("/api/task", { template_id: TEMPLATE });
-    assert.equal(throttled.code, 429, JSON.stringify(throttled.body));
-    assert.equal(events().length, 6, "a refused submission reached the log");
+    // (The throttle 429 itself is probed back at hop (d), inside a guaranteed
+    // window; this six-event tail is the proof the refusal appended nothing.)
 
     // -----------------------------------------------------------------------
     // (l) the sweep: nothing the server SERVED or printed carries the raw
