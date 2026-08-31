@@ -89,9 +89,15 @@ import {
 } from "../src/cli/channel-telegram.js";
 import {
   glossFor,
+  glossPrompt,
   tidyGloss,
   GLOSS_AUTHOR,
+  GLOSS_EDIT_INSTRUCTION,
+  GLOSS_EMAIL_INSTRUCTION,
+  GLOSS_INSTRUCTION,
   GLOSS_MAX_CHARS,
+  GLOSS_MAX_INPUT_CHARS,
+  GLOSS_TRUNCATION_NOTE,
   type GlossRunner,
 } from "../src/cli/gloss.js";
 import type { Streams } from "../src/cli/main.js";
@@ -2934,12 +2940,26 @@ test("the prompt shows the breakdown as computed, above the raw command", async 
 // The model gloss (APRV-144 #2, #3)
 // ---------------------------------------------------------------------------
 
-/** A world with one pending command-shaped request, and its dispatch setup. */
-function glossWorld(command: string, runner?: GlossRunner) {
-  const payload = { command, cwd: "/repo" };
+/** A world with one pending request over `payload`, and its dispatch setup. */
+function glossWorldFor(payload: Record<string, unknown>, runner?: GlossRunner) {
   const world = live(1, false, () => payload);
   const channel = channelFor();
   return { world, channel, setup: setupFor(world, channel, runner) };
+}
+
+/** A world with one pending command-shaped request, and its dispatch setup. */
+function glossWorld(command: string, runner?: GlossRunner) {
+  return glossWorldFor({ command, cwd: "/repo" }, runner);
+}
+
+/** The file-change payload the APRV-164 cases gloss: an `Edit` on a live file. */
+function editPayload(): Record<string, unknown> {
+  return {
+    tool: "Edit",
+    file: "src/cli/gloss.ts",
+    before: "export const GLOSS_MAX_CHARS = 200;",
+    after: "export const GLOSS_MAX_CHARS = 400;",
+  };
 }
 
 test("a gloss the runner answers is rendered, labelled model-authored", async () => {
@@ -3011,18 +3031,155 @@ test("no runner at all is the default, and spawns nothing", async () => {
   assertClean(world.unit);
 });
 
-test("a non-command payload is never sent to a model at all", async () => {
+test("an opaque payload is never sent to a model at all (APRV-164 #3)", async () => {
+  // A shape no view recognises is rendered as canonical JSON and nothing else,
+  // so there is no material to describe that the approver is not already
+  // reading verbatim.
   let calls = 0;
-  const world = live(1);
-  const channel = channelFor();
-  const setup = setupFor(world, channel, () => {
+  const { world, channel, setup } = glossWorldFor({ ledger: "ap", entries: 3 }, () => {
     calls += 1;
     return "should never be asked";
   });
 
+  const before = mock.sentTexts().length;
   await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
-  assert.equal(calls, 0, "an email payload was sent to a model");
+  assert.equal(calls, 0, "an opaque payload was sent to a model");
+  assert.doesNotMatch(mock.sentTexts().slice(before).join("\n"), /<b>gloss:<\/b>/u);
+  assert.equal(
+    channel.lastRendered()[0]?.fields.find((field) => field.field === "gloss"),
+    undefined,
+  );
   assertClean(world.unit);
+});
+
+test("a file change is glossed from the file-edit instruction (APRV-164 #1)", async () => {
+  const asked: string[] = [];
+  const { world, channel, setup } = glossWorldFor(editPayload(), (prompt) => {
+    asked.push(prompt);
+    return "Doubles the cap on how many characters a gloss may occupy.\n";
+  });
+
+  const before = mock.sentTexts().length;
+  const result = await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
+  assert.equal(result.delivered.length, 1, JSON.stringify(result));
+  const whole = mock.sentTexts().slice(before).join("\n");
+
+  // The edit instruction, and the path plus both sides of the change as data
+  // beneath it. Nothing about the command wording reaches a diff.
+  assert.equal(asked.length, 1);
+  const prompt = asked[0] ?? "";
+  assert.ok(prompt.startsWith(GLOSS_EDIT_INSTRUCTION), prompt);
+  assert.equal(prompt.includes(GLOSS_INSTRUCTION), false, "the command instruction leaked");
+  assert.match(prompt, /file: src\/cli\/gloss\.ts/u);
+  assert.match(prompt, /export const GLOSS_MAX_CHARS = 200;/u);
+  assert.match(prompt, /export const GLOSS_MAX_CHARS = 400;/u);
+  assert.equal(prompt.includes(GLOSS_TRUNCATION_NOTE), false, "a short edit was marked truncated");
+
+  assert.match(
+    whole,
+    /<b>gloss:<\/b> Doubles the cap on how many characters a gloss may occupy\. \(model, unverified\) <i>\(model:haiku\)<\/i>/u,
+  );
+  assert.equal(
+    channel.lastRendered()[0]?.fields.find((field) => field.field === "gloss")?.kind,
+    "claimed",
+  );
+  assertClean(world.unit);
+});
+
+test("an email is glossed from the email instruction (APRV-164 #2)", async () => {
+  const asked: string[] = [];
+  const { world, channel, setup } = glossWorldFor(payloadFor(0), (prompt) => {
+    asked.push(prompt);
+    return "Chases an overdue invoice with a vendor contact.\n";
+  });
+
+  const before = mock.sentTexts().length;
+  const result = await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
+  assert.equal(result.delivered.length, 1, JSON.stringify(result));
+  const whole = mock.sentTexts().slice(before).join("\n");
+
+  assert.equal(asked.length, 1);
+  const prompt = asked[0] ?? "";
+  assert.ok(prompt.startsWith(GLOSS_EMAIL_INSTRUCTION), prompt);
+  // The recipient and the body reached the model as the field view has them.
+  assert.match(prompt, /to: ap-0@vendor\.example/u);
+  assert.match(prompt, /Following up on invoice 41/u);
+
+  assert.match(
+    whole,
+    /<b>gloss:<\/b> Chases an overdue invoice with a vendor contact\. \(model, unverified\) <i>\(model:haiku\)<\/i>/u,
+  );
+  assert.equal(
+    channel.lastRendered()[0]?.fields.find((field) => field.field === "gloss")?.kind,
+    "claimed",
+  );
+  assertClean(world.unit);
+});
+
+test("a whole-file write reaches the model capped and marked (APRV-164 #4)", async () => {
+  const content = "x".repeat(GLOSS_MAX_INPUT_CHARS * 3);
+  const asked: string[] = [];
+  const { world, setup } = glossWorldFor(
+    { tool: "Write", file: "notes.txt", content },
+    (prompt) => {
+      asked.push(prompt);
+      return "Writes a file of repeated placeholder text.";
+    },
+  );
+
+  await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
+  assert.equal(asked.length, 1);
+  const prompt = asked[0] ?? "";
+  // The cap is on the material, announced where the model will read it, and
+  // the whole file never became an argv.
+  assert.ok(prompt.includes(GLOSS_TRUNCATION_NOTE), "the cap was not announced to the model");
+  assert.ok(prompt.length < content.length, "the whole file reached the subprocess");
+  assert.equal(
+    prompt.length,
+    GLOSS_EDIT_INSTRUCTION.length + GLOSS_TRUNCATION_NOTE.length + GLOSS_MAX_INPUT_CHARS + 4,
+  );
+  assertClean(world.unit);
+});
+
+test("every way of getting no gloss holds for the new kinds too (APRV-164 #5)", async () => {
+  const runners: Record<string, GlossRunner> = {
+    "a timeout, or any other silence": () => null,
+    "an empty answer": () => "",
+    "whitespace only": () => "   \n  ",
+    "an answer no prompt could hold": () => "x".repeat(GLOSS_MAX_CHARS * 100),
+    "a subprocess that throws": () => {
+      throw new Error("spawn claude ENOENT");
+    },
+  };
+  const payloads: Record<string, Record<string, unknown>> = {
+    "a file change": editPayload(),
+    "an email": payloadFor(0),
+  };
+
+  for (const [kind, payload] of Object.entries(payloads)) {
+    for (const [why, runner] of Object.entries(runners)) {
+      const { world, channel, setup } = glossWorldFor(payload, runner);
+      const before = mock.sentTexts().length;
+      const result = await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
+      assert.equal(result.delivered.length, 1, `${kind}, ${why}: the prompt was not delivered`);
+      const whole = mock.sentTexts().slice(before).join("\n");
+      const rendered = channel.lastRendered()[0]?.fields.find((field) => field.field === "gloss");
+      if (why === "an answer no prompt could hold") {
+        // An oversized answer is capped rather than dropped: the same
+        // {@link GLOSS_MAX_CHARS} bound every gloss has had, marked where it
+        // bit. It is the one failure mode that still renders a line.
+        assert.equal(rendered?.kind, "claimed", `${kind}, ${why}`);
+        assert.ok(
+          (rendered?.text ?? "").startsWith(`${"x".repeat(GLOSS_MAX_CHARS - 1)}…`),
+          `${kind}, ${why}: the answer was not capped`,
+        );
+      } else {
+        assert.doesNotMatch(whole, /<b>gloss:<\/b>/u, `${kind}, ${why}`);
+        assert.equal(rendered, undefined, `${kind}, ${why}`);
+      }
+      assertClean(world.unit);
+    }
+  }
 });
 
 test("the gloss reaches no log line, no payload hash and no decision record", async () => {
@@ -3069,8 +3226,31 @@ test("a gloss is untrusted text: escaped, single-lined and capped", () => {
   assert.equal(long.length, GLOSS_MAX_CHARS);
   assert.ok(long.endsWith("…"));
   // The runner is asked once, with the command inside the prompt.
-  assert.equal(glossFor("", () => "never asked"), null, "an empty command asks nothing");
+  assert.equal(
+    glossFor(GLOSS_INSTRUCTION, "", () => "never asked"),
+    null,
+    "empty material asks nothing",
+  );
   assert.equal(GLOSS_AUTHOR, "model:haiku");
+});
+
+test("the material is capped before the subprocess, and the cap is announced", () => {
+  // The command prompt is byte for byte what APRV-144 sent, and the cap is on
+  // the input alone: `GLOSS_MAX_CHARS` still bounds what comes back.
+  assert.equal(glossPrompt(GLOSS_INSTRUCTION, "git status"), `${GLOSS_INSTRUCTION}\n\ngit status`);
+  const capped = glossPrompt(GLOSS_EDIT_INSTRUCTION, "y".repeat(GLOSS_MAX_INPUT_CHARS + 1));
+  assert.ok(capped.includes(GLOSS_TRUNCATION_NOTE));
+  assert.equal(
+    capped.length,
+    GLOSS_EDIT_INSTRUCTION.length + GLOSS_TRUNCATION_NOTE.length + GLOSS_MAX_INPUT_CHARS + 4,
+  );
+  // Exactly at the cap is not truncation, and is not announced as one.
+  assert.equal(
+    glossPrompt(GLOSS_EMAIL_INSTRUCTION, "y".repeat(GLOSS_MAX_INPUT_CHARS)).includes(
+      GLOSS_TRUNCATION_NOTE,
+    ),
+    false,
+  );
 });
 
 test("markup in a gloss reaches the chat as text, never as markup", async () => {
