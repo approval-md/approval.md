@@ -678,7 +678,7 @@ test("the M7 demo: draft -> telegram -> approve -> mail sent -> chain clean", as
     assert.match(text, /COMPUTED — derived by the runtime/u);
     assert.match(text, new RegExp(`CLAIMED — authored by ${AGENT}, NOT verified`, "u"));
     assert.match(text, /Send deposit chaser to agency@example\.co\.uk/u);
-    assert.match(text, /FULL PAYLOAD/u);
+    assert.match(text, /PAYLOAD — the canonical rendering/u);
     assert.match(text, new RegExp(PAYLOAD_HASH, "u"), "the binding is shown to the approver");
     // The payload arrives whole and HTML-escaped: an agent-authored subject
     // must not become markup on its way to a phone.

@@ -75,10 +75,9 @@
  *   diff, so the approver reads the change rather than the fact that a file was
  *   touched. Same reason as the email case: `"before": "a\nb"` on a phone is
  *   bytes nobody can check.
- * - The canonical JSON follows underneath, unchanged, so the exact bytes remain
- *   on screen and every existing check that the region contains them still
- *   holds. The reading aid is above; the evidence is below.
- * - Every other shape keeps today's rendering byte for byte.
+ * - Every other shape falls to `opaque`, whose view IS the canonical JSON: the
+ *   bytes whole, pretty-printed, exactly the rendering every payload had before
+ *   the structural views existed.
  *
  * Three properties this file is careful about:
  *
@@ -105,12 +104,15 @@
  *    write one payload and have the approver read another. So the rendering is
  *    INJECTIVE by construction ({@link markEscapes}), and the property is
  *    tested by generating pairs of distinct byte strings.
- * 5. **A fold is announced.** The diff view is a reading aid over a payload
- *    whose canonical JSON sits underneath it in full, so a very long change may
- *    be folded in the aid — but only with an explicit
- *    `… N more lines (hash covers all bytes)` marker on the line where it
- *    happened. Silent shortening is the failure this whole module exists to
- *    remove, and it does not become acceptable because it is convenient.
+ * 5. **The view is the whole reading (APRV-162, `approval.md/wysiwys/2`).** A
+ *    structured kind's view is the canonical rendering entire; no canonical-JSON
+ *    appendix follows it. The completeness argument is property 2 above: kind
+ *    detection is a closed field set, one unrecognised key sends the payload to
+ *    `opaque` whose view is the whole JSON, so a structural view that renders at
+ *    all renders every byte. The views therefore do not fold. A fold was
+ *    survivable only while the appendix restated the hidden lines underneath it;
+ *    with the appendix gone it would hide bytes from the only reading a human
+ *    gets, which is the failure this module exists to remove.
  *
  * The output is plain text with real newlines. Escaping belongs to the channel:
  * `telegram.ts` and `web.ts` each pass this through their own `escapeHtml` and
@@ -236,14 +238,9 @@ export const PROPOSAL_QUALIFIER =
   "this edit targets a file inside an AGENT WORKTREE: it is a branch PROPOSAL, not the live file. Merging it to the live checkout is a separate gated action.";
 export const LIVE_QUALIFIER = "this edit targets the LIVE checkout, not a branch proposal.";
 
-/**
- * Lines per side of the diff before the view folds.
- *
- * Generous on purpose: a fold costs the reader a scroll to the canonical JSON
- * underneath, so it should happen only where the alternative is a phone screen
- * nobody reads at all.
- */
-export const DIFF_LINE_BUDGET = 120;
+/** The qualifier a protected-name touch outside the gated checkout renders (APRV-161). */
+export const ELSEWHERE_QUALIFIER =
+  "this edit targets a file NAMED like a policy file, OUTSIDE the gated checkout: it is not the live policy. It gates because the name is protected wherever it sits.";
 
 /** A file change, recognised structurally. */
 export interface ChangeView {
@@ -306,28 +303,14 @@ export function changePayloadView(value: unknown): ChangeView | null {
 }
 
 /**
- * The one way this module is allowed to stop showing lines.
+ * `text` as prefixed diff lines, whole (APRV-162).
  *
- * Exported and shared by every view here (APRV-126), because a second wording
- * of "there is more" is a second thing a reader has to learn to notice, and the
- * whole point of the marker is that it cannot be mistaken for the end.
+ * No budget and no fold: this view is the entire canonical rendering of the
+ * payload, so a line it stops showing is a line nobody sees. Length is the
+ * channel's problem (`telegram.ts` chunks, never truncates).
  */
-export function foldMarker(hidden: number): string {
-  return `… ${String(hidden)} more lines (hash covers all bytes)`;
-}
-
-/** `lines`, cut to `budget` with {@link foldMarker} on the line where it happened. */
-function fold(lines: string[], budget: number): string[] {
-  if (lines.length <= budget) return lines;
-  return [...lines.slice(0, budget), foldMarker(lines.length - budget)];
-}
-
-/** `text` as prefixed diff lines, folded — audibly — past the budget. */
 function diffLines(text: string, marker: "-" | "+"): string[] {
-  return fold(
-    text.split("\n").map((line) => `${marker}${line}`),
-    DIFF_LINE_BUDGET,
-  );
+  return text.split("\n").map((line) => `${marker}${line}`);
 }
 
 function lineCount(text: string): number {
@@ -347,17 +330,21 @@ function lineCount(text: string): number {
 const CHANGE_FIELD_ORDER = [...CHANGE_LABEL_KEYS, ...CHANGE_BOOL_KEYS] as const;
 
 /** The diff view: labels, then one block per side, `-` removed, `+` added. */
-function changeRegionText(view: ChangeView): string[] {
+function changeRegionText(view: ChangeView, hash: string): string[] {
   const lines: string[] = [EDIT_VIEW_HEADING];
   for (const key of CHANGE_FIELD_ORDER) {
     const field = view.labels.find((entry) => entry.label === key);
     lines.push(`${key}: ${field === undefined ? ABSENT : field.text}`);
   }
-  // The tier qualifier, rendered for BOTH tiers. Printing it only for a
-  // proposal would make "live" the silent default, and the silent default is
-  // the one that reaches the real file.
+  // The tier qualifier, rendered for EVERY tier. Printing it only for the
+  // qualified tiers would make "live" the silent default, and the silent
+  // default is the one that reaches the real file. Each tier has its own
+  // wording: LIVE_QUALIFIER is a claim about the file the edit lands in, so a
+  // protected-name touch elsewhere (APRV-161) must not borrow it.
   const rule = view.labels.find((field) => field.label === "rule");
-  if (rule !== undefined && rule.text.startsWith("protected-path")) {
+  if (rule !== undefined && rule.text === "protected-name-elsewhere") {
+    lines.push(`note: ${ELSEWHERE_QUALIFIER}`);
+  } else if (rule !== undefined && rule.text.startsWith("protected-path")) {
     lines.push(`note: ${rule.text.endsWith("-proposal") ? PROPOSAL_QUALIFIER : LIVE_QUALIFIER}`);
   }
 
@@ -375,6 +362,7 @@ function changeRegionText(view: ChangeView): string[] {
     lines.push(...diffLines(view.after, "+"));
   }
   lines.push(DIFF_END);
+  lines.push(rawBytesLine(hash));
   return lines;
 }
 
@@ -404,9 +392,6 @@ export const ESCAPE_CLOSE = "»";
 
 /** The legend printed above every command block, so the marker needs no lore. */
 export const ESCAPE_LEGEND = `escapes: ${ESCAPE_OPEN}\\n${ESCAPE_CLOSE} is the two LITERAL bytes backslash-n; a real line break is a line break`;
-
-/** Lines of command before the view folds. Same budget, same marker, as a diff. */
-export const COMMAND_LINE_BUDGET = DIFF_LINE_BUDGET;
 
 /**
  * The escape letters that name a character the reader could otherwise mistake
@@ -479,7 +464,11 @@ export function commandPayloadView(value: unknown): CommandView | null {
 }
 
 /**
- * Where the exact bytes live, and how to get them back (APRV-126).
+ * Where the exact bytes live, and how to get them back (APRV-126, APRV-162).
+ *
+ * Carried by every structural view, not the command view alone: with no
+ * canonical-JSON appendix underneath, this line is the reader's only route from
+ * a rendering back to the bytes it was derived from.
  *
  * The store is content-addressed by this very hash and re-verified on every
  * read (`core/payload-store.ts`), so the line is an instruction, never a claim:
@@ -498,7 +487,7 @@ function commandRegionText(view: CommandView, hash: string): string[] {
   const count = commandLines.length;
   lines.push(`command (${String(count)} line${count === 1 ? "" : "s"}):`);
   lines.push(COMMAND_BEGIN);
-  lines.push(...fold(commandLines.map(markEscapes), COMMAND_LINE_BUDGET));
+  lines.push(...commandLines.map(markEscapes));
   lines.push(COMMAND_END);
   // On its own line, beneath the command, because it is the other half of what
   // the command does and a `cd` the reader never saw is the whole difference
@@ -649,7 +638,7 @@ export function protectedPathView(
 }
 
 /** The email view: every field of the closed set, then the body in delimiters. */
-function emailRegionText(fields: EmailViewField[]): string[] {
+function emailRegionText(fields: EmailViewField[], hash: string): string[] {
   const lines: string[] = [EMAIL_VIEW_HEADING];
   for (const key of FIELD_ORDER) {
     if (key === "body") continue;
@@ -662,11 +651,12 @@ function emailRegionText(fields: EmailViewField[]): string[] {
   // empty" and that is a different claim.
   const body = fields.find((field) => field.label === "body");
   if (body === undefined) {
-    lines.push(`body: ${ABSENT}`);
+    lines.push(`body: ${ABSENT}`, rawBytesLine(hash));
     return lines;
   }
   const count = body.text === "" ? 0 : body.text.split("\n").length;
   lines.push(`body (${count} line${count === 1 ? "" : "s"}):`, BODY_BEGIN, body.text, BODY_END);
+  lines.push(rawBytesLine(hash));
   return lines;
 }
 
@@ -681,11 +671,16 @@ function emailRegionText(fields: EmailViewField[]): string[] {
  * a version that rode alongside the hash rather than inside it would let two
  * renderer versions produce the same digest for two different readings, which is
  * the one thing the digest exists to make impossible. Any change to the bytes
- * this module emits — a new field, a reworded heading, a different fold budget —
- * is a new version, and a reader comparing a stored `display_hash` against a
- * re-render can see which renderer wrote it.
+ * this module emits — a new field, a reworded heading, a line that used to be
+ * folded away — is a new version, and a reader comparing a stored
+ * `display_hash` against a re-render can see which renderer wrote it. A record
+ * written under an earlier version re-derives under the renderer its own hashed
+ * text names, never under this one.
+ *
+ * `/2` (APRV-162): the structural views render whole and carry no canonical-JSON
+ * appendix; `opaque` is unchanged, its view being that JSON.
  */
-export const CANONICAL_RENDERER_VERSION = "approval.md/wysiwys/1";
+export const CANONICAL_RENDERER_VERSION = "approval.md/wysiwys/2";
 
 /**
  * The `approval.requested` payload field carrying {@link
@@ -735,23 +730,30 @@ function canonicalBody(payload: unknown, hash: string): { kind: CanonicalKind; l
   if (command !== null) return { kind: "command", lines: commandRegionText(command, hash) };
 
   const change = changePayloadView(payload);
-  if (change !== null) return { kind: "file-change", lines: changeRegionText(change) };
+  if (change !== null) return { kind: "file-change", lines: changeRegionText(change, hash) };
 
   const fields = emailPayloadFields(payload);
-  if (fields !== null) return { kind: "email", lines: emailRegionText(fields) };
+  if (fields !== null) return { kind: "email", lines: emailRegionText(fields, hash) };
 
-  return { kind: "opaque", lines: [OPAQUE_VIEW_HEADING] };
+  // The `opaque` view IS the canonical JSON, and it is the only view that
+  // carries it (APRV-162): under a structured kind the same bytes would be a
+  // second reading of a payload the view already showed entire, and two
+  // readings is one more than a human checks.
+  return {
+    kind: "opaque",
+    lines: [OPAQUE_VIEW_HEADING, "", CANONICAL_JSON_HEADING, canonicalJson(payload)],
+  };
 }
 
 /**
- * The canonical JSON appendix: the payload, pretty-printed.
+ * The `opaque` view: the payload, pretty-printed.
  *
  * Indented rather than RFC 8785 canonical, deliberately. The line above it
  * states the RFC 8785 digest, which is the value the approval binds to and the
- * value any second implementation can recompute; what the appendix is for is a
- * human checking a field the structural view did not have a line for, and a
- * single 4KB line is not that. The two never disagree, because both are derived
- * from the same value in the same call.
+ * value any second implementation can recompute; what this is for is a human
+ * reading a shape no structural view knows, and a single 4KB line is not that.
+ * The two never disagree, because both are derived from the same value in the
+ * same call.
  */
 function canonicalJson(payload: unknown): string {
   return JSON.stringify(payload, null, 2) ?? String(payload);
@@ -766,9 +768,9 @@ function canonicalJson(payload: unknown): string {
  *
  * The block states its own renderer, class, kind and payload digest before it
  * shows anything, so a reader who is handed the text alone can tell what
- * produced it and what it binds to. Then the structural view for the kind, then
- * the canonical JSON underneath: the reading aid above, the evidence below,
- * which is the arrangement APRV-100 established and this formalizes.
+ * produced it and what it binds to. Then the view for the kind, which is the
+ * whole reading: it renders every byte of the payload or the payload is
+ * `opaque` and the view is its JSON (APRV-162).
  *
  * Throws `JcsError` for a payload RFC 8785 cannot serialize (a cycle, a NaN).
  * That is {@link payloadHash}'s contract and it is the right one here too: a
@@ -788,9 +790,6 @@ export function canonicalRender(payload: unknown, actionClass: string): Canonica
     `payload sha256: ${hash}`,
     "",
     ...body.lines,
-    "",
-    CANONICAL_JSON_HEADING,
-    canonicalJson(payload),
     CANONICAL_END,
   ].join("\n");
 

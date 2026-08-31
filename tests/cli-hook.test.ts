@@ -1810,17 +1810,18 @@ test("an Edit prompt shows the before/after diff, and the grant binds to those b
   assert.ok(prompt.payload.includes(`note: ${LIVE_QUALIFIER}`), prompt.payload);
   assert.ok(prompt.payload.includes("-    autonomy: manual"), prompt.payload);
   assert.ok(prompt.payload.includes("+    autonomy: autonomous"), prompt.payload);
-  // Inside the diff block the change reads as the human will read it; the
-  // literal `\n` escapes belong to the canonical JSON underneath, and only there.
+  // Inside the diff block the change reads as the human will read it, with no
+  // literal `\n` escapes anywhere in it.
   const diff = prompt.payload.slice(
     prompt.payload.indexOf(DIFF_BEGIN),
     prompt.payload.indexOf(DIFF_END),
   );
   assert.equal(diff.includes("\\n"), false, "the diff still carries literal \\n escapes");
 
-  // The exact bytes stay on screen underneath, and the agent's own account of
-  // its intent never reaches the payload at all.
-  assert.ok(prompt.payload.includes(CANONICAL_JSON_HEADING), prompt.payload);
+  // The diff is the whole rendering (APRV-162): no JSON copy of the same bytes
+  // beneath it, and the agent's own account of its intent never reaches the
+  // payload at all.
+  assert.equal(prompt.payload.includes(CANONICAL_JSON_HEADING), false, prompt.payload);
   assert.equal(prompt.payload.includes("totally harmless"), false, "description reached the bytes");
   assertClean(dir);
 });
@@ -1867,11 +1868,12 @@ test("a long command reaches the phone complete, however short the summary is", 
   assert.ok(prompt.summary.length <= SUMMARY_LIMIT, prompt.summary);
   assert.ok(prompt.summary.endsWith("…"), prompt.summary);
 
-  // The payload block is not. Every byte of the command is there, as the JSON
-  // value of `command`, and nothing in the region was folded away.
-  assert.ok(prompt.payload.includes(JSON.stringify(command)), "the full command bytes are missing");
+  // The payload block is not. Every byte of the command is there, in the
+  // command view that is now the whole rendering (APRV-162), and nothing in the
+  // region was folded away.
+  assert.ok(prompt.payload.includes(command), "the full command bytes are missing");
   assert.equal(prompt.payload.includes("…"), false, "the payload region ellipsized something");
-  assert.ok(prompt.payload.includes(`"cwd": "/repo"`), prompt.payload);
+  assert.ok(prompt.payload.includes("cwd: /repo"), prompt.payload);
   assertClean(dir);
 });
 

@@ -233,6 +233,19 @@ export const TELEGRAM_REJECT_NOTE = "rejected via telegram";
 export const TELEGRAM_PROMPT_HEADING = "APPROVAL REQUIRED";
 
 /**
+ * What the label over the payload chunks names (APRV-162).
+ *
+ * The chunks carry the canonical rendering, which is a deterministic function
+ * of the bytes and not the bytes themselves; calling it "the exact bytes" told
+ * the reader that a diff view and a JSON file were the same object. The
+ * rendering names its own `display_hash`, and the store path inside it is the
+ * route back to the bytes.
+ */
+export const PAYLOAD_CHUNK_LABEL_TAIL =
+  "the canonical rendering this approval's display_hash names; raw bytes at the store path inside";
+export const PAYLOAD_CHUNK_LABEL = `PAYLOAD — ${PAYLOAD_CHUNK_LABEL_TAIL}`;
+
+/**
  * The most members one digest may carry (APRV-115).
  *
  * Not a rendering limit — {@link renderDigest} checks the real one against
@@ -252,7 +265,7 @@ export const TELEGRAM_DIGEST_MAX_MEMBERS = 8;
  *
  * Glyphs, not emoji: `✓`/`✗` are the vocabulary `cli/style.ts` uses for the
  * same ok/fail distinction, and every line of *message text* this channel
- * writes ("APPROVAL REQUIRED", "FULL PAYLOAD", "WITHDRAWN") is emoji-free. The
+ * writes ("APPROVAL REQUIRED", "PAYLOAD", "WITHDRAWN") is emoji-free. The
  * emoji live on the button labels, which are a different surface and stay as
  * they are. `withdrawn` keeps the exact wording APRV-106 shipped.
  */
@@ -665,10 +678,15 @@ export function renderTelegram(
   return {
     lines: [...computedLines, ...claimedLines],
     header,
+    // A whole payload needs no prefix: the canonical block states its own
+    // renderer, class, kind and `payload sha256` in its first lines, and a
+    // second sha256 above it is one more line between the reader and the
+    // action. A TRUNCATED rendering has no canonical block to say any of that,
+    // so it gets a prefix worded as what it is: a refusal.
     payloadText:
       payload === null
         ? null
-        : `--- full payload (sha256 ${payload.hash}${payload.truncated ? ", TRUNCATED" : ""}) ---\n${payloadRegionText(payload, request.class.value)}`,
+        : `${payload.truncated ? `--- payload TRUNCATED at render (sha256 ${payload.hash}) — no canonical rendering exists; do not grant on this ---\n` : ""}${payloadRegionText(payload, request.class.value)}`,
   };
 }
 
@@ -1352,8 +1370,8 @@ export class TelegramChannel implements TestableChannel {
       for (const [index, chunk] of chunks.entries()) {
         const label =
           chunks.length === 1
-            ? "<b>FULL PAYLOAD — the exact bytes this approval binds to</b>"
-            : `<b>FULL PAYLOAD ${index + 1}/${chunks.length} — the exact bytes this approval binds to</b>`;
+            ? `<b>${PAYLOAD_CHUNK_LABEL}</b>`
+            : `<b>PAYLOAD ${index + 1}/${chunks.length} — ${PAYLOAD_CHUNK_LABEL_TAIL}</b>`;
         segments.push(`${label}\n<pre>${escapeHtml(chunk)}</pre>`);
       }
     }

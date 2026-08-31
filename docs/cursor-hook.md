@@ -244,10 +244,11 @@ A `summary` is a headline and may be ellipsized; the FULL PAYLOAD block never is
 | `Delete` | `{tool, rule, file, input}`, the tool input verbatim |
 
 A `Write` renders on the phone as a diff (removed lines `-`, added
-lines `+`) with the canonical JSON underneath it, so the human approves the
-change rather than the fact that a file was touched. A change too long for one
-screen folds in the diff view with an explicit `… N more lines (hash covers all
-bytes)` marker, and the bytes it folded are still in the JSON below.
+lines `+`), so the human approves the change rather than the fact that a file
+was touched. The diff is the whole rendering (APRV-162): it shows every byte of
+the payload or the payload is not a file change at all, so it never folds and
+carries no canonical-JSON copy of itself. A change too long for one screen
+arrives as several messages, never as a shortened one.
 
 A `Shell` command renders over the lines it really has, with `cwd` on its own
 line beneath it and the store path of the exact bytes under that (APRV-126).
@@ -255,8 +256,7 @@ Showing a real line break as a line break raises the question of what a
 *literal* backslash-`n` should look like, and the answer is that it is marked:
 `«\n»` is the two bytes, a line break is a line break, and no two payloads
 render the same way. The block says `the hash binds the RAW BYTES, not this
-view`, the canonical JSON underneath it is unchanged, and a long command folds
-with the same counted marker a diff uses.
+view`, and a long command renders whole, over as many messages as it takes.
 
 `rule` is the tier of a protected-path touch, on the same class:
 

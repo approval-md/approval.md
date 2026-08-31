@@ -36,6 +36,7 @@ import {
   type ConformanceHarness,
 } from "../src/channels/conformance.js";
 import {
+  rawBytesLine,
   BODY_BEGIN,
   BODY_END,
   CANONICAL_JSON_HEADING,
@@ -428,7 +429,7 @@ test("the page carries the full payload, hash-labelled, and the §11 trust banne
   assert.match(page.body, /human:carter/u, "the page names the actor decisions are recorded as");
 });
 
-test("an email-shaped payload is rendered field by field, escaped, JSON underneath", async () => {
+test("an email-shaped payload is rendered field by field, escaped, and whole", async () => {
   const world = live(1);
   const key = world.keys[0] as string;
   const running = await serve(world, at(2));
@@ -449,11 +450,13 @@ test("an email-shaped payload is rendered field by field, escaped, JSON undernea
   assert.equal(body.includes("<script>"), false, "raw markup reached the payload region");
   assert.match(body, /&lt;script&gt;alert\(&quot;pwned&quot;\)&lt;\/script&gt;/u);
 
-  // The exact bytes stay on the page, underneath, inside the same region.
-  assert.ok(page.body.includes(CANONICAL_JSON_HEADING), "the canonical JSON was dropped");
+  // The field-by-field view is the whole rendering (APRV-162): the same bytes
+  // are not repeated underneath as JSON, and the store path leads back to them.
+  assert.equal(page.body.includes(CANONICAL_JSON_HEADING), false, "the payload was shown twice");
   const hash = payloadHash(world.payloads.get(key));
   assert.ok(page.body.includes(`${PAYLOAD_BEGIN} (bound sha256 ${hash}) ---`), "no hash label");
-  assert.ok(page.body.indexOf(CANONICAL_JSON_HEADING) < page.body.indexOf(PAYLOAD_END));
+  assert.ok(page.body.includes(rawBytesLine(hash)), "the store pointer left the page");
+  assert.ok(page.body.indexOf(rawBytesLine(hash)) < page.body.indexOf(PAYLOAD_END));
 });
 
 // ---------------------------------------------------------------------------

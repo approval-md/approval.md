@@ -439,7 +439,7 @@ test("the MCP demo: a client requests, a phone grants, the tool call proceeds", 
       const messages = mock.sentTexts().join("\n");
       assert.match(messages, /APPROVAL REQUIRED/u);
       assert.match(messages, new RegExp(`<code>${ACTION}</code>`, "u"));
-      assert.match(messages, /FULL PAYLOAD/u);
+      assert.match(messages, /PAYLOAD — the canonical rendering/u);
       assert.match(messages, /echo/u, "the approver was not shown the command");
       assert.match(messages, new RegExp(PAYLOAD_HASH, "u"));
       assert.match(

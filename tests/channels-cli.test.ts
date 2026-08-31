@@ -39,6 +39,7 @@ import {
   type ConformanceHarness,
 } from "../src/channels/conformance.js";
 import { buildPendingQueue, type TagOptions } from "../src/channels/tagging.js";
+import { canonicalRender } from "../src/core/wysiwys.js";
 import { payloadHash } from "../src/core/payload.js";
 import { register, request } from "./clock-adapters.js";
 import { at, attest, fixedClock, newScenario, scratchRoot, T0, type Scenario } from "./scenario.js";
@@ -274,17 +275,21 @@ test("the full payload is printed verbatim inside its own delimiters", () => {
   assert.ok(text.includes(PAYLOAD_END), "no payload block was closed");
   assert.ok(text.includes(rendering.hash), "the bound hash is not shown on the block");
 
+  // What sits inside the delimiters is the canonical rendering (APRV-119),
+  // which under wysiwys/2 is the structural view alone: the raw JSON is no
+  // longer repeated beneath it (APRV-162).
+  const canonical = canonicalRender(rendering.value, only.class.value);
   const begin = text.indexOf(PAYLOAD_BEGIN);
   const end = text.indexOf(PAYLOAD_END);
   const block = text.slice(begin, end);
-  assert.ok(block.includes(rendering.text), "the payload bytes are not inside the delimiters");
+  assert.ok(block.includes(canonical.text), "the canonical rendering is not inside the delimiters");
   // §10.4: delineated from the agent's summary — which lives OUTSIDE the block.
   assert.ok(!block.includes("chase invoice 41"), "the agent's summary leaked into the payload block");
   assert.ok(text.indexOf("chase invoice 41") < begin, "the summary must be rendered before the payload");
 
   const reported = channel.lastRendered()[0]?.fullPayloadText;
   assert.ok(reported !== null && reported !== undefined);
-  assert.ok(reported.includes(rendering.text));
+  assert.ok(reported.includes(canonical.text));
   assert.ok(reported.startsWith(PAYLOAD_BEGIN));
 });
 

@@ -18,9 +18,11 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { payloadHash } from "../src/core/payload.js";
+import { proposalPayloadValue } from "../src/core/policy-proposal.js";
 import {
   canonicalRender,
   displayHashOf,
+  rawBytesLine,
   ABSENT,
   CANONICAL_BEGIN,
   CANONICAL_END,
@@ -30,8 +32,11 @@ import {
   COMMAND_VIEW_HEADING,
   DISPLAY_HASH_FIELD,
   EDIT_VIEW_HEADING,
+  ELSEWHERE_QUALIFIER,
   EMAIL_VIEW_HEADING,
+  LIVE_QUALIFIER,
   OPAQUE_VIEW_HEADING,
+  PROPOSAL_QUALIFIER,
 } from "../src/core/wysiwys.js";
 
 const CLASS = "communicate.email.external";
@@ -227,8 +232,83 @@ test("the canonical block is self-describing and delimited", () => {
   assert.ok(text.endsWith(CANONICAL_END), text);
   assert.ok(text.includes(`class: ${CLASS}`));
   assert.ok(text.includes(`payload sha256: ${payloadHash(payload)}`));
-  assert.ok(text.includes(CANONICAL_JSON_HEADING));
-  assert.ok(text.includes(JSON.stringify(payload, null, 2)), "the exact bytes are not underneath");
+  // And the route back to the bytes, which under wysiwys/2 is this line rather
+  // than a JSON appendix (APRV-162).
+  assert.ok(text.includes(rawBytesLine(payloadHash(payload))), text);
+});
+
+// ---------------------------------------------------------------------------
+// APRV-162 — the structural view is the whole reading
+// ---------------------------------------------------------------------------
+
+test("a structured kind renders no canonical-JSON appendix; opaque IS that JSON", () => {
+  for (const kind of ["command", "file-change", "email"]) {
+    const text = canonicalRender(SAMPLES[kind], CLASS).text;
+    assert.equal(
+      text.includes(CANONICAL_JSON_HEADING),
+      false,
+      `${kind} still shows the payload a second time as JSON`,
+    );
+  }
+
+  const opaque = canonicalRender(SAMPLES["opaque"], CLASS).text;
+  assert.ok(opaque.includes(CANONICAL_JSON_HEADING), opaque);
+  assert.ok(opaque.includes(JSON.stringify(SAMPLES["opaque"], null, 2)), "the bytes are not shown");
+});
+
+test("every structural view names the payload store, so the bytes stay reachable", () => {
+  for (const kind of ["command", "file-change", "email"]) {
+    const payload = SAMPLES[kind];
+    const text = canonicalRender(payload, CLASS).text;
+    assert.ok(text.includes(rawBytesLine(payloadHash(payload))), `${kind} lost the store pointer`);
+  }
+});
+
+test("a long change and a long command render whole: no view folds (APRV-162)", () => {
+  const lines = Array.from({ length: 400 }, (_, index) => `line ${String(index)}`);
+  const change = canonicalRender(
+    { tool: "Write", file: "/repo/x", content: lines.join("\n") },
+    "policy.edit",
+  ).text;
+  for (const line of lines) assert.ok(change.includes(`+${line}`), `${line} was folded away`);
+
+  const command = canonicalRender(
+    { command: lines.map((line) => `echo ${line}`).join("\n"), cwd: "/repo" },
+    "exec.local",
+  ).text;
+  for (const line of lines) assert.ok(command.includes(`echo ${line}`), `${line} was folded away`);
+
+  // The wording the old fold used, in any rendering, is now a defect.
+  for (const text of [change, command]) {
+    assert.equal(/more lines \(hash covers all bytes\)/u.test(text), false, text.slice(0, 200));
+  }
+});
+
+test("each protected-path tier renders its own qualifier, and never another's", () => {
+  const base = { tool: "Edit", file: "/repo/APPROVAL.md", before: "a", after: "b" };
+  const cases: [string, string, string[]][] = [
+    ["protected-path", LIVE_QUALIFIER, [PROPOSAL_QUALIFIER, ELSEWHERE_QUALIFIER]],
+    ["protected-path-proposal", PROPOSAL_QUALIFIER, [LIVE_QUALIFIER, ELSEWHERE_QUALIFIER]],
+    ["protected-name-elsewhere", ELSEWHERE_QUALIFIER, [LIVE_QUALIFIER, PROPOSAL_QUALIFIER]],
+  ];
+  for (const [rule, expected, forbidden] of cases) {
+    const text = canonicalRender({ ...base, rule }, "policy.edit").text;
+    assert.ok(text.includes(`note: ${expected}`), `${rule} lost its qualifier`);
+    for (const other of forbidden) {
+      assert.equal(text.includes(other), false, `${rule} borrowed another tier's wording`);
+    }
+  }
+});
+
+test("an attestation prompt's policy text still renders opaque, whole (APRV-162 #9)", () => {
+  // The shape `core/policy-proposal.ts` stores: no structural view claims it,
+  // so the approver reads the policy bytes as the canonical JSON they are.
+  const payload = proposalPayloadValue("/repo/APPROVAL.md", "defaults:\n  autonomy: manual\n");
+  const rendering = canonicalRender(payload, "policy.edit");
+  assert.equal(rendering.kind, "opaque");
+  assert.ok(rendering.text.includes(OPAQUE_VIEW_HEADING), rendering.text);
+  assert.ok(rendering.text.includes(CANONICAL_JSON_HEADING), rendering.text);
+  assert.ok(rendering.text.includes(JSON.stringify(payload, null, 2)), "the policy text is not shown");
 });
 
 test("displayHashOf answers nothing for a payload that cannot be bound to", () => {

@@ -45,7 +45,6 @@ import {
   changePayloadView,
   commandPayloadView,
   emailPayloadFields,
-  foldMarker,
   markEscapes,
   payloadRegionText,
   rawBytesLine,
@@ -55,9 +54,7 @@ import {
   CANONICAL_JSON_HEADING,
   COMMAND_BEGIN,
   COMMAND_END,
-  COMMAND_LINE_BUDGET,
   COMMAND_VIEW_HEADING,
-  DIFF_LINE_BUDGET,
   EDIT_VIEW_HEADING,
   EMAIL_VIEW_HEADING,
   ESCAPE_LEGEND,
@@ -74,6 +71,7 @@ import {
   groupForDigest,
   parseCallbackData,
   payloadShapeKey,
+  PAYLOAD_CHUNK_LABEL_TAIL,
   TelegramChannel,
   TELEGRAM_DEFAULT_RETENTION_MS,
   TELEGRAM_DIGEST_MAX_MEMBERS,
@@ -444,7 +442,7 @@ test("computed and claimed are separated, and the payload is sent verbatim", asy
   const whole = texts.join("\n");
   assert.match(whole, /COMPUTED — derived by the runtime/u);
   assert.match(whole, /CLAIMED — authored by agent:drafter, NOT verified/u);
-  assert.match(whole, /FULL PAYLOAD/u);
+  assert.ok(whole.includes(PAYLOAD_CHUNK_LABEL_TAIL), whole);
   assert.match(whole, new RegExp(`<code>${key}</code>`, "u"), "the action key is shown verbatim");
 
   // The payload arrives verbatim — and HTML-escaped, which is the whole reason
@@ -509,9 +507,10 @@ test("an email-shaped payload is rendered field by field, body as the human read
   assert.equal(body.includes("\\n"), false, "the body still carries literal \\n escapes");
   assert.ok(whole.includes("£1,200"), "the non-ASCII amount did not survive verbatim");
 
-  // The exact bytes are still on screen, underneath, JSON escapes and all.
-  assert.ok(whole.includes(CANONICAL_JSON_HEADING), "the canonical JSON was dropped");
-  assert.match(whole, /"body": "Following up on invoice 41[^"]*\\n/u);
+  // The field-by-field view is the whole reading (APRV-162): no second copy of
+  // the same bytes as JSON, and the store path is the route back to them.
+  assert.equal(whole.includes(CANONICAL_JSON_HEADING), false, "the payload was shown twice");
+  assert.ok(whole.includes(rawBytesLine(request_.payload_hash.value)), whole);
 
   // And the binding line — the one computed thing in this region — is intact.
   assert.match(
@@ -519,10 +518,10 @@ test("an email-shaped payload is rendered field by field, body as the human read
     new RegExp(`payload sha256:</b> ${request_.payload_hash.value}`, "u"),
     "the computed binding line changed",
   );
-  assert.ok(
-    whole.includes(`--- full payload (sha256 ${request_.payload_hash.value}) ---`),
-    "the payload region lost its hash label",
-  );
+  // The canonical block states the binding itself, so the region carries no
+  // second sha256 prefix above it.
+  assert.ok(whole.includes(`payload sha256: ${request_.payload_hash.value}`), whole);
+  assert.equal(whole.includes("--- full payload (sha256"), false, whole);
 
   // The reading aid announces itself as claimed, so legible never reads as verified.
   assert.ok(whole.includes(EMAIL_VIEW_HEADING.replace(/&/gu, "&amp;")));
@@ -2395,9 +2394,10 @@ test("a file-change payload renders as a diff, and every other shape stays JSON"
   assert.ok(rendered.includes(`note: ${LIVE_QUALIFIER}`), rendered);
   assert.ok(rendered.includes("-  - run: npm run lint"), rendered);
   assert.ok(rendered.includes("+  - run: npm test"), rendered);
-  // The exact bytes stay underneath: the diff is an aid, never a replacement.
-  assert.ok(rendered.includes(CANONICAL_JSON_HEADING), rendered);
-  assert.ok(rendered.includes(json(edit)), rendered);
+  // The diff IS the rendering (APRV-162): no JSON copy of the same bytes, and
+  // the store path names where the bytes themselves are.
+  assert.equal(rendered.includes(CANONICAL_JSON_HEADING), false, rendered);
+  assert.ok(rendered.includes(rawBytesLine(payloadHash(edit))), rendered);
 
   // The proposal tier renders its own qualifier, from the same key.
   assert.ok(view({ ...edit, rule: "protected-path-proposal" }).includes(PROPOSAL_QUALIFIER));
@@ -2434,20 +2434,17 @@ test("a file-change payload renders as a diff, and every other shape stays JSON"
   assert.ok(rendered.includes(`replace_all: ${ABSENT}`), rendered);
 });
 
-test("a very long change folds with an explicit marker, never silently", () => {
-  const after = Array.from({ length: DIFF_LINE_BUDGET + 25 }, (_, index) => `line ${index}`).join(
-    "\n",
-  );
+test("a very long change renders whole (APRV-162: the view is the only reading)", () => {
+  const lines = Array.from({ length: 300 }, (_, index) => `line ${String(index)}`);
+  const after = lines.join("\n");
   const payload = { tool: "Write", rule: "protected-path", file: "/repo/CLAUDE.md", content: after };
   const text = payloadRegionText(
     { value: payload, text: JSON.stringify(payload, null, 2), hash: "h", truncated: false },
     VIEW_CLASS,
   );
-  assert.ok(text.includes(`+line ${String(DIFF_LINE_BUDGET - 1)}`), "the budget is spent in full");
-  assert.equal(text.includes(`+line ${String(DIFF_LINE_BUDGET)}`), false, "the fold did not happen");
-  assert.ok(text.includes("… 25 more lines (hash covers all bytes)"), text);
-  // And the folded lines are still on screen, in the canonical JSON underneath.
-  assert.ok(text.includes(JSON.stringify(after)), "the exact bytes left the message");
+  for (const line of lines) assert.ok(text.includes(`+${line}`), `${line} is not on screen`);
+  assert.equal(/more lines \(hash covers all bytes\)/u.test(text), false, "a fold survived");
+  assert.ok(text.includes(rawBytesLine(payloadHash(payload))), text);
 });
 
 test("a diff reaches Telegram escaped, chunked and complete", async () => {
@@ -2477,9 +2474,10 @@ test("a diff reaches Telegram escaped, chunked and complete", async () => {
   assert.ok(whole.includes("+run: npm test --silent"), whole);
   assert.equal(whole.includes("<all>"), false, "raw markup reached the message");
   assert.ok(
-    whole.includes(`--- full payload (sha256 ${request_.payload_hash.value}) ---`),
-    "the payload region lost its hash label",
+    whole.includes(`payload sha256: ${request_.payload_hash.value}`),
+    "the canonical block lost its binding line",
   );
+  assert.equal(whole.includes("--- full payload (sha256"), false, whole);
   for (const text of texts) {
     assert.ok(text.length <= 4096, "a message exceeded Telegram's 4096-character limit");
   }
@@ -2517,9 +2515,10 @@ test("a command payload renders over its real lines, with cwd and the store path
   // the renderer recomputes from the payload rather than one a caller supplied.
   assert.ok(rendered.includes(rawBytesLine(payloadHash(payload))), rendered);
 
-  // The exact bytes stay underneath: the view is an aid, never a replacement.
-  assert.ok(rendered.includes(CANONICAL_JSON_HEADING), rendered);
-  assert.ok(rendered.includes(json(payload)), rendered);
+  // The command view IS the rendering (APRV-162): the bytes are not repeated
+  // beneath it as JSON, and the store path is what leads back to them.
+  assert.equal(rendered.includes(CANONICAL_JSON_HEADING), false, rendered);
+  assert.equal(rendered.includes(json(payload)), false, rendered);
 
   // A payload without a cwd says so rather than rendering an empty line.
   assert.ok(view({ command: "ls" }).includes("cwd: (none declared)"));
@@ -2606,30 +2605,17 @@ test("two distinct byte strings never render identically (property)", () => {
   assert.ok(seen.size > 1_000, `the generator produced too few distinct strings (${seen.size})`);
 });
 
-test("a very long command folds with an explicit marker, never silently", () => {
-  const command = Array.from(
-    { length: COMMAND_LINE_BUDGET + 12 },
-    (_, index) => `echo ${String(index)}`,
-  ).join("\n");
+test("a very long command renders whole (APRV-162: the view is the only reading)", () => {
+  const commandLines = Array.from({ length: 300 }, (_, index) => `echo ${String(index)}`);
+  const command = commandLines.join("\n");
   const payload = { command, cwd: "/repo" };
   const text = payloadRegionText(
     { value: payload, text: JSON.stringify(payload, null, 2), hash: "h", truncated: false },
     VIEW_CLASS,
   );
 
-  assert.ok(
-    text.includes(`echo ${String(COMMAND_LINE_BUDGET - 1)}`),
-    "the budget is not spent in full",
-  );
-  assert.equal(
-    text.includes(`echo ${String(COMMAND_LINE_BUDGET)}\n`),
-    false,
-    "the fold did not happen",
-  );
-  assert.ok(text.includes(foldMarker(12)), text);
-  // The folded lines are still on screen, in the canonical JSON underneath, and
-  // the reader is told where the whole thing lives.
-  assert.ok(text.includes(JSON.stringify(command)), "the exact bytes left the message");
+  for (const line of commandLines) assert.ok(text.includes(`${line}\n`), `${line} is not on screen`);
+  assert.equal(/more lines \(hash covers all bytes\)/u.test(text), false, "a fold survived");
   // The store path names the RECOMPUTED binding (APRV-119): the renderer takes
   // the payload and derives the hash itself, so a caller cannot label a
   // rendering with somebody else's content address.
@@ -2658,9 +2644,10 @@ test("a command reaches Telegram escaped, chunked and complete", async () => {
   assert.ok(whole.includes(`cwd: /repo`), whole);
   assert.ok(whole.includes(rawBytesLine(request_.payload_hash.value)), whole);
   assert.ok(
-    whole.includes(`--- full payload (sha256 ${request_.payload_hash.value}) ---`),
-    "the payload region lost its hash label",
+    whole.includes(`payload sha256: ${request_.payload_hash.value}`),
+    "the canonical block lost its binding line",
   );
+  assert.equal(whole.includes("--- full payload (sha256"), false, whole);
   for (const text of texts) {
     assert.ok(text.length <= 4096, "a message exceeded Telegram's 4096-character limit");
   }
