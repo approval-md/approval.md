@@ -39,6 +39,19 @@
  *     <demo dir>/tasks/ is the child's own stdout, verbatim, so treat that
  *     directory as it deserves: local, unpublished, and thrown away with the
  *     demo instance.
+ *   - IT ALLOWS CORS FROM EXACTLY ONE ORIGIN, `https://approval.md`, AND
+ *     THAT GRANTS NOTHING BUT REACH. The site's /rsi page reads this server's
+ *     four GET routes and posts to the one submission route, so those five
+ *     answers carry `Access-Control-Allow-Origin: https://approval.md` (never
+ *     `*`) plus `Vary: Origin`; any other origin, and a request with no
+ *     `Origin` at all, gets no such header and is served exactly as before.
+ *     There is no decision authority anywhere in this process for CORS to
+ *     hand out: a browser that is allowed to read the queue and submit a task
+ *     is allowed to do the two things this server could already do, and the
+ *     grant, the rejection and the token still live on the approver's own
+ *     channel. No credentials are involved either — nothing here reads a
+ *     cookie or an `Authorization` header, so `Allow-Credentials` is absent
+ *     on purpose.
  *   - THE LOOPBACK WEB CHANNEL (port 4680, `src/channels/web.ts`) IS
  *     LOOPBACK-ONLY BY DESIGN AND MUST NEVER BE TUNNELED. Nothing in this
  *     file starts it. When you expose a demo to a room or to the internet,
@@ -1028,6 +1041,58 @@ function submitTask(client, payload) {
 // http
 // ---------------------------------------------------------------------------
 
+/**
+ * The one origin allowed to read this server from a browser: the site's own
+ * /rsi page. An exact origin, never `*` — not because a wildcard would leak
+ * anything (every route here is public and unauthenticated), but because the
+ * allowlist is the documentation: it says out loud which page this demo is
+ * wired to, and a wildcard would say nothing at all.
+ */
+const ALLOWED_ORIGIN = "https://approval.md";
+/** Modest on purpose: a demo's route set changes between rehearsals. */
+const CORS_MAX_AGE_SECONDS = 600;
+
+/**
+ * Whether a (method, path) pair is one of the five the site may reach: the
+ * four reads, and the submission desk. Everything else — the index, the 404s,
+ * the 405s — is left exactly as it was, with no CORS header of any kind.
+ */
+function corsRoute(method, path) {
+  if (method === "GET" || method === "HEAD") {
+    return (
+      path === "/api/state" ||
+      path === "/api/tasks" ||
+      path === "/api/templates" ||
+      path.startsWith("/api/task/")
+    );
+  }
+  if (method === "POST" || method === "OPTIONS") return path === "/api/task";
+  return false;
+}
+
+/**
+ * Stamp the CORS answer, if there is one to stamp.
+ *
+ * `Vary: Origin` goes on every CORS-eligible route whatever the origin is, so
+ * a cache can never hand one origin's answer (with the header) to another
+ * (which must not have it). The allow header itself goes on only when the
+ * request actually came from the site: a request from any other origin, and a
+ * request with no `Origin` at all, is answered exactly as it was before this
+ * existed.
+ *
+ * No `Access-Control-Allow-Credentials`: this server reads no cookie and no
+ * `Authorization` header, so there is nothing for a browser to send and
+ * nothing here that would change if it did.
+ */
+function applyCors(req, res, path) {
+  if (!corsRoute(req.method ?? "", path)) return false;
+  res.setHeader("vary", "Origin");
+  const origin = req.headers["origin"];
+  if (origin !== ALLOWED_ORIGIN) return false;
+  res.setHeader("access-control-allow-origin", ALLOWED_ORIGIN);
+  return true;
+}
+
 function sendJson(res, code, body) {
   const text = JSON.stringify(body);
   res.writeHead(code, {
@@ -1100,6 +1165,27 @@ function clientKey(req) {
 
 const server = createServer((req, res) => {
   const path = (req.url ?? "/").split("?")[0];
+
+  // The site's page may read the four GETs and post to the desk; nothing else
+  // on this server, and nobody else's origin. Stamped before the routing below
+  // so every answer a matching route gives — 200, 400, 404, 429 alike — carries
+  // it, and a browser can show the refusal rather than a CORS error about it.
+  const fromTheSite = applyCors(req, res, path);
+
+  // The preflight for POST /api/task, and the only method here that is not
+  // GET, HEAD or POST. It is answered ONLY for the allowed origin: an OPTIONS
+  // from anywhere else falls through to the 405 below, which is what this
+  // server did for every OPTIONS before CORS existed and still does for
+  // OPTIONS on every other path.
+  if (req.method === "OPTIONS" && fromTheSite) {
+    res.writeHead(204, {
+      "access-control-allow-methods": "POST",
+      "access-control-allow-headers": "content-type",
+      "access-control-max-age": String(CORS_MAX_AGE_SECONDS),
+    });
+    res.end();
+    return;
+  }
 
   // Exactly one POST route exists, and it is a submission desk: it enqueues a
   // task for the gated agent to attempt. It decides nothing. There is no route
@@ -1203,6 +1289,7 @@ server.listen(PORT, "0.0.0.0", () => {
       `  agent:         ${CLAUDE_BIN} as ${AGENT_ID}, one at a time, ${QUEUE_MAX} may wait\n` +
       "  endpoints:     GET / /api/state /api/templates /api/tasks /api/task/:id\n" +
       "                 POST /api/task — submits a task, decides nothing\n" +
+      `  cors:          those five, for ${ALLOWED_ORIGIN} only — reach, not authority\n` +
       "  reminder:      tunnel THIS port if you must tunnel anything. The gate's\n" +
       "                 own web channel on 4680 is loopback-only and stays that way.\n",
   );
