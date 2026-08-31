@@ -61,6 +61,9 @@ export function mockAdapter(options: MockAdapterOptions = {}): MockAdapter {
   return {
     name: "mock-email",
     classes: [MOCK_CLASS],
+    // APRV-169: the one credential it cannot act without, declared so the
+    // contract resolves it before it consumes the token.
+    requiredCredentials: [MOCK_CREDENTIAL],
     sends,
     act(input: ActInput): ActOutcome {
       const credential = input.credentials.get(MOCK_CREDENTIAL);

@@ -42,6 +42,13 @@
  *    *before* `act` is called, and a refusal there means `act` is never called
  *    at all. A log that recorded an execution only once it succeeded could not
  *    tell you about the one that did not.
+ * 3b. **Resolve declared credentials before spending the token** (APRV-169). An
+ *    adapter names the credentials it cannot act without, and the contract
+ *    resolves them before `startExecution`. A missing one refuses
+ *    `credential-unavailable` with the log untouched and the grant intact,
+ *    because a configuration fault must not consume a human's single-use
+ *    authority. The side effect's own ordering is unchanged: the token is still
+ *    consumed and `execution.started` still appended before `act` runs.
  * 4. **Scope the credentials.** The provider handed to `act` is a wrapper that
  *    closes when `act` returns. Inside the verified-token window it answers;
  *    outside it, every `get` refuses `credential-window-closed`. An adapter that
@@ -384,6 +391,21 @@ export interface Adapter {
   name: string;
   /** The declared classes this adapter serves, matched exactly. */
   classes: readonly string[];
+  /**
+   * The credential names without which `act` cannot even be attempted (APRV-169).
+   *
+   * Declared here rather than discovered inside `act`, because the contract
+   * resolves them BEFORE it consumes the token: a credential this runtime cannot
+   * reach is a configuration fault, and a configuration fault must not spend the
+   * single-use authority a human granted. An adapter that names nothing keeps
+   * exactly the behaviour it had, and one that names an OPTIONAL credential here
+   * turns an optional value into a required one, so the list holds only the
+   * values whose absence makes the action impossible.
+   *
+   * Names, never values: the contract asks the provider for each of them and
+   * keeps none of what comes back.
+   */
+  requiredCredentials?: readonly string[];
   act(input: ActInput): Promise<ActOutcome> | ActOutcome;
 }
 
@@ -433,6 +455,18 @@ export const ADAPTER_REFUSAL_CODES = [
    * excuse — and even that message passes the redaction guard.
    */
   "adapter-act-threw",
+  /**
+   * A credential the adapter declared in {@link Adapter.requiredCredentials}
+   * could not be resolved (APRV-169). Refused BEFORE the token is consumed and
+   * before `execution.started` is appended, so the grant survives: the log is
+   * left exactly as it was found and the same token is spendable once the
+   * credential appears.
+   *
+   * The provider's own reason (`credential-unavailable`, `credential-refused`)
+   * rides in `adapter_code`, because "nobody stored an SMTP password" and "the
+   * vault would not open" are two different repairs.
+   */
+  "credential-unavailable",
 ] as const;
 
 export type AdapterRefusalCode = (typeof ADAPTER_REFUSAL_CODES)[number];
@@ -515,6 +549,88 @@ export interface AdapterExecuteOptions extends ExecuteOptions {
 /** The exit code recorded for an execution the adapter did not complete. */
 const ADAPTER_FAILURE_EXIT_CODE = 1;
 
+/** What one pre-token credential resolution produced. */
+type CredentialResolution =
+  | { ok: true; issued: ReadonlySet<string> }
+  | {
+      ok: false;
+      /** The provider's own reason, carried through to `adapter_code`. */
+      credentialCode: string;
+      message: string;
+      redactions: number;
+    };
+
+/**
+ * Resolve every credential the adapter declared it cannot act without, before
+ * the token is consumed (APRV-169).
+ *
+ * The ordering this exists to establish, stated once: a credential the runtime
+ * cannot reach is a configuration fault, and a configuration fault must not
+ * spend a human's single-use grant. Resolving here means a
+ * `credential-unavailable` refusal costs no authority: nothing is appended, the
+ * token stays spendable, and the same token executes once the credential
+ * appears.
+ *
+ * What this does NOT reorder is the consume-then-execute sequence for the side
+ * effect itself. `startExecution` still consumes the token and appends
+ * `execution.started` before `act` is called, because that ordering is what
+ * makes a crash between the two an ambiguity the log can SEE rather than one it
+ * is silent about (APRV-120). Credentials move ahead of the token; the side
+ * effect does not.
+ *
+ * The reads happen in a window of their own that closes immediately, so a
+ * provider handed here is never left live outside a scope, and every value it
+ * hands over joins the redaction corpus of the refusal this may return. Nothing
+ * read here is kept or returned: what comes back is whether the name resolved,
+ * and `act` asks for the values itself inside the verified-token window.
+ *
+ * Note what an unauthorized caller learns by invoking this path: whether the
+ * names THIS ADAPTER statically declared are present in a provider the caller
+ * supplied in the first place. It is not a channel for asking about arbitrary
+ * names, and a caller holding the provider could ask it directly anyway.
+ */
+function resolveRequiredCredentials(
+  adapter: Adapter,
+  actionKey: string,
+  inner: CredentialProvider,
+): CredentialResolution {
+  const names = adapter.requiredCredentials ?? [];
+  if (names.length === 0) return { ok: true, issued: new Set<string>() };
+
+  const scope = scopeCredentials(inner);
+  try {
+    for (const name of names) {
+      let got: CredentialResult;
+      try {
+        got = scope.provider.get(name);
+      } catch (error) {
+        // A provider is required to be total. One that throws anyway is a
+        // configuration this runtime cannot use, and it is reported as one
+        // rather than allowed to escape: nothing here throws.
+        got = {
+          ok: false,
+          code: "credential-unavailable",
+          message: `the credential provider raised instead of answering: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+      if (got.ok) continue;
+      const redacted = redactSecrets(
+        `the ${adapter.name} adapter declares that it cannot act without the credential ${JSON.stringify(name)}, and it did not resolve (${got.code}): ${got.message}. Nothing was appended and no token was spent: credentials resolve before the token is consumed (SPEC.md §10.4, APRV-169), so this refusal costs no authority and the same token executes once the credential is reachable.`,
+        scope.issued,
+      );
+      return {
+        ok: false,
+        credentialCode: got.code,
+        message: redacted.text,
+        redactions: redacted.hits,
+      };
+    }
+    return { ok: true, issued: scope.issued };
+  } finally {
+    scope.close();
+  }
+}
+
 /**
  * Copy the core-relevant options across, and bind the hash the contract
  * computed. Built explicitly rather than spread so that a future field added to
@@ -568,12 +684,17 @@ function refuse(
  *    `startExecution`, which reads for itself and compare-and-appends against
  *    the head it read. That is not redundancy to remove: a routing check that
  *    handed its records to core would be core trusting a caller's snapshot.)
- * 3. **`startExecution`**, which on the manual path verifies and consumes the
+ * 3. **Resolve the declared credentials** (APRV-169), in a window of their own
+ *    that closes at once. A name the provider cannot answer refuses
+ *    `credential-unavailable` here, with the log untouched and the token
+ *    unspent, so a missing secret costs no authority and the same token works
+ *    once the secret appears. An adapter declaring none skips this entirely.
+ * 4. **`startExecution`**, which on the manual path verifies and consumes the
  *    token, refuses `payload-mismatch` against the digest from step 1, and
  *    appends `execution.started`. Any refusal here returns with `acted: false`;
  *    `act` is not called, so no side effect was attempted.
- * 4. **`act`**, inside a credential window that closes the moment it returns.
- * 5. **The outcome event**, and WHICH one depends on where things went wrong
+ * 5. **`act`**, inside a credential window that closes the moment it returns.
+ * 6. **The outcome event**, and WHICH one depends on where things went wrong
  *    (APRV-120). `act` returning success is `execution.completed`; `act`
  *    returning a failure is `execution.failed`, because the provider answered
  *    and the answer was no; a throw on the way INTO `act` is `execution.failed`
@@ -582,7 +703,7 @@ function refuse(
  *    committed and this runtime cannot tell. The boundary is the invocation
  *    itself, not a judgment about the error.
  *
- * A refusal from step 5 is returned with `started_seq` set and the log left
+ * A refusal from step 6 is returned with `started_seq` set and the log left
  * holding a dangling execution — which is the honest state, since the side
  * effect did happen and its outcome could not be recorded. `approval status`
  * reports it and `approval execution resolve` is how a human closes it. An
@@ -644,7 +765,20 @@ export async function executeThroughAdapter(
     );
   }
 
-  // (c) Authorization and the start event. Refused here means act never runs.
+  // (c) The credentials the adapter declared it cannot act without, resolved
+  //     BEFORE the token is consumed (APRV-169). See
+  //     {@link resolveRequiredCredentials} for why this sits here and why the
+  //     consume-then-execute ordering below is untouched.
+  const provider = options.credentials ?? NO_CREDENTIALS;
+  const resolved = resolveRequiredCredentials(adapter, actionKey, provider);
+  if (!resolved.ok) {
+    return refuse(adapter, actionKey, "credential-unavailable", resolved.message, {
+      adapter_code: resolved.credentialCode,
+      redactions: resolved.redactions,
+    });
+  }
+
+  // (d) Authorization and the start event. Refused here means act never runs.
   const executeOptions = executeOptionsFrom(options, hash);
   const started = startExecution(logPath, actionKey, executeOptions, actor);
   if (!started.ok) {
@@ -652,7 +786,7 @@ export async function executeThroughAdapter(
   }
   const startedSeq = started.record.seq;
 
-  // (d) The adapter's own step, inside the credential window.
+  // (e) The adapter's own step, inside the credential window.
   //
   // `entered` is the custody boundary of APRV-120, and it is positional rather
   // than a judgment: everything up to and including the read of `adapter.act`
@@ -661,7 +795,11 @@ export async function executeThroughAdapter(
   // `execution.failed` — nothing was attempted. A throw on the far side is
   // `execution.indeterminate` — the provider may or may not have committed, and
   // saying "failed" about it is the assertion that produces double sends.
-  const scope = scopeCredentials(options.credentials ?? NO_CREDENTIALS);
+  const scope = scopeCredentials(provider);
+  // Everything the pre-token resolution was handed is already a secret this
+  // path may be about to print, so it joins the corpus before `act` runs rather
+  // than only if `act` happens to ask for the same names again.
+  for (const secret of resolved.issued) scope.issued.add(secret);
   let entered = false;
 
   let outcome: ActOutcome;

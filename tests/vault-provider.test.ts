@@ -303,19 +303,30 @@ test("no vault, and a name the vault does not hold, are both credential-unavaila
   }
 });
 
-test("an adapter that cannot authenticate reports a failed execution, not a silent skip", async () => {
+test("an adapter that cannot authenticate refuses before the token is spent", async () => {
   const unit = granted(false);
   const adapter = mockAdapter();
+  const before = readFileSync(unit.logPath, "utf8");
   const result = await run(adapter, unit, provider(unit));
 
   assert.equal(result.ok, false, "an adapter with no credential must not report success");
   if (!result.ok) {
-    assert.equal(result.code, "adapter-failed");
-    assert.equal(result.acted, true, "the execution was attempted and the log must say so");
+    // APRV-169. The mock declares the credential it cannot act without, so an
+    // empty vault is caught before `startExecution`: nothing is appended, the
+    // token stays spendable, and the vault's own reason rides in `adapter_code`.
+    assert.equal(result.code, "credential-unavailable");
+    assert.equal(result.acted, false, "act ran although the declared credential was missing");
     assert.equal(result.adapter_code, "credential-unavailable");
-    assert.equal(result.outcome, "execution.failed");
+    assert.equal(result.outcome, undefined);
+    assert.equal(result.message.includes(SECRET), false);
+    assert.equal(result.message.includes(PASSPHRASE), false);
   }
   assert.equal(adapter.sends.length, 0);
+  assert.equal(
+    readFileSync(unit.logPath, "utf8"),
+    before,
+    "an empty vault burned the grant it should have left alone",
+  );
 });
 
 // ---------------------------------------------------------------------------
