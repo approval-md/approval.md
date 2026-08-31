@@ -6,7 +6,7 @@ Version: 0.1.0-draft · Status: Draft · License: MIT · Canonical URL: https://
 
 > Your AGENTS.md says "require approval first." approval.md enforces it, and puts the approve button on your phone.
 
-Amended text names the task that changed it, `(Amended APRV-n.)`. Text a builder drafted and the maintainer has not signed off yet says so, `(Amended APRV-n, pending sign-off.)`, and carries no more authority than a proposal until the suffix is removed.
+Amended text names the task that changed it, `(Amended APRV-n.)`. An amendment whose exact text a human granted through the gate (a `policy.edit` grant on this file whose prompt showed the change whole, worktree proposals included) is signed off at that grant and carries the plain suffix from birth; the log records the grant, and the suffix MAY cite it (`granted seq N`) when the author wants the trail inline. Text that reached the file without such a grant says so, `(Amended APRV-n, pending sign-off.)`, and carries no more authority than a proposal until a human ratifies it; that covers an edit applied where the hook was silent and text drafted for a review that has not happened. Doubt resolves to pending. (Amended APRV-181.)
 
 ---
 
