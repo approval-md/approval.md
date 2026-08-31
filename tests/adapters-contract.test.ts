@@ -229,6 +229,7 @@ test("the adapter refusal union is frozen and a superset of the execute union", 
       "payload-unhashable",
       "adapter-failed",
       "adapter-act-threw",
+      "credential-unavailable",
     ],
     "the adapter refusal union changed; it is frozen public API",
   );
@@ -324,6 +325,7 @@ test("a credential the adapter publishes in its detail is redacted from the resu
 test("with no provider configured, nothing is handed out and the adapter cannot act", async () => {
   const unit = granted();
   const adapter = mockAdapter();
+  const before = readFileSync(unit.logPath, "utf8");
   const result = await executeThroughAdapter(
     adapter,
     { logPath: unit.logPath, actionKey: unit.actionKey, payload: unit.payload, actor: unit.actor },
@@ -332,13 +334,103 @@ test("with no provider configured, nothing is handed out and the adapter cannot 
 
   assert.equal(result.ok, false, "an adapter with no credential must not report success");
   if (!result.ok) {
-    assert.equal(result.code, "adapter-failed");
+    // APRV-169: the declared credential is resolved BEFORE the token is spent,
+    // so this is refused with the log untouched rather than recorded as a
+    // failed execution.
+    assert.equal(result.code, "credential-unavailable");
     assert.equal(result.adapter_code, "credential-unavailable");
-    assert.equal(result.acted, true, "act ran; it simply could not authenticate");
-    assert.equal(result.outcome, "execution.failed");
+    assert.equal(result.acted, false, "act must not run without the credential it declared");
+    assert.equal(result.started_seq, undefined, "an execution was started for a missing credential");
+    assert.equal(result.outcome, undefined, "an outcome was recorded for an execution never begun");
   }
   assert.equal(adapter.sends.length, 0, "the mock sent without a credential");
+  assert.equal(
+    readFileSync(unit.logPath, "utf8"),
+    before,
+    "a credential refusal wrote to the log; it must cost no authority",
+  );
   assert.equal(NO_CREDENTIALS.get("anything").ok, false, "the default provider handed out a value");
+  unit.cleanup?.();
+});
+
+test("a credential refusal leaves the token spendable, and the same token then succeeds", async () => {
+  const unit = granted();
+  const adapter = mockAdapter();
+  const before = readFileSync(unit.logPath, "utf8");
+
+  // The credential is absent at first: the provider knows the name and holds
+  // nothing for it, which is the shape of a vault an operator has not filled.
+  const holdings: Record<string, string> = {};
+  const late: CredentialProvider = {
+    get: (name: string) => inMemoryCredentials(holdings).get(name),
+  };
+
+  const refused = await run(adapter, unit, { credentials: late });
+  assert.equal(refused.ok, false, "a missing credential must not report success");
+  if (!refused.ok) assert.equal(refused.code, "credential-unavailable");
+  assert.equal(
+    readFileSync(unit.logPath, "utf8"),
+    before,
+    "the failed attempt appended to the log; the grant must be untouched",
+  );
+
+  // The operator stores it. The SAME token, never consumed, now works.
+  holdings[MOCK_CREDENTIAL] = SECRET;
+  const second = await run(adapter, unit, { credentials: late });
+  assert.equal(second.ok, true, `the retained token was refused: ${JSON.stringify(second)}`);
+  assert.equal(adapter.sends.length, 1, "the retry did not send exactly once");
+
+  // And it is still single-use: the third attempt is refused by the token, not
+  // by the credential.
+  const third = await run(adapter, unit, { credentials: late });
+  assert.equal(third.ok, false, "a spent token executed twice");
+  if (!third.ok) assert.equal(third.code, "token-consumed", `wrong refusal: ${third.code}`);
+  assert.equal(adapter.sends.length, 1, "a second send happened on a spent token");
+  unit.cleanup?.();
+});
+
+test("an adapter that declares no credentials keeps the ordering it always had", async () => {
+  const unit = granted();
+  const declaring: Adapter = {
+    name: "declares-nothing",
+    classes: [MOCK_CLASS],
+    act(input: ActInput): ActOutcome {
+      const got = input.credentials.get("never-stored");
+      return got.ok
+        ? { ok: true }
+        : { ok: false, code: got.code, message: `no credential: ${got.message}` };
+    },
+  };
+
+  const result = await run(declaring, unit, { credentials: inMemoryCredentials({}) });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    // Nothing was declared, so nothing was resolved early: act ran, asked, and
+    // the failure is the adapter's own, recorded as execution.failed.
+    assert.equal(result.code, "adapter-failed", `wrong refusal: ${result.code}`);
+    assert.equal(result.acted, true);
+    assert.equal(result.outcome, "execution.failed");
+  }
+  unit.cleanup?.();
+});
+
+test("a provider that throws during resolution is a refusal, not an exception", async () => {
+  const unit = granted();
+  const hostile: CredentialProvider = {
+    get(): never {
+      throw new Error("the vault file is a directory");
+    },
+  };
+  const before = readFileSync(unit.logPath, "utf8");
+
+  const result = await run(mockAdapter(), unit, { credentials: hostile });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.code, "credential-unavailable");
+    assert.equal(result.acted, false);
+  }
+  assert.equal(readFileSync(unit.logPath, "utf8"), before, "a throwing provider wrote to the log");
+  unit.cleanup?.();
 });
 
 test("the provider handed to act refuses once act has returned", async () => {

@@ -43,13 +43,15 @@
  * {@link CREDENTIAL_REFUSAL_CODES}.
  */
 
+import { defaultSourceRunner, type SourceRunner } from "../core/env-file.js";
 import {
   getCredential,
   passphraseFrom,
   vaultPathFor,
   type VaultRefusalCode,
 } from "../core/vault.js";
-import type { CredentialProvider, CredentialResult } from "./contract.js";
+import type { CredentialProvider, CredentialResult, ExecutionGrant } from "./contract.js";
+import { passphraseUnderGrant } from "./env-passphrase.js";
 
 /**
  * How to reach the vault. Either the vault file directly, or the log path the
@@ -67,6 +69,20 @@ export interface VaultProviderOptions {
   passphraseEnv: string;
   /** Injectable for tests. Defaults to this process's environment. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * The instance's `.approval/env`, enabling the scoped passphrase fallback
+   * (APRV-168). Absent, and the provider behaves exactly as it always did:
+   * the passphrase comes from the environment or it comes from nowhere.
+   *
+   * Supplied by `approval adapter <name>`, which executes through the contract
+   * and therefore inside a consumed-token window. It is deliberately NOT
+   * supplied by `approval setup adapter <name>`, `approval vault`, or anything
+   * else: those hold no token, so the fallback would have no authority behind
+   * it. See `adapters/env-passphrase.ts` for the whole argument.
+   */
+  envFilePath?: string;
+  /** The keychain / secret-service seam, injectable exactly as it is there. */
+  sourceRunner?: SourceRunner;
 }
 
 /**
@@ -118,6 +134,17 @@ function mapRefusal(code: VaultRefusalCode): "credential-unavailable" | "credent
  * captured at construction, so a provider built before the operator exported the
  * variable is not permanently poisoned.
  *
+ * **The scoped fallback (APRV-168).** When {@link VaultProviderOptions.envFilePath}
+ * is supplied AND the contract has told this provider it is inside a token
+ * window, a passphrase absent from the environment is resolved from the
+ * instance's `.approval/env` instead. That is the one narrowing of
+ * `core/env-file.ts`'s "no verb reads this file" rule, and the whole argument
+ * for it lives in `adapters/env-passphrase.ts`. The short form: the authority is
+ * the token, and a human tapped Approve for exactly this action. The value is
+ * used to derive one key and reaches no environment, no argv, no log, and no
+ * message; the cache is dropped when the window closes, so a passphrase resolved
+ * under one grant opens nothing under the next.
+ *
  * Messages name the environment VARIABLE and the credential NAME, and never a
  * value: an adapter's failure message is one of the strings the contract hands
  * back to a caller, and a diagnostic that quoted the secret would defeat the
@@ -131,18 +158,48 @@ export function vaultCredentialProvider(
   const vaultPath = "vaultPath" in location ? location.vaultPath : vaultPathFor(location.logPath);
   const { passphraseEnv } = options;
   const cache = new Map<string, string>();
+  // The live grant, set by the contract when the credential window opens and
+  // cleared when it closes. Never read except by the fallback below, and the
+  // fallback is unreachable while it is null.
+  let live: ExecutionGrant | null = null;
 
   return {
+    grant(grant: ExecutionGrant | null): void {
+      live = grant;
+      // A cached credential was derived under the previous window's authority.
+      // Dropping the cache with the grant means the next window pays for its
+      // own passphrase rather than inheriting one.
+      if (grant === null) cache.clear();
+    },
+
     get(name: string): CredentialResult {
       const cached = cache.get(name);
       if (cached !== undefined) return { ok: true, value: cached };
 
-      const passphrase = passphraseFrom(passphraseEnv, options.env ?? process.env);
+      const passphrase =
+        passphraseFrom(passphraseEnv, options.env ?? process.env) ??
+        // APRV-168. Only inside a window the contract opened against a token a
+        // human's grant minted, and only for the one variable the policy names.
+        // The value goes straight into the key derivation below: it is not
+        // exported, not cached on its own, and it appears in no message on
+        // either branch.
+        (options.envFilePath === undefined
+          ? null
+          : passphraseUnderGrant(
+              live,
+              options.envFilePath,
+              passphraseEnv,
+              options.sourceRunner ?? defaultSourceRunner,
+            ));
       if (passphrase === null) {
         return {
           ok: false,
           code: "credential-unavailable",
-          message: `credential ${JSON.stringify(name)} lives in the vault at ${vaultPath}, and the passphrase variable ${passphraseEnv} is unset or empty in this process. The policy names the variable and never the value (SPEC.md §5.2, §10.4); export it in the environment that runs the adapter.`,
+          message: `credential ${JSON.stringify(name)} lives in the vault at ${vaultPath}, and the passphrase variable ${passphraseEnv} is unset or empty in this process${
+            options.envFilePath === undefined
+              ? ""
+              : `, and it did not resolve from ${options.envFilePath} either`
+          }. The policy names the variable and never the value (SPEC.md §5.2, §10.4); export it in the environment that runs the adapter, or give it a line in the environment source map.`,
         };
       }
 

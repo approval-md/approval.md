@@ -24,8 +24,8 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 
 import {
@@ -38,6 +38,7 @@ import {
   type JsonValue,
 } from "../src/adapters/contract.js";
 import { vaultCredentialProvider } from "../src/adapters/vault-provider.js";
+import { envFilePathFor, type SourceRunner } from "../src/core/env-file.js";
 import { payloadHash } from "../src/core/payload.js";
 import { setCredential, VAULT_FILENAME } from "../src/core/vault.js";
 import { MOCK_CLASS, MOCK_CREDENTIAL, mockAdapter } from "./adapter-mock.js";
@@ -303,19 +304,30 @@ test("no vault, and a name the vault does not hold, are both credential-unavaila
   }
 });
 
-test("an adapter that cannot authenticate reports a failed execution, not a silent skip", async () => {
+test("an adapter that cannot authenticate refuses before the token is spent", async () => {
   const unit = granted(false);
   const adapter = mockAdapter();
+  const before = readFileSync(unit.logPath, "utf8");
   const result = await run(adapter, unit, provider(unit));
 
   assert.equal(result.ok, false, "an adapter with no credential must not report success");
   if (!result.ok) {
-    assert.equal(result.code, "adapter-failed");
-    assert.equal(result.acted, true, "the execution was attempted and the log must say so");
+    // APRV-169. The mock declares the credential it cannot act without, so an
+    // empty vault is caught before `startExecution`: nothing is appended, the
+    // token stays spendable, and the vault's own reason rides in `adapter_code`.
+    assert.equal(result.code, "credential-unavailable");
+    assert.equal(result.acted, false, "act ran although the declared credential was missing");
     assert.equal(result.adapter_code, "credential-unavailable");
-    assert.equal(result.outcome, "execution.failed");
+    assert.equal(result.outcome, undefined);
+    assert.equal(result.message.includes(SECRET), false);
+    assert.equal(result.message.includes(PASSPHRASE), false);
   }
   assert.equal(adapter.sends.length, 0);
+  assert.equal(
+    readFileSync(unit.logPath, "utf8"),
+    before,
+    "an empty vault burned the grant it should have left alone",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -343,4 +355,209 @@ test("the passphrase is read at open time, not captured at construction", () => 
   env[PASS_ENV] = PASSPHRASE;
   const now = lazy.get(MOCK_CREDENTIAL);
   assert.equal(now.ok, true, "the provider stayed poisoned after the operator exported the variable");
+});
+
+// ---------------------------------------------------------------------------
+// The scoped passphrase fallback (APRV-168)
+// ---------------------------------------------------------------------------
+
+/**
+ * A `.approval/env` beside the case's log, at the 0600 the reader insists on.
+ *
+ * Written as BYTES rather than through `upsertEnvFileEntries`, because what is
+ * under test here is the reader: a fixture built by the writer would agree with
+ * the parser by construction.
+ */
+function writeEnvFile(unit: Case, line: string): string {
+  const path = envFilePathFor(unit.logPath);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `# fixture\n${line}\n`, "utf8");
+  chmodSync(path, 0o600);
+  return path;
+}
+
+/** A stub keychain, standing in for `security find-generic-password`. */
+function fakeKeychain(items: Readonly<Record<string, string>>): SourceRunner {
+  return {
+    keychain(service: string) {
+      const value = items[service];
+      return value === undefined
+        ? { ok: false as const, code: "helper-item-missing" as const, message: "no such item" }
+        : { ok: true as const, value };
+    },
+    secretService() {
+      return {
+        ok: false as const,
+        code: "helper-binary-missing" as const,
+        message: "no secret-tool here",
+      };
+    },
+  };
+}
+
+test("a scrubbed process resolves the passphrase from .approval/env inside the window", async () => {
+  const unit = granted();
+  writeEnvFile(unit, `${PASS_ENV}=${PASSPHRASE}`);
+
+  // The environment the web-agent runner hands its child: everything matching
+  // APPROVAL|VAULT|TELEGRAM is gone, so the passphrase is nowhere in it.
+  const scrubbed = vaultCredentialProvider(
+    { vaultPath: unit.vaultPath },
+    { passphraseEnv: PASS_ENV, env: {}, envFilePath: envFilePathFor(unit.logPath) },
+  );
+
+  const adapter = mockAdapter();
+  const result = await run(adapter, unit, scrubbed);
+  assert.equal(
+    result.ok,
+    true,
+    `the scoped fallback did not open the vault: ${JSON.stringify(result)}`,
+  );
+  assert.equal(adapter.sends.length, 1, "the adapter did not send");
+
+  // Nothing leaked: not the credential, not the passphrase, on any line.
+  const raw = readFileSync(unit.logPath, "utf8");
+  assert.equal(raw.includes(SECRET), false, "the log holds the credential");
+  assert.equal(raw.includes(PASSPHRASE), false, "the log holds the passphrase");
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes(SECRET), false, "the result holds the credential");
+  assert.equal(serialized.includes(PASSPHRASE), false, "the result holds the passphrase");
+});
+
+test("a keychain: line resolves through the same seam `approval env` uses", async () => {
+  const unit = granted();
+  writeEnvFile(unit, `${PASS_ENV}=keychain:approval-vault-passphrase`);
+
+  const scrubbed = vaultCredentialProvider(
+    { vaultPath: unit.vaultPath },
+    {
+      passphraseEnv: PASS_ENV,
+      env: {},
+      envFilePath: envFilePathFor(unit.logPath),
+      sourceRunner: fakeKeychain({ "approval-vault-passphrase": PASSPHRASE }),
+    },
+  );
+
+  const adapter = mockAdapter();
+  const result = await run(adapter, unit, scrubbed);
+  assert.equal(result.ok, true, `the keychain seam did not answer: ${JSON.stringify(result)}`);
+  assert.equal(adapter.sends.length, 1);
+  assert.equal(readFileSync(unit.logPath, "utf8").includes(PASSPHRASE), false);
+});
+
+test("a keychain item that is missing refuses, and names no value", async () => {
+  const unit = granted();
+  writeEnvFile(unit, `${PASS_ENV}=keychain:approval-vault-passphrase`);
+  const scrubbed = vaultCredentialProvider(
+    { vaultPath: unit.vaultPath },
+    {
+      passphraseEnv: PASS_ENV,
+      env: {},
+      envFilePath: envFilePathFor(unit.logPath),
+      sourceRunner: fakeKeychain({}),
+    },
+  );
+
+  const before = readFileSync(unit.logPath, "utf8");
+  const result = await run(mockAdapter(), unit, scrubbed);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.code, "credential-unavailable");
+    assert.match(result.message, new RegExp(PASS_ENV, "u"));
+    assert.equal(result.message.includes(PASSPHRASE), false);
+    assert.equal(result.message.includes(SECRET), false);
+  }
+  assert.equal(
+    readFileSync(unit.logPath, "utf8"),
+    before,
+    "a missing keychain item burned the grant",
+  );
+});
+
+test("the fallback is unreachable without the token that grant minted", async () => {
+  const unit = granted();
+  writeEnvFile(unit, `${PASS_ENV}=${PASSPHRASE}`);
+  const opts = {
+    passphraseEnv: PASS_ENV,
+    env: {},
+    envFilePath: envFilePathFor(unit.logPath),
+  };
+
+  // (a) Asked directly, outside any execution. This is every generic verb:
+  //     `approval vault`, `approval doctor`, `approval setup adapter`. No grant
+  //     was ever handed over, so the file is not consulted.
+  const bare = vaultCredentialProvider({ vaultPath: unit.vaultPath }, opts);
+  const direct = bare.get(MOCK_CREDENTIAL);
+  assert.equal(direct.ok, false, "the file answered a caller holding no token at all");
+  if (!direct.ok) {
+    assert.equal(direct.code, "credential-unavailable");
+    assert.equal(direct.message.includes(PASSPHRASE), false);
+  }
+
+  // (b) Inside an execution, with a token that is not the one the grant minted.
+  //     Holding a string is not holding an approval.
+  const wrongToken = vaultCredentialProvider({ vaultPath: unit.vaultPath }, opts);
+  const refused = await executeThroughAdapter(
+    mockAdapter(),
+    { logPath: unit.logPath, actionKey: unit.actionKey, payload: unit.payload, actor: AGENT },
+    { ...unit.options, token: "not-the-token", credentials: wrongToken },
+  );
+  assert.equal(refused.ok, false, "a forged token reached the vault");
+  if (!refused.ok) assert.equal(refused.code, "credential-unavailable");
+
+  // (c) The same provider, after a real execution has closed its window.
+  const real = vaultCredentialProvider({ vaultPath: unit.vaultPath }, opts);
+  const done = await run(mockAdapter(), unit, real);
+  assert.equal(done.ok, true, `the real execution failed: ${JSON.stringify(done)}`);
+  const late = real.get(MOCK_CREDENTIAL);
+  assert.equal(late.ok, false, "the fallback outlived the window that authorized it");
+  if (!late.ok) assert.equal(late.code, "credential-unavailable");
+});
+
+test("the ambient environment wins, and an absent env file changes nothing", async () => {
+  const unit = granted();
+  // A file that resolves to the WRONG passphrase. It must never be reached: the
+  // shell a human established is the authority (SPEC.md §11.1 invariant 7).
+  writeEnvFile(unit, `${PASS_ENV}=a passphrase nobody set`);
+  const ambient = vaultCredentialProvider(
+    { vaultPath: unit.vaultPath },
+    {
+      passphraseEnv: PASS_ENV,
+      env: { [PASS_ENV]: PASSPHRASE },
+      envFilePath: envFilePathFor(unit.logPath),
+    },
+  );
+  const result = await run(mockAdapter(), unit, ambient);
+  assert.equal(
+    result.ok,
+    true,
+    `the file overrode the exported variable: ${JSON.stringify(result)}`,
+  );
+
+  // And with no file at all, a scrubbed process is exactly as stuck as before.
+  const other = granted();
+  const nothing = vaultCredentialProvider(
+    { vaultPath: other.vaultPath },
+    { passphraseEnv: PASS_ENV, env: {}, envFilePath: envFilePathFor(other.logPath) },
+  );
+  const stuck = await run(mockAdapter(), other, nothing);
+  assert.equal(stuck.ok, false);
+  if (!stuck.ok) assert.equal(stuck.code, "credential-unavailable");
+});
+
+test("an env file this runtime will not read is a refusal, not a silent read", async () => {
+  const unit = granted();
+  const path = writeEnvFile(unit, `${PASS_ENV}=${PASSPHRASE}`);
+  chmodSync(path, 0o644);
+
+  const loose = vaultCredentialProvider(
+    { vaultPath: unit.vaultPath },
+    { passphraseEnv: PASS_ENV, env: {}, envFilePath: path },
+  );
+  const result = await run(mockAdapter(), unit, loose);
+  assert.equal(result.ok, false, "a world-readable source map was read anyway");
+  if (!result.ok) {
+    assert.equal(result.code, "credential-unavailable");
+    assert.equal(result.message.includes(PASSPHRASE), false);
+  }
 });

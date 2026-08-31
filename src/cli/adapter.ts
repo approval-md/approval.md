@@ -57,6 +57,7 @@ import {
 } from "../adapters/contract.js";
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
 import { loadPolicy } from "../core/policy-load.js";
+import { envFilePathFor } from "../core/env-file.js";
 import { passphraseEnvFor, vaultPathFor } from "../core/vault.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
@@ -229,7 +230,17 @@ export async function commandAdapterEmail(
   const vaultPath = vaultFlag === null ? vaultPathFor(logPath) : absolute(vaultFlag, cwd);
   const credentials = vaultCredentialProvider(
     { vaultPath },
-    { passphraseEnv: passphraseEnvFor(loadPolicy(policyLocation)) },
+    {
+      passphraseEnv: passphraseEnvFor(loadPolicy(policyLocation)),
+      // APRV-168. This verb executes through the adapter contract, so its
+      // credential reads happen inside a window a human's grant opened. That is
+      // the one place the environment source map may answer for the vault
+      // passphrase when the process was launched without it; see
+      // `adapters/env-passphrase.ts`. The provider still prefers the ambient
+      // variable, and every other caller of `vaultCredentialProvider` omits
+      // this and keeps the old behaviour exactly.
+      envFilePath: envFilePathFor(logPath),
+    },
   );
 
   const result = await executeThroughAdapter(
