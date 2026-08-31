@@ -45,7 +45,6 @@ import {
   changePayloadView,
   commandPayloadView,
   emailPayloadFields,
-  foldMarker,
   markEscapes,
   payloadRegionText,
   rawBytesLine,
@@ -55,9 +54,7 @@ import {
   CANONICAL_JSON_HEADING,
   COMMAND_BEGIN,
   COMMAND_END,
-  COMMAND_LINE_BUDGET,
   COMMAND_VIEW_HEADING,
-  DIFF_LINE_BUDGET,
   EDIT_VIEW_HEADING,
   EMAIL_VIEW_HEADING,
   ESCAPE_LEGEND,
@@ -74,9 +71,13 @@ import {
   groupForDigest,
   parseCallbackData,
   payloadShapeKey,
+  renderTelegram,
+  PAYLOAD_CHUNK_LABEL_TAIL,
+  TELEGRAM_ANOMALY_MARK,
   TelegramChannel,
   TELEGRAM_DEFAULT_RETENTION_MS,
   TELEGRAM_DIGEST_MAX_MEMBERS,
+  TELEGRAM_GLOSS_SUFFIX,
   TELEGRAM_MAX_CALLBACK_BYTES,
   TELEGRAM_PROMPT_HEADING,
   type TelegramConfig,
@@ -89,13 +90,20 @@ import {
 } from "../src/cli/channel-telegram.js";
 import {
   glossFor,
+  glossPrompt,
   tidyGloss,
   GLOSS_AUTHOR,
+  GLOSS_EDIT_INSTRUCTION,
+  GLOSS_EMAIL_INSTRUCTION,
+  GLOSS_INSTRUCTION,
   GLOSS_MAX_CHARS,
+  GLOSS_MAX_INPUT_CHARS,
+  GLOSS_TRUNCATION_NOTE,
   type GlossRunner,
 } from "../src/cli/gloss.js";
 import type { Streams } from "../src/cli/main.js";
 import { appendAttestation } from "../src/core/attest.js";
+import type { BudgetVerdict } from "../src/core/budgets.js";
 import { register as registerCore, request as requestCore } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
 import { readVerifiedRecords } from "../src/core/state.js";
@@ -443,8 +451,8 @@ test("computed and claimed are separated, and the payload is sent verbatim", asy
   const texts = mock.sentTexts().slice(before);
   const whole = texts.join("\n");
   assert.match(whole, /COMPUTED — derived by the runtime/u);
-  assert.match(whole, /CLAIMED — authored by agent:drafter, NOT verified/u);
-  assert.match(whole, /FULL PAYLOAD/u);
+  assert.match(whole, /WHAT THIS DOES — CLAIMED by agent:drafter, NOT verified by the runtime/u);
+  assert.ok(whole.includes(PAYLOAD_CHUNK_LABEL_TAIL), whole);
   assert.match(whole, new RegExp(`<code>${key}</code>`, "u"), "the action key is shown verbatim");
 
   // The payload arrives verbatim — and HTML-escaped, which is the whole reason
@@ -468,6 +476,396 @@ test("computed and claimed are separated, and the payload is sent verbatim", asy
   // And nothing was written to the log by rendering it.
   assert.equal(recordsOf(world.unit.logPath).length, 3);
   assert.ok(key.length > 0);
+});
+
+// ---------------------------------------------------------------------------
+// The computed block: what a healthy prompt shows, and what an unhealthy one
+// adds (APRV-163). `renderTelegram` is pure, so these render directly rather
+// than through the mock: the question is which rows exist, not how they ship.
+// ---------------------------------------------------------------------------
+
+/** The `field` of every computed row the renderer produced, in order. */
+function computedFields(request_: ChannelRequest): string[] {
+  return renderTelegram(request_)
+    .lines.filter((entry) => entry.kind === "computed")
+    .map((entry) => entry.field);
+}
+
+/** One live request, healthy: manual autonomy, budgets passing, policy attested. */
+function healthy(): ChannelRequest {
+  const [request_] = queueOf(live(1), at(2));
+  assert.ok(request_ !== undefined);
+  assert.equal(request_.autonomy.value, "manual");
+  assert.equal(request_.attestation.value.status, "attested");
+  assert.ok(
+    request_.budgets.value.every((verdict) => verdict.pass),
+    "the fixture request already fails a budget; the healthy baseline is not healthy",
+  );
+  return request_;
+}
+
+const FAILING_VERDICT: BudgetVerdict = {
+  limit: "daily_usd",
+  scope: "class",
+  window: "rolling-24h",
+  consumed: "9.99",
+  requested: "0.02",
+  remaining: "-0.01",
+  pass: false,
+};
+
+test("a healthy prompt carries only the rows that drive the decision", () => {
+  const request_ = healthy();
+  assert.deepEqual(
+    computedFields(request_),
+    ["class", "waiting"],
+    "the healthy computed block is not the decision-driving set",
+  );
+
+  // The six bookkeeping rows are gone from the message and still on the
+  // request, which is what keeps `--json`, `approval queue` and the web page
+  // whole while the phone screen shrinks.
+  const header = renderTelegram(request_).header;
+  for (const label of ["resolved by", "payload sha256", "requested", "chain", "task", "state"]) {
+    assert.equal(header.includes(`<b>${label}:</b>`), false, `the header still renders ${label}`);
+  }
+  for (const field of [
+    request_.provenance,
+    request_.payload_hash,
+    request_.requested_ts,
+    request_.chain,
+    request_.task,
+    request_.state,
+  ]) {
+    assert.equal(field.kind, "computed", "a dropped row lost its field on the request");
+  }
+});
+
+test("the commands and protected-path rows render under the class they explain", () => {
+  const request_: ChannelRequest = {
+    ...healthy(),
+    command_breakdown: computed("npm test — run the test suite", "classifier"),
+    protected_path: computed("APPROVAL.md", "policy"),
+  };
+  assert.deepEqual(computedFields(request_), [
+    "class",
+    "command_breakdown",
+    "protected_path",
+    "waiting",
+  ]);
+});
+
+test("budgets renders only when a verdict fails, and shouts when it does", () => {
+  const base = healthy();
+  const passing = { ...FAILING_VERDICT, remaining: "5", pass: true };
+
+  assert.equal(
+    computedFields({ ...base, budgets: computed([], "budgets") }).includes("budgets"),
+    false,
+    "a prompt with no limits still spent a row saying so",
+  );
+  assert.equal(
+    computedFields({ ...base, budgets: computed([passing], "budgets") }).includes("budgets"),
+    false,
+    "a passing budget still spent a row saying everything is fine",
+  );
+
+  const over = renderTelegram({
+    ...base,
+    budgets: computed([passing, FAILING_VERDICT], "budgets"),
+  });
+  assert.ok(over.lines.some((entry) => entry.field === "budgets"));
+  assert.ok(
+    over.header.includes(`<b>${TELEGRAM_ANOMALY_MARK}budgets:</b>`),
+    "the failing budget row carries no anomaly mark",
+  );
+  assert.ok(over.header.includes("EXCEEDED class.daily_usd"), over.header);
+});
+
+test("the policy row renders only when the attestation is anything but attested", () => {
+  const base = healthy();
+  assert.equal(computedFields(base).includes("attestation"), false);
+
+  const abnormal = [
+    { status: "not-attested" as const },
+    {
+      status: "hash-mismatch" as const,
+      attestedSha256: "a".repeat(64),
+      liveSha256: "b".repeat(64),
+      seq: 2,
+    },
+    { status: "unreadable" as const, message: "policy file is not YAML" },
+  ];
+  const shouts = ["NOT ATTESTED", "HASH MISMATCH", "UNREADABLE"];
+  for (const [index, status] of abnormal.entries()) {
+    const rendered = renderTelegram({ ...base, attestation: computed(status, "policy") });
+    assert.ok(
+      rendered.lines.some((entry) => entry.field === "attestation"),
+      `${status.status} did not render a policy row`,
+    );
+    assert.ok(
+      rendered.header.includes(`<b>${TELEGRAM_ANOMALY_MARK}policy:</b>`),
+      `${status.status} rendered without the anomaly mark`,
+    );
+    assert.ok(rendered.header.includes(shouts[index] as string), rendered.header);
+  }
+});
+
+test("autonomy renders only when the policy did not say manual", () => {
+  const base = healthy();
+  assert.equal(computedFields(base).includes("autonomy"), false);
+
+  for (const value of ["supervised", "autonomous"] as const) {
+    const rendered = renderTelegram({ ...base, autonomy: computed(value, "policy") });
+    assert.ok(
+      rendered.lines.some((entry) => entry.field === "autonomy"),
+      `${value} did not render an autonomy row`,
+    );
+    assert.ok(
+      rendered.header.includes(`<b>${TELEGRAM_ANOMALY_MARK}autonomy:</b> ${value}`),
+      rendered.header,
+    );
+  }
+});
+
+test("an attestation prompt still shows the diff and the loads it asks about", () => {
+  const rendered = renderTelegram({
+    ...healthy(),
+    policy_diff: computed("-autonomy: manual\n+autonomy: autonomous", "policy"),
+    policy_load: computed("2 rules load; 0 refused", "policy"),
+    attestation: computed({ status: "not-attested" }, "policy"),
+  });
+  assert.deepEqual(
+    rendered.lines.filter((entry) => entry.kind === "computed").map((entry) => entry.field),
+    ["class", "policy_diff", "policy_load", "attestation", "waiting"],
+  );
+  assert.ok(rendered.header.includes("<b>policy diff:</b>"), rendered.header);
+  assert.ok(rendered.header.includes("<b>policy loads:</b>"), rendered.header);
+});
+
+// ---------------------------------------------------------------------------
+// The claimed block beside the buttons (APRV-165)
+// ---------------------------------------------------------------------------
+
+/** Every `sendMessage` the bot has issued, with the markup each carried. */
+function sends(): { text: string; replyMarkup: unknown }[] {
+  return mock.requests
+    .filter((entry) => entry.method === "sendMessage")
+    .map((entry) => ({
+      text: String(entry.body["text"] ?? ""),
+      replyMarkup: entry.body["reply_markup"],
+    }));
+}
+
+const CLAIMED_HEADING = /^<b>WHAT THIS DOES — CLAIMED by [^<]+, NOT verified by the runtime<\/b>/u;
+
+test("the claimed block is the last message of a prompt, and carries the buttons", async () => {
+  const world = live(2);
+  const [request_, second] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined && second !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = sends().length;
+  const deliveryId = await channel.notify(request_);
+
+  const messages = sends().slice(before);
+  assert.ok(messages.length >= 3, `a prompt with a payload is at least three messages: ${messages.length}`);
+
+  // The order the reader meets it in: what the runtime derived, the bytes, then
+  // what the act means — which is the message the thumb is next to.
+  const first = messages[0]?.text ?? "";
+  assert.ok(first.startsWith(`<b>${TELEGRAM_PROMPT_HEADING}</b>`), first);
+  assert.ok(first.includes("COMPUTED — derived by the runtime"), first);
+  assert.equal(first.includes("WHAT THIS DOES"), false, "the claimed block is still in the header");
+
+  const middle = messages.slice(1, -1).map((message) => message.text).join("\n");
+  assert.ok(middle.includes(PAYLOAD_CHUNK_LABEL_TAIL), "the payload is not between the two blocks");
+
+  const last = messages[messages.length - 1] as { text: string; replyMarkup: unknown };
+  assert.match(last.text, CLAIMED_HEADING);
+  assert.ok(last.text.includes(`<b>summary:</b> chase invoice 41`), last.text);
+  assert.ok(last.text.includes("<b>est. cost:</b> $0.02"), last.text);
+
+  // AC1: the keyboard is on that message and on no other, and the delivery id
+  // the channel reports (which the callback arming keys on) is its id.
+  assert.ok(last.replyMarkup !== undefined, "the claimed message carries no buttons");
+  for (const message of messages.slice(0, -1)) {
+    assert.equal(message.replyMarkup, undefined, "a message above the claimed block was buttoned");
+  }
+  // The delivery id is the buttoned message's id, which is the LAST one sent:
+  // a second prompt's id advances by exactly the number of messages it sent.
+  const mark = sends().length;
+  const nextId = await channel.notify(second);
+  assert.equal(
+    Number(nextId) - Number(deliveryId),
+    sends().length - mark,
+    "the delivery id is not the last message of the prompt",
+  );
+
+  // And the buttons on it are this request's: pressing them decides it.
+  assert.equal((await press(channel, world.keys[0] as string, "grant"))?.ok, true);
+  assertClean(world.unit);
+});
+
+test("the gloss leads the claimed block, above the summary", async () => {
+  const world = live(1);
+  const [base] = queueOf(world, at(2));
+  assert.ok(base !== undefined);
+  const request_: ChannelRequest = {
+    ...base,
+    gloss: claimed("Emails a vendor about an overdue invoice.", "model:haiku"),
+  };
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = sends().length;
+  await channel.notify(request_);
+
+  const block = (sends().at(-1) as { text: string }).text;
+  assert.match(block, CLAIMED_HEADING);
+  assert.ok(
+    block.indexOf("<b>gloss:</b>") < block.indexOf("<b>summary:</b>"),
+    `the gloss does not lead the claimed block: ${block}`,
+  );
+  assert.ok(block.includes(`${TELEGRAM_GLOSS_SUFFIX} <i>(model:haiku)</i>`), block);
+  assert.equal(sends().slice(before, -1).some((message) => message.text.includes("gloss:")), false);
+});
+
+test("a request with nothing to say still sends the claimed message, saying so", async () => {
+  // AC4. Absence is a thing the approver must SEE: a prompt whose author wrote
+  // no summary, no rationale and no gloss is exactly the one where a missing
+  // block would read as "nothing to worry about".
+  const world = live(1);
+  const [base] = queueOf(world, at(2));
+  assert.ok(base !== undefined);
+  const request_: ChannelRequest = { ...base, summary: claimed(null, ACTOR) };
+  assert.equal(request_.gloss, undefined);
+  assert.equal(request_.rationale, undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(request_);
+
+  const last = sends().at(-1) as { text: string; replyMarkup: unknown };
+  assert.match(last.text, CLAIMED_HEADING);
+  assert.ok(last.text.includes("<b>summary:</b> (none given)"), last.text);
+  assert.equal(last.text.includes("<b>rationale:</b>"), false, last.text);
+  assert.ok(last.replyMarkup !== undefined, "the keyboard lost its home");
+});
+
+test("an unbounded rationale becomes more claimed messages, buttons on the last", async () => {
+  // AC3. A rationale is agent-authored text with no length bound, so it chunks
+  // exactly as a payload does — split, never shortened — and the split never
+  // lands inside a tag or an entity, which would reach Telegram as a parse
+  // error rather than as a long explanation.
+  const world = live(1);
+  const [base] = queueOf(world, at(2));
+  assert.ok(base !== undefined);
+  const marker = "the vendor & <counsel> both asked. ";
+  const request_: ChannelRequest = {
+    ...base,
+    rationale: claimed(marker.repeat(400), ACTOR),
+  };
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = sends().length;
+  await channel.notify(request_);
+
+  const messages = sends().slice(before);
+  const claimedChunks = messages.filter((message) => message.text.includes("WHAT THIS DOES"));
+  assert.ok(claimedChunks.length >= 2, `the oversized rationale did not chunk: ${claimedChunks.length}`);
+  for (const message of messages) {
+    assert.ok(message.text.length <= 4096, "a claimed chunk exceeded Telegram's limit");
+  }
+  // Every chunk says whose words these are and that nobody checked them.
+  for (const chunk of claimedChunks.slice(1)) {
+    assert.ok(chunk.text.startsWith("<b>WHAT THIS DOES (continued)"), chunk.text);
+  }
+  // Complete, and escaped: the whole rationale arrived, as text. The
+  // continuation headings are dropped first, because they are the only thing
+  // the chunking ADDS to what was rendered.
+  const whole = claimedChunks
+    .map((chunk) => chunk.text.replace(/^<b>WHAT THIS DOES \(continued\)[^\n]*\n/u, ""))
+    .join("");
+  assert.equal(
+    whole.split("the vendor &amp; &lt;counsel&gt; both asked.").length - 1,
+    400,
+    "the rationale was shortened on its way to the phone",
+  );
+  assert.equal(whole.includes("<counsel>"), false, "raw markup reached the message");
+  // No chunk ends mid-tag or mid-entity.
+  for (const chunk of claimedChunks) {
+    assert.equal(/<[^>]*$/u.test(chunk.text), false, chunk.text.slice(-40));
+    assert.equal(/&[^;\s]*$/u.test(chunk.text), false, chunk.text.slice(-40));
+  }
+
+  const last = messages[messages.length - 1] as { text: string; replyMarkup: unknown };
+  assert.ok(last.text.includes("WHAT THIS DOES"), "the keyboard left the claimed block");
+  assert.ok(last.replyMarkup !== undefined, "the keyboard is not on the final chunk");
+  assert.equal(
+    claimedChunks[claimedChunks.length - 2]?.replyMarkup,
+    undefined,
+    "an earlier claimed chunk carried buttons",
+  );
+});
+
+test("a payload-less request is two messages: computed, then claimed with the buttons", async () => {
+  const world = live(1);
+  const [base] = queueOf(world, at(2));
+  assert.ok(base !== undefined);
+  const request_: ChannelRequest = { ...base, fullPayload: computed(null, "payload") };
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = sends().length;
+  await channel.notify(request_);
+
+  const messages = sends().slice(before);
+  assert.equal(messages.length, 2, JSON.stringify(messages.map((message) => message.text)));
+  assert.ok((messages[0] as { text: string }).text.includes("COMPUTED — derived by the runtime"));
+  assert.match((messages[1] as { text: string }).text, CLAIMED_HEADING);
+  assert.ok((messages[1] as { replyMarkup: unknown }).replyMarkup !== undefined);
+});
+
+test("a digest member keeps the same order and no buttons at all", async () => {
+  // AC5: the ordering is the ordering, whether or not the message can be
+  // answered on. A member prompt's answer lives on the digest below it.
+  const world = live(3);
+  const channel = channelFor();
+  const setup = setupFor(world, channel);
+  channel.onDecision(handlerFor(world, at(3)));
+
+  const before = sends().length;
+  const { streams } = capture();
+  const cycle = await dispatchPending(setup, streams, newDispatchState(), at(2));
+  assert.equal(cycle.digests.length, 1, JSON.stringify(cycle.digests));
+
+  const messages = sends().slice(before);
+  const digest = messages[messages.length - 1] as { text: string; replyMarkup: unknown };
+  assert.match(digest.text, /3 REQUESTS AWAITING APPROVAL/u);
+  assert.ok(digest.replyMarkup !== undefined, "the digest lost its keyboard");
+
+  const members = messages.slice(0, -1);
+  for (const message of members) {
+    assert.equal(message.replyMarkup, undefined, "a member prompt was buttoned");
+  }
+  // Each member: its own header, its payload, then its claimed block last.
+  for (const [index, key] of world.keys.entries()) {
+    const start = members.findIndex((message) => message.text.includes(`REQUEST ${index + 1} OF 3`));
+    assert.ok(start >= 0, `${key} was never prompted`);
+    const end = members.findIndex(
+      (message, position) => position > start && message.text.includes("REQUEST "),
+    );
+    const own = members.slice(start, end < 0 ? undefined : end);
+    assert.ok((own[0] as { text: string }).text.includes("COMPUTED — derived by the runtime"));
+    assert.match((own[own.length - 1] as { text: string }).text, CLAIMED_HEADING);
+    assert.ok(
+      own.slice(1, -1).some((message) => message.text.includes(PAYLOAD_CHUNK_LABEL_TAIL)),
+      `${key} lost its payload between the two blocks`,
+    );
+  }
 });
 
 test("an email-shaped payload is rendered field by field, body as the human reads it", async () => {
@@ -509,20 +907,23 @@ test("an email-shaped payload is rendered field by field, body as the human read
   assert.equal(body.includes("\\n"), false, "the body still carries literal \\n escapes");
   assert.ok(whole.includes("£1,200"), "the non-ASCII amount did not survive verbatim");
 
-  // The exact bytes are still on screen, underneath, JSON escapes and all.
-  assert.ok(whole.includes(CANONICAL_JSON_HEADING), "the canonical JSON was dropped");
-  assert.match(whole, /"body": "Following up on invoice 41[^"]*\\n/u);
+  // The field-by-field view is the whole reading (APRV-162): no second copy of
+  // the same bytes as JSON, and the store path is the route back to them.
+  assert.equal(whole.includes(CANONICAL_JSON_HEADING), false, "the payload was shown twice");
+  assert.ok(whole.includes(rawBytesLine(request_.payload_hash.value)), whole);
 
-  // And the binding line — the one computed thing in this region — is intact.
-  assert.match(
-    whole,
-    new RegExp(`payload sha256:</b> ${request_.payload_hash.value}`, "u"),
-    "the computed binding line changed",
+  // The binding is stated once, inside the canonical block (APRV-163): the
+  // header row that repeated it is gone, and the block's own line is the only
+  // place the sha256 has to be, because it is the block it binds.
+  assert.equal(
+    whole.includes(`payload sha256:</b> ${request_.payload_hash.value}`),
+    false,
+    "the header still carries a second copy of the binding",
   );
-  assert.ok(
-    whole.includes(`--- full payload (sha256 ${request_.payload_hash.value}) ---`),
-    "the payload region lost its hash label",
-  );
+  // The canonical block states the binding itself, so the region carries no
+  // second sha256 prefix above it.
+  assert.ok(whole.includes(`payload sha256: ${request_.payload_hash.value}`), whole);
+  assert.equal(whole.includes("--- full payload (sha256"), false, whole);
 
   // The reading aid announces itself as claimed, so legible never reads as verified.
   assert.ok(whole.includes(EMAIL_VIEW_HEADING.replace(/&/gu, "&amp;")));
@@ -2395,9 +2796,10 @@ test("a file-change payload renders as a diff, and every other shape stays JSON"
   assert.ok(rendered.includes(`note: ${LIVE_QUALIFIER}`), rendered);
   assert.ok(rendered.includes("-  - run: npm run lint"), rendered);
   assert.ok(rendered.includes("+  - run: npm test"), rendered);
-  // The exact bytes stay underneath: the diff is an aid, never a replacement.
-  assert.ok(rendered.includes(CANONICAL_JSON_HEADING), rendered);
-  assert.ok(rendered.includes(json(edit)), rendered);
+  // The diff IS the rendering (APRV-162): no JSON copy of the same bytes, and
+  // the store path names where the bytes themselves are.
+  assert.equal(rendered.includes(CANONICAL_JSON_HEADING), false, rendered);
+  assert.ok(rendered.includes(rawBytesLine(payloadHash(edit))), rendered);
 
   // The proposal tier renders its own qualifier, from the same key.
   assert.ok(view({ ...edit, rule: "protected-path-proposal" }).includes(PROPOSAL_QUALIFIER));
@@ -2434,20 +2836,17 @@ test("a file-change payload renders as a diff, and every other shape stays JSON"
   assert.ok(rendered.includes(`replace_all: ${ABSENT}`), rendered);
 });
 
-test("a very long change folds with an explicit marker, never silently", () => {
-  const after = Array.from({ length: DIFF_LINE_BUDGET + 25 }, (_, index) => `line ${index}`).join(
-    "\n",
-  );
+test("a very long change renders whole (APRV-162: the view is the only reading)", () => {
+  const lines = Array.from({ length: 300 }, (_, index) => `line ${String(index)}`);
+  const after = lines.join("\n");
   const payload = { tool: "Write", rule: "protected-path", file: "/repo/CLAUDE.md", content: after };
   const text = payloadRegionText(
     { value: payload, text: JSON.stringify(payload, null, 2), hash: "h", truncated: false },
     VIEW_CLASS,
   );
-  assert.ok(text.includes(`+line ${String(DIFF_LINE_BUDGET - 1)}`), "the budget is spent in full");
-  assert.equal(text.includes(`+line ${String(DIFF_LINE_BUDGET)}`), false, "the fold did not happen");
-  assert.ok(text.includes("… 25 more lines (hash covers all bytes)"), text);
-  // And the folded lines are still on screen, in the canonical JSON underneath.
-  assert.ok(text.includes(JSON.stringify(after)), "the exact bytes left the message");
+  for (const line of lines) assert.ok(text.includes(`+${line}`), `${line} is not on screen`);
+  assert.equal(/more lines \(hash covers all bytes\)/u.test(text), false, "a fold survived");
+  assert.ok(text.includes(rawBytesLine(payloadHash(payload))), text);
 });
 
 test("a diff reaches Telegram escaped, chunked and complete", async () => {
@@ -2477,9 +2876,10 @@ test("a diff reaches Telegram escaped, chunked and complete", async () => {
   assert.ok(whole.includes("+run: npm test --silent"), whole);
   assert.equal(whole.includes("<all>"), false, "raw markup reached the message");
   assert.ok(
-    whole.includes(`--- full payload (sha256 ${request_.payload_hash.value}) ---`),
-    "the payload region lost its hash label",
+    whole.includes(`payload sha256: ${request_.payload_hash.value}`),
+    "the canonical block lost its binding line",
   );
+  assert.equal(whole.includes("--- full payload (sha256"), false, whole);
   for (const text of texts) {
     assert.ok(text.length <= 4096, "a message exceeded Telegram's 4096-character limit");
   }
@@ -2517,9 +2917,10 @@ test("a command payload renders over its real lines, with cwd and the store path
   // the renderer recomputes from the payload rather than one a caller supplied.
   assert.ok(rendered.includes(rawBytesLine(payloadHash(payload))), rendered);
 
-  // The exact bytes stay underneath: the view is an aid, never a replacement.
-  assert.ok(rendered.includes(CANONICAL_JSON_HEADING), rendered);
-  assert.ok(rendered.includes(json(payload)), rendered);
+  // The command view IS the rendering (APRV-162): the bytes are not repeated
+  // beneath it as JSON, and the store path is what leads back to them.
+  assert.equal(rendered.includes(CANONICAL_JSON_HEADING), false, rendered);
+  assert.equal(rendered.includes(json(payload)), false, rendered);
 
   // A payload without a cwd says so rather than rendering an empty line.
   assert.ok(view({ command: "ls" }).includes("cwd: (none declared)"));
@@ -2606,30 +3007,17 @@ test("two distinct byte strings never render identically (property)", () => {
   assert.ok(seen.size > 1_000, `the generator produced too few distinct strings (${seen.size})`);
 });
 
-test("a very long command folds with an explicit marker, never silently", () => {
-  const command = Array.from(
-    { length: COMMAND_LINE_BUDGET + 12 },
-    (_, index) => `echo ${String(index)}`,
-  ).join("\n");
+test("a very long command renders whole (APRV-162: the view is the only reading)", () => {
+  const commandLines = Array.from({ length: 300 }, (_, index) => `echo ${String(index)}`);
+  const command = commandLines.join("\n");
   const payload = { command, cwd: "/repo" };
   const text = payloadRegionText(
     { value: payload, text: JSON.stringify(payload, null, 2), hash: "h", truncated: false },
     VIEW_CLASS,
   );
 
-  assert.ok(
-    text.includes(`echo ${String(COMMAND_LINE_BUDGET - 1)}`),
-    "the budget is not spent in full",
-  );
-  assert.equal(
-    text.includes(`echo ${String(COMMAND_LINE_BUDGET)}\n`),
-    false,
-    "the fold did not happen",
-  );
-  assert.ok(text.includes(foldMarker(12)), text);
-  // The folded lines are still on screen, in the canonical JSON underneath, and
-  // the reader is told where the whole thing lives.
-  assert.ok(text.includes(JSON.stringify(command)), "the exact bytes left the message");
+  for (const line of commandLines) assert.ok(text.includes(`${line}\n`), `${line} is not on screen`);
+  assert.equal(/more lines \(hash covers all bytes\)/u.test(text), false, "a fold survived");
   // The store path names the RECOMPUTED binding (APRV-119): the renderer takes
   // the payload and derives the hash itself, so a caller cannot label a
   // rendering with somebody else's content address.
@@ -2658,9 +3046,10 @@ test("a command reaches Telegram escaped, chunked and complete", async () => {
   assert.ok(whole.includes(`cwd: /repo`), whole);
   assert.ok(whole.includes(rawBytesLine(request_.payload_hash.value)), whole);
   assert.ok(
-    whole.includes(`--- full payload (sha256 ${request_.payload_hash.value}) ---`),
-    "the payload region lost its hash label",
+    whole.includes(`payload sha256: ${request_.payload_hash.value}`),
+    "the canonical block lost its binding line",
   );
+  assert.equal(whole.includes("--- full payload (sha256"), false, whole);
   for (const text of texts) {
     assert.ok(text.length <= 4096, "a message exceeded Telegram's 4096-character limit");
   }
@@ -2777,12 +3166,26 @@ test("the prompt shows the breakdown as computed, above the raw command", async 
 // The model gloss (APRV-144 #2, #3)
 // ---------------------------------------------------------------------------
 
-/** A world with one pending command-shaped request, and its dispatch setup. */
-function glossWorld(command: string, runner?: GlossRunner) {
-  const payload = { command, cwd: "/repo" };
+/** A world with one pending request over `payload`, and its dispatch setup. */
+function glossWorldFor(payload: Record<string, unknown>, runner?: GlossRunner) {
   const world = live(1, false, () => payload);
   const channel = channelFor();
   return { world, channel, setup: setupFor(world, channel, runner) };
+}
+
+/** A world with one pending command-shaped request, and its dispatch setup. */
+function glossWorld(command: string, runner?: GlossRunner) {
+  return glossWorldFor({ command, cwd: "/repo" }, runner);
+}
+
+/** The file-change payload the APRV-164 cases gloss: an `Edit` on a live file. */
+function editPayload(): Record<string, unknown> {
+  return {
+    tool: "Edit",
+    file: "src/cli/gloss.ts",
+    before: "export const GLOSS_MAX_CHARS = 200;",
+    after: "export const GLOSS_MAX_CHARS = 400;",
+  };
 }
 
 test("a gloss the runner answers is rendered, labelled model-authored", async () => {
@@ -2854,18 +3257,155 @@ test("no runner at all is the default, and spawns nothing", async () => {
   assertClean(world.unit);
 });
 
-test("a non-command payload is never sent to a model at all", async () => {
+test("an opaque payload is never sent to a model at all (APRV-164 #3)", async () => {
+  // A shape no view recognises is rendered as canonical JSON and nothing else,
+  // so there is no material to describe that the approver is not already
+  // reading verbatim.
   let calls = 0;
-  const world = live(1);
-  const channel = channelFor();
-  const setup = setupFor(world, channel, () => {
+  const { world, channel, setup } = glossWorldFor({ ledger: "ap", entries: 3 }, () => {
     calls += 1;
     return "should never be asked";
   });
 
+  const before = mock.sentTexts().length;
   await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
-  assert.equal(calls, 0, "an email payload was sent to a model");
+  assert.equal(calls, 0, "an opaque payload was sent to a model");
+  assert.doesNotMatch(mock.sentTexts().slice(before).join("\n"), /<b>gloss:<\/b>/u);
+  assert.equal(
+    channel.lastRendered()[0]?.fields.find((field) => field.field === "gloss"),
+    undefined,
+  );
   assertClean(world.unit);
+});
+
+test("a file change is glossed from the file-edit instruction (APRV-164 #1)", async () => {
+  const asked: string[] = [];
+  const { world, channel, setup } = glossWorldFor(editPayload(), (prompt) => {
+    asked.push(prompt);
+    return "Doubles the cap on how many characters a gloss may occupy.\n";
+  });
+
+  const before = mock.sentTexts().length;
+  const result = await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
+  assert.equal(result.delivered.length, 1, JSON.stringify(result));
+  const whole = mock.sentTexts().slice(before).join("\n");
+
+  // The edit instruction, and the path plus both sides of the change as data
+  // beneath it. Nothing about the command wording reaches a diff.
+  assert.equal(asked.length, 1);
+  const prompt = asked[0] ?? "";
+  assert.ok(prompt.startsWith(GLOSS_EDIT_INSTRUCTION), prompt);
+  assert.equal(prompt.includes(GLOSS_INSTRUCTION), false, "the command instruction leaked");
+  assert.match(prompt, /file: src\/cli\/gloss\.ts/u);
+  assert.match(prompt, /export const GLOSS_MAX_CHARS = 200;/u);
+  assert.match(prompt, /export const GLOSS_MAX_CHARS = 400;/u);
+  assert.equal(prompt.includes(GLOSS_TRUNCATION_NOTE), false, "a short edit was marked truncated");
+
+  assert.match(
+    whole,
+    /<b>gloss:<\/b> Doubles the cap on how many characters a gloss may occupy\. \(model, unverified\) <i>\(model:haiku\)<\/i>/u,
+  );
+  assert.equal(
+    channel.lastRendered()[0]?.fields.find((field) => field.field === "gloss")?.kind,
+    "claimed",
+  );
+  assertClean(world.unit);
+});
+
+test("an email is glossed from the email instruction (APRV-164 #2)", async () => {
+  const asked: string[] = [];
+  const { world, channel, setup } = glossWorldFor(payloadFor(0), (prompt) => {
+    asked.push(prompt);
+    return "Chases an overdue invoice with a vendor contact.\n";
+  });
+
+  const before = mock.sentTexts().length;
+  const result = await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
+  assert.equal(result.delivered.length, 1, JSON.stringify(result));
+  const whole = mock.sentTexts().slice(before).join("\n");
+
+  assert.equal(asked.length, 1);
+  const prompt = asked[0] ?? "";
+  assert.ok(prompt.startsWith(GLOSS_EMAIL_INSTRUCTION), prompt);
+  // The recipient and the body reached the model as the field view has them.
+  assert.match(prompt, /to: ap-0@vendor\.example/u);
+  assert.match(prompt, /Following up on invoice 41/u);
+
+  assert.match(
+    whole,
+    /<b>gloss:<\/b> Chases an overdue invoice with a vendor contact\. \(model, unverified\) <i>\(model:haiku\)<\/i>/u,
+  );
+  assert.equal(
+    channel.lastRendered()[0]?.fields.find((field) => field.field === "gloss")?.kind,
+    "claimed",
+  );
+  assertClean(world.unit);
+});
+
+test("a whole-file write reaches the model capped and marked (APRV-164 #4)", async () => {
+  const content = "x".repeat(GLOSS_MAX_INPUT_CHARS * 3);
+  const asked: string[] = [];
+  const { world, setup } = glossWorldFor(
+    { tool: "Write", file: "notes.txt", content },
+    (prompt) => {
+      asked.push(prompt);
+      return "Writes a file of repeated placeholder text.";
+    },
+  );
+
+  await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
+  assert.equal(asked.length, 1);
+  const prompt = asked[0] ?? "";
+  // The cap is on the material, announced where the model will read it, and
+  // the whole file never became an argv.
+  assert.ok(prompt.includes(GLOSS_TRUNCATION_NOTE), "the cap was not announced to the model");
+  assert.ok(prompt.length < content.length, "the whole file reached the subprocess");
+  assert.equal(
+    prompt.length,
+    GLOSS_EDIT_INSTRUCTION.length + GLOSS_TRUNCATION_NOTE.length + GLOSS_MAX_INPUT_CHARS + 4,
+  );
+  assertClean(world.unit);
+});
+
+test("every way of getting no gloss holds for the new kinds too (APRV-164 #5)", async () => {
+  const runners: Record<string, GlossRunner> = {
+    "a timeout, or any other silence": () => null,
+    "an empty answer": () => "",
+    "whitespace only": () => "   \n  ",
+    "an answer no prompt could hold": () => "x".repeat(GLOSS_MAX_CHARS * 100),
+    "a subprocess that throws": () => {
+      throw new Error("spawn claude ENOENT");
+    },
+  };
+  const payloads: Record<string, Record<string, unknown>> = {
+    "a file change": editPayload(),
+    "an email": payloadFor(0),
+  };
+
+  for (const [kind, payload] of Object.entries(payloads)) {
+    for (const [why, runner] of Object.entries(runners)) {
+      const { world, channel, setup } = glossWorldFor(payload, runner);
+      const before = mock.sentTexts().length;
+      const result = await dispatchPending(setup, capture().streams, newDispatchState(), at(2));
+      assert.equal(result.delivered.length, 1, `${kind}, ${why}: the prompt was not delivered`);
+      const whole = mock.sentTexts().slice(before).join("\n");
+      const rendered = channel.lastRendered()[0]?.fields.find((field) => field.field === "gloss");
+      if (why === "an answer no prompt could hold") {
+        // An oversized answer is capped rather than dropped: the same
+        // {@link GLOSS_MAX_CHARS} bound every gloss has had, marked where it
+        // bit. It is the one failure mode that still renders a line.
+        assert.equal(rendered?.kind, "claimed", `${kind}, ${why}`);
+        assert.ok(
+          (rendered?.text ?? "").startsWith(`${"x".repeat(GLOSS_MAX_CHARS - 1)}…`),
+          `${kind}, ${why}: the answer was not capped`,
+        );
+      } else {
+        assert.doesNotMatch(whole, /<b>gloss:<\/b>/u, `${kind}, ${why}`);
+        assert.equal(rendered, undefined, `${kind}, ${why}`);
+      }
+      assertClean(world.unit);
+    }
+  }
 });
 
 test("the gloss reaches no log line, no payload hash and no decision record", async () => {
@@ -2912,8 +3452,31 @@ test("a gloss is untrusted text: escaped, single-lined and capped", () => {
   assert.equal(long.length, GLOSS_MAX_CHARS);
   assert.ok(long.endsWith("…"));
   // The runner is asked once, with the command inside the prompt.
-  assert.equal(glossFor("", () => "never asked"), null, "an empty command asks nothing");
+  assert.equal(
+    glossFor(GLOSS_INSTRUCTION, "", () => "never asked"),
+    null,
+    "empty material asks nothing",
+  );
   assert.equal(GLOSS_AUTHOR, "model:haiku");
+});
+
+test("the material is capped before the subprocess, and the cap is announced", () => {
+  // The command prompt is byte for byte what APRV-144 sent, and the cap is on
+  // the input alone: `GLOSS_MAX_CHARS` still bounds what comes back.
+  assert.equal(glossPrompt(GLOSS_INSTRUCTION, "git status"), `${GLOSS_INSTRUCTION}\n\ngit status`);
+  const capped = glossPrompt(GLOSS_EDIT_INSTRUCTION, "y".repeat(GLOSS_MAX_INPUT_CHARS + 1));
+  assert.ok(capped.includes(GLOSS_TRUNCATION_NOTE));
+  assert.equal(
+    capped.length,
+    GLOSS_EDIT_INSTRUCTION.length + GLOSS_TRUNCATION_NOTE.length + GLOSS_MAX_INPUT_CHARS + 4,
+  );
+  // Exactly at the cap is not truncation, and is not announced as one.
+  assert.equal(
+    glossPrompt(GLOSS_EMAIL_INSTRUCTION, "y".repeat(GLOSS_MAX_INPUT_CHARS)).includes(
+      GLOSS_TRUNCATION_NOTE,
+    ),
+    false,
+  );
 });
 
 test("markup in a gloss reaches the chat as text, never as markup", async () => {
