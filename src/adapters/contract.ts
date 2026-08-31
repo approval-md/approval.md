@@ -103,7 +103,9 @@ import {
 } from "../core/execute.js";
 import { payloadHash } from "../core/payload.js";
 import type { Autonomy } from "../core/policy-load.js";
-import { readVerifiedRecords } from "../core/state.js";
+import type { EventRecord } from "../core/log.js";
+import { payloadOf, readVerifiedRecords } from "../core/state.js";
+import { TOKEN_HASH_FIELD, digestsEqual, tokenHash } from "../core/token.js";
 
 // ---------------------------------------------------------------------------
 // Payload values
@@ -169,6 +171,72 @@ export type CredentialResult =
  */
 export interface CredentialProvider {
   get(name: string): CredentialResult;
+  /**
+   * Told, by the contract and by nothing else, that a token has been consumed
+   * for this action and that the credential window is open (APRV-168). Called
+   * with `null` when the window closes.
+   *
+   * Optional, and a provider that ignores it behaves exactly as it always did.
+   * It exists so a provider can offer a capability that is only defensible
+   * inside a granted window, and it is safe to publish as a method because the
+   * argument cannot be forged: see {@link ExecutionGrant}.
+   */
+  grant?(grant: ExecutionGrant | null): void;
+}
+
+/**
+ * The brand that makes {@link ExecutionGrant} unforgeable outside this module.
+ *
+ * NOT exported. A `unique symbol` that no other module can name is a property
+ * no other module can write, so an object satisfying {@link ExecutionGrant} can
+ * be constructed here and nowhere else. This is the structural half of
+ * APRV-168's boundary: a capability keyed to a value only the contract can mint
+ * is reachable only from the contract's own execution path.
+ */
+declare const EXECUTION_GRANT_BRAND: unique symbol;
+
+/**
+ * Evidence, handed to a {@link CredentialProvider}, that this execution is
+ * inside a verified window (APRV-168).
+ *
+ * The contract mints one after {@link startExecution} returns, and drops it the
+ * moment `act` does. It carries no secret and grants no read by itself; what it
+ * asserts is WHEN, and on the manual path also WHAT: `tokenSha256` is the digest
+ * of the single-use token that was actually spent, present only when a token was
+ * actually spent, so a provider can insist on a human's grant rather than merely
+ * on being inside some execution.
+ */
+export interface ExecutionGrant {
+  readonly [EXECUTION_GRANT_BRAND]: true;
+  /**
+   * Where in the sequence this window is.
+   *
+   * - **`presented`** — the caller holds a token whose digest matches the one
+   *   the log's `approval.granted` recorded for this action, and the contract is
+   *   about to resolve the adapter's declared credentials (APRV-169). Minted
+   *   only on that digest match, so it is proof a human granted THIS action and
+   *   the caller has the token that grant minted. It is not full verification:
+   *   TTL, revocation and the single-use check are `core/token.ts`'s, and they
+   *   run in `startExecution` before anything is spent.
+   * - **`consumed`** — the token has been spent, `execution.started` is on the
+   *   log, and `act` is running.
+   *
+   * A capability that must not exist before a human decided may look at this;
+   * one that must not exist before the token is BURNED reads `tokenSha256`.
+   */
+  readonly phase: "presented" | "consumed";
+  /** The action this window belongs to. */
+  readonly actionKey: string;
+  /** The seq of the `execution.started` that opened it. `null` before it. */
+  readonly startedSeq: number | null;
+  /** How the action was admitted. `null` until `startExecution` has answered. */
+  readonly autonomy: Autonomy | null;
+  /**
+   * The digest of the token that was consumed, on the manual path only. Absent
+   * before the spend, and absent after it for a `supervised` or `autonomous`
+   * execution, which no human was asked about.
+   */
+  readonly tokenSha256?: string;
 }
 
 /** The default: no vault is wired, so nothing is handed out. Fails closed. */
@@ -549,6 +617,53 @@ export interface AdapterExecuteOptions extends ExecuteOptions {
 /** The exit code recorded for an execution the adapter did not complete. */
 const ADAPTER_FAILURE_EXIT_CODE = 1;
 
+/**
+ * Does `token` match the digest the log's grant for `actionKey` recorded?
+ *
+ * A pure comparison over records this path has already read and verified, and
+ * deliberately NOT a second opinion about whether the token may be spent:
+ * `core/token.ts` owns TTL, revocation and the single-use check, and
+ * `startExecution` runs all three before anything is appended. What this answers
+ * is the narrower question the pre-token phase needs: does the caller hold the
+ * token a human's grant minted for this action?
+ *
+ * Constant-time, through `digestsEqual`. `false` for everything else: no grant,
+ * no recorded digest, no token.
+ */
+function tokenMatchesGrant(
+  records: readonly EventRecord[],
+  actionKey: string,
+  token: string | undefined,
+): boolean {
+  if (token === undefined || token.length === 0) return false;
+  let recorded: unknown;
+  for (const record of records) {
+    if (record.event !== "approval.granted") continue;
+    if (record.action_key !== actionKey) continue;
+    recorded = payloadOf(record)[TOKEN_HASH_FIELD];
+  }
+  if (typeof recorded !== "string" || recorded.length === 0) return false;
+  return digestsEqual(tokenHash(token), recorded);
+}
+
+/**
+ * Hand `grant` to a provider that asked to be told, and swallow whatever it does
+ * about it.
+ *
+ * A provider is not required to implement `grant`, and one that implements it
+ * badly must not be able to fail an execution: this call carries no secret, no
+ * decision, and nothing the contract needs back. Every path that leaves the
+ * execution passes `null` through here, so a capability opened for a window is
+ * closed on every exit, refusals included.
+ */
+function tell(provider: CredentialProvider, grant: ExecutionGrant | null): void {
+  try {
+    provider.grant?.(grant);
+  } catch {
+    // Nothing to report and nothing to repair: the contract asked, not asked for.
+  }
+}
+
 /** What one pre-token credential resolution produced. */
 type CredentialResolution =
   | { ok: true; issued: ReadonlySet<string> }
@@ -770,8 +885,24 @@ export async function executeThroughAdapter(
   //     {@link resolveRequiredCredentials} for why this sits here and why the
   //     consume-then-execute ordering below is untouched.
   const provider = options.credentials ?? NO_CREDENTIALS;
+
+  // The presented-phase grant (APRV-168). Minted only when the caller's token
+  // matches the digest a human's grant recorded for this action, so a provider
+  // may offer a capability here on the strength of that decision. Everything
+  // that decides whether the token may actually be SPENT still happens below,
+  // in `startExecution`, and nothing here appends or consumes.
+  const presented: ExecutionGrant | null = tokenMatchesGrant(
+    read.records,
+    actionKey,
+    options.token,
+  )
+    ? ({ phase: "presented", actionKey, startedSeq: null, autonomy: null } as unknown as ExecutionGrant)
+    : null;
+  tell(provider, presented);
+
   const resolved = resolveRequiredCredentials(adapter, actionKey, provider);
   if (!resolved.ok) {
+    tell(provider, null);
     return refuse(adapter, actionKey, "credential-unavailable", resolved.message, {
       adapter_code: resolved.credentialCode,
       redactions: resolved.redactions,
@@ -782,6 +913,7 @@ export async function executeThroughAdapter(
   const executeOptions = executeOptionsFrom(options, hash);
   const started = startExecution(logPath, actionKey, executeOptions, actor);
   if (!started.ok) {
+    tell(provider, null);
     return refuse(adapter, actionKey, started.code, started.message, { execute: started });
   }
   const startedSeq = started.record.seq;
@@ -800,6 +932,24 @@ export async function executeThroughAdapter(
   // path may be about to print, so it joins the corpus before `act` runs rather
   // than only if `act` happens to ask for the same names again.
   for (const secret of resolved.issued) scope.issued.add(secret);
+
+  // The window is now a GRANTED one, and the provider is told so (APRV-168).
+  // Minted here because this is the only place that can: the brand on
+  // `ExecutionGrant` is a symbol no other module can name. It is dropped in the
+  // same `finally` that closes the window, so the capability it carries lives
+  // exactly as long as `act` does.
+  // The brand is a type-level marker with no runtime member (a `declare const
+  // unique symbol` emits nothing), so the cast is what mints it. That is the
+  // point: the cast compiles here and refuses to compile anywhere the brand
+  // cannot be named, which is everywhere else.
+  tell(provider, {
+    phase: "consumed",
+    actionKey,
+    startedSeq,
+    autonomy: started.autonomy,
+    ...(started.tokenSha256 === undefined ? {} : { tokenSha256: started.tokenSha256 }),
+  } as unknown as ExecutionGrant);
+
   let entered = false;
 
   let outcome: ActOutcome;
@@ -821,9 +971,12 @@ export async function executeThroughAdapter(
     outcome = { ok: false, code: "adapter-act-threw", message: threw };
   } finally {
     scope.close();
+    // The window and the grant end together. A provider that kept the grant is
+    // holding a value the contract no longer honours, and it was told so.
+    tell(provider, null);
   }
 
-  // (e) The outcome event, then the redacted result.
+  // (f) The outcome event, then the redacted result.
   const secrets = scope.issued;
   const unknown = threw !== null && entered;
   const exitCode = outcome.ok ? 0 : ADAPTER_FAILURE_EXIT_CODE;
