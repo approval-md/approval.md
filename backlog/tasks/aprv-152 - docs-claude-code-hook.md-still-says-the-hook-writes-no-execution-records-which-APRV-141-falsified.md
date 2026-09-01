@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-08-29 20:42'
-updated_date: '2026-09-01 00:37'
+updated_date: '2026-09-01 18:44'
 labels:
   - docs
   - hook
@@ -31,7 +31,7 @@ Found 2026-08-29 during the APRV-145 design review: docs/claude-code-hook.md aro
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Read src/cli/hook.ts (recordUnattended/startHarnessExecution, the post-execution half) and src/core/gate.ts (startHarnessExecution, consumeHarnessGrant, finishHarnessExecution) to establish what the hook actually appends today. 2. Rewrite the stale APRV-117 bullet in docs/claude-code-hook.md so it describes the delegated execution.started accurately: the execution: "harness" marker, the payload_hash binding (APRV-146), and what closes it. 3. Sweep the whole file for other stale claims about hook-written records and correct them. 4. Run npm test and lint; commit docs-only change on aprv-152-hook-docs.
+1. Sweep docs/claude-code-hook.md for stale claims that the hook writes no execution records. 2. Confirm the paragraph describes the APRV-141 delegated execution.started record (harness marker, payload_hash binding, terminal custody). 3. Finalize.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -46,10 +46,12 @@ AC2 sweep: one further correction, in the APRV-141 paragraph near the top, which
 Out of scope, flagged for the human: the same stale claim survives in source doc comments. src/cli/hook.ts module header (~line 42) says the hook 'never writes an execution.completed or execution.failed', and src/core/gate.ts startHarnessExecution's doc comment (~line 2777) says the harness marker says 'why no execution.completed or execution.failed will ever follow'.
 
 Validation: npm test 2442 pass, 0 fail (the worktree needed npm ci first; its node_modules was missing @modelcontextprotocol/sdk, which failed the ci-guard engines test before install and is unrelated to this change). npm run lint clean. Docs-only diff.
+
+2026-09-01 sweep on main: docs/claude-code-hook.md line ~414 describes the delegated execution.started record with the harness marker and payload_hash binding; line 419 states the hook writes no OUTCOME over that record (terminal by design), which is the accurate claim. grep for 'no execution', 'appends no', 'never appends', 'writes no' finds no surviving claim that the hook appends no execution records. The fix landed in passing during APRV-141/146 docs work; this task closes as verified.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Corrected docs/claude-code-hook.md's APRV-117 bullet, which still claimed no execution.completed ever follows a harness grant consumption. The bullet now describes the delegated execution.started accurately: the execution: "harness" marker, the payload_hash binding the grant carries (APRV-146), that this runtime writes no outcome of its own over it, and that its only counterpart is the outcome the post-execution registration reports (APRV-145), with the start standing open and terminal where no such report can arrive. Swept the whole file: one further edit to the APRV-141 paragraph up top (payload_hash binding plus the reported counterpart); every other record claim verified against src/cli/hook.ts and src/core/gate.ts. Verified with npm test (2442 pass, 0 fail) and npm run lint (clean).
+Verified docs/claude-code-hook.md already describes the APRV-141 delegated execution.started record accurately (harness marker, payload_hash binding, terminal-by-design custody) and a grep sweep finds no stale 'hook writes no execution records' claim. No diff needed.
 <!-- SECTION:FINAL_SUMMARY:END -->
