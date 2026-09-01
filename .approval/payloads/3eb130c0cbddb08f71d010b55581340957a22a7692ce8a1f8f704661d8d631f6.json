@@ -1,0 +1,1 @@
+{"command":"node scripts/protected-grant-guard.mjs --log /Users/carter/dev/approval-md/.approval/log/events.jsonl --base HEAD~1 SPEC.md CLAUDE.md .github/workflows/ci.yml docs/claude-code-hook.md 2>&1 | tail -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a9de0a50bde9864f3"}
