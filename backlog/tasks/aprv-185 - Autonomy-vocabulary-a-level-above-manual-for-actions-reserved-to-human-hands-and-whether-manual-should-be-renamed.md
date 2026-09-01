@@ -3,11 +3,11 @@ id: APRV-185
 title: >-
   Autonomy vocabulary: a level above manual for actions reserved to human hands,
   and whether manual should be renamed
-status: In Progress
+status: Done
 assignee:
   - 'agent:fable'
 created_date: '2026-08-31 23:39'
-updated_date: '2026-09-01 01:00'
+updated_date: '2026-09-01 04:48'
 labels:
   - policy
   - gate
@@ -37,11 +37,11 @@ Deliverable is a design + SPEC amendment (flagged pending sign-off) plus impleme
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Design decision recorded: level name, refusal semantics and code, strictness ordering, fail-closed target unchanged and justified
-- [ ] #2 SPEC 5/7/11 amendment drafted and flagged pending sign-off; schema updated with load tests
-- [ ] #3 Requests, grants, and tokens against the new level refuse machine-readably with a distinct code; tested
-- [ ] #4 Rename-of-manual question answered with rationale; if adopted, alias + load-time note per the supervised precedent, or explicitly declined in notes
-- [ ] #5 Dogfood proposal drafted: which APPROVAL.md classes move to the new level (human's amendment to make)
+- [x] #1 Design decision recorded: level name, refusal semantics and code, strictness ordering, fail-closed target unchanged and justified
+- [x] #2 SPEC 5/7/11 amendment drafted and flagged pending sign-off; schema updated with load tests
+- [x] #3 Requests, grants, and tokens against the new level refuse machine-readably with a distinct code; tested
+- [x] #4 Rename-of-manual question answered with rationale; if adopted, alias + load-time note per the supervised precedent, or explicitly declined in notes
+- [x] #5 Dogfood proposal drafted: which APPROVAL.md classes move to the new level (human's amendment to make)
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -60,4 +60,23 @@ RENAME OF MANUAL (AC 4): recommendation is gated as the canonical name with manu
 NEW GLOBAL INVARIANT for SPEC 11: human-only classes are inert to agents; no verb may mint authority for them and their refusal is its own code. The matching CLAUDE.md invariant-list line is a separate gated edit the orchestrator makes after this lands (per APRV-182 convention), noted here so it is not lost.
 
 DOGFOOD PROPOSAL (AC 5): draft an APPROVAL.md amendment moving the Never-list prohibitions into declared classes (candidate classes to verify against the live classifier: vault/credential access, vcs.history.rewrite, log mutation). Draft only; the amend ceremony is Carter's.
+
+Implementation landed via PR #171 (a1fa773 code + 6a5c225 SPEC, the latter applied under a policy.edit grant from the CLI channel after two hook timeouts). class-human-only joined three frozen unions (gate: after grant-classless-request; token: after the verify-prefix spread; execute: after action-not-registered) plus hook-class-human-only in HOOK_DENY_CODES; exit codes unchanged. Normative evaluation order pinned by test: class-human-only fires before policy-drift. Reject and revoke refuse too (a decision record about a human-only class would read as a class the gate transacts in); withdraw and expire stay open so amendment-raised requests leave the queue. No new schema allOf needed: the existing else branches already forbid both rates on the new level, pinned by two invalid fixtures. humanOnlyRefusal() lives in policy-match (pure) so all four surfaces share one text. approval token reports unspendable. Bonus: conformance vectors regenerated, closing three vectors APRV-183's fixtures added without a regen (121 -> 127). Verification: tests/human-only.test.ts 20/20, gate-verb suites 232/232, full 2487/2488 (pre-existing lane-only ci-guard ENOENT), conformance 238/238 over 110 controls, CI green on the merged PR. Global invariants touched, as required by CLAUDE.md: adds SPEC 11.1 invariant 9; refusals-machine-readable-and-distinct extended with the new code. CLAUDE.md invariant-list line for invariant 9 is still owed (gated edit, orchestrator's follow-up). Dogfood probe findings and the drafted APPROVAL.md human-only block are in the 2026-09-01 notes above; classifier gaps filed as APRV-194.
+
+The drafted APPROVAL.md amendment (AC 5), verbatim from the build's dogfood probe, for Carter's amend ceremony:
+
+classes:
+  vcs.history.rewrite:       { autonomy: human-only }   # was: manual
+  policy.edit:               { autonomy: human-only }   # was: manual  -- SEE CAVEAT
+  account.credential:        { autonomy: human-only }   # NEW -- inert until APRV-194
+
+Prose above the block: 'Three classes are not mine to delegate. Rewriting shared history destroys the record this project exists to keep; editing the policy, the log, or the agent instructions is editing the gate from inside it; and a credential is the one thing an agent holding it needs no gate for. These are human-only: I do them myself, at a terminal, and no approval of mine can move one of them into an agent's hands. Anything genuinely blocked by this is a task for me, not a policy amendment.'
+
+CAVEATS (the build's, endorsed): policy.edit at human-only would END gated agent edits of SPEC.md and CLAUDE.md, the workflow APRV-182 just established and APRV-184 wants to relax to supervised-live 0.1 -- the two amendments are in direct tension, and Carter should pick ONE direction for policy.edit (184's sampled gate, or 185's human-only) before any ceremony. account.credential is inert until APRV-194 gives the classifier rules that emit it.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+human-only landed via PR #171: the level above manual, inert to agents (class-human-only across three frozen unions plus the hook deny), defaults admission, rates forbidden, floor stops at manual both directions, fail-closed stays manual for recoverability. SPEC 5.2/7/11.1(+9)/11.2 amended under a CLI-channel grant, flagged pending sign-off. Rename of manual deferred with a written recommendation (gated + alias). Verified: 20/20 new tests, 2487/2488 lane suite, conformance 238/238, green CI on the merged PR. Follow-ups: APRV-194 (classifier), CLAUDE.md invariant-list line, and the 184-vs-185 policy.edit direction Carter must pick.
+<!-- SECTION:FINAL_SUMMARY:END -->

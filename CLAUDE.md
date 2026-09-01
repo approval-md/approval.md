@@ -94,7 +94,9 @@ defaults to fable):
   paths read only verified records; gate-typed events never accept caller
   timestamps; raw secrets never appear in the log; self-reported fields never
   reduce scrutiny; every check-then-append passes through compare-and-append;
-  refusals are machine-readable and distinct. A diff that weakens any of these
+  refusals are machine-readable and distinct; human-only classes are inert
+  to agents, with no verb minting authority for them (APRV-185). A diff
+  that weakens any of these
   fails review regardless of the task's stated criteria, and a task that
   *touches* one must say so in its implementation notes. When a new
   cross-cutting safety property is born, it is added to §11 and to this list —

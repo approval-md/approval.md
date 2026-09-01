@@ -1,11 +1,11 @@
 ---
 id: APRV-183
 title: 'Per-class supervised_sample_rate: retro review rates configurable per class'
-status: In Progress
+status: Done
 assignee:
   - 'agent:fable'
 created_date: '2026-08-31 23:25'
-updated_date: '2026-09-01 00:54'
+updated_date: '2026-09-01 04:46'
 labels:
   - policy
   - gate
@@ -27,11 +27,11 @@ Requires a SPEC amendment (policy grammar + the supervised_sample_rate section),
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Policy schema accepts an optional per-class retro sample rate; absent falls back to the global audit.supervised_sample_rate; schema and load tests
-- [ ] #2 Retro selection uses the per-class rate when declared, property-tested for determinism (identical bytes select identically) and agent-unpredictability (secret-keyed)
-- [ ] #3 Bare supervised alias honours a per-class rate identically to explicit supervised-retro, load-time note preserved
-- [ ] #4 Disabled-sampler reporting is per-class-aware: doctor and status name which classes sample at which rate and which are disabled, with the machine-readable reason
-- [ ] #5 SPEC 5/7 amendment drafted and flagged pending sign-off; no silent spec edit
+- [x] #1 Policy schema accepts an optional per-class retro sample rate; absent falls back to the global audit.supervised_sample_rate; schema and load tests
+- [x] #2 Retro selection uses the per-class rate when declared, property-tested for determinism (identical bytes select identically) and agent-unpredictability (secret-keyed)
+- [x] #3 Bare supervised alias honours a per-class rate identically to explicit supervised-retro, load-time note preserved
+- [x] #4 Disabled-sampler reporting is per-class-aware: doctor and status name which classes sample at which rate and which are disabled, with the machine-readable reason
+- [x] #5 SPEC 5/7 amendment drafted and flagged pending sign-off; no silent spec edit
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -43,3 +43,15 @@ Requires a SPEC amendment (policy grammar + the supervised_sample_rate section),
 4. Agent does not touch backlog/ files; lifecycle edits and notes recorded by the orchestrator in the session worktree.
 5. Verification: full targeted test run in the lane; fable reviews the diff; APRV-185 builds on the same branch afterwards.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Built by an Opus lane on autonomy-vocab (e017ede), merged via PR #171. Key decisions: retro_rate admitted on supervised-live too (its ungated fraction still enters the retro pool); rate on manual/autonomous is a load error mirroring live_rate (schema stays closed, no silent no-ops); sampler stays ENABLED when only class rates exist (EnabledSampler.rate went nullable with machine-readable fallbackReason); reporting extended doctor's audit-sampling check and audit list's sampling object, while status --json stays untouched BY DESIGN (frozen shape that never carried the sampler) — the AC's 'status' is satisfied by the two surfaces that actually speak for sampling; audit.sampled payload keeps its key set, only the rate value is per-class (no event-schema churn); rateFor() delegates to resolve() so specificity/strictness/floor stay one implementation. Verification: new tests/retro-rate.test.ts 20/20; targeted suites 292+195 pass; full suite 2464/2465 (one pre-existing lane-only ci-guard ENOENT, absent in CI); lint clean; CI green on PR #171; conformance regen rode the APRV-185 commit. SPEC 5.2 amended, flagged pending sign-off. Gotcha recorded: YAML class keys beginning with * must be quoted in test policies.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Per-class retro_rate landed via PR #171 (commit e017ede): schema, sampler, alias path, doctor/audit-list reporting, 20 new tests, SPEC 5.2 amendment flagged pending sign-off. Verified by the lane's full suite (2464/2465, one pre-existing env-only failure) and green CI on the merged PR.
+<!-- SECTION:FINAL_SUMMARY:END -->
