@@ -4,7 +4,7 @@ title: 'Policy amendment: policy.edit moves to supervised-live 0.1'
 status: To Do
 assignee: []
 created_date: '2026-08-31 23:38'
-updated_date: '2026-09-01 01:04'
+updated_date: '2026-09-01 05:15'
 labels:
   - policy
   - gate
@@ -50,4 +50,6 @@ to:
 Everything else on the rule unchanged (no approvers list or limits declared today, none added). Sampled edits follow the manual path bit for bit; unsampled ones proceed and stay in the retro pool.
 
 Prerequisites verified 2026-09-01: APRV-127 grammar is BUILT and its SPEC amendments still carry pending-sign-off flags (Carter's step 1). APPROVAL_SAMPLING_SECRET is unresolved and .approval/env absent (approval env --check), so supervised-live would fail closed and gate 100 percent: Carter runs approval setup sampling first (step 2), then verifies the daemon terminal resolves the secret, then approval policy amend --commit in the primary (step 3; expect the ~33s silent pre-diff verify, APRV-167). Blocked on those three human steps; nothing further for an agent until the ceremony lands.
+
+BLOCKED (2026-09-01, second blocker, found while drafting the human-only additions): the classifier emits policy.edit for APPROVAL.md itself, .approval/*, AND log-redirect writes, so supervised-live 0.1 on today's class would let ~9 in 10 of those execute unprompted. APRV-198 (classifier split: policy.edit narrows to SPEC/CLAUDE/CI prose; new policy.core and log.mutate) must land first; the ceremony then applies 0.1 to the NARROWED policy.edit and declares policy.core and log.mutate human-only in the same amendment. Sampling secret was minted by Carter this session (keychain, .approval/env written), so prerequisite 2 is met; the daemon terminal still needs eval "$(approval env)" and an approval up restart to hold it.
 <!-- SECTION:NOTES:END -->
