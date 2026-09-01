@@ -185,6 +185,7 @@
 
 import { createHash } from "node:crypto";
 
+import { GLOSS_UNVERIFIED_SUFFIX } from "./contract.js";
 import type {
   ChannelBatch,
   ChannelDecision,
@@ -542,11 +543,11 @@ function originOf(field: TaggedField<unknown>): string {
 /**
  * The suffix the model-authored line carries, on the line itself (APRV-144).
  *
- * Belt and braces with the `(author)` parenthetical: a reader skimming a wall
- * of bullets sees the word "model" inside the sentence they are about to
- * believe, not only in the small italic at the end of it.
+ * One constant, shared with the terminal channel since APRV-197: this name is
+ * kept because the tests and the help text pin it, and it now resolves to
+ * {@link GLOSS_UNVERIFIED_SUFFIX} so the two surfaces cannot drift apart.
  */
-export const TELEGRAM_GLOSS_SUFFIX = "(model, unverified)";
+export const TELEGRAM_GLOSS_SUFFIX = GLOSS_UNVERIFIED_SUFFIX;
 
 /**
  * The prefix a health row carries when it is the reason to look (APRV-163).

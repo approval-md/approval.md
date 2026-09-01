@@ -51,6 +51,7 @@ import { fileURLToPath } from "node:url";
 
 import { payloadHash } from "../src/core/payload.js";
 import { callbackUpdate, startMockBotApi, assertLocal, type MockBotApi } from "./telegram-mock.js";
+import { fakeClaudeEnv } from "./fake-claude.js";
 
 /** dist/tests/up.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -176,7 +177,12 @@ interface Run {
  * exactly what a case hands it.
  */
 function cliEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  const env = { ...process.env, ...extra };
+  // APRV-197. `up` starts the Telegram listener, and that listener asks a model
+  // for a one-sentence gloss unless told not to. Every spawn in this file gets
+  // a fake `claude` first on PATH, so the suite answers itself instantly rather
+  // than spending ~13s per request on a real model — and never depends on
+  // whether the machine running the tests has the CLI installed at all.
+  const env = { ...process.env, ...fakeClaudeEnv(scratch), ...extra };
   for (const name of ["APPROVAL_HUMAN", "APPROVAL_TG_TOKEN", "APPROVAL_TG_CHAT"]) {
     if (extra[name] === undefined) delete env[name];
   }

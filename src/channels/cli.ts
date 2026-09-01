@@ -69,6 +69,7 @@
 import { createInterface, type Interface } from "node:readline";
 
 import type { BudgetVerdict } from "../core/budgets.js";
+import { GLOSS_UNVERIFIED_SUFFIX } from "./contract.js";
 import type {
   ChannelBatch,
   ChannelDecision,
@@ -152,6 +153,14 @@ function formatBudgets(verdicts: BudgetVerdict[]): string {
  */
 function formatValue(field: string, value: unknown): string {
   if (value === null || value === undefined) return "(none)";
+  // APRV-197. The one line in the rendering that NO party stands behind — not
+  // the runtime, not even the requesting agent — says so on the line itself,
+  // in the same words Telegram has used since APRV-144. The `(model:haiku)`
+  // attribution at the end of the line is true but small, and a reader skimming
+  // a terminal reads the sentence, not the parenthetical.
+  if (field === "gloss" && typeof value === "string") {
+    return `${value} ${GLOSS_UNVERIFIED_SUFFIX}`;
+  }
   if (field === "ttl_remaining_ms" && typeof value === "number") return formatDuration(value);
   if (field === "budgets" && Array.isArray(value)) return formatBudgets(value as BudgetVerdict[]);
   if (field === "attestation" && typeof value === "object") {

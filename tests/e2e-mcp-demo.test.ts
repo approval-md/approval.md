@@ -61,6 +61,7 @@ import {
   startMockBotApi,
   type MockBotApi,
 } from "./telegram-mock.js";
+import { fakeClaudeEnv } from "./fake-claude.js";
 
 /** dist/tests/e2e-mcp-demo.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -172,7 +173,9 @@ const captured: { label: string; text: string }[] = [];
  * their own shell cannot make an identity-dependent step pass by accident.
  */
 function cliEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+  // APRV-197: a fake `claude` first on PATH, because this demo spawns the real
+  // listener and the listener glosses by default. See tests/fake-claude.ts.
+  const env: NodeJS.ProcessEnv = { ...process.env, ...fakeClaudeEnv(demo), ...extra };
   for (const name of [
     "APPROVAL_HUMAN",
     "APPROVAL_AGENT",

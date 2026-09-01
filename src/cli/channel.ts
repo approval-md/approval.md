@@ -19,6 +19,19 @@
  * verb must be able to predict, before it spawns anything, whether the child
  * will return.
  *
+ * ## The reading aids (APRV-197)
+ *
+ * Two of them, and they are different in kind. The deterministic one is the
+ * `command_breakdown` line: derived by the classifier from the bound bytes,
+ * marked `[computed] (classifier)`, free, and always present for a command this
+ * runtime's own tokenizer can read. The other is the model gloss, which costs a
+ * subprocess and 10-15 seconds and is marked `(model, unverified)` on the line
+ * itself. Until APRV-197 only the Telegram listener attached the second, so an
+ * operator deciding here read the agent's raw summary and nothing else; the two
+ * surfaces now share `cli/gloss-attach.ts`. See {@link glossRunner} for when a
+ * model is asked at all — only under `--gloss`, and never on the `--json` path,
+ * which is not interactive and has nobody waiting at it.
+ *
  * ## Identity is declared, not proved
  *
  * `--as human:<id>`, else `APPROVAL_HUMAN`. The trust boundary is the local
@@ -64,7 +77,9 @@ import {
 } from "../channels/contract.js";
 import { buildPendingQueue, type TagOptions } from "../channels/tagging.js";
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
-import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
+import { boolFlag, parseFlags, stringFlag, type FlagKind, type ParsedFlags } from "./args.js";
+import { spawnGloss, GLOSS_TIMEOUT_MS, type GlossRunner } from "./gloss.js";
+import { attachGloss, glossAbsenceLine } from "./gloss-attach.js";
 import {
   EXIT_INTEGRITY,
   EXIT_IO,
@@ -87,6 +102,7 @@ const FLAGS: Record<string, FlagKind> = {
   "--payload-dir": "string",
   "--as": "string",
   "--interactive": "boolean",
+  "--gloss": "boolean",
   "--json": "boolean",
   "--help": "boolean",
   "-h": "boolean",
@@ -250,7 +266,7 @@ export function commandChannelCli(argv: string[], streams: Streams, cwd: string)
 
   // See the module header: the prompt loop is asynchronous, so its exit code is
   // assigned to process.exitCode when it settles.
-  void interactiveLoop(queue.requests, logPath, policy, actor, streams).then(
+  void interactiveLoop(queue.requests, logPath, policy, actor, streams, glossRunner(flags)).then(
     (code) => {
       process.exitCode = code;
     },
@@ -263,6 +279,26 @@ export function commandChannelCli(argv: string[], streams: Streams, cwd: string)
   );
   reportSkipped(queue.skipped, streams);
   return EXIT_OK;
+}
+
+/**
+ * Whether this walk asks a model for a gloss, and with what (APRV-197).
+ *
+ * `--gloss`, and nothing else. The VERB is the only place a subprocess is
+ * wired, so every other caller of the prompt loop — the conformance harness,
+ * the test suite, any programmatic driver — gets `undefined` and spawns
+ * nothing. Three surfaces now carry the same flag under the same rule
+ * (`channel cli`, `channel telegram listen`, `up`).
+ *
+ * Opt-in rather than on-by-default because the cost is measured and it is not
+ * small: 10-15 seconds per request (see {@link GLOSS_TIMEOUT_MS}), spent while
+ * a human waits at a prompt. The reading aid that is always there is the
+ * deterministic one — `command_breakdown`, derived by the classifier from the
+ * bound bytes, free, and marked `[computed]`. A sentence from a model that no
+ * party vouches for is worth asking for, and worth asking for ON PURPOSE.
+ */
+function glossRunner(flags: ParsedFlags): GlossRunner | undefined {
+  return boolFlag(flags, "--gloss") ? spawnGloss : undefined;
 }
 
 function reportSkipped(
@@ -331,6 +367,7 @@ async function interactiveLoop(
   policy: { dir?: string; file?: string },
   actor: string,
   streams: Streams,
+  gloss?: GlossRunner,
 ): Promise<number> {
   const channel = new CliChannel({ output: { write: (text) => streams.out(text) } });
 
@@ -347,8 +384,25 @@ async function interactiveLoop(
   });
 
   let refused = false;
+  const tally = { asked: 0, absent: 0 };
   try {
-    for (const request of requests) {
+    for (const original of requests) {
+      // APRV-197. Attached per request, immediately before it is rendered, and
+      // by the same function the Telegram listener uses. Per request rather
+      // than in one pass up front because the wait is 10-15s each: a human who
+      // walks away after the first decision should not have paid for glosses of
+      // requests they never read, and one who stays sees the pause land next to
+      // the prompt it belongs to.
+      let request = original;
+      if (gloss !== undefined) {
+        streams.err(
+          `approval: asking a model to describe ${original.action_key.value} (up to ${GLOSS_TIMEOUT_MS}ms; drop --gloss to skip it)\n`,
+        );
+        const attached = attachGloss(original, gloss);
+        if (attached.outcome !== "opaque") tally.asked += 1;
+        if (attached.outcome === "absent") tally.absent += 1;
+        request = attached.request;
+      }
       const deliveryId = channel.notify(request);
       token = undefined;
       const collected = await channel.collectDecision(request.action_key.value, deliveryId);
@@ -368,6 +422,14 @@ async function interactiveLoop(
     }
   } finally {
     channel.close();
+  }
+
+  // APRV-197. Chronic silence becomes a visible line: an operator who asked for
+  // glosses and read none now learns that a model was asked and did not answer,
+  // instead of concluding the feature was never built (which is exactly what
+  // happened under APRV-144's ceiling).
+  if (tally.absent > 0) {
+    streams.err(glossAbsenceLine("channel cli", tally.absent, tally.asked, GLOSS_TIMEOUT_MS));
   }
 
   return refused ? EXIT_INTEGRITY : EXIT_OK;

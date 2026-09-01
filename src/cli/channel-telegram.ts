@@ -109,18 +109,12 @@ import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
 import type { DecideOptions } from "../core/gate.js";
 import { assembleBatch } from "../channels/batch.js";
 import {
-  claimed,
   recordChannelDecision,
   type ChannelDecision,
   type ChannelRequest,
   type DecisionOutcome,
   type DeliveryId,
 } from "../channels/contract.js";
-import {
-  changePayloadView,
-  commandPayloadView,
-  emailPayloadFields,
-} from "../channels/payload-view.js";
 import {
   buildPendingQueue,
   type ChannelTagRefusalCode,
@@ -146,16 +140,9 @@ import {
   proposalState,
 } from "../core/policy-proposal.js";
 import { payloadOf, readVerifiedRecords, requestState } from "../core/state.js";
-import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
-import {
-  glossFor,
-  spawnGloss,
-  GLOSS_AUTHOR,
-  GLOSS_EDIT_INSTRUCTION,
-  GLOSS_EMAIL_INSTRUCTION,
-  GLOSS_INSTRUCTION,
-  type GlossRunner,
-} from "./gloss.js";
+import { boolFlag, parseFlags, stringFlag, type FlagKind, type ParsedFlags } from "./args.js";
+import { spawnGloss, GLOSS_TIMEOUT_MS, type GlossRunner } from "./gloss.js";
+import { attachGloss, glossAbsenceLine } from "./gloss-attach.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import {
   TELEGRAM_HEALTH_HELP,
@@ -176,10 +163,30 @@ const LISTEN_FLAGS: Record<string, FlagKind> = {
   "--api-base": "string",
   "--poll-timeout": "string",
   "--once": "boolean",
+  "--gloss": "boolean",
+  "--no-gloss": "boolean",
   "--json": "boolean",
   "--help": "boolean",
   "-h": "boolean",
 };
+
+/**
+ * The gloss runner this listener will use, as a spreadable fragment (APRV-197).
+ *
+ * ON unless `--no-gloss`. Two flags rather than one because the pair reads
+ * honestly next to `channel cli`, where the default is the other way round:
+ * `--gloss` is accepted here (and is simply the default restated) so that one
+ * command line works on both verbs, and `--no-gloss` wins a tie, because the
+ * flag that removes a language model from the path should never lose one.
+ *
+ * A fragment rather than a value so that "no runner" is the ABSENCE of the
+ * key. {@link ListenSetup.gloss} being optional is what lets every
+ * programmatic caller of `dispatchPending` spawn nothing without saying so.
+ */
+export function glossWiring(flags: ParsedFlags): { gloss?: GlossRunner } {
+  if (boolFlag(flags, "--no-gloss")) return {};
+  return { gloss: spawnGloss };
+}
 
 function usageError(streams: Streams, json: boolean, message: string, helpText: string): number {
   if (json) streams.err(`${JSON.stringify({ error: { code: "usage", message } })}\n`);
@@ -516,11 +523,21 @@ function setUp(
     once: boolFlag(flags, "--once"),
     json,
     log: (message: string) => streams.err(`${message}\n`),
-    // APRV-144. The listener is the only place this is wired, and it is
-    // wired here rather than defaulted inside `dispatchPending` so that
-    // "a real subprocess may be spawned" is a decision one verb makes and
-    // every other caller of the dispatch cycle opts into explicitly.
-    gloss: spawnGloss,
+    // APRV-144, on by default, `--no-gloss` to turn it off (APRV-197).
+    //
+    // The listener is the surface the gloss was asked for: the phone is where
+    // an approver reads a request they did not watch being made, with none of
+    // the terminal's context around it. The measured 10-15 seconds a gloss
+    // costs (see GLOSS_TIMEOUT_MS) is spent inside a dispatch cycle that is
+    // already waiting on the network, and it blocks nobody — which is exactly
+    // why the terminal walker makes the opposite choice and asks only under
+    // `--gloss`: there, a person is sitting in front of the pause.
+    //
+    // The verb is still the only place a runner is wired: `dispatchPending`
+    // defaults to none, so no programmatic driver spawns a subprocess by
+    // importing it. Tests that drive THIS function pass `--no-gloss` or set a
+    // stub, which is what {@link listenGlossRunner} is for.
+    ...glossWiring(flags),
   });
 
   if (!prepared.ok) {
@@ -990,9 +1007,19 @@ export async function dispatchPending(
   // digest instead of one message each. Nothing waits for more — there is no
   // new latency mechanism here, and a lone request is delivered exactly as it
   // always was.
+  const tally = { asked: 0, absent: 0 };
   const undelivered = queue.requests
     .filter((request) => !state.delivered.has(request.action_key.value))
-    .map((request) => withGloss(setup, request));
+    .map((request) => withGloss(setup, request, tally));
+
+  // APRV-197. One line per cycle, and only when a model was actually asked and
+  // did not answer. Absence used to be silent by design, which was right for
+  // one request and wrong for a thousand: with APRV-144's ceiling the
+  // subprocess missed every time, and the operator's only evidence was prompts
+  // that looked exactly like prompts from before the feature existed.
+  if (tally.absent > 0) {
+    streams.err(glossAbsenceLine("telegram", tally.absent, tally.asked, GLOSS_TIMEOUT_MS));
+  }
 
   // APRV-196. The STARTUP batch gets one line in front of it, and only that
   // one: a later cycle delivers what has just been requested, which is a
@@ -1076,75 +1103,28 @@ export async function dispatchPending(
 }
 
 /**
- * The request, plus a model's one-sentence gloss of its command when one can be
- * had (APRV-144).
+ * The request, plus a model's one-sentence gloss when one can be had (APRV-144).
  *
- * Attached HERE, in the listener, at the last moment before delivery, and to a
- * request the tagger has already finished building. That placement is the whole
- * safety argument: the gate resolved the class, the budgets and the payload
- * binding without this field existing, the payload hash was computed over bytes
- * that do not contain it, and the log will record a decision that never
- * mentions it. Losing it costs one line on a message.
+ * The attaching itself moved to `cli/gloss-attach.ts` in APRV-197, when the
+ * terminal channel needed the same thing; what stays here is the listener's own
+ * two decisions. Whether to ask at all is `setup.gloss`, which the verb sets
+ * only under `--gloss`. What to do with the answer is nothing, except count it:
+ * absence used to be silent by design, and with the old 2s ceiling that made a
+ * chronically failing subprocess indistinguishable from a feature nobody built.
  *
- * Every payload kind the renderer can read gets one (APRV-164): a command, a
- * file change, an email. The kind is derived exactly as the WYSIWYS rendering
- * derives it, from the structure of the bytes, so the sentence is about the
- * material the approver is being shown and the two can never be about different
- * payloads. An opaque payload gets none: there is no material to describe that
- * the canonical JSON does not already show verbatim. Once per request, not once
- * per cycle: a request already in `delivered` never reaches this.
- *
- * Returns the request UNCHANGED when there is no runner, no legible payload, or
- * no answer. Every one of those is silent, because a listener that complained
- * about a missing reading aid would be teaching an operator to ignore its
- * stderr.
+ * Once per request, not once per cycle: a request already in `delivered` never
+ * reaches this.
  */
-function withGloss(setup: ListenSetup, request: ChannelRequest): ChannelRequest {
+function withGloss(
+  setup: ListenSetup,
+  request: ChannelRequest,
+  tally: { asked: number; absent: number },
+): ChannelRequest {
   if (setup.gloss === undefined) return request;
-  const asked = glossMaterial(request.fullPayload.value?.value);
-  if (asked === null) return request;
-  const sentence = glossFor(asked.instruction, asked.material, setup.gloss);
-  if (sentence === null) return request;
-  return { ...request, gloss: claimed(sentence, GLOSS_AUTHOR) };
-}
-
-/**
- * The instruction and the material for one payload, or `null` for an opaque one.
- *
- * The material is assembled from the same structural views the canonical
- * rendering is built from, and it is deliberately plain: labelled lines and the
- * text itself, in the order the prompt shows them. Nothing here reads a
- * self-declared kind field, for the reason `core/wysiwys.ts` gives at length —
- * a payload that chose its own presentation would have chosen its own gloss too.
- */
-function glossMaterial(value: unknown): { instruction: string; material: string } | null {
-  const command = commandPayloadView(value);
-  if (command !== null) {
-    // Byte for byte what APRV-144 sent: the command alone, under the command
-    // instruction. A prompt that drifted here would change a shipped behaviour
-    // for no reason beyond the refactor that touched it.
-    return { instruction: GLOSS_INSTRUCTION, material: command.command };
-  }
-
-  const change = changePayloadView(value);
-  if (change !== null) {
-    const labels = change.labels.map((field) => `${field.label}: ${field.text}`);
-    const body =
-      change.before === null
-        ? ["new content:", change.after]
-        : ["before:", change.before, "after:", change.after];
-    return { instruction: GLOSS_EDIT_INSTRUCTION, material: [...labels, ...body].join("\n") };
-  }
-
-  const email = emailPayloadFields(value);
-  if (email !== null) {
-    return {
-      instruction: GLOSS_EMAIL_INSTRUCTION,
-      material: email.map((field) => `${field.label}: ${field.text}`).join("\n"),
-    };
-  }
-
-  return null;
+  const attached = attachGloss(request, setup.gloss);
+  if (attached.outcome !== "opaque") tally.asked += 1;
+  if (attached.outcome === "absent") tally.absent += 1;
+  return attached.request;
 }
 
 /** Deliver each request as its own prompt: the pre-digest path, unchanged. */

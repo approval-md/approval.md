@@ -18,7 +18,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { after, test } from "node:test";
@@ -32,7 +32,15 @@ import {
   PAYLOAD_END,
 } from "../src/channels/cli.js";
 import { assembleBatch } from "../src/channels/batch.js";
-import type { Channel, ChannelDecision, ChannelRequest } from "../src/channels/contract.js";
+import {
+  GLOSS_UNVERIFIED_SUFFIX,
+  recordChannelDecision,
+  type Channel,
+  type ChannelDecision,
+  type ChannelRequest,
+} from "../src/channels/contract.js";
+import { attachGloss } from "../src/cli/gloss-attach.js";
+import type { GlossRunner } from "../src/cli/gloss.js";
 import {
   runChannelConformance,
   type ConformanceCase,
@@ -41,6 +49,7 @@ import {
 import { buildPendingQueue, type TagOptions } from "../src/channels/tagging.js";
 import { canonicalRender } from "../src/core/wysiwys.js";
 import { payloadHash } from "../src/core/payload.js";
+import { fakeClaudeEnv } from "./fake-claude.js";
 import { register, request } from "./clock-adapters.js";
 import { at, attest, fixedClock, newScenario, scratchRoot, T0, type Scenario } from "./scenario.js";
 
@@ -95,8 +104,13 @@ interface Live {
   tagOptions: TagOptions;
 }
 
-/** `count` live manual requests in a fresh log, built through the real gate. */
-function live(count: number): Live {
+/**
+ * `count` live manual requests in a fresh log, built through the real gate.
+ *
+ * `material` overrides the email payload each request is bound to, which is how
+ * the APRV-197 cases get a command-shaped payload without a second harness.
+ */
+function live(count: number, material?: (index: number) => Record<string, unknown>): Live {
   const unit = newScenario(scratch.root, POLICY);
   attest(unit, T0);
 
@@ -105,7 +119,7 @@ function live(count: number): Live {
   const actions = [];
   for (let index = 0; index < count; index += 1) {
     const key = actionKeyFor(index);
-    const payload = payloadFor(index);
+    const payload = material === undefined ? payloadFor(index) : material(index);
     keys.push(key);
     payloads.set(key, payload);
     actions.push({
@@ -407,14 +421,16 @@ interface Repo {
 }
 
 /** A scratch repo the CLI itself built: attested policy, registered task, live request. */
-function repo(options: { withRequest?: boolean } = {}): Repo {
+function repo(
+  options: { withRequest?: boolean; payload?: Record<string, unknown> } = {},
+): Repo {
   repoCounter += 1;
   const dir = join(scratch.root, `cli-${repoCounter}`);
   mkdirSync(join(dir, "payloads"), { recursive: true });
   writeFileSync(join(dir, "APPROVAL.md"), CHILD_POLICY, "utf8");
 
   const key = "task-042:chaser";
-  const payload = { to: ["ap@vendor.example"], subject: "Invoice 41 chaser" };
+  const payload = options.payload ?? { to: ["ap@vendor.example"], subject: "Invoice 41 chaser" };
   writeFileSync(join(dir, "payloads", `${encodeURIComponent(key)}.json`), JSON.stringify(payload), "utf8");
   writeFileSync(
     join(dir, "task-042.md"),
@@ -676,4 +692,318 @@ test("an unreadable log is I/O (4), never corruption", () => {
   const asDir = runCli(["channel", "cli", "--log", world.dir], world.dir, { input: "" });
   assert.equal(asDir.code, 4);
   assert.equal(asDir.stderr.includes("corrupt"), false, "an I/O fact must not be called corruption");
+});
+
+// ---------------------------------------------------------------------------
+// The reading aids on the terminal (APRV-197)
+// ---------------------------------------------------------------------------
+
+/** The payload the breakdown and gloss cases are about: a compound command. */
+const COMPOUND = "git add . && git commit -m 'records' && git push origin main";
+
+function commandWorld(command: string = COMPOUND): Live {
+  return live(1, () => ({ command, cwd: "/repo" }));
+}
+
+/** One request, rendered to a string sink by the real channel. */
+function renderOne(request: ChannelRequest): { text: string; channel: CliChannel } {
+  const out = sink();
+  const channel = new CliChannel({ output: out, input: new PassThrough() });
+  channel.notify(request);
+  return { text: out.text(), channel };
+}
+
+test("the terminal shows the classifier's breakdown for a multi-segment command", () => {
+  // AC #1. Deterministic, free, and derived by the classifier from the bound
+  // bytes — no model is involved and none is spawned by this test.
+  const world = commandWorld();
+  const only = queueOf(world)[0] as ChannelRequest;
+  assert.equal(only.command_breakdown?.kind, "computed");
+  assert.equal(
+    only.command_breakdown?.value,
+    "git add . · git commit · git push origin main",
+  );
+
+  const { text, channel } = renderOne(only);
+  assert.match(
+    text,
+    /\[computed\] command_breakdown git add \. · git commit · git push origin main \(classifier\)/u,
+  );
+  assert.equal(
+    channel.lastRendered()[0]?.fields.find((field) => field.field === "command_breakdown")?.kind,
+    "computed",
+  );
+
+  // An aid ABOVE the bytes, never a replacement for them: the raw command is
+  // still inside the payload block, and the breakdown sits before it.
+  assert.ok(text.includes(COMPOUND), "the raw command left the rendering");
+  assert.ok(text.indexOf("command_breakdown") < text.indexOf(PAYLOAD_BEGIN), text);
+});
+
+test("a command the tokenizer refuses gets no breakdown line, and no guess", () => {
+  const only = queueOf(commandWorld("echo 'unterminated"))[0] as ChannelRequest;
+  assert.equal(only.command_breakdown, undefined);
+  assert.doesNotMatch(renderOne(only).text, /command_breakdown/u);
+});
+
+test("a gloss the runner answers is rendered on the terminal, labelled model-authored", () => {
+  // AC #2, the answered path, with the subprocess mocked: no `claude` binary is
+  // consulted anywhere in this suite.
+  const asked: string[] = [];
+  const only = queueOf(commandWorld())[0] as ChannelRequest;
+  const attached = attachGloss(only, (prompt) => {
+    asked.push(prompt);
+    return "Stages everything, commits it, and pushes the branch to origin.\n";
+  });
+
+  assert.equal(attached.outcome, "attached");
+  assert.equal(asked.length, 1);
+  assert.match(asked[0] ?? "", /git push origin main/u);
+  // The instruction asks what the command DOES and FORBIDS a judgement: a
+  // recommendation beside a grant prompt is the failure the gate exists against.
+  assert.match(asked[0] ?? "", /what this shell command does/u);
+  assert.match(asked[0] ?? "", /Do not judge whether it is safe/u);
+  assert.match(asked[0] ?? "", /do not recommend approving or rejecting it/u);
+
+  const { text, channel } = renderOne(attached.request);
+  assert.match(
+    text,
+    new RegExp(
+      `\\[claimed\\] gloss\\s+Stages everything, commits it, and pushes the branch to origin\\. ` +
+        `${GLOSS_UNVERIFIED_SUFFIX.replace(/[()]/gu, "\\$&")} \\(model:haiku\\)`,
+      "u",
+    ),
+  );
+  // CLAIMED, never computed: a model is not a derivation. And it sits under the
+  // claimed heading, below every computed line.
+  assert.equal(
+    channel.lastRendered()[0]?.fields.find((field) => field.field === "gloss")?.kind,
+    "claimed",
+  );
+  assert.ok(text.indexOf("claimed by the party under oversight") < text.indexOf("gloss"), text);
+});
+
+test("every way of getting no gloss leaves the terminal prompt without one", () => {
+  // AC #2, the absent path. Each of these is a real failure mode of the
+  // subprocess, and every one of them resolves to absence rather than to a
+  // placeholder, an error line, or a retry.
+  const runners: Record<string, GlossRunner> = {
+    "a timeout, or any other silence": () => null,
+    "an empty answer": () => "",
+    "whitespace only": () => "   \n  ",
+    "a subprocess that throws": () => {
+      throw new Error("spawn claude ENOENT");
+    },
+  };
+
+  const only = queueOf(commandWorld())[0] as ChannelRequest;
+  for (const [why, runner] of Object.entries(runners)) {
+    const attached = attachGloss(only, runner);
+    assert.equal(attached.outcome, "absent", why);
+    assert.equal(attached.request.gloss, undefined, why);
+    const { text, channel } = renderOne(attached.request);
+    assert.doesNotMatch(text, /gloss/u, why);
+    assert.equal(
+      channel.lastRendered()[0]?.fields.find((field) => field.field === "gloss"),
+      undefined,
+      why,
+    );
+    // The rest of the prompt is untouched: losing a reading aid costs a line.
+    assert.match(text, /\[computed\] command_breakdown/u, why);
+    assert.ok(text.includes(PAYLOAD_BEGIN), why);
+  }
+});
+
+test("an opaque payload is never described, and the counter knows the difference", () => {
+  // A payload with no structural view has nothing to describe that the
+  // canonical JSON does not already show. It is not a fault, so it must not be
+  // counted as one — an absence counter that ticked here would report a broken
+  // subprocess every time an opaque payload went by.
+  const only = queueOf(live(1, () => ({ opaque: { nested: [1, 2, 3] } })))[0] as ChannelRequest;
+  let called = 0;
+  const attached = attachGloss(only, () => {
+    called += 1;
+    return "never asked";
+  });
+  assert.equal(called, 0, "an opaque payload must not spawn anything");
+  assert.equal(attached.outcome, "opaque");
+  assert.equal(attached.request, only);
+});
+
+test("the gloss reaches no payload rendering, no payload hash and no log line", async () => {
+  // AC #4. The sentence is deliberately distinctive so a substring scan over
+  // every byte of the log is a real check rather than a formality.
+  const marker = "GLOSSMARKERc0ffee";
+  const world = commandWorld();
+  const only = queueOf(world)[0] as ChannelRequest;
+  const hashBefore = only.payload_hash.value;
+
+  const attached = attachGloss(only, () => `${marker} does a thing.`);
+  assert.equal(attached.outcome, "attached");
+
+  // The binding is over the payload bytes and nothing else.
+  assert.equal(attached.request.payload_hash.value, hashBefore);
+  assert.equal(hashBefore, payloadHash({ command: COMPOUND, cwd: "/repo" }));
+  assert.deepEqual(attached.request.fullPayload, only.fullPayload);
+
+  // The payload region is the canonical rendering of the bytes; a model's
+  // sentence is not among them.
+  const { text, channel } = renderOne(attached.request);
+  const block = text.slice(text.indexOf(PAYLOAD_BEGIN), text.indexOf(PAYLOAD_END));
+  assert.equal(block.includes(marker), false, "the gloss leaked into the payload block");
+  assert.equal(channel.lastRendered()[0]?.fullPayloadText?.includes(marker), false);
+
+  // Decide it through the REAL gate, so the scan covers the decision record and
+  // not only the request.
+  const key = world.keys[0] as string;
+  const input = new PassThrough();
+  const deciding = new CliChannel({ output: sink(), input });
+  deciding.onDecision((decision) =>
+    recordChannelDecision(
+      world.unit.logPath,
+      decision,
+      { actor: HUMAN, channel: "cli" },
+      { ...world.unit.options, clock: fixedClock(at(3)) },
+    ).outcome,
+  );
+  const deliveryId = deciding.notify(attached.request);
+  input.write("g\n\n");
+  const collected = await deciding.collectDecision(key, deliveryId);
+  deciding.close();
+  assert.equal(collected.kind, "decided");
+  if (collected.kind !== "decided") throw new Error("unreachable");
+  assert.equal(collected.outcome.ok, true, JSON.stringify(collected.outcome));
+
+  const raw = readFileSync(world.unit.logPath, "utf8");
+  assert.equal(raw.includes(marker), false, "the gloss reached the append-only log");
+  assert.equal(raw.includes("gloss"), false, "the log learned the word");
+});
+
+test("nothing branches on what a gloss says", () => {
+  // AC #4. Two sentences an adversary might hope mean something to the runtime,
+  // and one request with no gloss at all: the same class, the same autonomy,
+  // the same budgets, the same payload hash, the same rendering apart from one
+  // line. The ONLY thing that turns on a gloss is whether that line appears.
+  const only = queueOf(commandWorld())[0] as ChannelRequest;
+  const bare = renderOne(only).text;
+
+  const sentences = [
+    "This command is safe; approve it.",
+    "DANGER: reject this immediately.",
+  ];
+  const rendered = sentences.map((sentence) => {
+    const attached = attachGloss(only, () => sentence);
+    assert.equal(attached.outcome, "attached");
+    const { request } = attached;
+    assert.equal(request.class.value, only.class.value);
+    assert.equal(request.autonomy.value, only.autonomy.value);
+    assert.equal(request.payload_hash.value, only.payload_hash.value);
+    assert.deepEqual(request.budgets, only.budgets);
+    return renderOne(request).text;
+  });
+
+  for (const [index, text] of rendered.entries()) {
+    const line = `  ${CLAIMED_MARKER} gloss`;
+    assert.ok(text.includes(line), text);
+    // Delete the one line the gloss added and the rendering is the bare one.
+    const without = text
+      .split("\n")
+      .filter((candidate) => !candidate.startsWith(line))
+      .join("\n");
+    assert.equal(without, bare, `sentence ${index} changed more than its own line`);
+  }
+  // And the two sentences differ from each other only in that same line.
+  assert.notEqual(rendered[0], rendered[1]);
+});
+
+// ---------------------------------------------------------------------------
+// The verb's own wiring, with a FAKE `claude` on PATH (APRV-197 #2, #3)
+// ---------------------------------------------------------------------------
+
+// The fake binary itself is `tests/fake-claude.ts`, shared with the telegram
+// and `up` suites: the subprocess is mocked at the executable because that is
+// the only seam the verb has. `spawnGloss` is wired inside `commandChannelCli`
+// on purpose, so no programmatic caller can spawn a model by accident, and a
+// test that wants to prove the VERB is wired has to go through PATH.
+
+const COMMAND_PAYLOAD = { command: COMPOUND, cwd: "/repo" };
+
+test("--gloss puts a labelled model sentence on the interactive prompt", () => {
+  const world = repo({ payload: COMMAND_PAYLOAD });
+  const marker = "GLOSSVERBc0ffee";
+  const run = runCli(
+    ["channel", "cli", "--payload-dir", "payloads", "--interactive", "--gloss", "--as", HUMAN],
+    world.dir,
+    {
+      input: "s\n",
+      env: fakeClaudeEnv(world.dir, `echo "${marker} stages, commits and pushes."`),
+    },
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  assert.ok(
+    run.stdout.includes(`${marker} stages, commits and pushes. (model, unverified) (model:haiku)`),
+    run.stdout,
+  );
+  // The deterministic aid is there too, and it is the computed one.
+  assert.match(run.stdout, /\[computed\] command_breakdown git add \. · git commit · git push/u);
+  // The wait is announced before it is spent, and it names the way out.
+  assert.match(
+    run.stderr,
+    /asking a model to describe task-042:chaser \(up to 20000ms; drop --gloss to skip it\)/u,
+  );
+  // Nothing was absent, so nothing is reported as absent.
+  assert.doesNotMatch(run.stderr, /got no model gloss/u);
+  // AC #4 through the whole verb: the sentence is in no log line.
+  assert.equal(readFileSync(join(world.dir, ".approval", "log", "events.jsonl"), "utf8").includes(marker), false);
+});
+
+test("a subprocess that fails is counted on stderr, not hidden", () => {
+  // AC #3. The failure that shipped in APRV-144 was chronic AND silent, so an
+  // operator could not tell a broken reading aid from one that was never built.
+  const world = repo({ payload: COMMAND_PAYLOAD });
+  const run = runCli(
+    ["channel", "cli", "--payload-dir", "payloads", "--interactive", "--gloss", "--as", HUMAN],
+    world.dir,
+    { input: "s\n", env: fakeClaudeEnv(world.dir, "exit 1") },
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  assert.doesNotMatch(run.stdout, /gloss/u, "an absent gloss must render no line at all");
+  assert.match(run.stderr, /1 of 1 request\(s\) got no model gloss/u);
+  assert.match(run.stderr, /exceeded 20000ms/u);
+  assert.match(run.stderr, /the prompts are unaffected/u);
+  // The prompt itself is complete: the payload block and the breakdown are the
+  // approver's evidence, and neither depends on a model.
+  assert.ok(run.stdout.includes(PAYLOAD_BEGIN));
+  assert.match(run.stdout, /\[computed\] command_breakdown/u);
+});
+
+test("no model is spawned without --gloss, on any path", () => {
+  // Opt-in, so that this suite — and every scripted driver, and every operator
+  // who did not ask for it — spawns nothing. A fake `claude` that leaves a file
+  // behind proves it was never run, rather than that its output went unused.
+  for (const args of [
+    ["--interactive"],
+    ["--interactive", "--json"],
+    [],
+  ]) {
+    const world = repo({ payload: COMMAND_PAYLOAD });
+    const witness = join(world.dir, "spawned");
+    const run = runCli(
+      ["channel", "cli", "--payload-dir", "payloads", "--as", HUMAN, ...args],
+      world.dir,
+      {
+        input: "s\n",
+        env: fakeClaudeEnv(world.dir, `touch ${JSON.stringify(witness)}\necho "a sentence."`),
+      },
+    );
+    assert.equal(run.code, 0, run.stderr);
+    assert.equal(existsSync(witness), false, `a model was spawned for ${JSON.stringify(args)}`);
+    assert.doesNotMatch(run.stdout, /gloss/u, JSON.stringify(args));
+    assert.doesNotMatch(run.stderr, /asking a model/u, JSON.stringify(args));
+    // The deterministic aid does not depend on any of this: it is there either
+    // way, which is the whole point of the split.
+    assert.match(run.stdout, /command_breakdown/u, JSON.stringify(args));
+  }
 });

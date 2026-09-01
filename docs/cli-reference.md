@@ -1731,6 +1731,30 @@ inside the delimiters is what the execution token will spend. A manual request
 with no material is skipped and reported on stderr — visibly, because a request
 missing from a queue is a request nobody will approve.
 
+**Two reading aids, and they are not the same kind of thing (APRV-197).** The
+first is `command_breakdown`: for a multi-segment command the classifier's own
+parse of the bound bytes, rendered `[computed] … (classifier)`, always present
+and costing nothing. The second is the model gloss, one sentence from a local
+`claude -p --model haiku`, rendered in the CLAIMED block and labelled `(model,
+unverified)` on the line itself. On THIS verb it is OPT-IN, behind `--gloss`,
+because it was measured at 10 to 15 seconds per request on the machine it was
+built on and here that is spent while a person waits at a prompt. Ask for it
+deliberately or do not get it.
+
+The push channel makes the opposite choice, and for the same reason read the
+other way: on `channel telegram listen` and `up` the gloss is ON by default,
+with `--no-gloss` to drop it. The phone is where an approver meets a request
+they did not watch being made, and the seconds are spent inside a dispatch cycle
+that is already waiting on the network, blocking nobody.
+
+The gloss is never load-bearing: it is attached at render time to a request the
+tagger has finished building, the payload hash does not cover it, the log never
+records it, and no code path branches on what it says. Every failure of the
+subprocess — missing binary, non-zero exit, empty output, exceeding the timeout —
+resolves to the line simply being absent. Absences are COUNTED and reported on
+stderr at the end of the walk, so a chronically broken subprocess reads as a
+broken subprocess rather than as a feature that was never built.
+
 **Identity is declared, not proved.** `--as`, else `APPROVAL_HUMAN`. The trust
 boundary is the local machine: a decision recorded here proves that someone with
 local control answered, not who. Missing or non-human identity on the deciding
