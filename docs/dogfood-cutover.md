@@ -135,8 +135,13 @@ is one-shot by design; running the verb again is its refresh.
 
 ## Drafts for the human's hands
 
-Agents do not edit CLAUDE.md or APPROVAL.md. The two edits this cutover wants
-are drafted here for the human to apply verbatim or amend.
+At the time of the cutover, agents edited neither CLAUDE.md nor APPROVAL.md,
+and the two edits this cutover wanted were drafted here for the human to apply
+verbatim or amend. Both landed. Since APRV-182 the CLAUDE.md half of that
+convention is retired: agents edit CLAUDE.md directly, the edit classifies
+`policy.edit` through the hook, and the human's tap is the sign-off.
+APPROVAL.md is unchanged, still edited only through the human's own amend
+ceremony. The drafts below stay as the historical record.
 
 ### CLAUDE.md — replace the final bullet of "Dogfooding — escalates at M2"
 
