@@ -364,6 +364,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | code | meaning |
 |---|---|
 | `hook-unclassified` | no rule covers some segment of the command |
+| `hook-class-human-only` | some class of the command resolves to `human-only`: the policy reserves it to human hands, so the command is denied outright and no gate lifecycle is opened. Nothing is registered, requested or appended, and a person runs the command instead. The gate's own code for the same fact is `class-human-only`, which the detail names |
 | `hook-opaque` | a construct whose effect cannot be read from the text |
 | `hook-unparseable` | the command line could not be tokenized |
 | `hook-rejected` | a human said no |

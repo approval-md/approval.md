@@ -261,6 +261,10 @@ function grantChaser(unit: Case, ts: string = at(1)): string {
 test("the execution refusal-code union is frozen public API", () => {
   assert.deepEqual([...EXECUTE_REFUSAL_CODES], [
     "action-not-registered",
+    // APRV-185: the class is reserved to human hands. Refused on both paths and
+    // before either is chosen, so it sits above `token-required` — which is a
+    // redirection, and this one is not.
+    "class-human-only",
     "token-required",
     "loop-escalated",
     "policy-not-attested",

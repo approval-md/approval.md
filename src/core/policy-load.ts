@@ -105,8 +105,18 @@ const MS_PER_UNIT: Readonly<Record<string, number>> = {
  * travels beside it as {@link SupervisionMode}. Widening this union instead
  * would have put a third case into every `switch` in the runtime, and a
  * `switch` that forgot it would have failed open.
+ *
+ * WIDENED by APRV-183's successor, APRV-185, and widened for the opposite
+ * reason. `human-only` is not a supervision mode and cannot travel beside
+ * anything: it says the action is reserved to human hands and is performed
+ * outside agent execution entirely, so there is no gate path, no token, and no
+ * record for an agent to produce. A member of this union is exactly what that
+ * needs to be, because the failure mode the note above worries about runs the
+ * other way here: a `switch` that forgets `human-only` reaches no allow, since
+ * every enforcement path in this runtime opens by refusing it and the remaining
+ * branches are all keyed to `manual`, `supervised` or `autonomous` by equality.
  */
-export type Autonomy = "manual" | "supervised" | "autonomous";
+export type Autonomy = "human-only" | "manual" | "supervised" | "autonomous";
 
 /**
  * Amended SPEC.md §5.2 (APRV-127): how far a supervised class is supervised.
@@ -125,6 +135,19 @@ export type DeclaredAutonomy = Autonomy | "supervised-live" | "supervised-retro"
  * What `defaults.autonomy` may write: {@link DeclaredAutonomy} less
  * `supervised-live`, which is meaningless without a `live_rate` and has nowhere
  * on `defaults` to declare one. Enforced by `policy.schema.json`.
+ *
+ * `human-only` IS admitted here (APRV-185), and the asymmetry with
+ * `supervised-live` is the whole of the reason: `supervised-live` is excluded
+ * because it carries a required rate `defaults` cannot hold, and `human-only`
+ * carries nothing at all. An author who writes it as the default is declaring
+ * maximal strictness for everything the policy did not name, which is a
+ * statement a policy is entitled to make.
+ *
+ * What it is NOT is the fail-closed target. A policy that cannot be parsed
+ * still resolves every class to `manual` (see `policy-match.ts`), because a
+ * broken policy must stay recoverable through its own gate: an unparseable file
+ * whose classes all became `human-only` would leave no gated path to the fix,
+ * and the repair for a typo would sit behind a level that admits no repair.
  */
 export type DefaultAutonomy = Exclude<DeclaredAutonomy, "supervised-live">;
 
@@ -152,15 +175,17 @@ export interface PolicyClassRule {
   /**
    * Amended SPEC.md §5.2 (APRV-127): the fraction of `supervised-live` actions
    * that block on the human gate, in (0, 1]. Required by the schema for
-   * `supervised-live` and forbidden for every other level.
+   * `supervised-live` and forbidden for every other level, `human-only`
+   * included (APRV-185): a level whose actions no agent may take has no
+   * fraction of them to gate.
    */
   live_rate?: number;
   /**
    * Amended SPEC.md §5.2 (APRV-183): the fraction of this class's executed
    * actions drawn into the retrospective review backlog, in (0, 1]. Optional on
    * every supervised level (`supervised`, `supervised-retro`, `supervised-live`)
-   * and a schema violation on `manual` and `autonomous`, which have no
-   * retrospective pool. Absent means the class is sampled at
+   * and a schema violation on `manual`, `autonomous` and `human-only`, none of
+   * which has a retrospective pool. Absent means the class is sampled at
    * `audit.supervised_sample_rate`.
    */
   retro_rate?: number;

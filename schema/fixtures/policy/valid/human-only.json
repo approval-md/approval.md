@@ -1,0 +1,9 @@
+{
+  "version": "0.1",
+  "defaults": { "autonomy": "human-only" },
+  "classes": {
+    "account.credential": { "autonomy": "human-only" },
+    "vcs.history.rewrite": { "autonomy": "human-only", "approvers": ["alice"] },
+    "read.*": { "autonomy": "autonomous" }
+  }
+}

@@ -43,8 +43,9 @@ import { isPayloadHash } from "../core/payload.js";
 import { readVerifiedRecords } from "../core/state.js";
 import {
   consumeToken,
+  humanOnlyClassRefusal,
+  tokenPolicy,
   tokenStatus,
-  tokenTtlMs,
   type TokenOptions,
   type TokenRefusal,
 } from "../core/token.js";
@@ -215,7 +216,13 @@ export function commandToken(argv: string[], streams: Streams, cwd: string): num
   }
 
   const options = tokenOptions(flags, cwd);
-  const status = tokenStatus(read.records, key.actionKey, now(), tokenTtlMs(options));
+  const load = tokenPolicy(options);
+  const status = tokenStatus(
+    read.records,
+    key.actionKey,
+    now(),
+    load.ok ? load.durations.approvalTtlMs : null,
+  );
   if (!status.ok) {
     // APRV-106. `token` is the verb an operator runs to ask "is there a key for
     // this?", and for a harness-executed grant the answer is a fact rather than
@@ -227,6 +234,19 @@ export function commandToken(argv: string[], streams: Streams, cwd: string): num
     }
     return emitRefusal(streams, json, status);
   }
+
+  // APRV-185. The grant is intact and the token is unspent, and the class it
+  // authorizes is one the policy now reserves to human hands — so `live: true`
+  // would be a true sentence about the log and a false one about the world.
+  // This verb exists to answer "can this be spent?", and the honest answer for
+  // a class raised to `human-only` after its grant is no. `core/token.ts`
+  // refuses the spend itself with the same code and the same words.
+  const reserved = humanOnlyClassRefusal(
+    load,
+    status.class,
+    `the token for action ${status.actionKey}, granted at seq ${status.grantSeq}, is unspent and unspendable`,
+  );
+  if (reserved !== null) return emitRefusal(streams, json, reserved);
 
   if (json) {
     emitJson(streams, {

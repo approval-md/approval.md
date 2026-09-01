@@ -2074,6 +2074,10 @@ test("the refusal-code union is frozen public API", () => {
     // APRV-20 pass two: the grant path used to substitute an empty class and
     // record the authorization anyway. Its own code now.
     "grant-classless-request",
+    // APRV-185: the policy's own answer that a class is reserved to human
+    // hands. An addition to the union, not a rename, and distinct from every
+    // rejection — nobody decided anything, so there is nothing to ask again.
+    "class-human-only",
     // APRV-18 added this one: SPEC.md §10.2 loop safety, refused at intake for
     // the non-manual paths only. An addition to the union, not a rename.
     "loop-escalated",

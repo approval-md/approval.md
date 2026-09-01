@@ -1,0 +1,7 @@
+{
+  "version": "0.1",
+  "defaults": { "autonomy": "manual" },
+  "classes": {
+    "account.credential": { "autonomy": "human-only", "live_rate": 0.5 }
+  }
+}

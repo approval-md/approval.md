@@ -1263,11 +1263,11 @@ Flags (claude-code, cursor):
   --dir/--policy/--log <p>   policy+log root; --dir sets BOTH, default primary
   -h, --help       this text
 
-Deny: hook-unclassified, hook-opaque, hook-unparseable, hook-rejected, hook-revoked,
-hook-expired, hook-withdrawn, hook-timeout (request stays OPEN), hook-gate-refused:<c>,
-hook-policy-unavailable, hook-log-unreachable, hook-io. EXIT 0 = verdict, never "ask".
+Deny: hook-unclassified, hook-class-human-only, hook-opaque, hook-unparseable,
+hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout,
+hook-gate-refused:<c>, hook-policy-unavailable, hook-log-unreachable, hook-io.
 
-${EXIT_CODES_POINTER} (harness verbs use only 0 and 2)
+${EXIT_CODES_POINTER} (harness verbs use 0 and 2 only; 0 is a verdict, never "ask")
 ${why("hook")}`;
 
 export const IMPORT_HELP = `approval import — turn existing permissions prose into a draft policy
