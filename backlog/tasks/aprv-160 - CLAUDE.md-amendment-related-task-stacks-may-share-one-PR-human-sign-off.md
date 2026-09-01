@@ -1,10 +1,10 @@
 ---
 id: APRV-160
 title: 'CLAUDE.md amendment: related task stacks may share one PR (human sign-off)'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-30 20:58'
-updated_date: '2026-08-30 21:01'
+updated_date: '2026-09-01 02:46'
 labels:
   - workflow
 dependencies: []
@@ -19,8 +19,8 @@ Approved in principle by Carter 2026-08-30 while diagnosing landing latency (~17
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Proposed CLAUDE.md diff text drafted and attached in task notes, scoped to the workflow section, following the repo prose style
-- [ ] #2 Carter has applied (or amended and applied) the CLAUDE.md change by hand, or explicitly declined it
+- [x] #1 Proposed CLAUDE.md diff text drafted and attached in task notes, scoped to the workflow section, following the repo prose style
+- [x] #2 Carter has applied (or amended and applied) the CLAUDE.md change by hand, or explicitly declined it
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -32,3 +32,9 @@ Proposed CLAUDE.md text, for Carter to apply by hand inside the Workflow section
 
 Rationale and measurements are in APRV-159's description (queue candidates 11.7/14.5/14/10 min on 2026-08-29/30). First application: the APRV-154..158 web-agent-demo stack, pre-approved by Carter as a one-off on 2026-08-30.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Landed through APRV-182 instead of by hand: the stack-rule wording was drafted in APRV-182's notes, applied to CLAUDE.md under policy.edit grant seq 4179 (human:carter tap, the sign-off this task's AC 2 wanted), and merged via PR #159.
+<!-- SECTION:FINAL_SUMMARY:END -->
