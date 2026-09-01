@@ -65,6 +65,7 @@ import {
 import { assembleBatch } from "../src/channels/batch.js";
 import { buildPendingQueue, type TagOptions } from "../src/channels/tagging.js";
 import {
+  actionRefOf,
   callbackData,
   digestCallbackData,
   digestKeyOf,
@@ -78,14 +79,20 @@ import {
   TELEGRAM_DEFAULT_RETENTION_MS,
   TELEGRAM_DIGEST_MAX_MEMBERS,
   TELEGRAM_GLOSS_SUFFIX,
+  TELEGRAM_ACK_FALLBACK,
   TELEGRAM_MAX_CALLBACK_BYTES,
   TELEGRAM_PROMPT_HEADING,
+  TELEGRAM_STALE_COPY_PREFIX,
+  TELEGRAM_STALE_UNKNOWN,
   type TelegramConfig,
   type TelegramPollResult,
 } from "../src/channels/telegram.js";
 import {
+  bannerLines,
+  describeActionFor,
   dispatchPending,
   newDispatchState,
+  DISPATCH_RETENTION_MS,
   type ListenSetup,
 } from "../src/cli/channel-telegram.js";
 import {
@@ -1008,15 +1015,20 @@ test("only structurally email-shaped payloads leave the JSON rendering", () => {
 
 test("callback_data is bounded, and the nonce — not the wire's key — is authoritative", () => {
   const short = callbackData("g", "abc123", "task-1:x");
-  assert.equal(short, "g:abc123:task-1:x");
+  assert.equal(short, `g:abc123:${actionRefOf("task-1:x")}`);
   assert.deepEqual(parseCallbackData(short), {
     decision: "grant",
     scope: "one",
     nonce: "abc123",
-    actionKey: "task-1:x",
+    actionRef: actionRefOf("task-1:x"),
   });
 
-  const long = callbackData("r", "abc123", "task-1:".padEnd(200, "x"));
+  // APRV-196: the reference is a fixed-width digest, so the cross-check the
+  // old plain-key form dropped for a long key is now always carried — and it
+  // is the same for two copies of one request delivered by two processes,
+  // which is what lets a pre-restart button resolve at all.
+  const longKey = "task-1:".padEnd(200, "x");
+  const long = callbackData("r", "abc123", longKey);
   assert.ok(
     Buffer.byteLength(long, "utf8") <= TELEGRAM_MAX_CALLBACK_BYTES,
     "callback_data must fit Telegram's 64-byte limit",
@@ -1025,8 +1037,23 @@ test("callback_data is bounded, and the nonce — not the wire's key — is auth
     decision: "reject",
     scope: "one",
     nonce: "abc123",
-    actionKey: null,
+    actionRef: actionRefOf(longKey),
   });
+  assert.equal(actionRefOf(longKey).length, 16);
+  assert.notEqual(actionRefOf(longKey), actionRefOf("task-1:x"));
+  assert.equal(
+    actionRefOf(longKey),
+    actionRefOf(longKey),
+    "the reference is a function of the action key alone",
+  );
+
+  // The cap still binds the whole string. A nonce long enough to break it is
+  // not one this class issues, and the guard drops the reference rather than
+  // the button: `callback_data` over 64 bytes is refused by `sendMessage`, so
+  // overflowing would cost delivery and not merely a lookup.
+  const overlong = "n".repeat(80);
+  assert.equal(callbackData("g", overlong, "task-1:x"), `g:${overlong}`);
+  assert.equal(parseCallbackData(callbackData("g", overlong, "task-1:x"))?.actionRef, null);
 
   // APRV-115: an "all" button names a delivery and never a set of keys, so the
   // set it decides cannot be chosen by whatever sent the bytes back.
@@ -1035,13 +1062,13 @@ test("callback_data is bounded, and the nonce — not the wire's key — is auth
     decision: "grant",
     scope: "all",
     nonce: "abc123",
-    actionKey: null,
+    actionRef: null,
   });
   assert.deepEqual(parseCallbackData("R:abc123"), {
     decision: "reject",
     scope: "all",
     nonce: "abc123",
-    actionKey: null,
+    actionRef: null,
   });
 
   assert.equal(parseCallbackData("x:abc"), null);
@@ -1180,11 +1207,14 @@ test("a callback whose nonce this listener never issued is ignored", async () =>
 test("a duplicate callback is refused and appends no second event", async () => {
   // APRV-113 changed which layer refuses the SECOND tap, deliberately. The
   // first tap's annotation forgets the delivery's nonce (that is what disarms a
-  // button the edit did not manage to remove), so a redelivered callback is an
-  // `unknown-callback` anomaly rather than a decision the gate then refuses as
-  // `already-decided`. Both refuse; neither appends. The property this test
-  // exists for — a second tap can never produce a second event — is unchanged,
-  // and the gate's own idempotency is still pinned by `tests/gate.test.ts`.
+  // button the edit did not manage to remove), so a redelivered callback never
+  // reaches the gate. APRV-196 renamed what that refusal is CALLED — the
+  // button now carries an action reference, so the channel can tell "a copy of
+  // a request I am not holding open" (`stale-copy`) from "bytes I cannot place
+  // at all" (`unknown-callback`) — and gave it a toast that says so. The
+  // property this test exists for — a second tap can never produce a second
+  // event — is unchanged, and the gate's own idempotency is still pinned by
+  // `tests/gate.test.ts`.
   const world = live(1);
   const key = world.keys[0] as string;
   const [request_] = queueOf(world, at(2));
@@ -1205,14 +1235,18 @@ test("a duplicate callback is refused and appends no second event", async () => 
   assert.deepEqual(second.outcomes, [], "a second tap must reach no decision at all");
   assert.deepEqual(
     second.ignored.map((entry) => entry.kind),
-    ["unknown-callback"],
+    ["stale-copy"],
   );
   assert.equal(
     recordsOf(world.unit.logPath).length,
     after_,
     "a second tap must never produce a second event",
   );
-  assert.match(mock.answerTexts().join("\n"), /This button is no longer live/u);
+  assert.equal(
+    mock.answerTexts().at(-1),
+    TELEGRAM_STALE_UNKNOWN,
+    "a second tap must still be acked, and with a sentence about the request",
+  );
   assertClean(world.unit);
 });
 
@@ -1801,7 +1835,7 @@ test("a digest expired by the daemon annotates its member, and the tap is refuse
   const poll = await channel.pollOnce();
   assert.deepEqual(
     poll.ignored.map((entry) => entry.kind),
-    ["unknown-callback"],
+    ["stale-copy"],
   );
   assert.equal(recordsOf(world.unit.logPath).length, before, "a stale tap appended something");
   assertClean(world.unit);
@@ -3545,7 +3579,7 @@ test("a callback for a swept delivery takes the stale-callback path (APRV-135 #1
   const key = request_.action_key.value;
 
   await channel.notify(request_);
-  const before = channel.anomalyCount("unknown-callback");
+  const before = channel.anomalyCount("stale-copy");
   const events = recordsOf(world.unit.logPath).length;
 
   clock.ms += TTL_MS;
@@ -3556,7 +3590,7 @@ test("a callback for a swept delivery takes the stale-callback path (APRV-135 #1
   // forgotten button is: counted, toasted, never carried to the gate.
   const outcome = await press(channel, key, "grant");
   assert.equal(outcome, undefined, "a swept delivery produced a decision");
-  assert.equal(channel.anomalyCount("unknown-callback"), before + 1);
+  assert.equal(channel.anomalyCount("stale-copy"), before + 1);
   assert.equal(recordsOf(world.unit.logPath).length, events, "the log grew on a swept callback");
 });
 
@@ -3651,4 +3685,296 @@ test("memory does not grow across a long run of decided prompts (APRV-135 #2)", 
     rounds,
     "the sweep cost the log a decision",
   );
+});
+
+// ---------------------------------------------------------------------------
+// Callback acks and duplicate suppression (APRV-196)
+//
+// The incident these pin: a listener died with five pending requests, the
+// restart re-sent all five with no warning, and only the newest copy's buttons
+// resolved — taps on the older copies were swallowed, so the approver kept
+// tapping a button that never answered. Three properties close it, and each has
+// a test here: every tap is acked, a tap on any copy decides the request, and a
+// re-delivery says what it is.
+// ---------------------------------------------------------------------------
+
+/** Every `answerCallbackQuery` text the mock has seen since `from`. */
+function answersSince(from: number): string[] {
+  return mock.answerTexts().slice(from);
+}
+
+test("every callback query is acked exactly once, on every path (APRV-196)", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const request_ = queueOf(world, at(2))[0] as ChannelRequest;
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(request_);
+  const live_ = mock.callbackDataFor(key, "grant");
+
+  /** Feed one callback, and report every ack it produced. */
+  const tap = async (data: string, chatId = CHAT): Promise<string[]> => {
+    const from = mock.answerTexts().length;
+    mock.queueUpdate(callbackUpdate({ data, chatId }));
+    await channel.pollOnce();
+    return answersSince(from);
+  };
+
+  // A stranger's chat, bytes that are not ours, and a nonce with no reference:
+  // three refusals, three toasts, no decision between them.
+  assert.equal((await tap(live_, OTHER_CHAT)).length, 1, "a foreign-chat tap went unanswered");
+  assert.equal((await tap("not-a-callback")).length, 1, "a malformed tap went unanswered");
+  assert.equal((await tap("g:nosuchnonce")).length, 1, "an unplaceable tap went unanswered");
+
+  // A reference for an action nothing here is holding open: acked, and with a
+  // sentence about the request rather than about the button.
+  const stale = await tap(`g:nosuchnonce:${actionRefOf("task-999:elsewhere")}`);
+  assert.deepEqual(stale, [TELEGRAM_STALE_UNKNOWN]);
+
+  // And the accepted decision, which is the one path that was never in doubt.
+  const accepted = await tap(live_);
+  assert.deepEqual(accepted, ["Approved — recorded in the log."]);
+
+  // The second tap on the same button — Telegram redelivers on its own — is
+  // acked too, and appends nothing.
+  const events = recordsOf(world.unit.logPath).length;
+  assert.deepEqual(await tap(live_), [TELEGRAM_STALE_UNKNOWN]);
+  assert.equal(recordsOf(world.unit.logPath).length, events, "a re-tap appended an event");
+  assertClean(world.unit);
+});
+
+test("a tap on a pre-restart copy decides the request the new listener holds (APRV-196)", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const request_ = queueOf(world, at(2))[0] as ChannelRequest;
+
+  // The listener that died, and the copy it left on the approver's phone.
+  const before = channelFor();
+  before.onDecision(handlerFor(world, at(2)));
+  await before.notify(request_);
+  const oldButton = mock.callbackDataFor(key, "grant");
+
+  // Its replacement: same log, same still-pending request, a new process with
+  // new nonces. This is the restart, in the only form a restart has.
+  const after = channelFor();
+  after.onDecision(handlerFor(world, at(3)));
+  await after.notify(request_);
+  const newButton = mock.callbackDataFor(key, "grant");
+
+  assert.notEqual(oldButton, newButton, "two copies must not share a nonce");
+  assert.equal(
+    oldButton.split(":")[2],
+    newButton.split(":")[2],
+    "two copies of one request must carry the same action reference",
+  );
+
+  // The human taps the copy they can see, which is the older one.
+  const from = mock.answerTexts().length;
+  mock.queueUpdate(callbackUpdate({ data: oldButton, chatId: CHAT }));
+  const poll = await after.pollOnce();
+
+  assert.deepEqual(poll.ignored, [], "the older copy's tap was refused");
+  const outcome = poll.outcomes.find((entry) => entry.action_key === key)?.outcome;
+  assert.equal(outcome?.ok, true, `the older copy did not decide: ${JSON.stringify(outcome)}`);
+  assert.equal(after.stats().staleCopyDecisions, 1);
+
+  // Acked, once, and told which copy answered.
+  const toast = answersSince(from);
+  assert.equal(toast.length, 1);
+  assert.ok(
+    (toast[0] as string).startsWith(TELEGRAM_STALE_COPY_PREFIX),
+    `the toast did not name the earlier copy: ${String(toast[0])}`,
+  );
+
+  // One event, not two: the gate decided it once, through the ordinary path.
+  assert.equal(
+    recordsOf(world.unit.logPath).filter((record) => record.event === "approval.granted").length,
+    1,
+  );
+  assertClean(world.unit);
+});
+
+test("a tap on a copy of a settled request is told what the log says (APRV-196)", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const request_ = queueOf(world, at(2))[0] as ChannelRequest;
+
+  // The probe the listener wires: it reads the VERIFIED log and nothing else.
+  const channel = channelFor({ describeAction: describeActionFor(world.unit.logPath) });
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(request_);
+  const button = mock.callbackDataFor(key, "grant");
+
+  const first = await press(channel, key, "grant");
+  assert.equal(first?.ok, true, JSON.stringify(first));
+
+  const from = mock.answerTexts().length;
+  mock.queueUpdate(callbackUpdate({ data: button, chatId: CHAT }));
+  const poll = await channel.pollOnce();
+  assert.deepEqual(poll.ignored.map((entry) => entry.kind), ["stale-copy"]);
+  assert.deepEqual(answersSince(from), [
+    "Already granted — the recorded answer stands, and nothing was recorded for this tap.",
+  ]);
+
+  // A reference the log has never carried is answered `null`, which is the
+  // channel's own "not open here" line — never an invented outcome.
+  assert.equal(describeActionFor(world.unit.logPath)(actionRefOf("task-999:nope")), null);
+  assertClean(world.unit);
+});
+
+test("an ack the Bot API refuses costs the decision nothing (APRV-196)", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const request_ = queueOf(world, at(2))[0] as ChannelRequest;
+
+  // Telegram drops a callback query after its own window, so a late tap's ack
+  // fails while everything around it works. The tap must still decide, and the
+  // poll loop must not be pushed into backoff by a failed courtesy.
+  const passthrough = globalThis.fetch as unknown as NonNullable<TelegramConfig["fetch"]>;
+  const channel = channelFor({
+    fetch: async (url, init) => {
+      if (url.endsWith("/answerCallbackQuery")) {
+        return { ok: false, status: 400, text: async () => "Bad Request: query is too old" };
+      }
+      return await passthrough(url, init);
+    },
+  });
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(request_);
+
+  const outcome = await press(channel, key, "grant");
+  assert.equal(outcome?.ok, true, `a failed toast cost the decision: ${JSON.stringify(outcome)}`);
+  assert.equal(
+    recordsOf(world.unit.logPath).filter((record) => record.event === "approval.granted").length,
+    1,
+  );
+  assert.ok(
+    complaints.some((entry) => entry.includes("could not answer a callback")),
+    "a failed ack was not reported to the operator",
+  );
+  assertClean(world.unit);
+});
+
+test("a startup batch is preceded by one banner naming how many are coming (APRV-196)", async () => {
+  const world = staged(3);
+  const channel = channelFor();
+  const setup = setupFor(world, channel);
+  const state = newDispatchState();
+  const keys = [0, 1, 2].map((index) => requestAt(world, index, at(1)));
+
+  const from = mock.sentTexts().length;
+  const first = await dispatchPending(setup, capture().streams, state, at(2));
+  assert.equal(first.banner?.pending, 3, JSON.stringify(first.banner));
+
+  const sent = mock.sentTexts().slice(from);
+  const banner = sent.findIndex((text) => text.includes("LISTENER STARTED"));
+  assert.equal(banner, 0, "the banner did not come first");
+  assert.equal(
+    sent.filter((text) => text.includes("LISTENER STARTED")).length,
+    1,
+    "more than one banner for one batch",
+  );
+  assert.match(sent[0] as string, /re-sending 3 pending requests/u);
+  for (const key of keys) {
+    assert.ok(!(sent[0] as string).includes(key), "the banner named an action key");
+  }
+
+  // A request appended later is a notification, not a flood: no second banner.
+  const laterFrom = mock.sentTexts().length;
+  const fourth = staged(1);
+  const key4 = requestAt(fourth, 0, at(3));
+  const later = await dispatchPending(
+    { ...setup, logPath: fourth.unit.logPath, tagOptions: fourth.tagOptions },
+    capture().streams,
+    state,
+    at(4),
+  );
+  assert.equal(later.banner, undefined, "a steady-state cycle sent a banner");
+  assert.ok(
+    mock
+      .sentTexts()
+      .slice(laterFrom)
+      .some((text) => text.includes(key4)),
+    "the later request was not delivered",
+  );
+
+  // The wording is honest about what a listener can know: it says STARTED,
+  // because nothing here can tell a restart from a first start.
+  assert.deepEqual(bannerLines(1)[0], "LISTENER STARTED — re-sending 1 pending request.");
+  assertClean(world.unit);
+});
+
+test("the listener's delivery bookkeeping is pruned, on settlement and on age (APRV-196)", async () => {
+  const world = staged(2);
+  const channel = channelFor();
+  const setup = setupFor(world, channel);
+  const state = newDispatchState();
+  const [first, second] = [0, 1].map((index) => requestAt(world, index, at(1)));
+  assert.ok(first !== undefined && second !== undefined);
+
+  const opened = await dispatchPending(setup, capture().streams, state, at(2));
+  assert.equal(opened.delivered.length, 2);
+  assert.equal(state.delivered.size, 2);
+  assert.equal(state.sentAtMs.size, 2);
+
+  // One is answered at another surface entirely. The next cycle annotates its
+  // message and then forgets it: the log will never call it pending again, so
+  // nothing can ask for the entry.
+  const granted = recordChannelDecision(
+    world.unit.logPath,
+    { action_key: first, decision: "grant", deliveryId: "cli" },
+    { actor: HUMAN, channel: "cli" },
+    { ...world.unit.options, clock: fixedClock(at(3)) },
+  );
+  assert.equal(granted.outcome.ok, true, JSON.stringify(granted.outcome));
+
+  const settled = await dispatchPending(setup, capture().streams, state, at(4));
+  assert.deepEqual(settled.pruned, [{ action_key: first, reason: "settled" }]);
+  assert.equal(state.delivered.has(first), false);
+  assert.equal(state.annotated.has(first), false);
+  assert.equal(state.sentAtMs.has(first), false);
+  assert.equal(state.delivered.has(second), true, "a pending request was pruned");
+
+  // The other simply lapses: no event says so, so nothing is annotated, and
+  // the entry would once have been held for the life of the process. Past the
+  // retention window, with the log no longer calling it pending, it goes.
+  assert.equal(DISPATCH_RETENTION_MS, 24 * 60 * 60 * 1000);
+  const aged = await dispatchPending(setup, capture().streams, state, at(1444));
+  assert.deepEqual(aged.pruned, [{ action_key: second, reason: "stale" }]);
+  assert.equal(state.delivered.size, 0);
+  assert.equal(state.sentAtMs.size, 0);
+  assert.deepEqual(aged.delivered, [], "a lapsed request was re-sent");
+  assertClean(world.unit);
+});
+
+test("a handler that throws still answers the tap, and the loop survives (APRV-196)", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const request_ = queueOf(world, at(2))[0] as ChannelRequest;
+  const channel = channelFor();
+
+  // The branch nobody writes on purpose: something inside the decision path
+  // throws. The tap must still be answered — a spinning button is what sent the
+  // approver back to tap again — and `pollOnce` must not propagate, because a
+  // throw there puts `listen` into backoff and costs the rest of the batch.
+  channel.onDecision(() => {
+    throw new Error("the handler fell over");
+  });
+  await channel.notify(request_);
+
+  const events = recordsOf(world.unit.logPath).length;
+  const from = mock.answerTexts().length;
+  mock.queueUpdate(
+    callbackUpdate({ data: mock.callbackDataFor(key, "grant"), chatId: CHAT }),
+  );
+  const poll = await channel.pollOnce();
+
+  assert.deepEqual(poll.outcomes, [], "a thrown handler produced an outcome");
+  assert.deepEqual(answersSince(from), [TELEGRAM_ACK_FALLBACK], "the tap went unanswered");
+  assert.ok(
+    complaints.some((entry) => entry.includes("failed while handling a callback")),
+    "a thrown handler was not reported to the operator",
+  );
+  assert.equal(recordsOf(world.unit.logPath).length, events, "a thrown handler appended");
+  assertClean(world.unit);
 });

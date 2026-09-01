@@ -81,6 +81,13 @@
  * a duplicate on the phone, never silence. That direction is the whole design
  * (SPEC.md §10.3: channels hold no state that is a source of truth).
  *
+ * APRV-196 made that re-send legible rather than rarer. The first batch a
+ * process sends is preceded by one banner naming how many are coming, the
+ * copies already in the chat keep working (`actionRefOf` in
+ * `channels/telegram.ts` resolves their buttons to the same request), and the
+ * bookkeeping above is pruned as requests settle and age out instead of growing
+ * for the life of a listener that `approval up` keeps running for weeks.
+ *
  * ### Send failures
  *
  * A key that fails to send stays undelivered, so the next cycle retries it.
@@ -120,6 +127,7 @@ import {
   type TagOptions,
 } from "../channels/tagging.js";
 import {
+  actionRefOf,
   decidedLine,
   groupForDigest,
   isTelegramTerminalState,
@@ -383,6 +391,10 @@ export function prepareListen(request: ListenRequest): ListenPreparation {
     // of its own, and a policy that failed to load declares no TTL, which makes
     // the sweep narrower rather than wider.
     approvalTtlMs: policyLoad.ok ? policyLoad.durations.approvalTtlMs : null,
+    // APRV-196. The channel answers a tap on a copy it is not holding open by
+    // asking what the LOG says, which is the only thing that knows. Wired here
+    // because the log path lives here and nothing under `channels/` reads one.
+    describeAction: describeActionFor(request.logPath),
   };
 
   return {
@@ -400,6 +412,56 @@ export function prepareListen(request: ListenRequest): ListenPreparation {
       },
       ...(request.gloss === undefined ? {} : { gloss: request.gloss }),
     },
+  };
+}
+
+/**
+ * What to tell a human who tapped a button for an action this listener is not
+ * holding open (APRV-196).
+ *
+ * The one place a stale tap gets a real answer instead of a shrug. It reads the
+ * VERIFIED log (SPEC.md §11.1(1): a sentence a human reads about what the log
+ * says is derived from a log that verified, or it is not derived at all) and
+ * answers from `requestState`, the same derivation the gate and the pending
+ * queue use. Nothing here decides anything, nothing is appended, and nothing is
+ * remembered between calls: an unreadable log answers `null`, which the channel
+ * renders as its "not open here" toast.
+ *
+ * The argument is an action REFERENCE and never a key. The string came off the
+ * network, so this hashes the keys the log actually carries and looks for a
+ * match; a caller cannot make it describe a request by naming one, and a ref
+ * matching nothing simply answers `null`.
+ *
+ * The walk is over `approval.requested` records, which is the set of things
+ * that could ever have had a button. Run only on a stale tap, which is rare by
+ * construction.
+ */
+export function describeActionFor(logPath: string): (actionRef: string) => string | null {
+  return (actionRef: string) => {
+    const read = readVerifiedRecords(logPath);
+    if (!read.ok) return null;
+    const now = new Date().toISOString();
+    for (const record of read.records) {
+      if (record.event !== "approval.requested") continue;
+      const key = record.action_key ?? payloadOf(record)["action_key"];
+      if (typeof key !== "string" || actionRefOf(key) !== actionRef) continue;
+      const derived = requestState(read.records, key, now, null);
+      switch (derived.state) {
+        case "granted":
+        case "rejected":
+        case "revoked":
+          return `Already ${derived.state} — the recorded answer stands, and nothing was recorded for this tap.`;
+        case "expired":
+          return "Expired — the approval window closed before an answer arrived; nothing was recorded.";
+        case "withdrawn":
+          return "Withdrawn — the requester took this back and is no longer waiting; nothing was recorded.";
+        case "requested":
+          return "Still pending — this copy's buttons are not live here. Tap the newest copy of this request in this chat.";
+        default:
+          return null;
+      }
+    }
+    return null;
   };
 }
 
@@ -486,6 +548,73 @@ function setUp(
 export const DISPATCH_LOUD_ATTEMPTS = 3;
 
 /**
+ * How long an unannotated delivery stays in the bookkeeping before it is
+ * dropped (APRV-196). Twenty-four hours, matching the channel's own
+ * `TELEGRAM_DEFAULT_RETENTION_MS`.
+ *
+ * It is a floor on forgetting and not a deadline for anything: a request that
+ * is still pending is never dropped however old it is, because the pending
+ * queue is checked first. What this bounds is the memory a long-lived listener
+ * holds for questions the log has finished with.
+ */
+export const DISPATCH_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The line that introduces the first batch a listener process sends (APRV-196).
+ *
+ * **Why a banner and not an edit of the earlier copies.** The incident was a
+ * restart re-sending five pending requests with no warning, on top of five
+ * copies whose buttons had quietly stopped working. Editing those earlier
+ * copies to say "superseded" would read better — and it is not a design that
+ * can be relied on, because it requires this process to know their message ids,
+ * which a restart by definition does not: SPEC.md §10.3 forbids channel state
+ * that is a source of truth, and a crash loses a cache whether or not one is
+ * allowed. A design that only works when the crash was gentle is a design that
+ * fails on the day it is needed. So the banner is unconditional, and the
+ * earlier copies are made harmless instead of tidy: their buttons resolve by
+ * action reference to the request this process has just re-delivered
+ * (`actionRefOf` in `channels/telegram.ts`), so a human who taps the copy they
+ * can see decides the request they meant.
+ *
+ * It says "started" rather than "restarted" because a listener cannot tell the
+ * two apart, having deliberately kept nothing that would let it, and a first
+ * start that claimed to be a restart would be this channel's own text lying
+ * about the system's history.
+ */
+export function bannerLines(pending: number): string[] {
+  const plural = pending === 1 ? "request" : "requests";
+  return [
+    `LISTENER STARTED — re-sending ${pending} pending ${plural}.`,
+    `The ${pending === 1 ? "message" : "messages"} below ${pending === 1 ? "is" : "are"} the live ${pending === 1 ? "copy" : "copies"}. If an earlier copy of the same request is further up this chat, its buttons still decide the same request; nothing is decided twice.`,
+    "Which requests are pending is read from the log on every cycle, never from this chat.",
+  ];
+}
+
+/**
+ * Note when a key was delivered, for the retention sweep (APRV-196).
+ *
+ * The cycle's own `now` rather than a clock read, for the reason every other
+ * instant in this file is a parameter: the tests drive dispatch at chosen
+ * instants, and a sweep judged against `Date.now()` would be untestable and
+ * would disagree with the TTL arithmetic beside it.
+ */
+function remember(state: DispatchState, actionKey: string, now: string): void {
+  const ms = Date.parse(now);
+  if (!Number.isNaN(ms)) state.sentAtMs.set(actionKey, ms);
+}
+
+/** Drop every trace of one action key from the bookkeeping (APRV-196). */
+function forget(state: DispatchState, actionKey: string): void {
+  state.delivered.delete(actionKey);
+  state.sentAtMs.delete(actionKey);
+  state.attempts.delete(actionKey);
+  state.annotated.delete(actionKey);
+  for (const token of state.warned) {
+    if (token.startsWith(`${actionKey}:`)) state.warned.delete(token);
+  }
+}
+
+/**
  * What one listener process remembers between cycles. **In memory only.**
  *
  * SPEC.md §10.3: channels hold no state that is a source of truth. Nothing here
@@ -495,8 +624,27 @@ export const DISPATCH_LOUD_ATTEMPTS = 3;
  * pending in the log and absent from the approver's phone.
  */
 export interface DispatchState {
-  /** action key -> the delivery id this process sent it under. Never pruned. */
+  /**
+   * action key -> the delivery id this process sent it under.
+   *
+   * Pruned (APRV-196): an entry goes when the request reaches a terminal state
+   * and its message has been annotated, and a straggler goes when it is older
+   * than {@link DISPATCH_RETENTION_MS} and the pending queue no longer carries
+   * it. Neither prune can cost a re-send, because `buildPendingQueue` only ever
+   * returns requests the verified log says are pending — the same reason losing
+   * the whole map to a restart is safe.
+   */
   readonly delivered: Map<string, DeliveryId>;
+  /** action key -> when this process sent it, ms since epoch (APRV-196). */
+  readonly sentAtMs: Map<string, number>;
+  /**
+   * Whether the re-delivery banner has been sent (APRV-196).
+   *
+   * A box rather than a field because {@link DispatchState} is `readonly`
+   * everywhere else, and for the same reason: a cycle may write what it did,
+   * and nothing may swap the state out from under one.
+   */
+  readonly banner: { sent: boolean };
   /** action key -> consecutive failed send attempts. Cleared on success. */
   readonly attempts: Map<string, number>;
   /** `<action key>:<code>` skips already reported, so cycles do not repeat them. */
@@ -522,6 +670,8 @@ export interface DispatchState {
 export function newDispatchState(): DispatchState {
   return {
     delivered: new Map(),
+    sentAtMs: new Map(),
+    banner: { sent: false },
     attempts: new Map(),
     warned: new Set(),
     annotated: new Set(),
@@ -554,6 +704,17 @@ export interface DispatchResult {
     batch_delivery_id: DeliveryId;
     action_keys: string[];
   }[];
+  /**
+   * The re-delivery banner, when this cycle sent one (APRV-196): the message
+   * that precedes a startup batch and says how many requests are coming.
+   */
+  banner?: { delivery_id: DeliveryId; pending: number };
+  /**
+   * Action keys dropped from the delivery bookkeeping this cycle (APRV-196),
+   * with why. Neither kind can cost a re-send: the pending queue is the log's
+   * answer, and a dropped key that is still pending is simply re-delivered.
+   */
+  pruned: { action_key: string; reason: "settled" | "stale" }[];
 }
 
 /** A delivery whose request the log now says is settled (APRV-106, APRV-113). */
@@ -725,7 +886,13 @@ export async function dispatchPending(
   state: DispatchState,
   now: string,
 ): Promise<DispatchResult> {
-  const result: DispatchResult = { delivered: [], failed: [], annotated: [], digests: [] };
+  const result: DispatchResult = {
+    delivered: [],
+    failed: [],
+    annotated: [],
+    digests: [],
+    pruned: [],
+  };
 
   const queue = buildPendingQueue(setup.logPath, setup.tagOptions, now);
   if (!queue.ok) {
@@ -759,6 +926,13 @@ export async function dispatchPending(
         delivery_id: settled.deliveryId,
         outcome: settled.outcome,
       });
+      // APRV-196. The question is over, the message says so, and nothing will
+      // ever consult this entry again: the pending queue is derived from the
+      // log and a settled request is not in it. Held until now rather than at
+      // the moment the log settled, so the annotation pass above still has the
+      // message id it needs.
+      forget(state, settled.actionKey);
+      result.pruned.push({ action_key: settled.actionKey, reason: "settled" });
       if (setup.json) {
         streams.out(
           `${JSON.stringify({
@@ -785,6 +959,23 @@ export async function dispatchPending(
     }
   }
 
+  // APRV-196, the other half of the prune: an entry whose message was never
+  // annotated (the edit failed, the request lapsed with nothing to say about
+  // it, the log settled it while this process was down) would otherwise sit in
+  // the map for the life of a listener that `approval up` now keeps running for
+  // weeks. Dropped once it is older than the retention window AND the log no
+  // longer calls it pending, which is the same pair of conditions the channel's
+  // own sweep uses: past that, a re-derivation cannot ask for it and a callback
+  // cannot be honoured against it.
+  const pendingNow = new Set(queue.requests.map((request) => request.action_key.value));
+  const nowMs = Date.parse(now);
+  for (const [actionKey, sentAtMs] of state.sentAtMs) {
+    if (pendingNow.has(actionKey)) continue;
+    if (Number.isNaN(nowMs) || nowMs - sentAtMs < DISPATCH_RETENTION_MS) continue;
+    forget(state, actionKey);
+    result.pruned.push({ action_key: actionKey, reason: "stale" });
+  }
+
   for (const skipped of queue.skipped) {
     const token = `${skipped.action_key}:${skipped.code}`;
     if (state.warned.has(token)) continue;
@@ -803,9 +994,33 @@ export async function dispatchPending(
     .filter((request) => !state.delivered.has(request.action_key.value))
     .map((request) => withGloss(setup, request));
 
+  // APRV-196. The STARTUP batch gets one line in front of it, and only that
+  // one: a later cycle delivers what has just been requested, which is a
+  // notification and not a re-delivery, and a banner over it would say
+  // something false. So the flag is consumed by the first cycle that completes
+  // a derivation whether or not it had anything to send — a listener that
+  // started against an empty queue has no re-delivery to announce, ever. See
+  // {@link bannerLines} for why this is a banner rather than an edit of the
+  // copies that came before.
+  const announcing = !state.banner.sent && undelivered.length > 0;
+  state.banner.sent = true;
+  if (announcing) {
+    try {
+      const deliveryId = await setup.channel.announce(bannerLines(undelivered.length));
+      result.banner = { delivery_id: deliveryId, pending: undelivered.length };
+    } catch (cause) {
+      // Cosmetic, and never a reason to withhold the requests it introduces.
+      streams.err(
+        `approval: telegram could not send the re-delivery banner: ${
+          cause instanceof Error ? cause.message : String(cause)
+        } — the requests below are unaffected\n`,
+      );
+    }
+  }
+
   for (const group of groupForDigest(undelivered)) {
     if (group.length < 2) {
-      await deliverUnits(setup, streams, state, result, group);
+      await deliverUnits(setup, streams, state, result, group, now);
       continue;
     }
 
@@ -822,7 +1037,7 @@ export async function dispatchPending(
           `approval: telegram cannot digest ${group.length} similar requests (${assembled.code}): ${assembled.message} — sending them one message each instead\n`,
         );
       }
-      await deliverUnits(setup, streams, state, result, group);
+      await deliverUnits(setup, streams, state, result, group, now);
       continue;
     }
 
@@ -831,6 +1046,7 @@ export async function dispatchPending(
       const delivered = await setup.channel.notifyBatch(assembled.batch);
       for (const member of delivered.members) {
         state.delivered.set(member.action_key, member.delivery_id);
+        remember(state, member.action_key, now);
         state.attempts.delete(member.action_key);
         result.delivered.push({ action_key: member.action_key, delivery_id: member.delivery_id });
       }
@@ -938,12 +1154,14 @@ async function deliverUnits(
   state: DispatchState,
   result: DispatchResult,
   requests: ChannelRequest[],
+  now: string,
 ): Promise<void> {
   for (const request of requests) {
     const actionKey = request.action_key.value;
     try {
       const deliveryId = await setup.channel.notify(request);
       state.delivered.set(actionKey, deliveryId);
+      remember(state, actionKey, now);
       state.attempts.delete(actionKey);
       result.delivered.push({ action_key: actionKey, delivery_id: deliveryId });
       report(setup, streams, null, [{ action_key: actionKey, delivery_id: deliveryId }]);
@@ -1092,10 +1310,12 @@ export function startListener(setup: ListenSetup, streams: Streams): RunningList
   channel.onDecision(handlerFor(setup, streams));
 
   // Delivery bookkeeping is in memory only — channels hold no state (SPEC.md
-  // §10.3). A restarted listener therefore re-sends everything still pending,
-  // and the buttons on the messages it sent before the restart stop resolving.
+  // §10.3). A restarted listener therefore re-sends everything still pending.
   // Duplicated messages are the acceptable failure; a decision that depends on
-  // a channel's memory surviving a crash is not.
+  // a channel's memory surviving a crash is not. Since APRV-196 the duplicates
+  // announce themselves (the banner this cycle sends) and the buttons on the
+  // pre-restart copies still decide the same request, so what a restart costs
+  // the approver is a longer transcript rather than a stuck one.
   const state = newDispatchState();
 
   let stopping = false;
