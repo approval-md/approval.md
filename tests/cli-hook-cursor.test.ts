@@ -79,6 +79,12 @@ const POLICY = [
   "    autonomy: manual",
   "  policy.edit:",
   "    autonomy: manual",
+  // The other two protected classes of the APRV-198 split, declared rather
+  // than left to the manual default so the fixture says what it means.
+  "  policy.core:",
+  "    autonomy: manual",
+  "  log.mutate:",
+  "    autonomy: manual",
   "```",
   "",
 ].join("\n");
@@ -199,7 +205,7 @@ test("a Cursor Write to an ordinary file passes through; a protected path does n
   assert.equal(verdict.permission, "deny");
   assert.match(verdict.reason, /^hook-timeout: /u);
   assert.notEqual(rawLog(dir), before);
-  assert.match(rawLog(dir), /"class":"policy\.edit"/u);
+  assert.match(rawLog(dir), /"class":"policy\.core"/u);
   assert.match(rawLog(dir), /"actor":"agent:cursor"/u);
   assertClean(dir);
 });
@@ -220,7 +226,7 @@ test("Delete accepts file_path, and a protected Delete is gated", () => {
   );
   assert.equal(verdictOf(protectedDelete).permission, "deny");
   assert.match(verdictOf(protectedDelete).reason, /^hook-timeout: /u);
-  assert.match(rawLog(dir), /"class":"policy\.edit"/u);
+  assert.match(rawLog(dir), /"class":"policy\.core"/u);
   assertClean(dir);
 });
 

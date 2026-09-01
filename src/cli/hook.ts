@@ -72,7 +72,7 @@ import { attestationRefusal, checkAttestation } from "../core/attest.js";
 import {
   classifyCommand,
   GATE_SELF_CLASS,
-  isProtectedPath,
+  protectedPathClass,
   type CommandClassification,
 } from "../core/command-class.js";
 import {
@@ -654,7 +654,7 @@ export function renderClassification(
  * its own flags is passed without this parser claiming them.
  *
  * It reads the policy for the same reason `hook claude-code` does (APRV-107):
- * `policy.protected_paths` widens what counts as `policy.edit`, and an explainer
+ * `policy.protected_paths` widens the protected surface, and an explainer
  * that answered from the built-ins alone would tell an agent a gated file is
  * ungated. `--dir` / `--policy` scope it exactly as they scope the hook. This
  * verb decides nothing and writes nothing, so an unreadable policy is not a
@@ -746,9 +746,11 @@ function truncate(text: string, limit: number): string {
 /**
  * The rule a protected-path file touch reports, on the SAME class.
  *
- * Three tiers, one class. A `policy.edit` inside an agent worktree is a branch
+ * Three tiers, and the class is whichever protected class the path selects
+ * (APRV-198: `policy.edit`, `policy.core` or `log.mutate`); the tier never
+ * changes it. A protected touch inside an agent worktree is a branch
  * PROPOSAL: the file it writes is a copy on a branch, and the merge that makes
- * it real is separately gated (`vcs.push.main`, `gh pr merge`). A `policy.edit`
+ * it real is separately gated (`vcs.push.main`, `gh pr merge`). The same touch
  * in the live checkout is the file itself. A protected name that resolves
  * OUTSIDE the gated checkout altogether (a scratchpad `APPROVAL.md`, a demo
  * fixture) is neither: the match is on the name, and the name is all it shares
@@ -756,8 +758,8 @@ function truncate(text: string, limit: number): string {
  * about all three, which is the "truthful label" half of this task.
  *
  * The distinction is deliberately NOT a class and NOT an autonomy: policy
- * semantics are untouched here, every tier resolves exactly as `policy.edit`
- * resolves today, and APRV-127 is where sampling may hang off the difference.
+ * semantics are untouched here, every tier resolves exactly as the path's own
+ * protected class resolves, and APRV-127 is where sampling may hang off it.
  * What changes is what the human reads.
  */
 const PROTECTED_PATH_RULE = "protected-path";
@@ -914,7 +916,13 @@ function fileToolGate(
     readString(toolInput, "notebook_path") ??
     readString(toolInput, "path");
   if (declared === null) return null;
-  if (!isProtectedPath(declared, protectedPaths)) return null;
+  // The SAME split the shell classifier applies (APRV-198): a file tool aimed
+  // at APPROVAL.md or the approval home is `policy.core`, one aimed at
+  // `.approval/log/` is `log.mutate`, and only the prose-and-configuration
+  // surface stays `policy.edit`. Editing through the Edit tool must not be a
+  // cheaper way to touch the gate than editing through a shell redirect.
+  const surface = protectedPathClass(declared, protectedPaths);
+  if (surface === null) return null;
 
   const file = absolute(declared, cwd);
   const tier = tierOf(file, cwd);
@@ -941,7 +949,7 @@ function fileToolGate(
   }
 
   return {
-    cls: "policy.edit",
+    cls: surface,
     rule,
     file,
     worktree: tier.worktree,
@@ -1784,7 +1792,7 @@ function runHarnessHook(
 
   // The policy is read BEFORE the command is classified (APRV-107): the
   // protected-path set is built-ins plus `policy.protected_paths`, so what
-  // counts as `policy.edit` is a policy question and the classifier cannot be
+  // counts as a protected path is a policy question and the classifier cannot be
   // asked it without the answer in hand.
   //
   // An unloadable policy resolves everything to manual, and a manual request

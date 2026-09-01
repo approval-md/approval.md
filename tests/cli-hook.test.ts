@@ -109,6 +109,13 @@ const POLICY = [
   "    autonomy: manual",
   "  policy.edit:",
   "    autonomy: manual",
+  // APRV-198 split the protected surface three ways; a fixture policy that
+  // declared only `policy.edit` would leave the other two on the manual
+  // default, which is the same answer by a less legible route.
+  "  policy.core:",
+  "    autonomy: manual",
+  "  log.mutate:",
+  "    autonomy: manual",
   "```",
   "",
 ].join("\n");
@@ -330,9 +337,9 @@ test("an ordinary file edit passes through; a policy file does not", () => {
   const verdict = verdictOf(protectedEdit);
   assert.equal(verdict.permission, "deny");
   assert.match(verdict.reason, /^hook-timeout: /u);
-  assert.notEqual(rawLog(dir), before, "the policy.edit request must reach the log");
+  assert.notEqual(rawLog(dir), before, "the policy.core request must reach the log");
   const log = rawLog(dir);
-  assert.match(log, /"class":"policy\.edit"/u);
+  assert.match(log, /"class":"policy\.core"/u);
   assertClean(dir);
 });
 
@@ -1591,6 +1598,79 @@ test("docs/claude-code-hook.md still lists every rule and every deny code", () =
 // ===========================================================================
 
 /** A case directory whose attested policy widens the protected set. */
+/** A case directory whose attested policy reserves credentials to human hands. */
+function readyWithHumanOnlyCredentials(): string {
+  counter += 1;
+  const dir = join(scratch, `case-${counter}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    POLICY.replace("classes:", ["classes:", "  account.credential:", "    autonomy: human-only"].join("\n")),
+    "utf8",
+  );
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+  return dir;
+}
+
+test("a credential deny names the class and never the value (APRV-194)", () => {
+  // The class the APRV-185 human-only level was built for, now that APRV-194
+  // gives the classifier rules that emit it. Two properties in one test: the
+  // refusal is machine-readable and names `account.credential`, and the SECRET
+  // ITSELF never appears — not in the verdict, not in the log. The hook's child
+  // process is given a real value for the variable the command probes, so a
+  // classifier that read its environment (this one cannot: it is pure over
+  // command text) would leak it here.
+  const dir = readyWithHumanOnlyCredentials();
+  const secret = "tg-token-value-that-must-never-be-logged";
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("printenv APPROVAL_TG_TOKEN"),
+    { APPROVAL_TG_TOKEN: secret },
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-class-human-only: /u);
+  assert.match(verdict.reason, /account\.credential/u);
+  assert.doesNotMatch(verdict.reason, new RegExp(secret, "u"));
+  assert.doesNotMatch(run.stdout, new RegExp(secret, "u"));
+  assert.doesNotMatch(run.stderr, new RegExp(secret, "u"));
+  // Nothing was appended at all: a human-only class opens no request.
+  assert.doesNotMatch(rawLog(dir), new RegExp(secret, "u"));
+
+  // The other surface a human reads. `hook classify` explains the refusal, and
+  // the explanation is the class plus the command as written — which carries
+  // the variable's NAME, the actionable half, and cannot carry its value.
+  const explained = runCli(
+    ["hook", "classify", "--dir", dir, "--", "printenv APPROVAL_TG_TOKEN"],
+    dir,
+    "",
+    { APPROVAL_TG_TOKEN: secret },
+  );
+  assert.equal(explained.code, 0, explained.stderr);
+  assert.match(explained.stdout, /account\.credential/u);
+  assert.match(explained.stdout, /APPROVAL_TG_TOKEN/u);
+  assert.doesNotMatch(explained.stdout, new RegExp(secret, "u"));
+  assertClean(dir);
+});
+
+test("reading the vault is gated, not autonomous (APRV-194 AC2)", () => {
+  // Before this task `cat .approval/vault.enc` classified read.shell, which the
+  // reference policy makes autonomous: an agent could read vault ciphertext
+  // with no prompt. It now reaches the gate as account.credential.
+  const dir = readyWithHumanOnlyCredentials();
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("cat .approval/vault.enc"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /account\.credential/u);
+  assertClean(dir);
+});
+
 function readyWithProtectedPaths(): string {
   counter += 1;
   const dir = join(scratch, `case-${counter}`);
@@ -1619,7 +1699,7 @@ test("an edit to a policy-listed file is gated; the same file is ungated without
   const verdict = verdictOf(gated);
   assert.equal(verdict.permission, "deny");
   assert.match(verdict.reason, /^hook-timeout: /u);
-  assert.notEqual(rawLog(listed), before, "the policy.edit request must reach the log");
+  assert.notEqual(rawLog(listed), before, "the policy.core request must reach the log");
   assert.match(rawLog(listed), /"class":"policy\.edit"/u);
   assertClean(listed);
 
@@ -1784,7 +1864,7 @@ test("an Edit prompt shows the before/after diff, and the grant binds to those b
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "deny");
   assert.match(verdict.reason, /^hook-timeout: /u);
-  assert.match(rawLog(dir), /"class":"policy\.edit"/u);
+  assert.match(rawLog(dir), /"class":"policy\.core"/u);
 
   const prompt = promptFor(dir);
 
@@ -1902,7 +1982,7 @@ test("an identical retried edit adopts the same question; a changed one asks aga
 
   // The late tap authorizes the identical retry, once.
   const granted = runCli(
-    ["grant", "hook:sess-1:tu-edit-1:policy.edit", "--as", "human:carter"],
+    ["grant", "hook:sess-1:tu-edit-1:policy.core", "--as", "human:carter"],
     dir,
   );
   assert.equal(granted.code, 0, granted.stderr);
@@ -1913,7 +1993,7 @@ test("an identical retried edit adopts the same question; a changed one asks aga
   );
   const carried = verdictOf(retry);
   assert.equal(carried.permission, "allow", carried.reason);
-  assert.match(carried.reason, /carried: hook:sess-1:tu-edit-1:policy\.edit/u);
+  assert.match(carried.reason, /carried: hook:sess-1:tu-edit-1:policy\.core/u);
 
   // A DIFFERENT edit to the same file is a different question, and waits.
   const changed = runCli(
@@ -1924,6 +2004,6 @@ test("an identical retried edit adopts the same question; a changed one asks aga
   assert.equal(verdictOf(changed).permission, "deny");
   log = rawLog(dir);
   assert.equal(log.match(/"event":"approval\.requested"/gu)?.length, 2);
-  assert.match(log, /hook:sess-1:tu-edit-4:policy\.edit/u);
+  assert.match(log, /hook:sess-1:tu-edit-4:policy\.core/u);
   assertClean(dir);
 });

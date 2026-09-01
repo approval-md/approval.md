@@ -1461,7 +1461,7 @@ function registersApprovalHook(hooks: unknown, event: string): boolean {
  * silent control, which is worse than an absent one.
  *
  * Doctor READS this file and never writes it. `.claude/settings.json` is
- * `policy.edit` in this taxonomy — a file that configures the gate is part of
+ * `policy.core` in this taxonomy — a file that configures the gate is part of
  * the gate — so the repair is a line for a human to commit, printed by
  * `approval instructions hook`.
  */
@@ -1505,7 +1505,7 @@ function checkHarnessOutcomes(dir: string): DoctorCheck {
       check,
       status: "fail",
       detail: `${path} registers \`approval hook\` for PreToolUse and not for PostToolUse, so no tool call ever reports an outcome: every harness execution.started stays delegated, and the loop escalation of SPEC.md §10.2 cannot accrue on this path`,
-      fix: "approval hook claude-code --help — prints the PostToolUse entry to add, which a human commits (.claude/settings.json is policy.edit)",
+      fix: "approval hook claude-code --help — prints the PostToolUse entry to add, which a human commits (.claude/settings.json is policy.core)",
     };
   }
   return {

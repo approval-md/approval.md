@@ -20,9 +20,9 @@ repository that is Telegram.
 ## Installing it
 
 The hook lives in `.cursor/hooks.json`. **A human commits this file.** It is
-`policy.edit`: a file that configures the gate is part of the gate. The
+`policy.core`: a file that configures the gate is part of the gate. The
 classifier treats `.cursor/hooks.json`, `.cursor/hooks/`, and `.cursor/agents/`
-as `policy.edit` for the same reason.
+as `policy.core` for the same reason.
 
 ```json
 {
@@ -125,20 +125,27 @@ an addition).
 | `sed` | sed | (any) | read.shell, files.write.workspace |
 | `web-fetch` | curl, wget, http, httpie | (any) | read.web for a GET-shaped fetch; network.call for a body, an upload, a non-GET method, or anything ambiguous |
 | `network` | ssh, scp, sftp, rsync, nc, telnet, ftp | (any) | network.call |
+| `keychain` | security, secret-tool, keyring, pass | (any) | account.credential |
+| `printenv` | printenv | (any) | account.credential bare, or with a variable whose NAME is credential-bearing; read.shell otherwise |
 | `read-shell` | basename, cat, cd, cksum, cut, diff, dirname, du, echo, false, file, find, grep, head, jq, ls, md5sum, printf, pwd, readlink, realpath, rg, shasum, sha256sum, sort, stat, tail, test, tr, tree, true, type, uniq, wc, which | (any) | read.shell |
 
 † These rewrites are LOCAL, and the hook refines them against the checkout it
 runs in: see [Rewriting unpublished history](#rewriting-unpublished-history).
 `git push --force` is not marked, and never refines.
 
-Four overrides sit on top of the table:
+Five overrides sit on top of the table:
 
-- **`redirect-protected` / `protected-path` → `policy.edit`.** Any effectful
-  segment naming a protected path is `policy.edit`, redirect targets included.
-  The protected set is the built-ins plus `policy.protected_paths`. The
-  built-ins are `APPROVAL.md`, `APPROVALS.md`, `CLAUDE.md`, `AGENTS.md`,
-  `.npmrc`, anything under `.approval/`, `.claude/settings*`, `.cursor/hooks.json`, `.cursor/hooks/`,
-  `.cursor/agents/`, and `.github/workflows/`; they hold whatever the policy says, so a policy can
+- **`redirect-protected` / `protected-path` → `policy.edit`, `policy.core` or
+  `log.mutate`.** Any effectful segment naming a protected path takes that
+  path's class, redirect targets included, and every positional is scanned, so
+  `cp` is direction-blind. The protected set is the built-ins plus
+  `policy.protected_paths`, split three ways by consequence since APRV-198:
+  `log.mutate` for anything under `.approval/log/`; `policy.core` for
+  `APPROVAL.md`, `APPROVALS.md`, the rest of `.approval/`, `.claude/settings*`,
+  `.cursor/hooks.json`, `.cursor/hooks/` and `.cursor/agents/`; `policy.edit`
+  for `CLAUDE.md`, `AGENTS.md`, `.npmrc`, `.github/workflows/` and every
+  `policy.protected_paths` entry. The check order is the precedence, strictest
+  first. The built-ins hold whatever the policy says, so a policy can
   widen the protected surface and never narrow it. `policy.protected_paths`
   (SPEC.md §5.2, APRV-107) lists repo-relative paths: an exact file (`SPEC.md`,
   matched against a candidate's trailing segments, so a bare filename matches
@@ -146,6 +153,15 @@ Four overrides sit on top of the table:
   (`design/`, matched wherever those segments appear). No globs, no negation.
   `approval hook classify --dir <checkout>` answers under that checkout's
   policy, which is how to ask what a path classifies as before touching it.
+- **`credential-path` / `credential-env` / `env-dump` → `account.credential`.**
+  Credential material, whatever binary names it (APRV-194): `.approval/vault*`,
+  `.approval/keys/` and `.approval/env`, a word expanding `$APPROVAL_*`,
+  `$TELEGRAM_*` or `$VAULT_*` (minus the runtime's own non-secret names), and a
+  bare `env`. A WRITE to those files is `policy.core`; a READ of them is
+  `account.credential`, and `cp` is direction-blind onto the credential class.
+  `sudo cat .approval/env` stays opaque: the credential check sits below the
+  opaque one, so a refusal is never softened into a request. No rule can print
+  a value — the classifier reads command text and never an environment.
 - **`redirect-write` → `files.write.workspace`.** A read command with a `>` or
   `>>` writes a file, and the class says so.
 - **`gate.self`.** The `approval` CLI (and `node …/dist/src/cli/main.js`) is the
@@ -258,7 +274,7 @@ Showing a real line break as a line break raises the question of what a
 render the same way. The block says `the hash binds the RAW BYTES, not this
 view`, and a long command renders whole, over as many messages as it takes.
 
-`rule` is the tier of a protected-path touch, on the same class:
+`rule` is the tier of a protected-path touch, on the class the path itself selects:
 
 - `protected-path` — the target is the LIVE checkout's file;
 - `protected-path-proposal` — the target resolves inside
@@ -272,7 +288,7 @@ The tier is resolved from the hook's own process view (`git rev-parse
 --git-common-dir`, then the real paths), never from the `cwd` the harness sends,
 and it fails closed: anything not provably inside an agent worktree and not
 provably outside the checkout is live-tier. It changes no policy semantics —
-every tier resolves exactly as `policy.edit` resolves — only what the prompt
+every tier resolves exactly as the path's own protected class resolves — only what the prompt
 says.
 
 ## Deny reasons

@@ -53,12 +53,12 @@ export interface ClassifiedSegment {
    * The protected path that selected the class, present only when one did
    * (APRV-143).
    *
-   * `policy.edit` is the one class a segment can take because of a *value* in
-   * it rather than because of its binary, and until this field the value was
-   * discarded the moment the rule fired: an approver was told the class and
-   * left to guess which of six arguments earned it. It is the word the
-   * classifier matched, verbatim, so a channel can name it without a second
-   * search of its own.
+   * The protected classes (`policy.edit`, `policy.core`, `log.mutate`) are the
+   * classes a segment can take because of a *value* in it rather than because
+   * of its binary, and until this field the value was discarded the moment the
+   * rule fired: an approver was told the class and left to guess which of six
+   * arguments earned it. It is the word the classifier matched, verbatim, so a
+   * channel can name it without a second search of its own.
    */
   path?: string;
 }
@@ -84,21 +84,42 @@ export type CommandClassification =
 export const GATE_SELF_CLASS = "gate.self";
 
 // ===========================================================================
-// Protected paths (policy.edit)
+// Protected paths (policy.edit, policy.core, log.mutate)
 // ===========================================================================
 
 /**
- * Files whose edit is `policy.edit` wherever they sit: the policy itself, the
- * agent instructions that carry the same authority in prose, and the release
- * configuration.
+ * The three classes a protected path can select (APRV-198).
+ *
+ * One class used to cover the whole protected surface, so a policy could not
+ * say "an agent may edit the prose that describes the gate, under sampling,
+ * and may never touch the gate itself". These are that sentence, in the order
+ * of decreasing consequence:
+ *
+ * - `log.mutate` — anything aimed at `.approval/log/`. The log is the truth;
+ *   a write to it is not an edit of the rules, it is an edit of the record of
+ *   what happened.
+ * - `policy.core` — the policy file itself and the rest of the gate's own
+ *   directory (env, payload store, vault, keys, `QUEUE.md`), plus the harness
+ *   files that install the hook. An agent that can write these can write
+ *   itself out of the gate without the gate ever seeing it.
+ * - `policy.edit` — the prose and configuration ABOUT the gate: the agent
+ *   instructions, CI and release configuration, and whatever paths the policy
+ *   itself protects. Reviewable after the fact, and the only one of the three
+ *   a policy can sensibly sample.
  */
-const PROTECTED_FILENAMES: readonly string[] = [
-  "APPROVAL.md",
-  "APPROVALS.md",
-  "CLAUDE.md",
-  "AGENTS.md",
-  ".npmrc",
-];
+export type ProtectedPathClass = "log.mutate" | "policy.core" | "policy.edit";
+
+/**
+ * Files whose edit is `policy.core` wherever they sit: the policy itself,
+ * under either spelling.
+ */
+const CORE_FILENAMES: readonly string[] = ["APPROVAL.md", "APPROVALS.md"];
+
+/**
+ * Files whose edit is `policy.edit` wherever they sit: the agent instructions
+ * that carry the policy's authority in prose, and the release configuration.
+ */
+const PROTECTED_FILENAMES: readonly string[] = ["CLAUDE.md", "AGENTS.md", ".npmrc"];
 
 /** Split a path into segments, dropping `./` noise. Never touches the disk. */
 function pathSegments(candidate: string): string[] {
@@ -158,7 +179,7 @@ function matchesEntry(segments: readonly string[], entry: ProtectedEntry): boole
 }
 
 /**
- * Does this path name something only a human may write? (`policy.edit`.)
+ * Which protected class does this path name, if any? (APRV-198.)
  *
  * Deliberately name-based rather than location-based: the hook runs in whatever
  * directory the harness is in, and a classifier that resolved paths against a
@@ -166,42 +187,251 @@ function matchesEntry(segments: readonly string[], entry: ProtectedEntry): boole
  * false positive here costs one approval prompt; a false negative costs the
  * property the whole file exists to defend.
  *
+ * **The check order IS the precedence.** A path is answered by the strictest
+ * surface it names, `log.mutate` first, then `policy.core`, then
+ * `policy.edit`: `.approval/log/events.jsonl` is a log write and not merely an
+ * approval-home write, and a `policy.protected_paths` entry that happens to
+ * name a built-in surface cannot demote it, because the built-ins are matched
+ * before the policy's own list is read.
+ *
  * `extra` carries `policy.protected_paths` (APRV-107). It is strictly
  * ADDITIVE: the built-in set above is protected whatever a policy says, so a
- * policy can widen the protected surface and can never narrow it. Still pure —
- * the caller loads the policy, this function only matches segments.
+ * policy can widen the protected surface and can never narrow it, and every
+ * path it adds lands on `policy.edit` — the reviewable class — because a
+ * policy widening its own surface is naming prose and configuration, not
+ * minting authority over the gate's organs. Still pure: the caller loads the
+ * policy, this function only matches segments.
  */
-export function isProtectedPath(candidate: string, extra: readonly string[] = []): boolean {
-  if (candidate.length === 0) return false;
+export function protectedPathClass(
+  candidate: string,
+  extra: readonly string[] = [],
+): ProtectedPathClass | null {
+  if (candidate.length === 0) return null;
   const segments = pathSegments(candidate);
-  const last = segments[segments.length - 1];
-  if (last !== undefined && PROTECTED_FILENAMES.includes(last)) return true;
 
+  // 1. The log directory, before anything else that would call it a policy file.
+  for (let index = 0; index < segments.length; index += 1) {
+    if (segments[index] === ".approval" && segments[index + 1] === "log") return "log.mutate";
+  }
+
+  // 2. The gate's own organs.
+  const last = segments[segments.length - 1];
+  if (last !== undefined && CORE_FILENAMES.includes(last)) return "policy.core";
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index];
-    // The whole approval home: log, payload store, vault, environment map.
-    if (segment === ".approval") return true;
+    // The rest of the approval home: payload store, vault, keys, environment
+    // map, queue. The bare `.approval` directory itself lands here too.
+    if (segment === ".approval") return "policy.core";
     // The harness's own settings, which is where a hook is installed or removed.
     if (segment === ".claude") {
       const next = segments[index + 1];
-      if (next !== undefined && next.startsWith("settings")) return true;
+      if (next !== undefined && next.startsWith("settings")) return "policy.core";
     }
     // Cursor's equivalent surface: the hook install file, hook scripts, and
     // custom-agent prompts. An agent that could write those could write itself
-    // out of the gate (APRV-133).
+    // out of the gate (APRV-133), which is the `policy.core` property and not
+    // the prose one.
     if (segment === ".cursor") {
       const next = segments[index + 1];
-      if (next === "hooks.json" || next === "hooks" || next === "agents") return true;
+      if (next === "hooks.json" || next === "hooks" || next === "agents") return "policy.core";
     }
+  }
+
+  // 3. The prose and configuration about the gate.
+  if (last !== undefined && PROTECTED_FILENAMES.includes(last)) return "policy.edit";
+  for (let index = 0; index < segments.length; index += 1) {
     // CI configuration.
-    if (segment === ".github" && segments[index + 1] === "workflows") return true;
+    if (segments[index] === ".github" && segments[index + 1] === "workflows") return "policy.edit";
   }
 
   for (const raw of extra) {
     const entry = parseProtectedEntry(raw);
-    if (entry !== null && matchesEntry(segments, entry)) return true;
+    if (entry !== null && matchesEntry(segments, entry)) return "policy.edit";
+  }
+  return null;
+}
+
+/**
+ * Does this path name something only a human may write?
+ *
+ * The boolean face of {@link protectedPathClass}, kept because two callers
+ * (`core/wysiwys.ts`'s protected-path view and the hook's file-tool gate) ask
+ * whether a path is protected at all before they ask which surface it is.
+ */
+export function isProtectedPath(candidate: string, extra: readonly string[] = []): boolean {
+  return protectedPathClass(candidate, extra) !== null;
+}
+
+// ===========================================================================
+// Credential material (account.credential, APRV-194)
+// ===========================================================================
+
+/**
+ * The class a credential touch takes.
+ *
+ * SPEC.md §7 has declared `account.credential` since v0.1 and no rule emitted
+ * it, so a policy line on the class was inert: `security find-generic-password`
+ * fell to `unclassified` (a deny, but undiagnostic) and `cat .approval/vault.enc`
+ * fell to `read.shell`, which this repository's own policy makes AUTONOMOUS.
+ * The vault is sealed, so that was not an exploit; it was the Never list
+ * believing something the classifier did not enforce.
+ */
+const CREDENTIAL_CLASS = "account.credential";
+
+/**
+ * Files under the approval home that hold credential material.
+ *
+ * Named by their position under `.approval/`, so this is the same pure segment
+ * matching every other rule in this file uses: `vault*` (the sealed store and
+ * anything beside it), `keys/` (the subtree), and `env` (plus `env.local` and
+ * kin), which is the environment map holding the Telegram token, the vault
+ * passphrase and the sampling secret.
+ */
+function isCredentialPath(candidate: string): boolean {
+  if (candidate.length === 0) return false;
+  const segments = pathSegments(candidate);
+  for (let index = 0; index < segments.length; index += 1) {
+    if (segments[index] !== ".approval") continue;
+    const next = segments[index + 1];
+    if (next === undefined) return false;
+    if (next.startsWith("vault")) return true;
+    if (next === "keys") return true;
+    if (next === "env" || next.startsWith("env.")) return true;
   }
   return false;
+}
+
+/**
+ * Binaries whose effect on a named path is a WRITE, and nothing else.
+ *
+ * The precedence between this task and APRV-198, in one list. A write to
+ * `.approval/env` is `policy.core` — it is an edit of the gate's own directory,
+ * and the protected-path override already says so — while a READ of the same
+ * file is `account.credential`, because what leaves the machine is the secret.
+ * These binaries are the write half: naming them here makes the credential rule
+ * decline, and the segment falls through to the `policy.core` override below.
+ *
+ * `cp` is deliberately absent. It reads its source and writes its destination,
+ * the classifier cannot tell which argument is which (that is the
+ * direction-blindness APRV-198 preserves), and of the two readings the
+ * exfiltrating one is the one worth naming: a `cp` touching credential material
+ * is `account.credential` in either direction. Both classes are gated, so the
+ * choice is about what the approver is told, not about whether they are asked.
+ */
+const CREDENTIAL_WRITE_BINS: readonly string[] = [
+  "rm",
+  "mv",
+  "tee",
+  "truncate",
+  "chmod",
+  "chown",
+  "ln",
+  "touch",
+  "mkdir",
+  "rmdir",
+  "git",
+  "dd",
+  "install",
+];
+
+/**
+ * Environment variables whose NAME says they carry a secret.
+ *
+ * Prefix-matched, because the classifier reads command text and never an
+ * environment: it cannot know which `APPROVAL_*` holds a token, so it treats
+ * the family alike and lets the allowlist below carve out the runtime's own
+ * non-secret names. Erring wide costs one approval prompt.
+ */
+const SECRET_ENV_PREFIXES: readonly string[] = ["APPROVAL_", "TELEGRAM_", "VAULT_"];
+
+/**
+ * The runtime's own variables under those prefixes that hold no secret: an
+ * identity, a rendering switch, a path. Listed rather than pattern-matched so
+ * that adding one is a deliberate act with a reviewer.
+ */
+const NON_SECRET_ENV_NAMES: readonly string[] = [
+  "APPROVAL_HUMAN",
+  "APPROVAL_AGENT",
+  "APPROVAL_ASCII",
+  "APPROVAL_MD",
+  "APPROVAL_HOME",
+  "APPROVAL_DIR",
+];
+
+/** Does this bare variable name name credential material? */
+function isSecretEnvName(name: string): boolean {
+  if (NON_SECRET_ENV_NAMES.includes(name)) return false;
+  return SECRET_ENV_PREFIXES.some((prefix) => name.startsWith(prefix) && name.length > prefix.length);
+}
+
+/** `$NAME` and `${NAME}` anywhere inside a word, including inside quotes. */
+const ENV_REFERENCE = /\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/gu;
+
+/** The first secret-named variable this word expands, or `null`. */
+function secretEnvReference(word: string): string | null {
+  ENV_REFERENCE.lastIndex = 0;
+  let match = ENV_REFERENCE.exec(word);
+  while (match !== null) {
+    const name = match[1];
+    if (name !== undefined && isSecretEnvName(name)) return name;
+    match = ENV_REFERENCE.exec(word);
+  }
+  return null;
+}
+
+/** What a credential touch resolves to, in the shape `classifySegment` returns. */
+interface CredentialOutcome {
+  class: string;
+  rule: string;
+  path?: string;
+}
+
+/**
+ * Is this segment a credential touch? (`null` when it is not.)
+ *
+ * Two shapes, and neither reads a value. A command naming a credential FILE
+ * that it is not merely writing is a read of the material; a command whose text
+ * expands a secret-named variable carries the secret into whatever it does with
+ * it, which is why the rule fires on `curl -H "…: $APPROVAL_TG_TOKEN"` as well
+ * as on `echo $APPROVAL_TG_TOKEN`. Because the classifier is pure over command
+ * text it can only ever report the variable's NAME: there is no environment
+ * here to read a value from, which is how SPEC.md §11.1's "raw secrets never
+ * appear in the log" invariant survives a refusal message that names what it
+ * refused.
+ */
+function credentialTouch(
+  basename: string,
+  args: readonly string[],
+  positionals: readonly string[],
+): CredentialOutcome | null {
+  const inPlaceSed =
+    basename === "sed" &&
+    (hasFlag(args, ["--in-place"]) ||
+      args.some((arg) => arg.startsWith("-i") && !arg.startsWith("--")));
+  const writesOnly = CREDENTIAL_WRITE_BINS.includes(basename) || inPlaceSed;
+  if (!writesOnly) {
+    const named = positionals.find((arg) => isCredentialPath(arg));
+    if (named !== undefined) {
+      return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
+    }
+  }
+
+  for (const word of args) {
+    if (secretEnvReference(word) !== null) {
+      return { class: CREDENTIAL_CLASS, rule: "credential-env" };
+    }
+  }
+  return null;
+}
+
+/** `printenv` prints one variable, or all of them. */
+function refinePrintenv(ctx: RuleContext): Refinement {
+  if (ctx.positionals.length === 0) {
+    return { class: CREDENTIAL_CLASS, rule: "printenv-all" };
+  }
+  return ctx.positionals.some((name) => isSecretEnvName(name))
+    ? { class: CREDENTIAL_CLASS, rule: "printenv-secret" }
+    : { class: "read.shell", rule: "printenv-read" };
 }
 
 // ===========================================================================
@@ -1130,6 +1360,24 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     class: "network.call",
   },
 
+  // -- credentials (APRV-194) ----------------------------------------------
+  // The keychain readers. Every subcommand of these binaries exists to move
+  // credential material, so the row does not split on one: `security` is
+  // macOS's keychain, `secret-tool` the libsecret CLI, `keyring` the Python
+  // one, `pass` the unix password store.
+  {
+    id: "keychain",
+    bins: ["security", "secret-tool", "keyring", "pass"],
+    class: CREDENTIAL_CLASS,
+  },
+  {
+    id: "printenv",
+    bins: ["printenv"],
+    class: CREDENTIAL_CLASS,
+    emits: ["read.shell"],
+    refine: refinePrintenv,
+  },
+
   // -- reads ---------------------------------------------------------------
   {
     id: "read-shell",
@@ -1263,6 +1511,40 @@ const INLINE_SOURCE_BINS: Readonly<Record<string, readonly string[]>> = {
 /** `VAR=value` prefixes, which are not the command. */
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
 
+/**
+ * Strictest-first, and the order is normative (APRV-198): a segment naming
+ * more than one protected path is answered by the most consequential of them.
+ */
+const PROTECTED_PRECEDENCE: readonly ProtectedPathClass[] = [
+  "log.mutate",
+  "policy.core",
+  "policy.edit",
+];
+
+/**
+ * The strictest protected surface named by these words, with the word itself.
+ *
+ * `null` when none of them is protected. The word is returned verbatim, which
+ * is what {@link ClassifiedSegment.path} carries to the approver.
+ */
+function strictestProtected(
+  words: readonly string[],
+  protectedPaths: readonly string[],
+): { surface: ProtectedPathClass; path: string } | null {
+  let best: { surface: ProtectedPathClass; path: string } | null = null;
+  for (const word of words) {
+    const surface = protectedPathClass(word, protectedPaths);
+    if (surface === null) continue;
+    if (
+      best === null ||
+      PROTECTED_PRECEDENCE.indexOf(surface) < PROTECTED_PRECEDENCE.indexOf(best.surface)
+    ) {
+      best = { surface, path: word };
+    }
+  }
+  return best;
+}
+
 /** Every class the table can emit, for docs and for the dogfood test. */
 export const CLASSIFIER_CLASSES: readonly string[] = (() => {
   const seen = new Set<string>();
@@ -1270,9 +1552,12 @@ export const CLASSIFIER_CLASSES: readonly string[] = (() => {
     seen.add(rule.class);
     for (const extra of rule.emits ?? []) seen.add(extra);
   }
-  // Emitted outside the binary table: the protected-path override, the
-  // redirect-write override, and the bare-assignment segment.
-  seen.add("policy.edit");
+  // Emitted outside the binary table: the three protected-path classes
+  // (APRV-198), the credential overrides (APRV-194: a credential path named by
+  // a binary the table does not know, a secret-named variable expansion, a
+  // bare `env`), the redirect-write override, and the bare-assignment segment.
+  for (const surface of PROTECTED_PRECEDENCE) seen.add(surface);
+  seen.add(CREDENTIAL_CLASS);
   seen.add("files.write.workspace");
   seen.add("read.shell");
   return [...seen].sort();
@@ -1330,9 +1615,19 @@ function classifySegment(segment: LexSegment, protectedPaths: readonly string[])
   const writeTargets = segment.redirects
     .filter((redirect) => redirect.op !== "<")
     .map((redirect) => redirect.target.text);
-  const protectedTarget = writeTargets.find((target) => isProtectedPath(target, protectedPaths));
-  if (protectedTarget !== undefined) {
-    return { ok: true, class: "policy.edit", rule: "redirect-protected", path: protectedTarget };
+  // A redirection onto a protected path is a write to that path, whatever the
+  // command in front of it was going to do. The CLASS says which surface was
+  // aimed at (APRV-198); the RULE stays `redirect-protected`, because the
+  // mechanism is unchanged and the hook's tiers and the channel's protected-path
+  // view are keyed on the rule.
+  const redirected = strictestProtected(writeTargets, protectedPaths);
+  if (redirected !== null) {
+    return {
+      ok: true,
+      class: redirected.surface,
+      rule: "redirect-protected",
+      path: redirected.path,
+    };
   }
 
   const bin = words[cursor];
@@ -1345,18 +1640,35 @@ function classifySegment(segment: LexSegment, protectedPaths: readonly string[])
   }
 
   const basename = pathSegments(bin).slice(-1)[0] ?? bin;
+  const args = words.slice(cursor + 1);
+
+  // `env` with nothing to run prints the whole environment, secrets included,
+  // and it is checked HERE, above the opaque table, because `env <command>` is
+  // opaque for a different reason (it re-launches something else with a
+  // modified environment) and the dump would otherwise be denied as
+  // unreadable rather than named for what it is (APRV-194).
+  if (basename === "env" && args.filter((arg) => !isFlag(arg)).length === 0) {
+    return { ok: true, class: CREDENTIAL_CLASS, rule: "env-dump" };
+  }
+
   const opaqueReason = OPAQUE_BINS[basename];
   if (opaqueReason !== undefined) {
     return { ok: false, code: "opaque", detail: `${basename} ${opaqueReason}` };
   }
 
-  const args = words.slice(cursor + 1);
   const inlineFlags = INLINE_SOURCE_BINS[basename];
   if (inlineFlags !== undefined && hasFlag(args, inlineFlags)) {
     return { ok: false, code: "opaque", detail: `${basename} runs inline source` };
   }
 
   const positionals = args.filter((arg) => !isFlag(arg));
+
+  // Credential material, below the opaque checks so `sudo cat .approval/env`
+  // stays opaque (a refusal) rather than being softened into a request, and
+  // above the binary table so a reader the table does not know (`base64`,
+  // `xxd`, `less`) is named rather than answered `unclassified` (APRV-194).
+  const credential = credentialTouch(basename, args, positionals);
+  if (credential !== null) return { ok: true, ...credential };
   const sub = positionals[0] ?? null;
   const rule = matchRule(basename, sub);
   if (rule === null) {
@@ -1381,12 +1693,16 @@ function classifySegment(segment: LexSegment, protectedPaths: readonly string[])
   let cls = refined === null ? rule.class : refined.class;
   let ruleId = refined === null ? rule.id : refined.rule;
 
-  // A protected path anywhere in an effectful segment is `policy.edit`: the
-  // command is editing the rules, whatever else it is doing.
+  // A protected path anywhere in an effectful segment takes that path's class:
+  // the command is editing the gate, whatever else it is doing. Every
+  // positional is scanned, source and destination alike, so `cp` stays
+  // direction-blind — a copy OUT of the policy directory is as gated as a copy
+  // into it, because the classifier cannot tell which argument the binary will
+  // treat as the destination and guessing would be the ungated direction.
   if (!cls.startsWith("read.") && cls !== GATE_SELF_CLASS) {
-    const named = positionals.find((arg) => isProtectedPath(arg, protectedPaths));
-    if (named !== undefined) {
-      return { ok: true, class: "policy.edit", rule: "protected-path", path: named };
+    const named = strictestProtected(positionals, protectedPaths);
+    if (named !== null) {
+      return { ok: true, class: named.surface, rule: "protected-path", path: named.path };
     }
   }
 
@@ -1410,7 +1726,7 @@ function classifySegment(segment: LexSegment, protectedPaths: readonly string[])
  * `protectedPaths` is `policy.protected_paths` (APRV-107), added to the
  * built-in protected set rather than replacing it. Omitting it classifies
  * against the built-ins alone, which is the strictly narrower answer, so a
- * caller that forgets it under-reports `policy.edit` rather than inventing an
+ * caller that forgets it under-reports the protected classes rather than inventing an
  * authorization; every enforcement path passes the loaded policy's list.
  */
 export function classifyCommand(

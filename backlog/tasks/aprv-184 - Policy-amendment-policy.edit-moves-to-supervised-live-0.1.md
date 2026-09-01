@@ -4,7 +4,7 @@ title: 'Policy amendment: policy.edit moves to supervised-live 0.1'
 status: To Do
 assignee: []
 created_date: '2026-08-31 23:38'
-updated_date: '2026-09-01 18:45'
+updated_date: '2026-09-01 21:40'
 labels:
   - policy
   - gate
@@ -52,4 +52,17 @@ Everything else on the rule unchanged (no approvers list or limits declared toda
 Prerequisites verified 2026-09-01: APRV-127 grammar is BUILT and its SPEC amendments still carry pending-sign-off flags (Carter's step 1). APPROVAL_SAMPLING_SECRET is unresolved and .approval/env absent (approval env --check), so supervised-live would fail closed and gate 100 percent: Carter runs approval setup sampling first (step 2), then verifies the daemon terminal resolves the secret, then approval policy amend --commit in the primary (step 3; expect the ~33s silent pre-diff verify, APRV-167). Blocked on those three human steps; nothing further for an agent until the ceremony lands.
 
 2026-09-01: ceremony landed. Carter hand-applied line 46 (policy.edit: { autonomy: supervised-live, live_rate: 0.1 }) and ran approval policy amend --commit: attested seq 5147, PR #175 (policy-amend-5147, merged 05:39Z with the dogfood pin moved to supervised in the same PR), log advance PR #176 merged 08:14Z. AC2: APRV-127 sign-off PR #174 merged 05:21Z, before the ceremony. Still open: AC3 (APPROVAL_SAMPLING_SECRET minted via approval setup sampling into keychain + .approval/env, but not yet resolvable in hook/agent gate processes, so supervised-live fails closed and gates 100 percent; safe, no tap reduction yet) and AC5 (observation of one sampled + one unsampled edit, possible only after AC3). Hardening dependency: APRV-198 narrows policy.edit so the 0.1 sampling stops covering APPROVAL.md and the log; landing today.
+
+DEPENDENCY ADDED 2026-09-01 by the APRV-198 lane: this task now depends on APRV-198, which splits the classifier's single protected class three ways (policy.edit narrows to CLAUDE.md / AGENTS.md / .npmrc / .github/workflows/ and the policy's own protected_paths entries; policy.core is APPROVAL.md and the rest of the approval home plus the harness files that install the hook; log.mutate is anything aimed at .approval/log/). Until that lands, the supervised-live 0.1 already attested at seq 5147 is sampling a class that still covers APPROVAL.md itself and log-redirect writes, which is the second blocker recorded above.
+
+The proposed APPROVAL.md block for the next amend ceremony, updated to name the split (APRV-198 AC5, and the APRV-185 draft it supersedes):
+
+classes:
+  policy.edit:         { autonomy: supervised-live, live_rate: 0.1 }   # UNCHANGED, now the narrowed class: agent instructions, CI/release config, protected_paths entries
+  policy.core:         { autonomy: human-only }   # NEW -- APPROVAL.md, .approval/* outside the log, .claude/settings*, .cursor/hooks*
+  log.mutate:          { autonomy: human-only }   # NEW -- any write, redirect, append, truncation or rename aimed at .approval/log/
+  account.credential:  { autonomy: human-only }   # NEW -- emitted since APRV-194
+  vcs.history.rewrite: { autonomy: human-only }   # was: manual
+
+This resolves the 184-vs-185 tension APRV-185's notes flagged: policy.edit stays sampled BECAUSE it no longer covers the gate's organs, and the human-only line lands on policy.core, log.mutate, account.credential and vcs.history.rewrite instead. The ceremony is Carter's; nothing here is applied.
 <!-- SECTION:NOTES:END -->
