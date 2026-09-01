@@ -701,7 +701,14 @@ test("the ci aggregator requires the active tier to have succeeded (APRV-44)", (
   const jobs = doc["jobs"] as Record<string, Record<string, unknown>>;
   const ci = jobs["ci"];
   assert.ok(ci !== undefined, "an aggregator job named ci must exist for branch protection");
-  assert.deepEqual(ci["needs"], ["classify", "doc-guard", "records", "full", "full-floor"]);
+  assert.deepEqual(ci["needs"], [
+    "classify",
+    "doc-guard",
+    "records",
+    "full",
+    "full-floor",
+    "protected-paths",
+  ]);
   assert.equal(ci["if"], "always()", "the aggregator must run even when tier jobs are skipped");
   const steps = ci["steps"] as Array<Record<string, unknown>>;
   const script = String((steps[steps.length - 1] as Record<string, unknown>)["run"]);

@@ -157,6 +157,54 @@ jobs:
       - run: npm run build
       - run: node scripts/run-tests.mjs --only milestones-guard backlog-fixtures docs-guard
 
+  protected-paths:
+    # The fail-closed backstop for protected-path writes that bypassed the
+    # harness hook (APRV-151). Two incidents — 2026-08-29 SPEC.md in worktree
+    # aprv-145-land, 2026-08-30 this very file in agent-a3f5d255372d43ac0 —
+    # applied in spawned-agent worktrees with no prompt, no denial, and no
+    # refused-request record. An action that bypasses the hook writes nothing to
+    # the log, so nothing in-session can report the gap; the only surviving
+    # signal is the ABSENCE of a grant. This job reads that absence.
+    #
+    # It never asks a session whether it was hooked. It asks git which protected
+    # paths changed and requires, for each, evidence in the committed
+    # hash-chained log that a human decided it. Session wiring is not an input.
+    #
+    # It runs on every event and every tier, deliberately: a tier says how much
+    # test suite a change needs, and this says whether a change was consented
+    # to. fetch-depth 0 because the guard reads blobs at two commits.
+    name: protected paths (grant cross-check)
+    needs: classify
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: cross-check protected paths against the committed log
+        # Context values reach the script as environment variables and are never
+        # interpolated into its text, for the reason the classify job states: a
+        # branch name is attacker-shaped input and must not become shell syntax.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ] && [ -n "$BASE_REF" ]; then
+            target="origin/$BASE_REF"
+          else
+            target="origin/main"
+          fi
+          base="$(git merge-base "$target" HEAD)"
+          echo "base=$base head=$(git rev-parse HEAD)"
+          node scripts/protected-path-guard.mjs --base "$base" --head HEAD
+
   full:
     # The full gate's bulk, sharded (APRV-149). Three jobs run a third of the
     # suite each, so the tier's wall clock is the slowest shard rather than one
@@ -248,7 +296,7 @@ jobs:
     # so this job decides which events owe a floor result rather than letting a
     # skipped job read as a pass on the events that must prove the floor.
     name: ci
-    needs: [classify, doc-guard, records, full, full-floor]
+    needs: [classify, doc-guard, records, full, full-floor, protected-paths]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -260,12 +308,17 @@ jobs:
           RECORDS_RESULT: ${{ needs.records.result }}
           FULL_RESULT: ${{ needs.full.result }}
           FULL_FLOOR_RESULT: ${{ needs['full-floor'].result }}
+          PROTECTED_RESULT: ${{ needs['protected-paths'].result }}
           FLOOR_REQUIRED: ${{ github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         run: |
           set -euo pipefail
-          echo "classify=$CLASSIFY_RESULT tier=$TIER doc-guard=$DOC_RESULT records=$RECORDS_RESULT full=$FULL_RESULT full-floor=$FULL_FLOOR_RESULT floor-required=$FLOOR_REQUIRED"
+          echo "classify=$CLASSIFY_RESULT tier=$TIER doc-guard=$DOC_RESULT records=$RECORDS_RESULT full=$FULL_RESULT full-floor=$FULL_FLOOR_RESULT floor-required=$FLOOR_REQUIRED protected-paths=$PROTECTED_RESULT"
           if [ "$CLASSIFY_RESULT" != "success" ]; then
             echo "classify did not succeed; nothing downstream is trustworthy"
+            exit 1
+          fi
+          if [ "$PROTECTED_RESULT" != "success" ]; then
+            echo "the protected-path grant cross-check did not succeed ($PROTECTED_RESULT); a protected path changed with no evidence in the committed log that a human decided it"
             exit 1
           fi
           case "$TIER" in
