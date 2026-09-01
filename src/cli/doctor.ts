@@ -1515,6 +1515,128 @@ function checkHarnessOutcomes(dir: string): DoctorCheck {
   };
 }
 
+// ---------------------------------------------------------------------------
+// harness hook wiring in THIS worktree (APRV-151)
+// ---------------------------------------------------------------------------
+
+/** The tool names a protected-path write can arrive as. */
+const GATED_TOOLS: readonly string[] = ["Edit", "Write", "Bash"];
+
+/** The `matcher` strings of every `approval hook` entry registered for `event`. */
+function approvalHookMatchers(hooks: unknown, event: string): string[] {
+  if (typeof hooks !== "object" || hooks === null || Array.isArray(hooks)) return [];
+  const matchers = (hooks as Record<string, unknown>)[event];
+  if (!Array.isArray(matchers)) return [];
+  const found: string[] = [];
+  for (const matcher of matchers) {
+    if (typeof matcher !== "object" || matcher === null) continue;
+    const entries = (matcher as Record<string, unknown>)["hooks"];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const command = (entry as Record<string, unknown>)["command"];
+      if (typeof command !== "string" || !/\bapproval hook\b/u.test(command)) continue;
+      const pattern = (matcher as Record<string, unknown>)["matcher"];
+      found.push(typeof pattern === "string" ? pattern : "");
+    }
+  }
+  return found;
+}
+
+/**
+ * Does the settings file THIS worktree carries register the pre-execution hook
+ * for the tools a protected-path write arrives through? (APRV-151.)
+ *
+ * The incidents this row exists for are two file-tool Edits to protected paths
+ * that applied in spawned-agent worktrees with no prompt, no denial, and no
+ * refused-request record — the hook never ran, and nothing anywhere said so.
+ * A session cannot be asked whether it is hooked (a party under oversight does
+ * not report its own oversight, SPEC.md §11), so this row reports only the one
+ * thing a process CAN establish about itself from disk: whether the settings
+ * file in this checkout carries the entry at all.
+ *
+ * Read the `pass` wording carefully, because the limit is the point. The entry
+ * being on disk is NOT proof the session loaded it: `.claude/settings.json` is
+ * git-tracked here, so every worktree has an identical copy, and both bypasses
+ * happened in worktrees whose copy was present and correct. What actually
+ * differs between a gated and an ungated session is whether the harness
+ * resolved and trusted this file when the session started, which is state this
+ * runtime cannot see. That is exactly why the deterministic backstop is
+ * CI-side, over the committed log, in `core/protected-path-guard.ts`: it does
+ * not trust session wiring, and this row does not claim to establish it.
+ *
+ * Advisory, so it never fails the run. Doctor reads and never writes; the file
+ * is `policy.edit` and its repair is a line for a human to commit.
+ */
+function checkHarnessWiring(dir: string): DoctorCheck {
+  const check = "harness-hook-wiring";
+  const root = repoRoot(dir);
+  const where = root === null ? dir : root;
+  const path = join(where, CLAUDE_SETTINGS);
+  const scope =
+    root === null
+      ? `${dir} (git could not say what checkout this is)`
+      : root === dir
+        ? root
+        : `${root}, the checkout root above ${dir}`;
+
+  if (!existsSync(path)) {
+    return {
+      check,
+      status: "skip",
+      // No `fix`, deliberately: a checkout that is not a Claude Code checkout
+      // at all owes no repair, exactly as `harness-hook-outcomes` treats the
+      // same absence. The two branches below DO carry one, because there the
+      // harness is present and the entry is what is missing.
+      detail: `NOT WIRED: ${scope} carries no ${CLAUDE_SETTINGS}, so nothing in this worktree registers the pre-execution hook and a protected-path Edit here would apply unclassified. A session started elsewhere may still be hooked; this row can only see this checkout.`,
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch (cause) {
+    return {
+      check,
+      status: "skip",
+      detail: `UNDETERMINABLE: ${path} exists and is not readable as JSON (${detailOf(cause)}), so whether this checkout registers the pre-execution hook cannot be established here.`,
+    };
+  }
+
+  const hooks =
+    typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)["hooks"]
+      : null;
+  const matchers = approvalHookMatchers(hooks, "PreToolUse");
+  if (matchers.length === 0) {
+    return {
+      check,
+      status: "skip",
+      detail: `NOT WIRED: ${path} registers no \`approval hook\` entry for PreToolUse, so a protected-path Edit, Write or Bash call in this checkout reaches the file system unclassified.`,
+      fix: "approval instructions hook — prints the PreToolUse entry a human commits",
+    };
+  }
+
+  const covered = GATED_TOOLS.filter((tool) =>
+    matchers.some((pattern) => pattern.length === 0 || pattern.split("|").includes(tool)),
+  );
+  const missing = GATED_TOOLS.filter((tool) => !covered.includes(tool));
+  if (missing.length > 0) {
+    return {
+      check,
+      status: "skip",
+      detail: `NOT WIRED for every tool: ${path} registers \`approval hook\` for PreToolUse with matcher ${JSON.stringify(matchers.join(", "))}, which does not cover ${missing.join(", ")}. A protected-path write arriving through ${missing[0]} is never classified.`,
+      fix: "approval instructions hook — prints the PreToolUse entry a human commits",
+    };
+  }
+
+  return {
+    check,
+    status: "pass",
+    detail: `WIRED on disk: ${path} registers \`approval hook\` for PreToolUse over ${GATED_TOOLS.join(", ")}. This is the file being present, NOT proof this session loaded it — the APRV-151 bypasses happened in worktrees carrying exactly this entry. The check that does not trust session wiring is the CI-side grant cross-check over the committed log.`,
+  };
+}
+
 /** The Backlog.md board key a task file's name begins with (`task-3 - Slug.md`). */
 function taskIdFromFileName(name: string): string | null {
   const match = /^([A-Za-z][A-Za-z0-9_]*-\d+)/u.exec(name);
@@ -1672,6 +1794,8 @@ export function commandDoctor(
       checkReconciliation(verified.records),
       // APRV-145: appended, sixth time, same reason.
       checkHarnessOutcomes(dir),
+      // APRV-151: appended, seventh time, same reason.
+      checkHarnessWiring(dir),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

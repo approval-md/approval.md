@@ -338,6 +338,14 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // cannot accrue at all: the pre-execution hook registered and the
       // post-execution one not.
       "harness-hook-outcomes",
+      // APRV-151: whether THIS worktree's settings file carries the
+      // pre-execution hook entry at all, appended for the same reason. Advisory
+      // and never a failure: the two bypasses it exists for happened in
+      // worktrees carrying exactly that entry, so the row reports what it can
+      // see from disk and says plainly that this is not proof the session
+      // loaded it. The check that does not trust session wiring is the CI-side
+      // grant cross-check in core/protected-path-guard.ts.
+      "harness-hook-wiring",
     ],
   );
   assert.deepEqual(
@@ -360,6 +368,9 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
     // harness-hook-outcomes skips: the fixture has no `.claude/settings.json`,
     // so it is not a Claude Code checkout and there is no hook registration to
     // report on (APRV-145).
+    // harness-hook-wiring skips for the same absence, and carries no fix for
+    // it: a checkout that is not a Claude Code checkout owes no repair
+    // (APRV-151).
     [
       "pass",
       "pass",
@@ -374,6 +385,7 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       "skip",
       "skip",
       "pass",
+      "skip",
       "skip",
     ],
   );
@@ -413,7 +425,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 14);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 15);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
@@ -872,7 +884,7 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  assert.equal(parsed.checks.length, 14);
+  assert.equal(parsed.checks.length, 15);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);

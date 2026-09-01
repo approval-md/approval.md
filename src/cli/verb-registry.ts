@@ -1337,7 +1337,7 @@ const VERBS: VerbSpec[] = [
   {
     name: "doctor",
     purpose:
-      "Is this MACHINE able to run the system? Fourteen checks in cascade order — build freshness, declared identity, policy attestation, chain health, Telegram, the web port, the payload store, audit sampling, envelope integrity, the vault, the environment, log drift, reconciliation, harness hook outcomes — each with a concrete repair that begins with a command you can paste. Appends nothing, sends nothing, repairs nothing. `status` reports the system's health; doctor reports whether this machine can run it at all.",
+      "Is this MACHINE able to run the system? Fifteen checks in cascade order — build freshness, declared identity, policy attestation, chain health, Telegram, the web port, the payload store, audit sampling, envelope integrity, the vault, the environment, log drift, reconciliation, harness hook outcomes, harness hook wiring — each with a concrete repair that begins with a command you can paste. Appends nothing, sends nothing, repairs nothing. `status` reports the system's health; doctor reports whether this machine can run it at all.",
     human_only: false,
     input: input({
       flags: {
