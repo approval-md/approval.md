@@ -48,7 +48,7 @@ classes:
   log.advance:               { autonomy: manual }       # records commit to a records branch; APRV-125
 
 budgets:
-  global: { daily_actions: 2000 }
+  global: { daily_actions: 20000 }
 
 audit:
   supervised_sample_rate: 0.15
