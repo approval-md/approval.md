@@ -208,13 +208,15 @@ an addition).
 | `sed` | sed | (any) | read.shell, files.write.workspace |
 | `web-fetch` | curl, wget, http, httpie | (any) | read.web for a GET-shaped fetch; network.call for a body, an upload, a non-GET method, or anything ambiguous |
 | `network` | ssh, scp, sftp, rsync, nc, telnet, ftp | (any) | network.call |
+| `keychain` | security, secret-tool, keyring, pass | (any) | account.credential |
+| `printenv` | printenv | (any) | account.credential bare, or with a variable whose NAME is credential-bearing; read.shell otherwise |
 | `read-shell` | basename, cat, cd, cksum, cut, diff, dirname, du, echo, false, file, find, grep, head, jq, ls, md5sum, printf, pwd, readlink, realpath, rg, shasum, sha256sum, sort, stat, tail, test, tr, tree, true, type, uniq, wc, which | (any) | read.shell |
 
 † These rewrites are LOCAL, and the hook refines them against the checkout it
 runs in: see [Rewriting unpublished history](#rewriting-unpublished-history).
 `git push --force` is not marked, and never refines.
 
-Four overrides sit on top of the table:
+Five overrides sit on top of the table:
 
 - **`redirect-protected` / `protected-path` → `policy.edit`, `policy.core` or
   `log.mutate`.** Any effectful segment naming a protected path takes that
@@ -240,6 +242,26 @@ Four overrides sit on top of the table:
   (`design/`, matched wherever those segments appear). No globs, no negation.
   `approval hook classify --dir <checkout>` answers under that checkout's
   policy, which is how to ask what a path classifies as before touching it.
+- **`credential-path` / `credential-env` / `env-dump` → `account.credential`.**
+  Credential material, whatever binary names it (APRV-194). A segment naming
+  `.approval/vault*`, `.approval/keys/` or `.approval/env` is
+  `account.credential` — including under a binary the table does not know, so
+  `base64 .approval/vault.enc` is named rather than refused as `unclassified` —
+  and so is a word expanding `$APPROVAL_*`, `$TELEGRAM_*` or `$VAULT_*` (minus
+  the runtime's own non-secret names: `APPROVAL_HUMAN`, `APPROVAL_AGENT`,
+  `APPROVAL_ASCII`, `APPROVAL_MD`, `APPROVAL_HOME`, `APPROVAL_DIR`). A bare
+  `env` prints the whole environment and is answered before the opaque table;
+  `env <command>` stays opaque, and so does `sudo cat .approval/env`, because
+  the credential check sits below the opaque one and a refusal must not be
+  softened into a request.
+
+  **Precedence with the protected classes:** a WRITE to those files is
+  `policy.core` — it edits the gate's own directory — and a READ of them is
+  `account.credential`, because what leaves the machine is the secret. `cp` is
+  the deliberate exception: it is direction-blind, and a `cp` touching
+  credential material is `account.credential` either way. Nothing here reads an
+  environment, so a refusal can only ever name a variable's NAME; no rule can
+  print a value.
 - **`redirect-write` → `files.write.workspace`.** A read command with a `>` or
   `>>` writes a file, and the class says so.
 - **`gate.self`.** The `approval` CLI (and `node …/dist/src/cli/main.js`) is the

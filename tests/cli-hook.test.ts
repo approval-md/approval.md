@@ -1598,6 +1598,79 @@ test("docs/claude-code-hook.md still lists every rule and every deny code", () =
 // ===========================================================================
 
 /** A case directory whose attested policy widens the protected set. */
+/** A case directory whose attested policy reserves credentials to human hands. */
+function readyWithHumanOnlyCredentials(): string {
+  counter += 1;
+  const dir = join(scratch, `case-${counter}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    POLICY.replace("classes:", ["classes:", "  account.credential:", "    autonomy: human-only"].join("\n")),
+    "utf8",
+  );
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+  return dir;
+}
+
+test("a credential deny names the class and never the value (APRV-194)", () => {
+  // The class the APRV-185 human-only level was built for, now that APRV-194
+  // gives the classifier rules that emit it. Two properties in one test: the
+  // refusal is machine-readable and names `account.credential`, and the SECRET
+  // ITSELF never appears — not in the verdict, not in the log. The hook's child
+  // process is given a real value for the variable the command probes, so a
+  // classifier that read its environment (this one cannot: it is pure over
+  // command text) would leak it here.
+  const dir = readyWithHumanOnlyCredentials();
+  const secret = "tg-token-value-that-must-never-be-logged";
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("printenv APPROVAL_TG_TOKEN"),
+    { APPROVAL_TG_TOKEN: secret },
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-class-human-only: /u);
+  assert.match(verdict.reason, /account\.credential/u);
+  assert.doesNotMatch(verdict.reason, new RegExp(secret, "u"));
+  assert.doesNotMatch(run.stdout, new RegExp(secret, "u"));
+  assert.doesNotMatch(run.stderr, new RegExp(secret, "u"));
+  // Nothing was appended at all: a human-only class opens no request.
+  assert.doesNotMatch(rawLog(dir), new RegExp(secret, "u"));
+
+  // The other surface a human reads. `hook classify` explains the refusal, and
+  // the explanation is the class plus the command as written — which carries
+  // the variable's NAME, the actionable half, and cannot carry its value.
+  const explained = runCli(
+    ["hook", "classify", "--dir", dir, "--", "printenv APPROVAL_TG_TOKEN"],
+    dir,
+    "",
+    { APPROVAL_TG_TOKEN: secret },
+  );
+  assert.equal(explained.code, 0, explained.stderr);
+  assert.match(explained.stdout, /account\.credential/u);
+  assert.match(explained.stdout, /APPROVAL_TG_TOKEN/u);
+  assert.doesNotMatch(explained.stdout, new RegExp(secret, "u"));
+  assertClean(dir);
+});
+
+test("reading the vault is gated, not autonomous (APRV-194 AC2)", () => {
+  // Before this task `cat .approval/vault.enc` classified read.shell, which the
+  // reference policy makes autonomous: an agent could read vault ciphertext
+  // with no prompt. It now reaches the gate as account.credential.
+  const dir = readyWithHumanOnlyCredentials();
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("cat .approval/vault.enc"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /account\.credential/u);
+  assertClean(dir);
+});
+
 function readyWithProtectedPaths(): string {
   counter += 1;
   const dir = join(scratch, `case-${counter}`);
