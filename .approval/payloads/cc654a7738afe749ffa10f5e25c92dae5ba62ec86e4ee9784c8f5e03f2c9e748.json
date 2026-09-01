@@ -1,0 +1,1 @@
+{"command":"git checkout -- CLAUDE.md && git status --short CLAUDE.md; echo REVERTED","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/project-luma-event-relevance-3d2cb0"}

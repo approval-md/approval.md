@@ -1,0 +1,1 @@
+{"command":"curl -s -X POST -H 'content-type: application/json' -d '{\"template_id\":\"run_a_command\"}' http://127.0.0.1:4711/api/task","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/project-luma-event-relevance-3d2cb0"}
