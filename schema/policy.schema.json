@@ -118,7 +118,7 @@
           "type": "number",
           "minimum": 0,
           "maximum": 1,
-          "description": "SPEC.md §5.2: fraction of `supervised` actions escalated for after-the-fact human review, as a proportion in [0, 1] (0 = never sample, 1 = review everything). Sample selection is reproducible by the operator and unpredictable to agents: HMAC-SHA-256 over the event hash using an operator-held secret (amended SPEC.md §5.2; enforcement lands with the M5 daemon)."
+          "description": "SPEC.md §5.2: fraction of `supervised` actions escalated for after-the-fact human review, as a proportion in [0, 1] (0 = never sample, 1 = review everything). Sample selection is reproducible by the operator and unpredictable to agents: HMAC-SHA-256 over the event hash using an operator-held secret (amended SPEC.md §5.2; enforcement lands with the M5 daemon). Amended APRV-183: this is the FALLBACK rate. A class rule may declare its own `retro_rate`, which governs that class instead; classes declaring none are sampled at this rate, and a policy that declares this key alone behaves exactly as it did before the per-class key existed."
         },
         "sampling_secret_env": {
           "type": "string",
@@ -201,6 +201,13 @@
       "description": "SPEC.md §5.2 (amended, APRV-127): the fraction of `supervised-live` actions in a class that BLOCK on the human gate before executing, as a proportion in (0, 1]. Selection is HMAC-SHA-256 over the action's `payload_hash` under the operator-held secret named by `audit.sampling_secret_env` — the same construction `audit.supervised_sample_rate` uses, reused rather than reinvented, so an agent cannot predict its own luck and an operator holding the secret can verify every selection after the fact. Determinism is a required property, not an implementation detail: identical payload bytes always select identically, so a retry cannot re-roll until it comes up unsampled. Zero is excluded because \"never gate live\" is spelled `autonomy: supervised-retro`, and 1 is admitted because \"gate every one of them\" is a legitimate, if verbose, way to say `manual` for a class an author expects to relax later.",
       "examples": [0.01, 0.1]
     },
+    "retroRate": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "description": "SPEC.md §5.2 (amended, APRV-183): the fraction of a supervised class's executed actions drawn into the retrospective review backlog, as a proportion in (0, 1]. Overrides `audit.supervised_sample_rate` for this class and for nothing else; an absent key leaves the class on the global rate. Selection is the same construction the global rate uses, HMAC-SHA-256 over the subject record's event hash under the operator-held secret named by `audit.sampling_secret_env`, so there is one mechanism and one secret, and an operator holding that secret can recompute any verdict from the record's own hash. Zero is excluded because \"never review this class\" is a claim a policy makes by raising the class out of supervision, and a rate of 0 written here would read as a review budget the author meant to fill in; 1 is admitted because \"review every one of them\" is a legitimate setting for a small, high-consequence class.",
+      "examples": [0.25, 1]
+    },
     "defaultAutonomy": {
       "type": "string",
       "enum": ["manual", "supervised", "supervised-retro", "autonomous"],
@@ -243,6 +250,24 @@
             "type": "object",
             "properties": { "live_rate": false }
           }
+        },
+        {
+          "$comment": "SPEC.md §5.2 (amended, APRV-183): `retro_rate` is the per-class retrospective sampling rate, and it belongs to the levels that have a retrospective pool. OPTIONAL on `supervised`, `supervised-retro` and `supervised-live` — absent means the class is sampled at `audit.supervised_sample_rate`, so every policy written before this key keeps the rate its author configured. `supervised-live` admits it because the fraction the live draw does NOT gate executes and stays eligible for retrospective review, which is a real pool with a real rate. FORBIDDEN on `manual` and `autonomous`, and forbidden as a LOAD ERROR rather than as a stated no-op, which is exactly how `live_rate` treats the levels it does not belong to: a `manual` class has no retrospective pool because every one of its actions was decided in advance, an `autonomous` class is not supervised at all, and a rate sitting on either is a review fraction its author believes is running that nothing reads.",
+          "if": {
+            "type": "object",
+            "properties": {
+              "autonomy": { "enum": ["supervised", "supervised-retro", "supervised-live"] }
+            },
+            "required": ["autonomy"]
+          },
+          "then": {
+            "type": "object",
+            "properties": { "retro_rate": { "$ref": "#/$defs/retroRate" } }
+          },
+          "else": {
+            "type": "object",
+            "properties": { "retro_rate": false }
+          }
         }
       ],
       "properties": {
@@ -251,6 +276,7 @@
           "description": "SPEC.md §5.2: autonomy for actions matching this class pattern."
         },
         "live_rate": { "$ref": "#/$defs/liveRate" },
+        "retro_rate": { "$ref": "#/$defs/retroRate" },
         "approvers": {
           "type": "array",
           "minItems": 1,

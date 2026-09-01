@@ -1,0 +1,17 @@
+{
+  "version": "0.1",
+  "defaults": { "autonomy": "manual" },
+  "classes": {
+    "record.write.stage": { "autonomy": "supervised-retro", "retro_rate": 0.5 },
+    "record.write.draft": { "autonomy": "supervised" },
+    "files.write.*": {
+      "autonomy": "supervised-live",
+      "live_rate": 0.1,
+      "retro_rate": 1
+    }
+  },
+  "audit": {
+    "supervised_sample_rate": 0.1,
+    "sampling_secret_env": "APPROVAL_SAMPLING_SECRET"
+  }
+}

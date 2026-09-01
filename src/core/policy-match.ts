@@ -130,6 +130,17 @@ export interface Resolution {
    * rate is read as "gate all of them".
    */
   liveRate: number | null;
+  /**
+   * The declared `retro_rate` for a supervised class, else `null` (amended
+   * SPEC.md §5.2, APRV-183).
+   *
+   * `null` is not "do not sample": it is "this class declared no rate of its
+   * own", and the retrospective sampler reads it as the instruction to fall back
+   * to `audit.supervised_sample_rate`. A rate the schema would have rejected
+   * cannot arrive here, and one that somehow does is read as absent, which puts
+   * the class back on the global rate rather than on a number nobody wrote.
+   */
+  retroRate: number | null;
   provenance: Provenance;
   matched: { pattern: string; rule: PolicyClassRule } | null;
   approvers: string[] | null;
@@ -194,16 +205,25 @@ export function supervisionOf(declared: DeclaredAutonomy, rule: PolicyClassRule 
   autonomy: Autonomy;
   supervision: SupervisionMode | null;
   liveRate: number | null;
+  retroRate: number | null;
 } {
   if (declared === "manual" || declared === "autonomous") {
-    return { autonomy: declared, supervision: null, liveRate: null };
+    return { autonomy: declared, supervision: null, liveRate: null, retroRate: null };
   }
+  // APRV-183. A `retro_rate` is carried by every supervised mode, live included:
+  // the fraction a live draw does not gate executes and stays in the
+  // retrospective pool, so that pool has a rate whether or not the class also
+  // gates some of its actions. An unusable value is read as absent, which leaves
+  // the class on the global rate rather than on an invented one.
+  const retro = rule?.retro_rate;
+  const retroRate =
+    typeof retro === "number" && Number.isFinite(retro) && retro > 0 && retro <= 1 ? retro : null;
   if (declared !== "supervised-live") {
-    return { autonomy: "supervised", supervision: "retro", liveRate: null };
+    return { autonomy: "supervised", supervision: "retro", liveRate: null, retroRate };
   }
   const rate = rule?.live_rate;
   const usable = typeof rate === "number" && Number.isFinite(rate) && rate > 0 && rate <= 1;
-  return { autonomy: "supervised", supervision: "live", liveRate: usable ? rate : 1 };
+  return { autonomy: "supervised", supervision: "live", liveRate: usable ? rate : 1, retroRate };
 }
 
 const WILDCARD = "*";
@@ -295,6 +315,7 @@ const FAIL_CLOSED: Readonly<Resolution> = {
   declaredAutonomy: "manual",
   supervision: null,
   liveRate: null,
+  retroRate: null,
   provenance: "fail-closed",
   matched: null,
   approvers: null,
@@ -422,9 +443,10 @@ function fromRules(candidates: Candidate[]): Resolution {
  * author who does not trust a class's declarations writes `manual` for the
  * class, which no declaration can loosen.
  *
- * The floor also clears `supervision` and `liveRate`. An action pushed to
- * `manual` is not a supervised action with a mode; it is gated, and leaving a
- * live rate on it would tell a downstream reader a fraction still applies.
+ * The floor also clears `supervision`, `liveRate` and `retroRate`. An action
+ * pushed to `manual` is not a supervised action with a mode; it is gated, and
+ * leaving either fraction on it would tell a downstream reader that a draw still
+ * applies to an action every one of whose instances stops for a human.
  */
 function applyFloor(resolution: Resolution, options: ResolveOptions): Resolution {
   if (options.reversible !== false) return resolution;
@@ -441,6 +463,9 @@ function applyFloor(resolution: Resolution, options: ResolveOptions): Resolution
     declaredAutonomy: "manual",
     supervision: null,
     liveRate: null,
+    // A gated action has no retrospective pool to be drawn from, so it carries
+    // no retrospective rate either.
+    retroRate: null,
     provenance: "floor",
     floorApplied: true,
   };

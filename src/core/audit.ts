@@ -327,8 +327,14 @@ export function pendingSamples(
   for (const subject of sampledSubjects(records)) {
     if (subject.subjectHash !== null) alreadySampled.add(subject.subjectHash);
   }
+  // APRV-183. The draw is per class: a class declaring its own `retro_rate` is
+  // compared against that rate, and one that declares none against
+  // `audit.supervised_sample_rate`. Same secret, same HMAC, same input; only the
+  // threshold moves, so there is still exactly one selection mechanism.
   return supervisedExecutions(records, load).filter(
-    (candidate) => !alreadySampled.has(candidate.hash) && sampler.selects(candidate.hash),
+    (candidate) =>
+      !alreadySampled.has(candidate.hash) &&
+      sampler.selectsFor(candidate.class, candidate.hash),
   );
 }
 
@@ -430,7 +436,12 @@ function appendSample(
     // oracle nobody needs.
     reason: "supervised-sample",
     selection: "hmac-sha256/event-hash",
-    rate: sampler.rate,
+    // APRV-183: the rate this candidate was actually drawn at — the class's own
+    // `retro_rate` when it declared one, the global fallback otherwise. The
+    // record states the number the verdict was compared against, so a
+    // reproducing operator needs no second lookup and no guess about which key
+    // was in force.
+    rate: sampler.rateFor(candidate.class).rate ?? sampler.rate,
     autonomy: "supervised",
   };
 

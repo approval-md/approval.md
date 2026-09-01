@@ -155,6 +155,15 @@ export interface PolicyClassRule {
    * `supervised-live` and forbidden for every other level.
    */
   live_rate?: number;
+  /**
+   * Amended SPEC.md §5.2 (APRV-183): the fraction of this class's executed
+   * actions drawn into the retrospective review backlog, in (0, 1]. Optional on
+   * every supervised level (`supervised`, `supervised-retro`, `supervised-live`)
+   * and a schema violation on `manual` and `autonomous`, which have no
+   * retrospective pool. Absent means the class is sampled at
+   * `audit.supervised_sample_rate`.
+   */
+  retro_rate?: number;
   approvers?: string[];
   limits?: Record<string, number>;
 }
