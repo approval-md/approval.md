@@ -296,6 +296,11 @@ test("the refusal unions are frozen and the verify codes are a prefix of them", 
   ]);
   assert.deepEqual([...TOKEN_REFUSAL_CODES], [
     ...TOKEN_VERIFY_REFUSAL_CODES,
+    // APRV-185: the class the grant authorizes is reserved to human hands, so
+    // the token may not be spent. Deliberately in THIS union and not the
+    // verification one above — verification is pure over the log, and this is a
+    // fact about the policy, which `verifyToken` does not read.
+    "class-human-only",
     "log-unreadable",
     "log-torn-tail",
     // APRV-20 finding S1, shared verbatim with the gate and the executor.

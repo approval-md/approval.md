@@ -99,7 +99,8 @@ import {
 } from "./log.js";
 import { usdOrZero } from "./money.js";
 import { isPayloadHash } from "./payload.js";
-import { loadPolicy, type LoadPolicyOptions } from "./policy-load.js";
+import { loadPolicy, type LoadPolicyOptions, type PolicyLoadResult } from "./policy-load.js";
+import { humanOnlyRefusal, resolve } from "./policy-match.js";
 import {
   asSealedToken,
   openSealedToken,
@@ -217,6 +218,29 @@ export type TokenVerifyRefusalCode = (typeof TOKEN_VERIFY_REFUSAL_CODES)[number]
  */
 export const TOKEN_REFUSAL_CODES = [
   ...TOKEN_VERIFY_REFUSAL_CODES,
+  /**
+   * The action's class resolves to `human-only` (APRV-185, amended SPEC.md
+   * §5.2): the policy reserves it to human hands, so no token may be spent for
+   * it and none should ever have existed.
+   *
+   * Deliberately NOT a member of {@link TOKEN_VERIFY_REFUSAL_CODES}, and the
+   * split is the point. Verification is pure over the log and answers what the
+   * records say about one grant; this is a fact about the POLICY, which
+   * {@link verifyToken} does not read and must not start reading — a
+   * verification replayable from a log plus the policy that was in force is
+   * what makes an audit reproducible. So the check lives at the two places that
+   * hold a policy already: {@link consumeToken}, which spends, and the
+   * `approval token` verb, which would otherwise report a live token for an
+   * action nothing may execute.
+   *
+   * `core/gate.ts` refuses the request that would mint such a token, so a grant
+   * under a human-only class means the class was raised by a policy amendment
+   * after the grant. The token becomes unspendable at that moment, which is the
+   * fail-closed direction: the human who amended the policy took the class out
+   * of agent hands, and an authorization minted under the older rules is not
+   * the exception to that.
+   */
+  "class-human-only",
   /** The log could not be read, or holds a line that is not a record. */
   "log-unreadable",
   /** The log's final line is unterminated (a crashed write). */
@@ -595,6 +619,33 @@ export function tokenTtlMs(options: TokenOptions): number | null {
   return load.ok ? load.durations.approvalTtlMs : null;
 }
 
+/** The policy this module reads, loaded once per operation. */
+export function tokenPolicy(options: TokenOptions): PolicyLoadResult {
+  return loadPolicy(loadOptionsOf(options));
+}
+
+/**
+ * Is `actionClass` reserved to human hands under `load` (APRV-185)?
+ *
+ * Returns the refusal to emit, or `null`. Shared by {@link consumeToken} and by
+ * the `approval token` verb, which report the same fact about the same class
+ * and must not word it two ways.
+ *
+ * The §7 irreversibility floor is deliberately not consulted: it raises to
+ * `manual` at most and can neither produce `human-only` nor remove it, so the
+ * grant's declared `reversible` — which this module does not carry anyway —
+ * cannot change this answer.
+ */
+export function humanOnlyClassRefusal(
+  load: PolicyLoadResult,
+  actionClass: string | null,
+  whatWasRefused: string,
+): TokenRefusal | null {
+  if (actionClass === null || actionClass.length === 0) return null;
+  if (resolve(load, actionClass).autonomy !== "human-only") return null;
+  return refuse("class-human-only", humanOnlyRefusal(actionClass, whatWasRefused));
+}
+
 /**
  * Spend a token: verify it, then append `execution.started`.
  *
@@ -643,14 +694,30 @@ export function consumeToken(
   );
   if (!read.ok) return fromReadRefusal(read);
 
+  // One read of the policy for the whole spend: the TTL the verification
+  // applies and the class check below come from the same bytes.
+  const load = tokenPolicy(options);
+
   const verified = verifyToken(
     read.records,
     actionKey,
     presentedToken,
     ts,
-    tokenTtlMs(options),
+    load.ok ? load.durations.approvalTtlMs : null,
   );
   if (!verified.ok) return verified;
+
+  // APRV-185, amended SPEC.md §5.2. The grant exists and the token is the right
+  // one; the class it authorizes is one the policy now reserves to human hands,
+  // so it may not be spent. Checked immediately after verification and before
+  // the binding, because a token that cannot be spent at all should not send its
+  // holder off to reconcile payload hashes. Nothing is appended.
+  const reserved = humanOnlyClassRefusal(
+    load,
+    verified.class,
+    `the token for action ${actionKey}, granted at seq ${verified.grantSeq}, may not be spent and no execution.started was written`,
+  );
+  if (reserved !== null) return reserved;
 
   // Content binding (amended SPEC.md §10, A1). A grant approves specific bytes,
   // so the executor must say which bytes it holds and they must be the ones the

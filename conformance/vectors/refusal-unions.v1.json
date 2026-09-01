@@ -30,6 +30,7 @@
           "payload-mismatch",
           "payload-store-failed",
           "grant-classless-request",
+          "class-human-only",
           "loop-escalated",
           "not-delegated",
           "already-finished",
@@ -89,6 +90,7 @@
           "token-revoked",
           "payload-mismatch",
           "harness-executed",
+          "class-human-only",
           "log-unreadable",
           "log-torn-tail",
           "log-corrupt",
@@ -106,6 +108,7 @@
         "valid": true,
         "codes": [
           "action-not-registered",
+          "class-human-only",
           "token-required",
           "loop-escalated",
           "policy-not-attested",

@@ -31,7 +31,7 @@ import {
 } from "../core/audit.js";
 import { resolveHumanActor, HUMAN_ACTOR_ENV } from "../core/attest.js";
 import { loadPolicy } from "../core/policy-load.js";
-import { resolveSampler } from "../core/sampler.js";
+import { classSampling, resolveSampler } from "../core/sampler.js";
 import { readVerifiedRecords } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
@@ -206,20 +206,39 @@ export function commandAuditList(argv: string[], streams: Streams, cwd: string):
   // which. See core/sampler.ts on why a missing secret disables sampling.
   const policyFlag = stringFlag(flags, "--policy");
   const dirFlag = stringFlag(flags, "--dir");
-  const sampler = resolveSampler(
-    loadPolicy(
-      policyFlag !== null
-        ? { file: absolute(policyFlag, cwd) }
-        : { dir: dirFlag === null ? cwd : absolute(dirFlag, cwd) },
-    ),
+  const samplingLoad = loadPolicy(
+    policyFlag !== null
+      ? { file: absolute(policyFlag, cwd) }
+      : { dir: dirFlag === null ? cwd : absolute(dirFlag, cwd) },
   );
+  const sampler = resolveSampler(samplingLoad);
+  // APRV-183. `rate` is the GLOBAL fallback and `classes` is the coverage: with
+  // a per-class `retro_rate` in the grammar, one number can no longer describe
+  // what is sampled, and a backlog explained by one number would be explained
+  // wrongly. Additive to the existing object, so every reader of `enabled`,
+  // `rate`, `secret_env` and `reason` keeps reading what it read.
+  const classes = classSampling(samplingLoad, sampler).map((entry) => ({
+    pattern: entry.pattern,
+    autonomy: entry.autonomy,
+    rate: entry.rate,
+    source: entry.source,
+    enabled: entry.enabled,
+    reason: entry.reason,
+  }));
   const sampling = sampler.enabled
-    ? { enabled: true, rate: sampler.rate, secret_env: sampler.secretEnv, reason: null }
+    ? {
+        enabled: true,
+        rate: sampler.rate,
+        secret_env: sampler.secretEnv,
+        reason: null,
+        classes,
+      }
     : {
         enabled: false,
         rate: sampler.rate,
         secret_env: sampler.secretEnv,
         reason: sampler.reason,
+        classes,
       };
 
   if (json) {
@@ -235,6 +254,13 @@ export function commandAuditList(argv: string[], streams: Streams, cwd: string):
         ? `sampling: on, rate ${String(sampler.rate)}, secret from ${sampler.secretEnv}\n`
         : `sampling: OFF (${sampler.reason}) — ${sampler.message}\n`,
     );
+    for (const entry of classes) {
+      streams.out(
+        entry.enabled
+          ? `  ${entry.pattern}: rate ${String(entry.rate)} (${entry.source})\n`
+          : `  ${entry.pattern}: not sampled (${entry.reason ?? "rate-absent"})\n`,
+      );
+    }
     if (rows.length === 0) {
       streams.out(
         all

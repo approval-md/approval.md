@@ -93,7 +93,7 @@ import { isLoopEscalated } from "./loop.js";
 import { usdOrZero } from "./money.js";
 import { isPayloadHash } from "./payload.js";
 import { loadPolicy, POLICY_FILENAMES, type Autonomy, type LoadPolicyOptions } from "./policy-load.js";
-import { resolve } from "./policy-match.js";
+import { humanOnlyRefusal, resolve } from "./policy-match.js";
 import { readVerifiedRecords, type LogReadRefusal } from "./state.js";
 import { forgetPrivateKey, keyStoreDirFor } from "./seal.js";
 import { consumeToken, deliveredToken, type TokenRefusal } from "./token.js";
@@ -119,6 +119,23 @@ export {
 export const EXECUTE_REFUSAL_CODES = [
   /** No `task.registered` record declares this action key (SPEC.md §7). */
   "action-not-registered",
+  /**
+   * The action's class resolves to `human-only` (APRV-185, amended SPEC.md
+   * §5.2): the policy reserves it to human hands, and a person performs it
+   * outside agent execution entirely.
+   *
+   * Refused on BOTH paths, before either is chosen, which is what separates it
+   * from `token-required`. That code is a redirection — get a token and come
+   * back — and this one is not: there is no token to get and no grant that
+   * could mint one, because `core/gate.ts` refuses the request that would open
+   * one under the same code. Nothing is appended on either path, and no retry
+   * of any shape changes the answer.
+   *
+   * Surfaced verbatim from `core/token.ts` as well, for a manual-path spend of
+   * a token whose class a policy amendment raised after the grant, so an
+   * executor meets one spelling of one fact.
+   */
+  "class-human-only",
   /** The class resolves manual and no token was presented. Nothing appended. */
   "token-required",
   /** Loop safety escalated the task to manual (SPEC.md §10.2). */
@@ -588,6 +605,23 @@ export function startExecution(
     declared.class,
     declared.reversible === null ? {} : { reversible: declared.reversible },
   );
+
+  // APRV-185, amended SPEC.md §5.2, and the first question asked of the
+  // resolution: a class reserved to human hands has no execution path here at
+  // all. Above the manual/supervised fork deliberately — the fork is a question
+  // about HOW this action is authorized, and this one says nothing authorizes it
+  // in this process. Above the `gatedByCycle` test for the same reason: an
+  // approval cycle opened before a policy amendment raised the class does not
+  // survive the amendment as a licence to run.
+  if (resolution.autonomy === "human-only") {
+    return refuse(
+      "class-human-only",
+      humanOnlyRefusal(
+        declared.class,
+        `action ${actionKey} may not be executed and no execution.started was written`,
+      ),
+    );
+  }
 
   // APRV-127. An action that went through the gate is spent through the gate,
   // whatever its class resolves to now.

@@ -265,12 +265,22 @@ const POLICY_RESOLUTION_OUTPUT: JsonSchema = object(
     reversible: nullable(BOOLEAN),
     outcome: object(
       {
-        autonomy: { enum: ["autonomous", "supervised", "manual"] },
-        // APRV-127. `autonomy` is what is ENFORCED and its domain is unchanged;
-        // these three say how a supervised class is supervised. An agent that
-        // wants to know whether a prompt is possible reads `supervision`.
+        // APRV-185 adds `human-only`, the one enforced level for which no
+        // request, grant, token or run exists: `approval policy explain` is
+        // where an agent learns that before it tries.
+        autonomy: { enum: ["autonomous", "supervised", "manual", "human-only"] },
+        // APRV-127. These three say how a supervised class is supervised. An
+        // agent that wants to know whether a prompt is possible reads
+        // `supervision`.
         declaredAutonomy: {
-          enum: ["autonomous", "supervised", "supervised-live", "supervised-retro", "manual"],
+          enum: [
+            "autonomous",
+            "supervised",
+            "supervised-live",
+            "supervised-retro",
+            "manual",
+            "human-only",
+          ],
         },
         supervision: nullable({ enum: ["live", "retro"] }),
         liveRate: nullable(NUMBER),

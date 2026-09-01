@@ -38,7 +38,8 @@
 
 import { createHmac } from "node:crypto";
 
-import type { PolicyLoadResult } from "./policy-load.js";
+import type { DeclaredAutonomy, PolicyLoadResult } from "./policy-load.js";
+import { resolve } from "./policy-match.js";
 
 /**
  * Why sampling is not running. Machine-readable and distinct (SPEC.md §11.1
@@ -63,23 +64,77 @@ export const SAMPLER_DISABLED_REASONS = [
 
 export type SamplerDisabledReason = (typeof SAMPLER_DISABLED_REASONS)[number];
 
+/**
+ * The rate in force for one action class, and where it came from (APRV-183).
+ *
+ * `source` is the honest part. `"class"` means the winning rule declared a
+ * `retro_rate`; `"global"` means it did not and `audit.supervised_sample_rate`
+ * applies; `"none"` means neither exists, so nothing in this class is sampled
+ * and `rate` is `null`. A reader that prints a rate without its source cannot
+ * tell an operator whether editing the class rule or the global key is what
+ * changes the number.
+ */
+export interface EffectiveRetroRate {
+  rate: number | null;
+  source: "class" | "global" | "none";
+  /** The winning rule's pattern, when a rule matched. */
+  pattern: string | null;
+}
+
 /** A sampler that will select. The secret is closed over and never exposed. */
 export interface EnabledSampler {
   enabled: true;
-  /** `audit.supervised_sample_rate`, clamped to (0, 1]. */
-  rate: number;
+  /**
+   * `audit.supervised_sample_rate`, clamped to (0, 1] — the FALLBACK rate
+   * (amended, APRV-183).
+   *
+   * `null` when the policy declares no usable global rate and at least one class
+   * declares a `retro_rate` of its own: the sampler is running, and it is
+   * running for those classes only. {@link EnabledSampler.fallbackReason} says
+   * why there is no fallback.
+   */
+  rate: number | null;
+  /**
+   * Why there is no global fallback rate, or `null` when there is one. The same
+   * machine-readable vocabulary a disabled sampler uses, because it is the same
+   * fact about the same key.
+   */
+  fallbackReason: SamplerDisabledReason | null;
   /** The NAME of the environment variable the secret was read from. */
   secretEnv: string;
   /**
-   * Does the event with this record hash fall in the sample?
+   * Does the event with this record hash fall in the sample at the GLOBAL rate?
    *
    * `eventHash` is the subject record's `hash` field: the 64-hex digest the
    * chain already carries, which is stable, unique per record, and the one
    * identifier a reproducing operator can name without re-deriving anything.
+   *
+   * Prefer {@link EnabledSampler.selectsFor} wherever the action's class is
+   * known: a class declaring its own `retro_rate` is not sampled at this rate.
    */
   selects(eventHash: string): boolean;
-  /** Serializes to the rate and the variable NAME. Never to the secret. */
-  toJSON(): { enabled: true; rate: number; secret_env: string };
+  /** The rate governing this action class, and where it came from (APRV-183). */
+  rateFor(actionClass: string): EffectiveRetroRate;
+  /**
+   * Does the event with this record hash fall in the sample for its class?
+   *
+   * The same HMAC over the same event hash under the same secret; only the rate
+   * it is compared against differs. There is one mechanism here, and a class
+   * rate moves the threshold rather than introducing a second draw.
+   */
+  selectsFor(actionClass: string, eventHash: string): boolean;
+  /**
+   * Serializes to the rates and the variable NAME. Never to the secret.
+   *
+   * `class_rates` maps a class pattern to the `retro_rate` it declared. Both
+   * halves are bytes the policy file already carries in the open.
+   */
+  toJSON(): {
+    enabled: true;
+    rate: number | null;
+    secret_env: string;
+    class_rates: Record<string, number>;
+  };
 }
 
 /** A sampler that will not select, and the reason it will not. */
@@ -200,39 +255,49 @@ export function resolveSampler(
       ? audit.sampling_secret_env
       : null;
   const rawRate = audit?.supervised_sample_rate;
+  // APRV-183. A class rule may carry its own rate, so the global key is a
+  // FALLBACK and its absence no longer settles the question on its own: a policy
+  // whose only rate sits on one class is a policy that samples that one class.
+  const classRates = classRetroRates(load);
 
+  let rate: number | null = null;
+  let fallbackReason: SamplerDisabledReason | null = null;
+  let fallbackMessage = "";
   if (rawRate === undefined) {
+    fallbackReason = "rate-absent";
+    fallbackMessage = `${load.source.filename} declares no audit.supervised_sample_rate, so no supervised action is escalated for retrospective review`;
+  } else if (typeof rawRate !== "number" || !Number.isFinite(rawRate) || rawRate < 0) {
+    fallbackReason = "rate-invalid";
+    fallbackMessage = `${load.source.filename} declares audit.supervised_sample_rate ${JSON.stringify(rawRate)}, which is not a proportion in [0, 1]; nothing is sampled`;
+  } else if (rawRate === 0) {
+    fallbackReason = "rate-zero";
+    fallbackMessage = `${load.source.filename} sets audit.supervised_sample_rate to 0: the operator asked for no retrospective sampling`;
+  } else {
+    // A rate above 1 is a schema violation upstream. Read here as "everything",
+    // which is the stricter of the two available readings.
+    rate = Math.min(rawRate, 1);
+  }
+
+  if (rate === null && classRates.size === 0) {
     return disabled(
-      "rate-absent",
-      `${load.source.filename} declares no audit.supervised_sample_rate, so no supervised action is escalated for retrospective review`,
+      fallbackReason ?? "rate-absent",
+      fallbackMessage,
       secretEnv,
-      null,
+      fallbackReason === "rate-zero" ? 0 : null,
     );
   }
-  if (typeof rawRate !== "number" || !Number.isFinite(rawRate) || rawRate < 0) {
-    return disabled(
-      "rate-invalid",
-      `${load.source.filename} declares audit.supervised_sample_rate ${JSON.stringify(rawRate)}, which is not a proportion in [0, 1]; nothing is sampled`,
-      secretEnv,
-      null,
-    );
-  }
-  if (rawRate === 0) {
-    return disabled(
-      "rate-zero",
-      `${load.source.filename} sets audit.supervised_sample_rate to 0: the operator asked for no retrospective sampling`,
-      secretEnv,
-      0,
-    );
-  }
-  // A rate above 1 is a schema violation upstream. Read here as "everything",
-  // which is the stricter of the two available readings.
-  const rate = Math.min(rawRate, 1);
+
+  // What the policy asked for, in the words of whichever key asked for it. The
+  // global phrasing is unchanged for a policy that declares only the global key.
+  const asked =
+    rate !== null
+      ? `sets audit.supervised_sample_rate to ${String(rate)}`
+      : `declares a per-class retro_rate on ${String(classRates.size)} class rule(s)`;
 
   if (secretEnv === null) {
     return disabled(
       "secret-env-unnamed",
-      `${load.source.filename} sets audit.supervised_sample_rate to ${String(rate)} but names no audit.sampling_secret_env. Selection needs an operator-held secret: seeding from event content alone is forbidden by SPEC.md §5.2, because the agent authoring the event controls that content and could search it until its action falls outside the sample. Nothing is sampled until the variable is named.`,
+      `${load.source.filename} ${asked} but names no audit.sampling_secret_env. Selection needs an operator-held secret: seeding from event content alone is forbidden by SPEC.md §5.2, because the agent authoring the event controls that content and could search it until its action falls outside the sample. Nothing is sampled until the variable is named.`,
       null,
       rate,
     );
@@ -248,13 +313,130 @@ export function resolveSampler(
     );
   }
 
+  const globalRate = rate;
+  const rateFor = (actionClass: string): EffectiveRetroRate => {
+    const resolution = resolve(load, actionClass);
+    const pattern = resolution.matched?.pattern ?? null;
+    if (resolution.retroRate !== null) {
+      return { rate: resolution.retroRate, source: "class", pattern };
+    }
+    return globalRate === null
+      ? { rate: null, source: "none", pattern }
+      : { rate: globalRate, source: "global", pattern };
+  };
+
   return {
     enabled: true,
-    rate,
+    rate: globalRate,
+    fallbackReason,
     secretEnv,
-    selects: (eventHash: string): boolean => isSampled(secret, eventHash, rate),
-    toJSON: () => ({ enabled: true, rate, secret_env: secretEnv }),
+    selects: (eventHash: string): boolean =>
+      globalRate !== null && isSampled(secret, eventHash, globalRate),
+    rateFor,
+    selectsFor: (actionClass: string, eventHash: string): boolean => {
+      const effective = rateFor(actionClass);
+      return effective.rate !== null && isSampled(secret, eventHash, effective.rate);
+    },
+    toJSON: () => ({
+      enabled: true,
+      rate: globalRate,
+      secret_env: secretEnv,
+      class_rates: Object.fromEntries([...classRates.entries()].sort(([a], [b]) => (a < b ? -1 : 1))),
+    }),
   };
+}
+
+/**
+ * Every class rule that declares a usable `retro_rate`, keyed by pattern
+ * (APRV-183).
+ *
+ * Pure, and deliberately ignorant of matching: this answers "what did the policy
+ * write" for reporting and for the enabled/disabled decision above. Which rule
+ * governs a given action is {@link resolve}'s question, and
+ * {@link EnabledSampler.rateFor} asks it there so that specificity, strictness
+ * and the irreversibility floor are honoured by one implementation rather than
+ * two.
+ */
+export function classRetroRates(load: PolicyLoadResult): Map<string, number> {
+  const rates = new Map<string, number>();
+  if (!load.ok) return rates;
+  const classes = load.policy.classes ?? {};
+  for (const pattern of Object.keys(classes).sort()) {
+    const declared = classes[pattern]?.retro_rate;
+    if (typeof declared !== "number" || !Number.isFinite(declared)) continue;
+    if (declared <= 0 || declared > 1) continue;
+    rates.set(pattern, declared);
+  }
+  return rates;
+}
+
+/** One line of the per-class sampling report (APRV-183). */
+export interface ClassSamplingEntry {
+  /** The class rule's pattern, as the policy wrote it. */
+  pattern: string;
+  /** The level the rule declared, so a reader can see why it is in this list. */
+  autonomy: DeclaredAutonomy;
+  /** The rate in force for the class, or `null` when nothing samples it. */
+  rate: number | null;
+  source: "class" | "global" | "none";
+  enabled: boolean;
+  /** Why this class is not sampled, or `null` when it is. */
+  reason: SamplerDisabledReason | null;
+}
+
+/**
+ * What each supervised class rule is sampled at, and which are not sampled at
+ * all (APRV-183).
+ *
+ * The disabled-sampler honesty rule of SPEC.md §5.2 is per class once the rate
+ * is per class: an operator told "sampling: on, rate 0.1" while three of their
+ * four supervised classes declare nothing and the global key is absent has been
+ * told something true about the sampler and nothing true about their coverage.
+ * Every entry carries the same machine-readable reason vocabulary the sampler
+ * itself uses, so a diagnostic branches on one union.
+ *
+ * Pure. Reports on the rules a policy WROTE, in pattern order, so the output is
+ * byte-stable across runs and independent of YAML key order.
+ */
+export function classSampling(load: PolicyLoadResult, sampler: Sampler): ClassSamplingEntry[] {
+  if (!load.ok) return [];
+  const classes = load.policy.classes ?? {};
+  const entries: ClassSamplingEntry[] = [];
+  for (const pattern of Object.keys(classes).sort()) {
+    const rule = classes[pattern];
+    if (rule === undefined) continue;
+    const declaredAutonomy = rule.autonomy;
+    if (
+      declaredAutonomy !== "supervised" &&
+      declaredAutonomy !== "supervised-retro" &&
+      declaredAutonomy !== "supervised-live"
+    ) {
+      continue;
+    }
+    const declaredRate = classRetroRates(load).get(pattern) ?? null;
+    if (!sampler.enabled) {
+      entries.push({
+        pattern,
+        autonomy: declaredAutonomy,
+        rate: declaredRate,
+        source: declaredRate === null ? "none" : "class",
+        enabled: false,
+        reason: sampler.reason,
+      });
+      continue;
+    }
+    const rate = declaredRate ?? sampler.rate;
+    const source = declaredRate !== null ? "class" : sampler.rate !== null ? "global" : "none";
+    entries.push({
+      pattern,
+      autonomy: declaredAutonomy,
+      rate,
+      source,
+      enabled: rate !== null,
+      reason: rate !== null ? null : (sampler.fallbackReason ?? "rate-absent"),
+    });
+  }
+  return entries;
 }
 
 // ---------------------------------------------------------------------------

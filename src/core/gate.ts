@@ -142,7 +142,7 @@ import {
   type Autonomy,
   type PolicyLoadResult,
 } from "./policy-load.js";
-import { resolve, type Resolution } from "./policy-match.js";
+import { humanOnlyRefusal, resolve, type Resolution } from "./policy-match.js";
 import {
   LIVE_SELECTION,
   resolveLiveSelector,
@@ -328,6 +328,38 @@ export const GATE_REFUSAL_CODES = [
    * Fail closed and say which fact was missing.
    */
   "grant-classless-request",
+  /**
+   * The action's class resolves to `human-only` (APRV-185, amended SPEC.md
+   * §5.2): the policy reserves it to human hands, and a person performs it
+   * outside agent execution entirely.
+   *
+   * Its own code, and distinct from every rejection, because nobody decided
+   * anything. A `reject` is a human's answer to a question that was legitimately
+   * asked; this is the policy answering that the question does not arise — there
+   * is no approval to seek, no approver to ask, and no grant that could be
+   * recorded. An agent that read a rejection would sensibly try again with a
+   * better summary; an agent that reads this must stop asking and hand the
+   * action to a person.
+   *
+   * Every verb of this module that could mint or withdraw authority returns it:
+   * {@link request}, {@link decide} in all three of its decisions, and
+   * {@link consumeHarnessGrant}. Grant is the obvious one. Reject and revoke are
+   * refused too, and the reason is stated plainly rather than assumed: those
+   * verbs WITHDRAW authority, and withdrawing authority that cannot exist would
+   * write a decision record about a human-only class into the log, which reads
+   * afterwards as a class the gate transacts in. A pending request that a policy
+   * amendment has since raised to `human-only` is not stranded by that: it
+   * authorizes nothing, no token can be minted for it and no run can spend it,
+   * and its requester withdraws it (`withdraw`) or its TTL lapses (`expire`).
+   * Neither of those verbs is refused here, deliberately — they are the exits
+   * from a question nobody may answer.
+   *
+   * Evaluated immediately after the check that establishes a request exists at
+   * all, and before every other check on the path, on all three verbs. A class
+   * that cannot be transacted in is answered before any question about who may
+   * decide it, under which policy hash, or against which budget.
+   */
+  "class-human-only",
   /**
    * Loop safety escalated the task to manual (SPEC.md §10.2, APRV-18): three
    * consecutive `execution.failed` events. Only the non-manual paths are
@@ -1558,6 +1590,27 @@ export function request(
     input.reversible === undefined ? {} : { reversible: input.reversible },
   );
 
+  // APRV-185, amended SPEC.md §5.2, and the first thing intake asks once the
+  // class has an autonomy: a `human-only` class is not requestable. The policy
+  // itself answers, so nothing is put in front of a human, nothing is drawn,
+  // and nothing is appended — a `human-only` class must never acquire an
+  // `approval.requested` record, because such a record is a question in a
+  // queue that no approver may answer.
+  //
+  // Placed above the §7 declaration check deliberately. An unregistered action
+  // in a human-only class is refused for the class rather than for the missing
+  // registration: registering it would not help, and `not-registered` would
+  // send the caller to fix the one thing that cannot make this request valid.
+  if (resolution.autonomy === "human-only") {
+    return refuse(
+      "class-human-only",
+      humanOnlyRefusal(
+        input.cls,
+        `action ${input.actionKey} cannot be requested and no approval.requested was written`,
+      ),
+    );
+  }
+
   // SPEC.md §7's first invariant, enforced at intake since APRV-147: "an
   // action's class MUST be declared before an execution token can be requested
   // for it". Asked of the LOG, before the live draw, before the binding is
@@ -1993,6 +2046,44 @@ export function decide(
       `action ${actionKey} has no approval.requested record to decide`,
       { state: derivation.state },
     );
+  }
+
+  // APRV-185, amended SPEC.md §5.2. A request exists, and its class is one the
+  // policy reserves to human hands: no decision may be recorded about it, in
+  // any of this verb's three directions.
+  //
+  // `request` refuses such a class outright, so the only way a live request can
+  // be sitting under one is a policy amendment between the request and the
+  // decision. That is the case this exists for, and it is why REJECT and REVOKE
+  // are refused alongside grant rather than left open as the tidy-up. Those two
+  // withdraw authority rather than confer it, which is exactly why they are
+  // normally unrestricted — but a decision record of any kind about a
+  // human-only class reads afterwards as a class this gate transacts in, and
+  // the log is the artifact both parties are supposed to be able to trust about
+  // that. The request is not stranded: it authorizes nothing, no token exists
+  // for it, and its requester withdraws it or its TTL lapses. Neither
+  // `withdraw` nor `expire` is refused here, deliberately — they are the exits
+  // from a question nobody may answer.
+  //
+  // A request whose payload carries no usable class cannot be tested and falls
+  // through, exactly as it does for `grant-classless-request` below.
+  const declaredClass = derivation.declared.class;
+  if (declaredClass !== null && declaredClass.length > 0) {
+    const classResolution = resolve(
+      load,
+      declaredClass,
+      derivation.declared.reversible === null ? {} : { reversible: derivation.declared.reversible },
+    );
+    if (classResolution.autonomy === "human-only") {
+      return refuse(
+        "class-human-only",
+        humanOnlyRefusal(
+          declaredClass,
+          `no ${decision} may be recorded for action ${actionKey}`,
+        ),
+        { state: derivation.state },
+      );
+    }
   }
 
   if (derivation.state === "expired") {
@@ -2708,6 +2799,30 @@ function attemptHarnessConsume(
       { state: derivation.state },
     );
   }
+  // APRV-185, and the same placement `decide` uses: once a request is known to
+  // exist, a class the policy reserves to human hands is answered before every
+  // question about the spend. A harness grant is spent by a LATER process, so a
+  // policy amendment can raise the class in the gap — and a spend here would
+  // let a harness run a command in a class no agent may execute at all, on the
+  // strength of a grant recorded under rules that no longer stand.
+  const spendClass = derivation.declared.class;
+  if (spendClass !== null && spendClass.length > 0) {
+    const spendResolution = resolve(
+      load,
+      spendClass,
+      derivation.declared.reversible === null ? {} : { reversible: derivation.declared.reversible },
+    );
+    if (spendResolution.autonomy === "human-only") {
+      return refuse(
+        "class-human-only",
+        humanOnlyRefusal(
+          spendClass,
+          `the harness grant for action ${actionKey} may not be spent and no execution.started was written`,
+        ),
+        { state: derivation.state },
+      );
+    }
+  }
   if (derivation.execution.started !== null) {
     return refuse(
       "already-executed",
@@ -2961,6 +3076,22 @@ function attemptHarnessStart(
 
   const load = parsePolicy(policyRead, options);
   const resolution = resolve(load, input.cls);
+  // APRV-185, and the belt to the hook's braces exactly as the loop floor below
+  // is: `approval hook claude-code` denies a human-only class before the harness
+  // ever runs the command, and a caller that reaches this write boundary without
+  // asking the hook first must not be able to record an execution in a class no
+  // agent may execute. Checked before `manual`, because the two refusals say
+  // different things: that one says a human's grant authorizes this, and this
+  // one says nothing authorizes it here at all.
+  if (resolution.autonomy === "human-only") {
+    return refuse(
+      "class-human-only",
+      humanOnlyRefusal(
+        input.cls,
+        `the harness execution of ${input.actionKey} may not be recorded and no execution.started was written`,
+      ),
+    );
+  }
   if (resolution.autonomy === "manual") {
     return refuse(
       "not-granted",

@@ -63,6 +63,21 @@
  * provenance `"fail-closed"` — see `policy-load.ts`. An absent
  * `defaults.autonomy` is likewise `manual` (provenance `"default"`): the schema
  * permits omitting `defaults`, and the absence of a grant is not a grant.
+ *
+ * ## `human-only` (amended SPEC.md §5.2, APRV-185)
+ *
+ * A fourth level, and the strictest: an action reserved to human hands, taken
+ * outside agent execution entirely. It resolves like any other level and
+ * nothing here refuses anything — this module is pure — but every enforcement
+ * path downstream refuses it with the code `class-human-only`, so a resolution
+ * carrying it authorizes no request, no decision, no token and no run.
+ *
+ * The fail-closed target stays `manual` and deliberately does not follow the
+ * new head of the strictness table. A policy that cannot be parsed must remain
+ * recoverable through its own gate, and a broken file whose every class became
+ * `human-only` would put the repair behind a level that admits no gated repair.
+ * Failing closed raises the scrutiny an action gets; it does not remove the
+ * path by which a human fixes the file.
  */
 
 import type {
@@ -130,6 +145,17 @@ export interface Resolution {
    * rate is read as "gate all of them".
    */
   liveRate: number | null;
+  /**
+   * The declared `retro_rate` for a supervised class, else `null` (amended
+   * SPEC.md §5.2, APRV-183).
+   *
+   * `null` is not "do not sample": it is "this class declared no rate of its
+   * own", and the retrospective sampler reads it as the instruction to fall back
+   * to `audit.supervised_sample_rate`. A rate the schema would have rejected
+   * cannot arrive here, and one that somehow does is read as absent, which puts
+   * the class back on the global rate rather than on a number nobody wrote.
+   */
+  retroRate: number | null;
   provenance: Provenance;
   matched: { pattern: string; rule: PolicyClassRule } | null;
   approvers: string[] | null;
@@ -168,13 +194,22 @@ export interface ResolveOptions {
  * disagree about a fraction, and ordering by rate would let a policy author move
  * a rule's precedence by editing a number they were only tuning. The
  * lexicographic tie-break settles it, exactly as it settles every other tie.
+ *
+ * APRV-185 puts `human-only` above `manual` at the head of the table, and this
+ * table is the one place the ordering exists: the tie-break below,
+ * `core/policy-explain.ts`'s trace, and `core/agents-md.ts`'s draft merge all
+ * read it and hold no copy. It sits above `manual` because it is strictly more
+ * scrutiny — `manual` says a human decides and an agent then acts, `human-only`
+ * says the human acts — so a tie between the two must resolve to the level that
+ * lets no agent execute.
  */
 export const STRICTNESS: Readonly<Record<DeclaredAutonomy, number>> = {
-  manual: 0,
-  "supervised-live": 1,
-  supervised: 2,
-  "supervised-retro": 2,
-  autonomous: 3,
+  "human-only": 0,
+  manual: 1,
+  "supervised-live": 2,
+  supervised: 3,
+  "supervised-retro": 3,
+  autonomous: 4,
 };
 
 /**
@@ -189,21 +224,56 @@ export const STRICTNESS: Readonly<Record<DeclaredAutonomy, number>> = {
  * alternative reading, "a rate we could not understand means gate none of them",
  * would turn a typo into a silently disabled control, which is the failure this
  * project exists to prevent.
+ *
+ * `human-only` (APRV-185) collapses onto itself carrying nothing, exactly as
+ * `manual` and `autonomous` do. It names no supervision because it describes no
+ * agent execution to supervise, and the schema forbids both rates on it, so
+ * there is no fraction here for a reader to misread as live.
  */
 export function supervisionOf(declared: DeclaredAutonomy, rule: PolicyClassRule | null): {
   autonomy: Autonomy;
   supervision: SupervisionMode | null;
   liveRate: number | null;
+  retroRate: number | null;
 } {
-  if (declared === "manual" || declared === "autonomous") {
-    return { autonomy: declared, supervision: null, liveRate: null };
+  if (declared === "human-only" || declared === "manual" || declared === "autonomous") {
+    return { autonomy: declared, supervision: null, liveRate: null, retroRate: null };
   }
+  // APRV-183. A `retro_rate` is carried by every supervised mode, live included:
+  // the fraction a live draw does not gate executes and stays in the
+  // retrospective pool, so that pool has a rate whether or not the class also
+  // gates some of its actions. An unusable value is read as absent, which leaves
+  // the class on the global rate rather than on an invented one.
+  const retro = rule?.retro_rate;
+  const retroRate =
+    typeof retro === "number" && Number.isFinite(retro) && retro > 0 && retro <= 1 ? retro : null;
   if (declared !== "supervised-live") {
-    return { autonomy: "supervised", supervision: "retro", liveRate: null };
+    return { autonomy: "supervised", supervision: "retro", liveRate: null, retroRate };
   }
   const rate = rule?.live_rate;
   const usable = typeof rate === "number" && Number.isFinite(rate) && rate > 0 && rate <= 1;
-  return { autonomy: "supervised", supervision: "live", liveRate: usable ? rate : 1 };
+  return { autonomy: "supervised", supervision: "live", liveRate: usable ? rate : 1, retroRate };
+}
+
+/**
+ * The refusal every enforcement path prints for a `human-only` class (APRV-185).
+ *
+ * One text, in one place, for the same reason `STRICTNESS` is one table: the
+ * code `class-human-only` is frozen in four separate unions (`core/gate.ts`,
+ * `core/token.ts`, `core/execute.ts`, and the hook's own), and four hand-written
+ * explanations of one condition would disagree about what a caller should do the
+ * first time one of them was edited.
+ *
+ * `whatWasRefused` is the verb's own half of the sentence, so the message names
+ * the thing that did not happen as well as the reason it cannot.
+ */
+export function humanOnlyRefusal(actionClass: string, whatWasRefused: string): string {
+  return (
+    `class ${actionClass} resolves to human-only (amended SPEC.md §5.2, APRV-185), so ${whatWasRefused}. ` +
+    `A human performs this action outside agent execution: the policy reserves the class to human hands rather than routing it through the gate, so there is no approval to seek, no approver to ask, and no token that could exist for it. ` +
+    `This is not a rejection — nobody decided anything, and asking again with a better summary will get the same answer. ` +
+    `Nothing was appended. If the class should be gated rather than reserved, amend APPROVAL.md and re-attest it.`
+  );
 }
 
 const WILDCARD = "*";
@@ -295,6 +365,7 @@ const FAIL_CLOSED: Readonly<Resolution> = {
   declaredAutonomy: "manual",
   supervision: null,
   liveRate: null,
+  retroRate: null,
   provenance: "fail-closed",
   matched: null,
   approvers: null,
@@ -422,13 +493,26 @@ function fromRules(candidates: Candidate[]): Resolution {
  * author who does not trust a class's declarations writes `manual` for the
  * class, which no declaration can loosen.
  *
- * The floor also clears `supervision` and `liveRate`. An action pushed to
- * `manual` is not a supervised action with a mode; it is gated, and leaving a
- * live rate on it would tell a downstream reader a fraction still applies.
+ * The floor also clears `supervision`, `liveRate` and `retroRate`. An action
+ * pushed to `manual` is not a supervised action with a mode; it is gated, and
+ * leaving either fraction on it would tell a downstream reader that a draw still
+ * applies to an action every one of whose instances stops for a human.
+ *
+ * ## The floor stops at `manual` (amended SPEC.md §7, APRV-185)
+ *
+ * The floor raises to `manual` and never to `human-only`, in either direction.
+ * It never raises a class TO `human-only`, because the floor is a runtime
+ * escalation computed from a self-reported field, and `human-only` is a
+ * declaration a policy author makes about who performs an action. Deriving one
+ * from the other would let a `reversible: false` on an envelope reserve a class
+ * to human hands that its author put behind an ordinary gate. And it never
+ * lowers a `human-only` class either: the early return below covers it, so an
+ * irreversible action in a human-only class stays human-only rather than being
+ * "raised" to the weaker level.
  */
 function applyFloor(resolution: Resolution, options: ResolveOptions): Resolution {
   if (options.reversible !== false) return resolution;
-  if (resolution.autonomy === "manual") return resolution;
+  if (resolution.autonomy === "manual" || resolution.autonomy === "human-only") return resolution;
   return {
     ...resolution,
     autonomy: "manual",
@@ -441,6 +525,9 @@ function applyFloor(resolution: Resolution, options: ResolveOptions): Resolution
     declaredAutonomy: "manual",
     supervision: null,
     liveRate: null,
+    // A gated action has no retrospective pool to be drawn from, so it carries
+    // no retrospective rate either.
+    retroRate: null,
     provenance: "floor",
     floorApplied: true,
   };

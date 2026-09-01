@@ -89,7 +89,7 @@ import { payloadStoreDirFor } from "../core/payload-store.js";
 import { DEFAULT_TASKS_DIR, latestRegistration } from "../core/registration.js";
 import { POLICY_FILENAMES, loadPolicy, type PolicyLoadResult } from "../core/policy-load.js";
 import { openObligations } from "../core/audit.js";
-import { resolveSampler } from "../core/sampler.js";
+import { classSampling, resolveSampler, type Sampler } from "../core/sampler.js";
 import {
   checkVault,
   passphraseEnvFor,
@@ -757,13 +757,37 @@ function checkPayloadStore(logPath: string, records: EventRecord[]): DoctorCheck
  * unloadable policy) is `fail` with a fix: someone intended sampling and is not
  * getting it.
  */
+/**
+ * The per-class half of the sampling report (amended SPEC.md §5.2, APRV-183).
+ *
+ * A rate that can differ per class makes "sampling is on" an incomplete answer:
+ * an operator needs to know which classes sample, at which rate, and which
+ * sample at nothing and why. Appended to the existing `audit-sampling` detail
+ * rather than added as a check of its own, because it is the same fact about the
+ * same control and a second check would let one of them go stale.
+ */
+function classDetail(load: PolicyLoadResult, sampler: Sampler): string {
+  const entries = classSampling(load, sampler);
+  if (entries.length === 0) return "";
+  const rendered = entries.map((entry) =>
+    entry.enabled
+      ? `${entry.pattern} ${String(entry.rate)} (${entry.source})`
+      : `${entry.pattern} none (${entry.reason ?? "rate-absent"})`,
+  );
+  return `; supervised classes: ${rendered.join(", ")}`;
+}
+
 function checkSampling(load: PolicyLoadResult): DoctorCheck {
   const sampler = resolveSampler(load);
   if (sampler.enabled) {
+    const fallback =
+      sampler.rate === null
+        ? `no global fallback rate (${sampler.fallbackReason ?? "rate-absent"}): only classes declaring their own retro_rate are sampled`
+        : `fallback rate ${String(sampler.rate)} from audit.supervised_sample_rate`;
     return {
       check: "audit-sampling",
       status: "pass",
-      detail: `enabled at rate ${String(sampler.rate)}; secret read from $${sampler.secretEnv} (the value itself is never printed and never logged)`,
+      detail: `enabled at rate ${String(sampler.rate)}; secret read from $${sampler.secretEnv} (the value itself is never printed and never logged); ${fallback}${classDetail(load, sampler)}`,
     };
   }
   const deliberate = sampler.reason === "rate-absent" || sampler.reason === "rate-zero";
@@ -771,13 +795,13 @@ function checkSampling(load: PolicyLoadResult): DoctorCheck {
     return {
       check: "audit-sampling",
       status: "skip",
-      detail: `disabled (${sampler.reason}): ${sampler.message}`,
+      detail: `disabled (${sampler.reason}): ${sampler.message}${classDetail(load, sampler)}`,
     };
   }
   return {
     check: "audit-sampling",
     status: "fail",
-    detail: `disabled (${sampler.reason}): ${sampler.message}`,
+    detail: `disabled (${sampler.reason}): ${sampler.message}${classDetail(load, sampler)}`,
     fix:
       sampler.reason === "secret-unset" && sampler.secretEnv !== null
         ? `approval setup sampling — or set it yourself: export ${sampler.secretEnv} with the operator-held sampling secret in the environment that runs the daemon`

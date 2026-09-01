@@ -833,6 +833,18 @@ to decide whether to fix itself, stop retrying, or ask a human.
 - `already-executed` — the action key already has an `execution.started`.
 - `budget-exceeded` — budget verdicts failed; a `budget.exceeded` event WAS
   appended and `error.verdicts` lists the failures.
+- `class-human-only` — the action's class resolves to `human-only`: the policy
+  reserves it to human hands, and a person performs it outside agent execution.
+  Distinct from every rejection, and the distinction is the whole of the code:
+  nobody decided anything, so asking again with a better summary gets the same
+  answer. `request` refuses and writes no `approval.requested`; `grant`, `reject`
+  and `revoke` all refuse, because a decision record of any kind about such a
+  class would read afterwards as a class this gate transacts in; a harness-grant
+  spend refuses too. Evaluated immediately after the check that establishes a
+  request exists, before every question about who may decide it, under which
+  policy hash, or against which budget. `withdraw` and `expire` are deliberately
+  NOT refused: they are the exits for a request whose class a policy amendment
+  raised after it was opened.
 - `loop-escalated` — three consecutive `execution.failed` events escalated the
   task to manual (SPEC.md §10.2). Its MANUAL actions are unaffected; the streak
   clears on a completion.
@@ -929,6 +941,13 @@ Frozen public API in the same sense the gate's codes are.
   a process that runs the command itself rather than through `approval run`.
   Distinct from `token-mismatch`, which would send an agent hunting for a token
   that deliberately never existed.
+- `class-human-only` — the class the grant authorizes resolves to `human-only`,
+  so the token may not be spent and `approval token` reports it unspendable
+  rather than live. The gate refuses the request that would mint such a token,
+  so a grant under this class means a policy amendment raised the class after
+  the grant; the token dies at that moment, which is the direction the amendment
+  chose. Not a member of the verification union: verification is pure over the
+  log, and this is a fact about the policy.
 - `log-unreadable` (exit 4) / `log-torn-tail` (exit 3) / `log-corrupt` (exit 1):
   no token is spendable from a log that does not verify.
 - `append-failed` — the append itself failed; the exit code follows the cause.
@@ -1055,6 +1074,10 @@ refusal  {"ok":false,"error":{"code":"...","message":"...","detail"?:"...",
 - `token-required` — the class resolves to manual and no token was given. Nothing
   was appended. EXIT 5.
 - `action-not-registered` — no `task.registered` record declares this action key.
+- `class-human-only` — the class resolves to `human-only`: a person performs
+  this action outside agent execution. Refused on both paths, before either is
+  chosen, and nothing is appended. Distinct from `token-required`, which is a
+  redirection: here there is no token to get and no grant that could mint one.
 - `loop-escalated` — three consecutive `execution.failed` events escalated the
   task to manual; route it through a human grant instead.
 - `policy-not-attested` — policy unattested or its bytes changed (detail:
@@ -1952,6 +1975,8 @@ autonomous class   allow, and NOTHING is appended
 supervised class   allow, after registering the task; no approval event exists
 manual class       register + request, then WAIT for a human decision. Allow
                    on granted; deny on rejected, revoked, expired or timeout
+human-only class   deny, before any of the above. Nothing is registered,
+                   requested or appended: a person runs the command instead
 gate.self          the "approval" CLI itself is pass-through
 ```
 
@@ -1967,6 +1992,12 @@ its own flags are not parsed as this verb's.
 **Deny reasons** (the reason string is `<code>: <detail>`):
 
 - `hook-unclassified` — no rule covers some segment of the command.
+- `hook-class-human-only` — some class of the command resolves to `human-only`,
+  so the policy reserves it to human hands and no gate lifecycle is opened: the
+  command is denied outright, nothing is registered, nothing is requested, and
+  no human is asked. This union's spelling of the gate's `class-human-only`,
+  which the detail names in full. The opposite repair to `hook-unclassified`:
+  that one says declare a class, this one says a person runs the command.
 - `hook-opaque` — a construct whose effect cannot be read from the text
   (`bash -c`, `eval`, backticks, a non-read substitution).
 - `hook-unparseable` — the command line could not be tokenized.

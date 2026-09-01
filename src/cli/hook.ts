@@ -93,7 +93,7 @@ import {
 } from "../core/loop.js";
 import { payloadHash } from "../core/payload.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
-import { resolve as resolvePolicy } from "../core/policy-match.js";
+import { humanOnlyRefusal, resolve as resolvePolicy } from "../core/policy-match.js";
 import { readVerifiedRecords, requestState, type WithdrawReason } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
@@ -135,6 +135,26 @@ export const SUMMARY_LIMIT = 160;
 export const HOOK_DENY_CODES = [
   /** No rule covers some segment of the command line. */
   "hook-unclassified",
+  /**
+   * Some class of the command resolves to `human-only` (APRV-185, amended
+   * SPEC.md §5.2): the policy reserves it to human hands, so the command is
+   * denied outright and no gate lifecycle is opened for it.
+   *
+   * This union's spelling of the gate's `class-human-only`, which the detail
+   * names in full. It wears the `hook-` prefix every other member wears rather
+   * than borrowing the gate's bare code, because a caller branching on this
+   * vocabulary branches on one shape; `hook-gate-refused:<c>` is the form
+   * reserved for a code the gate itself produced, and the gate is not asked
+   * here.
+   *
+   * Distinct from `hook-unclassified`, and the repairs are opposites. That one
+   * says the policy has nothing to say about this command, so the fix is to
+   * declare a class for it. This one says the policy has spoken as clearly as
+   * it can, and the fix is for a person to run the command themselves. Distinct
+   * from `hook-rejected` for the reason the gate's code is distinct from a
+   * rejection: nobody decided anything, so there is nothing to ask again.
+   */
+  "hook-class-human-only",
   /** A construct whose effect cannot be read off the text (`bash -c`, `eval`). */
   "hook-opaque",
   /** The command line could not be tokenized at all. */
@@ -1875,6 +1895,31 @@ function runHarnessHook(
   };
 
   const autonomies = classes.map((cls) => resolvePolicy(load, cls).autonomy);
+
+  // APRV-185, amended SPEC.md §5.2, and the first verdict this function reaches
+  // once the classes have autonomies. A command touching a class the policy
+  // reserves to human hands is denied outright: no request is opened, no task is
+  // registered, nothing is appended, and no human is asked — because the policy
+  // has already answered, and there is no decision anyone could make that would
+  // let this process run the command.
+  //
+  // Above the loop floor and the unattended guard deliberately. Those two route
+  // a command TO a human's gate, and this class has no gate to be routed to; a
+  // floor applied first would open a request nobody may grant. A command whose
+  // classes are mixed is denied on the strength of the one human-only class, per
+  // the classifier's existing rule that the whole command is answered by the
+  // strictest thing in it.
+  const reserved = classes.find(
+    (_cls, index) => autonomies[index] === "human-only",
+  );
+  if (reserved !== undefined) {
+    return deny(
+      streams,
+      "hook-class-human-only",
+      `${humanOnlyRefusal(reserved, "this command may not run under an agent")} The gate's own code for this fact is \`class-human-only\`.`,
+      adapter.kind,
+    );
+  }
 
   // APRV-145, amended SPEC.md §10.2: loop safety on a surface that mints a
   // fresh task id per tool call. The floor is applied AFTER class resolution and

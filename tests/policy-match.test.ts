@@ -430,6 +430,7 @@ test("a failed load makes every class manual with provenance fail-closed", () =>
       declaredAutonomy: "manual",
       supervision: null,
       liveRate: null,
+      retroRate: null,
       provenance: "fail-closed",
       matched: null,
       approvers: null,
