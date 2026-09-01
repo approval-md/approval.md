@@ -1,9 +1,11 @@
 ---
 id: APRV-183
 title: 'Per-class supervised_sample_rate: retro review rates configurable per class'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - 'agent:fable'
 created_date: '2026-08-31 23:25'
+updated_date: '2026-09-01 00:54'
 labels:
   - policy
   - gate
@@ -31,3 +33,13 @@ Requires a SPEC amendment (policy grammar + the supervised_sample_rate section),
 - [ ] #4 Disabled-sampler reporting is per-class-aware: doctor and status name which classes sample at which rate and which are disabled, with the machine-readable reason
 - [ ] #5 SPEC 5/7 amendment drafted and flagged pending sign-off; no silent spec edit
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Opus subagent builds in an isolated worktree on branch autonomy-vocab, explicitly created from origin/main e70006d (fleet lesson: never fork a lane from an implicit base).
+2. Scope: policy schema gains optional per-class retro_rate; loader validates; retro sampler substitutes the class rate, falling back to audit.supervised_sample_rate; the supervised alias path honours it identically with its load-time note; doctor/status report per-class rates and disabled classes with machine-readable reasons.
+3. SPEC 5 amendment drafted, flagged pending sign-off; no silent spec edits.
+4. Agent does not touch backlog/ files; lifecycle edits and notes recorded by the orchestrator in the session worktree.
+5. Verification: full targeted test run in the lane; fable reviews the diff; APRV-185 builds on the same branch afterwards.
+<!-- SECTION:PLAN:END -->
