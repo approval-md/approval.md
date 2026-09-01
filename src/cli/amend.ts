@@ -93,6 +93,7 @@ import {
 import { POLICY_AMEND_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { makeProgress } from "./progress.js";
 import { readLineFromStdin } from "./prompt.js";
 import {
   refusal as renderRefusal,
@@ -968,7 +969,15 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   }
 
   const logPath = resolvePath(stringFlag(parsed.flags, "--log"), DEFAULT_LOG_PATH, cwd);
-  const read = readVerifiedRecords(logPath);
+  // APRV-167. Everything from here to the Policy/Changes/Load block is silent
+  // work on a large log: the chain walk below, then the baseline recovery. On
+  // this repository's own ~3000-record log that was ~33 seconds of nothing, and
+  // an operator read it as a hang. The reporter writes plain count lines to
+  // stderr — never stdout, which `--json` owns byte for byte.
+  const progress = makeProgress({ err: streams.err, style: st });
+  const read = readVerifiedRecords(logPath, {
+    onProgress: progress.chain("verifying the log chain"),
+  });
   if (!read.ok) {
     const exitCode =
       read.code === "log-torn-tail"
@@ -1014,6 +1023,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   }
 
   // (b) The baseline, and only a verifiable one. See the module header.
+  progress.step("recovering the attested baseline from git HEAD");
   const recovered = recoverBaseline(policyPath, attested?.sha256 ?? null);
   const liveLoad = loadPolicy({ file: policyPath });
   const diff =
