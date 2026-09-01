@@ -119,7 +119,12 @@ const EXPECTATIONS: readonly Expectation[] = [
     note: "re-tightened 2026-08-20 (attested seq 293) once APRV-114 taught the classifier that GET-shaped fetches are read.web; this class now covers only the mutating and ambiguous remainder",
   },
   { actionClass: "release.publish", autonomy: "manual", provenance: "rule" },
-  { actionClass: "policy.edit", autonomy: "manual", provenance: "rule" },
+  {
+    actionClass: "policy.edit",
+    autonomy: "supervised",
+    provenance: "rule",
+    note: "supervised-live 0.1 since the seq 5147 ceremony (APRV-184): one edit in ten blocks on the gate, the rest execute and stay in the retrospective pool; with no usable sampling secret live selection fails closed and every edit gates",
+  },
   { actionClass: "vcs.history.rewrite", autonomy: "manual", provenance: "rule" },
   { actionClass: "files.delete.out_of_scope", autonomy: "manual", provenance: "rule" },
   {
