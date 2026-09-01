@@ -63,7 +63,7 @@ import { readFileSync } from "node:fs";
 
 import { ALG, computeRecordHash, type EventRecord, type LogHead } from "./log.js";
 import { loadPolicy, type LoadPolicyOptions } from "./policy-load.js";
-import { validate, type ValidateOptions } from "./validate.js";
+import { prepareValidator, type ValidateOptions } from "./validate.js";
 
 /**
  * A chain head: the last record's position and digest.
@@ -443,6 +443,12 @@ function walk(
   let prevHash: string | null = start.prevHash;
   const verified: EventRecord[] = [];
 
+  // Compiled once, on the first record that needs it, and reused for every
+  // record after: a per-record recompile is what turned a cold walk of a few
+  // thousand records into minutes of CPU (APRV-186). Lazy so that a walk over
+  // zero lines still never touches the schema directory, exactly as before.
+  let eventValidator: ReturnType<typeof prepareValidator> | null = null;
+
   for (const [index, line] of lines.entries()) {
     const lineNumber = start.lineNumberBase + index + 1;
 
@@ -497,7 +503,8 @@ function walk(
       };
     }
 
-    const validation = validate("event", raw, validateOptions);
+    eventValidator ??= prepareValidator("event", validateOptions);
+    const validation = eventValidator.ok ? eventValidator.check(raw) : eventValidator;
     if (!validation.ok) {
       const detail = validation.errors
         .map((error) => `${error.path === "" ? "/" : error.path} ${error.message}`)
