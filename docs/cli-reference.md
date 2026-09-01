@@ -309,6 +309,28 @@ so an exported log leaks no home directory. The event's payload is
 
 ## policy amend
 
+**Progress while it is quiet (APRV-167).** The ceremony re-verifies the whole
+hash chain and recovers the diff baseline before it can print anything, which on
+a few thousand records is tens of seconds of silence, and silence reads as a
+hang. On a log of 100 records or more the verb narrates that work on **stderr**,
+in plain lines and count form:
+
+```
+approval: verifying the log chain: 3000 records
+approval: verifying the log chain: 150/3000 records
+approval: verifying the log chain: 3000/3000 records, done
+approval: recovering the attested baseline from git HEAD
+```
+
+The first line lands as soon as the log has been read, before the first record
+is checked. There is no spinner and no cursor movement, so a pipe, a log file
+and a CI transcript get the same bytes a terminal does. Below 100 records
+nothing is printed at all: the verb has already answered. stdout is untouched by
+this, `--json` included; under `--json` a refusal is still the last line of
+stderr, now possibly behind these progress lines. The same treatment is wired
+into `log verify`, `status`, `queue`, `wait` (first pass only), `audit list`,
+`audit obligations` and `doctor`, which share the walk-then-speak shape.
+
 **Branch protection (the two flows).** A protected default branch rejects the
 push that would land the amendment, so this verb detects one and offers the flow
 that works. DIRECT is `git add` + `git commit` on the branch you are standing

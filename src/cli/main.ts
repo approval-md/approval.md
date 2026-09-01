@@ -87,6 +87,7 @@ import {
   preflightLog,
   resolvePath,
 } from "./paths.js";
+import { makeProgress } from "./progress.js";
 import { parseLines, readCompleteLines } from "./records.js";
 import { helpFor, longHelp } from "./long-help.js";
 import {
@@ -317,7 +318,15 @@ function commandVerify(argv: string[], streams: Streams, cwd: string): number {
   // and it reaches only which anomalies are reported. The verdict below is a
   // function of the log bytes and the schemas, so a missing or unloadable
   // policy leaves this command's answer exactly as it was.
-  const result = verify(logPath, { policy: { dir: cwd } });
+  // APRV-167. This verb IS the walk: everything it prints comes after it, so on
+  // a large log it is silent for the whole run. Count lines on stderr, which
+  // `--json` (stdout) does not own.
+  const result = verify(logPath, {
+    policy: { dir: cwd },
+    onProgress: makeProgress({ err: streams.err, style: style({ json }) }).chain(
+      "verifying the log chain",
+    ),
+  });
 
   if (result.status === "clean") {
     if (json) {

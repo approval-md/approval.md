@@ -312,6 +312,30 @@ export interface VerifyOptions extends ValidateOptions {
    * paths and the tests can state a threshold without a file on disk.
    */
   skewToleranceMs?: number;
+  /**
+   * Where to report walk progress, for a caller that has a human waiting
+   * (APRV-167).
+   *
+   * Purely observational: the sink is handed counts, it is never asked
+   * anything, and nothing it does can move a verdict. It is called once before
+   * the first record (so a caller can name the step and the size of the job
+   * before any per-record work begins) and once after each record the walk
+   * vouches for. Counts are file-absolute, so a walk resumed behind a verified
+   * prefix reports the same numbers a cold walk would.
+   *
+   * A sink that throws is a caller's bug and is not caught here: verification
+   * has no business swallowing it, and a progress line that cannot be printed
+   * must not be able to turn a clean log into a corrupt one by silence.
+   */
+  onProgress?: (progress: VerifyProgress) => void;
+}
+
+/** One progress report from a chain walk (APRV-167). Counts, nothing else. */
+export interface VerifyProgress {
+  /** Records verified so far, counted from the start of the file. */
+  verified: number;
+  /** Records this walk will have covered when it finishes, same origin. */
+  total: number;
 }
 
 /** The tolerance a verification run should apply, from its options alone. */
@@ -413,6 +437,7 @@ function walk(
   lines: string[],
   validateOptions: ValidateOptions,
   start: WalkStart,
+  onRecord: ((verified: number) => void) | null = null,
 ): { failure: VerifyResult | null; head: LogHead | null; records: EventRecord[] } {
   let prevSeq = start.prevSeq;
   let prevHash: string | null = start.prevHash;
@@ -567,6 +592,10 @@ function walk(
     prevSeq = record.seq;
     prevHash = record.hash;
     verified.push(record);
+    // APRV-167. After the record is vouched for, never before: a progress line
+    // counts records that verified, and one that ran ahead of the checks would
+    // be reporting confidence the walk has not earned yet.
+    if (onRecord !== null) onRecord(start.lineNumberBase + index + 1);
   }
 
   return {
@@ -681,7 +710,18 @@ export function verifyText(
   const priorLines = prefix === null ? 0 : prefix.lines;
 
   const { complete, torn } = text.length === 0 ? { complete: [], torn: null } : splitLines(text);
-  const walked = walk(complete, validateOptions, start);
+  // APRV-167. The total is known here — the file is read and split — and long
+  // before the first schema compile, which is where the seconds actually go. A
+  // caller that reports this opening call has named the job inside milliseconds
+  // of the read, rather than after the walk it is describing.
+  const { onProgress } = options;
+  let onRecord: ((verified: number) => void) | null = null;
+  if (onProgress !== undefined) {
+    const total = priorLines + complete.length;
+    onProgress({ verified: priorLines, total });
+    onRecord = (verified) => onProgress({ verified, total });
+  }
+  const walked = walk(complete, validateOptions, start, onRecord);
   const { failure, head } = walked;
   const records =
     priorRecords.length === 0 ? walked.records : [...priorRecords, ...walked.records];

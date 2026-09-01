@@ -105,6 +105,7 @@ import { repoPath, repoRoot, showBlob } from "./git-scope.js";
 import { DOCTOR_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { makeProgress } from "./progress.js";
 import { style, type Glyph, type Style, type TableRow } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
@@ -1614,7 +1615,13 @@ export function commandDoctor(
   // ONE walk of the log for both the attestation check and the log check: two
   // walks could disagree, and doctor is the last place a reader wants to be
   // told two different things about one file.
-  const verified = verifyWithRecords(logPath);
+  // APRV-167: and it is the slow one. Doctor is what a worried operator runs on
+  // a big log, and every check line lands after this returns.
+  const verified = verifyWithRecords(logPath, {
+    onProgress: makeProgress({ err: streams.err, style: style({ json }) }).chain(
+      "verifying the log chain",
+    ),
+  });
 
   const policyLoad = loadPolicy(policyFlag === null ? { dir } : { file: policyPath });
   const port = policyWebPort(policyLoad);

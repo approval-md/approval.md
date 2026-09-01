@@ -50,6 +50,7 @@ import {
 } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
+import { makeProgress } from "./progress.js";
 import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
@@ -184,7 +185,12 @@ export function commandAuditList(argv: string[], streams: Streams, cwd: string):
   const check = preflightLog(logPath);
   if (!check.ok) return ioError(streams, json, check.message);
 
-  const read = readVerifiedRecords(logPath);
+  const read = readVerifiedRecords(logPath, {
+    // APRV-167: the sample table is printed only after the whole chain verifies.
+    onProgress: makeProgress({ err: streams.err, style: style({ json }) }).chain(
+      "verifying the log chain",
+    ),
+  });
   if (!read.ok) {
     return emitRefusal(streams, json, { ok: false, code: read.code, message: read.message });
   }
@@ -392,7 +398,12 @@ export function commandAuditObligations(argv: string[], streams: Streams, cwd: s
   const check = preflightLog(logPath);
   if (!check.ok) return ioError(streams, json, check.message);
 
-  const read = readVerifiedRecords(logPath);
+  const read = readVerifiedRecords(logPath, {
+    // APRV-167, as in `audit list`: nothing prints until the walk is done.
+    onProgress: makeProgress({ err: streams.err, style: style({ json }) }).chain(
+      "verifying the log chain",
+    ),
+  });
   if (!read.ok) {
     return emitRefusal(streams, json, { ok: false, code: read.code, message: read.message });
   }

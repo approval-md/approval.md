@@ -80,7 +80,7 @@ import { readVerifiedRecords, requestState } from "../core/state.js";
 import { deliveredToken } from "../core/token.js";
 import type { EventRecord } from "../core/log.js";
 import { loadPolicy, parseDuration, POLICY_FILENAMES } from "../core/policy-load.js";
-import { verify } from "../core/verify.js";
+import { verify, type VerifyProgress } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
   EXIT_INTEGRITY,
@@ -102,6 +102,7 @@ import {
 } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
+import { makeProgress } from "./progress.js";
 import {
   refusal as renderRefusal,
   relPath,
@@ -636,8 +637,22 @@ export function commandWait(argv: string[], streams: Streams, cwd: string): numb
   const ttlMs = ttlOf(flags, cwd);
   const deadline = Date.now() + timeoutMs;
 
+  // APRV-167. Only the FIRST pass reports: it is the cold walk, the one a human
+  // stares at before the verb has printed anything. Every later pass comes back
+  // through the verified-read cache and re-verifies only what was appended
+  // since, so counting it again would be a progress line per poll for work that
+  // is not happening.
+  let waitProgress: ((progress: VerifyProgress) => void) | null = makeProgress({
+    err: streams.err,
+    style: style({ json }),
+  }).chain("verifying the log chain");
+
   for (;;) {
-    const read = readVerifiedRecords(logPath);
+    const read = readVerifiedRecords(
+      logPath,
+      waitProgress === null ? {} : { onProgress: waitProgress },
+    );
+    waitProgress = null;
     if (!read.ok) {
       return emitRefusal(streams, json, {
         ok: false,
@@ -872,7 +887,12 @@ export function commandQueue(argv: string[], streams: Streams, cwd: string): num
   const check = preflightLog(logPath);
   if (!check.ok) return ioError(streams, json, check.message);
 
-  const read = readVerifiedRecords(logPath);
+  const read = readVerifiedRecords(logPath, {
+    // APRV-167: the queue is printed only after the whole chain verifies.
+    onProgress: makeProgress({ err: streams.err, style: style({ json }) }).chain(
+      "verifying the log chain",
+    ),
+  });
   if (!read.ok) {
     return emitRefusal(streams, json, {
       ok: false,
@@ -1030,7 +1050,15 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
   // The policy is read here for one number, the skew tolerance of amended
   // SPEC.md §8 (APRV-58), and it reaches only which anomalies are reported. The
   // verdict, the health line and the exit code below are unmoved by it.
-  const verification = verify(logPath, { policy: policyLocation(flags, cwd) });
+  // APRV-167: the count lines belong to THIS walk. The read below is the same
+  // bytes through the verified-read cache, so it re-walks nothing and has
+  // nothing to report.
+  const verification = verify(logPath, {
+    policy: policyLocation(flags, cwd),
+    onProgress: makeProgress({ err: streams.err, style: style({ json }) }).chain(
+      "verifying the log chain",
+    ),
+  });
   const read = readVerifiedRecords(logPath);
   // A log that cannot be read at all is an I/O fact, not a health report.
   if (!read.ok && read.code === "log-unreadable") {
