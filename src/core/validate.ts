@@ -12,7 +12,10 @@
  * Determinism: the result is a pure function of (schema files on disk,
  * document). No network, no clock, no randomness, and no cross-call caching —
  * schemas are re-read and re-compiled per call so a run never depends on the
- * order or history of previous calls.
+ * order or history of previous calls. The one deliberate reuse is
+ * {@link prepareValidator}: a caller validating many documents against one
+ * schema in one pass compiles once and holds the snapshot itself; preparing is
+ * still uncached call to call.
  *
  * Dialect / import notes (AC #6 — documented, never silently downgraded):
  *
@@ -318,14 +321,59 @@ export function validate(
   document: unknown,
   options: ValidateOptions = {},
 ): ValidationResult {
+  const prepared = prepareValidator(schemaId, options);
+  if (!prepared.ok) return prepared;
+  return prepared.check(document);
+}
+
+/**
+ * A validator compiled once and reusable for many documents.
+ *
+ * `check` is {@link validate} with the schema load and Ajv compile already
+ * paid: same results, same error shapes, on every document. This exists for
+ * the one caller that validates thousands of documents against one schema in
+ * one pass — the log chain walk — where a per-document recompile turns a
+ * subsecond verification into minutes of CPU (APRV-186).
+ *
+ * The determinism stance in the module header is unchanged: nothing is cached
+ * across calls to {@link prepareValidator} itself. A prepared validator is a
+ * snapshot of the schema files as they stood when it was prepared; a caller
+ * that wants fresh schemas prepares again.
+ */
+export interface PreparedValidator {
+  ok: true;
+  check(document: unknown): ValidationResult;
+}
+
+/**
+ * Load and compile `schemaId` once, for reuse across many documents.
+ *
+ * Fails closed exactly as {@link validate} does: every load, parse, and
+ * compile problem is reported as `{ ok: false, errors }`, never thrown.
+ */
+export function prepareValidator(
+  schemaId: string,
+  options: ValidateOptions = {},
+): PreparedValidator | { ok: false; errors: ValidationError[] } {
   const schemaDir = options.schemaDir ?? DEFAULT_SCHEMA_DIR;
 
   const compiled = compileSchema(schemaDir, schemaId, options.mode ?? "write");
   if (!compiled.ok) return compiled;
 
+  return {
+    ok: true,
+    check: (document: unknown) => runCompiled(schemaId, compiled.validateFn, document),
+  };
+}
+
+function runCompiled(
+  schemaId: string,
+  validateFn: ValidateFunction,
+  document: unknown,
+): ValidationResult {
   let valid: boolean;
   try {
-    valid = compiled.validateFn(document) as boolean;
+    valid = validateFn(document) as boolean;
   } catch (cause) {
     // Ajv only throws here for $ref resolution problems in async/dynamic
     // schemas; treat it as a rejection, never as a pass.
@@ -337,7 +385,7 @@ export function validate(
 
   if (valid) return { ok: true };
 
-  const errors = (compiled.validateFn.errors ?? []).map(toValidationError);
+  const errors = (validateFn.errors ?? []).map(toValidationError);
   return {
     ok: false,
     errors:
