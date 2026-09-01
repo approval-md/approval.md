@@ -128,7 +128,7 @@ the constant ~1,300x. At 4.4k records the walk costs ~80 ms. If the
 log grows 100x this becomes seconds again. The durable fix is to stop
 paying a cold walk per process: let hooks read via the running daemon
 (which holds the warm cache) over a local socket, falling back to the
-cold walk when the daemon is down. Unfiled as of this writing.
+cold walk when the daemon is down. Filed as APRV-188.
 
 ## Verification trail
 
