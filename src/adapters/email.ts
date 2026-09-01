@@ -576,6 +576,32 @@ export const EMAIL_CREDENTIAL_SPECS: readonly CredentialSpec[] = [
 ];
 
 /**
+ * The names this adapter cannot act without, for the contract's pre-token
+ * resolution (APRV-169).
+ *
+ * DERIVED from {@link EMAIL_CREDENTIAL_SPECS}, which already states which values
+ * are required, and mapped through `names` so a deployment that renamed one gets
+ * the name it actually stored. The login pair is deliberately absent: a relay
+ * that wants no login is a supported configuration, and listing `smtp.user`
+ * here would turn an optional value into a precondition and refuse a
+ * deployment that works today.
+ */
+export function requiredEmailCredentials(
+  names: EmailCredentialNames = DEFAULT_CREDENTIAL_NAMES,
+): readonly string[] {
+  const keyOfDefault = new Map<string, keyof EmailCredentialNames>(
+    Object.entries(DEFAULT_CREDENTIAL_NAMES).map(([key, value]) => [
+      value,
+      key as keyof EmailCredentialNames,
+    ]),
+  );
+  return EMAIL_CREDENTIAL_SPECS.filter((spec) => spec.required === true).map((spec) => {
+    const key = keyOfDefault.get(spec.name);
+    return key === undefined ? spec.name : names[key];
+  });
+}
+
+/**
  * The cross-field rule: a username and a password are both-or-neither.
  *
  * Returns the refusal sentence, or `null` when the set is coherent. Exported so
@@ -803,6 +829,7 @@ export function emailAdapter(options: EmailAdapterOptions = {}): Adapter {
   return {
     name: "email",
     classes,
+    requiredCredentials: requiredEmailCredentials(names),
     async act(input: ActInput): Promise<ActOutcome> {
       // (1) The payload. Refused before any credential is read and long before
       //     any socket is opened: a malformed payload is not a reason to touch

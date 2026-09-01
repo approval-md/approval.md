@@ -24,7 +24,11 @@ to prevent.
    checkbox list), and an implementation plan written *after* reading the
    relevant code, *before* writing any.
 2. **One task = one context window = one reviewable unit.** If a task
-   won't fit, split it in Backlog.md first.
+   won't fit, split it in Backlog.md first. Related tasks in one milestone
+   may land as a single PR with one commit per task (APRV-160): authoring
+   and review stay per-task, the merge unit is the stack, the PR
+   description lists the task IDs, and records/log commits keep their
+   separate path.
 3. **Implementation notes are mandatory** at task completion: what was
    done, what was decided, and anything the diff alone wouldn't reveal.
 4. **Sequencing:** milestones land in order (M0→M8). Within a milestone,
@@ -38,6 +42,12 @@ to prevent.
    genesis events, this file). A worktree branched from a stale main invites
    exactly the non-fast-forward rejections and log divergence the rules above
    exist to prevent.
+7. **A PR is not shipped until the merge is armed.** After opening or
+   updating a PR, the session itself runs `gh pr merge <n> --merge`. The
+   hook classifies it `vcs.push.main`, the prompt reaches the human's
+   phone, and the tap queues the merge. A PR sitting at CLEAN waiting for
+   a hand click in the GitHub UI is the failure mode this rule removes
+   (APRV-182).
 
 ## Model tiers
 
@@ -101,7 +111,10 @@ grandfathered — apply this to new and rewritten text only.
   living behind it.
 - Agents MUST NOT edit `APPROVAL.md`, `.approval/`, or anything holding
   credentials, in any milestone. Propose policy changes as Backlog.md
-  tasks for human sign-off.
+  tasks for human sign-off. `CLAUDE.md` is different since APRV-182:
+  agents edit it directly, the edit classifies `policy.edit` through the
+  hook, and the human's tap is the sign-off; hand-applied drafts are
+  retired.
 - From M4 (channels) onward: side-effecting repo actions route through
   the built Telegram channel. Yes, really: releases of approval.md get
   approved via approval.md.

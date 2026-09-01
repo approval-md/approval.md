@@ -26,7 +26,10 @@ decision. What they do record, since APRV-141, is the execution itself, marked
 `execution: "harness"` because this runtime hands over permission and never sees
 an exit status. That record is the one budgets charge and the one the
 retrospective audit sampler draws from, so without it the path carrying most of
-an agent's traffic was unbudgeted and unsampled.
+an agent's traffic was unbudgeted and unsampled. It binds the `payload_hash` of
+the bytes about to run (APRV-146), so it says WHAT ran and not merely that
+something did, and the only thing that ever closes it is the outcome the
+post-execution registration below reports (APRV-145).
 
 Before any of those rows allows, the hook establishes two facts from the
 verified log (APRV-139): a human has attested the live policy bytes, and the
@@ -408,10 +411,17 @@ rather than to one invocation:
 - a retry after a grant landed **proceeds on it**, with no new prompt, provided
   the TTL has not lapsed and nothing has spent it;
 - a grant is spent **exactly once**. Consumption is an `execution.started`
-  carrying `execution: "harness"`, appended through compare-and-append by
-  `consumeHarnessGrant` before the `allow` is printed. No `execution.completed`
-  ever follows it: the harness runs the command and this runtime never learns
-  the outcome.
+  carrying `execution: "harness"` and the `payload_hash` the grant binds to
+  (APRV-146: a start that cannot state its bytes says only that something ran),
+  appended through compare-and-append by `consumeHarnessGrant` before the
+  `allow` is printed. The harness runs the command, so this runtime observes no
+  exit status and writes no outcome of its own over that record: the human
+  recovery verbs refuse a delegated start with `execution-delegated`, and its
+  only counterpart is the one the post-execution registration REPORTS
+  (`execution.completed` or `execution.failed`, carrying `reported_by:
+  "post-tool-use"`, APRV-145). Where that registration is absent, or the event
+  carries no `tool_use_id` to reconstruct the task id from, the start stands
+  open and terminal.
 
 **The replay bounds, exactly.** Same command bytes, same `cwd`, same class, once,
 inside the TTL, and only against a request that declared `execution: "harness"`.
