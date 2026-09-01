@@ -37,13 +37,16 @@ classes:
   vcs.push.branch:           { autonomy: autonomous }
   vcs.push.main:             { autonomy: supervised }   # gated by per-task human review; includes gh pr merge
   vcs.pr.*:                  { autonomy: supervised }   # gh pr create / edit / comment on a feature branch
-  vcs.history.rewrite:       { autonomy: manual}
+  vcs.history.rewrite:       { autonomy: human-only }   # a person rewrites shared history, never an agent (APRV-185)
   files.delete.out_of_scope: { autonomy: manual }
   deps.add:                  { autonomy: manual }       # every new package, runtime or dev
   deps.install:              { autonomy: autonomous }   # bare npm install / npm ci from the lockfile
   network.call:              { autonomy: manual }       # mutating/ambiguous only; reads classify read.* and flow
   release.publish:           { autonomy: manual }       # npm, tags, versions
   policy.edit:               { autonomy: supervised-live, live_rate: 0.1 }       # this file, CLAUDE.md, CI config
+  policy.core:               { autonomy: human-only }   # APPROVAL.md and .approval/* except the log (APRV-198)
+  log.mutate:                { autonomy: human-only }   # any write aimed at .approval/log/ (APRV-198)
+  account.credential:        { autonomy: human-only }   # keychain, APPROVAL_*/TELEGRAM_*/VAULT_* probes, vault/keys/env reads (APRV-194)
   log.sync:                  { autonomy: manual }       # ff-pull with chain reconcile; APRV-125
   log.advance:               { autonomy: manual }       # records commit to a records branch; APRV-125
 
