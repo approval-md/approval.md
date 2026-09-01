@@ -43,10 +43,10 @@ tap grants it, and the hook returns allow to the harness that was blocked on it.
 ## Installing it
 
 The hook lives in `.claude/settings.json`. **A human commits this file.** It is
-`policy.edit` in the taxonomy and in this repository's own policy: a file that
+`policy.core` in the taxonomy and in this repository's own policy: a file that
 configures the gate is part of the gate, and an agent that could write its own
 hook entry could write itself out of it. The hook classifies edits to it as
-`policy.edit` for the same reason.
+`policy.core` for the same reason.
 
 ```json
 {
@@ -216,13 +216,24 @@ runs in: see [Rewriting unpublished history](#rewriting-unpublished-history).
 
 Four overrides sit on top of the table:
 
-- **`redirect-protected` / `protected-path` → `policy.edit`.** Any effectful
-  segment naming a protected path is `policy.edit`, redirect targets included.
-  The protected set is the built-ins plus `policy.protected_paths`. The
-  built-ins are `APPROVAL.md`, `APPROVALS.md`, `CLAUDE.md`, `AGENTS.md`,
-  `.npmrc`, anything under `.approval/`, `.claude/settings*`, `.cursor/hooks.json`, `.cursor/hooks/`,
-  `.cursor/agents/`, and `.github/workflows/`; they hold whatever the policy says, so a policy can
-  widen the protected surface and never narrow it. `policy.protected_paths`
+- **`redirect-protected` / `protected-path` → `policy.edit`, `policy.core` or
+  `log.mutate`.** Any effectful segment naming a protected path takes that
+  path's class, redirect targets included, and every positional is scanned, so
+  `cp` is direction-blind: a copy OUT of a protected path is as gated as a copy
+  into it. The protected set is the built-ins plus `policy.protected_paths`,
+  and since APRV-198 it is split three ways by consequence:
+
+  | Class | Built-in surface | What it is |
+  |---|---|---|
+  | `log.mutate` | anything under `.approval/log/` | a write to the record of what happened, not to the rules |
+  | `policy.core` | `APPROVAL.md`, `APPROVALS.md`, the rest of `.approval/` (env, payloads, vault, keys, `QUEUE.md`), `.claude/settings*`, `.cursor/hooks.json`, `.cursor/hooks/`, `.cursor/agents/` | the gate's own organs, including the files that install the hook |
+  | `policy.edit` | `CLAUDE.md`, `AGENTS.md`, `.npmrc`, `.github/workflows/`, and every `policy.protected_paths` entry | the prose and configuration *about* the gate |
+
+  The check order is the precedence: a path is answered by the strictest
+  surface it names (`log.mutate`, then `policy.core`, then `policy.edit`), and
+  so is a segment naming several of them. The built-ins hold whatever the
+  policy says, so a policy can widen the protected surface and never narrow it,
+  and every path a policy adds lands on `policy.edit`. `policy.protected_paths`
   (SPEC.md §5.2, APRV-107) lists repo-relative paths: an exact file (`SPEC.md`,
   matched against a candidate's trailing segments, so a bare filename matches
   in any directory as the built-ins do) or a directory prefix ending in `/`
@@ -342,7 +353,7 @@ Showing a real line break as a line break raises the question of what a
 render the same way. The block says `the hash binds the RAW BYTES, not this
 view`, and a long command renders whole, over as many messages as it takes.
 
-`rule` is the tier of a protected-path touch, on the same class:
+`rule` is the tier of a protected-path touch, on the class the path itself selects:
 
 - `protected-path` — the target is the LIVE checkout's file;
 - `protected-path-proposal` — the target resolves inside
@@ -356,7 +367,7 @@ The tier is resolved from the hook's own process view (`git rev-parse
 --git-common-dir`, then the real paths), never from the `cwd` the harness sends,
 and it fails closed: anything not provably inside an agent worktree and not
 provably outside the checkout is live-tier. It changes no policy semantics —
-every tier resolves exactly as `policy.edit` resolves — only what the prompt
+every tier resolves exactly as the path's own protected class resolves — only what the prompt
 says.
 
 ## Deny reasons

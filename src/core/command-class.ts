@@ -53,12 +53,12 @@ export interface ClassifiedSegment {
    * The protected path that selected the class, present only when one did
    * (APRV-143).
    *
-   * `policy.edit` is the one class a segment can take because of a *value* in
-   * it rather than because of its binary, and until this field the value was
-   * discarded the moment the rule fired: an approver was told the class and
-   * left to guess which of six arguments earned it. It is the word the
-   * classifier matched, verbatim, so a channel can name it without a second
-   * search of its own.
+   * The protected classes (`policy.edit`, `policy.core`, `log.mutate`) are the
+   * classes a segment can take because of a *value* in it rather than because
+   * of its binary, and until this field the value was discarded the moment the
+   * rule fired: an approver was told the class and left to guess which of six
+   * arguments earned it. It is the word the classifier matched, verbatim, so a
+   * channel can name it without a second search of its own.
    */
   path?: string;
 }
@@ -84,21 +84,42 @@ export type CommandClassification =
 export const GATE_SELF_CLASS = "gate.self";
 
 // ===========================================================================
-// Protected paths (policy.edit)
+// Protected paths (policy.edit, policy.core, log.mutate)
 // ===========================================================================
 
 /**
- * Files whose edit is `policy.edit` wherever they sit: the policy itself, the
- * agent instructions that carry the same authority in prose, and the release
- * configuration.
+ * The three classes a protected path can select (APRV-198).
+ *
+ * One class used to cover the whole protected surface, so a policy could not
+ * say "an agent may edit the prose that describes the gate, under sampling,
+ * and may never touch the gate itself". These are that sentence, in the order
+ * of decreasing consequence:
+ *
+ * - `log.mutate` — anything aimed at `.approval/log/`. The log is the truth;
+ *   a write to it is not an edit of the rules, it is an edit of the record of
+ *   what happened.
+ * - `policy.core` — the policy file itself and the rest of the gate's own
+ *   directory (env, payload store, vault, keys, `QUEUE.md`), plus the harness
+ *   files that install the hook. An agent that can write these can write
+ *   itself out of the gate without the gate ever seeing it.
+ * - `policy.edit` — the prose and configuration ABOUT the gate: the agent
+ *   instructions, CI and release configuration, and whatever paths the policy
+ *   itself protects. Reviewable after the fact, and the only one of the three
+ *   a policy can sensibly sample.
  */
-const PROTECTED_FILENAMES: readonly string[] = [
-  "APPROVAL.md",
-  "APPROVALS.md",
-  "CLAUDE.md",
-  "AGENTS.md",
-  ".npmrc",
-];
+export type ProtectedPathClass = "log.mutate" | "policy.core" | "policy.edit";
+
+/**
+ * Files whose edit is `policy.core` wherever they sit: the policy itself,
+ * under either spelling.
+ */
+const CORE_FILENAMES: readonly string[] = ["APPROVAL.md", "APPROVALS.md"];
+
+/**
+ * Files whose edit is `policy.edit` wherever they sit: the agent instructions
+ * that carry the policy's authority in prose, and the release configuration.
+ */
+const PROTECTED_FILENAMES: readonly string[] = ["CLAUDE.md", "AGENTS.md", ".npmrc"];
 
 /** Split a path into segments, dropping `./` noise. Never touches the disk. */
 function pathSegments(candidate: string): string[] {
@@ -158,7 +179,7 @@ function matchesEntry(segments: readonly string[], entry: ProtectedEntry): boole
 }
 
 /**
- * Does this path name something only a human may write? (`policy.edit`.)
+ * Which protected class does this path name, if any? (APRV-198.)
  *
  * Deliberately name-based rather than location-based: the hook runs in whatever
  * directory the harness is in, and a classifier that resolved paths against a
@@ -166,42 +187,79 @@ function matchesEntry(segments: readonly string[], entry: ProtectedEntry): boole
  * false positive here costs one approval prompt; a false negative costs the
  * property the whole file exists to defend.
  *
+ * **The check order IS the precedence.** A path is answered by the strictest
+ * surface it names, `log.mutate` first, then `policy.core`, then
+ * `policy.edit`: `.approval/log/events.jsonl` is a log write and not merely an
+ * approval-home write, and a `policy.protected_paths` entry that happens to
+ * name a built-in surface cannot demote it, because the built-ins are matched
+ * before the policy's own list is read.
+ *
  * `extra` carries `policy.protected_paths` (APRV-107). It is strictly
  * ADDITIVE: the built-in set above is protected whatever a policy says, so a
- * policy can widen the protected surface and can never narrow it. Still pure —
- * the caller loads the policy, this function only matches segments.
+ * policy can widen the protected surface and can never narrow it, and every
+ * path it adds lands on `policy.edit` — the reviewable class — because a
+ * policy widening its own surface is naming prose and configuration, not
+ * minting authority over the gate's organs. Still pure: the caller loads the
+ * policy, this function only matches segments.
  */
-export function isProtectedPath(candidate: string, extra: readonly string[] = []): boolean {
-  if (candidate.length === 0) return false;
+export function protectedPathClass(
+  candidate: string,
+  extra: readonly string[] = [],
+): ProtectedPathClass | null {
+  if (candidate.length === 0) return null;
   const segments = pathSegments(candidate);
-  const last = segments[segments.length - 1];
-  if (last !== undefined && PROTECTED_FILENAMES.includes(last)) return true;
 
+  // 1. The log directory, before anything else that would call it a policy file.
+  for (let index = 0; index < segments.length; index += 1) {
+    if (segments[index] === ".approval" && segments[index + 1] === "log") return "log.mutate";
+  }
+
+  // 2. The gate's own organs.
+  const last = segments[segments.length - 1];
+  if (last !== undefined && CORE_FILENAMES.includes(last)) return "policy.core";
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index];
-    // The whole approval home: log, payload store, vault, environment map.
-    if (segment === ".approval") return true;
+    // The rest of the approval home: payload store, vault, keys, environment
+    // map, queue. The bare `.approval` directory itself lands here too.
+    if (segment === ".approval") return "policy.core";
     // The harness's own settings, which is where a hook is installed or removed.
     if (segment === ".claude") {
       const next = segments[index + 1];
-      if (next !== undefined && next.startsWith("settings")) return true;
+      if (next !== undefined && next.startsWith("settings")) return "policy.core";
     }
     // Cursor's equivalent surface: the hook install file, hook scripts, and
     // custom-agent prompts. An agent that could write those could write itself
-    // out of the gate (APRV-133).
+    // out of the gate (APRV-133), which is the `policy.core` property and not
+    // the prose one.
     if (segment === ".cursor") {
       const next = segments[index + 1];
-      if (next === "hooks.json" || next === "hooks" || next === "agents") return true;
+      if (next === "hooks.json" || next === "hooks" || next === "agents") return "policy.core";
     }
+  }
+
+  // 3. The prose and configuration about the gate.
+  if (last !== undefined && PROTECTED_FILENAMES.includes(last)) return "policy.edit";
+  for (let index = 0; index < segments.length; index += 1) {
     // CI configuration.
-    if (segment === ".github" && segments[index + 1] === "workflows") return true;
+    if (segments[index] === ".github" && segments[index + 1] === "workflows") return "policy.edit";
   }
 
   for (const raw of extra) {
     const entry = parseProtectedEntry(raw);
-    if (entry !== null && matchesEntry(segments, entry)) return true;
+    if (entry !== null && matchesEntry(segments, entry)) return "policy.edit";
   }
-  return false;
+  return null;
+}
+
+/**
+ * Does this path name something only a human may write?
+ *
+ * The boolean face of {@link protectedPathClass}, kept because two callers
+ * (`core/wysiwys.ts`'s protected-path view and the hook's file-tool gate) ask
+ * whether a path is protected at all before they ask which surface it is.
+ */
+export function isProtectedPath(candidate: string, extra: readonly string[] = []): boolean {
+  return protectedPathClass(candidate, extra) !== null;
 }
 
 // ===========================================================================
@@ -1263,6 +1321,40 @@ const INLINE_SOURCE_BINS: Readonly<Record<string, readonly string[]>> = {
 /** `VAR=value` prefixes, which are not the command. */
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
 
+/**
+ * Strictest-first, and the order is normative (APRV-198): a segment naming
+ * more than one protected path is answered by the most consequential of them.
+ */
+const PROTECTED_PRECEDENCE: readonly ProtectedPathClass[] = [
+  "log.mutate",
+  "policy.core",
+  "policy.edit",
+];
+
+/**
+ * The strictest protected surface named by these words, with the word itself.
+ *
+ * `null` when none of them is protected. The word is returned verbatim, which
+ * is what {@link ClassifiedSegment.path} carries to the approver.
+ */
+function strictestProtected(
+  words: readonly string[],
+  protectedPaths: readonly string[],
+): { surface: ProtectedPathClass; path: string } | null {
+  let best: { surface: ProtectedPathClass; path: string } | null = null;
+  for (const word of words) {
+    const surface = protectedPathClass(word, protectedPaths);
+    if (surface === null) continue;
+    if (
+      best === null ||
+      PROTECTED_PRECEDENCE.indexOf(surface) < PROTECTED_PRECEDENCE.indexOf(best.surface)
+    ) {
+      best = { surface, path: word };
+    }
+  }
+  return best;
+}
+
 /** Every class the table can emit, for docs and for the dogfood test. */
 export const CLASSIFIER_CLASSES: readonly string[] = (() => {
   const seen = new Set<string>();
@@ -1270,9 +1362,9 @@ export const CLASSIFIER_CLASSES: readonly string[] = (() => {
     seen.add(rule.class);
     for (const extra of rule.emits ?? []) seen.add(extra);
   }
-  // Emitted outside the binary table: the protected-path override, the
-  // redirect-write override, and the bare-assignment segment.
-  seen.add("policy.edit");
+  // Emitted outside the binary table: the three protected-path classes
+  // (APRV-198), the redirect-write override, and the bare-assignment segment.
+  for (const surface of PROTECTED_PRECEDENCE) seen.add(surface);
   seen.add("files.write.workspace");
   seen.add("read.shell");
   return [...seen].sort();
@@ -1330,9 +1422,19 @@ function classifySegment(segment: LexSegment, protectedPaths: readonly string[])
   const writeTargets = segment.redirects
     .filter((redirect) => redirect.op !== "<")
     .map((redirect) => redirect.target.text);
-  const protectedTarget = writeTargets.find((target) => isProtectedPath(target, protectedPaths));
-  if (protectedTarget !== undefined) {
-    return { ok: true, class: "policy.edit", rule: "redirect-protected", path: protectedTarget };
+  // A redirection onto a protected path is a write to that path, whatever the
+  // command in front of it was going to do. The CLASS says which surface was
+  // aimed at (APRV-198); the RULE stays `redirect-protected`, because the
+  // mechanism is unchanged and the hook's tiers and the channel's protected-path
+  // view are keyed on the rule.
+  const redirected = strictestProtected(writeTargets, protectedPaths);
+  if (redirected !== null) {
+    return {
+      ok: true,
+      class: redirected.surface,
+      rule: "redirect-protected",
+      path: redirected.path,
+    };
   }
 
   const bin = words[cursor];
@@ -1381,12 +1483,16 @@ function classifySegment(segment: LexSegment, protectedPaths: readonly string[])
   let cls = refined === null ? rule.class : refined.class;
   let ruleId = refined === null ? rule.id : refined.rule;
 
-  // A protected path anywhere in an effectful segment is `policy.edit`: the
-  // command is editing the rules, whatever else it is doing.
+  // A protected path anywhere in an effectful segment takes that path's class:
+  // the command is editing the gate, whatever else it is doing. Every
+  // positional is scanned, source and destination alike, so `cp` stays
+  // direction-blind — a copy OUT of the policy directory is as gated as a copy
+  // into it, because the classifier cannot tell which argument the binary will
+  // treat as the destination and guessing would be the ungated direction.
   if (!cls.startsWith("read.") && cls !== GATE_SELF_CLASS) {
-    const named = positionals.find((arg) => isProtectedPath(arg, protectedPaths));
-    if (named !== undefined) {
-      return { ok: true, class: "policy.edit", rule: "protected-path", path: named };
+    const named = strictestProtected(positionals, protectedPaths);
+    if (named !== null) {
+      return { ok: true, class: named.surface, rule: "protected-path", path: named.path };
     }
   }
 
@@ -1410,7 +1516,7 @@ function classifySegment(segment: LexSegment, protectedPaths: readonly string[])
  * `protectedPaths` is `policy.protected_paths` (APRV-107), added to the
  * built-in protected set rather than replacing it. Omitting it classifies
  * against the built-ins alone, which is the strictly narrower answer, so a
- * caller that forgets it under-reports `policy.edit` rather than inventing an
+ * caller that forgets it under-reports the protected classes rather than inventing an
  * authorization; every enforcement path passes the loaded policy's list.
  */
 export function classifyCommand(

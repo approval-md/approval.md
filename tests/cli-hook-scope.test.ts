@@ -344,7 +344,7 @@ test("a protected-path edit inside an agent worktree is prompted as a branch pro
   // The class is unchanged — policy semantics are untouched by this task — and
   // the request landed in the primary checkout's log (APRV-101).
   const log = rawLog(primary);
-  assert.match(log, /"class":"policy\.edit"/u);
+  assert.match(log, /"class":"policy\.core"/u);
   // The tier LEADS the headline, so it survives the summary's truncation.
   assert.match(log, /"summary":"branch proposal \(worktree session-1\): Edit /u);
 
@@ -367,7 +367,7 @@ test("the same edit against the primary checkout is prompted as live", (t: TestC
   assert.equal(verdictOf(run).permission, "deny");
 
   const log = rawLog(primary);
-  assert.match(log, /"class":"policy\.edit"/u);
+  assert.match(log, /"class":"policy\.core"/u);
   assert.doesNotMatch(log, /branch proposal/u);
 
   const prompt = promptFor(primary);
@@ -404,7 +404,7 @@ test("a lookalike path outside the primary's worktrees directory stays live-tier
 test("a protected name outside the gated checkout is labelled elsewhere, still gated", (t: TestContext) => {
   // The bug: a scratchpad APPROVAL.md classified identically to an edit of the
   // live policy, so every prompt read as a policy edit. The gate is unchanged
-  // (class policy.edit, manual) and only the label tells the truth.
+  // (class policy.core, manual) and only the label tells the truth.
   if (!haveGit()) {
     t.skip("git is not available on this host");
     return;
@@ -420,7 +420,7 @@ test("a protected name outside the gated checkout is labelled elsewhere, still g
   assert.match(verdict.reason, /^hook-timeout: /u);
 
   const log = rawLog(primary);
-  assert.match(log, /"class":"policy\.edit"/u);
+  assert.match(log, /"class":"policy\.core"/u);
   // The tier LEADS the headline, so it survives the summary's truncation.
   assert.match(
     log,
@@ -433,21 +433,21 @@ test("a protected name outside the gated checkout is labelled elsewhere, still g
   assertClean(primary);
 });
 
-/** The same policy, with `policy.edit` autonomous so a verdict carries its note. */
-const POLICY_EDIT_AUTONOMOUS = POLICY.replace(
+/** The same policy, with `policy.core` autonomous so a verdict carries its note. */
+const POLICY_CORE_AUTONOMOUS = POLICY.replace(
   "classes:",
-  ["classes:", "  policy.edit:", "    autonomy: autonomous"].join("\n"),
+  ["classes:", "  policy.core:", "    autonomy: autonomous"].join("\n"),
 );
 
 test("the elsewhere verdict note names the checkout and what the file is not", (t: TestContext) => {
   // The note rides on the verdict, which only carries one when the policy lets
-  // the call through, so this case makes `policy.edit` autonomous. The tier
+  // the call through, so this case makes `policy.core` autonomous. The tier
   // wording is the point; the class and the gate are pinned above.
   if (!haveGit()) {
     t.skip("git is not available on this host");
     return;
   }
-  const { primary } = repoWithAgentWorktree("tier-elsewhere-note", POLICY_EDIT_AUTONOMOUS);
+  const { primary } = repoWithAgentWorktree("tier-elsewhere-note", POLICY_CORE_AUTONOMOUS);
   const outside = join(scratch, "scratchpad-note");
   mkdirSync(outside, { recursive: true });
   const target = join(outside, "APPROVAL.md");
@@ -470,7 +470,7 @@ test("the live verdict note still says LIVE, unchanged by the third tier", (t: T
     t.skip("git is not available on this host");
     return;
   }
-  const { primary } = repoWithAgentWorktree("tier-live-note", POLICY_EDIT_AUTONOMOUS);
+  const { primary } = repoWithAgentWorktree("tier-live-note", POLICY_CORE_AUTONOMOUS);
   const target = join(primary, "APPROVAL.md");
 
   const run = runCli(HOOK, primary, editEvent(target, "tu-live-note"));

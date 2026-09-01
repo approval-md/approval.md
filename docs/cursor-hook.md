@@ -133,12 +133,17 @@ runs in: see [Rewriting unpublished history](#rewriting-unpublished-history).
 
 Four overrides sit on top of the table:
 
-- **`redirect-protected` / `protected-path` → `policy.edit`.** Any effectful
-  segment naming a protected path is `policy.edit`, redirect targets included.
-  The protected set is the built-ins plus `policy.protected_paths`. The
-  built-ins are `APPROVAL.md`, `APPROVALS.md`, `CLAUDE.md`, `AGENTS.md`,
-  `.npmrc`, anything under `.approval/`, `.claude/settings*`, `.cursor/hooks.json`, `.cursor/hooks/`,
-  `.cursor/agents/`, and `.github/workflows/`; they hold whatever the policy says, so a policy can
+- **`redirect-protected` / `protected-path` → `policy.edit`, `policy.core` or
+  `log.mutate`.** Any effectful segment naming a protected path takes that
+  path's class, redirect targets included, and every positional is scanned, so
+  `cp` is direction-blind. The protected set is the built-ins plus
+  `policy.protected_paths`, split three ways by consequence since APRV-198:
+  `log.mutate` for anything under `.approval/log/`; `policy.core` for
+  `APPROVAL.md`, `APPROVALS.md`, the rest of `.approval/`, `.claude/settings*`,
+  `.cursor/hooks.json`, `.cursor/hooks/` and `.cursor/agents/`; `policy.edit`
+  for `CLAUDE.md`, `AGENTS.md`, `.npmrc`, `.github/workflows/` and every
+  `policy.protected_paths` entry. The check order is the precedence, strictest
+  first. The built-ins hold whatever the policy says, so a policy can
   widen the protected surface and never narrow it. `policy.protected_paths`
   (SPEC.md §5.2, APRV-107) lists repo-relative paths: an exact file (`SPEC.md`,
   matched against a candidate's trailing segments, so a bare filename matches

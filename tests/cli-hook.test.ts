@@ -109,6 +109,13 @@ const POLICY = [
   "    autonomy: manual",
   "  policy.edit:",
   "    autonomy: manual",
+  // APRV-198 split the protected surface three ways; a fixture policy that
+  // declared only `policy.edit` would leave the other two on the manual
+  // default, which is the same answer by a less legible route.
+  "  policy.core:",
+  "    autonomy: manual",
+  "  log.mutate:",
+  "    autonomy: manual",
   "```",
   "",
 ].join("\n");
@@ -330,9 +337,9 @@ test("an ordinary file edit passes through; a policy file does not", () => {
   const verdict = verdictOf(protectedEdit);
   assert.equal(verdict.permission, "deny");
   assert.match(verdict.reason, /^hook-timeout: /u);
-  assert.notEqual(rawLog(dir), before, "the policy.edit request must reach the log");
+  assert.notEqual(rawLog(dir), before, "the policy.core request must reach the log");
   const log = rawLog(dir);
-  assert.match(log, /"class":"policy\.edit"/u);
+  assert.match(log, /"class":"policy\.core"/u);
   assertClean(dir);
 });
 
@@ -1619,7 +1626,7 @@ test("an edit to a policy-listed file is gated; the same file is ungated without
   const verdict = verdictOf(gated);
   assert.equal(verdict.permission, "deny");
   assert.match(verdict.reason, /^hook-timeout: /u);
-  assert.notEqual(rawLog(listed), before, "the policy.edit request must reach the log");
+  assert.notEqual(rawLog(listed), before, "the policy.core request must reach the log");
   assert.match(rawLog(listed), /"class":"policy\.edit"/u);
   assertClean(listed);
 
@@ -1784,7 +1791,7 @@ test("an Edit prompt shows the before/after diff, and the grant binds to those b
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "deny");
   assert.match(verdict.reason, /^hook-timeout: /u);
-  assert.match(rawLog(dir), /"class":"policy\.edit"/u);
+  assert.match(rawLog(dir), /"class":"policy\.core"/u);
 
   const prompt = promptFor(dir);
 
@@ -1902,7 +1909,7 @@ test("an identical retried edit adopts the same question; a changed one asks aga
 
   // The late tap authorizes the identical retry, once.
   const granted = runCli(
-    ["grant", "hook:sess-1:tu-edit-1:policy.edit", "--as", "human:carter"],
+    ["grant", "hook:sess-1:tu-edit-1:policy.core", "--as", "human:carter"],
     dir,
   );
   assert.equal(granted.code, 0, granted.stderr);
@@ -1913,7 +1920,7 @@ test("an identical retried edit adopts the same question; a changed one asks aga
   );
   const carried = verdictOf(retry);
   assert.equal(carried.permission, "allow", carried.reason);
-  assert.match(carried.reason, /carried: hook:sess-1:tu-edit-1:policy\.edit/u);
+  assert.match(carried.reason, /carried: hook:sess-1:tu-edit-1:policy\.core/u);
 
   // A DIFFERENT edit to the same file is a different question, and waits.
   const changed = runCli(
@@ -1924,6 +1931,6 @@ test("an identical retried edit adopts the same question; a changed one asks aga
   assert.equal(verdictOf(changed).permission, "deny");
   log = rawLog(dir);
   assert.equal(log.match(/"event":"approval\.requested"/gu)?.length, 2);
-  assert.match(log, /hook:sess-1:tu-edit-4:policy\.edit/u);
+  assert.match(log, /hook:sess-1:tu-edit-4:policy\.core/u);
   assertClean(dir);
 });

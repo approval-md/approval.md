@@ -19,6 +19,7 @@ import {
   classifyCommand,
   commandSegmentWords,
   isProtectedPath,
+  protectedPathClass,
   CLASSIFIER_CLASSES,
   COMMAND_RULES,
   GATE_SELF_CLASS,
@@ -201,14 +202,18 @@ const FIXTURES: readonly Fixture[] = [
   { command: "ls -la src", class: "read.shell", rule: "read-shell" },
   { command: "grep -rn TODO src", class: "read.shell", rule: "read-shell" },
 
-  // -- the overrides --------------------------------------------------------
-  { command: "echo hi > APPROVAL.md", class: "policy.edit", rule: "redirect-protected" },
+  // -- the overrides, split three ways (APRV-198) ---------------------------
+  // policy.edit: the prose and configuration ABOUT the gate.
   { command: "cp draft.md CLAUDE.md", class: "policy.edit", rule: "protected-path" },
-  { command: "rm -rf .approval/log", class: "policy.edit", rule: "protected-path" },
+  { command: "echo hi > CLAUDE.md", class: "policy.edit", rule: "redirect-protected" },
   { command: "cp x .github/workflows/ci.yml", class: "policy.edit", rule: "protected-path" },
-  { command: "cp x .cursor/hooks.json", class: "policy.edit", rule: "protected-path" },
-  { command: "rm -rf .cursor/hooks", class: "policy.edit", rule: "protected-path" },
-  { command: "tee .cursor/agents/x.md", class: "policy.edit", rule: "protected-path" },
+  // policy.core: the gate's own organs.
+  { command: "echo hi > APPROVAL.md", class: "policy.core", rule: "redirect-protected" },
+  { command: "cp x .cursor/hooks.json", class: "policy.core", rule: "protected-path" },
+  { command: "rm -rf .cursor/hooks", class: "policy.core", rule: "protected-path" },
+  { command: "tee .cursor/agents/x.md", class: "policy.core", rule: "protected-path" },
+  // log.mutate: anything aimed at the log directory.
+  { command: "rm -rf .approval/log", class: "log.mutate", rule: "protected-path" },
   { command: "ls src > listing.txt", class: "files.write.workspace", rule: "redirect-write" },
   { command: "APPROVAL_HUMAN=human:alice", class: "read.shell", rule: "assignment" },
   { command: "APPROVAL_HUMAN=human:alice approval queue", class: GATE_SELF_CLASS, rule: "approval" },
@@ -635,6 +640,133 @@ test("a malformed entry matches nothing rather than matching wildly", () => {
   // A glob is matched literally: it protects a file actually named `*.md`, and
   // never every `.md` in the tree.
   assert.equal(isProtectedPath("docs/notes.md", ["docs/*.md"]), false);
+});
+
+// ---------------------------------------------------------------------------
+// The protected split: policy.edit / policy.core / log.mutate (APRV-198)
+// ---------------------------------------------------------------------------
+
+/**
+ * One class per surface, pinned command by command.
+ *
+ * The split exists so a policy can sample prose edits without sampling edits to
+ * the gate itself, so the interesting rows are the ones that used to be one
+ * class: a redirect onto `APPROVAL.md`, an append onto the log, a `cp` out of
+ * the approval home. Every row here is a command an agent could plausibly type.
+ */
+const SPLIT_FIXTURES: ReadonlyArray<{ command: string; class: string }> = [
+  // -- policy.edit: prose and configuration about the gate -------------------
+  { command: "echo x >> CLAUDE.md", class: "policy.edit" },
+  { command: "sed -i '' s/a/b/ CLAUDE.md", class: "policy.edit" },
+  { command: "tee AGENTS.md", class: "policy.edit" },
+  { command: "mv notes.md AGENTS.md", class: "policy.edit" },
+  { command: "cp AGENTS.md /tmp/agents.md", class: "policy.edit" },
+  { command: "truncate -s 0 .npmrc", class: "policy.edit" },
+  { command: "git checkout -- .github/workflows/ci.yml", class: "policy.edit" },
+  { command: "mv ci.yml .github/workflows/ci.yml", class: "policy.edit" },
+
+  // -- policy.core: the gate's own organs ------------------------------------
+  { command: "echo x >> APPROVAL.md", class: "policy.core" },
+  { command: "sed -i '' s/manual/autonomous/ APPROVAL.md", class: "policy.core" },
+  { command: "tee APPROVAL.md", class: "policy.core" },
+  { command: "mv draft.md APPROVAL.md", class: "policy.core" },
+  // Direction-blind: a copy OUT of the gate's directory is as gated as one in.
+  { command: "cp APPROVAL.md /tmp/policy.md", class: "policy.core" },
+  { command: "cp /tmp/policy.md APPROVAL.md", class: "policy.core" },
+  { command: "cp .approval/env /tmp/env", class: "policy.core" },
+  { command: "truncate -s 0 .approval/QUEUE.md", class: "policy.core" },
+  { command: "rm -rf .approval/payloads", class: "policy.core" },
+  { command: "git checkout -- .approval/QUEUE.md", class: "policy.core" },
+  { command: "echo x > .claude/settings.json", class: "policy.core" },
+
+  // -- log.mutate: anything aimed at the log directory -----------------------
+  { command: "echo x >> .approval/log/events.jsonl", class: "log.mutate" },
+  { command: "echo x > .approval/log/events.jsonl", class: "log.mutate" },
+  { command: "tee -a .approval/log/events.jsonl", class: "log.mutate" },
+  { command: "truncate -s 0 .approval/log/events.jsonl", class: "log.mutate" },
+  { command: "mv /tmp/events.jsonl .approval/log/events.jsonl", class: "log.mutate" },
+  { command: "cp .approval/log/events.jsonl /tmp/events.jsonl", class: "log.mutate" },
+  { command: "rm .approval/log/events.jsonl", class: "log.mutate" },
+  { command: "git checkout -- .approval/log/events.jsonl", class: "log.mutate" },
+  { command: "sed -i '' s/granted/denied/ .approval/log/events.jsonl", class: "log.mutate" },
+  { command: "mv .approval/log /tmp/log", class: "log.mutate" },
+];
+
+for (const fixture of SPLIT_FIXTURES) {
+  test(`split: ${fixture.command} → ${fixture.class}`, () => {
+    const result = classifyCommand(fixture.command);
+    assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
+    if (!result.ok) return;
+    assert.deepEqual(result.classes, [fixture.class]);
+  });
+}
+
+test("the strictest surface answers a command naming more than one (APRV-198)", () => {
+  // The check order in `protectedPathClass` is the precedence, and a segment
+  // naming several protected paths takes the most consequential of them: a
+  // command that moves the policy file INTO the log directory is a log write.
+  const intoLog = classifyCommand("mv APPROVAL.md .approval/log/APPROVAL.md");
+  assert.ok(intoLog.ok);
+  assert.deepEqual(intoLog.classes, ["log.mutate"]);
+
+  const coreOverPolicy = classifyCommand("cp CLAUDE.md APPROVAL.md");
+  assert.ok(coreOverPolicy.ok);
+  assert.deepEqual(coreOverPolicy.classes, ["policy.core"]);
+});
+
+test("no protected touch reaches an autonomous class (APRV-198 AC4)", () => {
+  // The fail-closed half of the split. Whatever the surface and whatever the
+  // binary, a protected touch lands on one of the three gated classes; it must
+  // never come back as `files.write.workspace` (autonomous in this repo's own
+  // policy) or as a read.
+  const gated = ["policy.edit", "policy.core", "log.mutate"];
+  const touches = [
+    ...SPLIT_FIXTURES.map((fixture) => fixture.command),
+    // Surfaces with no fixture of their own, and shapes the table does not name.
+    "ln -s /tmp/evil APPROVAL.md",
+    "chmod 777 .approval/log",
+    "mkdir .approval/log/../log2",
+    "touch .approval/keys/id_ed25519",
+    "rmdir .approval",
+    "node build.mjs > APPROVAL.md",
+    "npm run build > .approval/log/events.jsonl",
+  ];
+  for (const command of touches) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, true, `${command}: ${result.ok ? "" : result.detail}`);
+    if (!result.ok) continue;
+    assert.ok(
+      result.classes.every((cls) => gated.includes(cls)),
+      `${command} classified ${result.classes.join(", ")}, which is not a gated protected class`,
+    );
+  }
+});
+
+test("protectedPathClass names the surface, strictest first", () => {
+  for (const [path, surface] of [
+    [".approval/log/events.jsonl", "log.mutate"],
+    ["/repo/.approval/log", "log.mutate"],
+    ["APPROVAL.md", "policy.core"],
+    ["./APPROVALS.md", "policy.core"],
+    ["/repo/.approval/vault.enc", "policy.core"],
+    [".approval", "policy.core"],
+    [".claude/settings.local.json", "policy.core"],
+    [".cursor/hooks.json", "policy.core"],
+    ["CLAUDE.md", "policy.edit"],
+    ["AGENTS.md", "policy.edit"],
+    [".npmrc", "policy.edit"],
+    [".github/workflows/ci.yml", "policy.edit"],
+  ] as const) {
+    assert.equal(protectedPathClass(path), surface, path);
+  }
+  for (const path of ["README.md", "src/core/gate.ts", ""]) {
+    assert.equal(protectedPathClass(path), null, path);
+  }
+  // A policy's own entries widen the reviewable class and never the core one,
+  // and they cannot demote a built-in surface: the built-ins match first.
+  assert.equal(protectedPathClass("SPEC.md", ["SPEC.md"]), "policy.edit");
+  assert.equal(protectedPathClass(".approval/env", [".approval/"]), "policy.core");
+  assert.equal(protectedPathClass(".approval/log/events.jsonl", [".approval/"]), "log.mutate");
 });
 
 test("classifyCommand routes the policy's paths to policy.edit", () => {
