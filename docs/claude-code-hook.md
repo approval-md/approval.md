@@ -467,6 +467,57 @@ so nobody hunts for a token that was deliberately never created.
   so on its face. It is bounded in one direction (SPEC.md §11.1 invariant 4): a
   reported failure accrues the loop streak, and only a completion clears one.
 - **A hook that fails to launch is an open gate.** See the install note above.
+- **A hook the harness never invokes leaves no trace at all** (APRV-151). Not a
+  deny, not a refused request, not a record of any kind: the session simply does
+  not appear in the log. Two protected-path edits reached agent-created
+  worktrees that way (SPEC.md on 2026-08-29, `.github/workflows/ci.yml` on
+  2026-08-30), and nothing in the runtime could have noticed, because every
+  other check here runs inside the session whose wiring is the thing in
+  question. The backstop is `scripts/protected-grant-guard.mjs`, described
+  below; it asks the question from outside.
 - **Latency.** Every gated tool call pays a Node start-up plus a verified read of
   the log. SPEC.md §13's post-v1 Rust fast-path is the accelerator for exactly
   this loop.
+
+## The backstop outside the session: `scripts/protected-grant-guard.mjs`
+
+Everything above runs inside the agent's session. That is the right place for a
+gate and the wrong place for the gate's own audit: a session whose harness never
+invoked the hook produces no evidence that it did not, so the runtime cannot
+tell such a session apart from one that never existed (APRV-151).
+
+The guard asks the same question where the answer does not depend on session
+wiring. Its inputs are a pull request's diff and the committed log:
+
+```sh
+node scripts/protected-grant-guard.mjs --base origin/main
+```
+
+For every changed path that is a protected path, it looks for an
+`approval.granted` record, for a `policy.edit` action, whose action was declared
+as a file-tool touch of that same file. Nothing else authorizes a protected
+change:
+
+- a request is not an answer, so pending, rejected, withdrawn and expired
+  requests count for nothing;
+- a `policy.edit` that came from a shell command (`git add SPEC.md && git
+  commit`) is a grant to run that command, and the bytes a human read were the
+  command line, not the diff; it does not stand in for the edit;
+- a grant older than the branch point is a grant somebody else was given. The
+  window floor is the head of the log the branch itself carries, which is frozen
+  at the commit the branch was cut from, since the daemon writes the log in the
+  primary checkout and never on a feature branch. `--since-seq` overrides it.
+
+Paths are anchored, never suffix-matched. A granted summary names an absolute
+path in whatever checkout minted it, a diff names a repository-relative one, and
+the checkout roots are read out of the log's own agent-worktree summaries
+(`<root>/.claude/worktrees/<name>/…` names its root exactly). A path the guard
+cannot anchor authorizes nothing, which is the same direction as every other
+failure here: an unreadable git state, an unreadable log, an unparseable summary
+and a missing policy all leave the change UNAUTHORIZED. Exit 0 is a clean
+verdict, 1 is at least one unauthorized change, and 2 is "could not establish an
+answer", which is also a failure.
+
+`policy.protected_paths` is read from BOTH sides of the diff and unioned, so a
+change that drops an entry cannot un-protect the file it was protecting on the
+way in. The built-in set needs no policy at all.
