@@ -16,11 +16,14 @@
  *   "The token never goes back into the chat" below.
  * - **It holds no decision state.** The only thing kept in memory is the map
  *   from a callback nonce to the action key it was issued for, which is
- *   delivery bookkeeping, not authorization. It is lost on restart; a restarted
- *   listener re-notifies the pending queue, and the buttons on the old messages
- *   stop resolving (they answer "unknown or expired request"). That is the
- *   documented, deliberate trade: an approval that survives a restart lives in
- *   the log, never in a channel's memory.
+ *   delivery bookkeeping, not authorization. It is lost on restart, and a
+ *   restarted listener re-notifies the pending queue. Since APRV-196 a button
+ *   also carries a digest of its action key, so a tap on a pre-restart copy
+ *   resolves to the request the new process is holding open and decides it;
+ *   what a lost map costs is a duplicate message, not a dead button. The trade
+ *   is unchanged and is the reason that works at all: an approval that survives
+ *   a restart lives in the log, never in a channel's memory, so the thing a
+ *   stale button resolves against is a request the LOG still calls pending.
  *
  * ## Zero dependencies
  *
@@ -180,6 +183,8 @@
  * and the log is not opened.
  */
 
+import { createHash } from "node:crypto";
+
 import type {
   ChannelBatch,
   ChannelDecision,
@@ -221,6 +226,27 @@ export const TELEGRAM_MAX_CALLBACK_BYTES = 64;
 
 /** The note recorded on a rejection collected from a button. */
 export const TELEGRAM_REJECT_NOTE = "rejected via telegram";
+
+/**
+ * The toast a tap gets when no branch produced one of its own (APRV-196).
+ *
+ * It is deliberately about the tap and not about the request: this text is only
+ * ever reached when the handler threw or forgot, which are exactly the states
+ * in which this process does not know what became of the request. Saying so is
+ * the honest answer, and it is still infinitely better than a button that spins.
+ */
+export const TELEGRAM_ACK_FALLBACK =
+  "Received — this listener could not finish reading your tap. Nothing was recorded by it; check the message above for the outcome.";
+
+/** Prefixed to the toast when the tap arrived on a pre-restart copy (APRV-196). */
+export const TELEGRAM_STALE_COPY_PREFIX = "Earlier copy of this request — ";
+
+/**
+ * The toast for a tap on a copy of an action this process is not holding open,
+ * when no verified-log probe is configured to say more (APRV-196).
+ */
+export const TELEGRAM_STALE_UNKNOWN =
+  "This request is not open here — it was already decided, it lapsed, or another listener holds it. Nothing was recorded.";
 
 /**
  * The headline of an ordinary single-request prompt.
@@ -418,6 +444,23 @@ export interface TelegramConfig {
    * reaches a human or the log reads this one.
    */
   now?: () => number;
+  /**
+   * What to tell a human who tapped a button for an action this process is not
+   * holding open (APRV-196). One sentence, or `null` for "nothing is known".
+   *
+   * Supplied by the listener, which reads the VERIFIED log and can therefore
+   * say whether the request was granted, rejected, revoked, expired or
+   * withdrawn. The channel asks the question and repeats the answer; it does
+   * not derive one, does not cache one, and could not, because the only thing
+   * that knows is the log.
+   *
+   * The argument is an {@link actionRefOf} digest rather than an action key,
+   * for the same reason the button carries one: the string came off the
+   * network, and the probe's job is to look for a record whose key hashes to
+   * it, never to trust a name it was handed. Optional, and absent by default —
+   * a channel with no probe falls back to a toast that names no outcome.
+   */
+  describeAction?: (actionRef: string) => string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +485,15 @@ export const TELEGRAM_ANOMALY_KINDS = [
   "unknown-callback",
   /** The action key carried in `callback_data` disagrees with the issued nonce. */
   "key-mismatch",
+  /**
+   * A tap on a copy of a request this process is no longer holding open
+   * (APRV-196): the nonce is not one of ours, and the action it names is not
+   * pending here either — it was decided, it lapsed, or another process owns
+   * it. Distinct from `unknown-callback` because the operator's question is
+   * different: nothing is wrong with the button, the question behind it is
+   * over. Always answered with a toast that names the state.
+   */
+  "stale-copy",
 ] as const;
 
 export type TelegramAnomalyKind = (typeof TELEGRAM_ANOMALY_KINDS)[number];
@@ -457,6 +509,14 @@ export interface TelegramStats {
   pollErrors: number;
   /** Ignored callbacks, by reason. Never a decision, never a log event. */
   anomalies: Record<TelegramAnomalyKind, number>;
+  /**
+   * Taps that arrived on a copy whose nonce this process never issued and were
+   * carried to the gate anyway, because the action they reference is one this
+   * process is holding open (APRV-196). Not an anomaly: it is the duplicate-copy
+   * trap being defused, and it is counted so an operator can see how often a
+   * restart is costing the approver a wrong tap.
+   */
+  staleCopyDecisions: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,21 +1152,50 @@ export function renderDigest(digest: DigestState): {
 // ---------------------------------------------------------------------------
 
 /**
- * `callback_data` for one button: `<g|r>:<nonce>[:<action key>]`.
+ * The stable short reference to an action key that a button carries (APRV-196).
  *
- * The **nonce is authoritative**, not the action key. Telegram caps
- * `callback_data` at 64 bytes, which many action keys already exceed, and — the
- * larger reason — the bytes come back from the network, so treating a key found
- * in them as the thing to decide would let anything that can reach the bot name
- * the action. The nonce is issued by this process at `notify` and resolves
- * through an in-memory map to the request that was actually delivered. The key
- * rides along when it fits, purely as a cross-check: a mismatch is an anomaly
- * and the callback is dropped.
+ * The first {@link ACTION_REF_HEX} hex characters of the key's sha256. Two
+ * properties earn it its place, and they are the two the old scheme lacked:
+ *
+ * 1. **It always fits.** `<verb>:<nonce>:<ref>` is well inside Telegram's
+ *    64-byte cap for any nonce this class issues, so the cross-check that used
+ *    to be dropped for a long action key is now always present.
+ * 2. **It survives a restart.** The nonce is per-process and per-copy; the ref
+ *    is a function of the action key alone, so two copies of the same request
+ *    delivered by two different listener processes carry the same ref. That is
+ *    what lets a tap on a pre-restart copy resolve to the request the current
+ *    process is holding, instead of dying as an unknown nonce.
+ *
+ * It is a REFERENCE and never an authorization. The bytes come back from the
+ * network, so a ref is only ever matched against deliveries THIS process made
+ * (and only from the configured chat); it can select among what the listener
+ * has itself put in front of the approver, and it can name nothing else.
+ */
+export const ACTION_REF_HEX = 16;
+
+export function actionRefOf(actionKey: string): string {
+  return createHash("sha256").update(actionKey, "utf8").digest("hex").slice(0, ACTION_REF_HEX);
+}
+
+/**
+ * `callback_data` for one button: `<g|r>:<nonce>:<action ref>`.
+ *
+ * The **nonce is authoritative** where it resolves: it is issued by this process
+ * at `notify` and maps to the request that was actually delivered, so an
+ * ordinary tap never consults the ref for anything but a cross-check (a
+ * mismatch is an anomaly and the callback is dropped). The ref is the fallback
+ * for the copy whose nonce this process never issued, and {@link actionRefOf}
+ * states the bound on what that fallback may reach.
  */
 export function callbackData(verb: "g" | "r", nonce: string, actionKey: string): string {
-  const withKey = `${verb}:${nonce}:${actionKey}`;
-  return Buffer.byteLength(withKey, "utf8") <= TELEGRAM_MAX_CALLBACK_BYTES
-    ? withKey
+  const withRef = `${verb}:${nonce}:${actionRefOf(actionKey)}`;
+  // Unreachable with the nonces this class issues, and kept because the failure
+  // it guards is the worst one available here: `callback_data` over the cap is
+  // refused by `sendMessage`, so an over-long nonce would stop DELIVERY rather
+  // than degrade a lookup. Dropping the reference costs a stale copy's tap its
+  // rescue and leaves every other property intact.
+  return Buffer.byteLength(withRef, "utf8") <= TELEGRAM_MAX_CALLBACK_BYTES
+    ? withRef
     : `${verb}:${nonce}`;
 }
 
@@ -1128,7 +1217,8 @@ interface ParsedCallback {
   /** `all` for a digest's "all" button; `one` for every per-request button. */
   scope: "one" | "all";
   nonce: string;
-  actionKey: string | null;
+  /** {@link actionRefOf} of the action this button was drawn for, when present. */
+  actionRef: string | null;
 }
 
 const CALLBACK_VERBS: Record<string, { decision: "grant" | "reject"; scope: "one" | "all" }> = {
@@ -1152,7 +1242,7 @@ export function parseCallbackData(data: unknown): ParsedCallback | null {
     decision: verb.decision,
     scope: verb.scope,
     nonce,
-    actionKey: second === -1 ? null : rest.slice(second + 1),
+    actionRef: second === -1 ? null : rest.slice(second + 1),
   };
 }
 
@@ -1209,6 +1299,8 @@ export interface TelegramListenOptions {
 /** One delivered request, as this process remembers it. Never a decision. */
 interface Delivery {
   actionKey: string;
+  /** {@link actionRefOf} of `actionKey`, precomputed for the APRV-196 lookup. */
+  actionRef: string;
   deliveryId: DeliveryId;
   batchDeliveryId?: DeliveryId;
   /** When this process sent it, on {@link TelegramConfig.now}'s clock (APRV-135). */
@@ -1246,8 +1338,17 @@ export class TelegramChannel implements TestableChannel {
   /** The policy's approval TTL, or `null` when it declares none (APRV-135). */
   private readonly approvalTtlMs: number | null;
   private readonly now: () => number;
+  /** The listener's verified-log probe for a stale tap (APRV-196), or null. */
+  private readonly describeAction: ((actionRef: string) => string | null) | null;
   /** When {@link sweep} last ran, so the poll loop can call it every cycle. */
   private lastSweepMs = Number.NEGATIVE_INFINITY;
+
+  /**
+   * The callback query being handled, and whether an ack has been attempted for
+   * it (APRV-196). Set and cleared by {@link handleUpdate}, which processes
+   * updates one at a time and awaits each.
+   */
+  private ack: { id: string; answered: boolean } | null = null;
 
   private handler: ((decision: ChannelDecision) => DecisionOutcome) | null = null;
   private readonly deliveries = new Map<string, Delivery>();
@@ -1271,7 +1372,9 @@ export class TelegramChannel implements TestableChannel {
       "malformed-callback": 0,
       "unknown-callback": 0,
       "key-mismatch": 0,
+      "stale-copy": 0,
     },
+    staleCopyDecisions: 0,
   };
 
   constructor(config: TelegramConfig) {
@@ -1290,6 +1393,7 @@ export class TelegramChannel implements TestableChannel {
       });
     this.approvalTtlMs = config.approvalTtlMs ?? null;
     this.now = config.now ?? (() => Date.now());
+    this.describeAction = config.describeAction ?? null;
     this.makeNonce =
       config.nonce ??
       (() => {
@@ -1450,6 +1554,7 @@ export class TelegramChannel implements TestableChannel {
     for (const member of state.members) {
       this.deliveries.set(member.nonce, {
         actionKey: member.actionKey,
+        actionRef: actionRefOf(member.actionKey),
         deliveryId,
         batchDeliveryId,
         deliveredAtMs,
@@ -1559,6 +1664,7 @@ export class TelegramChannel implements TestableChannel {
     this.counters.notified += 1;
     this.deliveries.set(nonce, {
       actionKey,
+      actionRef: actionRefOf(actionKey),
       deliveryId: sent.deliveryId,
       deliveredAtMs: this.now(),
       ...(batchDeliveryId === undefined ? {} : { batchDeliveryId }),
@@ -1579,8 +1685,11 @@ export class TelegramChannel implements TestableChannel {
    *
    * Called by {@link annotate} before the edit goes out, so a tap on a button
    * the edit does not manage to remove resolves to nothing and is answered as
-   * an `unknown-callback` rather than carried to the gate as a decision
-   * attempt. Forgetting is never the channel growing state.
+   * a `stale-copy` rather than carried to the gate as a decision attempt.
+   * Forgetting is never the channel growing state, and forgetting a SETTLED
+   * request is what stops APRV-196's action-reference fallback from finding it:
+   * the ladder rescues a tap on an old copy of a request still open here, and
+   * a decided one is not that.
    */
   private disarm(deliveryId: DeliveryId): string {
     let actionKey = "";
@@ -1624,8 +1733,9 @@ export class TelegramChannel implements TestableChannel {
    * reference a dropped entry, because the state in which no callback can still
    * be honoured is exactly the state in which the entry is dropped. A tap that
    * arrives anyway is answered by the stale-callback path a restarted
-   * listener's buttons already take — `unknown-callback`, counted, toasted,
-   * never carried to the gate.
+   * listener's buttons already take: `stale-copy` since APRV-196, counted,
+   * toasted with what the log says became of the request, never carried to the
+   * gate.
    *
    * Process memory only. No event, no message edit, no log read. `nowMs`
    * defaults to the configured clock and is a parameter so a test can run a
@@ -1777,6 +1887,30 @@ export class TelegramChannel implements TestableChannel {
     await this.annotate(deliveryId, TELEGRAM_TERMINAL_HEADLINES.withdrawn, [reason], actionKey);
   }
 
+  /**
+   * Send one plain message that carries no question (APRV-196).
+   *
+   * Used for the re-delivery banner the listener puts in front of a startup
+   * batch. It arms nothing, remembers nothing, and names no action key: a
+   * banner is a sentence about the messages that follow, and a reader who
+   * mistook it for a request would be a reader the banner had made worse off.
+   * `lines` are escaped here, exactly as everything else interpolated into an
+   * HTML-mode message is.
+   */
+  async announce(lines: string[]): Promise<DeliveryId> {
+    const result = await this.call<{ message_id: number }>("sendMessage", {
+      chat_id: this.chatId,
+      text: lines
+        .map((entry, index) =>
+          index === 0 ? `<b>${escapeHtml(entry)}</b>` : escapeHtml(entry),
+        )
+        .join("\n"),
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    });
+    return String(result.message_id);
+  }
+
   // -------------------------------------------------------------------------
   // Long polling
   // -------------------------------------------------------------------------
@@ -1864,6 +1998,24 @@ export class TelegramChannel implements TestableChannel {
     return result;
   }
 
+  /**
+   * Exactly one `answerCallbackQuery` per callback query, on every path
+   * (APRV-196).
+   *
+   * The incident this closes: a tap that reached no branch with a toast on it
+   * spun on the approver's phone until Telegram gave up, and the human — with
+   * no way to tell a swallowed tap from a slow one — tapped again. So the ack
+   * is a property of the WRAPPER rather than of each branch: every route below
+   * still writes its own, better sentence, and anything that fails to (a throw
+   * halfway through, a branch a later change forgets) is caught here and
+   * answered with {@link TELEGRAM_ACK_FALLBACK}.
+   *
+   * A thrown handler is answered and swallowed rather than propagated, and that
+   * is deliberate: `pollOnce` throwing puts `listen` into its backoff, so one
+   * malformed update would cost the whole batch and the poll after it. Nothing
+   * is lost by continuing — the gate has already appended whatever it appended,
+   * and the log is what says so.
+   */
   private async handleUpdate(
     update: Record<string, unknown>,
     result: TelegramPollResult,
@@ -1873,6 +2025,28 @@ export class TelegramChannel implements TestableChannel {
     const query = callback as Record<string, unknown>;
     const callbackId = typeof query["id"] === "string" ? query["id"] : "";
 
+    this.ack = { id: callbackId, answered: false };
+    try {
+      await this.routeCallback(query, callbackId, result);
+    } catch (cause) {
+      this.complain(
+        `approval: telegram failed while handling a callback: ${this.describe(cause)} — the tap is answered; whatever the gate appended stands`,
+      );
+      await this.safeAnswer(callbackId, TELEGRAM_ACK_FALLBACK);
+    } finally {
+      const pending = this.ack;
+      this.ack = null;
+      if (pending !== null && !pending.answered) {
+        await this.safeAnswer(callbackId, TELEGRAM_ACK_FALLBACK);
+      }
+    }
+  }
+
+  private async routeCallback(
+    query: Record<string, unknown>,
+    callbackId: string,
+    result: TelegramPollResult,
+  ): Promise<void> {
     const message = (query["message"] ?? {}) as Record<string, unknown>;
     const chat = (message["chat"] ?? {}) as Record<string, unknown>;
     const chatId = chat["id"] === undefined ? "" : String(chat["id"]);
@@ -1909,8 +2083,37 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
-    const delivery = this.deliveries.get(parsed.nonce);
+    // The resolution ladder (APRV-196). A tap is answered by the nonce when
+    // this process issued it, by the action reference when it did not, and by
+    // the log when neither is holding the action open.
+    let delivery = this.deliveries.get(parsed.nonce);
+    let viaStaleCopy = false;
+
+    if (delivery === undefined && parsed.actionRef !== null) {
+      // The pre-restart copy. Its nonce died with the process that issued it,
+      // but the request it names is one THIS process has since re-delivered, so
+      // the tap decides that request — on the live copy's message, which is
+      // where the annotation belongs. The bytes select among what this listener
+      // has itself put in this chat and can name nothing else; the gate then
+      // does everything it does for any other tap.
+      delivery = this.liveDeliveryFor(parsed.actionRef);
+      viaStaleCopy = delivery !== undefined;
+    }
+
     if (delivery === undefined) {
+      if (parsed.actionRef !== null) {
+        // Nothing open here for that action. Say what the log says, which is
+        // the only thing that knows: decided, lapsed, withdrawn, or unknown.
+        const described = this.describeAction?.(parsed.actionRef) ?? null;
+        await this.ignore(
+          result,
+          callbackId,
+          "stale-copy",
+          `no open delivery for action ref ${JSON.stringify(parsed.actionRef)} (an earlier copy of a request this listener is not holding open)`,
+          described ?? TELEGRAM_STALE_UNKNOWN,
+        );
+        return;
+      }
       await this.ignore(
         result,
         callbackId,
@@ -1925,12 +2128,12 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
-    if (parsed.actionKey !== null && parsed.actionKey !== delivery.actionKey) {
+    if (!viaStaleCopy && parsed.actionRef !== null && parsed.actionRef !== delivery.actionRef) {
       await this.ignore(
         result,
         callbackId,
         "key-mismatch",
-        `callback names ${JSON.stringify(parsed.actionKey)} but the nonce was issued for ${JSON.stringify(delivery.actionKey)}`,
+        `callback references ${JSON.stringify(parsed.actionRef)} but the nonce was issued for ${JSON.stringify(delivery.actionKey)}`,
         "That button does not match a delivered request.",
       );
       return;
@@ -1961,8 +2164,21 @@ export class TelegramChannel implements TestableChannel {
 
     const outcome = this.handler(decision);
     this.counters.decisions += 1;
+    if (viaStaleCopy) {
+      this.counters.staleCopyDecisions += 1;
+      this.complain(
+        `approval: telegram resolved a tap on an earlier copy of ${delivery.actionKey} to the live delivery (message ${delivery.deliveryId})`,
+      );
+    }
     result.outcomes.push({ action_key: delivery.actionKey, outcome });
-    await this.answer(callbackId, this.answerFor(decision, outcome));
+    // Best effort, and before the edit: the toast is what the tapping human is
+    // waiting on, and a Bot API that refuses it (a callback older than
+    // Telegram's own window, most often) must not cost them the annotation the
+    // message is about to get.
+    await this.safeAnswer(
+      callbackId,
+      `${viaStaleCopy ? TELEGRAM_STALE_COPY_PREFIX : ""}${this.answerFor(decision, outcome)}`,
+    );
 
     // APRV-113. The tap is now visible in the transcript, not only in a toast
     // that vanishes. The outcome word comes from the record the gate actually
@@ -2087,7 +2303,7 @@ export class TelegramChannel implements TestableChannel {
       refusals.length === 0
         ? `${word} ${landed} — one log event each.`
         : `${word} ${landed}; ${refusals.length} refused (${[...new Set(refusals)].join(", ")}). Nothing was recorded for those.`;
-    await this.answer(callbackId, summary);
+    await this.safeAnswer(callbackId, summary);
 
     try {
       await this.redraw(digest);
@@ -2137,19 +2353,60 @@ export class TelegramChannel implements TestableChannel {
     result.ignored.push({ kind, detail });
     this.complain(`approval: telegram ignored a callback (${kind}): ${detail}`);
     // A refusal toast is a courtesy, not part of the decision path: it is best
-    // effort and its failure is not the listener's problem.
-    if (callbackId.length > 0) {
-      try {
-        await this.answer(callbackId, reply);
-      } catch {
-        /* ignored: answering a stranger is best effort */
-      }
-    }
+    // effort and its failure is not the listener's problem. Through
+    // {@link safeAnswer} since APRV-196, so that this counts as THE ack for the
+    // query and `handleUpdate`'s guarantee does not add a second, vaguer one on
+    // top of the sentence this path already chose.
+    await this.safeAnswer(callbackId, reply);
   }
 
   private async answer(callbackId: string, text: string): Promise<void> {
     if (callbackId.length === 0) return;
     await this.call("answerCallbackQuery", { callback_query_id: callbackId, text });
+  }
+
+  /**
+   * Answer, and never throw (APRV-196).
+   *
+   * A toast is a courtesy on every path, including the successful one: the
+   * decision is already in the log by the time the ack is attempted, and an
+   * `answerCallbackQuery` that fails (Telegram drops a query after its own
+   * window, and a phone on a train produces plenty of late taps) must not
+   * abandon the annotation or push the poll loop into backoff.
+   *
+   * The attempt is recorded either way, so {@link handleUpdate}'s guarantee
+   * does not turn one failed ack into a second doomed call.
+   */
+  private async safeAnswer(callbackId: string, text: string): Promise<void> {
+    if (this.ack !== null && this.ack.id === callbackId) this.ack.answered = true;
+    if (callbackId.length === 0) return;
+    try {
+      await this.answer(callbackId, text);
+    } catch (cause) {
+      this.complain(
+        `approval: telegram could not answer a callback (${this.describe(cause)}) — the tap has no toast; the log is unaffected`,
+      );
+    }
+  }
+
+  /**
+   * The delivery this process is holding open for an action reference, if any
+   * (APRV-196).
+   *
+   * A linear walk of the delivery map rather than a second index: the map is
+   * bounded by the pending queue and swept (APRV-135), this runs only on the
+   * uncommon path where a nonce did not resolve, and a second map would be a
+   * second thing to keep in step with `disarm`, `settleMember` and `sweep` —
+   * three places where forgetting is the safety property.
+   *
+   * Digest members are eligible: a member's nonce is deleted the moment it is
+   * settled, so a member still in the map is one still armed on a live message.
+   */
+  private liveDeliveryFor(actionRef: string): Delivery | undefined {
+    for (const delivery of this.deliveries.values()) {
+      if (delivery.actionRef === actionRef) return delivery;
+    }
+    return undefined;
   }
 
   // -------------------------------------------------------------------------

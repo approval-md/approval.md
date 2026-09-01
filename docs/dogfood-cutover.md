@@ -114,9 +114,10 @@ exercised this; the order no longer matters.
 
 Two consequences worth knowing at the terminal. A restarted listener re-sends
 everything still pending, because the "already sent" set lives only in the
-process (SPEC.md §10.3: channels hold no state that is truth), and the buttons
-on the pre-restart messages stop resolving: a duplicate on the phone, never a
-request nobody sees. And a send that fails is retried on every later cycle
+process (SPEC.md §10.3: channels hold no state that is truth): a duplicate on
+the phone, never a request nobody sees. Since APRV-196 that re-delivery
+announces itself and the older copies keep working; the section below is the
+operator's view of it. And a send that fails is retried on every later cycle
 without an attempt limit, so a phone out of signal or a Bot API outage delays
 delivery rather than dropping it; the stderr warnings thin out after a few
 consecutive failures for the same request. Only a failure during the startup
@@ -132,6 +133,71 @@ above are the same behaviour, reached on a timer instead of by your hand.
 `approval channel web` needs no equivalent: it builds the queue from the log on
 every page load, so a refresh shows what is pending now. `approval channel cli`
 is one-shot by design; running the verb again is its refresh.
+
+### What a restart looks like on the phone (APRV-196)
+
+The re-delivery above used to arrive as a wall: five pending requests, five new
+messages with no warning, sitting under five older copies whose buttons had
+quietly stopped working. Taps on the older copies did nothing at all, so the
+natural response (tap it again, harder) was the one response that could not
+help. Three things changed.
+
+**A restart announces itself.** The first batch a listener process sends is
+preceded by one line: `LISTENER STARTED — re-sending N pending requests`,
+followed by the requests. A flood that says what it is is a re-delivery; the
+same flood in silence is an incident. Later cycles send no banner, because a
+request that arrives at 14:00 is a notification and not a re-delivery. The line
+says *started* rather than *restarted* because the listener genuinely cannot
+tell the two apart: it keeps nothing across a restart, on purpose.
+
+**Every copy's buttons work.** A button now carries a short digest of the action
+key alongside its own message nonce, so a tap on last night's copy resolves to
+the request this process is holding open and decides it, on the ordinary gate
+path, with one log event. You do not have to find the newest copy, and you
+cannot decide the same request twice by tapping two copies of it: the second tap
+finds the request already settled and says so. Older copies are not edited to
+say "superseded", and that is deliberate: a restart does not know their message
+ids, so a design that depended on editing them would work only when the crash
+was gentle. They are made harmless instead of tidy.
+
+**Every tap gets a toast.** A button never spins now. What the toast says is the
+useful part:
+
+| Toast | What happened |
+|---|---|
+| `Approved — recorded in the log.` / `Rejected — …` | The decision landed; the log has the event. |
+| `Earlier copy of this request — Approved — recorded in the log.` | You tapped an older copy. It decided the same request, once. |
+| `Already granted/rejected/revoked — the recorded answer stands…` | Someone (possibly you) already answered this, here or at another surface. Nothing was recorded for this tap. |
+| `Expired — the approval window closed…` | The TTL lapsed before an answer. Nothing was recorded; the requester must ask again. |
+| `Withdrawn — the requester took this back…` | The asker is gone. Nothing to do. |
+| `Still pending — this copy's buttons are not live here…` | The listener is holding the request but has not yet re-sent it. The new copy is seconds away. |
+| `This request is not open here…` | The listener could not place the request at all: another listener holds it, or the log it reads does not carry it. Check which checkout `approval up` is running in. |
+| `Received — this listener could not finish reading your tap.` | A bug or a transport failure mid-handling. Nothing was recorded by the tap; read the message above for the outcome and check the listener's stderr. |
+
+The toast is a courtesy and the log is the record: a toast that fails to send
+(Telegram drops a callback query after its own window, so a tap from a phone
+that was offline can arrive too late to answer) is reported on the listener's
+stderr and changes nothing about the decision.
+
+### When the phone channel misbehaves, decide at the CLI
+
+The phone is one channel, not the gate. Every decision the Telegram listener
+records goes through the same `decide()` as every other surface, so a dark
+channel (the bot is rate-limited, the listener will not start, the buttons are
+behaving strangely) is no reason to wait and no reason to work around the gate.
+Decide in the primary checkout:
+
+```sh
+approval queue                       # what is pending, from the verified log
+approval channel cli --interactive   # walk the queue, full payload, grant/reject
+approval grant <action-key>          # or answer one directly
+```
+
+This is what unblocked the APRV-182..185 wave while APRV-196 was still open, and
+it is the standing fallback. The decision is identical in the log; only the
+surface that collected it differs, and `approval.granted` records which one.
+Once the listener is healthy again it annotates the chat prompts it delivered
+with the outcome the log now carries, so the transcript catches up on its own.
 
 ## Drafts for the human's hands
 
