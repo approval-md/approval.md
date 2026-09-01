@@ -93,6 +93,7 @@ import {
 import { POLICY_AMEND_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { createProgress, silentProgress } from "./progress.js";
 import { readLineFromStdin } from "./prompt.js";
 import {
   refusal as renderRefusal,
@@ -968,7 +969,30 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   }
 
   const logPath = resolvePath(stringFlag(parsed.flags, "--log"), DEFAULT_LOG_PATH, cwd);
-  const read = readVerifiedRecords(logPath);
+
+  // (a-pre) The thirty-three seconds of silence, ended (APRV-167).
+  //
+  // Everything from here to the `Policy` block below is work the operator could
+  // not see: a full chain re-verification, then a baseline recovery that shells
+  // out to git. The verb said nothing until all of it was done, which read as a
+  // hang — one ceremony was abandoned mid-run over it and left this repository's
+  // gate fail-closed for every agent session until the next attempt.
+  //
+  // SILENT UNDER `--json`, and this is not a stylistic choice. This verb's
+  // machine surface is not stdout alone: a refusal under `--json` emits its
+  // error OBJECT on stderr (see `refuse`), and every caller parses that stream
+  // whole. Narration mixed into it would be a parse error in every machine
+  // consumer of a refusal — the progress meter would have broken the thing it
+  // was added beside. A human is the only reader who benefits from these lines,
+  // and `--json` is exactly the flag that says there is no human.
+  const progress = json ? silentProgress : createProgress(streams);
+  progress.phase("verifying the log chain before anything is read from it");
+  const read = readVerifiedRecords(logPath, {
+    onProgress: ({ done, total }) => {
+      progress.step(done, total);
+    },
+  });
+  progress.done();
   if (!read.ok) {
     const exitCode =
       read.code === "log-torn-tail"
@@ -1014,6 +1038,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   }
 
   // (b) The baseline, and only a verifiable one. See the module header.
+  progress.phase("recovering the attested baseline and diffing it against the live policy");
   const recovered = recoverBaseline(policyPath, attested?.sha256 ?? null);
   const liveLoad = loadPolicy({ file: policyPath });
   const diff =
@@ -1021,6 +1046,9 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       ? null
       : diffPolicies(recovered.load, liveLoad, SPEC_NAMESPACES);
   if (recovered.scratch !== null) rmSync(recovered.scratch, { recursive: true, force: true });
+  // Closed here, so the report below starts on a line of its own on a terminal
+  // and after the last phase line everywhere else.
+  progress.done();
 
   // (e-pre) Which ceremony this is: the direct one (commit on the branch you
   // are standing on and push it) or the branch one (branch, commit, push, PR).

@@ -309,6 +309,28 @@ so an exported log leaks no home directory. The event's payload is
 
 ## policy amend
 
+**Progress, on stderr.** The verb re-verifies the whole chain and recovers the
+attested baseline before it can print anything, and on a few-thousand-record log
+that is half a minute in which it used to say nothing at all. It reads as a
+hang, and a ceremony abandoned midway leaves the gate fail-closed for every
+session until someone runs it again. So it narrates: the phase it is on, and a
+record count for the verification, on stderr.
+
+```
+verifying the log chain before anything is read from it
+  250/3184 records
+  1750/3184 records
+  3184/3184 records
+recovering the attested baseline and diffing it against the live policy
+```
+
+A terminal gets the counts repainted onto one line under the phase name, erased
+when the phase closes. A pipe gets the lines above, newline-terminated, with no
+carriage return in them. `--json` gets NOTHING on either stream but its report:
+a `--json` refusal emits its error object on stderr and callers parse that
+stream whole, so narration there would break every machine consumer of a
+refusal.
+
 **Branch protection (the two flows).** A protected default branch rejects the
 push that would land the amendment, so this verb detects one and offers the flow
 that works. DIRECT is `git add` + `git commit` on the branch you are standing
