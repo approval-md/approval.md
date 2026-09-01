@@ -478,6 +478,128 @@ so nobody hunts for a token that was deliberately never created.
   so on its face. It is bounded in one direction (SPEC.md §11.1 invariant 4): a
   reported failure accrues the loop streak, and only a completion clears one.
 - **A hook that fails to launch is an open gate.** See the install note above.
+- **A hook the harness never invokes leaves no trace at all** (APRV-151). Not a
+  deny, not a refused request, not a record of any kind. Two protected-path
+  edits reached agent-created worktrees this way — SPEC.md on 2026-08-29,
+  `.github/workflows/ci.yml` on 2026-08-30 — and nothing in this runtime could
+  have noticed, because every other check on this page runs inside the session
+  whose wiring is the thing in question. Asking a session whether it is hooked
+  is asking the party under oversight to report its own oversight. The backstop
+  is `scripts/protected-path-guard.mjs`, below, which asks from outside.
 - **Latency.** Every gated tool call pays a Node start-up plus a verified read of
   the log. SPEC.md §13's post-v1 Rust fast-path is the accelerator for exactly
   this loop.
+
+## The backstop outside the session: `scripts/protected-path-guard.mjs`
+
+Everything above runs inside the agent's session, which is the right place for a
+gate and the wrong place for the gate's own audit. A session whose harness never
+invoked the hook produces no evidence that it did not, so from the log alone
+such a session is indistinguishable from one that never existed.
+
+The guard asks the same question where the answer cannot depend on session
+wiring: it takes two commits, asks git which protected paths changed between
+them, and requires for each one evidence in the committed hash-chained log that
+a human decided it.
+
+```sh
+node scripts/protected-path-guard.mjs --base "$(git merge-base origin/main HEAD)" --head HEAD
+```
+
+Exit 0 is a clean verdict, 1 is a protected path with no evidence (or a log that
+failed closed), 2 is usage, 4 is "the guard could not look". Every blob it reads
+comes from `git show <ref>:<path>`, never from the working tree: a guard that
+read the checkout could be told a different story than the pull request carries.
+
+### What counts as evidence
+
+Three verdicts pass, ordered by how much they prove.
+
+| verdict | what it establishes |
+|---|---|
+| `attested` | CONTENT-level. The policy file's bytes at the head commit hash to a digest some `policy.updated` record carries, which is what `approval policy amend --commit` writes. No grant is sought, which is how amendment pull requests pass — they have an attestation and would never have a `policy.edit` grant. |
+| `granted-file` | PATH-level. An `approval.granted` of class `policy.edit`/`policy.core` whose `payload_hash` resolves in the committed payload store to material whose `file` names this path. Since APRV-124 the hook binds the CHANGE rather than the touch, so this is a grant against the actual bytes. |
+| `granted-command` | PATH-level, one notch weaker. The granted command is re-run through this runtime's own `classifyCommand`, and it counts only when a segment classifies as a granting class BECAUSE of a word naming this path (`ClassifiedSegment.path`). A mention is not a grant: `cat SPEC.md` is `read.shell` and proves nothing. |
+
+There is deliberately **no class-level pass**. A `policy.edit` grant that exists
+but names some other file is not evidence that anybody saw this edit, and
+accepting it would let one approved edit launder every other edit beside it.
+Class-level grants appear in the failure text as diagnosis, never as a verdict.
+A grant whose payload the committed store does not carry is likewise not
+evidence, and the failure names those hashes.
+
+Where several grants qualify, the report names the strongest and then the
+nearest, rather than the first one it happened to find. A true verdict resting
+on a misleading reason is the kind of pass that survives review and then misleads
+whoever reads the log after an incident.
+
+### Grants go stale
+
+Naming the path is necessary and not sufficient, because grants accumulate
+forever: without a recency rule, a `git add SPEC.md` granted on 2026-08-20 passes
+a SPEC.md edit made on 2026-08-29, and any path ever approved is approved
+permanently. So evidence must also sit within seven days of the commit that
+introduced the change, **on either side of it**. Either side, because both
+orderings occur: a grant shortly before the commit is the ordinary case, and a
+grant shortly after is the grant-follows-write anomaly (APRV-200), which is a
+defect in its own right but a complete consent trail, and not this guard's to
+adjudicate.
+
+Two limits of that bound, stated rather than buried. A repeat edit to the same
+path inside the window still inherits the earlier grant; closing that needs
+hunk-level coverage, tracing every added region of the diff to the
+`after`/`content` bytes of some grant. And when git cannot date the change at
+all, no bound is applied rather than a weaker one invented — a bound against the
+head commit would pass everything, since every record in the log at head is
+already before it. The finding says which of the two it got, every time.
+
+### The log lags, so ordering is a rule
+
+The committed log on `main` trails the primary checkout's live log, because
+advances land periodically as records pull requests. A grant made this morning
+may not be on `main` yet, and the guard sees only the log the head commit
+carries. That is an ordering rule rather than a bug to paper over, and every
+failure states it: **the log advance carrying the grant must merge to `main`
+before or with the protected-path pull request.** Each failure also names the
+window it searched — the seq and timestamp range of the log at head — so a
+reader can tell "the grant is not there" from "the grant is newer than this log".
+
+### The evidence surface is not a protected write surface
+
+`.approval/` is protected wherever it sits, and a records pull request changes
+`.approval/log/events.jsonl`, the payload store beside it, and the regenerated
+`QUEUE.md`. Demanding a grant for those would demand a grant for the evidence
+and make it impossible to land the commits this guard reads. Exactly those three
+prefixes are exempt, and they are reported by name in the output rather than
+silently dropped. Everything else under `.approval/` — the vault, the
+environment map — is still a protected write.
+
+`policy.protected_paths` is read from BOTH sides of the diff and unioned, so a
+change that drops an entry cannot un-protect the file it was protecting on the
+way in. The built-in set of `core/command-class.ts` holds regardless, and the
+guard shares that predicate with the hook: a CI guard whose idea of "protected"
+drifted from the hook's would fail changes the hook already gated and pass ones
+it would have caught.
+
+### Fail closed
+
+A missing log (`log-missing`), a log that does not pass chain verification
+(`log-unverified`), and a protected path with no evidence (`no-evidence`) are all
+failures. The first two fire before any evidence is sought, so an unreadable log
+is never mistaken for "no protected paths changed", and records that have not
+passed verification are never read for evidence at all (SPEC.md §11.1 invariant 1
+applied to a new surface).
+
+### Prior art
+
+An earlier attempt at this guard is PR #169 (`scripts/protected-grant-guard.mjs`,
+unmerged). Two of its choices are worth recording because they differ. It
+anchored paths against checkout roots recovered from the log's own worktree
+summaries instead of matching path suffixes, which is stronger than what is
+implemented here and remains the better answer to "two files with the same
+repository-relative path in two checkouts". And it refused command-derived
+grants outright, on the ground that the bytes a human read were the command line
+and not the diff — correct as far as it goes, but it would fail the shell-granted
+`CLAUDE.md` edits this repository actually makes, so the classifier-checked
+`granted-command` verdict above is used instead. Its per-session census of hook
+task ids is what established the root cause recorded in APRV-151.
