@@ -124,6 +124,7 @@ process.stdout.write(JSON.stringify(result));
 interface Consumer {
   ok: boolean;
   code?: string;
+  message?: string;
   append?: { code: string; message: string };
   record?: EventRecord;
 }
@@ -465,6 +466,264 @@ test("two concurrent processes race one token: exactly one execution.started", a
     assert.match(String(loser.append?.message), /head moved/);
 
     // And the log the winner left behind is a clean chain.
+    assert.equal(verify(unit.logPath).status, "clean", `round ${round}: log not clean`);
+  }
+});
+
+// ===========================================================================
+// The benign race the hook used to lose (APRV-150)
+// ===========================================================================
+
+/**
+ * The incident, in miniature. Two sessions run under the Claude Code hook at
+ * the same time. Each resolves its command to an autonomous class, each reads
+ * the log head, each appends its own `execution.started` against that head. One
+ * lands second and is refused `head-moved` — correctly, because its checks were
+ * made against an older log — and the hook printed a DENY for a `git status` no
+ * human had a question about.
+ *
+ * The same harness as the two races above, and the same reason for it: the
+ * parent holds the append lock across both children's reads, so both are
+ * provably authorized by the same log and the second append provably meets a
+ * moved head. Nothing here writes a record by hand — every event in these logs
+ * is written by the real gate through the real append path.
+ *
+ * `attempts` is the seam that lets one harness pin both shapes. `1` is the
+ * pre-APRV-150 writer (one read, one set of checks, one append); the default is
+ * the fix.
+ */
+const STARTER_SOURCE = `
+import { existsSync, writeFileSync } from "node:fs";
+import { startHarnessExecution } from ${JSON.stringify(GATE_MODULE)};
+
+const [logPath, task, actionKey, cls, hash, ts, actor, policyFile, attempts, ready, go] =
+  process.argv.slice(2);
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+writeFileSync(ready, "ready", "utf8");
+while (!existsSync(go)) sleep(2);
+
+const options = { policy: { file: policyFile }, clock: () => ts };
+if (attempts !== "default") options.retryOnHeadMoved = Number(attempts);
+
+const result = startHarnessExecution(
+  logPath,
+  { task, actionKey, cls, payload_hash: hash },
+  actor,
+  options,
+);
+process.stdout.write(
+  JSON.stringify({
+    ok: result.ok,
+    code: result.code,
+    message: result.message,
+    append: result.append,
+  }),
+);
+`;
+
+const HARNESS_TASK = "task-150";
+const HARNESS_CLASS = "read.shell";
+
+/** An attested policy where `read.shell` needs no human, with an optional ceiling. */
+function harnessPolicy(dailyActions: number | null): string {
+  return [
+    "# Policy",
+    "",
+    "```yaml approval-policy",
+    'version: "0.1"',
+    "defaults:",
+    "  autonomy: manual",
+    '  approval_ttl: "1h"',
+    ...(dailyActions === null
+      ? []
+      : ["budgets:", "  global:", `    daily_actions: ${String(dailyActions)}`]),
+    "classes:",
+    `  ${HARNESS_CLASS}:`,
+    "    autonomy: autonomous",
+    "```",
+    "",
+  ].join("\n");
+}
+
+/** A log holding exactly one attestation: the state a fresh session starts in. */
+function harnessCase(dailyActions: number | null = null): RaceCase {
+  counter += 1;
+  const dir = join(scratch, `race-${counter}`);
+  mkdirSync(dir, { recursive: true });
+  const policyPath = join(dir, "APPROVAL.md");
+  writeFileSync(policyPath, harnessPolicy(dailyActions), "utf8");
+  const logPath = join(dir, ".approval", "log", "events.jsonl");
+
+  assert.equal(appendAttestation(logPath, policyPath, "human:carter", T0).ok, true);
+  return { dir, logPath, policyPath, token: "" };
+}
+
+/** Two harness starts, forced to authorize themselves against the same log. */
+async function raceHarnessStarts(
+  script: string,
+  unit: RaceCase,
+  keys: [string, string],
+  attempts: "default" | number,
+): Promise<Consumer[]> {
+  const go = join(unit.dir, "go");
+  const readyA = join(unit.dir, "ready-a");
+  const readyB = join(unit.dir, "ready-b");
+  const lock = `${unit.logPath}.lock`;
+
+  // Nothing can be appended until the parent lets go, so both children
+  // necessarily verify against the same head.
+  closeSync(openSync(lock, "wx"));
+
+  const children = keys.map((key, index) =>
+    runChild(script, [
+      unit.logPath,
+      HARNESS_TASK,
+      key,
+      HARNESS_CLASS,
+      PAYLOAD_HASH,
+      at(3),
+      index === 0 ? "agent:claude" : "agent:mallory",
+      unit.policyPath,
+      attempts === "default" ? "default" : String(attempts),
+      index === 0 ? readyA : readyB,
+      go,
+    ]),
+  );
+
+  const deadline = Date.now() + 10_000;
+  while (!(existsSync(readyA) && existsSync(readyB))) {
+    assert.ok(Date.now() < deadline, "children never signalled ready");
+    sleep(5);
+  }
+
+  writeFileSync(go, "go", "utf8");
+  // Both children read the log and reach `appendEvent` inside this window,
+  // where they block on the lock the parent still holds.
+  sleep(250);
+  unlinkSync(lock);
+
+  return await Promise.all(children);
+}
+
+function startsIn(logPath: string): EventRecord[] {
+  return records(logPath).filter((record) => record.event === "execution.started");
+}
+
+test("an unretried harness start that loses the race is denied head-moved (the pre-APRV-150 shape)", async () => {
+  const script = join(scratch, "harness-start.mjs");
+  writeFileSync(script, STARTER_SOURCE, "utf8");
+
+  for (let round = 1; round <= 3; round += 1) {
+    const unit = harnessCase();
+    const outcomes = await raceHarnessStarts(
+      script,
+      unit,
+      [`${HARNESS_TASK}:a`, `${HARNESS_TASK}:b`],
+      1,
+    );
+
+    const winners = outcomes.filter((outcome) => outcome.ok);
+    const losers = outcomes.filter((outcome) => !outcome.ok);
+    assert.equal(winners.length, 1, `round ${round}: expected exactly one winner`);
+    assert.equal(losers.length, 1, `round ${round}: expected exactly one loser`);
+
+    // The defect, pinned: two commands, two different idempotency keys, no
+    // shared verdict of any kind, and one of them denied because the other
+    // wrote first.
+    const loser = losers[0] as Consumer;
+    assert.equal(loser.code, "append-failed", `round ${round}: ${JSON.stringify(loser)}`);
+    assert.equal(loser.append?.code, "head-moved", `round ${round}: ${JSON.stringify(loser)}`);
+    assert.equal(startsIn(unit.logPath).length, 1, `round ${round}: expected one start`);
+    assert.equal(verify(unit.logPath).status, "clean", `round ${round}: log not clean`);
+  }
+});
+
+test("a harness start that loses the race re-derives its verdict and lands (APRV-150)", async () => {
+  const script = join(scratch, "harness-start.mjs");
+  writeFileSync(script, STARTER_SOURCE, "utf8");
+
+  for (let round = 1; round <= 3; round += 1) {
+    const unit = harnessCase();
+    const outcomes = await raceHarnessStarts(
+      script,
+      unit,
+      [`${HARNESS_TASK}:a`, `${HARNESS_TASK}:b`],
+      "default",
+    );
+
+    // Both commands were autonomous under an attested policy and neither
+    // verdict depended on the other's record. Both run.
+    for (const outcome of outcomes) {
+      assert.equal(outcome.ok, true, `round ${round}: ${JSON.stringify(outcome)}`);
+    }
+    assert.equal(startsIn(unit.logPath).length, 2, `round ${round}: expected two starts`);
+    assert.equal(verify(unit.logPath).status, "clean", `round ${round}: log not clean`);
+  }
+});
+
+test("the retry re-derives rather than re-appends: a spent key is refused already-executed", async () => {
+  const script = join(scratch, "harness-start.mjs");
+  writeFileSync(script, STARTER_SOURCE, "utf8");
+
+  for (let round = 1; round <= 3; round += 1) {
+    const unit = harnessCase();
+    // The state that flips between the read and the append: both racers hold
+    // the SAME idempotency key, so the winner's record makes the loser's key
+    // single-use-spent. A blind re-append would write a second start for one
+    // key; re-running the checks refuses it.
+    const outcomes = await raceHarnessStarts(
+      script,
+      unit,
+      [`${HARNESS_TASK}:shared`, `${HARNESS_TASK}:shared`],
+      "default",
+    );
+
+    const winners = outcomes.filter((outcome) => outcome.ok);
+    const losers = outcomes.filter((outcome) => !outcome.ok);
+    assert.equal(winners.length, 1, `round ${round}: expected exactly one winner`);
+    assert.equal(losers.length, 1, `round ${round}: expected exactly one loser`);
+
+    const loser = losers[0] as Consumer;
+    // The NEW verdict, in the gate's own vocabulary: not the stale one, and not
+    // the lost race.
+    assert.equal(loser.code, "already-executed", `round ${round}: ${JSON.stringify(loser)}`);
+    assert.equal(startsIn(unit.logPath).length, 1, `round ${round}: an idempotency key ran twice`);
+    assert.equal(verify(unit.logPath).status, "clean", `round ${round}: log not clean`);
+  }
+});
+
+test("the retry re-derives the budget: a ceiling reached in the window is enforced", async () => {
+  const script = join(scratch, "harness-start.mjs");
+  writeFileSync(script, STARTER_SOURCE, "utf8");
+
+  for (let round = 1; round <= 3; round += 1) {
+    // One action a day, globally. Both racers pass the budget check against the
+    // log they read; the winner's start consumes the whole ceiling.
+    const unit = harnessCase(1);
+    const outcomes = await raceHarnessStarts(
+      script,
+      unit,
+      [`${HARNESS_TASK}:a`, `${HARNESS_TASK}:b`],
+      "default",
+    );
+
+    const winners = outcomes.filter((outcome) => outcome.ok);
+    const losers = outcomes.filter((outcome) => !outcome.ok);
+    assert.equal(winners.length, 1, `round ${round}: expected exactly one winner`);
+    assert.equal(losers.length, 1, `round ${round}: expected exactly one loser`);
+
+    const loser = losers[0] as Consumer;
+    assert.equal(loser.code, "budget-exceeded", `round ${round}: ${JSON.stringify(loser)}`);
+    assert.equal(startsIn(unit.logPath).length, 1, `round ${round}: the ceiling was exceeded`);
+    assert.equal(
+      records(unit.logPath).filter((record) => record.event === "budget.exceeded").length,
+      1,
+      `round ${round}: the refusal left no budget.exceeded record`,
+    );
     assert.equal(verify(unit.logPath).status, "clean", `round ${round}: log not clean`);
   }
 });
