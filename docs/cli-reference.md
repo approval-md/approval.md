@@ -1382,6 +1382,15 @@ The checks, at length:
   or ACL prompt, and a diagnostic must never hang or ask a human for a password.
   Value-free by construction: it reads each variable's status and source and
   never its value, on any path.
+- **keychain-scope** — whose keystore items this instance's `.approval/env`
+  names, answered from the NAMES alone so that it too can never block on an
+  unlock dialog. FAIL for an item whose eight-hex scope suffix belongs to
+  another instance: two gates pointed at one credential is how a demo instance
+  ended up sending through the production bot and eating its approval taps.
+  SKIP, named, for the unscoped pre-APRV-178 item every gate on the machine
+  resolves alike, and for a value inherited from the shell while the file names
+  a source of its own — both are correct configurations that become somebody
+  else's problem the moment a second instance exists.
 
 **`--json`** (one object on stdout):
 
@@ -1393,8 +1402,8 @@ The checks, at length:
 
 `status` is `pass` | `fail` | `skip`. `fix` is present only when there is
 something to do, and it always begins with a runnable command. `ok` is true when
-no check failed; a skip does not make it false. The eleven checks always appear,
-in the order listed above.
+no check failed; a skip does not make it false. Every check always appears, in
+the order listed above.
 
 `--root <path>` is TEST-ONLY: it points the build-freshness check at another tree
 and moves no other check. Real invocations never pass it, because freshness is
@@ -2617,10 +2626,23 @@ neither                      offered as a PLAINTEXT literal in .approval/env,
                              taken only on a typed `yes`, and reported as
                              plaintext by `approval env --check` ever after
 
-approval-tg-token            the bot token
-approval-vault-passphrase    the vault passphrase
-approval-sampling-secret     the audit sampling secret
+approval-tg-token-<id>            the bot token
+approval-vault-passphrase-<id>    the vault passphrase
+approval-sampling-secret-<id>     the audit sampling secret
 ```
+
+`<id>` is eight hex digits derived from this instance's `.approval` directory,
+because a keystore is machine-global and everything else about an instance is
+directory-scoped. Without it, a second gate in another directory stores its bot
+token over the first one's item and then reads the first one's token back: two
+listeners long-poll one bot, and an approval tap is answered by whichever asked
+for updates first. `approval doctor`'s `keychain-scope` row reports the id and
+says whether every source `.approval/env` names is this instance's own.
+
+Names without the suffix are the pre-APRV-178 spelling and still resolve, since
+`.approval/env` carries the service name in the open. `setup channel telegram`
+asks before adopting one — naming the item, this instance's directory and its id
+— and takes only a `yes` typed in full.
 
 What it writes is `.approval/env` (one `KEY=VALUE` line per variable, mode 0600,
 every other line and comment preserved) and items in the OS keystore.

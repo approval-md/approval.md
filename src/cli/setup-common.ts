@@ -44,6 +44,12 @@ import {
   envFilePathFor,
   type EnvFileRefusal,
 } from "../core/env-file.js";
+import {
+  LEGACY_SERVICE_SAMPLING_SECRET,
+  LEGACY_SERVICE_TELEGRAM_TOKEN,
+  LEGACY_SERVICE_VAULT_PASSPHRASE,
+  scopedService,
+} from "../core/instance.js";
 import { loadPolicy, type PolicyLoadResult } from "../core/policy-load.js";
 import { telegramChatEnvFor, telegramTokenEnvFor } from "../core/telegram-config.js";
 import { passphraseEnvFor } from "../core/vault.js";
@@ -63,16 +69,34 @@ import { usageErrorText } from "./usage.js";
 // ---------------------------------------------------------------------------
 
 /**
- * The keystore item names, one per secret. Fixed strings rather than a flag:
- * an operator reading `.approval/env` sees the service name in the file itself
- * (`keychain:approval-tg-token`), so the name is already discoverable, and a
- * `--service-prefix` would add a way for two checkouts to disagree about which
- * item is which without adding a capability the file's own value does not
- * already have.
+ * The keystore item names, one per secret, SCOPED TO THIS INSTANCE (APRV-178).
+ *
+ * They were three fixed strings until a demo gate in another directory stored
+ * its bot token over the production gate's item, read the production token
+ * back, and had a human's approval tap consumed by the wrong listener. A
+ * keystore is machine-global and the filesystem scoping every other part of an
+ * instance has was simply missing here; `core/instance.ts` carries the whole
+ * reasoning and the shape of the suffix.
+ *
+ * Still not a flag. An operator reading `.approval/env` sees the service name
+ * in the file itself (`keychain:approval-tg-token-3f2a9c11`), so the name is
+ * discoverable, and a `--service-prefix` would add a way for two checkouts to
+ * disagree about which item is which — which is the bug, not the fix.
  */
-export const SERVICE_TELEGRAM_TOKEN = "approval-tg-token";
-export const SERVICE_VAULT_PASSPHRASE = "approval-vault-passphrase";
-export const SERVICE_SAMPLING_SECRET = "approval-sampling-secret";
+export interface ServiceNames {
+  telegramToken: string;
+  vaultPassphrase: string;
+  samplingSecret: string;
+}
+
+/** The three item names the instance owning `logPath` reads and writes. */
+export function servicesFor(logPath: string): ServiceNames {
+  return {
+    telegramToken: scopedService(LEGACY_SERVICE_TELEGRAM_TOKEN, logPath),
+    vaultPassphrase: scopedService(LEGACY_SERVICE_VAULT_PASSPHRASE, logPath),
+    samplingSecret: scopedService(LEGACY_SERVICE_SAMPLING_SECRET, logPath),
+  };
+}
 
 /**
  * The variable a sampling secret goes into when the policy names none. The
@@ -412,6 +436,8 @@ export interface Context {
   load: PolicyLoadResult;
   logPath: string;
   envPath: string;
+  /** This instance's keystore item names (APRV-178). */
+  services: ServiceNames;
   apiBase: string;
   generate: () => string;
   pollTimeoutSeconds: number;
@@ -428,6 +454,12 @@ export type FrontOutcome = { kind: "handled"; code: number } | ({ kind: "run" } 
 export interface HintContext {
   envPath: string;
   kind: KeystoreKind;
+  /**
+   * The instance's item names. A hint that printed the unscoped legacy name
+   * would teach the operator to create by hand exactly the shared item
+   * APRV-178 exists to stop.
+   */
+  services: ServiceNames;
   passphraseEnv: string;
   samplingEnv: string;
   tokenEnv: string;
@@ -445,10 +477,12 @@ export function hintContextFor(
   load: PolicyLoadResult,
   envPath: string,
   kind: KeystoreKind,
+  services: ServiceNames,
 ): HintContext {
   return {
     envPath,
     kind,
+    services,
     passphraseEnv: passphraseEnvFor(load),
     samplingEnv: samplingEnvName(load) ?? DEFAULT_SAMPLING_ENV,
     tokenEnv: telegramTokenEnvFor(load),
@@ -505,6 +539,7 @@ export function front(
 
   const keystore = deps.keystore ?? defaultKeystoreRunner;
   const kind = keystore.kind();
+  const services = servicesFor(logPath);
   const prompter = deps.prompter ?? createPrompter(streams);
 
   if (json || prompter === null) {
@@ -513,7 +548,7 @@ export function front(
         json
           ? "--json was given"
           : "stdin is not a terminal"
-      }. Nothing was written.\n\nIdentity is declared, not proved, so establishing it — and the credentials beside it — is an act of the human at the machine, not something a pipe or a CI job can do. The non-interactive path is explicit, and here it is:\n\n${nonInteractiveHint(hintContextFor(load, envPath, kind))}\n\nThen check it with \`approval env --check\`, which prints no values.\n`,
+      }. Nothing was written.\n\nIdentity is declared, not proved, so establishing it — and the credentials beside it — is an act of the human at the machine, not something a pipe or a CI job can do. The non-interactive path is explicit, and here it is:\n\n${nonInteractiveHint(hintContextFor(load, envPath, kind, services))}\n\nThen check it with \`approval env --check\`, which prints no values.\n`,
     );
     return { kind: "handled", code: EXIT_USAGE };
   }
@@ -528,6 +563,7 @@ export function front(
     load,
     logPath,
     envPath,
+    services,
     apiBase: deps.apiBase ?? stringFlag(parsed.flags, "--api-base") ?? TELEGRAM_DEFAULT_API_BASE,
     generate: deps.generate ?? (() => randomBytes(32).toString("base64")),
     pollTimeoutSeconds: deps.pollTimeoutSeconds ?? POLL_TIMEOUT_SECONDS,

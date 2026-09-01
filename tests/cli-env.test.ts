@@ -246,6 +246,8 @@ interface EnvJson {
     value?: string;
     fix?: string;
     refusal?: { code: string; message: string };
+    /** APRV-178: what the FILE said, even when the shell won. Value-free. */
+    file_source?: { kind: string; service?: string; line: number };
   }>;
 }
 
@@ -445,6 +447,30 @@ test("an already-exported value wins and the file's line is not consulted", () =
   const token = variable(parsed, "APPROVAL_TG_TOKEN");
   assert.equal(token.status, "set-in-environment");
   assert.match(token.source, /already exported/u);
+});
+
+test("--check names the bleed when the shell's value overrides the instance's own line (APRV-178)", () => {
+  const home = makeHome({ env: "APPROVAL_TG_TOKEN=keychain:approval-tg-token-deadbeef\n" });
+
+  const bled = runCli(["env", "--check"], home, { env: { APPROVAL_TG_TOKEN: TOKEN } });
+  assert.match(bled.stdout, /CROSS-INSTANCE BLEED/u);
+  assert.match(bled.stdout, /APPROVAL_TG_TOKEN is set in this shell/u);
+  assert.match(bled.stdout, /keychain:approval-tg-token-deadbeef/u);
+  assert.match(bled.stdout, /unset APPROVAL_TG_TOKEN/u);
+  assert.equal(bled.stdout.includes(TOKEN), false, "--check printed the value it warned about");
+
+  // The same file with nothing exported: no disagreement, so nothing is said.
+  const quiet = runCli(["env", "--check"], home);
+  assert.doesNotMatch(quiet.stdout, /CROSS-INSTANCE BLEED/u);
+
+  // And the machine path carries the file's own source, value-free, so a
+  // caller can make the same comparison.
+  const { parsed } = envJson(home, ["--check"], { env: { APPROVAL_TG_TOKEN: TOKEN } });
+  assert.deepEqual(variable(parsed, "APPROVAL_TG_TOKEN").file_source, {
+    kind: "keychain",
+    service: "approval-tg-token-deadbeef",
+    line: 1,
+  });
 });
 
 test("env: means inherited — set in the shell it is set, unset it is unset", () => {

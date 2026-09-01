@@ -54,6 +54,7 @@
  */
 
 import type { CredentialSpec } from "../core/credential-spec.js";
+import { LEGACY_SERVICE_TELEGRAM_TOKEN, instanceHomeFor, instanceIdFor } from "../core/instance.js";
 import type { PolicyLoadResult } from "../core/policy-load.js";
 import {
   telegramChatEnvFor,
@@ -66,7 +67,6 @@ import { SETUP_CHANNEL_HELP, SETUP_CHANNEL_TELEGRAM_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import {
   PROBE_TIMEOUT_MS,
-  SERVICE_TELEGRAM_TOKEN,
   detail,
   front,
   offerLiteral,
@@ -251,7 +251,7 @@ function candidatesFrom(updates: unknown): Candidate[] {
 // ---------------------------------------------------------------------------
 
 const TELEGRAM_HINT = (where: HintContext): string =>
-  `  # 1. store the bot token (the helper prompts for it with NO ECHO; the token is\n  #    never an argument, so it never reaches your shell history or \`ps\`):\n  ${storageCommand(where.kind === "none" ? "keychain" : where.kind, SERVICE_TELEGRAM_TOKEN)}\n\n  # 2. find the chat id — send your bot a message first, then:\n  curl -s "https://api.telegram.org/bot<token>/getUpdates" \\\n    | grep -o '"chat":{"id":[-0-9]*' | head -1\n\n  # 3. record both (a chat id is not a secret):\n  printf '%s\\n' '${where.tokenEnv}=${schemeFor(where.kind === "none" ? "keychain" : where.kind, SERVICE_TELEGRAM_TOKEN) ?? ""}' '${where.chatEnv}=<id>' >> ${where.envPath}\n  chmod 600 ${where.envPath}`;
+  `  # 1. store the bot token (the helper prompts for it with NO ECHO; the token is\n  #    never an argument, so it never reaches your shell history or \`ps\`):\n  ${storageCommand(where.kind === "none" ? "keychain" : where.kind, where.services.telegramToken)}\n\n  # 2. find the chat id — send your bot a message first, then:\n  curl -s "https://api.telegram.org/bot<token>/getUpdates" \\\n    | grep -o '"chat":{"id":[-0-9]*' | head -1\n\n  # 3. record both (a chat id is not a secret; the item name carries THIS\n  #    instance's id, so a second gate on this machine gets its own token):\n  printf '%s\\n' '${where.tokenEnv}=${schemeFor(where.kind === "none" ? "keychain" : where.kind, where.services.telegramToken) ?? ""}' '${where.chatEnv}=<id>' >> ${where.envPath}\n  chmod 600 ${where.envPath}`;
 
 /**
  * The Telegram conversation, as three hooks over one run.
@@ -277,6 +277,80 @@ function telegramHooks(
   let username: string | null = null;
   /** The chat the operator picked, for the proof's report line. */
   let chosen: Candidate | null = null;
+  /** The keystore item this run reads and writes. Decided once, by {@link chooseService}. */
+  let service: string | null = null;
+
+  /**
+   * Which keystore item this instance's token lives in (APRV-178).
+   *
+   * The name it WANTS is the scoped one, `approval-tg-token-<instance id>`, and
+   * on a machine with one gate and a clean keystore that is the end of it. Two
+   * other situations exist, and the difference between them is the whole task:
+   *
+   * - **The scoped item is already there.** This instance provisioned itself
+   *   before. Nothing to ask: the item is this instance's by construction, and
+   *   storing over it replaces this gate's own token, which is what a re-run is
+   *   for.
+   * - **The scoped item is absent and the UNSCOPED legacy item exists.** That
+   *   item is the pre-APRV-178 name every gate on this machine resolves to the
+   *   same value, so it may be this instance's token from before the rename, or
+   *   it may be another instance's production bot — which is the incident. This
+   *   runtime cannot tell those apart, and guessing is what consumed a human's
+   *   approval tap in the wrong listener, so it ASKS, naming the item and this
+   *   instance's directory, and adopts the legacy name only on a typed `yes`.
+   *
+   * The reads here can, on a locked keychain, put the OS's own unlock prompt in
+   * front of the operator. That is acceptable HERE and nowhere else: this is an
+   * interactive verb with a human at the machine who is about to be asked for a
+   * password by `security` anyway. `approval doctor` answers the same question
+   * from names alone, precisely so that a diagnostic never blocks on a dialog.
+   */
+  function chooseService(): string {
+    if (service !== null) return service;
+    const mine = context.services.telegramToken;
+    if (context.backend === "none") {
+      service = mine;
+      return service;
+    }
+    // The legacy item is probed FIRST and the scoped one only if it is there,
+    // so the ordinary machine — the one with no legacy item at all — costs one
+    // extra keystore lookup rather than two, and asks nothing.
+    if (!context.keystore.read(LEGACY_SERVICE_TELEGRAM_TOKEN).ok) {
+      service = mine;
+      return service;
+    }
+    if (context.keystore.read(mine).ok) {
+      service = mine;
+      return service;
+    }
+
+    streams.out(
+      `\nA bot token is already stored under ${LEGACY_SERVICE_TELEGRAM_TOKEN}, which is the name this\n` +
+        `runtime used before item names were scoped to an instance. EVERY gate on this machine\n` +
+        `resolves that one name to that one item, so it belongs to whichever instance stored it\n` +
+        `last — and nothing here can tell whether that was this one.\n\n` +
+        `This instance is ${instanceHomeFor(context.logPath)} (id ${instanceIdFor(context.logPath)}).\n` +
+        `Its own item name is ${mine}.\n\n` +
+        `Answer NO unless you are certain that stored token is this instance's bot. Sharing one\n` +
+        `token between two gates makes both of them long-poll the same bot, and a human's\n` +
+        `approval tap is then delivered to whichever listener asked for updates first.\n\n`,
+    );
+    const answer = context.prompter.readLine(
+      `does ${LEGACY_SERVICE_TELEGRAM_TOKEN} belong to THIS instance? type \`yes\` in full to reuse it: `,
+    );
+    if ((answer ?? "").trim() === "yes") {
+      service = LEGACY_SERVICE_TELEGRAM_TOKEN;
+      streams.out(
+        `reusing ${LEGACY_SERVICE_TELEGRAM_TOKEN} for this instance; nothing else on this machine may name it\n`,
+      );
+      return service;
+    }
+    service = mine;
+    streams.out(
+      `not reused: this instance will store its own token as ${mine}, and ${LEGACY_SERVICE_TELEGRAM_TOKEN} is left untouched\n`,
+    );
+    return service;
+  }
 
   /**
    * getMe — doctor's probe, verbatim in shape: it mutates nothing, sends
@@ -354,22 +428,23 @@ function telegramHooks(
       context.backend === "keychain"
         ? '"password data for new item:" and then "retype password for new item:"'
         : '"Password:"';
+    const item = chooseService();
     streams.out(
       `Next: paste the BOT TOKEN from @BotFather (Telegram: /mybots, pick the bot, "API Token"; it looks like 123456789:AAH...).\n` +
         `${helper} asks for it with its own prompt, ${helperPrompt}. Nothing is echoed as\n` +
-        `you paste, and the value goes straight into the keystore as ${SERVICE_TELEGRAM_TOKEN};\n` +
+        `you paste, and the value goes straight into the keystore as ${item};\n` +
         `this process never sees you type it. There is nothing to look up first: this creates the item.\n` +
         `Already saved it under that name from an earlier run? Pasting the same value updates the item in\n` +
-        `place; print it in another window with: ${retrievalCommand(context.backend, SERVICE_TELEGRAM_TOKEN)}\n\n`,
+        `place; print it in another window with: ${retrievalCommand(context.backend, item)}\n\n`,
     );
-    const stored = context.keystore.storePrompted(SERVICE_TELEGRAM_TOKEN);
+    const stored = context.keystore.storePrompted(item);
     if (!stored.ok) {
       streams.err(
         `approval: the token could not be stored (${stored.message}); nothing was written to ${context.envPath}\n`,
       );
       return { kind: "refused", code: EXIT_IO };
     }
-    const read = context.keystore.read(SERVICE_TELEGRAM_TOKEN);
+    const read = context.keystore.read(item);
     if (!read.ok) {
       streams.err(
         `approval: the token was stored but could not be read back (${read.message}); nothing was written to ${context.envPath}\n`,
@@ -377,9 +452,9 @@ function telegramHooks(
       return { kind: "refused", code: EXIT_IO };
     }
     token = read.value.trim();
-    const scheme = schemeFor(context.backend, SERVICE_TELEGRAM_TOKEN) as string;
+    const scheme = schemeFor(context.backend, item) as string;
     streams.out(`stored the token as ${scheme}\n`);
-    streams.out(`  read it back with: ${retrievalCommand(context.backend, SERVICE_TELEGRAM_TOKEN)}\n`);
+    streams.out(`  read it back with: ${retrievalCommand(context.backend, item)}\n`);
 
     const probed = await probeIdentity();
     if (!probed.ok) return { kind: "refused", code: probed.code };
@@ -395,6 +470,13 @@ function telegramHooks(
    * consulted for it on any path: reading a value out of that file is the
    * resolution §11.1 invariant 7 forbids, which is also why the no-keystore
    * machine (whose token IS the file's literal) cannot take this path.
+   *
+   * The scoped item is tried first and the unscoped legacy one second (APRV-178),
+   * because an instance provisioned before the rename has its token only under
+   * the old name and a re-run that replaced just the chat id must not start
+   * demanding a token the operator already stored. The fallback is announced on
+   * stderr every time it is taken: adopting a machine-global item silently is
+   * the behaviour that put a demo gate on the production bot.
    */
   function recoverToken(): { ok: true } | { ok: false; code: number } {
     if (token !== null) return { ok: true };
@@ -404,7 +486,17 @@ function telegramHooks(
       );
       return { ok: false, code: EXIT_IO };
     }
-    const read = context.keystore.read(SERVICE_TELEGRAM_TOKEN);
+    const mine = context.services.telegramToken;
+    let read = context.keystore.read(mine);
+    if (!read.ok) {
+      const legacy = context.keystore.read(LEGACY_SERVICE_TELEGRAM_TOKEN);
+      if (legacy.ok) {
+        streams.err(
+          `approval: no ${mine} item for this instance, so the token was read from ${LEGACY_SERVICE_TELEGRAM_TOKEN} — the unscoped name every gate on this machine shares. Re-run \`approval setup channel telegram\` and replace the ${tokenEnv} line to give this instance its own item\n`,
+        );
+      }
+      read = legacy;
+    }
     if (!read.ok) {
       streams.err(
         `approval: the ${tokenEnv} line was left alone, so the stored token is what this run would ask the Bot API with, and it could not be read (${read.message}); nothing was written to ${context.envPath}\n`,

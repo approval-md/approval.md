@@ -43,6 +43,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { FIX_COMMAND_PREFIXES } from "../src/cli/doctor.js";
+import { servicesFor } from "../src/cli/setup-common.js";
 import { assertLocal, startMockBotApi, type MockBotApi } from "./telegram-mock.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -346,6 +347,10 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // loaded it. The check that does not trust session wiring is the CI-side
       // grant cross-check in core/protected-path-guard.ts.
       "harness-hook-wiring",
+      // APRV-178: whose keystore items this instance's own file names, appended
+      // for the same reason. The sharing it reports is what put a demo gate on
+      // the production bot and had a human's tap answered by the wrong listener.
+      "keychain-scope",
     ],
   );
   assert.deepEqual(
@@ -371,6 +376,8 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
     // harness-hook-wiring skips for the same absence, and carries no fix for
     // it: a checkout that is not a Claude Code checkout owes no repair
     // (APRV-151).
+    // keychain-scope passes: the fixture has no .approval/env, so no line names
+    // anybody's keystore item and there is nothing to share (APRV-178).
     [
       "pass",
       "pass",
@@ -387,6 +394,7 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       "pass",
       "skip",
       "skip",
+      "pass",
     ],
   );
   for (const entry of parsed.checks) {
@@ -425,7 +433,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 15);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 16);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
@@ -884,7 +892,7 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  assert.equal(parsed.checks.length, 15);
+  assert.equal(parsed.checks.length, 16);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);
@@ -1623,4 +1631,68 @@ test("doctor: every failing check's fix begins with a runnable command", async (
       "vault",
     ].sort(),
   );
+});
+
+// ---------------------------------------------------------------------------
+// keychain-scope (APRV-178)
+// ---------------------------------------------------------------------------
+
+/** Write an instance's `.approval/env` at the mode the runtime insists on. */
+function writeEnvFile(home: string, lines: string[]): void {
+  const path = join(home, ".approval", "env");
+  writeFileSync(path, `${lines.join("\n")}\n`, "utf8");
+  chmodSync(path, 0o600);
+}
+
+test("doctor: an item scoped to another instance FAILS as cross-instance sharing", async () => {
+  const home = await makeHome({ port: await freePort() });
+  const other = await makeHome({ port: await freePort() });
+  const stranger = servicesFor(logPathOf(other)).telegramToken;
+  writeEnvFile(home, [`APPROVAL_TG_TOKEN=keychain:${stranger}`, "APPROVAL_TG_CHAT=12345"]);
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, {});
+
+  const scope = checkNamed(run, "keychain-scope");
+  assert.equal(scope.status, "fail");
+  assert.match(scope.detail, new RegExp(stranger, "u"));
+  assert.match(scope.detail, /two gates on this machine are pointed at one credential/u);
+  assert.match(scope.fix ?? "", /approval setup channel telegram/u);
+  // Name-only: doctor resolved nothing, so it cannot have blocked on an unlock
+  // dialog, and it printed no value because it never had one.
+  assert.equal(run.stdout.includes(TOKEN), false);
+});
+
+test("doctor: the unscoped legacy item is a named skip, not a red row for every old install", async () => {
+  const home = await makeHome({ port: await freePort() });
+  writeEnvFile(home, ["APPROVAL_TG_TOKEN=keychain:approval-tg-token", "APPROVAL_TG_CHAT=12345"]);
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, {});
+
+  const scope = checkNamed(run, "keychain-scope");
+  assert.equal(scope.status, "skip");
+  assert.match(scope.detail, /the unscoped item name every gate on this machine resolves/u);
+});
+
+test("doctor: a value inherited from the shell over the instance's own line is reported", async () => {
+  const home = await makeHome({ port: await freePort() });
+  writeEnvFile(home, [
+    `APPROVAL_TG_TOKEN=keychain:${servicesFor(logPathOf(home)).telegramToken}`,
+    "APPROVAL_TG_CHAT=12345",
+  ]);
+
+  const clean = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, {});
+  assert.equal(checkNamed(clean, "keychain-scope").status, "pass");
+
+  // The second half of the incident: the operator's shell exports a token, so
+  // the instance's own line is never consulted and the gate uses somebody
+  // else's bot. Correct precedence, and now something says so.
+  const bled = await runCli(
+    ["doctor", "--json", "--root", makeRoot("fresh"), "--api-base", assertLocal(mock.url)],
+    home,
+    { APPROVAL_TG_TOKEN: TOKEN, APPROVAL_TG_CHAT: "12345" },
+  );
+  const scope = checkNamed(bled, "keychain-scope");
+  assert.equal(scope.status, "skip");
+  assert.match(scope.detail, /APPROVAL_TG_TOKEN is exported in this environment/u);
+  assert.equal(bled.stdout.includes(TOKEN), false, "the bleed report carried the value");
 });

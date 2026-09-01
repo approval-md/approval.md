@@ -75,13 +75,14 @@ import {
 } from "../channels/telegram.js";
 import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
 import {
+  KEYSTORE_DEFERRED,
+  NON_RESOLVING_RUNNER,
   envFilePathFor,
   resolveEnvironment,
   type ResolvedVariable,
-  type SourceOutcome,
-  type SourceRunner,
 } from "../core/env-file.js";
 import { readTaskFile } from "../core/frontmatter.js";
+import { instanceFindings, instanceHomeFor, instanceIdFor } from "../core/instance.js";
 import type { EventRecord } from "../core/log.js";
 import { compareChains, describeDrift, describeHead } from "../core/log-reconcile.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
@@ -1112,25 +1113,11 @@ function checkVaultHealth(logPath: string, dir: string, load: PolicyLoadResult):
  * This is not a general exception to doctor probing: the Telegram check does
  * make a network call. The line is that a probe may cost time and packets, and
  * may not block on a human or ask anyone for a password.
+ *
+ * The runner itself is `core/env-file.ts`'s {@link NON_RESOLVING_RUNNER} since
+ * APRV-178, because `approval up`'s cross-instance report needs the same
+ * refusal and two copies would be two sets of words for one rule.
  */
-const KEYSTORE_DEFERRED = "not resolved by doctor";
-
-const NON_RESOLVING_RUNNER: SourceRunner = {
-  keychain(service: string): SourceOutcome {
-    return {
-      ok: false,
-      code: "helper-failed",
-      message: `${KEYSTORE_DEFERRED}: keychain:${service} is declared here and looked up by \`approval env --check\`. \`security find-generic-password -w\` can block on a keychain-unlock or ACL prompt, and a diagnostic must never hang or ask a human for a password`,
-    };
-  },
-  secretService(label: string): SourceOutcome {
-    return {
-      ok: false,
-      code: "helper-failed",
-      message: `${KEYSTORE_DEFERRED}: secret-service:${label} is declared here and looked up by \`approval env --check\`. \`secret-tool lookup\` can block on a keyring-unlock prompt, and a diagnostic must never hang or ask a human for a password`,
-    };
-  },
-};
 
 /** Was this variable left unresolved by {@link NON_RESOLVING_RUNNER}? */
 function isDeferred(variable: ResolvedVariable): boolean {
@@ -1321,6 +1308,65 @@ function checkEnvironment(logPath: string, dir: string, load: PolicyLoadResult):
     check: "environment",
     status: "pass",
     detail: `${preamble}. Every variable your policy names is available to the verbs run from this shell. No value is printed by this check on any path`,
+  };
+}
+
+/**
+ * Whose credentials is this instance actually using? (APRV-178)
+ *
+ * The row this check exists to print did not exist on the morning a demo gate
+ * in another directory stored its bot token under the same fixed keystore name
+ * the production gate used, read the production token back, and put two long
+ * pollers on one bot until a human's approval tap was delivered to the listener
+ * that had not asked the question. Nothing on the machine could be asked "are
+ * two instances sharing a credential"; the answer was assembled by hand,
+ * afterwards.
+ *
+ * It resolves nothing (`core/instance.ts` calls the {@link NON_RESOLVING_RUNNER}
+ * for exactly the reason the environment check does), reads no value, and
+ * prints none: a scope suffix, an item name and a variable name are all the
+ * evidence it needs, and all three are already in `.approval/env` in the open.
+ *
+ * ## The verdict rule
+ *
+ * - **FAIL** for an item whose scope suffix belongs to ANOTHER instance. That
+ *   is two gates on one credential, and it is wrong rather than a state.
+ * - **SKIP**, named and loud, for the unscoped legacy item and for a value that
+ *   came from the ambient environment while the file names something else. Both
+ *   are what a correct pre-APRV-178 machine looks like, and the primary gate on
+ *   this project's own machine is fed exactly that way on purpose. A red row for
+ *   every existing installation is a red row people learn to skip past.
+ * - **PASS** when every line names this instance's own item.
+ */
+function checkKeychainScope(logPath: string, load: PolicyLoadResult): DoctorCheck {
+  const findings = instanceFindings(logPath, load);
+  const id = instanceIdFor(logPath);
+  const head = `${instanceHomeFor(logPath)} is instance ${id}; its keystore items are named \`<secret>-${id}\``;
+
+  const foreign = findings.filter((finding) => finding.kind === "foreign-instance");
+  if (foreign.length > 0) {
+    return {
+      check: "keychain-scope",
+      status: "fail",
+      detail: `${head}. ${foreign.map((finding) => finding.detail).join("; ")}. Two instances resolving one item share a bot: both long-poll it, their getUpdates offsets acknowledge each other's messages, and an approval tap is answered by whichever listener asked first`,
+      fix: `approval setup channel telegram — store this instance's own token under its own item; \`approval env --check\` shows which name each variable resolves through`,
+    };
+  }
+
+  const shared = findings.filter((finding) => finding.kind === "legacy-shared");
+  const bleed = findings.filter((finding) => finding.kind === "ambient-bleed");
+  if (shared.length > 0 || bleed.length > 0) {
+    return {
+      check: "keychain-scope",
+      status: "skip",
+      detail: `${head}. ${[...shared, ...bleed].map((finding) => finding.detail).join("; ")}. Neither is broken here and both are how one instance becomes two instances' problem: re-run \`approval setup channel telegram\` to move onto this instance's own item, and \`unset\` an inherited variable before \`eval "$(approval env)"\` if the exported value is another gate's`,
+    };
+  }
+
+  return {
+    check: "keychain-scope",
+    status: "pass",
+    detail: `${head}, and every source ${envFilePathFor(logPath)} names is this instance's own. No value is read or printed by this check on any path`,
   };
 }
 
@@ -1796,6 +1842,9 @@ export function commandDoctor(
       checkHarnessOutcomes(dir),
       // APRV-151: appended, seventh time, same reason.
       checkHarnessWiring(dir),
+      // APRV-178: appended, eighth time, same reason. The sharing this reports
+      // is what put a demo gate on the production bot.
+      checkKeychainScope(logPath, policyLoad),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");
