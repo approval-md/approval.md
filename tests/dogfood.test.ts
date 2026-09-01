@@ -125,7 +125,6 @@ const EXPECTATIONS: readonly Expectation[] = [
     provenance: "rule",
     note: "supervised-live 0.1 since the seq 5147 ceremony (APRV-184): one edit in ten blocks on the gate, the rest execute and stay in the retrospective pool; with no usable sampling secret live selection fails closed and every edit gates",
   },
-  { actionClass: "vcs.history.rewrite", autonomy: "manual", provenance: "rule" },
   { actionClass: "files.delete.out_of_scope", autonomy: "manual", provenance: "rule" },
   {
     actionClass: "log.sync",
@@ -138,6 +137,32 @@ const EXPECTATIONS: readonly Expectation[] = [
     autonomy: "manual",
     provenance: "rule",
     note: "declared 2026-08-26 (attested seq 513); the APRV-125 sign-off names advance=supervised as the candidate end state once trust builds",
+  },
+
+  // human-only — a person acts; no verb mints or withdraws authority (APRV-185); declared at the seq 7355 ceremony
+  {
+    actionClass: "vcs.history.rewrite",
+    autonomy: "human-only",
+    provenance: "rule",
+    note: "manual until seq 7355; a person rewrites shared history, never an agent",
+  },
+  {
+    actionClass: "policy.core",
+    autonomy: "human-only",
+    provenance: "rule",
+    note: "APPROVAL.md and .approval/* outside the log; split out of policy.edit by APRV-198 so the 0.1 sample never sits on the gate's own organs",
+  },
+  {
+    actionClass: "log.mutate",
+    autonomy: "human-only",
+    provenance: "rule",
+    note: "any write aimed at .approval/log/ (APRV-198)",
+  },
+  {
+    actionClass: "account.credential",
+    autonomy: "human-only",
+    provenance: "rule",
+    note: "keychain readers, APPROVAL_*/TELEGRAM_*/VAULT_* probes, vault/keys/env reads (APRV-194)",
   },
 
   // autonomous — reads and in-workspace/branch-local writes
