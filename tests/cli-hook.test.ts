@@ -158,6 +158,28 @@ function recordsSince(dir: string, before: string): Record<string, unknown>[] {
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
+/**
+ * When the latest `approval.requested` for `actionKey` was written, in
+ * milliseconds, read back through the verified path.
+ *
+ * TTL arithmetic in `core/gate.ts` runs from this timestamp, so a test that
+ * waits out a TTL waits from here rather than from its own `delay` call
+ * (APRV-201).
+ */
+function requestedAtMs(dir: string, actionKey: string): number {
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true, "the log reads back verified");
+  const { records } = read as { ok: true; records: EventRecord[] };
+  let ts: string | null = null;
+  for (const record of records) {
+    if (record.event === "approval.requested" && record.action_key === actionKey) ts = record.ts;
+  }
+  assert.ok(ts !== null, `no approval.requested record for ${actionKey}`);
+  const parsed = Date.parse(ts);
+  assert.ok(!Number.isNaN(parsed), `unparseable request ts ${JSON.stringify(ts)}`);
+  return parsed;
+}
+
 function payloadOf(record: Record<string, unknown>): Record<string, unknown> {
   return (record["payload"] ?? {}) as Record<string, unknown>;
 }
@@ -204,22 +226,170 @@ function verdictOf(run: Run): Verdict {
   };
 }
 
-/** Decide `actionKey` from another process after `delayMs`, without blocking. */
-function decideLater(dir: string, verb: string, actionKey: string, delayMs: number): void {
-  const helper = join(dir, `decide-${verb}-${counter}.cjs`);
+/** How often the detached decision helper asks whether the request is pending. */
+const DECIDE_POLL_MS = 100;
+
+/** How long it keeps asking before giving up and saying so in its report. */
+const DECIDE_DEADLINE_MS = 15_000;
+
+/** How long the test waits for the helper's report file to appear. */
+const DECIDE_REPORT_MS = 20_000;
+
+/**
+ * The detached helper's own account of what it did, read back from disk.
+ *
+ * `decided: false` means the request never became pending inside the deadline;
+ * `status` is the decision verb's exit code, which is the field APRV-201 exists
+ * to stop discarding.
+ */
+interface DecisionReport {
+  decided: boolean;
+  polls: number;
+  waitedMs: number;
+  status?: number | null;
+  stdout?: string;
+  stderr?: string;
+  reason?: string;
+  seen?: string;
+}
+
+interface LaterDecision {
+  /** One line naming what the helper did, for an assertion message. */
+  describe(): Promise<string>;
+  /** Fail, by name, when the helper never decided or the verb refused. */
+  assertDecided(): Promise<void>;
+}
+
+/**
+ * Decide `actionKey` from another process as soon as it is pending, without
+ * blocking this one.
+ *
+ * The helper used to sleep a FIXED 700ms and fire once with `stdio: "ignore"`
+ * (APRV-201). Both halves of that were wrong. The delay raced a cold CLI start:
+ * the hook under test has to spawn node, load the CLI, verify the chain, check
+ * attestation and validate the schema before `approval.requested` reaches the
+ * log, and on a loaded machine that is well past 700ms, so the decision landed
+ * on `not-requested` and nothing ever decided. Ignoring the verb's stdio then
+ * threw away the one sentence that said so, and the suite reported the hook
+ * timing out (a defect in the code under test) in place of the helper missing
+ * its window. So: poll the log for the key's `approval.requested` record,
+ * decide once it is there, and write the exit status and stderr where the test
+ * can put them in its assertion message.
+ *
+ * The poll reads the log file rather than shelling out to `approval queue`. A
+ * cold CLI start costs well over a second on a loaded machine, which is the
+ * whole finding of APRV-201, so a CLI-per-poll poller would add seconds of its
+ * own to the window it exists to close (measured: 3.5s per poll, a grant
+ * landing 7s late). Nothing is decided on what it reads: the decision verb does
+ * its own verified read, and every test still ends at `log verify`. This is a
+ * synchronisation point, not an enforcement path. A trailing partial line is
+ * dropped and every line is parsed defensively, because the hook is appending
+ * to the file while the helper reads it.
+ */
+function decideLater(dir: string, verb: string, actionKey: string): LaterDecision {
+  const stem = `decide-${verb}-${counter}`;
+  const helper = join(dir, `${stem}.cjs`);
+  const reportPath = join(dir, `${stem}.json`);
   writeFileSync(
     helper,
     [
       'const { spawnSync } = require("node:child_process");',
-      "setTimeout(() => {",
-      `  spawnSync(process.execPath, [${JSON.stringify(CLI_ENTRY)}, ${JSON.stringify(verb)}, ${JSON.stringify(actionKey)}, "--as", "human:alice"], { cwd: ${JSON.stringify(dir)}, stdio: "ignore" });`,
-      `}, ${delayMs});`,
+      'const { readFileSync, renameSync, writeFileSync } = require("node:fs");',
+      `const CLI = ${JSON.stringify(CLI_ENTRY)};`,
+      `const DIR = ${JSON.stringify(dir)};`,
+      `const LOG_PATH = ${JSON.stringify(join(dir, LOG))};`,
+      `const KEY = ${JSON.stringify(actionKey)};`,
+      `const VERB = ${JSON.stringify(verb)};`,
+      `const REPORT = ${JSON.stringify(reportPath)};`,
+      `const DEADLINE = Date.now() + ${DECIDE_DEADLINE_MS};`,
+      "const started = Date.now();",
+      "let polls = 0;",
+      'let seen = "(the log was never readable)";',
+      "const write = (fields) => {",
+      "  const body = JSON.stringify({ polls: polls, waitedMs: Date.now() - started, ...fields });",
+      "  try {",
+      '    writeFileSync(REPORT + ".part", body);',
+      '    renameSync(REPORT + ".part", REPORT);',
+      "  } catch (error) {",
+      "    // The test reports the report's absence; there is nowhere else to say it.",
+      "  }",
+      "};",
+      "// The key's request, if the log holds it yet. The hook is appending while",
+      "// this reads, so the last line is dropped unless the file ends in a newline",
+      "// and every line is parsed inside a try.",
+      "const requested = () => {",
+      "  let raw;",
+      '  try { raw = readFileSync(LOG_PATH, "utf8"); } catch (error) { seen = "unreadable: " + String(error && error.code); return false; }',
+      '  const lines = raw.split("\\n");',
+      '  if (!raw.endsWith("\\n")) lines.pop();',
+      "  const keys = [];",
+      "  let found = false;",
+      "  for (const line of lines) {",
+      "    if (line.trim().length === 0) continue;",
+      "    let record;",
+      "    try { record = JSON.parse(line); } catch (error) { continue; }",
+      '    if (record.event !== "approval.requested") continue;',
+      "    keys.push(String(record.action_key));",
+      "    if (record.action_key === KEY) found = true;",
+      "  }",
+      '  seen = lines.length + " records, requests for [" + keys.join(", ") + "]";',
+      "  return found;",
+      "};",
+      "const attempt = () => {",
+      "  polls += 1;",
+      "  if (!requested()) {",
+      "    if (Date.now() >= DEADLINE) {",
+      '      write({ decided: false, reason: "deadline: no approval.requested for " + KEY, seen: seen });',
+      "      return;",
+      "    }",
+      `    setTimeout(attempt, ${DECIDE_POLL_MS});`,
+      "    return;",
+      "  }",
+      '  const run = spawnSync(process.execPath, [CLI, VERB, KEY, "--as", "human:alice"], { cwd: DIR, encoding: "utf8" });',
+      '  write({ decided: true, status: run.status, stdout: String(run.stdout || "").trim(), stderr: String(run.stderr || "").trim(), seen: seen });',
+      "};",
+      "attempt();",
       "",
     ].join("\n"),
     "utf8",
   );
   const child = spawn(process.execPath, [helper], { cwd: dir, stdio: "ignore" });
   child.unref();
+
+  let cached: DecisionReport | null = null;
+  const load = async (): Promise<DecisionReport | null> => {
+    if (cached !== null) return cached;
+    const until = Date.now() + DECIDE_REPORT_MS;
+    for (;;) {
+      if (existsSync(reportPath)) {
+        try {
+          cached = JSON.parse(readFileSync(reportPath, "utf8")) as DecisionReport;
+          return cached;
+        } catch {
+          // A half-written report; the rename makes this vanishingly unlikely.
+        }
+      }
+      if (Date.now() >= until) return null;
+      await delay(50);
+    }
+  };
+  const describe = async (): Promise<string> => {
+    const found = await load();
+    const who = `decision helper (${verb} ${actionKey})`;
+    if (found === null) return `${who} wrote no report at ${reportPath}`;
+    if (!found.decided) {
+      return `${who} NEVER DECIDED after ${found.polls} polls in ${found.waitedMs}ms: ${found.reason ?? "(no reason)"} | log held: ${found.seen ?? "(nothing)"}`;
+    }
+    const stderrPart = found.stderr === undefined || found.stderr === "" ? "" : ` stderr: ${found.stderr}`;
+    const stdoutPart = found.stdout === undefined || found.stdout === "" ? "" : ` stdout: ${found.stdout}`;
+    return `${who} decided after ${found.polls} polls in ${found.waitedMs}ms: exit ${String(found.status)}${stderrPart}${stdoutPart}`;
+  };
+  const assertDecided = async (): Promise<void> => {
+    const line = await describe();
+    const found = await load();
+    assert.ok(found !== null && found.decided && found.status === 0, line);
+  };
+  return { describe, assertDecided };
 }
 
 // ===========================================================================
@@ -576,11 +746,11 @@ test("a loop-escalated harness task may not run unattended", () => {
  * Grant `actionKey` from another process as soon as it is pending, retrying
  * until it lands or the deadline passes.
  *
- * {@link decideLater}'s single shot at a fixed delay is enough where the hook
- * opens its request immediately. The APRV-145 floor tests run three tool calls
- * and six CLI invocations first, so under parallel load the request can be
- * later than any one fixed delay; a poller is the difference between a test that
- * pins the floor and a test that pins the machine's mood.
+ * The same shape as {@link decideLater}'s poller, keyed on the grant's own exit
+ * status rather than on the log: the APRV-145 floor tests run three tool calls
+ * and six CLI invocations first, so under parallel load the request can be later
+ * than any fixed delay, and a poller is the difference between a test that pins
+ * the floor and a test that pins the machine's mood.
  */
 function grantWhenPending(dir: string, actionKey: string): void {
   const helper = join(dir, `grant-when-pending-${counter}.cjs`);
@@ -1236,16 +1406,19 @@ test("an unloadable policy denies with hook-policy-unavailable", () => {
 // hook claude-code: the gated paths
 // ===========================================================================
 
-test("a manual command is allowed when a grant lands mid-wait", () => {
+test("a manual command is allowed when a grant lands mid-wait", async () => {
   const dir = ready();
-  decideLater(dir, "grant", "hook:sess-1:tu-grant:deps.add", 700);
+  const decision = decideLater(dir, "grant", "hook:sess-1:tu-grant:deps.add");
   const run = runCli(
     ["hook", "claude-code", "--as", "agent:claude-code", "--timeout", "20s", "--interval", "100ms"],
     dir,
     bashEvent("npm install left-pad", "tu-grant"),
   );
   const verdict = verdictOf(run);
-  assert.equal(verdict.permission, "allow", verdict.reason);
+  // The helper's own account comes first: when it missed its window, this test
+  // must say so rather than accuse the hook of timing out (APRV-201).
+  await decision.assertDecided();
+  assert.equal(verdict.permission, "allow", `${verdict.reason}\n${await decision.describe()}`);
   assert.match(verdict.reason, /^granted: /u);
   const log = rawLog(dir);
   assert.match(log, /"event":"approval\.requested"/u);
@@ -1253,17 +1426,18 @@ test("a manual command is allowed when a grant lands mid-wait", () => {
   assertClean(dir);
 });
 
-test("a rejected request denies with hook-rejected", () => {
+test("a rejected request denies with hook-rejected", async () => {
   const dir = ready();
-  decideLater(dir, "reject", "hook:sess-1:tu-reject:network.call", 700);
+  const decision = decideLater(dir, "reject", "hook:sess-1:tu-reject:network.call");
   const run = runCli(
     ["hook", "claude-code", "--timeout", "20s", "--interval", "100ms"],
     dir,
     bashEvent("curl -X POST https://example.com", "tu-reject"),
   );
   const verdict = verdictOf(run);
-  assert.equal(verdict.permission, "deny");
-  assert.match(verdict.reason, /^hook-rejected: /u);
+  await decision.assertDecided();
+  assert.equal(verdict.permission, "deny", `${verdict.reason}\n${await decision.describe()}`);
+  assert.match(verdict.reason, /^hook-rejected: /u, `${verdict.reason}\n${await decision.describe()}`);
   assertClean(dir);
 });
 
@@ -1476,12 +1650,22 @@ test("replay bounds: different bytes or a different cwd is a different question"
 });
 
 test("a grant that lapsed its TTL carries nothing", async () => {
-  // The last replay bound: within the TTL. A one-second TTL makes the lapse
+  // The last replay bound: within the TTL. A short TTL makes the lapse
   // observable without a clock injection, and `queue` is what materialises it.
+  //
+  // APRV-201: the TTL was one second, and the wait after it a flat 1400ms. Both
+  // numbers were bets on the machine. `grantLapsed` measures from the REQUEST's
+  // ts, so a cold `approval grant` that takes longer than a second to start
+  // arrives after its own request has lapsed and is refused. That is the failure
+  // this test showed under load, wearing the costume of a carryover bug. Four
+  // seconds buys the grant a cold start, and the wait that follows is anchored
+  // on the request record's own timestamp rather than on a sleep, so the lapse
+  // this test asserts is the one the runtime will compute.
+  const ttlMs = 4_000;
   const dir = caseDir();
   writeFileSync(
     join(dir, "APPROVAL.md"),
-    POLICY.replace('approval_ttl: "1h"', 'approval_ttl: "1s"'),
+    POLICY.replace('approval_ttl: "1h"', 'approval_ttl: "4s"'),
     "utf8",
   );
   const attested = runCli(["policy", "attest", "--as", "human:alice"], dir);
@@ -1492,12 +1676,19 @@ test("a grant that lapsed its TTL carries nothing", async () => {
     dir,
     bashEvent("npm install left-pad", "tu-ttl"),
   );
+  const requestedAt = requestedAtMs(dir, "hook:sess-1:tu-ttl:deps.add");
   const granted = runCli(["grant", "hook:sess-1:tu-ttl:deps.add", "--as", "human:carter"], dir);
-  assert.equal(granted.code, 0, granted.stderr);
+  assert.equal(
+    granted.code,
+    0,
+    `the grant had to land inside the ${ttlMs}ms TTL and reached the gate ${Date.now() - requestedAt}ms after the request: ${granted.stderr}`,
+  );
 
   // Wait out the TTL, then retry: the grant is no longer live, so the retry
-  // asks its own question rather than proceeding on a lapsed one.
-  await delay(1_400);
+  // asks its own question rather than proceeding on a lapsed one. The deadline
+  // is `requestTs + ttl` (core/gate.ts's `grantLapsed`), plus a margin for the
+  // retry's own cold start, and it is read off the record, not guessed.
+  while (Date.now() <= requestedAt + ttlMs + 250) await delay(50);
   const retry = runCli(
     ["hook", "claude-code", "--timeout", "100ms", "--interval", "50ms"],
     dir,
