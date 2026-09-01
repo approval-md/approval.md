@@ -673,6 +673,44 @@ function stripOneNewline(text: string): string {
  * {@link "helper-failed"}, which is the honest answer for a locked keyring or a
  * D-Bus that is not running: the repair is not "store the item".
  */
+/**
+ * The prefix a deferred lookup carries. See {@link NON_RESOLVING_RUNNER}.
+ */
+export const KEYSTORE_DEFERRED = "not resolved by doctor";
+
+/**
+ * A {@link SourceRunner} that looks nothing up (moved here by APRV-178).
+ *
+ * `security find-generic-password -w` can raise a keychain-unlock or ACL dialog
+ * and `secret-tool lookup` can block on a keyring prompt. Either would hang a
+ * command run over ssh or from CI, and a command that pops a keychain prompt
+ * also TEACHES people to click through keychain prompts. So the diagnostics —
+ * `approval doctor`, and `approval up`'s cross-instance report — resolve
+ * keystore-backed variables not at all: they report the scheme and the service
+ * name, which `.approval/env` already carries in the open, and leave the actual
+ * lookup to `approval env --check`, which a human runs deliberately and watches.
+ *
+ * It lives beside {@link defaultSourceRunner} rather than in one of its callers
+ * because two of them now need it and a second copy would be a second set of
+ * words for the same refusal.
+ */
+export const NON_RESOLVING_RUNNER: SourceRunner = {
+  keychain(service: string): SourceOutcome {
+    return {
+      ok: false,
+      code: "helper-failed",
+      message: `${KEYSTORE_DEFERRED}: keychain:${service} is declared here and looked up by \`approval env --check\`. \`security find-generic-password -w\` can block on a keychain-unlock or ACL prompt, and a diagnostic must never hang or ask a human for a password`,
+    };
+  },
+  secretService(label: string): SourceOutcome {
+    return {
+      ok: false,
+      code: "helper-failed",
+      message: `${KEYSTORE_DEFERRED}: secret-service:${label} is declared here and looked up by \`approval env --check\`. \`secret-tool lookup\` can block on a keyring-unlock prompt, and a diagnostic must never hang or ask a human for a password`,
+    };
+  },
+};
+
 export const defaultSourceRunner: SourceRunner = {
   keychain(service: string): SourceOutcome {
     const account = process.env["USER"] ?? userInfo().username;
@@ -803,6 +841,47 @@ export interface ResolvedVariable {
   declared: boolean;
   /** The value would be a secret if it had one: token, passphrase, sampling. */
   secretBearing: boolean;
+  /**
+   * What the INSTANCE's own `.approval/env` says about this variable, whether
+   * or not that is where the value came from (APRV-178).
+   *
+   * The ambient environment wins over the file and the file is then not even
+   * consulted, which is correct and is invariant 7 — but it is also how a
+   * production bot token exported in a shell profile silently became a demo
+   * instance's channel credential. Nothing could report that, because the
+   * resolution discarded the file entry it had ignored. It is kept here so
+   * `approval env --check`, `approval doctor` and `approval up` can say "this
+   * value is not the one your instance's file names".
+   *
+   * Value-free by construction: {@link DeclaredSource.service} is filled only
+   * for the two keystore schemes, whose argument is a service name the file
+   * carries in the open. A `literal` entry's argument IS the secret, so only
+   * its KIND is recorded.
+   */
+  fileSource?: DeclaredSource;
+}
+
+/** A `.approval/env` line, reduced to what may be printed. */
+export interface DeclaredSource {
+  kind: EnvSourceKind;
+  /** The service name or label, for `keychain:` and `secret-service:` only. */
+  service?: string;
+  /** 1-based line number in `.approval/env`. */
+  line: number;
+}
+
+/** The declared source of an entry, with a literal's value dropped. */
+function declaredSourceOf(entry: EnvFileEntry): DeclaredSource {
+  return entry.kind === "keychain" || entry.kind === "secret-service"
+    ? { kind: entry.kind, service: entry.argument, line: entry.line }
+    : { kind: entry.kind, line: entry.line };
+}
+
+/** A declared source in words, and never a value. */
+export function describeDeclaredSource(source: DeclaredSource): string {
+  if (source.kind === "literal") return LITERAL_SOURCE;
+  if (source.kind === "env") return "env: (inherited)";
+  return `${source.kind}:${source.service ?? ""}`;
 }
 
 /** The whole answer. */
@@ -988,6 +1067,7 @@ function resolveOne(
     name: want.name,
     declared: want.declared,
     secretBearing: want.secretBearing,
+    ...(entry === undefined ? {} : { fileSource: declaredSourceOf(entry) }),
   };
 
   if (!SHELL_NAME_PATTERN.test(want.name)) {

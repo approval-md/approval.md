@@ -309,6 +309,28 @@ so an exported log leaks no home directory. The event's payload is
 
 ## policy amend
 
+**Progress, on stderr.** The verb re-verifies the whole chain and recovers the
+attested baseline before it can print anything, and on a few-thousand-record log
+that is half a minute in which it used to say nothing at all. It reads as a
+hang, and a ceremony abandoned midway leaves the gate fail-closed for every
+session until someone runs it again. So it narrates: the phase it is on, and a
+record count for the verification, on stderr.
+
+```
+verifying the log chain before anything is read from it
+  250/3184 records
+  1750/3184 records
+  3184/3184 records
+recovering the attested baseline and diffing it against the live policy
+```
+
+A terminal gets the counts repainted onto one line under the phase name, erased
+when the phase closes. A pipe gets the lines above, newline-terminated, with no
+carriage return in them. `--json` gets NOTHING on either stream but its report:
+a `--json` refusal emits its error object on stderr and callers parse that
+stream whole, so narration there would break every machine consumer of a
+refusal.
+
 **Branch protection (the two flows).** A protected default branch rejects the
 push that would land the amendment, so this verb detects one and offers the flow
 that works. DIRECT is `git add` + `git commit` on the branch you are standing
@@ -1382,6 +1404,15 @@ The checks, at length:
   or ACL prompt, and a diagnostic must never hang or ask a human for a password.
   Value-free by construction: it reads each variable's status and source and
   never its value, on any path.
+- **keychain-scope** — whose keystore items this instance's `.approval/env`
+  names, answered from the NAMES alone so that it too can never block on an
+  unlock dialog. FAIL for an item whose eight-hex scope suffix belongs to
+  another instance: two gates pointed at one credential is how a demo instance
+  ended up sending through the production bot and eating its approval taps.
+  SKIP, named, for the unscoped pre-APRV-178 item every gate on the machine
+  resolves alike, and for a value inherited from the shell while the file names
+  a source of its own — both are correct configurations that become somebody
+  else's problem the moment a second instance exists.
 
 **`--json`** (one object on stdout):
 
@@ -1393,8 +1424,8 @@ The checks, at length:
 
 `status` is `pass` | `fail` | `skip`. `fix` is present only when there is
 something to do, and it always begins with a runnable command. `ok` is true when
-no check failed; a skip does not make it false. The eleven checks always appear,
-in the order listed above.
+no check failed; a skip does not make it false. Every check always appears, in
+the order listed above.
 
 `--root <path>` is TEST-ONLY: it points the build-freshness check at another tree
 and moves no other check. Real invocations never pass it, because freshness is
@@ -2617,10 +2648,23 @@ neither                      offered as a PLAINTEXT literal in .approval/env,
                              taken only on a typed `yes`, and reported as
                              plaintext by `approval env --check` ever after
 
-approval-tg-token            the bot token
-approval-vault-passphrase    the vault passphrase
-approval-sampling-secret     the audit sampling secret
+approval-tg-token-<id>            the bot token
+approval-vault-passphrase-<id>    the vault passphrase
+approval-sampling-secret-<id>     the audit sampling secret
 ```
+
+`<id>` is eight hex digits derived from this instance's `.approval` directory,
+because a keystore is machine-global and everything else about an instance is
+directory-scoped. Without it, a second gate in another directory stores its bot
+token over the first one's item and then reads the first one's token back: two
+listeners long-poll one bot, and an approval tap is answered by whichever asked
+for updates first. `approval doctor`'s `keychain-scope` row reports the id and
+says whether every source `.approval/env` names is this instance's own.
+
+Names without the suffix are the pre-APRV-178 spelling and still resolve, since
+`.approval/env` carries the service name in the open. `setup channel telegram`
+asks before adopting one — naming the item, this instance's directory and its id
+— and takes only a `yes` typed in full.
 
 What it writes is `.approval/env` (one `KEY=VALUE` line per variable, mode 0600,
 every other line and comment preserved) and items in the OS keystore.

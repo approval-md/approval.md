@@ -46,6 +46,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+import {
+  LEGACY_SERVICE_TELEGRAM_TOKEN,
+  instanceHomeFor,
+  instanceIdFor,
+} from "../src/core/instance.js";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -74,9 +80,7 @@ import {
 import type { ChannelSetupDeps } from "../src/cli/setup-channel.js";
 import {
   DEFAULT_SAMPLING_ENV,
-  SERVICE_SAMPLING_SECRET,
-  SERVICE_TELEGRAM_TOKEN,
-  SERVICE_VAULT_PASSPHRASE,
+  servicesFor,
   type KeystoreKind,
   type KeystoreRunner,
   type SetupDeps,
@@ -607,10 +611,12 @@ test("setup vault generates, stores in the keystore, and writes only the source"
 
   assert.equal(result.code, EXIT_OK, result.err);
   assert.deepEqual(readEnvLines(home), [
-    `APPROVAL_VAULT_PASSPHRASE=keychain:${SERVICE_VAULT_PASSPHRASE}`,
+    `APPROVAL_VAULT_PASSPHRASE=keychain:${servicesFor(home.logPath).vaultPassphrase}`,
   ]);
-  assert.equal(keystore.items.get(SERVICE_VAULT_PASSPHRASE), GENERATED);
-  assert.deepEqual(keystore.calls, [`storeGenerated:${SERVICE_VAULT_PASSPHRASE}`]);
+  assert.equal(keystore.items.get(servicesFor(home.logPath).vaultPassphrase), GENERATED);
+  assert.deepEqual(keystore.calls, [
+    `storeGenerated:${servicesFor(home.logPath).vaultPassphrase}`,
+  ]);
   // The variable NAME and the retrieval command, and never the value. The
   // suite-wide sweep is the real assertion; this one names the intent.
   assert.match(result.out, /APPROVAL_VAULT_PASSPHRASE/u);
@@ -668,9 +674,9 @@ test("setup sampling uses the policy's name when it has one", async () => {
 
   assert.equal(result.code, EXIT_OK, result.err);
   assert.deepEqual(readEnvLines(home), [
-    `APPROVAL_AUDIT_SECRET=secret-service:${SERVICE_SAMPLING_SECRET}`,
+    `APPROVAL_AUDIT_SECRET=secret-service:${servicesFor(home.logPath).samplingSecret}`,
   ]);
-  assert.equal(keystore.items.get(SERVICE_SAMPLING_SECRET), GENERATED);
+  assert.equal(keystore.items.get(servicesFor(home.logPath).samplingSecret), GENERATED);
   assert.match(result.out, /secret-tool lookup approval/u);
   assert.doesNotMatch(result.out, /SAMPLING IS STILL OFF/u);
 });
@@ -685,7 +691,7 @@ test("setup sampling defaults the name, says sampling is still off, and prints t
 
   assert.equal(result.code, EXIT_OK, result.err);
   assert.deepEqual(readEnvLines(home), [
-    `${DEFAULT_SAMPLING_ENV}=keychain:${SERVICE_SAMPLING_SECRET}`,
+    `${DEFAULT_SAMPLING_ENV}=keychain:${servicesFor(home.logPath).samplingSecret}`,
   ]);
   assert.match(result.out, /SAMPLING IS STILL OFF/u);
   assert.match(result.out, /sampling_secret_env: APPROVAL_SAMPLING_SECRET/u);
@@ -864,16 +870,18 @@ test("setup channel telegram: token, getMe, chat discovery, both lines — and n
 
     assert.equal(result.code, EXIT_OK, result.err);
     assert.deepEqual(readEnvLines(home), [
-      `APPROVAL_TG_TOKEN=keychain:${SERVICE_TELEGRAM_TOKEN}`,
+      `APPROVAL_TG_TOKEN=keychain:${servicesFor(home.logPath).telegramToken}`,
       `APPROVAL_TG_CHAT=${CHAT}`,
     ]);
 
     // The token was collected by the KEYSTORE's prompt, not by ours: the
     // scripted prompter was never asked for it, and the value came back over
-    // the read seam.
+    // the read seam. The leading read is APRV-178's legacy probe, which finds
+    // nothing here and therefore asks nothing.
     assert.deepEqual(keystore.calls, [
-      `storePrompted:${SERVICE_TELEGRAM_TOKEN}`,
-      `read:${SERVICE_TELEGRAM_TOKEN}`,
+      `read:${LEGACY_SERVICE_TELEGRAM_TOKEN}`,
+      `storePrompted:${servicesFor(home.logPath).telegramToken}`,
+      `read:${servicesFor(home.logPath).telegramToken}`,
     ]);
     assert.equal(
       prompter.asked.some((question) => /token/iu.test(question)),
@@ -912,6 +920,156 @@ test("setup channel telegram: token, getMe, chat discovery, both lines — and n
     // No message was sent: the proof step defaulted to no and was answered no.
     assert.deepEqual(mock.sentTexts(), []);
     assert.match(result.out, /No update was acknowledged by this verb/u);
+  } finally {
+    await mock.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// APRV-178: the legacy item is never adopted in silence
+// ---------------------------------------------------------------------------
+
+/**
+ * A keystore that already holds a token under the UNSCOPED name — the shape of
+ * a machine that was provisioned before item names carried an instance, and the
+ * shape of a machine whose OTHER gate was provisioned that way. Nothing here can
+ * tell those apart, which is the whole reason the verb asks.
+ */
+function keystoreWithLegacyItem(): FakeKeystore {
+  const keystore = fakeKeystore("keychain", { prompted: TOKEN });
+  keystore.items.set(LEGACY_SERVICE_TELEGRAM_TOKEN, TOKEN);
+  return keystore;
+}
+
+test("setup channel telegram: a legacy item is not reused without being asked about", async () => {
+  const mock = await startMockBotApi(TOKEN);
+  try {
+    const home = makeHome();
+    const keystore = keystoreWithLegacyItem();
+    mock.queueUpdate(messageUpdate({ chatId: CHAT, type: "group", title: "Approvals" }));
+
+    // "no" to the reuse question, then the ordinary chat questions.
+    const prompter = scriptedPrompter(["no", true, false]);
+    const result = await run(["channel", "telegram", "--as", HUMAN], home, {
+      prompter,
+      keystore,
+      fetch: mockFetch(),
+      apiBase: assertLocal(mock.url),
+      pollTimeoutSeconds: 1,
+    });
+
+    assert.equal(result.code, EXIT_OK, result.err);
+    const asked = prompter.asked.join("\n");
+    assert.match(asked, new RegExp(`does ${LEGACY_SERVICE_TELEGRAM_TOKEN} belong to THIS instance`, "u"));
+    // The question names the item and the instance, which is what makes it
+    // answerable: an operator cannot tell two gates apart from "reuse? y/n".
+    assert.match(result.out, new RegExp(LEGACY_SERVICE_TELEGRAM_TOKEN, "u"));
+    assert.match(result.out, new RegExp(instanceHomeFor(home.logPath).replaceAll("\\", "\\\\"), "u"));
+    assert.match(result.out, new RegExp(`id ${instanceIdFor(home.logPath)}`, "u"));
+
+    // Answered no: this instance got its own item and the legacy one was not
+    // written to at all.
+    assert.deepEqual(readEnvLines(home), [
+      `APPROVAL_TG_TOKEN=keychain:${servicesFor(home.logPath).telegramToken}`,
+      `APPROVAL_TG_CHAT=${CHAT}`,
+    ]);
+    assert.equal(
+      keystore.calls.includes(`storePrompted:${LEGACY_SERVICE_TELEGRAM_TOKEN}`),
+      false,
+      "an unanswered-for legacy item was written to",
+    );
+    assert.equal(keystore.items.get(LEGACY_SERVICE_TELEGRAM_TOKEN), TOKEN);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("setup channel telegram: a typed yes adopts the legacy item, and says so", async () => {
+  const mock = await startMockBotApi(TOKEN);
+  try {
+    const home = makeHome();
+    const keystore = keystoreWithLegacyItem();
+    mock.queueUpdate(messageUpdate({ chatId: CHAT, type: "group", title: "Approvals" }));
+
+    const result = await run(["channel", "telegram", "--as", HUMAN], home, {
+      prompter: scriptedPrompter(["yes", true, false]),
+      keystore,
+      fetch: mockFetch(),
+      apiBase: assertLocal(mock.url),
+      pollTimeoutSeconds: 1,
+    });
+
+    assert.equal(result.code, EXIT_OK, result.err);
+    assert.deepEqual(readEnvLines(home), [
+      `APPROVAL_TG_TOKEN=keychain:${LEGACY_SERVICE_TELEGRAM_TOKEN}`,
+      `APPROVAL_TG_CHAT=${CHAT}`,
+    ]);
+    assert.ok(keystore.calls.includes(`storePrompted:${LEGACY_SERVICE_TELEGRAM_TOKEN}`));
+    assert.match(result.out, /reusing approval-tg-token for this instance/u);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("setup channel telegram: anything short of `yes` is a no", async () => {
+  const mock = await startMockBotApi(TOKEN);
+  try {
+    const home = makeHome();
+    const keystore = keystoreWithLegacyItem();
+    mock.queueUpdate(messageUpdate({ chatId: CHAT, type: "group", title: "Approvals" }));
+
+    // `y` is the answer a hurried operator gives, and it must not be a yes: the
+    // content of this question is that they read it.
+    const result = await run(["channel", "telegram", "--as", HUMAN], home, {
+      prompter: scriptedPrompter(["y", true, false]),
+      keystore,
+      fetch: mockFetch(),
+      apiBase: assertLocal(mock.url),
+      pollTimeoutSeconds: 1,
+    });
+
+    assert.equal(result.code, EXIT_OK, result.err);
+    assert.ok(
+      readEnvLines(home).includes(
+        `APPROVAL_TG_TOKEN=keychain:${servicesFor(home.logPath).telegramToken}`,
+      ),
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test("setup channel telegram: this instance's OWN item is re-stored without a question", async () => {
+  const mock = await startMockBotApi(TOKEN);
+  try {
+    const home = makeHome();
+    const keystore = keystoreWithLegacyItem();
+    // Both items exist: the legacy one from before the rename, and this
+    // instance's own from a previous run. Its own wins, silently, because an
+    // item bearing this instance's id is this instance's by construction.
+    keystore.items.set(servicesFor(home.logPath).telegramToken, TOKEN);
+    mock.queueUpdate(messageUpdate({ chatId: CHAT, type: "group", title: "Approvals" }));
+
+    const prompter = scriptedPrompter([true, false]);
+    const result = await run(["channel", "telegram", "--as", HUMAN], home, {
+      prompter,
+      keystore,
+      fetch: mockFetch(),
+      apiBase: assertLocal(mock.url),
+      pollTimeoutSeconds: 1,
+    });
+
+    assert.equal(result.code, EXIT_OK, result.err);
+    assert.equal(
+      prompter.asked.some((question) => /belong to THIS instance/u.test(question)),
+      false,
+      "the verb asked about an item that carries this instance's own id",
+    );
+    assert.ok(
+      readEnvLines(home).includes(
+        `APPROVAL_TG_TOKEN=keychain:${servicesFor(home.logPath).telegramToken}`,
+      ),
+    );
   } finally {
     await mock.close();
   }
@@ -1387,9 +1545,9 @@ test("a complete run of all five subcommands leaves the log byte-identical", asy
     // from the adapter.
     assert.deepEqual(readEnvLines(home), [
       `APPROVAL_HUMAN=${HUMAN}`,
-      `APPROVAL_VAULT_PASSPHRASE=keychain:${SERVICE_VAULT_PASSPHRASE}`,
-      `APPROVAL_AUDIT_SECRET=keychain:${SERVICE_SAMPLING_SECRET}`,
-      `APPROVAL_TG_TOKEN=keychain:${SERVICE_TELEGRAM_TOKEN}`,
+      `APPROVAL_VAULT_PASSPHRASE=keychain:${servicesFor(home.logPath).vaultPassphrase}`,
+      `APPROVAL_AUDIT_SECRET=keychain:${servicesFor(home.logPath).samplingSecret}`,
+      `APPROVAL_TG_TOKEN=keychain:${servicesFor(home.logPath).telegramToken}`,
       `APPROVAL_TG_CHAT=${CHAT}`,
     ]);
     assert.deepEqual(vaultNames(home), Object.values(DEFAULT_CREDENTIAL_NAMES).sort());
@@ -2135,7 +2293,13 @@ test("`approval env --check` reads back exactly what setup wrote", () => {
   // Every source is a keychain: line, so nothing resolves without a helper —
   // the point here is that the FILE parses and every variable is accounted for.
   assert.match(result.stdout, /APPROVAL_HUMAN/u);
-  assert.match(result.stdout, new RegExp(`keychain:${SERVICE_TELEGRAM_TOKEN}`, "u"));
+  assert.match(
+    result.stdout,
+    new RegExp(
+      `keychain:${servicesFor(join(fullWalkHome, ".approval", "log", "events.jsonl")).telegramToken}`,
+      "u",
+    ),
+  );
   assert.match(result.stdout, /No value is printed on this path/u);
 });
 

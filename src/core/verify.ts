@@ -312,7 +312,50 @@ export interface VerifyOptions extends ValidateOptions {
    * paths and the tests can state a threshold without a file on disk.
    */
   skewToleranceMs?: number;
+  /**
+   * Called as the walk advances, so a caller can say what is taking so long
+   * (APRV-167).
+   *
+   * `approval policy amend` sat silent for thirty-three seconds re-verifying a
+   * three-thousand-record chain before it printed its first line, read as
+   * frozen, and was once abandoned mid-ceremony — which left the repository's
+   * gate fail-closed for every agent session until somebody tried again. The
+   * work was never the problem; the silence was.
+   *
+   * It OBSERVES and never decides. Nothing in the walk consults it, no verdict,
+   * message, line number or record depends on whether it was supplied, and a
+   * listener that throws would fail the verification of a sound log — so
+   * callers must not throw from it. Counts are absolute over the whole log
+   * (a resumed read behind a {@link VerifiedPrefix} reports the same numbers a
+   * cold one does) and strictly increasing within one run. The final call
+   * reports `done === total` when the chain held, and the length of the
+   * verified prefix when it did not — a meter must not claim work that was
+   * refused.
+   */
+  onProgress?: VerifyProgressListener;
 }
+
+/** How far along a verification walk is. Counts are records, not bytes. */
+export interface VerifyProgress {
+  /** Records verified so far. Monotonically increasing within one run. */
+  done: number;
+  /** Records this run will cover in total, known before the walk starts. */
+  total: number;
+}
+
+export type VerifyProgressListener = (progress: VerifyProgress) => void;
+
+/**
+ * How many records pass between progress calls.
+ *
+ * Count-based rather than time-based, and reported here rather than throttled
+ * here: this module has no clock, a listener that fires on a deterministic
+ * schedule is a listener a test can assert on exactly, and the decision about
+ * how often a HUMAN should see a repaint belongs to the thing holding the
+ * terminal (`cli/progress.ts`), which is the only layer that knows whether
+ * there is one.
+ */
+export const PROGRESS_INTERVAL = 250;
 
 /** The tolerance a verification run should apply, from its options alone. */
 function toleranceOf(options: VerifyOptions): number {
@@ -413,6 +456,12 @@ function walk(
   lines: string[],
   validateOptions: ValidateOptions,
   start: WalkStart,
+  /**
+   * Called with the number of lines consumed so far, every
+   * {@link PROGRESS_INTERVAL} records (APRV-167). Purely observational; see
+   * {@link VerifyOptions.onProgress}.
+   */
+  report: ((consumed: number) => void) | null = null,
 ): { failure: VerifyResult | null; head: LogHead | null; records: EventRecord[] } {
   let prevSeq = start.prevSeq;
   let prevHash: string | null = start.prevHash;
@@ -567,6 +616,8 @@ function walk(
     prevSeq = record.seq;
     prevHash = record.hash;
     verified.push(record);
+
+    if (report !== null && (index + 1) % PROGRESS_INTERVAL === 0) report(index + 1);
   }
 
   return {
@@ -681,7 +732,34 @@ export function verifyText(
   const priorLines = prefix === null ? 0 : prefix.lines;
 
   const { complete, torn } = text.length === 0 ? { complete: [], torn: null } : splitLines(text);
-  const walked = walk(complete, validateOptions, start);
+
+  // Absolute over the whole log, not over this walk: a resumed read behind a
+  // verified prefix has already accounted for `priorLines` records, and an
+  // operator watching "1500/3000" should not see it restart at zero because
+  // the process happened to hold a warm cache (APRV-167).
+  const progressTotal = priorLines + complete.length;
+  const listener = options.onProgress;
+  let reported = -1;
+  const report =
+    listener === undefined
+      ? null
+      : (consumed: number): void => {
+          // Never twice for the same count, and never backwards: the closing
+          // call below lands on a number an interval boundary may already have
+          // reported, and a listener drawing a bar should not see it repeat.
+          if (consumed <= reported) return;
+          reported = consumed;
+          listener({ done: priorLines + consumed, total: progressTotal });
+        };
+
+  const walked = walk(complete, validateOptions, start, report);
+  // The closing call: the count the walk actually reached, which is the total
+  // when the chain held and the verified prefix when it did not. Reporting the
+  // total for a walk that stopped at record 12 would be a progress meter
+  // claiming work that was refused.
+  if (report !== null) {
+    report(walked.failure === null ? complete.length : walked.records.length);
+  }
   const { failure, head } = walked;
   const records =
     priorRecords.length === 0 ? walked.records : [...priorRecords, ...walked.records];

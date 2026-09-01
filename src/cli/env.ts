@@ -37,8 +37,10 @@
 
 import {
   defaultSourceRunner,
+  describeDeclaredSource,
   envFilePathFor,
   resolveEnvironment,
+  type DeclaredSource,
   type EnvFileRefusal,
   type ResolvedVariable,
 } from "../core/env-file.js";
@@ -129,6 +131,21 @@ function pad(text: string, width: number): string {
   return text.length >= width ? text : text + " ".repeat(width - text.length);
 }
 
+/**
+ * The value came from the ambient environment while this instance's file names
+ * a source of its own (APRV-178).
+ *
+ * Reported, never failed. The precedence is correct and is invariant 7's whole
+ * point; what was missing is that nothing said out loud when the two disagree,
+ * and the disagreement is exactly the shape of the incident that produced this
+ * check: a production token exported in a shell profile, a demo instance whose
+ * `.approval/env` named its own item, and every fresh terminal quietly using
+ * the production bot.
+ */
+function overriddenByEnvironment(entry: ResolvedVariable): boolean {
+  return entry.status === "set-in-environment" && entry.fileSource !== undefined;
+}
+
 /** Unresolved AND named by the policy: the thing `--check` fails on. */
 function failing(variables: ResolvedVariable[]): ResolvedVariable[] {
   return variables.filter((entry) => entry.status === "unset" && entry.declared);
@@ -179,6 +196,10 @@ export function commandEnv(argv: string[], streams: Streams, cwd: string): numbe
           source: entry.source,
           plaintext: entry.plaintext,
           declared: entry.declared,
+          // APRV-178. Value-free on every path, `--check` or not: a keystore
+          // service name is what the file carries in the open, and a literal
+          // entry contributes its KIND alone.
+          ...(entry.fileSource === undefined ? {} : { file_source: entry.fileSource }),
           // --json --check is the value-free machine path, exactly as --check is
           // the value-free human one. The key is omitted rather than nulled: a
           // null would read as "resolved to nothing".
@@ -230,6 +251,20 @@ function emitCheck(
       `\nPLAINTEXT: ${plaintext
         .map((entry) => entry.name)
         .join(", ")} — the value is written literally in ${path}. That is permitted and it is always reported; the file must be mode 0600 and \`approval init\` gitignores it. Move one to your keychain with \`<NAME>=keychain:<service>\` (macOS) or \`<NAME>=secret-service:<label>\` (Linux).\n`,
+    );
+  }
+
+  const bleeding = variables.filter(overriddenByEnvironment);
+  if (bleeding.length > 0) {
+    streams.out(
+      `\nCROSS-INSTANCE BLEED: ${bleeding
+        .map(
+          (entry) =>
+            `${entry.name} is set in this shell, and ${path} line ${String(entry.fileSource?.line ?? 0)} names ${describeDeclaredSource(entry.fileSource as DeclaredSource)} instead`,
+        )
+        .join("; ")}. The exported value wins and the file is not consulted, which is deliberate — your shell is the authority — but it means the verbs run from HERE use a credential this instance never configured. That is how a demo gate ends up sending through another instance's bot and eating its approval taps (APRV-178). If that is not what you want, \`unset ${bleeding
+        .map((entry) => entry.name)
+        .join(" ")}\` and then \`eval "$(approval env)"\` in this shell.\n`,
     );
   }
 

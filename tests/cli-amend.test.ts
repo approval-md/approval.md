@@ -505,6 +505,25 @@ function report(run: Run): Record<string, unknown> {
   return JSON.parse(run.stdout) as Record<string, unknown>;
 }
 
+/**
+ * stderr with APRV-167's progress narration removed.
+ *
+ * The verb now says what it is doing while it does it, because it used to say
+ * nothing for thirty-three seconds and read as hung. That narration is stderr's
+ * and stdout is untouched, so the cases that assert "nothing went wrong" assert
+ * it against this rather than against an empty string.
+ */
+function withoutProgress(text: string): string {
+  return text
+    .split("\n")
+    .filter(
+      (line) =>
+        !/^(verifying the log chain|recovering the attested baseline)/u.test(line) &&
+        !/^ {2}\d+\/\d+ records$/u.test(line),
+    )
+    .join("\n");
+}
+
 function errorOf(run: Run): { code: string; message: string } {
   return (JSON.parse(run.stderr) as { error: { code: string; message: string } }).error;
 }
@@ -521,7 +540,7 @@ test("an already-attested policy is nothing to amend, and that is a success", ()
   const run = runCli(["policy", "amend", "--as", "human:carter", "--yes"], dir);
 
   assert.equal(run.code, 0);
-  assert.equal(run.stderr, "");
+  assert.equal(withoutProgress(run.stderr), "");
   assert.match(run.stdout, /nothing to amend/u);
   assert.match(run.stdout, /already matches its attestation at seq 1/u);
   assert.equal(rawLog(dir), before, "the no-op ceremony wrote to the log");
@@ -992,6 +1011,56 @@ test("--dry-run --json reports the diff with a null attestation", () => {
   // add, commit, push: the whole direct ceremony, in order.
   assert.equal((gitPlan["commands"] as string[]).length, 3);
   assert.match((gitPlan["commands"] as string[])[1] as string, /attested seq <seq>/u);
+});
+
+// ---------------------------------------------------------------------------
+// Progress during the pre-diff verify (APRV-167)
+// ---------------------------------------------------------------------------
+
+test("the ceremony names the step it is on, on stderr, before the report", () => {
+  const dir = repoDir();
+  attest(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(["policy", "amend", "--as", "human:carter", "--yes", "--dry-run"], dir);
+
+  assert.equal(run.code, 0, run.stderr);
+  // The two phases the operator used to sit through in silence, in order.
+  const lines = run.stderr.split("\n").filter((line) => line.length > 0);
+  assert.equal(lines[0], "verifying the log chain before anything is read from it");
+  assert.ok(
+    lines.some((line) => line.startsWith("recovering the attested baseline")),
+    `no baseline phase in ${JSON.stringify(run.stderr)}`,
+  );
+  // A pipe is not a terminal: line-oriented, and not one carriage return.
+  assert.equal(run.stderr.includes("\r"), false, "a pipe was sent a repaint");
+  // And the report itself is where it always was.
+  assert.match(run.stdout, /Policy/u);
+});
+
+test("--json says nothing on either stream but its report: the machine surface is both", () => {
+  const dir = repoDir();
+  attest(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--dry-run", "--json"],
+    dir,
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  // Exactly one line on stdout, and it parses: a progress meter that had leaked
+  // onto this stream would break every machine caller of this verb.
+  assert.deepEqual(run.stdout.split("\n").filter((line) => line.length > 0).length, 1);
+  const parsed = report(run);
+  assert.equal(parsed["dryRun"], true);
+  assert.equal(run.stdout.includes("verifying the log chain"), false);
+
+  // And NOTHING on stderr either. A `--json` refusal puts its error object on
+  // that stream and callers parse it whole, so narration mixed in would be a
+  // parse error in every machine consumer of a refusal. `--json` is the flag
+  // that says nobody is watching.
+  assert.equal(run.stderr, "");
 });
 
 test("without --yes and without a terminal the verb refuses rather than assuming", () => {
@@ -1635,7 +1704,7 @@ test("push-rejected renders a headline, YOUR STATE, and numbered NEXT STEPS", ()
 
   assert.equal(run.code, 4, run.stdout);
   // The headline: one short line naming what happened, with the code on it.
-  const headline = run.stderr.split("\n")[0] ?? "";
+  const headline = firstLine(run.stderr);
   assert.match(headline, /push-rejected/u);
   // APRV-130: the headline names the SUB-STEP that was refused, which after the
   // automatic recovery is the branch push and no longer the direct one.
@@ -1697,7 +1766,7 @@ test("the runbook survives NO_COLOR and ASCII mode with its structure intact", (
 
   assert.equal(plain.code, 4);
   assert.ok(!plain.stderr.includes("\u001b"), "an escape sequence survived NO_COLOR");
-  assert.match(plain.stderr, /^\[x\] push-rejected {2}the remote REJECTED/u);
+  assert.match(firstLine(plain.stderr), /^\[x\] push-rejected {2}the remote REJECTED/u);
   assert.ok(sectionLines(plain.stderr, "YOUR STATE").length >= 3);
   assert.match(sectionLines(plain.stderr, "NEXT STEPS")[0] ?? "", /^1\. git push -u origin/u);
   assert.doesNotMatch(plain.stderr, /reset --hard/u);
@@ -1744,7 +1813,7 @@ test("a rejected BRANCH push renders the same runbook shape", () => {
   );
 
   assert.equal(run.code, 4, run.stdout);
-  assert.match(run.stderr.split("\n")[0] ?? "", /push-rejected {2}the remote REJECTED/u);
+  assert.match(firstLine(run.stderr), /push-rejected {2}the remote REJECTED/u);
   assert.match(sectionLines(run.stderr, "YOUR STATE").join("\n"), /nowhere else/u);
   assert.match(sectionLines(run.stderr, "NEXT STEPS")[0] ?? "", /^1\. git push -u origin policy-amend-2/u);
   assert.doesNotMatch(run.stderr, /reset --hard/u);
@@ -1766,8 +1835,19 @@ test("a rejected BRANCH push renders the same runbook shape", () => {
 // ---------------------------------------------------------------------------
 
 /** The first line of `text` that carries anything, headline included. */
+/**
+ * The first line that says something.
+ *
+ * Progress narration is skipped (APRV-167): on stderr the phase names now
+ * precede the outcome, and the property these cases pin is "the first thing the
+ * verb SAYS ABOUT THE RESULT is the headline", which is what it always was.
+ */
 function firstLine(text: string): string {
-  return text.split("\n").find((line) => line.trim().length > 0) ?? "";
+  return (
+    withoutProgress(text)
+      .split("\n")
+      .find((line) => line.trim().length > 0) ?? ""
+  );
 }
 
 /**
@@ -1821,7 +1901,7 @@ test("a rejected push is published through a branch, and the ceremony reads as a
 
   // Attested AND published: the ceremony finished its own job, so it is a 0.
   assert.equal(run.code, 0, run.stderr);
-  assert.equal(run.stderr, "");
+  assert.equal(withoutProgress(run.stderr), "");
 
   // THE PROPERTY: the first line is the achievement, not the failed sub-step.
   assert.match(firstLine(ceremonyOutput(run.stdout)), /attested seq 2 — the policy is operative/u);

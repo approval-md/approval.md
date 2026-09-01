@@ -72,6 +72,7 @@
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
+import { instanceFindings } from "../core/instance.js";
 import { loadPolicy } from "../core/policy-load.js";
 import {
   DEFAULT_DEBOUNCE_MS,
@@ -404,6 +405,18 @@ export function commandUp(
     if (prepared.ok) {
       telegram = prepared.setup;
       parts.push("telegram");
+      // APRV-178. The channel's credentials come from the launch environment
+      // and only from there, which is invariant 7 and stays true — but an
+      // exported value that this instance's own `.approval/env` disagrees with
+      // is how a demo gate spent an evening sending through the production bot.
+      // Said once, on stderr, before anything starts: a long-running process
+      // that is quietly holding another instance's bot token should say so at
+      // the moment it picks it up, not in a postmortem. It is a warning and not
+      // a refusal, because an operator who feeds the primary daemon from a
+      // shell profile is doing something deliberate and supported.
+      for (const finding of instanceFindings(logPath, load)) {
+        streams.err(`approval: cross-instance: ${finding.detail}\n`);
+      }
     } else if (prepared.code === "poll-timeout" || prepared.code === "payloads-unreadable") {
       // A mistyped command line, not an unconfigured machine. Refused here, the
       // way every verb refuses one, rather than degraded into a missing channel

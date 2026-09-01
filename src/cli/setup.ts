@@ -178,8 +178,6 @@ import { RENAMED_NOTICE, commandSetupChannel } from "./setup-channel.js";
 import { commandSetupService } from "./setup-service.js";
 import {
   DEFAULT_SAMPLING_ENV,
-  SERVICE_SAMPLING_SECRET,
-  SERVICE_VAULT_PASSPHRASE,
   emitRefusal,
   front,
   offerLiteral,
@@ -450,7 +448,7 @@ export function commandSetupIdentity(
 // ---------------------------------------------------------------------------
 
 const VAULT_HINT = (where: HintContext): string =>
-  `  # 1. store a passphrase you generated yourself (no value on this command line;\n  #    the helper prompts for it with no echo):\n  ${storageCommand(where.kind === "none" ? "keychain" : where.kind, SERVICE_VAULT_PASSPHRASE)}\n\n  # 2. record where it lives:\n  printf '%s\\n' '${where.passphraseEnv}=${schemeFor(where.kind === "none" ? "keychain" : where.kind, SERVICE_VAULT_PASSPHRASE) ?? ""}' >> ${where.envPath}\n  chmod 600 ${where.envPath}`;
+  `  # 1. store a passphrase you generated yourself (no value on this command line;\n  #    the helper prompts for it with no echo):\n  ${storageCommand(where.kind === "none" ? "keychain" : where.kind, where.services.vaultPassphrase)}\n\n  # 2. record where it lives (the name carries this instance's id; see \`approval doctor\`):\n  printf '%s\\n' '${where.passphraseEnv}=${schemeFor(where.kind === "none" ? "keychain" : where.kind, where.services.vaultPassphrase) ?? ""}' >> ${where.envPath}\n  chmod 600 ${where.envPath}`;
 
 /** `approval setup vault` — mint and store the vault passphrase. HUMAN-ONLY. */
 export function commandSetupVault(
@@ -494,7 +492,7 @@ export function commandSetupVault(
   const stored = storeGeneratedSecret(
     streams,
     context,
-    SERVICE_VAULT_PASSPHRASE,
+    context.services.vaultPassphrase,
     "vault passphrase",
   );
   if (stored === null) return EXIT_OK;
@@ -520,7 +518,7 @@ export function commandSetupVault(
 // ---------------------------------------------------------------------------
 
 const SAMPLING_HINT = (where: HintContext): string =>
-  `  # 1. store the secret (the helper prompts; no value on this command line):\n  ${storageCommand(where.kind === "none" ? "keychain" : where.kind, SERVICE_SAMPLING_SECRET)}\n\n  # 2. record where it lives:\n  printf '%s\\n' '${where.samplingEnv}=${schemeFor(where.kind === "none" ? "keychain" : where.kind, SERVICE_SAMPLING_SECRET) ?? ""}' >> ${where.envPath}\n  chmod 600 ${where.envPath}\n\n  # 3. name the variable in the policy, through the amendment ceremony:\n  #    audit: { sampling_secret_env: ${where.samplingEnv} }\n  approval policy amend`;
+  `  # 1. store the secret (the helper prompts; no value on this command line):\n  ${storageCommand(where.kind === "none" ? "keychain" : where.kind, where.services.samplingSecret)}\n\n  # 2. record where it lives (the name carries this instance's id; see \`approval doctor\`):\n  printf '%s\\n' '${where.samplingEnv}=${schemeFor(where.kind === "none" ? "keychain" : where.kind, where.services.samplingSecret) ?? ""}' >> ${where.envPath}\n  chmod 600 ${where.envPath}\n\n  # 3. name the variable in the policy, through the amendment ceremony:\n  #    audit: { sampling_secret_env: ${where.samplingEnv} }\n  approval policy amend`;
 
 /** `approval setup sampling` — mint and store the audit sampling secret. HUMAN-ONLY. */
 export function commandSetupSampling(
@@ -553,7 +551,7 @@ export function commandSetupSampling(
   const stored = storeGeneratedSecret(
     streams,
     context,
-    SERVICE_SAMPLING_SECRET,
+    context.services.samplingSecret,
     "sampling secret",
   );
   if (stored === null) return EXIT_OK;
