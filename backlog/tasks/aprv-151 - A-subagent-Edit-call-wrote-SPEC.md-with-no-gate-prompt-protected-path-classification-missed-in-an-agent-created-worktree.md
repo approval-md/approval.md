@@ -3,11 +3,11 @@ id: APRV-151
 title: >-
   A subagent Edit call wrote SPEC.md with no gate prompt: protected-path
   classification missed in an agent-created worktree
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-08-29 20:41'
-updated_date: '2026-09-01 20:43'
+updated_date: '2026-09-01 23:40'
 labels:
   - security
   - hook
@@ -29,7 +29,7 @@ Observed 2026-08-29 during the APRV-145 design landing. A subagent session worki
 - [x] #1 Root cause identified and recorded: why this session Edit call on SPEC.md was never classified while sibling sessions were
 - [x] #2 A fail-closed detection exists for protected-path writes that bypassed classification (session doctor check, repo guard, or CI-side grant cross-check), tested
 - [x] #3 The overnight bypass instance is reconstructed in the notes: which commit, which worktree, and the remediation that re-applied the edit through a granted policy.edit
-- [ ] #4 npm test passes; lint clean
+- [x] #4 npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -694,6 +694,8 @@ refused command-derived grants outright, which is correct in principle but would
 fail the shell-granted CLAUDE.md edits this repository actually makes.
 
 `docs/` is not a protected path, so this is an ordinary edit.
+
+AC4 (2026-09-01): full suite 2492 pass / 0 fail on the APRV-201 fix (PR #186, merged), which removed the decideLater race that reddened PR #180's first run; lint clean on the guard commit 5b74b33. The CI job itself landed on main through the Wave 1 batch (PR #187, grant seq 7282) and passed on that PR via in-window grants, which is the limitation APRV-202 records.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
