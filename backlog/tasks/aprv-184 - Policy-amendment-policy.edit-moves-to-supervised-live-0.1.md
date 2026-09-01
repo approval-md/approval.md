@@ -4,7 +4,7 @@ title: 'Policy amendment: policy.edit moves to supervised-live 0.1'
 status: To Do
 assignee: []
 created_date: '2026-08-31 23:38'
-updated_date: '2026-09-01 01:04'
+updated_date: '2026-09-01 18:45'
 labels:
   - policy
   - gate
@@ -29,10 +29,10 @@ Note for the drafter: consider whether the live grants for sampled policy.edit a
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Exact APPROVAL.md diff drafted in this task: policy.edit autonomy supervised-live, live_rate 0.1, everything else on the rule unchanged
-- [ ] #2 APRV-127 SPEC sign-off confirmed landed before the ceremony
+- [x] #1 Exact APPROVAL.md diff drafted in this task: policy.edit autonomy supervised-live, live_rate 0.1, everything else on the rule unchanged
+- [x] #2 APRV-127 SPEC sign-off confirmed landed before the ceremony
 - [ ] #3 Sampling secret verified resolvable in the gate process environment (approval doctor or env --check clean on APPROVAL_SAMPLING_SECRET)
-- [ ] #4 Human runs the amend ceremony; attestation seq and PR recorded in implementation notes
+- [x] #4 Human runs the amend ceremony; attestation seq and PR recorded in implementation notes
 - [ ] #5 Post-amend: one sampled and one unsampled policy.edit observed and their selection verified against the secret, recorded in notes
 <!-- AC:END -->
 
@@ -50,4 +50,6 @@ to:
 Everything else on the rule unchanged (no approvers list or limits declared today, none added). Sampled edits follow the manual path bit for bit; unsampled ones proceed and stay in the retro pool.
 
 Prerequisites verified 2026-09-01: APRV-127 grammar is BUILT and its SPEC amendments still carry pending-sign-off flags (Carter's step 1). APPROVAL_SAMPLING_SECRET is unresolved and .approval/env absent (approval env --check), so supervised-live would fail closed and gate 100 percent: Carter runs approval setup sampling first (step 2), then verifies the daemon terminal resolves the secret, then approval policy amend --commit in the primary (step 3; expect the ~33s silent pre-diff verify, APRV-167). Blocked on those three human steps; nothing further for an agent until the ceremony lands.
+
+2026-09-01: ceremony landed. Carter hand-applied line 46 (policy.edit: { autonomy: supervised-live, live_rate: 0.1 }) and ran approval policy amend --commit: attested seq 5147, PR #175 (policy-amend-5147, merged 05:39Z with the dogfood pin moved to supervised in the same PR), log advance PR #176 merged 08:14Z. AC2: APRV-127 sign-off PR #174 merged 05:21Z, before the ceremony. Still open: AC3 (APPROVAL_SAMPLING_SECRET minted via approval setup sampling into keychain + .approval/env, but not yet resolvable in hook/agent gate processes, so supervised-live fails closed and gates 100 percent; safe, no tap reduction yet) and AC5 (observation of one sampled + one unsampled edit, possible only after AC3). Hardening dependency: APRV-198 narrows policy.edit so the 0.1 sampling stops covering APPROVAL.md and the log; landing today.
 <!-- SECTION:NOTES:END -->
