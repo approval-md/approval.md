@@ -90,6 +90,7 @@ import {
   type MockBotApi,
 } from "./telegram-mock.js";
 import { assertLoopback, startMockSmtp, type MockSmtp } from "./smtp-mock.js";
+import { fakeClaudeEnv } from "./fake-claude.js";
 
 /** dist/tests/e2e-email-demo.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -297,7 +298,11 @@ interface Run {
  * a step pass by accident.
  */
 function cliEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+  // APRV-197. The listener asks a model for a one-sentence gloss unless told
+  // not to, and this demo spawns the real listener. A fake `claude` first on
+  // PATH keeps every step deterministic and instant, instead of adding ~13s per
+  // request and a dependency on whether this machine has the CLI installed.
+  const env: NodeJS.ProcessEnv = { ...process.env, ...fakeClaudeEnv(demo), ...extra };
   for (const name of [
     "APPROVAL_HUMAN",
     "APPROVAL_TG_TOKEN",

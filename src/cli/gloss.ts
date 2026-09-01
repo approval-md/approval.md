@@ -29,9 +29,13 @@
  *
  * **It fails toward absence, fast.** A hard timeout (default
  * {@link GLOSS_TIMEOUT_MS}), a non-zero exit, empty output, a binary that is
- * not installed, a spawn that throws: all `null`. The timeout is short on
- * purpose — this sits in a dispatch cycle that an approver is waiting on, and
- * a slow reading aid is worse than no reading aid.
+ * not installed, a spawn that throws: all `null`. The timeout is bounded on
+ * purpose — this sits in a dispatch cycle that an approver is waiting on — and
+ * since APRV-197 it is bounded by a MEASUREMENT rather than by a guess, because
+ * a ceiling the model cannot meet is not a fast failure, it is a feature that
+ * never runs. See {@link GLOSS_TIMEOUT_MS}. Absences are counted and reported
+ * by the caller (`cli/gloss-attach.ts`), so a ceiling that is wrong again
+ * announces itself instead of looking like silence.
  *
  * **Its output is untrusted text.** Whatever comes back is collapsed to a
  * single line, capped at {@link GLOSS_MAX_CHARS}, and handed to the channel as
@@ -46,8 +50,35 @@
 
 import { spawnSync } from "node:child_process";
 
-/** How long the subprocess gets before it is killed and the gloss is dropped. */
-export const GLOSS_TIMEOUT_MS = 2_000;
+/**
+ * How long the subprocess gets before it is killed and the gloss is dropped.
+ *
+ * **Measured, not guessed (APRV-197).** APRV-144 chose 2s on the reasoning that
+ * "a slow reading aid is worse than no reading aid", which is true and was the
+ * wrong number: five fresh `claude -p --model haiku` spawns of this module's
+ * own command instruction, timed on the author's machine on 2026-09-01, came
+ * back in 10.2s, 11.3s, 13.5s, 14.6s and 14.9s. Every one of them would have
+ * been killed. The gloss was therefore not "occasionally absent"; it was
+ * absent every single time, and because absence is silent by design that was
+ * indistinguishable from the feature never having shipped — which is exactly
+ * how it was reported (Carter, 2026-09-01: "i thought we implemented a change
+ * so that the claim would be an llm summary").
+ *
+ * A pre-warm was the other option on the table and the measurement rules it
+ * out: the runs above were consecutive, so runs two through five were warm in
+ * every sense a second process can be (page cache, module cache), and they took
+ * 10s to 15s all the same. What is being waited on is inference, not start-up,
+ * and nothing a listener does once at boot shortens it.
+ *
+ * So the ceiling is set above the slowest observed run with headroom, and the
+ * price of that honesty is made explicit rather than hidden. A gloss is now
+ * asked for only under `--gloss` (on `channel cli`, `channel telegram listen`
+ * and `up` alike): an operator who wants the sentence spends the seconds
+ * knowingly, one who does not is never made to wait, and the reading aid that
+ * is always present is the deterministic `command_breakdown` the classifier
+ * derives from the same bytes for free.
+ */
+export const GLOSS_TIMEOUT_MS = 20_000;
 
 /** The most characters a gloss may occupy on the prompt. */
 export const GLOSS_MAX_CHARS = 200;

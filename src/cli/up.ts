@@ -236,6 +236,8 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--port": "string",
   "--no-telegram": "boolean",
   "--no-web": "boolean",
+  "--gloss": "boolean",
+  "--no-gloss": "boolean",
   // The supervisor's.
   "--restart-backoff": "string",
   "--json": "boolean",
@@ -400,7 +402,11 @@ export function commandUp(
       once,
       json,
       log: (message: string) => streams.err(`${message}\n`),
-      gloss: spawnGloss,
+      // APRV-197: on by default, `--no-gloss` to turn it off, exactly as on
+      // `channel telegram listen` — this IS that listener, and a flag that
+      // meant different things on the two verbs that start it would be a trap.
+      // The reasoning is at `glossWiring` there.
+      ...(boolFlag(flags, "--no-gloss") ? {} : { gloss: spawnGloss }),
     });
     if (prepared.ok) {
       telegram = prepared.setup;

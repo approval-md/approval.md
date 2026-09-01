@@ -131,6 +131,18 @@ export type TaggedField<T> =
   | { kind: "computed"; value: T; source: string }
   | { kind: "claimed"; value: T; author: string };
 
+/**
+ * The words that ride beside a rendered `gloss`, on every channel that renders
+ * one (APRV-144 for Telegram, APRV-197 for the terminal).
+ *
+ * Belt and braces with the `(author)` parenthetical: a reader skimming a wall
+ * of lines sees the word "model" inside the sentence they are about to believe,
+ * not only in the small print at the end of it. It lives here, next to the
+ * field it labels, because two channels rendering the same field under two
+ * different labels is how one of them ends up looking authoritative.
+ */
+export const GLOSS_UNVERIFIED_SUFFIX = "(model, unverified)";
+
 /** Tag `value` as runtime-derived, naming the derivation that produced it. */
 export function computed<T>(value: T, source: ComputedSource | string): TaggedField<T> {
   return { kind: "computed", value, source };

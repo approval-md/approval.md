@@ -91,10 +91,12 @@ import {
   bannerLines,
   describeActionFor,
   dispatchPending,
+  glossWiring,
   newDispatchState,
   DISPATCH_RETENTION_MS,
   type ListenSetup,
 } from "../src/cli/channel-telegram.js";
+import { parseFlags } from "../src/cli/args.js";
 import {
   glossFor,
   glossPrompt,
@@ -115,6 +117,7 @@ import { register as registerCore, request as requestCore } from "../src/core/ga
 import { payloadHash } from "../src/core/payload.js";
 import { readVerifiedRecords } from "../src/core/state.js";
 import { expire, register, request, withdraw } from "./clock-adapters.js";
+import { fakeClaudeEnv, FAKE_GLOSS_SENTENCE } from "./fake-claude.js";
 import {
   assertLocal,
   callbackUpdate,
@@ -2473,6 +2476,12 @@ test("--once: pending request → message → callback → grant → token on st
         APPROVAL_TG_TOKEN: TOKEN,
         APPROVAL_TG_CHAT: CHAT,
         APPROVAL_HUMAN: HUMAN,
+        // APRV-197. The listener asks for a gloss by default now, and this is
+        // the one case in this file that runs the REAL verb, so without a fake
+        // binary in front of it the suite would call a language model and wait
+        // ~13s for it. The stub answers instantly and deterministically, which
+        // also makes the assertion below a real check that the verb is wired.
+        ...fakeClaudeEnv(world.unit.dir),
       }),
       cwd: world.unit.dir,
     },
@@ -2515,7 +2524,17 @@ test("--once: pending request → message → callback → grant → token on st
   // The token reached stdout and nothing else: not the chat, not the log.
   const sent = mock.sentTexts().join("\n");
   assert.equal(sent.includes(token[1] as string), false, "the token was sent to Telegram");
+
+  // APRV-197. The listener asks for a gloss without being told to, and the
+  // stub's sentence arrives on the prompt labelled as a model's. This is the
+  // only assertion in the suite that the VERB is wired to a runner at all —
+  // every other gloss test injects one directly.
+  assert.ok(
+    sent.includes(`${FAKE_GLOSS_SENTENCE} ${TELEGRAM_GLOSS_SUFFIX}`),
+    `the default-on gloss did not reach the prompt: ${sent}`,
+  );
   const logBytes = readFileSync(world.unit.logPath, "utf8");
+  assert.equal(logBytes.includes(FAKE_GLOSS_SENTENCE), false, "the gloss reached the log");
   assert.equal(logBytes.includes(token[1] as string), false, "the raw token reached the log");
   assert.equal(logBytes.includes(TOKEN), false, "the bot token reached the log");
 
@@ -3289,6 +3308,27 @@ test("no runner at all is the default, and spawns nothing", async () => {
     undefined,
   );
   assertClean(world.unit);
+});
+
+test("the listener verb asks for a gloss by default; --no-gloss is how you stop it", () => {
+  // APRV-197. The decision, pinned where it is made. The phone is the surface
+  // the gloss was asked for and a dispatch cycle blocks nobody, so this verb
+  // defaults ON — the opposite of `channel cli`, where a person is waiting at
+  // the prompt and the flag is `--gloss`. `dispatchPending` itself still
+  // defaults to no runner (the test above), which is what keeps a model out of
+  // every programmatic driver; the flag decides only for the VERB.
+  const wiring = (argv: string[]) => {
+    const parsed = parseFlags(argv, { "--gloss": "boolean", "--no-gloss": "boolean" });
+    assert.equal(parsed.ok, true, JSON.stringify(parsed));
+    if (!parsed.ok) throw new Error("unreachable");
+    return glossWiring(parsed.flags);
+  };
+
+  assert.equal(typeof wiring([]).gloss, "function", "the listener must gloss by default");
+  assert.equal(typeof wiring(["--gloss"]).gloss, "function", "--gloss restates the default");
+  assert.equal("gloss" in wiring(["--no-gloss"]), false, "--no-gloss removes the key entirely");
+  // The flag that takes a language model OUT of the path never loses a tie.
+  assert.equal("gloss" in wiring(["--gloss", "--no-gloss"]), false);
 });
 
 test("an opaque payload is never sent to a model at all (APRV-164 #3)", async () => {

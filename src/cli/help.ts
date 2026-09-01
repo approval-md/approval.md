@@ -1173,7 +1173,7 @@ export const CHANNEL_CLI_HELP = `approval channel cli — the zero-config channe
 Usage:
   approval channel cli [--log <path>] [--policy-dir <path>] [--policy <path>]
                        [--payload-dir <path>] [--as human:<id>] [--interactive]
-                       [--json]
+                       [--gloss] [--json]
 
 Flags:
   --log <path>         log file to read, and to append decisions to
@@ -1181,14 +1181,14 @@ Flags:
   --payload-dir <path> OPTIONAL OVERRIDE for material held outside the store
   --as human:<id>      the person deciding; else APPROVAL_HUMAN
   --interactive        prompt even though stdin is not a terminal
+  --gloss              add a labelled model gloss per payload (~10-15s each)
   --json               machine-readable output; never interactive
   -h, --help           this text
 
 Renders every pending manual request with [computed]/[claimed] markers and the
 full payload verbatim between "--- BEGIN FULL PAYLOAD" delimiters. With a TTY (or
---interactive) each request is answered g) grant, r) reject, s) skip. WITHOUT a
-TTY, and always with --json, the queue is printed and the command
-EXITS 0 WITHOUT READING STDIN.
+--interactive) each is answered g) grant, r) reject, s) skip. WITHOUT a TTY, and
+always with --json, the queue is printed and EXITS 0 WITHOUT READING STDIN.
 
 JSON shape: docs/cli-reference.md#channel-cli
 ${EXIT_CODES_POINTER} (1 is also a gate refusal surfaced from a decision)
@@ -1399,15 +1399,15 @@ export const TELEGRAM_LISTEN_HELP = `approval channel telegram listen — delive
 
 Usage:
   approval channel telegram listen [--once] [--as human:<id>] [--payloads <f>]
-                                   [--policy <p>] [--dir <p>] [--log <p>]
+                                   [--policy <p>] [--dir <p>] [--log <p>] [--no-gloss]
                                    [--api-base <url>] [--poll-timeout <s>] [--json]
 
 Flags:
   --once / --json  one getUpdates batch then exit / ONE JSON OBJECT PER LINE
+  --no-gloss       drop the labelled model gloss (ON by default, ~10-15s each)
   --as human:<id>  the approver every decision is recorded against. REQUIRED
   --payloads <f>   OPTIONAL OVERRIDE: JSON file of action key -> payload
-  --policy <path> / --dir <path>   the policy file, or where to discover it
-  --log <path>     log file (read for the queue, appended to by decisions)
+  --policy <p> / --dir <p> / --log <p>   the policy, its dir, the log written to
   --api-base <url> / --poll-timeout <s>   Bot API base / long-poll seconds (25)
   -h, --help       this text
 
@@ -1496,7 +1496,7 @@ export const UP_HELP = `approval up — the daemon and every configured channel,
 
 Usage:
   approval up [every "daemon run" flag] [--as human:<id>] [--port <n>]
-              [--payloads <f>] [--payload-dir <d>] [--api-base <url>]
+              [--payloads <f>] [--payload-dir <d>] [--api-base <url>] [--no-gloss]
               [--poll-timeout <s>] [--no-telegram] [--no-web] [--restart-backoff <d>]
 
 Flags (every "daemon run" flag, unchanged, plus):
@@ -1505,7 +1505,7 @@ Flags (every "daemon run" flag, unchanged, plus):
   --api-base <url> / --poll-timeout <s>   Bot API base / long-poll seconds
   --port <n>       queue-page port. Precedence: --port, channels.web.port
   --no-telegram / --no-web   leave that channel out of this process
-  --restart-backoff <d>      first wait after a channel falls over (1s)
+  --no-gloss / --restart-backoff <d>   drop the model gloss / first retry wait
   -h, --help       this text
 
 Credentials and identity come from THE LAUNCH ENVIRONMENT and nowhere else. A
