@@ -44,10 +44,12 @@ to prevent.
    exist to prevent.
 7. **A PR is not shipped until the merge is armed.** After opening or
    updating a PR, the session itself runs `gh pr merge <n> --merge`. The
-   hook classifies it `vcs.push.main`, the prompt reaches the human's
-   phone, and the tap queues the merge. A PR sitting at CLEAN waiting for
-   a hand click in the GitHub UI is the failure mode this rule removes
-   (APRV-182).
+   hook classifies it `vcs.push.main`, supervised in today's policy: the
+   command proceeds at once, enters the retrospective sample, and the
+   merge queue takes it from there. A policy that raises the class puts
+   the same command on the phone instead. A PR sitting at CLEAN waiting
+   for a hand click in the GitHub UI is the failure mode this rule
+   removes (APRV-182).
 
 ## Model tiers
 
