@@ -49,6 +49,7 @@ import {
   isEmailFailureCode,
   quotedPrintable,
   renderEmailMessage,
+  requiredEmailCredentials,
   rfc5322Date,
   validateEmailPayload,
   type EmailPayload,
@@ -690,10 +691,22 @@ test("no vault at all is credential-unavailable, and nothing is sent", async () 
   });
   assert.equal(result.ok, false);
   if (!result.ok) {
+    // APRV-169: the adapter declares smtp.host, smtp.port and smtp.security as
+    // credentials it cannot act without, so an absent vault is caught before the
+    // token is consumed. No execution was started, no outcome was recorded, and
+    // the grant is still spendable once the vault exists.
+    assert.equal(result.code, "credential-unavailable");
     assert.equal(result.adapter_code, "credential-unavailable");
-    assert.equal(result.outcome, "execution.failed");
+    assert.equal(result.acted, false);
+    assert.equal(result.started_seq, undefined);
+    assert.equal(result.outcome, undefined);
   }
   assert.equal(starttls.connections, before);
+  assert.equal(
+    eventsOf(unit.logPath).includes("execution.started"),
+    false,
+    "a missing vault burned the grant",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -985,6 +998,41 @@ test("options.classes adds to the canonical class rather than replacing it", () 
 // ===========================================================================
 // The credential manifest (APRV-78)
 // ===========================================================================
+
+test("the pre-token credential list is the manifest's required entries, and only those", () => {
+  // APRV-169. The list is what the contract resolves before it spends the
+  // token, so it must be the manifest's REQUIRED entries and nothing else: an
+  // optional value listed here would refuse a relay that wants no login.
+  assert.deepEqual(
+    [...requiredEmailCredentials()],
+    EMAIL_CREDENTIAL_SPECS.filter((spec) => spec.required === true).map((spec) => spec.name),
+  );
+  assert.equal(
+    requiredEmailCredentials().includes(DEFAULT_CREDENTIAL_NAMES.user),
+    false,
+    "the optional login pair must not become a precondition",
+  );
+  assert.equal(requiredEmailCredentials().includes(DEFAULT_CREDENTIAL_NAMES.password), false);
+
+  // The list is looked up through the `names` map rather than restating the
+  // manifest's strings, so a deployment that renames a value gets the name it
+  // actually stored. (`EmailCredentialNames` is literal-typed today, so the
+  // rename is exercised through the map itself.)
+  assert.deepEqual(
+    [...requiredEmailCredentials(DEFAULT_CREDENTIAL_NAMES)],
+    [
+      DEFAULT_CREDENTIAL_NAMES.host,
+      DEFAULT_CREDENTIAL_NAMES.port,
+      DEFAULT_CREDENTIAL_NAMES.security,
+    ],
+  );
+
+  // And the adapter itself declares that list, rather than a copy of it.
+  assert.deepEqual(
+    [...(emailAdapter().requiredCredentials ?? [])],
+    [...requiredEmailCredentials()],
+  );
+});
 
 test("the manifest declares exactly the names `act` reads, key for key", () => {
   const declared = EMAIL_CREDENTIAL_SPECS.map((spec) => spec.name);
