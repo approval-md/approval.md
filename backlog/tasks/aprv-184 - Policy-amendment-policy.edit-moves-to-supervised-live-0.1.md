@@ -4,6 +4,7 @@ title: 'Policy amendment: policy.edit moves to supervised-live 0.1'
 status: To Do
 assignee: []
 created_date: '2026-08-31 23:38'
+updated_date: '2026-09-01 01:04'
 labels:
   - policy
   - gate
@@ -34,3 +35,19 @@ Note for the drafter: consider whether the live grants for sampled policy.edit a
 - [ ] #4 Human runs the amend ceremony; attestation seq and PR recorded in implementation notes
 - [ ] #5 Post-amend: one sampled and one unsampled policy.edit observed and their selection verified against the secret, recorded in notes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Exact APPROVAL.md diff drafted (AC 1). Line 46 changes from:
+
+  policy.edit:               { autonomy: manual }       # this file, CLAUDE.md, CI config
+
+to:
+
+  policy.edit:               { autonomy: supervised-live, live_rate: 0.1 }  # this file, CLAUDE.md, CI config; APRV-184
+
+Everything else on the rule unchanged (no approvers list or limits declared today, none added). Sampled edits follow the manual path bit for bit; unsampled ones proceed and stay in the retro pool.
+
+Prerequisites verified 2026-09-01: APRV-127 grammar is BUILT and its SPEC amendments still carry pending-sign-off flags (Carter's step 1). APPROVAL_SAMPLING_SECRET is unresolved and .approval/env absent (approval env --check), so supervised-live would fail closed and gate 100 percent: Carter runs approval setup sampling first (step 2), then verifies the daemon terminal resolves the secret, then approval policy amend --commit in the primary (step 3; expect the ~33s silent pre-diff verify, APRV-167). Blocked on those three human steps; nothing further for an agent until the ceremony lands.
+<!-- SECTION:NOTES:END -->

@@ -44,10 +44,12 @@ to prevent.
    exist to prevent.
 7. **A PR is not shipped until the merge is armed.** After opening or
    updating a PR, the session itself runs `gh pr merge <n> --merge`. The
-   hook classifies it `vcs.push.main`, the prompt reaches the human's
-   phone, and the tap queues the merge. A PR sitting at CLEAN waiting for
-   a hand click in the GitHub UI is the failure mode this rule removes
-   (APRV-182).
+   hook classifies it `vcs.push.main`, supervised in today's policy: the
+   command proceeds at once, enters the retrospective sample, and the
+   merge queue takes it from there. A policy that raises the class puts
+   the same command on the phone instead. A PR sitting at CLEAN waiting
+   for a hand click in the GitHub UI is the failure mode this rule
+   removes (APRV-182).
 
 ## Model tiers
 
@@ -92,7 +94,9 @@ defaults to fable):
   paths read only verified records; gate-typed events never accept caller
   timestamps; raw secrets never appear in the log; self-reported fields never
   reduce scrutiny; every check-then-append passes through compare-and-append;
-  refusals are machine-readable and distinct. A diff that weakens any of these
+  refusals are machine-readable and distinct; human-only classes are inert
+  to agents, with no verb minting authority for them (APRV-185). A diff
+  that weakens any of these
   fails review regardless of the task's stated criteria, and a task that
   *touches* one must say so in its implementation notes. When a new
   cross-cutting safety property is born, it is added to §11 and to this list —
