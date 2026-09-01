@@ -1413,6 +1413,16 @@ The checks, at length:
   resolves alike, and for a value inherited from the shell while the file names
   a source of its own — both are correct configurations that become somebody
   else's problem the moment a second instance exists.
+- **harness-hook-wiring** — whether THIS checkout's `.claude/settings.json`
+  registers `approval hook` for PreToolUse over every gated tool (Bash, Edit,
+  Write, NotebookEdit). SKIP, named, when the file is absent, unreadable, or
+  registers the hook for only some tools: a spawned-agent worktree without the
+  entry is how the APRV-151 bypasses happened, and a session started elsewhere
+  may still be hooked, so this row can only speak for the checkout it runs in.
+  PASS means the entry is present on disk, and says so plainly: it is not proof
+  the running session loaded it. The check that trusts no session is the
+  CI-side grant cross-check (`scripts/protected-path-guard.mjs`) over the
+  committed log.
 
 **`--json`** (one object on stdout):
 
