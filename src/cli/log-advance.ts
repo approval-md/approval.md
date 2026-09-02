@@ -522,6 +522,25 @@ export interface PublishedState {
   pending: number;
   /** The same count with the daemon's own advance cycles removed. */
   substantive: number;
+  /**
+   * Where the OWED SPAN ends: the highest unpublished seq that is not an
+   * advance cycle's own bookkeeping, or {@link publishedSeq} when none is
+   * (APRV-211).
+   *
+   * `workingSeq` was the wrong end of the span for the daemon's idempotency
+   * key. One gated attempt appends its own `task.registered` and
+   * `approval.requested`, which move the head, so the next tick computed a
+   * DIFFERENT key for the SAME owed work and asked the human a second question.
+   * Measured over substantive records, the span is stable for exactly as long
+   * as the owed work is unchanged, which is what makes one owed advance one
+   * question — and it still moves the moment a real record lands, so the
+   * payload hash still differs per distinct advance and the `supervised-live`
+   * draw is never re-rolled for the same span.
+   *
+   * Never below `publishedSeq`: a span that ran backwards would name a range
+   * the commit could not carry.
+   */
+  substantiveSeq: number;
 }
 
 /**
@@ -604,11 +623,13 @@ export function publishedState(
   }
 
   const unpublished = records.filter((record) => record.seq > publishedSeq);
+  const substantive = unpublished.filter((record) => !isAdvanceBookkeeping(record));
   return {
     publishedSeq,
     workingSeq,
     pending: unpublished.length,
-    substantive: unpublished.filter((record) => !isAdvanceBookkeeping(record)).length,
+    substantive: substantive.length,
+    substantiveSeq: substantive[substantive.length - 1]?.seq ?? publishedSeq,
   };
 }
 

@@ -87,6 +87,19 @@ export const RECIPIENT_KEY_FIELD = "token_recipient_key";
 /** The payload key carrying the sealed token on `approval.granted`. */
 export const SEALED_TOKEN_FIELD = "token_sealed";
 
+/**
+ * The payload key on `approval.requested` saying the requester will consume its
+ * own grant in its own process (APRV-211), so the raw token is delivered ONLY
+ * through the seal and is never returned to the granting surface.
+ *
+ * A fact about delivery, recorded where every other delivery fact is recorded.
+ * It authorizes nothing and relaxes nothing: the token is still minted only by
+ * a human's grant, still bound to the payload bytes, still single-use. What it
+ * removes is a reader — a terminal that was being handed a live credential it
+ * had no use for.
+ */
+export const SELF_DELIVERY_FIELD = "token_delivery_self";
+
 /** `.approval/keys/`, the sibling of the log directory the private keys live in. */
 export const KEY_STORE_DIRNAME = "keys";
 

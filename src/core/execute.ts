@@ -869,6 +869,31 @@ export function startExecution(
 // finish
 // ---------------------------------------------------------------------------
 
+/**
+ * What a failure says about itself, beyond its exit status (APRV-211).
+ *
+ * Machine-readable first: `code` is the executor's own closed refusal code (for
+ * the daemon's advance, one of `cli/log-advance.ts`'s
+ * `LOG_ADVANCE_REFUSAL_CODES`), so a status surface can branch on it rather
+ * than parse prose. The message is the sentence a human reads.
+ *
+ * It is a REPORT and never an authorization: nothing in the gate reads either
+ * field back, no decision anywhere turns on them, and SPEC.md §11.1's rule that
+ * self-reported fields never reduce scrutiny is untouched — the only thing they
+ * can do is make a failure explicable. The message is written by this runtime's
+ * own code and must stay that way: a raw child stderr forwarded here could
+ * carry a credential into a permanent log.
+ */
+export interface FailureReason {
+  code: string;
+  message: string;
+}
+
+/** {@link ExecuteOptions} plus the reason a non-zero exit carries (APRV-211). */
+export interface FinishOptions extends ExecuteOptions {
+  reason?: FailureReason;
+}
+
 export type FinishResult =
   | { ok: true; record: EventRecord; event: "execution.completed" | "execution.failed"; exitCode: number; task: string }
   | ExecuteRefusal;
@@ -899,12 +924,24 @@ export function finishExecution(
   actionKey: string,
   exitCode: number,
   actor: string,
-  options: ExecuteOptions = {},
+  options: FinishOptions = {},
 ): FinishResult {
   const open = openExecution(logPath, actionKey, options);
   if (!open.ok) return open;
 
   const event = exitCode === 0 ? "execution.completed" : "execution.failed";
+  // APRV-211. A non-zero exit with no reason is not a report: the daemon's
+  // advance recorded `exit_code: 1` and the operator's only surfaces — the
+  // daemon's event stream, which is gone the moment nobody is tailing it, and
+  // the `log-advance-cadence` doctor row, which reads the log — could say
+  // nothing about WHY. So the executor's own words travel with the outcome.
+  // Recorded ONLY on failure, and only when the caller states them: the
+  // completed case has nothing to explain, and a reason nobody supplied would
+  // be a runtime's guess in an append-only log.
+  const reason =
+    event === "execution.failed" && options.reason !== undefined
+      ? { code: options.reason.code, message: options.reason.message }
+      : {};
   const appended = append(
     logPath,
     {
@@ -913,7 +950,7 @@ export function finishExecution(
       actor,
       task: open.task,
       action_key: actionKey,
-      payload: { exit_code: exitCode },
+      payload: { exit_code: exitCode, ...reason },
     },
     options,
     // The head read above, when the not-started / already-finished checks ran.
