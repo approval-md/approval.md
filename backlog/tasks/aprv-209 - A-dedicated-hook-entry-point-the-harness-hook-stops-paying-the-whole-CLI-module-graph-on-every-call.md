@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-x'
 created_date: '2026-09-02 08:06'
-updated_date: '2026-09-02 09:23'
+updated_date: '2026-09-02 19:05'
 labels:
   - performance
   - hook
@@ -30,6 +30,17 @@ Measured by the APRV-188 lane on a quiet machine: a cold gated hook invocation i
 - [ ] #4 If the settings.json command string must change, the exact new entry is drafted in the notes and docs/claude-code-hook.md describes both forms
 - [ ] #5 npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Merge origin/main into aprv-209-hook-entry; confirm build.
+2. Measure the BEFORE graph and latency: a loader-hook probe over a cold `hook claude-code` pass-through, and cold pass-through/gated medians on 1k and 10k fixture logs built through the real append path.
+3. Implement the lazily-importing main: every case in src/cli/main.ts's switch reaches its verb through `await import()`, and core/verify.ts and core/reindex.ts are reached the same way from the log verbs. main() becomes async; cli.js, the direct-execution footer, src/mcp/server.ts's default arm and the seven in-process test helpers follow. No new bin, so the .claude/settings.json command string is unchanged.
+4. Add tests/hook-module-graph.test.ts: a cold pass-through against a 10k fixture log loads neither the MCP SDK, better-sqlite3, nor src/channels/.
+5. Re-measure INTERLEAVED against a rebuilt pre-change CLI, because the box is not quiet and two runs minutes apart differ by more than the effect.
+6. Run every hook suite and both hook docs guards, then the full matrix and oxlint.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
