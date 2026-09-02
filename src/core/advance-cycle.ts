@@ -11,6 +11,7 @@
  */
 
 import type { EventRecord } from "./log.js";
+import { payloadOf, requestState, type RequestState } from "./state.js";
 
 /**
  * Who proposes an advance.
@@ -56,6 +57,69 @@ export function isAdvanceBookkeeping(record: EventRecord): boolean {
   return typeof record.task === "string" && record.task.startsWith(`${ADVANCE_TASK_PREFIX}-`);
 }
 
+/**
+ * The most recent advance cycle's request, as the log derives it (APRV-211).
+ *
+ * The whole answer a tick needs before it considers asking anything: which key
+ * the last question was opened under, what the human did with it, what bytes it
+ * bound to, and whether anything has spent it yet.
+ */
+export interface OpenAdvanceRequest {
+  actionKey: string;
+  task: string | null;
+  state: RequestState;
+  /** The `payload_hash` the request declared, so an adopting tick binds to it. */
+  payloadHash: string | null;
+  /** True once an `execution.started` has spent this cycle. */
+  spent: boolean;
+}
+
+/**
+ * The latest advance request in the log, with its derived state, or `null`.
+ *
+ * ## Why the daemon asks this before it asks the gate anything
+ *
+ * A gated advance leaves an `approval.requested` open and its own two records
+ * on the log. Until APRV-211 the next tick recomputed a key from the moving
+ * head, found no request under it, and opened a second question about the same
+ * owed work; the human got one phone buzz per tick for one advance. So the tick
+ * now reads the log for what it already asked, and the answer here is that
+ * reading.
+ *
+ * PURE, and over records the caller verified: the enforcement path never reads
+ * an unverified log (SPEC.md §11.1). The TTL is applied through
+ * {@link requestState}, so a request whose window lapsed reads `expired` here
+ * whether or not the daemon has yet materialised an `approval.expired` record —
+ * an adopting tick must not wait forever on a question nobody can answer.
+ */
+export function openAdvanceRequest(
+  records: readonly EventRecord[],
+  ts: string,
+  ttlMs: number | null,
+): OpenAdvanceRequest | null {
+  let actionKey: string | null = null;
+  for (const record of records) {
+    if (record.event !== "approval.requested") continue;
+    const key = record.action_key;
+    if (typeof key !== "string" || !key.startsWith(`${ADVANCE_KEY_PREFIX}-`)) continue;
+    // The class is read off the record rather than assumed from the prefix: a
+    // key that merely LOOKS like the daemon's must not be able to make the
+    // daemon adopt somebody else's question.
+    if (payloadOf(record)["class"] !== ADVANCE_CLASS) continue;
+    actionKey = key;
+  }
+  if (actionKey === null) return null;
+
+  const derivation = requestState([...records], actionKey, ts, ttlMs);
+  return {
+    actionKey,
+    task: derivation.task,
+    state: derivation.state,
+    payloadHash: derivation.declared.payload_hash,
+    spent: derivation.execution.started !== null,
+  };
+}
+
 /** What the log says about the most recent advance cycle. */
 export interface LastAdvance {
   /** The working head the cycle was registered for. */
@@ -68,6 +132,15 @@ export interface LastAdvance {
    * that got no further.
    */
   outcome: "completed" | "failed" | "awaiting" | "requested" | "registered";
+  /**
+   * Why it failed, as the verb said it (APRV-211): the refusal code and message
+   * `cli/log-advance.ts` produced, copied onto `execution.failed` at the write
+   * boundary. `null` for every other outcome and for a failure recorded before
+   * the field existed — an exit status with no reason, which is the defect this
+   * carries the fix for and not a shape any reader may assume away.
+   */
+  code: string | null;
+  message: string | null;
 }
 
 /**
@@ -102,5 +175,14 @@ export function lastAdvance(records: readonly EventRecord[]): LastAdvance | null
           : last.event === "task.registered"
             ? "registered"
             : "requested";
-  return { toSeq: Number.isNaN(toSeq) ? 0 : toSeq, ts: last.ts, outcome };
+  const payload = payloadOf(last);
+  const code = typeof payload["code"] === "string" ? payload["code"] : null;
+  const message = typeof payload["message"] === "string" ? payload["message"] : null;
+  return {
+    toSeq: Number.isNaN(toSeq) ? 0 : toSeq,
+    ts: last.ts,
+    outcome,
+    code,
+    message,
+  };
 }

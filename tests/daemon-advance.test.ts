@@ -370,13 +370,20 @@ test("refusal: a manual log.advance stops the cadence, records the question, and
   );
   assert.equal(warnings.length >= 1, true);
 
-  // And the next tick tries again rather than giving up or looping in place.
+  // And the next tick tries again rather than giving up or looping in place —
+  // by ADOPTING the standing question, not by opening a second one.
+  //
+  // This assertion read `2` until APRV-211, under the message below, which is
+  // how the defect survived a test suite: the message said the retry must not
+  // open a second question and the number said it had. Three ticks over one
+  // owed advance put three questions on a human's phone on 2026-09-02. One owed
+  // advance is one question, however many ticks pass under it.
   const second = runDaemon(repo, cadence({ afterRecords: 1, intervalMs: 0 }));
   assert.equal(advanceEvents(second.events)[0]?.outcome, "gated");
   assert.equal(
     records(repo).filter((record) => record.event === "approval.requested").length,
-    2,
-    "the retry did not open a second question",
+    1,
+    "the retry opened a second question",
   );
   // The daemon never merges, whatever the gate says.
   assert.equal(

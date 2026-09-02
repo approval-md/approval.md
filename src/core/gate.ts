@@ -162,6 +162,7 @@ import {
   RECIPIENT_KEY_FIELD,
   sealToken,
   SEALED_TOKEN_FIELD,
+  SELF_DELIVERY_FIELD,
   writePrivateKey,
 } from "./seal.js";
 import {
@@ -545,6 +546,17 @@ export const GATE_REFUSAL_CODES = [
    * so nothing was written and nothing is retried here.
    */
   "append-failed",
+  /**
+   * A `delivery: "self"` request could not publish a delivery address (APRV-211):
+   * the ephemeral private key could not be written beside the log.
+   *
+   * Fail closed, and unlike APRV-105's ordinary sealed path, which drops the
+   * convenience and leaves the paste path standing. There is no paste path
+   * here — the requester is a process, not a terminal — so a request admitted
+   * without an address would spend a human's decision on an authorization
+   * nothing can ever open. Nothing is appended; the next attempt asks again.
+   */
+  "token-delivery-unavailable",
 ] as const;
 
 export type GateRefusalCode = (typeof GATE_REFUSAL_CODES)[number];
@@ -1363,6 +1375,36 @@ export interface RequestInput {
    * {@link startHarnessExecution}, which re-checks the same streaks.
    */
   loopFloor?: boolean;
+  /**
+   * `"self"` when the requesting process will consume its own grant, in its own
+   * process, and no other principal needs the raw token (APRV-211).
+   *
+   * The daemon's cadence advance is the case it exists for. The daemon is the
+   * requester AND the executor: it asks the gate, a human answers on the phone,
+   * and the same process spends the answer through {@link startExecution}'s
+   * APRV-105 sealed path. Before this field, the grant handed its raw token back
+   * to the GRANTING surface — the Telegram listener's terminal — which printed
+   * it under "single-use · stored nowhere · copy it now", the APRV-166 relay
+   * path meant for a requester in another process. Nobody was ever going to
+   * carry that value anywhere; it was a live credential rendered for a principal
+   * that was not the requester, which SPEC.md §11.1's raw-secrets invariant
+   * exists to prevent.
+   *
+   * So it does two things and nothing else. {@link request} mints the sealed
+   * delivery address for this action REGARDLESS of `defaults.token_delivery`,
+   * because there is no terminal on the other end of the paste path and a
+   * request with no address would be an authorization nobody could open; and
+   * {@link decide} withholds the raw token from its own return value, so no
+   * granting surface has one to print. The token still exists, still binds to
+   * the payload bytes, is still single-use, and is still minted only by a
+   * human's grant. Nothing here reduces scrutiny: it removes a reader, not a
+   * check.
+   *
+   * Refused when the key cannot be written (`token-delivery-unavailable`), which
+   * is the fail-closed direction: a self-delivered grant nobody can open would
+   * spend a human's decision on an authorization that can never execute.
+   */
+  delivery?: "self";
 }
 
 /**
@@ -1999,8 +2041,16 @@ export function request(
   // the delivery is a convenience, the human's decision is not, and a request
   // that recorded a key it cannot open would be worse than one that recorded
   // none. So a failed write drops the field and the paste path stands.
+  //
+  // APRV-211. `delivery: "self"` mints the address whatever the policy says,
+  // and refuses when it cannot. The operator's `token_delivery` setting chooses
+  // between two ways of getting a token to a HUMAN AT A TERMINAL; a requester
+  // that is a process in the same machine has no terminal on the other end, so
+  // the setting has nothing to choose between and the address is the only route
+  // that exists. See {@link RequestInput.delivery}.
+  const selfDelivered = input.delivery === "self" && input.execution !== "harness";
   if (
-    tokenDeliveryOf(load) === "sealed" &&
+    (tokenDeliveryOf(load) === "sealed" || selfDelivered) &&
     input.execution !== "harness" // a harness grant mints no token to deliver
   ) {
     const keypair = mintRecipientKeypair();
@@ -2010,6 +2060,14 @@ export function request(
       keypair.privateKey,
     );
     if (written.ok) payload[RECIPIENT_KEY_FIELD] = keypair.publicKey;
+    else if (selfDelivered) {
+      return {
+        ok: false,
+        code: "token-delivery-unavailable",
+        message: `action ${input.actionKey} is requested with self-delivery, so the grant's token can only reach this process through the sealed address this request publishes — and the private half could not be written (${written.message}). Nothing was appended: a decision spent on an authorization nobody can open would be worse than a question asked again.`,
+      };
+    }
+    if (written.ok && selfDelivered) payload[SELF_DELIVERY_FIELD] = "self";
   }
   if (input.summary !== undefined) payload["summary"] = input.summary;
   if (input.reversible !== undefined) payload["reversible"] = input.reversible;
@@ -2088,6 +2146,12 @@ export type DecideResult =
        * The raw single-use execution token, on `grant` only (APRV-17). Returned
        * here and nowhere else: the log carries only its SHA-256, so this value
        * is unrecoverable once the caller drops it.
+       *
+       * Absent — on a grant that DID mint one — when the request declared
+       * self-delivery and the token was sealed to its address (APRV-211). The
+       * authorization is complete; the granting surface simply has no copy to
+       * print, because the requester is a process that opens the seal itself.
+       * See {@link RequestInput.delivery}.
        */
       token?: string;
     }
@@ -2450,12 +2514,27 @@ export function decide(
       //
       // The raw token is STILL returned to this caller and still printed once on
       // the granting surface. Sealing adds a second reader; it removes none.
-      const recipient = payloadOf(requestRecord(read.records, actionKey))[RECIPIENT_KEY_FIELD];
+      //
+      // APRV-211 adds the one request for which it DOES remove one. A request
+      // that declared self-delivery was minted by a process that will open the
+      // seal itself (the daemon's own advance), so every copy of the token that
+      // leaves this function is a copy nobody needs: the observed defect was the
+      // Telegram listener printing "copy it now" on Carter's terminal for an
+      // action they were not going to run. Withheld HERE, at the single choke
+      // point, rather than at each granting surface — a value never handed out
+      // cannot be printed by a surface written later. Only when the seal was
+      // actually written: an unopenable grant with no returned token would be a
+      // decision spent on nothing.
+      const declared = payloadOf(requestRecord(read.records, actionKey));
+      const recipient = declared[RECIPIENT_KEY_FIELD];
       if (isRecipientKey(recipient)) {
         const sealed = sealToken(token, recipient, actionKey);
         // An unusable recipient key drops the convenience and never the grant:
         // a human's yes must not be voidable by a malformed delivery address.
-        if (sealed !== null) payload[SEALED_TOKEN_FIELD] = { ...sealed };
+        if (sealed !== null) {
+          payload[SEALED_TOKEN_FIELD] = { ...sealed };
+          if (declared[SELF_DELIVERY_FIELD] === "self") token = undefined;
+        }
       }
     }
   }
