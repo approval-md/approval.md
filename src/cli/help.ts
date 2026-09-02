@@ -1631,7 +1631,7 @@ Flags:
   --log <p> / --out <p> / --tasks <d>  log / queue / task folder (backlog/tasks)
   --policy <path> / --dir <path>   the policy file, or where to discover it
   --interval <d> / --debounce <d>  tick period (30s) / event settle time (250ms)
-  --once / --json  one tick then exit / machine-readable, one object per line
+  --once / --json / --no-preflight  one tick / JSON lines / skip the git check
   --git-evidence / --advance / --dark-sessions  three OPT-INs, off by default
   --read-proof full|incremental    prefix proof per read; full is the default
   --with-channels  the channels in this process too: SAME VERB as "approval up"
@@ -1654,8 +1654,7 @@ export const UP_HELP = `approval up — the daemon and every configured channel,
 Usage:
   approval up [every "daemon run" flag] [--as human:<id>] [--port <n>]
               [--payloads <f>] [--payload-dir <d>] [--api-base <url>] [--no-gloss]
-              [--poll-timeout <s>] [--no-telegram] [--no-web] [--restart-backoff <d>]
-              [--no-preflight] [--preflight-remote <r>] [--preflight-base <b>]
+              [--poll-timeout <s>] [--no-telegram] [--no-web] [--no-preflight]
 
 Flags (every "daemon run" flag, unchanged, plus):
   --as human:<id>  the approver every decision is recorded against
@@ -1664,24 +1663,13 @@ Flags (every "daemon run" flag, unchanged, plus):
   --port <n>       queue-page port. Precedence: --port, channels.web.port
   --no-telegram / --no-web   leave that channel out of this process
   --no-gloss / --restart-backoff <d>   drop the model gloss / first retry wait
-  --no-preflight   start on this checkout and this build, whatever git says
-  --preflight-remote <r> / --preflight-base <b>   default origin / this branch
   -h, --help       this text
 
-BEFORE ANYTHING STARTS, the preflight fetches and judges (APRV-215). Safe means
-this checkout is not AHEAD of the remote and the upstream range does not rewrite
-a file you have uncommitted changes to; then it fast-forwards, rebuilds if dist
-is older than src, and names the commit it is now running. Otherwise it refuses
-with up-preflight-behind-ahead, up-preflight-log-diverged (run "approval log
-sync") or up-preflight-dirty-protected, and TOUCHES NOTHING. It never resets
---hard, never stashes, and never moves the working log. A fetch that cannot
-reach the remote is a warning; it starts on the build it has.
+BEFORE ANYTHING STARTS the preflight ("daemon run" runs it too) fetches, then
+fast-forwards and rebuilds when that is safe, else refuses and TOUCHES NOTHING;
+opt out with --no-preflight. Credentials come from THE LAUNCH ENVIRONMENT and
+nowhere else: a channel whose credential is unset is skipped in doctor's words.
 
-Credentials and identity come from THE LAUNCH ENVIRONMENT and nowhere else. A
-channel whose credential is unset is NOT started, is reported in doctor's words,
-and the rest run. One that falls over restarts with backoff; the daemon lives.
-
-JSON shape: docs/cli-reference.md#up
 ${EXIT_CODES_POINTER} (a clean stop is 0; the daemon's outcome chooses it)
 ${JSON_ERRORS}
 ${why("up")}`;

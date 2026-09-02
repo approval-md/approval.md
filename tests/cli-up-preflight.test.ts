@@ -37,6 +37,8 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { PREFLIGHT_REFUSAL_CODES } from "../src/cli/preflight.js";
+
 /** dist/tests/cli-up-preflight.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
@@ -455,6 +457,19 @@ test("preflight: approval daemon run shares it, and --no-preflight opts out ther
   const skipped = cli([...base, "--no-preflight"], repo.dir);
   assert.equal(skipped.code, 0, `${skipped.stdout}${skipped.stderr}`);
   assert.doesNotMatch(skipped.stdout, /"preflight"/u);
+});
+
+/**
+ * SPEC.md §11.1 invariant 6 in its own small way: the union is frozen public
+ * API and is pinned by a test, so a fourth code cannot appear without a line
+ * changing here. These are not gate refusals and do not join one of §11.2's six
+ * unions; they are this verb's, and they are distinct by repair.
+ */
+test("preflight: the refusal-code union is frozen", () => {
+  assert.deepEqual(
+    [...PREFLIGHT_REFUSAL_CODES],
+    ["up-preflight-behind-ahead", "up-preflight-log-diverged", "up-preflight-dirty-protected"],
+  );
 });
 
 // ---------------------------------------------------------------------------

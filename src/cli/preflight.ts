@@ -724,6 +724,13 @@ export function startupPreflight(input: StartupPreflightInput): { ok: boolean } 
     input.refuse(renderPreflightRefusal(outcome, input.json));
     return { ok: false };
   }
+  // A preflight with no repository to look at says nothing. The line reports
+  // what the preflight DID, and "there is no origin here" is a property of the
+  // deployment rather than an event in it: a log-only install outside git would
+  // otherwise open every start with a line about a question it cannot ask.
+  // Doctor's `main-behind-origin` row is where that state is visible.
+  if (outcome.facts.action === "skipped") return { ok: true };
+
   if (outcome.warning !== null) {
     input.emit({ event: "preflight_warning", message: outcome.warning });
   }
