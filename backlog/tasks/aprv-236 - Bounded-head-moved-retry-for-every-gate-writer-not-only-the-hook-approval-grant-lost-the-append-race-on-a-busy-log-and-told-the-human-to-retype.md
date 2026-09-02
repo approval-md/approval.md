@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-s'
 created_date: '2026-09-02 20:28'
-updated_date: '2026-09-02 21:37'
+updated_date: '2026-09-02 22:13'
 labels:
   - core
   - gate
@@ -29,7 +29,7 @@ Seen 2026-09-02: approval grant daemon-log-advance-1-14008 in the primary refuse
 - [x] #2 Retries are bounded (same count as APRV-150) and the final refusal is append-failed with the attempt count in its message
 - [x] #3 The hook's existing retry uses the shared helper (no second implementation)
 - [x] #4 SPEC sentence drafted in the notes for sign-off
-- [ ] #5 npm test passes; lint clean
+- [x] #5 npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -85,4 +85,12 @@ Not applied: the spec is a protected path, and a divergence is called out rather
 - `tests/head-retry.test.ts` (new, 11 tests) pins what a race cannot pin deterministically: the bound runs exactly N cycles and never more, only `head-moved` re-runs one, a verdict the fresh head produces ends the loop on the attempt that derived it, a lock timeout is returned on the first attempt with its message untouched, the ceiling is lowered by a caller and never raised, and the exhausted refusal is `append-failed` carrying the count.
 - `tests/concurrency.test.ts` gains eight rounds of real two-process races in the file's existing style: the parent holds the append lock across both children's reads, so both writers are provably authorized by the same head and the second append provably meets a moved one. Every record is written by the real verbs through the real append path. Two shapes per writer: two grants both land (the incident verb), two withdrawals both land, two registrations both land, two requests both land, two autonomous runs both start; and contending for one request settles it once with the loser refused `already-decided` (grant vs reject), `duplicate-request`, `task-already-registered` or `token-consumed` rather than for the race. A `retryOnHeadMoved: 1` round pins the unretried shape and the attempt count in its message.
 - The APRV-106 grant-vs-withdraw race is updated to the new contract: its loser used to be asserted `append-failed`/`head-moved` and now re-derives to `request-withdrawn` or `already-decided` depending on who won, which is the change the task is about.
+
+## Validation
+
+- `npm run build`: clean. `npx oxlint`: clean, exit 0.
+- `npm test` (second run, quiet machine): 3033 tests, 3031 pass, 1 fail. The single failure is `an inbox that discloses no permissions prints the reminder instead of a verdict` in the setup suite, which makes a live call to the AgentMail API and failed `agentmail-unreachable ... fetch failed`. It is a network reachability fact about this machine, touches nothing in this change, and the file is green on its own: `node --test dist/tests/cli-setup.test.js` gives 90/90, exit 0.
+- The first full run, taken while the machine was under load from parallel lanes, had four failures. All four are timing or network flakes and all four pass alone, each verified individually with its exit code read: setup's telegram poll ("it polled once and gave up on the human's timing"), the same AgentMail probe, the daemon sweep (a 2000ms real-clock TTL that lapsed before the test could decide), and the APRV-206 latency RATIO. `node --test dist/tests/telegram-tap-latency.test.js` 5/5 exit 0, `node --test dist/tests/daemon.test.js` 31/31 exit 0, `node --test dist/tests/cli-setup.test.js` 90/90 exit 0.
+- Per-file runs during development, all exit 0: `gate.test.js` 88/88, `execute.test.js` 33/33, `concurrency.test.js` 14/14 (6 pre-existing plus 8 new), `head-retry.test.js` 11/11, `cli-hook.test.js` 88/88, and `gate-window + token + evidence-append + human-only + clock` 81/81 together.
+- The latency RATIO test deserves the explicit note because `decide` is on the path it measures: the retry adds one closure call on the happy path and no extra read, and the test passes on a quiet machine (2574ms, ratio within bound).
 <!-- SECTION:NOTES:END -->
