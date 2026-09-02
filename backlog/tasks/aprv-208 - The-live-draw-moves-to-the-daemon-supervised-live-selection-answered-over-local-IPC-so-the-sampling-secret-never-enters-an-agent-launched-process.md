@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-02 08:03'
+updated_date: '2026-09-02 08:21'
 labels:
   - sampling
   - daemon
@@ -31,3 +32,9 @@ Verified 2026-09-02 (APRV-184 notes): every supervised-live action since the seq
 - [ ] #5 SPEC section 6 or wherever the live draw is specified gains the daemon-answered draw paragraph, drafted in the notes pending sign-off; docs/dogfood-cutover.md explains that supervised-live needs the daemon up
 - [ ] #6 npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Orchestrator (2026-09-02): APRV-188 shipped as a daemon-published verified-head snapshot file, not a socket, because the hook request path is synchronous end to end and a node:net client cannot be awaited from it. So the IPC this task needs does not exist yet. Options for the draw: (a) a spawnSync helper that asks the daemon over an owner-only socket under the approval home (20-40 ms node start, acceptable for a supervised-live draw since it is off the pass-through path); (b) a file-based request/answer with the daemon polling (slow, avoid); (c) pre-published answers (not viable). Recommend (a), with the MAC as specified. The dependency on 188 stays for the verified-snapshot pattern and the doctor row shape.
+<!-- SECTION:NOTES:END -->
