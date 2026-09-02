@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-s'
 created_date: '2026-09-02 20:28'
-updated_date: '2026-09-02 20:43'
+updated_date: '2026-09-02 21:37'
 labels:
   - core
   - gate
@@ -25,10 +25,10 @@ Seen 2026-09-02: approval grant daemon-log-advance-1-14008 in the primary refuse
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 approval grant, reject, withdraw, register, request and run succeed under a concurrent appender in a test that appends between their read and their append, with the decision re-checked on the fresh head (a request decided in between refuses with the decided code, not append-failed)
-- [ ] #2 Retries are bounded (same count as APRV-150) and the final refusal is append-failed with the attempt count in its message
-- [ ] #3 The hook's existing retry uses the shared helper (no second implementation)
-- [ ] #4 SPEC sentence drafted in the notes for sign-off
+- [x] #1 approval grant, reject, withdraw, register, request and run succeed under a concurrent appender in a test that appends between their read and their append, with the decision re-checked on the fresh head (a request decided in between refuses with the decided code, not append-failed)
+- [x] #2 Retries are bounded (same count as APRV-150) and the final refusal is append-failed with the attempt count in its message
+- [x] #3 The hook's existing retry uses the shared helper (no second implementation)
+- [x] #4 SPEC sentence drafted in the notes for sign-off
 - [ ] #5 npm test passes; lint clean
 <!-- AC:END -->
 
@@ -43,3 +43,46 @@ Seen 2026-09-02: approval grant daemon-log-advance-1-14008 in the primary refuse
 6. Tests: extend tests/concurrency.test.ts with real two-process races (parent holds the append lock across both children's reads) for grant/reject, withdraw, register, request and run; assert the write lands, that a request decided in the window refuses with the decided code rather than append-failed, and that the exhausted bound names its attempt count. Update the APRV-106 grant-vs-withdraw race, whose loser now re-derives instead of reporting head-moved.
 7. npm run build, per-file node --test, npx oxlint, full npm test; draft the spec sentence in the notes.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## What changed
+
+One bounded head-moved retry now exists in the runtime, in `src/core/head-retry.ts`, and every writer a human or a session drives runs under it. `src/core/log.ts` is untouched: compare-and-append is byte-for-byte what it was and still refuses a stale write under the lock.
+
+- `src/core/head-retry.ts` (new): `HEAD_MOVED_ATTEMPTS = 3` (the count APRV-150 chose, not a second number for the same fact), `isHeadMoved`, `attemptsOf(asked, ceiling)` and `withHeadRetry(attempts, cycle)`. The refusal shape it takes is structural (`{ ok, code?, message?, append? }`), so four frozen refusal unions in four modules use one helper without learning about each other.
+- `src/core/gate.ts`: its local `HEAD_MOVED_ATTEMPTS` / `isHeadMoved` / `attemptsOf` / `withHeadMovedRetry` are gone, replaced by a three-line adapter that reads `GateOptions.retryOnHeadMoved` and calls the shared helper. `register`, `request`, `decide` and `withdraw` join `startHarnessExecution` and `consumeHarnessGrant` under it: each keeps its exported name and signature, its body moved verbatim into an `attemptX` function, and the wrapper runs it.
+- `finishHarnessExecution` is retried PER KEY rather than as a whole verb. It appends one outcome per open delegated execution, and re-entering the verb after some of them landed would find those keys closed and could answer `already-finished` for a call that in fact wrote records. Its per-key read-check-append is the cycle, so that is the unit retried; counterparts already appended stand.
+- `src/core/execute.ts`: `ExecuteOptions.retryOnHeadMoved` added, and `startExecution` (`approval run`'s writer, both the manual path and the supervised/autonomous one) wrapped the same way.
+- `src/core/gate-window.ts`: its copy of the loop deleted; it calls the shared helper and passes its own 4-attempt ceiling as a parameter. Its doc claimed the same bound as the gate's and had 4 where the gate had 3; the doc now states the extra attempt and why a bypass record gets it.
+- `src/daemon/advance.ts` untouched (APRV-233 owns its finish); `core/token.ts`'s `consumeToken` and `core/gate.ts`'s `expire` keep no retry of their own, deliberately. `consumeToken` is re-entered WHOLE by the retried `startExecution` cycle, so its single-use scan is re-run rather than skipped and double-spend stays exactly as pinned; `expire` is materialisation the daemon's next tick performs again.
+
+## The attempt count, and the refusal once it is spent
+
+The code stays `append-failed` and the `append` error stays the writer's own, because that is what a caller branches on and it is still the true reason. The message gains the count: "3 attempts were made, each a fresh read, fresh checks and a fresh compare-and-append, and the head had moved again every time. Nothing was appended." One lost race and a log under sustained contention are different operational facts, and a reader who cannot tell them apart cannot act on either.
+
+## Global invariant paths touched
+
+- **Invariant 5, every check-then-append passes through compare-and-append.** Preserved PER ATTEMPT, which is where it has to hold. This is a bounded loop over complete read-check-append cycles, never a retry of an append: every attempt supplies `expectedHead` from its own read, and an attempt whose head moved writes nothing. Unchanged in `core/log.ts`.
+- **Invariant 1, enforcement paths read only verified records.** Each attempt re-reads through the verified path (`readGateRecords` / `readVerifiedRecords`); nothing crosses an attempt except the caller's inputs.
+- **Invariant 2, gate-typed events never accept caller timestamps.** `tick(options)` is read inside the retried cycle, so each attempt stamps its own moment from the runtime's clock.
+- **Invariant 4, self-reported fields never reduce scrutiny.** `retryOnHeadMoved` is clamped downward only: a caller may ask for less tolerance of a moved head, never more, and a non-integer, a zero or a negative resolves to the runtime's own value.
+- **Invariant 6, refusals machine-readable and distinct.** No code added, none repurposed, no union widened. A verdict the fresh head produces is returned as itself and ends the loop, so a request decided in the window refuses `already-decided`, a withdrawn one `request-withdrawn`, a spent key `already-executed` or `token-consumed`, a colliding registration `task-already-registered`, a live request `duplicate-request`. Only the human-readable message of the exhausted `append-failed` changed.
+- **Invariant 8, a verdict whose event cannot be appended is a refusal.** Unchanged: nothing returns proceed, prints an allow or hands back a token before its record is appended, and the exhausted bound is still a refusal.
+- **Invariant 9, human-only classes are inert to agents.** Re-derived per attempt like everything else, so an amendment landing in the window is enforced rather than raced past.
+
+## The spec sentence, drafted for sign-off
+
+The `head-moved` row of the spec's refusal registry currently ends "...and nothing is retried by the writer", which this change makes false. Proposed replacement for that cell:
+
+> The caller supplied a compare-and-append precondition and the tail read under the lock is a different `(seq, hash)`. Every read-dependent check that authorized the write is stale, and the append is never retried. The gate writers above it re-run the whole read-check-append cycle instead, bounded (three attempts, four for the open window's bypass record): each attempt is a new verified read, a fresh run of every check against the head that read observed, and a fresh compare-and-append, so §11.1 invariant 5 holds per attempt and a verdict the interleaved record changed is the verdict enforced. A caller sees `append-failed` only once the bound is spent, and the message carries the attempt count.
+
+Not applied: the spec is a protected path, and a divergence is called out rather than edited silently.
+
+## Tests
+
+- `tests/head-retry.test.ts` (new, 11 tests) pins what a race cannot pin deterministically: the bound runs exactly N cycles and never more, only `head-moved` re-runs one, a verdict the fresh head produces ends the loop on the attempt that derived it, a lock timeout is returned on the first attempt with its message untouched, the ceiling is lowered by a caller and never raised, and the exhausted refusal is `append-failed` carrying the count.
+- `tests/concurrency.test.ts` gains eight rounds of real two-process races in the file's existing style: the parent holds the append lock across both children's reads, so both writers are provably authorized by the same head and the second append provably meets a moved one. Every record is written by the real verbs through the real append path. Two shapes per writer: two grants both land (the incident verb), two withdrawals both land, two registrations both land, two requests both land, two autonomous runs both start; and contending for one request settles it once with the loser refused `already-decided` (grant vs reject), `duplicate-request`, `task-already-registered` or `token-consumed` rather than for the race. A `retryOnHeadMoved: 1` round pins the unretried shape and the attempt count in its message.
+- The APRV-106 grant-vs-withdraw race is updated to the new contract: its loser used to be asserted `append-failed`/`head-moved` and now re-derives to `request-withdrawn` or `already-decided` depending on who won, which is the change the task is about.
+<!-- SECTION:NOTES:END -->
