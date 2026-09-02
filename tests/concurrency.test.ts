@@ -480,8 +480,12 @@ test("two concurrent processes race one token: exactly one execution.started", a
     );
     assert.equal(started.length, 1, `round ${round}: expected exactly one execution.started`);
 
-    // The loser lost under the lock, on the compare-and-append precondition —
-    // not by re-reading, because the core never retries.
+    // The loser lost under the lock, on the compare-and-append precondition.
+    // `consumeToken` is called directly here and keeps no retry of its own: the
+    // double-spend refusal is the property nobody softens casually, and APRV-236
+    // deliberately left this writer where APRV-150 left it. Its caller
+    // `startExecution` does retry, and re-enters this function whole, which is
+    // the race two tests below.
     const loser = losers[0] as Consumer;
     assert.equal(loser.code, "append-failed", `round ${round}: ${JSON.stringify(loser)}`);
     assert.equal(loser.append?.code, "head-moved", `round ${round}: ${JSON.stringify(loser)}`);

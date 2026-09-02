@@ -1009,7 +1009,12 @@ to decide whether to fix itself, stop retrying, or ask a human.
   nothing is authorized from a log that does not verify.
 - `append-failed` — the append itself failed; the exit code follows the cause.
   `head-moved` means the log grew between this command's read and its write, so
-  nothing was written.
+  nothing was written. Since APRV-236 you see it only after the command has
+  re-read the log, re-run its checks against the fresh head and tried again, up
+  to three times, and the message says how many attempts were made. One lost race
+  no longer surfaces at all, and a request something else settled in the window
+  is refused for that (`already-decided`, `request-withdrawn`, `expired`,
+  `policy-drift`) rather than for the race.
 
 ## token
 

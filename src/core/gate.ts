@@ -546,7 +546,11 @@ export const GATE_REFUSAL_CODES = [
    * The append itself failed; `append` carries the underlying error. Its
    * `code` is `head-moved` when the log grew between this module's read and its
    * append: every check that authorized the write was made against an older log,
-   * so nothing was written and nothing is retried here.
+   * so nothing was written. Since APRV-236 this code reaches a caller only after
+   * the bounded read-check-append retry is spent (`core/head-retry.ts`), and its
+   * message says how many attempts were made. A single lost race is no longer
+   * reported at all: it is re-derived, and the answer the fresh log supports is
+   * what the caller receives.
    */
   "append-failed",
   /**

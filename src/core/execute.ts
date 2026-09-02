@@ -229,7 +229,11 @@ export const EXECUTE_REFUSAL_CODES = [
    * The append itself failed; `append` carries the underlying error. Its `code`
    * is `head-moved` when a record landed between this module's read and its
    * append, so the idempotency and budget checks that authorized the write were
-   * made against an older log. Nothing was written and nothing is retried here.
+   * made against an older log. Nothing was written. Since APRV-236 this code
+   * reaches a caller of {@link startExecution} only after the bounded
+   * read-check-append retry is spent (`core/head-retry.ts`), and its message
+   * says how many attempts were made; a single lost race is re-derived rather
+   * than reported.
    */
   "append-failed",
 ] as const;
