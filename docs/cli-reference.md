@@ -2700,6 +2700,15 @@ error before the first tick, and the `started` line prints the mode in force.
 
 **Each tick, in order.**
 
+- ANCHOR (APRV-219) — on every tick whose reads re-proved the prefix in full,
+  the working log's prefix is compared against the newest committed copy of it,
+  exactly as `approval log verify --anchor` does. A divergence STOPS the daemon
+  at exit 1 with the outcome `anchor-diverged`, distinct from `log-corrupt`: one
+  means the file contradicts itself, the other that it contradicts the record of
+  it, and neither is a log to append onto. A working log that is a strict prefix
+  of the committed copy is an `anchor-behind` warning, not a stop. The `started`
+  line names the rev and seq this run is held to (`"anchor"`), and the tick line
+  carries the comparison it made. Git is read, never fetched.
 - ENVELOPE DRIFT — a task file whose `state:` contradicts the log gets an
   `envelope.drift` event (actor `system:daemon`), once per claim.
 - TTL SWEEP — every live request whose TTL lapsed gets an `approval.expired`
