@@ -299,10 +299,10 @@ is 0: the raw token is in no log byte.
 Close the task on the board as you normally would. The approval `state` is
 unaffected by it: `status` is Backlog.md's answer to "where is this on the
 board", `state` is the log's answer to "where is this action in its
-lifecycle", and the runtime derives the second from the log alone. A daemon
-(`approval up`) watching `backlog/` writes `state: executed` into the file
-after the fact, as a projection; an edit that contradicts the log is recorded
-as `envelope.drift` and surfaced, never silently corrected.
+lifecycle", and the runtime derives the second from the log alone. A running
+daemon (`approval up`) writes `state: executed` into the file after the fact,
+as a projection; an edit that contradicts the log is recorded as
+`envelope.drift` and surfaced, never silently corrected.
 
 One caution for the pinned Backlog.md CLI, stated once here and in full in
 docs/backlog-md-pin.md: `backlog task edit` at 1.49.3 rewrites the file
