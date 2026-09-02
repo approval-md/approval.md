@@ -1034,3 +1034,113 @@ test("commandSegmentWords refuses exactly what the tokenizer refuses", () => {
   assert.equal(classified.ok, false);
   if (!classified.ok) assert.equal(classified.code, "unparseable");
 });
+
+// ---------------------------------------------------------------------------
+// The journal directory (APRV-195)
+// ---------------------------------------------------------------------------
+
+/**
+ * The journal is ungated because of WHERE it is, and these are the pins for
+ * that sentence.
+ *
+ * `.approval-journal/` is a sibling of the approval home, not a directory
+ * inside it, precisely so that no rule in `command-class.ts` had to be
+ * loosened. Two failure modes are guarded here, in opposite directions: a
+ * future edit that made the journal protected would silently close the one
+ * channel a policy must never be able to close, and a future edit that widened
+ * the journal's exemption into the approval home would open an exfiltration
+ * path. The credential case is the sharp one — a copy FROM the vault INTO the
+ * journal is still `account.credential`, because that rule reads every
+ * argument and fires on the source.
+ */
+test("a path under the journal directory is not protected, at any depth", () => {
+  for (const path of [
+    ".approval-journal",
+    ".approval-journal/2026-09-01.jsonl",
+    "./.approval-journal/2026-09-01.jsonl",
+    "/repo/.approval-journal/2026-09-01.jsonl",
+    "/repo/.approval-journal/nested/notes.txt",
+  ]) {
+    assert.equal(
+      isProtectedPath(path),
+      false,
+      `${path} must NOT be protected: an outlet the gate can close is not an outlet`,
+    );
+    assert.equal(protectedPathClass(path), null);
+  }
+});
+
+test("the approval home is untouched by the journal's exemption", () => {
+  // The sibling name shares a prefix with `.approval` as a STRING and shares no
+  // segment with it as a PATH, which is the whole reason this design needed no
+  // carve-out. Traversal out of the journal lands back in the gate's directory
+  // and is protected again.
+  assert.equal(protectedPathClass(".approval/journal/notes.txt"), "policy.core");
+  assert.equal(protectedPathClass(".approval-journal/../.approval/vault.enc"), "policy.core");
+  assert.equal(protectedPathClass(".approval/log/events.jsonl"), "log.mutate");
+});
+
+test("writing to the journal is an ordinary workspace write", () => {
+  for (const command of [
+    "echo 'this reads as odd to me' >> .approval-journal/2026-09-01.jsonl",
+    "cp /tmp/note.txt .approval-journal/note.txt",
+  ]) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
+    if (!result.ok) return;
+    assert.deepEqual(
+      result.classes,
+      ["files.write.workspace"],
+      `${command} must classify as an ordinary workspace write`,
+    );
+  }
+});
+
+test("reading the journal back is a read", () => {
+  const result = classifyCommand("cat .approval-journal/2026-09-01.jsonl");
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(result.classes, ["read.shell"]);
+});
+
+test("a copy from credential material INTO the journal is still account.credential", () => {
+  for (const command of [
+    "cp .approval/vault.enc .approval-journal/leak",
+    "cp .approval/env .approval-journal/leak",
+    "cat .approval/keys/requester.key > .approval-journal/leak",
+  ]) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
+    if (!result.ok) return;
+    assert.deepEqual(
+      result.classes,
+      ["account.credential"],
+      `${command} must stay a credential touch; the journal is not a laundering path`,
+    );
+  }
+});
+
+test("`approval journal write` is the gate's own CLI, and is not gated by it", () => {
+  for (const command of [
+    "approval journal write --message 'I am complying and I think this is wrong'",
+    "node cli.js journal write --message hi",
+    "approval journal read --json",
+  ]) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
+    if (!result.ok) return;
+    assert.deepEqual(result.classes, [GATE_SELF_CLASS], command);
+  }
+});
+
+test("a journal entry that expands a secret-named variable is still a credential touch", () => {
+  // The classifier reads command TEXT, so it catches the shell's expansion
+  // before the verb ever sees it. The verb itself stores whatever bytes it is
+  // handed — it is a sink, not a scanner — so this rule is the only thing
+  // standing between "$APPROVAL_TG_TOKEN" and a file, and it must not be
+  // weakened by the journal being ungated.
+  const result = classifyCommand("approval journal write --message $APPROVAL_TG_TOKEN");
+  assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
+  if (!result.ok) return;
+  assert.deepEqual(result.classes, ["account.credential"]);
+});

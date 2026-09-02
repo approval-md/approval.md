@@ -162,6 +162,12 @@ Five overrides sit on top of the table:
   `sudo cat .approval/env` stays opaque: the credential check sits below the
   opaque one, so a refusal is never softened into a request. No rule can print
   a value — the classifier reads command text and never an environment.
+- **`.approval-journal/` is not protected** (APRV-195). The journal of
+  `approval journal write` is a SIBLING of the approval home, not a directory
+  inside it, so nothing above was loosened to let an agent write there: a write
+  to it is `files.write.workspace` like any other workspace write, which is what
+  makes the channel ungated. Traversal back out of it is protected again, and a
+  copy from credential material into it is still `account.credential`.
 - **`redirect-write` → `files.write.workspace`.** A read command with a `>` or
   `>>` writes a file, and the class says so.
 - **`gate.self`.** The `approval` CLI (and `node …/dist/src/cli/main.js`) is the

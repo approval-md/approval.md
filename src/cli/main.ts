@@ -70,6 +70,7 @@ import { commandDoctor } from "./doctor.js";
 import { commandEnv } from "./env.js";
 import { commandHook } from "./hook.js";
 import { commandImport } from "./import.js";
+import { commandJournal } from "./journal.js";
 import { commandInstructions } from "./instructions.js";
 import { commandInit } from "./init.js";
 import { commandLogAdvance, commandLogSync } from "./log-verbs.js";
@@ -851,6 +852,13 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // It reads no log and writes nothing.
     case "payload":
       return commandPayload(rest, streams, cwd);
+    // The ungated channel (APRV-195). `journal write` is the one verb in this
+    // switch that reaches no policy, no log and no token: it appends free text
+    // to a local file so that an agent complying perfectly can still say it
+    // thinks something is wrong. Nothing in the runtime reads what it writes,
+    // which is what makes leaving it ungated safe (SPEC.md §11.1 invariant 4).
+    case "journal":
+      return commandJournal(rest, streams, cwd);
     // The environment verb (APRV-73). `env` resolves `.approval/env` — the
     // source map naming where each *_env variable's value lives — and prints an
     // export block for a shell to evaluate. IT IS THE ONLY COMMAND IN THIS

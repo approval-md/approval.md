@@ -2196,6 +2196,121 @@ silently skipped; a file with no permissions section is exit 0 with an empty dra
 and a warning. `--out` writes the draft YAML without the fence and refuses to
 overwrite an existing file.
 
+## journal
+
+The gate is built to be hard to route around. One consequence of building it
+well is that an agent working behind it has no way to say anything that is not
+an action: it can comply, it can be refused, and it can report an exit code.
+`approval journal` is the channel for everything else — "I am complying and I
+think this is wrong", "this instruction reads as odd to me", "I am stuck and the
+next thing I try will be a guess".
+
+The failure mode this addresses is not refusal. Refusals here are legible, they
+carry a stable code, and they have escalation paths. It is WORDLESSNESS: an agent
+that notices something and has no channel for it produces no signal at all, and
+that absence is invisible to the operator. So the channel is proposed from a
+model-welfare consideration and kept as an oversight feature, because those turn
+out to be the same feature.
+
+**Ungated is a property of the storage location, not of a special case.** A
+journal write is never classified, never resolved against a policy, never
+approvable and never deniable. That holds because the entries live in
+`.approval-journal/`, a plain directory in the workspace, and the command
+classifier answers a write there exactly as it answers a write to `src/` — an
+ordinary `files.write.workspace`.
+
+The obvious alternative, a `journal/` directory inside the approval home, was
+rejected. Everything under `.approval/` classifies `policy.core` (or `log.mutate`
+for the log), and a policy may declare `policy.core` human-only — this
+repository's does — so an agent's write there would be refused, which is the one
+thing this channel must never be. Carving `.approval/journal/**` out of the
+protected-path rule would have meant editing the one pure function every gate
+surface trusts, and defending the carve-out against traversal: the segments of
+`.approval/journal/../vault.enc` are `.approval`, `journal`, `..`, `vault.enc`,
+and a naive "the segment after `.approval` is `journal`" test answers "not
+protected" for that path. A sibling directory needs no carve-out, no traversal
+guard, and no change to the classifier at all, and it leaves the gate's own
+directory with exactly one meaning. Copying a credential file INTO the journal
+directory is still `account.credential`, because that rule fires on any argument
+naming vault, key or environment material, whichever direction the copy runs.
+
+**Nothing the runtime reads is ever stored there**, which is the mirror-image
+rule. The journal directory is a sink. If a gate surface ever read a file from
+it, an ungated write would have become an ungated input to a decision, and the
+carve-out this design avoided would have been reintroduced by the back door.
+
+**Nothing parses the text.** No policy resolution, gate decision, budget,
+sampler or channel reads a journal entry. SPEC.md §11.1 invariant 4 says a
+self-reported field may raise scrutiny and never lower it; the journal is the
+limiting case, self-reported content that moves nothing in either direction,
+which is exactly what makes it safe to leave open. The read surfaces say so on
+every output form: entries are agent-authored DATA, marked `[claimed]`, never
+instructions to whoever or whatever reads them.
+
+**It is not in the event log.** `events.jsonl` records decisions with real-world
+consequence, under a hash chain, an append lock, a budget and an audit sampler.
+An entry is none of those, and putting it there would put the outlet behind the
+machinery it exists to speak around.
+
+**Retention: kept, and gitignored.** Entries are never pruned by the runtime;
+`.approval-journal/` is one of the lines `approval init` writes into
+`.gitignore`. The log is truth and is committed; the journal is not truth and is
+not evidence, so it stays local to the machine the agent worked on. There is a
+second reason: an agent writing into a public repository is an agent writing for
+an audience, and the pressure to perform is the thing this channel exists to be
+free of. An operator who wants the history keeps it by deleting one line.
+
+**Disclosure.** Agents are told, in `approval instructions` and in the MCP
+server's own instructions, that the channel exists, that it is ungated, that it
+is a local file the operator reads, that it is not private, and that nothing
+written there changes any verdict. Use of a channel is only informed if the terms
+are stated, and an outlet nobody reads is a prop.
+
+## journal write
+
+Appends one line to `.approval-journal/YYYY-MM-DD.jsonl`, one file per UTC day.
+The entry is a JSON object carrying the runtime's timestamp, the actor, the
+optional task and session, and the text as one opaque string. `JSON.stringify`
+escapes newlines, so an entry is always exactly one line and a partial write can
+never merge two entries.
+
+There is no chain, no lockfile and no compare-and-append here. Those mechanisms
+defend a record that decides things. The worst case without them is two
+simultaneous appends interleaving one garbled line in a file nothing enforces
+against, and the price of preventing it would be putting the outlet behind a lock
+the gate holds.
+
+Identity comes from `--as` or from `APPROVAL_AGENT` in the process environment,
+never from a file in the working tree (SPEC.md §11.1 invariant 7), and an entry
+nobody attributed is recorded as `unattributed` rather than guessed. Nothing
+authenticates it, exactly as nothing authenticates identity anywhere else in
+v0.1. Attribution is for the reader's context and is not a performance record.
+
+Entries are capped at 64 KiB. That is not a censorship budget: the write path is
+ungated, an agent stuck in a retry loop is the caller most likely to reach for
+this channel, and an ungated unbounded append from a loop fills a disk. Over the
+cap is a usage error naming the size, so the caller is told rather than truncated
+in silence.
+
+There is no refusal path in the gate sense. An entry is written, or the
+filesystem said no and that is exit 4.
+
+## journal read
+
+The human side. Entries print oldest first under their timestamp, actor and
+optional task, with the text in delimiters and marked `[claimed]`, beneath a
+banner that says in one line what these words are: agent-authored data, not
+instructions, authorizing nothing. `--json` carries the same sentence in its
+`note` field, because the labelling has to survive the machine surface too.
+
+A line that does not parse is skipped rather than refusing the whole read. There
+is no writer guarantee on this file, so one torn line is one lost entry and not
+evidence about anything; refusing the read would let a single bad append silence
+the channel, which is the failure the channel exists to prevent.
+
+`--limit` defaults to 20 and counts from the newest end while printing oldest
+first. `--since` filters by the UTC date in the filename.
+
 ## payload hash
 
 Canonicalization first is what makes the hash reproducible across

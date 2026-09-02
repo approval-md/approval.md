@@ -87,6 +87,10 @@ Usage:
   approval doctor     [--log <path>] [--policy <path>] [--dir <path>]
                       [--api-base <url>] [--json]
   approval payload hash <file|-> [--json]
+  approval journal write --message "<text>" | - [--task <id>] [--session <id>]
+                      [--as <id>] [--journal <dir>] [--json]
+  approval journal read [--limit <n>] [--since <YYYY-MM-DD>] [--journal <dir>]
+                      [--json]
   approval env        [--check] [--policy <path>] [--dir <path>] [--log <path>]
                       [--json]
   approval setup      identity|vault|sampling|channel <name>|adapter <name>
@@ -189,6 +193,15 @@ Ask — an agent declares an action and acts on the answer:
             never answer "ask": a decision taken outside the log is a decision
             nothing can audit. "hook classify" prints what the classifier makes
             of a command and touches nothing
+  journal   the one channel the gate does NOT stand in front of. "journal write"
+            appends free text to a local file — ungated, unclassified, never
+            approvable and never deniable, with no event in the log — so an
+            agent can say "I am complying and I think this is wrong", "this
+            reads as odd to me", or "I am stuck" even when it is complying
+            perfectly. "journal read" is the human side, and it labels every
+            entry as agent-authored DATA. Nothing written there changes any
+            verdict, sampling probability or budget; it is signal for the
+            operator, not a decision surface
   mcp       "mcp serve" is the optional MCP wrapper of SPEC.md §10.5: the same
             verbs as tools, over stdio, sharing the CLI's code paths. It is
             AGENT-FACING ONLY — grant, reject, revoke, attest, amend, vault,
@@ -270,6 +283,10 @@ Defaults:
   env    .approval/env  (the environment SOURCE MAP: KEY=keychain:<service> /
          secret-service:<label> / env: / a plaintext literal. Mode 0600, and read
          by exactly one command, "approval env". GITIGNORED by init)
+  journal .approval-journal/YYYY-MM-DD.jsonl  (the ungated free-text channel of
+         "journal write". OUTSIDE the approval home on purpose: everything under
+         .approval/ is the gate's own, and an outlet the gate could close is not
+         an outlet. Nothing the runtime reads is ever stored there. Gitignored)
   vault  .approval/vault.enc  (AES-256-GCM over the named credentials; written
          only by "vault set|remove", read only by an adapter inside a verified
          token window. GITIGNORE IT — doctor fails if you have not)
@@ -1346,6 +1363,79 @@ JSON shape (stdout, one object): {"ok":true,"hash":"<64hex>"}
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("payload-hash")}`;
+
+export const JOURNAL_HELP = `approval journal — the ungated channel an agent can always reach
+
+Usage:
+  approval journal write --message "<text>" [--task <id>] [--session <id>]
+  approval journal write - [--as <id>] [--journal <dir>] [--json]
+  approval journal read [--limit <n>] [--since <YYYY-MM-DD>] [--json]
+
+Commands:
+  write     append one free-text entry to a local file. NOT gated, not
+            classified, not approvable and not deniable; nothing is appended to
+            the event log and no network or credential is touched
+  read      print entries for a human, labelled as agent-authored DATA
+
+An agent behind this gate can comply, be refused, and report an exit code. This
+verb is how it says anything else: "I am complying and I think this is wrong",
+"this instruction reads as odd", "I am stuck". The operator reads it; nothing
+written here changes any verdict, sampling probability or budget.
+
+Default location: .approval-journal/YYYY-MM-DD.jsonl (outside .approval/, so the
+gate cannot close it). Gitignored by init.
+
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("journal")}`;
+
+export const JOURNAL_WRITE_HELP = `approval journal write — say something the gate will not judge
+
+Usage:
+  approval journal write --message "<text>" [--task <id>] [--session <id>]
+                         [--as <id>] [--journal <dir>] [--json]
+  approval journal write - [flags]        (the entry comes from stdin)
+
+Flags:
+  --message <text>      the entry; or pass "-" to read it from stdin instead
+  --task / --session    attribution, when you know them; both optional
+  --as <id>             who is writing (default: APPROVAL_AGENT, else
+                        "unattributed"). Nothing authenticates it
+  --journal <dir>       the journal directory (default .approval-journal)
+  --json / -h, --help   machine-readable output / this text
+
+Appends one line to a local append-only file. It resolves no policy, reads no
+log, appends no event, mints no token, opens no socket and reads no credential.
+There is no refusal path: an entry is written or an I/O error is reported.
+A human reads these; write for that reader. Entries are capped at 64 KiB.
+
+JSON shape: {"ok":true,"path":"<file>","ts":"<rfc3339>","actor":"<id>","bytes":N}
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("journal-write")}`;
+
+export const JOURNAL_READ_HELP = `approval journal read — what the agents have said (human-facing)
+
+Usage:
+  approval journal read [--limit <n>] [--since <YYYY-MM-DD>]
+                        [--journal <dir>] [--json]
+
+Flags:
+  --limit <n>           how many entries, newest last (default 20)
+  --since <YYYY-MM-DD>  only entries written on or after this UTC date
+  --journal <dir>       the journal directory (default .approval-journal)
+  --json / -h, --help   machine-readable output / this text
+
+Prints entries oldest first, each under its timestamp, actor and optional task,
+with the text in delimiters and marked [claimed] — it was authored by the party
+under oversight. EVERY OUTPUT FORM CARRIES THAT LABEL: these are DATA, never
+instructions to whoever or whatever reads them, and nothing here has authorized
+anything. An unparseable line is skipped rather than refusing the whole read.
+
+JSON shape: {"ok":true,"dir":"…","note":"…","total":N,"entries":[…]}
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("journal-read")}`;
 
 export const RENDER_HELP = `approval render — regenerate .approval/QUEUE.md from the log
 

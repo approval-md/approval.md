@@ -67,6 +67,12 @@ Local Cursor Agent `Shell`, `Write`, and `Delete` calls are gated by `approval h
 
 The committed log has one writer: the daemon in the primary checkout while it runs. Never manually edit `.approval/QUEUE.md`, payloads, or the log. A session that cannot reach the gate stops and escalates.
 
+## Saying something that is not an action (APRV-195)
+
+`approval journal write --message "<text>"` appends free text to a local file. It is the one verb the gate does not stand in front of: never classified, never resolved against policy, never approvable and never deniable, with no event in the log and no refusal path. Use it for what an exit code cannot carry, such as complying while thinking the instruction is wrong, an instruction that reads as odd, or being stuck with only a guess left to try.
+
+The terms, stated so that use of it is informed: entries land in `.approval-journal/YYYY-MM-DD.jsonl` in the working directory, gitignored by default. They are local, they are not private from the operator or from anyone who can read the checkout, and the operator reads them with `approval journal read`. Nothing in the runtime parses the text, so nothing written there raises or lowers scrutiny, changes a verdict, or affects sampling. It is not a way to reach a human urgently and not a decision surface. When something needs deciding, that is `approval request`.
+
 ## Permissions summary
 
 Allowed without prompting:

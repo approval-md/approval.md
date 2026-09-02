@@ -262,6 +262,16 @@ Five overrides sit on top of the table:
   credential material is `account.credential` either way. Nothing here reads an
   environment, so a refusal can only ever name a variable's NAME; no rule can
   print a value.
+  **`.approval-journal/` is NOT any of these** (APRV-195). The journal of
+  `approval journal write` is a sibling of the approval home rather than a
+  directory inside it, so no rule above was loosened to let an agent write
+  there: it shares a string prefix with `.approval` and shares no path SEGMENT
+  with it, and a write to it classifies `files.write.workspace` like any other
+  workspace write. That is what makes the channel ungated — an outlet a policy
+  could close is not an outlet. Two consequences hold in the other direction:
+  traversal back out of it (`.approval-journal/../.approval/vault.enc`) is
+  protected again, and a copy FROM credential material INTO the journal is
+  still `account.credential`, because that rule reads every argument.
 - **`redirect-write` → `files.write.workspace`.** A read command with a `>` or
   `>>` writes a file, and the class says so.
 - **`gate.self`.** The `approval` CLI (and `node …/dist/src/cli/main.js`) is the
