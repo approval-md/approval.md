@@ -134,6 +134,7 @@ import {
   type TelegramTerminalState,
 } from "../channels/telegram.js";
 import { loadPolicy } from "../core/policy-load.js";
+import { passphraseEnvFor } from "../core/vault.js";
 import {
   isAttestationActionKey,
   proposalRecords,
@@ -141,7 +142,7 @@ import {
 } from "../core/policy-proposal.js";
 import { payloadOf, readVerifiedRecords, requestState } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind, type ParsedFlags } from "./args.js";
-import { spawnGloss, GLOSS_TIMEOUT_MS, type GlossRunner } from "./gloss.js";
+import { glossRunnerFor, GLOSS_TIMEOUT_MS, type GlossRunner } from "./gloss.js";
 import { attachGloss, glossAbsenceLine } from "./gloss-attach.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import {
@@ -182,10 +183,18 @@ const LISTEN_FLAGS: Record<string, FlagKind> = {
  * A fragment rather than a value so that "no runner" is the ABSENCE of the
  * key. {@link ListenSetup.gloss} being optional is what lets every
  * programmatic caller of `dispatchPending` spawn nothing without saying so.
+ *
+ * `passphraseEnv` is the name this policy's `vault.passphrase_env` gives, and
+ * the only thing the APRV-207 scrub needs from a policy: the subprocess is
+ * spawned starved either way, and naming the variable covers the deployment
+ * that renamed it out from under the credential prefixes.
  */
-export function glossWiring(flags: ParsedFlags): { gloss?: GlossRunner } {
+export function glossWiring(
+  flags: ParsedFlags,
+  passphraseEnv: string | null = null,
+): { gloss?: GlossRunner } {
   if (boolFlag(flags, "--no-gloss")) return {};
-  return { gloss: spawnGloss };
+  return { gloss: glossRunnerFor(passphraseEnv) };
 }
 
 function usageError(streams: Streams, json: boolean, message: string, helpText: string): number {
@@ -537,7 +546,7 @@ function setUp(
     // defaults to none, so no programmatic driver spawns a subprocess by
     // importing it. Tests that drive THIS function pass `--no-gloss` or set a
     // stub, which is what {@link listenGlossRunner} is for.
-    ...glossWiring(flags),
+    ...glossWiring(flags, passphraseEnvFor(loadPolicy(policy))),
   });
 
   if (!prepared.ok) {

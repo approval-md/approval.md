@@ -50,6 +50,8 @@
 
 import { spawnSync } from "node:child_process";
 
+import { childEnvironment } from "../core/child-env.js";
+
 /**
  * How long the subprocess gets before it is killed and the gloss is dropped.
  *
@@ -189,12 +191,33 @@ export function tidyGloss(raw: string | null): string | null {
  * prompt is an argument and never a string a shell re-parses. Every failure is
  * a value rather than an exception — `spawnSync` reports a missing binary and a
  * timeout kill on the result object, and both are simply "no gloss".
+ *
+ * **Starved, like a granted child (APRV-207).** The environment is built by
+ * APRV-205's scrub rather than inherited: this is a third-party CLI that talks
+ * to the network on every prompt render, spawned by the listener, which is the
+ * process holding the Telegram bot token and the vault passphrase. It has no
+ * use for either, and a gate that hands its own credentials to a convenience is
+ * a gate whose custody claim is decorative. No credential is DECLARED here,
+ * because a gloss is not a granted action and no adapter asked for one.
+ *
+ * What passes is what the scrub does not take: the model's own auth
+ * (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`,
+ * `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` and kin), `PATH`, `HOME`, `TMPDIR`
+ * and the locale. None of them is under the gate's credential-bearing prefixes,
+ * so none of them needs a list of its own: a second list here is a second list
+ * to drift, and the CLI's ability to reach its own model is not this gate's
+ * secret to keep.
+ *
+ * `passphraseEnv` is the name the policy's `vault.passphrase_env` gives, for
+ * the deployment that renamed it out from under the prefixes. Omitted, the
+ * default (`APPROVAL_VAULT_PASSPHRASE`) is removed by the prefix rule anyway.
  */
-export function spawnGloss(prompt: string): string | null {
+export function spawnGloss(prompt: string, passphraseEnv: string | null = null): string | null {
   let result;
   try {
     result = spawnSync("claude", ["-p", "--model", GLOSS_MODEL, prompt], {
       encoding: "utf8",
+      env: childEnvironment({ passphraseEnv }).env,
       timeout: GLOSS_TIMEOUT_MS,
       killSignal: "SIGKILL",
       // A sentence is a few hundred bytes. A model that decides to emit a
@@ -206,6 +229,18 @@ export function spawnGloss(prompt: string): string | null {
   }
   if (result.error !== undefined || result.status !== 0) return null;
   return typeof result.stdout === "string" ? result.stdout : null;
+}
+
+/**
+ * {@link spawnGloss} bound to one policy's passphrase variable (APRV-207).
+ *
+ * The verbs that wire a runner (`channel cli`, `channel telegram listen`, `up`)
+ * have a policy load in hand already, and this is the only thing the scrub
+ * needs from it. A runner is still a `(prompt) => string | null`, so nothing
+ * downstream learns that a policy exists.
+ */
+export function glossRunnerFor(passphraseEnv: string | null): GlossRunner {
+  return (prompt: string) => spawnGloss(prompt, passphraseEnv);
 }
 
 /**
