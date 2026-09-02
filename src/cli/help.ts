@@ -459,25 +459,13 @@ Flags:
   -h, --help          this text
 
 Walks every complete line: re-derives each record's digest, follows the prev
-chain and the seq succession, and reports the first place the log stops being
-self-consistent. An absent file is an empty log and verifies clean. Nothing is
-written, and a torn tail is never truncated.
+chain and seq succession, and names where the log stops being self-consistent.
+An absent file verifies clean; nothing is written and a torn tail is not cut.
+--anchor also compares the prefix against the copy on a records branch or the
+trunk: a mismatch refuses anchor-diverged; a missing copy skips, never passes.
 
---anchor adds the one check the file cannot make about itself. The chain is
-unkeyed, so a process with write access can truncate the log and recompute a
-chain that walks clean from genesis; the copy already committed to a records
-branch or the trunk is the witness that party cannot rewrite. The working log's
-first N bytes must hash to the anchored copy's digest and its record at the
-anchored head seq must carry that hash, or the verb refuses anchor-diverged.
-Git is READ (git show), never fetched. No committed copy is a skip with a
-reason on stderr, never a pass.
-
-JSON shape (stdout, one object):
-  {"status":"clean"|"torn-tail"|"corrupt"|"anchor-diverged","records","head",
-   "intactThroughSeq"?,"firstBadSeq"?,"reason"?,"message"?,"anomalies"?,
-   "anchor"?:{"status":"pass"|"behind"|"skip"|"diverged","rev"?,"seq"?,
-              "hash"?,"bytes"?,"reason"?}}
-  A CLEAN LOG WITH ANOMALIES IS CLEAN and still exits 0.
+JSON (one object): "status" clean|torn-tail|corrupt|anchor-diverged, "records",
+"head", optional reason/message/anomalies/anchor. ANOMALIES ARE CLEAN, exit 0.
 
 ${EXIT_CODES_POINTER} (clean 0, corrupt 1, torn-tail 3; an unreadable log is 4)
 ${JSON_ERRORS}

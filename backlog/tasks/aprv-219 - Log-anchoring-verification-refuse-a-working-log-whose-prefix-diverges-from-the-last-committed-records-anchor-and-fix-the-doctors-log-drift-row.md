@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-v'
 created_date: '2026-09-02 16:26'
-updated_date: '2026-09-02 19:18'
+updated_date: '2026-09-02 19:30'
 labels:
   - core
   - log
@@ -32,10 +32,10 @@ An unkeyed hash chain means a process with write access to .approval/log/events.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 approval log verify --anchor refuses with anchor-diverged when the working log's prefix does not match the newest committed anchor (byte digest and head seq/hash), and passes when it does; both proved through the real append path plus a git fixture repo
-- [ ] #2 A missing anchor (no records branch, no git, detached) is reported as a skip with a reason and never as a pass
-- [ ] #3 The daemon runs the anchor check at startup and on each full re-proof; divergence stops the daemon with a distinct outcome, and the tick/started lines name the anchor in use
-- [ ] #4 approval doctor's log-drift row is this check's result and no longer misreads the checkout (APRV-210's two reproductions pass)
+- [x] #1 approval log verify --anchor refuses with anchor-diverged when the working log's prefix does not match the newest committed anchor (byte digest and head seq/hash), and passes when it does; both proved through the real append path plus a git fixture repo
+- [x] #2 A missing anchor (no records branch, no git, detached) is reported as a skip with a reason and never as a pass
+- [x] #3 The daemon runs the anchor check at startup and on each full re-proof; divergence stops the daemon with a distinct outcome, and the tick/started lines name the anchor in use
+- [x] #4 approval doctor's log-drift row is this check's result and no longer misreads the checkout (APRV-210's two reproductions pass)
 - [ ] #5 The refusal code joins the pinned code union (SPEC §11.1 inv. 6); SPEC.md §9 or §11 gains the anchoring sentence via a gated edit
 - [ ] #6 docs/cli-reference.md and docs/git-evidence.md updated; npm test passes; lint clean
 <!-- AC:END -->

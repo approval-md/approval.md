@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-v'
 created_date: '2026-09-02 08:44'
-updated_date: '2026-09-02 19:23'
+updated_date: '2026-09-02 19:32'
 labels:
   - doctor
   - bug
@@ -25,9 +25,9 @@ Observed 2026-09-02 on the primary checkout right after syncing to main and rebu
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 On a scratch repo whose HEAD commit carries the log, log-drift passes and reports the committed seq; it never prints 'never been committed' when git show HEAD:<log> succeeds
-- [ ] #2 On a scratch repo with a bare remote whose trunk carries seq 1..N and a working log at seq N+k, log-advance-cadence reports k owed, not N+k, and names the ref it read
-- [ ] #3 Both rows resolve paths repo-relative from the checkout root via git-scope helpers; no row builds a HEAD:<absolute path> spec
+- [x] #1 On a scratch repo whose HEAD commit carries the log, log-drift passes and reports the committed seq; it never prints 'never been committed' when git show HEAD:<log> succeeds
+- [x] #2 On a scratch repo with a bare remote whose trunk carries seq 1..N and a working log at seq N+k, log-advance-cadence reports k owed, not N+k, and names the ref it read
+- [x] #3 Both rows resolve paths repo-relative from the checkout root via git-scope helpers; no row builds a HEAD:<absolute path> spec
 - [ ] #4 npm test passes; lint clean
 <!-- AC:END -->
 
