@@ -134,6 +134,13 @@ export interface AdapterSetupEntry {
   check?(values: Record<string, string>, kept: readonly string[]): string | null;
   /** One line of what this adapter is, for the title. */
   summary: string;
+  /**
+   * This adapter's own help, printed for `--help` and beside every usage error
+   * from here down (APRV-221). On the entry rather than in a `name === "email"`
+   * branch: an adapter's help is the adapter's, and a branch is a place for the
+   * next adapter's help to be forgotten.
+   */
+  help: string;
   /** The non-interactive path: the exact `vault set` calls, generated. */
   hint(context: HintContext): string;
   /** Prove the stored configuration against the far end, sending nothing. */
@@ -368,6 +375,7 @@ export const ADAPTER_SETUPS: Record<string, AdapterSetupEntry> = {
     check: (values, kept) => checkEmailCredentialSet(values, DEFAULT_CREDENTIAL_NAMES, kept),
     summary:
       "the SMTP settings `approval adapter email` reads inside the verified-token window",
+    help: SETUP_ADAPTER_EMAIL_HELP,
     hint: (context) => manifestHint(EMAIL_CREDENTIAL_SPECS, context),
     verify: verifyEmail,
     nextSteps: [
@@ -454,7 +462,10 @@ export async function commandSetupAdapter(
       SETUP_ADAPTER_HELP,
     );
   }
-  const helpText = name === "email" ? SETUP_ADAPTER_EMAIL_HELP : SETUP_ADAPTER_HELP;
+  // The adapter's own help, from the table entry the name resolved to: the
+  // generic SETUP_ADAPTER_HELP is for the errors that happen BEFORE a name
+  // resolves, and for nothing after this line.
+  const helpText = entry.help;
 
   const outcome = front(
     `adapter ${name}`,

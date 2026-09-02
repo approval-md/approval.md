@@ -15,8 +15,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import type { Adapter } from "../src/adapters/contract.js";
 import { emailAdapter } from "../src/adapters/email.js";
-import { declaredCredentialsForClass } from "../src/adapters/registry.js";
+import {
+  builtInAdapters,
+  declaredCredentialsForClass,
+  unionRequiredCredentials,
+} from "../src/adapters/registry.js";
 import { childEnvironment } from "../src/core/child-env.js";
 
 /** A fixture value, never a real one. */
@@ -148,4 +153,60 @@ test("the pass-through set comes from the adapter's own declaration (APRV-169)",
   assert.ok(declared.length > 0, "the email adapter declares no required credential");
   assert.deepEqual(declaredCredentialsForClass("files.write.local"), []);
   assert.deepEqual(declaredCredentialsForClass("no.such.class"), []);
+});
+
+/**
+ * Two adapters, one class (APRV-221).
+ *
+ * The union is the rule the scrub depends on: when more than one adapter serves
+ * a class, "which one would have run this" has no answer at the point `approval
+ * run` builds the child's environment, so both declarations pass through and
+ * neither adapter is guessed at. The build ships one adapter today, so the
+ * second here is a fixture object rather than a real adapter — the pure
+ * `unionRequiredCredentials` takes the roster so this case can exist at all,
+ * while `declaredCredentialsForClass` keeps reading the built-in roster and
+ * nothing else (a caller-supplied keep-list is the hole APRV-205 closed).
+ */
+test("declaredCredentialsForClass unions two adapters serving one class", () => {
+  const CLASS = "communicate.email.external";
+  const first: Adapter = {
+    name: "fixture-one",
+    classes: [CLASS],
+    requiredCredentials: ["fixture.host", "fixture.shared"],
+    act: () => ({ ok: true }),
+  };
+  const second: Adapter = {
+    name: "fixture-two",
+    classes: [CLASS, "fixture.other.class"],
+    // `fixture.shared` is declared by both: the union deduplicates it, and the
+    // order is the roster's, so a second adapter never reorders the first's.
+    requiredCredentials: ["fixture.shared", "fixture.api-key"],
+    act: () => ({ ok: true }),
+  };
+  const third: Adapter = {
+    name: "fixture-three",
+    classes: ["fixture.other.class"],
+    requiredCredentials: ["fixture.unrelated"],
+    act: () => ({ ok: true }),
+  };
+
+  assert.deepEqual(
+    [...unionRequiredCredentials([first, second, third], CLASS)],
+    ["fixture.host", "fixture.shared", "fixture.api-key"],
+  );
+  // An adapter that serves the class but declares nothing contributes nothing,
+  // and a class nobody serves is still the empty list.
+  assert.deepEqual(
+    [...unionRequiredCredentials([{ name: "bare", classes: [CLASS], act: () => ({ ok: true }) }], CLASS)],
+    [],
+  );
+  assert.deepEqual([...unionRequiredCredentials([first, second], "no.such.class")], []);
+
+  // And the fixtures reached nothing: the shipped lookup still answers from the
+  // built-in roster alone.
+  assert.deepEqual(
+    [...declaredCredentialsForClass(CLASS)],
+    [...unionRequiredCredentials(builtInAdapters(), CLASS)],
+  );
+  assert.deepEqual(declaredCredentialsForClass("fixture.other.class"), []);
 });
