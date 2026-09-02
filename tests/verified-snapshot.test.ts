@@ -44,6 +44,7 @@ import {
 import {
   admitSnapshot,
   clearSnapshot,
+  forgetPublishedSnapshots,
   publishSnapshot,
   readSnapshot,
   snapshotPathFor,
@@ -406,8 +407,119 @@ test("publishSnapshot refuses a prefix that is not newline-terminated", () => {
   const raw = readFileSync(unit.logPath);
   const truncated = raw.subarray(0, raw.length - 1);
   assert.equal(
-    publishSnapshot(unit.logPath, truncated, 10, { seq: 10, hash: "e".repeat(64) }, undefined),
+    publishSnapshot(
+      unit.logPath,
+      truncated,
+      createHash("sha256").update(truncated).digest("hex"),
+      10,
+      { seq: 10, hash: "e".repeat(64) },
+      undefined,
+    ),
     false,
     "a prefix that does not end at a line boundary is never published",
   );
+});
+
+// ---------------------------------------------------------------------------
+// Publishing only what changed (APRV-211)
+// ---------------------------------------------------------------------------
+
+/** The log's bytes, its digest, its line count and its head: what a publish takes. */
+function endorsement(unit: Scenario): {
+  raw: Buffer;
+  digest: string;
+  lines: number;
+  head: { seq: number; hash: string };
+} {
+  const raw = readFileSync(unit.logPath);
+  const read = readVerifiedRecords(unit.logPath, { cache: null });
+  assert.equal(read.ok, true, "the log must verify before it may be endorsed");
+  const ok = read as { ok: true; records: unknown[]; head: { seq: number; hash: string } };
+  return {
+    raw,
+    digest: createHash("sha256").update(raw).digest("hex"),
+    lines: ok.records.length,
+    head: ok.head,
+  };
+}
+
+/** The snapshot file's identity: a temp-and-rename publish always changes it. */
+function snapshotIdentity(unit: Scenario): string {
+  const stats = statSync(snapshotPathFor(unit.logPath));
+  return `${String(stats.ino)}:${String(stats.mtimeMs)}`;
+}
+
+test("publishing the same bytes twice writes the file once", () => {
+  // APRV-211. The snapshot lands in the directory the daemon watches, so a
+  // publish that re-states an unchanged endorsement is a filesystem event whose
+  // only cause was the previous tick — the daemon waking itself. Nothing about
+  // what a reader may believe changes: the file on disk is the same file.
+  const unit = fixture(15);
+  forgetPublishedSnapshots(unit.logPath);
+  const { raw, digest, lines, head } = endorsement(unit);
+
+  assert.equal(publishSnapshot(unit.logPath, raw, digest, lines, head, undefined), true);
+  const first = snapshotIdentity(unit);
+  assert.equal(
+    publishSnapshot(unit.logPath, raw, digest, lines, head, undefined),
+    false,
+    "the same endorsement must not be written a second time",
+  );
+  assert.equal(snapshotIdentity(unit), first, "the file was rewritten");
+
+  // The same suppression through the read path the daemon actually uses.
+  publish(unit);
+  assert.equal(snapshotIdentity(unit), first, "a clean read of an unchanged log republished");
+  assertEquivalent(unit, true);
+});
+
+test("a changed prefix publishes again", () => {
+  const unit = fixture(15);
+  forgetPublishedSnapshots(unit.logPath);
+  publish(unit);
+  const before = snapshotIdentity(unit);
+  const endorsed = published(unit).byte_length;
+
+  const appended = appendEvent(unit.logPath, {
+    ts: T0,
+    event: "task.registered",
+    actor: "agent:planner",
+    task: "one-more",
+    channel: "cli",
+    payload: { title: "one more" },
+  });
+  assert.ok(appended.ok, JSON.stringify(appended));
+
+  publish(unit);
+  assert.notEqual(snapshotIdentity(unit), before, "a log that grew must be endorsed again");
+  assert.ok(published(unit).byte_length > endorsed, "the new endorsement covers the new bytes");
+  assertEquivalent(unit, true);
+});
+
+test("the published sha256 is the digest the publisher was handed", () => {
+  // The digest is a parameter now rather than a recomputation, so the file must
+  // carry exactly what the verifying read proved over the bytes it walked.
+  const unit = fixture(15);
+  forgetPublishedSnapshots(unit.logPath);
+  const { raw, digest, lines, head } = endorsement(unit);
+  assert.equal(publishSnapshot(unit.logPath, raw, digest, lines, head, undefined), true);
+
+  const snapshot = published(unit);
+  assert.equal(snapshot.sha256, digest);
+  assert.equal(snapshot.byte_length, raw.length);
+  assert.equal(snapshot.lines, lines);
+  assert.deepEqual(snapshot.head, head);
+  assertEquivalent(unit, true);
+});
+
+test("clearing a snapshot makes the next clean read publish it again", () => {
+  // The memo describes a file. Removing the file must not leave this process
+  // believing a snapshot is in place that is not.
+  const unit = fixture(15);
+  publish(unit);
+  clearSnapshot(unit.logPath);
+  assert.equal(readSnapshot(unit.logPath).ok, false, "the file is gone");
+  publish(unit);
+  assert.equal(readSnapshot(unit.logPath).ok, true, "the same bytes are endorsed again");
+  assertEquivalent(unit, true);
 });

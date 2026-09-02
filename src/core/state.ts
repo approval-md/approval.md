@@ -431,12 +431,23 @@ export class VerifiedReadCache {
       entry !== undefined && cached !== null && raw.length === entry.byteLength
         ? entry.prefixHash
         : provedDigest;
-    this.#remember(key, raw, schemaKey, mtimeMs, verified, known);
-    if (snapshot.publish === true) {
-      const result = verified.result;
-      if (result.status === "clean" && result.head !== null) {
-        publishSnapshot(logPath, raw, result.records, result.head, options.schemaDir);
+
+    // The digest of these bytes, computed at most ONCE per read and shared by
+    // everything that wants it (APRV-211). Only a clean read has anything to
+    // remember or to publish, so a torn or corrupt log is never hashed here at
+    // all, and `#remember` still owns the rule about which reads qualify.
+    const result = verified.result;
+    if (result.status === "clean" && result.head !== null) {
+      const digest = known ?? sha256(raw);
+      this.#remember(key, raw, schemaKey, mtimeMs, verified, digest);
+      // The publisher is handed the digest rather than left to recompute it: it
+      // endorses exactly the bytes this read proved, and a second hash of the
+      // same megabytes was the larger half of a daemon tick.
+      if (snapshot.publish === true) {
+        publishSnapshot(logPath, raw, digest, result.records, result.head, options.schemaDir);
       }
+    } else {
+      this.#remember(key, raw, schemaKey, mtimeMs, verified, known);
     }
     return verified;
   }
