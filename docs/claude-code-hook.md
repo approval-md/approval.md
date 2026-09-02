@@ -530,8 +530,62 @@ so nobody hunts for a token that was deliberately never created.
   is asking the party under oversight to report its own oversight. The backstop
   is `scripts/protected-path-guard.mjs`, below, which asks from outside.
 - **Latency.** Every gated tool call pays a Node start-up plus a verified read of
-  the log. SPEC.md §13's post-v1 Rust fast-path is the accelerator for exactly
-  this loop.
+  the log. The read is accelerated when the daemon is running (see below);
+  the start-up is not, and SPEC.md §13's post-v1 Rust fast-path is the
+  accelerator for exactly this loop.
+
+## Where the hook's reads come from (APRV-188)
+
+A hook is a fresh process per gated tool call, so it starts with nothing
+remembered and verifies the chain from genesis before it may decide anything.
+That cost is linear in the log: measured on a ten-thousand-record log it was
+65 ms of a 371 ms invocation, growing by about 6.5 ms per further thousand
+records. The daemon, meanwhile, holds a warm cache and re-verifies only the
+appended tail on every tick.
+
+So the daemon publishes what it verified, at
+`.approval/log/verified-head.json`, and a hook uses it instead of walking:
+
+```json
+{"v":1,"log":"/repo/.approval/log/events.jsonl","schema_dir":"",
+ "byte_length":3391938,"sha256":"…","lines":10008,
+ "head":{"seq":10008,"hash":"…"},"verified_at":"…","pid":812}
+```
+
+**It is an endorsement of bytes, not a source of records.** It says: the first
+`byte_length` bytes of this log, whose SHA-256 is this, verified clean and end
+at this head. The hook then, on its own:
+
+1. reads the log itself and computes the SHA-256 of those bytes — the proof, and
+   the same one the in-process cache pays on every cached read;
+2. parses the endorsed lines itself and re-derives the head and the line count,
+   so a snapshot naming a head those bytes do not reach is refused by arithmetic
+   rather than trusted;
+3. re-checks the chain links (`alg`, `seq` succession, `prev` linkage) over its
+   own parse;
+4. walks everything appended past the endorsed prefix in full, cold, exactly as
+   it walks a whole log today.
+
+**Anything it cannot prove, it ignores.** A snapshot that is absent, stale,
+truncated, for another log, verified against other schemas, owned by another
+user, writable by group or other, malformed, of an unknown version, or wrong in
+any of the checks above is dropped without comment and the hook verifies from
+genesis. There is no failure mode where a hook is *worse off* for a bad
+snapshot; the worst case is the behaviour of a machine that has never run the
+daemon. `approval doctor`'s `verified-snapshot` row says which of the two is
+happening.
+
+What the hook takes on the publisher's word is exactly two checks over bytes it
+has itself proved are the bytes the publisher named: the `event` schema
+validation and the per-record hash recompute. That residue is not a new
+capability. A snapshot can only endorse bytes already in the log file, and
+anyone who can write `verified-head.json` can write `events.jsonl` beside it —
+where, the chain being unkeyed, they could recompute a self-consistent forged
+log that passes a cold walk too. The ownership and permission checks are what
+keep that sentence true under a loose umask.
+
+The file is local, derived, gitignored, and never evidence. Deleting it costs
+latency and nothing else.
 
 ## The backstop outside the session: `scripts/protected-path-guard.mjs`
 
@@ -561,8 +615,8 @@ Three verdicts pass, ordered by how much they prove.
 | verdict | what it establishes |
 |---|---|
 | `attested` | CONTENT-level. The policy file's bytes at the head commit hash to a digest some `policy.updated` record carries, which is what `approval policy amend --commit` writes. No grant is sought, which is how amendment pull requests pass — they have an attestation and would never have a `policy.edit` grant. |
-| `granted-file` | PATH-level. An `approval.granted` of class `policy.edit`/`policy.core` whose `payload_hash` resolves in the committed payload store to material whose `file` names this path. Since APRV-124 the hook binds the CHANGE rather than the touch, so this is a grant against the actual bytes. |
-| `granted-command` | PATH-level, one notch weaker. The granted command is re-run through this runtime's own `classifyCommand`, and it counts only when a segment classifies as a granting class BECAUSE of a word naming this path (`ClassifiedSegment.path`). A mention is not a grant: `cat SPEC.md` is `read.shell` and proves nothing. |
+| `granted-file` | HUNK-level. An `approval.granted` of class `policy.edit`/`policy.core` whose `payload_hash` resolves in the committed payload store to material whose `file` names this path. Since APRV-124 the hook binds the CHANGE rather than the touch, so the payload carries the exact edit, and since APRV-202 that is what is checked: the granted `after` bytes must occur verbatim in the blob at head, the `before` bytes in the blob at base, and the lines they contain are the ones they cover. |
+| `granted-command` | ATTRIBUTED, one notch weaker. The granted command is re-run through this runtime's own `classifyCommand`, and it counts only when a segment classifies as a granting class BECAUSE of a word naming this path (`ClassifiedSegment.path`, or another word of that same segment that resolves exactly to this checkout's copy of the path — a batch names several files and the field holds one). A mention is not a grant: `cat SPEC.md` is `read.shell` and proves nothing. A command payload describes no bytes, so it covers the whole path only with the three tests below. |
 
 There is deliberately **no class-level pass**. A `policy.edit` grant that exists
 but names some other file is not evidence that anybody saw this edit, and
@@ -588,13 +642,46 @@ grant shortly after is the grant-follows-write anomaly (APRV-200), which is a
 defect in its own right but a complete consent trail, and not this guard's to
 adjudicate.
 
-Two limits of that bound, stated rather than buried. A repeat edit to the same
-path inside the window still inherits the earlier grant; closing that needs
-hunk-level coverage, tracing every added region of the diff to the
-`after`/`content` bytes of some grant. And when git cannot date the change at
-all, no bound is applied rather than a weaker one invented — a bound against the
-head commit would pass everything, since every record in the log at head is
-already before it. The finding says which of the two it got, every time.
+When git cannot date the change at all, no bound is applied rather than a weaker
+one invented: a bound against the head commit would pass everything, since every
+record in the log at head is already before it. The finding says which of the two
+it got, every time.
+
+The bound used to be the whole answer, and that was the guard's weakest joint: a
+repeat edit to the same path inside the window inherited the earlier grant, and
+PR #187, #196 and #207 each passed on a grant that authorized some earlier edit.
+Since APRV-202 the window is a pre-filter and coverage is the verdict.
+
+### Coverage: the change, not the path
+
+The guard reads the blob at base and at head, reduces the difference to the
+substantive lines added and removed, and requires every one to trace to the
+bound material of some in-window grant. Coverage may be assembled from several
+grants, and the finding lists every contributor.
+
+- A **file grant** covers the lines its own `before`/`after` (or `content`)
+  bytes contain, and only when those bytes are anchored: the after-state occurs
+  verbatim in the blob at head, the before-state in the blob at base. A granted
+  edit whose after-state is not in head approved something that did not land,
+  and it covers nothing.
+- A **command grant** has no bytes to check, so it is attributed instead, and
+  three tests all have to hold. Its write has to land at THIS checkout's copy of
+  the path (the payload's `cwd` joined with the repository-relative path equals
+  the word the classifier matched); the log has to carry the RUN, an
+  `execution.started` for the grant's `action_key`, because a grant nobody spent
+  authorized a command that never ran; and that run has to sit within six hours
+  of the commit and NOT after it, because a command's effect follows its own
+  `execution.started`. The finding names the run it attributed the change to.
+- A change that alters no substantive line (whitespace, a mode bit) has no hunk
+  to cover, and a grant naming the path inside the window is still required. A
+  change that only REORDERS lines is an uncovered hunk, not an empty diff.
+
+Three limits, stated rather than buried. Coverage is by line text and not by
+position, so an added line whose exact text appears in some granted edit counts
+as covered wherever it landed; tightening that to positions would fail every
+rebase and re-indent. Blank lines neither need coverage nor give it. And a
+command grant still authorizes the whole file for the duration of its run, which
+is as fine as a payload naming a script can get.
 
 ### The log lags, so ordering is a rule
 
@@ -627,11 +714,21 @@ it would have caught.
 ### Fail closed
 
 A missing log (`log-missing`), a log that does not pass chain verification
-(`log-unverified`), and a protected path with no evidence (`no-evidence`) are all
-failures. The first two fire before any evidence is sought, so an unreadable log
-is never mistaken for "no protected paths changed", and records that have not
-passed verification are never read for evidence at all (SPEC.md §11.1 invariant 1
-applied to a new surface).
+(`log-unverified`), a protected path nothing in the log names (`no-evidence`), a
+change whose lines trace to no granted material even though grants DO name the
+path (`uncovered-hunk`), and a change whose blobs could not be read at both
+commits (`change-unreadable`) are all failures. The first two fire before any
+evidence is sought, so an unreadable log is never mistaken for "no protected
+paths changed", and records that have not passed verification are never read for
+evidence at all (SPEC.md §11.1 invariant 1 applied to a new surface).
+
+`uncovered-hunk` and `no-evidence` are separate because the reader's next move
+differs. `no-evidence` says nobody approved anything about this file, and the
+question is whether the hook fired at all. `uncovered-hunk` says somebody
+approved something about this file and it was not this: the grant is real, the
+consent trail for THESE bytes is missing, and the fix is to take the change to
+the gate rather than to hunt for a lost record. The failure prints the uncovered
+lines and why each naming grant was set aside.
 
 ### Prior art
 

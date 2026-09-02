@@ -915,6 +915,25 @@ to decide whether to fix itself, stop retrying, or ask a human.
 - `already-executed` — the action key already has an `execution.started`.
 - `budget-exceeded` — budget verdicts failed; a `budget.exceeded` event WAS
   appended and `error.verdicts` lists the failures.
+- `queue-full` — the approver's queue is at the ceiling the policy declared
+  (SPEC.md §5.2's `limits.max_pending`, per class or on a `budgets` scope), so
+  the request was not added to it. `error.limits` lists the failing verdicts
+  (`limit`, `scope`, `observed`, `ceiling`). **Nothing is appended**, unlike
+  `budget-exceeded`: a log line per refused request would hand a queue-flooder
+  the log growth it was refused the queue for. Retrying at once gets the same
+  answer; the queue drains when a human decides, a requester withdraws, or a
+  TTL lapses. `.approval/QUEUE.md` shows each declared ceiling and how close the
+  queue is to it, which is where a human sees the standing condition.
+- `rate-limited` — this origin created more requests in the last hour than
+  `limits.requests_per_hour` allows. Origin is the requesting actor, which the
+  runtime assigns rather than the caller, so re-labelling does not buy a fresh
+  hour. Counted over request CREATION, so a request answered a minute after it
+  was made still spent the origin's share. Nothing is appended, and the window
+  is rolling: the oldest request in it ages out on its own. Distinct from
+  `queue-full`, and the distinction is the repair — that one says wait for an
+  approver, this one says slow down. Where both ceilings are met the answer is
+  `queue-full`, because an agent that backs off for a minute and retries into a
+  full queue was told the smaller of the two facts.
 - `class-human-only` — the action's class resolves to `human-only`: the policy
   reserves it to human hands, and a person performs it outside agent execution.
   Distinct from every rejection, and the distinction is the whole of the code:
@@ -1511,7 +1530,22 @@ The checks, at length:
   PASS means the entry is present on disk, and says so plainly: it is not proof
   the running session loaded it. The check that trusts no session is the
   CI-side grant cross-check (`scripts/protected-path-guard.mjs`) over the
-  committed log.
+  committed log, which since APRV-202 requires every added and removed line of a
+  protected path to trace to the bound material of a grant, rather than only
+  that the path was granted at some point in the week.
+- **verified-snapshot** — whether the daemon's verified-head snapshot
+  (`.approval/log/verified-head.json`, APRV-188) is in place and still covers
+  the live log, so a hook re-proves one SHA-256 instead of re-walking the chain
+  per gated tool call. SKIP when there is none: the daemon has not run here, and
+  every hook verifies the log from genesis, which is correct and slower. PASS
+  when it applies, naming how much of the log it endorses; PASS, with the
+  reason, when it no longer applies, because a snapshot a reader refuses is a
+  snapshot that never existed. The one FAIL is a snapshot every reader would
+  refuse for a reason an operator should act on — a foreign owner, or a mode
+  that lets somebody else write it — and the fix is to delete it and let the
+  daemon republish. This row can never report a correctness fault: the file
+  endorses bytes, the reader re-proves them, and nothing is authorized on its
+  word.
 
 **`--json`** (one object on stdout):
 
@@ -1845,6 +1879,11 @@ other way: on `channel telegram listen` and `up` the gloss is ON by default,
 with `--no-gloss` to drop it. The phone is where an approver meets a request
 they did not watch being made, and the seconds are spent inside a dispatch cycle
 that is already waiting on the network, blocking nobody.
+
+The subprocess is spawned starved (APRV-207): it gets the same scrubbed
+environment a granted child gets, so no `APPROVAL_*`, `TELEGRAM_*` or `VAULT_*`
+variable and no vault passphrase reaches it, while its own auth (`ANTHROPIC_*`,
+`CLAUDE_CODE_OAUTH_TOKEN`), `PATH`, `HOME` and the locale pass through.
 
 The gloss is never load-bearing: it is attached at render time to a request the
 tagger has finished building, the payload hash does not cover it, the log never
@@ -2416,6 +2455,18 @@ log is the truth and the file is its projection. Exactly the `state:` line
 changes; every other byte, key, comment and line ending is preserved. So a drift
 record marks a file found wrong AND fixed; a file that keeps drifting is one
 another writer is fighting over.
+
+**The verified-head snapshot (APRV-188).** Every clean read a tick makes is
+published to `.approval/log/verified-head.json`: an endorsement of the exact
+bytes the daemon just walked, so a hook process re-proves one SHA-256 instead of
+re-verifying the chain from genesis per gated tool call. It is written at mode
+0600, is gitignored, and carries no records. A reader re-proves the digest over
+its own read of the log, re-derives the head and the line count from its own
+parse, and walks anything appended past the endorsed prefix; a snapshot that
+fails any of that is ignored and the reader walks the whole log. Nothing is
+authorized on the file's word, no verdict depends on it, and deleting it costs
+latency and nothing else. `approval doctor`'s `verified-snapshot` row reports
+its state, and `docs/claude-code-hook.md` states the trust boundary in full.
 
 **Git evidence (`--git-evidence`, off by default).** SPEC.md §8's optional
 hardening: a second, independent record of the same bytes, one an operator can

@@ -91,6 +91,11 @@ export const GENESIS_PREV = null;
  * an agent asking a human to attest prepared policy bytes, and the human's
  * refusal (amended SPEC.md §10.1, §10.3). The acceptance is `policy.updated`,
  * which already existed and is still the only event an attestation is.
+ * `audit.dark_session` (APRV-192) is the ninth: the daemon recording git
+ * activity it can see for which the log carries no corresponding record
+ * (amended SPEC.md §10.2). It is an observation the RUNTIME makes about a
+ * session, never a record written on a session's behalf, so it carries a
+ * `system:` actor and the schema refuses any other.
  */
 export type EventType =
   | "task.registered"
@@ -114,6 +119,7 @@ export type EventType =
   | "envelope.drift"
   | "audit.sampled"
   | "audit.reviewed"
+  | "audit.dark_session"
   | "reconciliation.required"
   | "reconciliation.satisfied"
   | "payload.pruned";

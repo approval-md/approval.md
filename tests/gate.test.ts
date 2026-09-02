@@ -2061,6 +2061,13 @@ test("the refusal-code union is frozen public API", () => {
     "duplicate-request",
     "already-executed",
     "budget-exceeded",
+    // APRV-173: SPEC.md §5.2's request-volume limits stop being vocabulary no
+    // runtime reads. Two additions, distinct from each other and from
+    // `budget-exceeded`: budgets meter the world's exposure, these meter the
+    // approver's queue, and the repairs differ (wait for the queue to drain
+    // versus slow down). Neither appends anything.
+    "queue-full",
+    "rate-limited",
     // APRV-20 pass two, amendment A1: a manual action must bind to bytes, and
     // the schema cannot know autonomy, so intake enforces it. An addition.
     "payload-hash-required",
