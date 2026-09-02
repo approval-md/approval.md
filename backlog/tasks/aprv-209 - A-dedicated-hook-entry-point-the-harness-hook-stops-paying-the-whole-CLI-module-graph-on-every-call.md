@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-x'
 created_date: '2026-09-02 08:06'
-updated_date: '2026-09-02 19:05'
+updated_date: '2026-09-02 19:25'
 labels:
   - performance
   - hook
@@ -119,4 +119,92 @@ Everything. `npm test` has NOT been run in this worktree at any point,
 per the operator's pause. `npm run build` is the only build/verify step
 that ran, and it passed. Lint not run. No AC is ticked and none should be
 until the measurement and the implementation land.
+
+## Session 2: implemented
+
+### What was done
+
+`src/cli/main.ts` no longer statically imports a single verb. Every `case` in
+the dispatch reaches its command function through `await import()`, and the two
+core modules the log verbs need (`core/verify.ts`, `core/reindex.ts`) are
+reached the same way from `commandVerify`, `readForOutput` and
+`commandReindex`. What is still imported at the top of the file is the preamble
+every verb needs before dispatch: argument parsing, path resolution, the help
+text, styling, the exit-code table.
+
+ESM has no synchronous dynamic import, so `main()` returns a promise. The ten
+call sites APRV-188 predicted all followed: `cli.js`, the direct-execution
+footer at the bottom of main.ts, `src/mcp/server.ts`'s default invoke arm, and
+the seven in-process test helpers (anomalies, audit, autonomy-split, cli-help,
+cli-long-help, retro-rate, sealed-delivery). Their `runCli`/`capture` helpers
+became async and their callers await; `cli-long-help.ts`'s `withColour` also
+became async, awaiting inside the `try` so its `finally` cannot put FORCE_COLOR
+back while the verb is still deciding its palette.
+
+### Decisions
+
+1. **A lazily-importing main, not a second bin.** The `.claude/settings.json`
+   command string is unchanged (see AC #4 below), and `tests/cli-hook.test.ts`
+   spawns `dist/src/cli/main.js` directly, so a fast path in the `cli.js` shim
+   would not have been exercised by the hook suite at all.
+2. **Every verb, not only `hook`.** A hook-only fast path would have been a
+   second dispatch to keep in step with the first. One dispatch, thirty lazy
+   arms, and the gain reaches `log verify` and `queue` as well.
+3. **An internal throw stays uncaught.** The footer sets `process.exitCode` from
+   the resolved code and deliberately does not catch the rejection: a throw out
+   of the dispatch was an uncaught exception (stack, exit 1) before this task,
+   and reporting it as one of the frozen exit codes would make a CLI bug
+   indistinguishable from a filesystem problem.
+
+### AC #2 — before/after timings
+
+The box was NOT quiet (a shared fleet machine; two identical runs twenty minutes
+apart differed by more than the effect being measured, 540 ms then 1350 ms for
+the same pass-through). The numbers below are therefore INTERLEAVED A/B: each
+repetition spawns the pre-change CLI and the post-change CLI back to back
+against the same fixture, 21 pairs, medians reported. The pre-change CLI is the
+same source tree with only `src/cli/main.ts` and `src/mcp/server.ts` rolled back
+to afde0af and rebuilt to a separate outDir. Both arms produced identical
+verdicts on every case, which is what makes the pair comparable.
+
+Fixture logs are built through the real append path (policy attested through
+`approval policy attest`, filler through `core/log.ts`'s `appendEvent`).
+Pass-through = `cat README.md` (read.shell, autonomous). Gated = `git push
+origin main` (vcs.push.main, supervised: the full gate path, register through
+the execution records, with no decision wait to measure instead of it).
+
+| case | log | before | after | delta |
+| --- | --- | --- | --- | --- |
+| pass-through | 1k | 903.0 ms | 798.5 ms | **-104.4 ms** |
+| pass-through | 10k | 1619.3 ms | 1487.3 ms | **-132.0 ms** |
+| gated | 1k | 1462.7 ms | 1387.7 ms | -74.9 ms |
+| gated | 10k | 1976.0 ms | 1954.1 ms | -21.8 ms |
+
+The pass-through case improves by more than the 50 ms the criterion asks for at
+both log sizes. The absolute values are inflated by roughly 2-3x against
+APRV-188's quiet-machine numbers (371 ms cold gated at 10k); the DELTA is the
+claim, and the delta is what interleaving protects. The gated cases move less
+because the gate's own work (verified read, budget arithmetic, two appends under
+the lock) grows with the log and swamps a fixed 100 ms of module loading.
+
+Module count on a cold pass-through, measured with an ESM loader hook: 133
+modules before, and the three named families gone after (see AC #1).
+
+### AC #4 — the settings.json entry does NOT change
+
+No new bin and no new verb: the hook is still `approval hook claude-code`, and
+`docs/claude-code-hook.md` needs no edit. The entry the human committed stands
+as it is:
+
+    "command": "approval hook claude-code --dir <primary checkout> --as agent:claude-code --timeout 9m"
+
+Since there is only one form, the criterion's "describes both forms" has nothing
+to describe.
+
+### Global invariants touched
+
+None weakened. This is a module-loading change: no policy resolution, gate
+check, timestamp source, append path or refusal shape moved. `core/gate.ts`,
+`core/policy-match.ts` and `src/cli/hook.ts` are untouched, and the hook
+suites (88 + 31 cases) pass with the same verdicts and exit codes.
 <!-- SECTION:NOTES:END -->
