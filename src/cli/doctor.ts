@@ -1830,7 +1830,7 @@ function checkHarnessWiring(dir: string): DoctorCheck {
   return {
     check,
     status: "pass",
-    detail: `WIRED on disk: ${path} registers \`approval hook\` for PreToolUse over ${GATED_TOOLS.join(", ")}. This is the file being present, NOT proof this session loaded it — the APRV-151 bypasses happened in worktrees carrying exactly this entry. The check that does not trust session wiring is the CI-side grant cross-check over the committed log.`,
+    detail: `WIRED on disk: ${path} registers \`approval hook\` for PreToolUse over ${GATED_TOOLS.join(", ")}. This is the file being present, NOT proof this session loaded it — the APRV-151 bypasses happened in worktrees carrying exactly this entry. The check that does not trust session wiring is the CI-side grant cross-check over the committed log, which asks whether the CHANGE was granted rather than whether the path ever was (APRV-202).`,
   };
 }
 

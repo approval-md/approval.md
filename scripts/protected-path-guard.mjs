@@ -239,8 +239,37 @@ async function main() {
       return value;
     };
 
+    // The bytes of each protected path at BOTH commits: what the hunk-level
+    // coverage check is made of (APRV-202). Read from the trees, never the
+    // working copy. A path absent at one end is an add or a delete and is
+    // reported as `null` there; a blob the guard cannot read as text (binary,
+    // detected by a NUL byte) yields `null` for the whole change, which fails
+    // `change-unreadable` rather than falling back to the path-level rule.
+    const blobCache = new Map();
+    const blobsFor = (path) => {
+      if (blobCache.has(path)) return blobCache.get(path);
+      const inTree = (ref) => {
+        const listed = git(repo, ["ls-tree", "-z", "--name-only", ref, "--", path]);
+        return listed !== null && listed.replace(/\0/gu, "").trim().length > 0;
+      };
+      let value = null;
+      const baseHas = inTree(base);
+      const headHas = inTree(head);
+      const baseText = baseHas ? showBlob(repo, base, path) : null;
+      const headText = headHas ? showBlob(repo, head, path) : null;
+      const unreadable =
+        (baseHas && baseText === null) ||
+        (headHas && headText === null) ||
+        (baseText !== null && baseText.includes("\u0000")) ||
+        (headText !== null && headText.includes("\u0000"));
+      if (!unreadable) value = { base: baseText, head: headText };
+      blobCache.set(path, value);
+      return value;
+    };
+
     const report = guard.evaluateProtectedPaths({
       changedPaths,
+      blobsFor,
       records,
       logStatus,
       logDetail,

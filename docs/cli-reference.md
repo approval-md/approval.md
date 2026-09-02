@@ -1530,7 +1530,9 @@ The checks, at length:
   PASS means the entry is present on disk, and says so plainly: it is not proof
   the running session loaded it. The check that trusts no session is the
   CI-side grant cross-check (`scripts/protected-path-guard.mjs`) over the
-  committed log.
+  committed log, which since APRV-202 requires every added and removed line of a
+  protected path to trace to the bound material of a grant, rather than only
+  that the path was granted at some point in the week.
 - **verified-snapshot** — whether the daemon's verified-head snapshot
   (`.approval/log/verified-head.json`, APRV-188) is in place and still covers
   the live log, so a hook re-proves one SHA-256 instead of re-walking the chain
