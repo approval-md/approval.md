@@ -3,21 +3,18 @@ id: APRV-217
 title: >-
   Incremental prefix proof for the verified-read cache: re-prove the appended
   bytes, not the whole log, behind a policy switch
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - 'agent:claude-code'
 created_date: '2026-09-02 16:14'
+updated_date: '2026-09-02 16:19'
 labels:
   - core
   - performance
   - design
 dependencies: []
 references:
-  - APRV-212
-  - APRV-213
-  - APRV-43
-  - APRV-188
-  - APRV-206
-  - docs/postmortem-2026-09-02-daemon-tick-cpu.md
+  - docs/proposals/incremental-prefix-proof.md
 priority: high
 type: enhancement
 ordinal: 179000
@@ -39,3 +36,15 @@ DESIGN TASK: read and sign off the trust argument before building. After APRV-21
 - [ ] #6 Enforcement reads only verified records (SPEC §11.1 inv. 1) and approval log verify never takes the incremental path; implementation notes name the proof change explicitly
 - [ ] #7 Docs: cli-reference (daemon run flags, policy key) and the postmortem's remaining-risk section updated; npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Read the cache (state.ts VerifiedReadCache, reusablePrefix, #remember), the resume seam (verify.ts verifyText prefix), the hook admission (verified-snapshot.ts admitSnapshot), and the policy load path for a daemon block. 2. Write docs/proposals/incremental-prefix-proof.md: current proof, proposed proof, guards, full re-proof triggers, per-reader table, configuration surface (policy key + CLI flag + defaults), failure ladder, test plan, measurement plan, what is explicitly out of scope. 3. Link it from the task and hand it to Carter for sign-off (AC1). 4. Build only after sign-off, as its own step.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Design written: docs/proposals/incremental-prefix-proof.md. Claims stated side by side (full: every read re-hashes the proved prefix; incremental: head line at its offset + not shrunk + tail chains onto the cached head + running hash state anchored at the last full re-proof). What is given up: a same-length, same-tail rewrite inside the prefix between full re-proofs, by a party who could already forge a self-consistent cold-walkable chain (unkeyed chain, APRV-188's argument). Full re-proof triggers: first read per process, every 50 reads or 60 s (proposed), immediately after this process's own appendEvent, any guard failure (cold walk). Readers: daemon and listeners may use incremental; hooks keep full-digest snapshot admission; verify/doctor/cache:null never touch it. Configuration: top-level daemon block (read_proof full|incremental, full_reproof_every, full_reproof_after), default FULL, CLI flags override, started line + doctor row + tick.reproof field. Schema change is a subtask. Three sign-off questions at the end (defaults, cadence, tail-only disk read in the same change). Awaiting Carter before any code.
+<!-- SECTION:NOTES:END -->
