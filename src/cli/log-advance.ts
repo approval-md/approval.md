@@ -563,7 +563,9 @@ function advanceOnSnapshot(ctx: UnderLock, snapshot: LogSnapshot): LogAdvanceRes
     // APRV-233. The log goes in as the blob taken under the append lock, not as
     // whatever the file holds now: the lock was released before the fetch, and
     // a record appended since is a record this commit's message does not claim.
-    blobs: [{ path: repoPath(root, logPath), sha: snapshot.blob }],
+    blobs: carried.includes(DEFAULT_LOG_PATH)
+      ? [{ path: repoPath(root, logPath), sha: snapshot.blob }]
+      : [],
   });
   if (!built.ok) {
     return {

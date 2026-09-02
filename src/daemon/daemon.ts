@@ -617,6 +617,8 @@ export class Daemon {
    * is looked at. Nothing else may advance while it stands.
    */
   private pendingAdvanceFinish: PendingAdvanceFinish | null = null;
+  /** The dangling advance cycle this process has already warned about once. */
+  private reportedDangling: string | null = null;
   /** Epoch ms of the last dark-session sweep (APRV-192); `null` before the first. */
   private lastDarkSweepAt: number | null = null;
   private reportedEscalations = new Set<string>();
@@ -1186,11 +1188,16 @@ export class Daemon {
           message: reconciled.message,
           flush,
         });
-      } else {
+      } else if (this.reportedDangling !== reconciled.actionKey) {
+        // Once per cycle, not once per tick: an operator needs to be told, and
+        // being told every thirty seconds forever is how a warning stops being
+        // read.
+        this.reportedDangling = reconciled.actionKey;
         this.warn("advance-refused", reconciled.message);
       }
       return;
     }
+    this.reportedDangling = null;
 
     const state = publishedState(root, this.options.logPath, read.records, cadence, today);
     if (state.substantive === 0) return;
