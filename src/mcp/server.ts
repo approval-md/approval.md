@@ -538,7 +538,11 @@ async function invoke(
     code = await commandPayload([...words, ...argv], streams, cwd);
   } else {
     const words = spec.subcommand === undefined ? [] : spec.subcommand.split(" ");
-    code = main([spec.name, ...words, ...argv], { streams, cwd });
+    // `main()` is asynchronous since APRV-209 (every verb is loaded on demand),
+    // so the default arm awaits it. The arms above still exist for the reason
+    // they always did: they need a code `main()` drops into `process.exitCode`
+    // rather than returning.
+    code = await main([spec.name, ...words, ...argv], { streams, cwd });
   }
 
   return {

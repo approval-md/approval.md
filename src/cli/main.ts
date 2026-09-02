@@ -29,8 +29,16 @@
 
 import { pathToFileURL } from "node:url";
 
-import { reindex } from "../core/reindex.js";
-import { verify, type ChainAnomaly } from "../core/verify.js";
+// APRV-209. NOTHING that belongs to a single verb is imported here statically.
+// Every `command*` function below is reached through `await import()` inside the
+// switch, and `core/verify.ts` and `core/reindex.ts` are reached the same way
+// from the log verbs that use them. The reason is latency the harness pays on
+// every command a session runs: the hook is a PreToolUse gate, so the CLI's
+// whole module graph (better-sqlite3 through the reindexer, the channels, the
+// MCP SDK) used to be loaded before a `cat README.md` could be answered. What
+// stays static is argument parsing, path resolution, help text, styling and the
+// exit-code table — the preamble every verb needs before dispatch.
+import type { ChainAnomaly } from "../core/verify.js";
 import { boolFlag, countFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
   EXIT_INTEGRITY,
@@ -47,42 +55,6 @@ import {
   TAIL_HELP,
   VERIFY_HELP,
 } from "./help.js";
-import {
-  commandDecide,
-  commandExpire,
-  commandRegister,
-  commandRequest,
-  commandWithdraw,
-} from "./gate.js";
-import { commandGate } from "./gate-window.js";
-import {
-  commandExecution,
-  commandQueue,
-  commandRun,
-  commandStatus,
-  commandWait,
-} from "./execute.js";
-import { commandAudit } from "./audit.js";
-import { commandChannel } from "./channel.js";
-import { commandDaemon } from "./daemon.js";
-// APRV-110. The ambient runtime, imported beside the daemon it supervises.
-import { commandUp } from "./up.js";
-import { commandDoctor } from "./doctor.js";
-import { commandEnv } from "./env.js";
-import { commandHook } from "./hook.js";
-import { commandImport } from "./import.js";
-import { commandJournal } from "./journal.js";
-import { commandInstructions } from "./instructions.js";
-import { commandInit } from "./init.js";
-import { commandLogAdvance, commandLogSync } from "./log-verbs.js";
-import { commandMcp } from "./mcp.js";
-import { commandPayload } from "./payload.js";
-import { commandPolicy } from "./policy.js";
-import { commandRender } from "./render.js";
-import { commandConsume, commandToken } from "./token.js";
-import { commandAdapter } from "./adapter.js";
-import { commandSetup } from "./setup.js";
-import { commandVault } from "./vault.js";
 import {
   DEFAULT_INDEX_PATH,
   DEFAULT_LOG_PATH,
@@ -301,7 +273,7 @@ function reportAnomalies(streams: Streams, anomalies: ChainAnomaly[]): void {
   }
 }
 
-function commandVerify(argv: string[], streams: Streams, cwd: string): number {
+async function commandVerify(argv: string[], streams: Streams, cwd: string): Promise<number> {
   const front = prelude(
     argv,
     { "--log": "string", "--json": "boolean" },
@@ -319,6 +291,7 @@ function commandVerify(argv: string[], streams: Streams, cwd: string): number {
   // and it reaches only which anomalies are reported. The verdict below is a
   // function of the log bytes and the schemas, so a missing or unloadable
   // policy leaves this command's answer exactly as it was.
+  const { verify } = await import("../core/verify.js");
   const result = verify(logPath, { policy: { dir: cwd } });
 
   if (result.status === "clean") {
@@ -384,11 +357,12 @@ function commandVerify(argv: string[], streams: Streams, cwd: string): number {
  * `tail` and `export` share everything but the slice and the rendering, so they
  * share the verify → read → refuse-or-print sequence too.
  */
-function readForOutput(
+async function readForOutput(
   logPath: string,
   streams: Streams,
   json: boolean,
-): { code: number } | { lines: string[]; warning: string | null } {
+): Promise<{ code: number } | { lines: string[]; warning: string | null }> {
+  const { verify } = await import("../core/verify.js");
   const result = verify(logPath);
 
   if (result.status === "corrupt") {
@@ -413,7 +387,7 @@ function readForOutput(
   };
 }
 
-function commandTail(argv: string[], streams: Streams, cwd: string): number {
+async function commandTail(argv: string[], streams: Streams, cwd: string): Promise<number> {
   const front = prelude(
     argv,
     { "--log": "string", "--json": "boolean", "-n": "string" },
@@ -431,7 +405,7 @@ function commandTail(argv: string[], streams: Streams, cwd: string): number {
   const check = preflightLog(logPath);
   if (!check.ok) return ioError(streams, json, check.message);
 
-  const outcome = readForOutput(logPath, streams, json);
+  const outcome = await readForOutput(logPath, streams, json);
   if ("code" in outcome) return outcome.code;
 
   const selected = limit === 0 ? [] : outcome.lines.slice(-limit);
@@ -453,7 +427,7 @@ function commandTail(argv: string[], streams: Streams, cwd: string): number {
   return EXIT_OK;
 }
 
-function commandExport(argv: string[], streams: Streams, cwd: string): number {
+async function commandExport(argv: string[], streams: Streams, cwd: string): Promise<number> {
   const front = prelude(
     argv,
     { "--log": "string", "--json": "boolean" },
@@ -467,7 +441,7 @@ function commandExport(argv: string[], streams: Streams, cwd: string): number {
   const check = preflightLog(logPath);
   if (!check.ok) return ioError(streams, json, check.message);
 
-  const outcome = readForOutput(logPath, streams, json);
+  const outcome = await readForOutput(logPath, streams, json);
   if ("code" in outcome) return outcome.code;
 
   if (json) {
@@ -488,7 +462,7 @@ function commandExport(argv: string[], streams: Streams, cwd: string): number {
   return EXIT_OK;
 }
 
-function commandReindex(argv: string[], streams: Streams, cwd: string): number {
+async function commandReindex(argv: string[], streams: Streams, cwd: string): Promise<number> {
   const front = prelude(
     argv,
     {
@@ -509,6 +483,10 @@ function commandReindex(argv: string[], streams: Streams, cwd: string): number {
   const check = preflightLog(logPath);
   if (!check.ok) return ioError(streams, json, check.message);
 
+  // The projection is the only thing in this CLI that loads `better-sqlite3`,
+  // and it is loaded here rather than at the top of the file so that the verbs
+  // that never touch the index never pay for the native addon (APRV-209).
+  const { reindex } = await import("../core/reindex.js");
   const result = reindex(logPath, indexPath, boolFlag(flags, "--force") ? { force: true } : {});
 
   if (result.ok) {
@@ -547,7 +525,7 @@ function commandReindex(argv: string[], streams: Streams, cwd: string): number {
   }
 }
 
-function commandLog(argv: string[], streams: Streams, cwd: string): number {
+async function commandLog(argv: string[], streams: Streams, cwd: string): Promise<number> {
   const sub = argv[0];
   const rest = argv.slice(1);
 
@@ -569,10 +547,14 @@ function commandLog(argv: string[], streams: Streams, cwd: string): number {
     // APRV-125. The two verbs that move the log FILE rather than reading it: a
     // fast-forward pull with a chain reconcile, and the commit-and-push of what
     // the chain has grown since. Neither appends an event.
-    case "sync":
+    case "sync": {
+      const { commandLogSync } = await import("./log-verbs.js");
       return commandLogSync(rest, streams, cwd);
-    case "advance":
+    }
+    case "advance": {
+      const { commandLogAdvance } = await import("./log-verbs.js");
       return commandLogAdvance(rest, streams, cwd);
+    }
     default:
       return usageError(
         streams,
@@ -638,11 +620,18 @@ function longHelpRequest(argv: readonly string[]): string | null {
 }
 
 /**
- * Run the CLI. Returns the process exit code rather than calling
+ * Run the CLI. Resolves to the process exit code rather than calling
  * `process.exit`, so buffered stdout is flushed by the normal exit path — a
  * truncated JSON object would be worse than no output at all.
+ *
+ * ASYNCHRONOUS since APRV-209, and for one reason: every verb is loaded by
+ * `await import()` inside the switch below, and ESM has no synchronous dynamic
+ * import. The awaits do not make any verb concurrent — exactly one runs per
+ * invocation, the preamble still decides presentation once before any of them
+ * can print, and the long-lived verbs (`channel`, `daemon`, `up`, `mcp`) report
+ * their eventual code through `process.exitCode` exactly as they did.
  */
-export function main(argv: string[], options: MainOptions = {}): number {
+export async function main(argv: string[], options: MainOptions = {}): Promise<number> {
   const streams = options.streams ?? defaultStreams();
   const cwd = options.cwd ?? process.cwd();
 
@@ -696,67 +685,95 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // generated from — the one source SPEC.md §10.5's MCP wrapper derives its
     // tool descriptions and input schemas from, so the two surfaces cannot
     // drift. It reads no log, resolves no policy, and writes nothing.
-    case "instructions":
+    case "instructions": {
+      const { commandInstructions } = await import("./instructions.js");
       return commandInstructions(rest, streams, cwd);
+    }
     // The scaffolding verb (APRV-71). It is the only command that writes files
     // a human has not asked for by name, and it is deliberately the least
     // authoritative one in the CLI: it appends nothing, attests nothing, and
     // overwrites nothing. Everything it creates is inert until a human attests.
-    case "init":
+    case "init": {
+      const { commandInit } = await import("./init.js");
       return commandInit(rest, streams, cwd);
+    }
     case "log":
       return commandLog(rest, streams, cwd);
-    case "policy":
+    case "policy": {
+      const { commandPolicy } = await import("./policy.js");
       return commandPolicy(rest, streams, cwd);
+    }
     // The gate verbs (APRV-16). grant/reject/revoke are human-only and expire
     // is the system verb; the enforcement lives in core, not in this dispatch.
-    case "register":
+    case "register": {
+      const { commandRegister } = await import("./gate.js");
       return commandRegister(rest, streams, cwd);
-    case "request":
+    }
+    case "request": {
+      const { commandRequest } = await import("./gate.js");
       return commandRequest(rest, streams, cwd);
+    }
     case "grant":
-      return commandDecide("grant", rest, streams, cwd);
     case "reject":
-      return commandDecide("reject", rest, streams, cwd);
-    case "revoke":
-      return commandDecide("revoke", rest, streams, cwd);
+    case "revoke": {
+      const { commandDecide } = await import("./gate.js");
+      return commandDecide(command, rest, streams, cwd);
+    }
     // APRV-106. The one terminal gate verb that is NOT human-only: withdrawal
     // is the requester retracting its own question, and the requester is
     // usually an agent. The gate checks the actor against the request record,
     // so the verb cannot be used to clear anyone else's queue.
-    case "withdraw":
+    case "withdraw": {
+      const { commandWithdraw } = await import("./gate.js");
       return commandWithdraw(rest, streams, cwd);
-    case "expire":
+    }
+    case "expire": {
+      const { commandExpire } = await import("./gate.js");
       return commandExpire(rest, streams, cwd);
+    }
     // The token verbs (APRV-17). `token` reports status and writes nothing;
     // `consume` is internal plumbing for APRV-18's `approval run` and is the
     // only sanctioned appender of execution.started on the manual path.
-    case "token":
+    case "token": {
+      const { commandToken } = await import("./token.js");
       return commandToken(rest, streams, cwd);
-    case "consume":
+    }
+    case "consume": {
+      const { commandConsume } = await import("./token.js");
       return commandConsume(rest, streams, cwd);
+    }
     // The execution verbs (APRV-18). `run` is the only command that spawns
     // anything and the only one that can exit 5; `wait` the only one that can
     // exit 6. `queue` is the pending-decision inbox and `status` is system
     // health — deliberately two verbs, because they answer to two different
     // people (the human who decides, the operator who repairs).
-    case "run":
+    case "run": {
+      const { commandRun } = await import("./execute.js");
       return commandRun(rest, streams, cwd);
+    }
     // The recovery verb (APRV-20 pass two). `execution resolve` is the only
     // sanctioned way to close a dangling execution, and it is human-only,
     // note-mandatory, and records no invented exit code.
-    case "execution":
+    case "execution": {
+      const { commandExecution } = await import("./execute.js");
       return commandExecution(rest, streams, cwd);
+    }
     // The audit verbs (APRV-40). `audit list` reads the sampled-audit backlog
     // and `audit review` closes one item of it, human-only. There is no
     // `audit sample`: selection is the runtime's, made by the daemon from an
     // operator-held secret, and a caller who could sample could decline to.
-    case "audit":
+    case "audit": {
+      const { commandAudit } = await import("./audit.js");
       return commandAudit(rest, streams, cwd);
-    case "wait":
+    }
+    case "wait": {
+      const { commandWait } = await import("./execute.js");
       return commandWait(rest, streams, cwd);
-    case "queue":
+    }
+    case "queue": {
+      const { commandQueue } = await import("./execute.js");
       return commandQueue(rest, streams, cwd);
+    }
     // The open window (APRV-214, amended SPEC.md §5.2). `gate open` is the one
     // verb that SUSPENDS the policy for the harness hook, so it is human-only
     // three times over: it classifies `policy.core` (which APPROVAL.md holds
@@ -764,15 +781,20 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // that is not a terminal, and it reads the word `understood` with no --yes
     // and no --force. `gate close` only tightens and `gate status` decides
     // nothing. The window's whole state is in the log; no file holds it.
-    case "gate":
+    case "gate": {
+      const { commandGate } = await import("./gate-window.js");
       return commandGate(rest, streams, cwd);
-    case "status":
+    }
+    case "status": {
+      const { commandStatus } = await import("./execute.js");
       return commandStatus(rest, streams, cwd);
+    }
     // The diagnostic verb (APRV-31). `doctor` answers for the MACHINE what
     // `status` answers for the system, and it is asynchronous for the same
     // reason `channel` is: two of its checks touch the network stack (a Bot API
     // `getMe`, a loopback bind probe). It writes nothing anywhere.
     case "doctor": {
+      const { commandDoctor } = await import("./doctor.js");
       const outcome = commandDoctor(rest, streams, cwd);
       if (typeof outcome === "number") return outcome;
       void outcome.then(
@@ -800,6 +822,7 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // Callers that need the code (tests, embedders) call `commandChannel` and
     // await it directly.
     case "channel": {
+      const { commandChannel } = await import("./channel.js");
       const outcome = commandChannel(rest, streams, cwd);
       if (typeof outcome === "number") return outcome;
       void outcome.then(
@@ -821,6 +844,7 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // is the only command that both watches and appends, and the only one whose
     // ordinary ending is a signal (which is exit 0, not a failure).
     case "daemon": {
+      const { commandDaemon } = await import("./daemon.js");
       const outcome = commandDaemon(rest, streams, cwd);
       if (typeof outcome === "number") return outcome;
       void outcome.then(
@@ -841,6 +865,8 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // fourth LONG-LIVED command here, unwrapped exactly as `channel` and
     // `daemon` are. `daemon run --with-channels` reaches the same function.
     case "up": {
+      // APRV-110. The ambient runtime, loaded beside the daemon it supervises.
+      const { commandUp } = await import("./up.js");
       const outcome = commandUp(rest, streams, cwd);
       if (typeof outcome === "number") return outcome;
       void outcome.then(
@@ -864,6 +890,7 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // verb joins the asynchronous family and is unwrapped the same way; the
     // `hash` path is still synchronous and returns its code directly.
     case "payload": {
+      const { commandPayload } = await import("./payload.js");
       const outcome = commandPayload(rest, streams, cwd);
       if (typeof outcome === "number") return outcome;
       void outcome.then(
@@ -884,8 +911,10 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // to a local file so that an agent complying perfectly can still say it
     // thinks something is wrong. Nothing in the runtime reads what it writes,
     // which is what makes leaving it ungated safe (SPEC.md §11.1 invariant 4).
-    case "journal":
+    case "journal": {
+      const { commandJournal } = await import("./journal.js");
       return commandJournal(rest, streams, cwd);
+    }
     // The environment verb (APRV-73). `env` resolves `.approval/env` — the
     // source map naming where each *_env variable's value lives — and prints an
     // export block for a shell to evaluate. IT IS THE ONLY COMMAND IN THIS
@@ -893,8 +922,10 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // its own environment: human identity is one of the variables it can carry,
     // so a file a process read on its own would let anything able to write it
     // act as the human on every human-only verb (SPEC.md §11.1 invariant 7).
-    case "env":
+    case "env": {
+      const { commandEnv } = await import("./env.js");
       return commandEnv(rest, streams, cwd);
+    }
     // The configuration verb (APRV-74) and the only WRITER of .approval/env.
     // It is interactive by construction: every subcommand refuses a
     // non-terminal stdin and --json, because a setup a pipe could drive would
@@ -903,6 +934,7 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // no policy file. `setup channel telegram` reaches the network, so the dispatch
     // unwraps a promise exactly as `channel`, `daemon` and `adapter` do.
     case "setup": {
+      const { commandSetup } = await import("./setup.js");
       const outcome = commandSetup(rest, streams, cwd);
       if (typeof outcome === "number") return outcome;
       void outcome.then(
@@ -924,14 +956,17 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // from the vault into an adapter inside the verified-token window, and a
     // verb that printed one would put it in a terminal and a shell history.
     // Nothing under this verb appends to the log.
-    case "vault":
+    case "vault": {
+      const { commandVault } = await import("./vault.js");
       return commandVault(rest, streams, cwd);
+    }
     // The side-effect verb (APRV-69). `adapter email` is the first thing in
     // this CLI that reaches the world: it executes one granted action through
     // the adapter contract, which spends the token and writes both execution
     // events around the send. It is asynchronous for the obvious reason (a
     // socket), and is unwrapped exactly as `channel` and `daemon` are.
     case "adapter": {
+      const { commandAdapter } = await import("./adapter.js");
       const outcome = commandAdapter(rest, streams, cwd);
       void outcome.then(
         (code) => {
@@ -953,14 +988,21 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // object for another program rather than a report for a human, and whose
     // exit code is deliberately 0 on a refusal: the harness reads a hook's
     // verdict only on exit 0.
-    case "hook":
+    case "hook": {
+      // The latency-critical case (APRV-209): a session pays this load on every
+      // command it runs, so `hook.ts` and its core dependencies are the only
+      // verb graph a pass-through invocation brings in.
+      const { commandHook } = await import("./hook.js");
       return commandHook(rest, streams, cwd);
+    }
     // The interoperability verb (APRV-64). `import agents-md` reads permissions
     // PROSE and prints a draft policy block. It is the only verb whose output is
     // a proposal: it writes no policy, appends nothing, and attests nothing —
     // the human's `policy amend` is what puts any of it in force.
-    case "import":
+    case "import": {
+      const { commandImport } = await import("./import.js");
       return commandImport(rest, streams, cwd);
+    }
     // The wrapper verb (APRV-87). `mcp serve` publishes the agent-facing verbs
     // as MCP tools over stdio (SPEC.md §10.5) and is the third LONG-LIVED
     // command here, unwrapped exactly as `channel` and `daemon` are. It is
@@ -970,6 +1012,7 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // exists. The verb itself is human-only, because starting one is an
     // operator's act.
     case "mcp": {
+      const { commandMcp } = await import("./mcp.js");
       const outcome = commandMcp(rest, streams, cwd);
       if (typeof outcome === "number") return outcome;
       void outcome.then(
@@ -989,8 +1032,10 @@ export function main(argv: string[], options: MainOptions = {}): number {
       return commandReindex(rest, streams, cwd);
     // The projection verb (APRV-24). `render` writes .approval/QUEUE.md and
     // nothing else; the projection itself is `channels/render-queue.ts`.
-    case "render":
+    case "render": {
+      const { commandRender } = await import("./render.js");
       return commandRender(rest, streams, cwd);
+    }
     default:
       return usageError(
         streams,
@@ -1005,5 +1050,19 @@ export function main(argv: string[], options: MainOptions = {}): number {
 // `approval` bin, which is a thin loader around this module.
 const invoked = process.argv[1];
 if (invoked !== undefined && import.meta.url === pathToFileURL(invoked).href) {
-  process.exitCode = main(process.argv.slice(2));
+  // `main` resolves rather than returns since APRV-209; the code still reaches
+  // the process through `process.exitCode`, so stdout is flushed by the normal
+  // exit path. A rejection here would be a bug in the dispatch itself, so it is
+  // reported as an I/O failure rather than swallowed.
+  main(process.argv.slice(2)).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (cause: unknown) => {
+      process.stderr.write(
+        `approval: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+      );
+      process.exitCode = EXIT_IO;
+    },
+  );
 }

@@ -205,12 +205,12 @@ function assertClean(unit: Machine): void {
   assert.equal(result.status, "clean", `log not clean: ${JSON.stringify(result)}`);
 }
 
-function runCli(unit: Machine, argv: string[]): { code: number; out: string; err: string } {
+async function runCli(unit: Machine, argv: string[]): Promise<{ code: number; out: string; err: string }> {
   let out = "";
   let err = "";
   // `--log` goes before any `--` separator: what follows the separator is the
   // child argv, and `approval run` hashes exactly those bytes (APRV-140).
-  const code = main([argv[0] ?? "", "--log", unit.logPath, ...argv.slice(1)], {
+  const code = await main([argv[0] ?? "", "--log", unit.logPath, ...argv.slice(1)], {
     cwd: unit.dir,
     streams: {
       out: (text) => {
@@ -234,7 +234,7 @@ function sync(from: Machine, to: Machine): void {
 // The default: manual delivery changes nothing (AC 4)
 // ===========================================================================
 
-test("under token_delivery: manual nothing is minted, written, or added", () => {
+test("under token_delivery: manual nothing is minted, written, or added", async () => {
   const unit = ready("manual");
   assert.equal(ask(unit).ok, true);
   const granted = decide(unit.logPath, KEY, "grant", "human:carter", at(2), unit.options);
@@ -266,12 +266,12 @@ test("under token_delivery: manual nothing is minted, written, or added", () => 
   assertClean(unit);
 });
 
-test("under manual delivery wait --json returns the object it always returned", () => {
+test("under manual delivery wait --json returns the object it always returned", async () => {
   const unit = ready("manual");
   assert.equal(ask(unit).ok, true);
   assert.equal(decide(unit.logPath, KEY, "grant", "human:carter", at(2), unit.options).ok, true);
 
-  const waited = runCli(unit, ["wait", "task-042", "--timeout", "1s", "--json"]);
+  const waited = await runCli(unit, ["wait", "task-042", "--timeout", "1s", "--json"]);
   assert.equal(waited.code, 0, waited.err);
   const body = JSON.parse(waited.out) as {
     ok: boolean;
@@ -286,7 +286,7 @@ test("under manual delivery wait --json returns the object it always returned", 
 // The seal itself (AC 2)
 // ===========================================================================
 
-test("a seal opens only with the right private key and the right action key", () => {
+test("a seal opens only with the right private key and the right action key", async () => {
   const recipient = mintRecipientKeypair();
   const stranger = mintRecipientKeypair();
   const token = "f".repeat(64);
@@ -317,7 +317,7 @@ test("a seal opens only with the right private key and the right action key", ()
   assert.equal(asSealedToken({ alg: "something-else" }), null);
 });
 
-test("the private key is written 0600 and the key store is not world-readable", () => {
+test("the private key is written 0600 and the key store is not world-readable", async () => {
   const unit = ready("sealed");
   assert.equal(ask(unit).ok, true);
 
@@ -335,7 +335,7 @@ test("the private key is written 0600 and the key store is not world-readable", 
 // The lifecycle of a key file (AC 3)
 // ===========================================================================
 
-test("the key file is unlinked when the token is spent", () => {
+test("the key file is unlinked when the token is spent", async () => {
   const unit = ready("sealed");
   assert.equal(ask(unit).ok, true);
   const granted = decide(unit.logPath, KEY, "grant", "human:carter", at(2), unit.options);
@@ -343,7 +343,7 @@ test("the key file is unlinked when the token is spent", () => {
   assert.equal(existsSync(keyPath(unit.keyDir, KEY)), true);
 
   // No --token: `approval run` opens the seal with the local key.
-  const ran = runCli(unit, [
+  const ran = await runCli(unit, [
     "run",
     KEY,
     "--as",
@@ -365,7 +365,7 @@ test("the key file is unlinked when the token is spent", () => {
   assertClean(unit);
 });
 
-test("the key file is unlinked when the grant is revoked", () => {
+test("the key file is unlinked when the grant is revoked", async () => {
   const unit = ready("sealed");
   assert.equal(ask(unit).ok, true);
   assert.equal(decide(unit.logPath, KEY, "grant", "human:carter", at(2), unit.options).ok, true);
@@ -376,7 +376,7 @@ test("the key file is unlinked when the grant is revoked", () => {
   assertClean(unit);
 });
 
-test("the key file is unlinked when the request expires", () => {
+test("the key file is unlinked when the request expires", async () => {
   const unit = ready("sealed", "expiring", true);
   assert.equal(ask(unit).ok, true);
   assert.equal(existsSync(keyPath(unit.keyDir, KEY)), true);
@@ -393,7 +393,7 @@ test("the key file is unlinked when the request expires", () => {
 // Across machines, with the log synced (AC 5)
 // ===========================================================================
 
-test("request on A, grant on B, wait and run on A: the token never crosses in clear", () => {
+test("request on A, grant on B, wait and run on A: the token never crosses in clear", async () => {
   const a = ready("sealed", "machine-a");
   const b = newMachine("sealed", "machine-b");
 
@@ -410,7 +410,7 @@ test("request on A, grant on B, wait and run on A: the token never crosses in cl
 
   // B grants, through the CLI, as a human would. The raw token is still printed
   // once on the granting surface: the paste path is preserved, not replaced.
-  const grantOut = runCli(b, ["grant", KEY, "--as", "human:carter", "--policy", b.policyPath]);
+  const grantOut = await runCli(b, ["grant", KEY, "--as", "human:carter", "--policy", b.policyPath]);
   assert.equal(grantOut.code, 0, grantOut.err);
   const printed = /\b([a-f0-9]{64})\b/u.exec(grantOut.out)?.[1];
   assert.notEqual(printed, undefined, "the granting surface printed no token");
@@ -423,7 +423,7 @@ test("request on A, grant on B, wait and run on A: the token never crosses in cl
 
   // A waits, and gets its token — with no paste, and from a process that never
   // saw B's stdout.
-  const waited = runCli(a, ["wait", "task-042", "--timeout", "1s", "--json"]);
+  const waited = await runCli(a, ["wait", "task-042", "--timeout", "1s", "--json"]);
   assert.equal(waited.code, 0, waited.err);
   const body = JSON.parse(waited.out) as { actions: Array<{ token?: string; state: string }> };
   const delivered = body.actions[0];
@@ -431,7 +431,7 @@ test("request on A, grant on B, wait and run on A: the token never crosses in cl
   assert.equal(delivered?.token, printed, "wait returned a different token than B minted");
 
   // …and spends it, with no --token flag anywhere.
-  const ran = runCli(a, [
+  const ran = await runCli(a, [
     "run",
     KEY,
     "--as",
@@ -459,25 +459,26 @@ test("request on A, grant on B, wait and run on A: the token never crosses in cl
   assert.equal(openSealedToken(sealed, outsider.privateKey, KEY), null);
 });
 
-test("a machine that did not open the request gets no token from wait", () => {
+test("a machine that did not open the request gets no token from wait", async () => {
   const a = ready("sealed", "owner");
   const b = newMachine("sealed", "onlooker");
   assert.equal(ask(a).ok, true);
   sync(a, b);
-  assert.equal(runCli(b, ["grant", KEY, "--as", "human:carter", "--policy", b.policyPath]).code, 0);
+  const granted = await runCli(b, ["grant", KEY, "--as", "human:carter", "--policy", b.policyPath]);
+  assert.equal(granted.code, 0);
 
   // B has the whole log, including the ciphertext, and no key. `wait` reports
   // the decision and returns no token — the same answer it gives under manual
   // delivery, which is the point: a missing key is not an error, it is simply
   // not this machine's token.
-  const waited = runCli(b, ["wait", "task-042", "--timeout", "1s", "--json"]);
+  const waited = await runCli(b, ["wait", "task-042", "--timeout", "1s", "--json"]);
   assert.equal(waited.code, 0, waited.err);
   const body = JSON.parse(waited.out) as { actions: Array<Record<string, unknown>> };
   assert.deepEqual(Object.keys(body.actions[0] ?? {}), ["action_key", "state", "seq"]);
   assertClean(b);
 });
 
-test("the human render never prints the token, whatever the delivery mode is", () => {
+test("the human render never prints the token, whatever the delivery mode is", async () => {
   const unit = ready("sealed");
   assert.equal(ask(unit).ok, true);
   const granted = decide(unit.logPath, KEY, "grant", "human:carter", at(2), unit.options);
@@ -486,7 +487,7 @@ test("the human render never prints the token, whatever the delivery mode is", (
 
   // `wait` without `--json` writes to a terminal, and a token on a terminal is
   // the paste this feature exists to remove.
-  const waited = runCli(unit, ["wait", "task-042", "--timeout", "1s"]);
+  const waited = await runCli(unit, ["wait", "task-042", "--timeout", "1s"]);
   assert.equal(waited.code, 0, waited.err);
   assert.equal(waited.out.includes(granted.token), false, "the human render printed the token");
 });

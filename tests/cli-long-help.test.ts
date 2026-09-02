@@ -48,10 +48,10 @@ const HELP_TEXTS: Array<[string, string]> = Object.entries(help).filter(
   (entry): entry is [string, string] => typeof entry[1] === "string" && entry[0].endsWith("_HELP"),
 );
 
-function capture(argv: string[], cwd: string): { code: number; out: string; err: string } {
+async function capture(argv: string[], cwd: string): Promise<{ code: number; out: string; err: string }> {
   let out = "";
   let err = "";
-  const code = main(argv, {
+  const code = await main(argv, {
     cwd,
     streams: {
       out: (text) => {
@@ -70,11 +70,14 @@ function scratch(): string {
 }
 
 /** Run `argv` with colour forced on, then put the environment back. */
-function withColour<T>(run: () => T): T {
+async function withColour<T>(run: () => Promise<T>): Promise<T> {
   const previous = process.env["FORCE_COLOR"];
   process.env["FORCE_COLOR"] = "1";
   try {
-    return run();
+    // Awaited inside the try, not returned out of it: `main()` is asynchronous
+    // since APRV-209, and a `finally` that ran before the promise settled would
+    // put FORCE_COLOR back while the verb was still deciding its palette.
+    return await run();
   } finally {
     if (previous === undefined) delete process.env["FORCE_COLOR"];
     else process.env["FORCE_COLOR"] = previous;
@@ -85,7 +88,7 @@ function withColour<T>(run: () => T): T {
 // 1. The 25-line cap
 // ---------------------------------------------------------------------------
 
-test("no per-verb short help exceeds 25 lines", () => {
+test("no per-verb short help exceeds 25 lines", async () => {
   // The root help is exempt by design: it is the one page that carries the verb
   // index, the frozen exit-code table and the stances every verb inherits, and
   // splitting THAT is how you get an operator who never finds the exit codes.
@@ -102,7 +105,7 @@ test("no per-verb short help exceeds 25 lines", () => {
   );
 });
 
-test("every per-verb short help names the anchor its long form lives at", () => {
+test("every per-verb short help names the anchor its long form lives at", async () => {
   // This is what makes --long possible at all: no anchor, no long form.
   for (const [name, text] of HELP_TEXTS) {
     if (name === "ROOT_HELP") continue;
@@ -120,7 +123,7 @@ test("every per-verb short help names the anchor its long form lives at", () => 
 // 2. --long prints the moved prose
 // ---------------------------------------------------------------------------
 
-test("--long prints the short help verbatim and then the reference section", () => {
+test("--long prints the short help verbatim and then the reference section", async () => {
   const short = help.QUEUE_HELP;
   const rendered = longHelp(short, { reference: REFERENCE, style: makeStyle({ tty: false }) });
 
@@ -135,10 +138,10 @@ test("--long prints the short help verbatim and then the reference section", () 
   assert.ok(rendered.length > short.length, "--long added nothing");
 });
 
-test("approval help <verb> --long reaches the same text through the CLI", () => {
+test("approval help <verb> --long reaches the same text through the CLI", async () => {
   const dir = scratch();
-  const short = capture(["help", "queue"], dir);
-  const long = capture(["help", "queue", "--long"], dir);
+  const short = await capture(["help", "queue"], dir);
+  const long = await capture(["help", "queue", "--long"], dir);
   assert.equal(short.code, 0);
   assert.equal(long.code, 0);
   assert.ok(long.out.length > short.out.length, "--long printed no more than the short help");
@@ -151,15 +154,14 @@ test("approval help <verb> --long reaches the same text through the CLI", () => 
   assert.equal(short.out.includes(claim), false, "the short help already carried the long prose");
 });
 
-test("--long is spelled the same way on a verb as on the help command", () => {
+test("--long is spelled the same way on a verb as on the help command", async () => {
   const dir = scratch();
-  assert.equal(
-    capture(["queue", "--help", "--long"], dir).out,
-    capture(["help", "queue", "--long"], dir).out,
-  );
+  const onVerb = await capture(["queue", "--help", "--long"], dir);
+  const onHelp = await capture(["help", "queue", "--long"], dir);
+  assert.equal(onVerb.out, onHelp.out);
 });
 
-test("--long survives a reference that is not installed", () => {
+test("--long survives a reference that is not installed", async () => {
   // A documentation flag that exits non-zero because a doc file moved would be
   // a worse bug than the missing prose.
   const rendered = longHelp(help.QUEUE_HELP, {
@@ -170,22 +172,22 @@ test("--long survives a reference that is not installed", () => {
   assert.match(rendered, /docs\/cli-reference\.md#queue/u);
 });
 
-test("--long only means something alongside a help request", () => {
+test("--long only means something alongside a help request", async () => {
   const dir = scratch();
   // On its own it is an unknown flag, which is the honest answer.
-  const stray = capture(["queue", "--long"], dir);
+  const stray = await capture(["queue", "--long"], dir);
   assert.equal(stray.code, 2);
   assert.match(stray.err, /unknown flag --long/u);
 });
 
-test("the help index finds the longest matching verb", () => {
+test("the help index finds the longest matching verb", async () => {
   assert.equal(helpFor(["log", "tail"]), help.TAIL_HELP);
   assert.equal(helpFor(["log"]), help.LOG_HELP);
   assert.equal(helpFor(["setup", "channel", "telegram"]), help.SETUP_CHANNEL_TELEGRAM_HELP);
   assert.equal(helpFor(["frobnicate"]), null);
 });
 
-test("the reference ships with the package, or --long is a lie", () => {
+test("the reference ships with the package, or --long is a lie", async () => {
   assert.ok(
     PACKAGE.files.includes("docs/cli-reference.md"),
     'package.json "files" must ship docs/cli-reference.md: --long reads it at runtime',
@@ -197,7 +199,7 @@ test("the reference ships with the package, or --long is a lie", () => {
 // 3. The wordmark
 // ---------------------------------------------------------------------------
 
-test("the wordmark degrades to one line whenever colour is off", () => {
+test("the wordmark degrades to one line whenever colour is off", async () => {
   const plain = wordmark(makeStyle({ tty: false }));
   assert.equal(plain, plainWordmark());
   assert.equal(plain.split("\n").length, 1);
@@ -205,7 +207,7 @@ test("the wordmark degrades to one line whenever colour is off", () => {
   assert.equal(ESCAPE.test(plain), false);
 });
 
-test("the wordmark degrades to one line in ASCII mode even on a colour terminal", () => {
+test("the wordmark degrades to one line in ASCII mode even on a colour terminal", async () => {
   // A terminal that cannot promise UTF-8 is not a terminal to draw on, whatever
   // its colour support says.
   for (const env of [{ APPROVAL_ASCII: "1" }, { LANG: "C" }, { LC_ALL: "POSIX" }]) {
@@ -214,7 +216,7 @@ test("the wordmark degrades to one line in ASCII mode even on a colour terminal"
   }
 });
 
-test("the wordmark is six lines of ASCII art plus a tagline on a terminal", () => {
+test("the wordmark is six lines of ASCII art plus a tagline on a terminal", async () => {
   const art = wordmark(makeStyle({ tty: true, env: { LANG: "en_US.UTF-8" } }));
   const lines = art.split("\n");
   assert.equal(lines.length, 7, "six lines of art and one tagline line");
@@ -228,11 +230,11 @@ test("the wordmark is six lines of ASCII art plus a tagline on a terminal", () =
   assert.ok(/^[\x20-\x7e\n]*$/u.test(artOnly), `the wordmark art is not pure ASCII:\n${artOnly}`);
 });
 
-test("the version in the wordmark is the package version", () => {
+test("the version in the wordmark is the package version", async () => {
   assert.equal(VERSION, PACKAGE.version);
 });
 
-test("the wordmark appears on --help, on init, and on a bare invocation", () => {
+test("the wordmark appears on --help, on init, and on a bare invocation", async () => {
   // Spawned with piped stdio rather than captured in process: in process, the
   // style is decided from THIS runner's stdout, which is a TTY when a human
   // runs `npm test` in a terminal, and then the art prints instead of the
@@ -247,7 +249,7 @@ test("the wordmark appears on --help, on init, and on a bare invocation", () => 
   }
 });
 
-test("the wordmark appears nowhere else", () => {
+test("the wordmark appears nowhere else", async () => {
   // Principle five of the brief: verbs are tools, not billboards. A banner over
   // a refusal at 2am is an insult.
   //
@@ -266,11 +268,11 @@ test("the wordmark appears nowhere else", () => {
   }
 });
 
-test("a bare invocation still refuses, and the refusal is still one line", () => {
+test("a bare invocation still refuses, and the refusal is still one line", async () => {
   // The orientation screen goes to stdout; the usage error keeps stderr and
   // exit 2, so anything scripting this CLI sees exactly what it saw before.
   const dir = scratch();
-  const run = capture([], dir);
+  const run = await capture([], dir);
   assert.equal(run.code, 2);
   assert.match(run.err, /no command given/u);
   // "no command given" is an argument-shape error by APRV-91's own rule, so it
@@ -292,7 +294,7 @@ test("a bare invocation still refuses, and the refusal is still one line", () =>
 // 4. The colour boundary, end to end
 // ---------------------------------------------------------------------------
 
-test("piped human output carries no escape code", () => {
+test("piped human output carries no escape code", async () => {
   // The spawned form is the real one: stdio is piped, so `process.stdout.isTTY`
   // is undefined and the whole palette is a no-op.
   const dir = scratch();
@@ -306,7 +308,7 @@ test("piped human output carries no escape code", () => {
   }
 });
 
-test("--json carries no escape code even with colour forced on", () => {
+test("--json carries no escape code even with colour forced on", async () => {
   // The veto that makes the frozen shapes safe. One escape byte in a JSON
   // stream is a parse error, not a cosmetic regression.
   const dir = scratch();
@@ -328,28 +330,28 @@ test("--json carries no escape code even with colour forced on", () => {
   }
 });
 
-test("human output DOES gain colour when colour is forced on", () => {
+test("human output DOES gain colour when colour is forced on", async () => {
   // The negative tests above are only meaningful if the positive one holds:
   // otherwise they would pass on a build where the palette does nothing.
   const dir = scratch();
-  const run = withColour(() => capture(["--help"], dir));
+  const run = await withColour(() => capture(["--help"], dir));
   assert.ok(ESCAPE.test(run.out), "FORCE_COLOR=1 produced no colour at all");
 });
 
-test("--no-color turns it off again and never reaches the verb", () => {
+test("--no-color turns it off again and never reaches the verb", async () => {
   const dir = scratch();
-  const run = withColour(() => capture(["--help", "--no-color"], dir));
+  const run = await withColour(() => capture(["--help", "--no-color"], dir));
   assert.equal(ESCAPE.test(run.out), false, "--no-color did not suppress colour");
   // The flag is consumed centrally, so no verb has to declare it and none can
   // call it unknown.
-  const verb = withColour(() => capture(["queue", "--no-color"], dir));
+  const verb = await withColour(() => capture(["queue", "--no-color"], dir));
   assert.doesNotMatch(verb.err, /unknown flag --no-color/u);
 });
 
-test("--no-color is not stolen from the command a verb is asked to run", () => {
+test("--no-color is not stolen from the command a verb is asked to run", async () => {
   // `approval run … -- some-tool --no-color` is the child's flag, and rewriting
   // a command line we were asked to execute would be a real bug.
   const dir = scratch();
-  const run = capture(["hook", "classify", "--", "mytool", "--no-color"], dir);
+  const run = await capture(["hook", "classify", "--", "mytool", "--no-color"], dir);
   assert.match(run.out + run.err, /--no-color/u, "the flag was stripped from the child's argv");
 });

@@ -149,7 +149,7 @@ const BARE = ["  record.write.draft:", "    autonomy: supervised-retro"];
 // 1. The grammar
 // ===========================================================================
 
-test("a supervised class may declare its own retro_rate, at every supervised spelling", () => {
+test("a supervised class may declare its own retro_rate, at every supervised spelling", async () => {
   const cases: Array<[string[], string]> = [
     [HALF, "record.write.stage"],
     [["  record.write.draft:", "    autonomy: supervised", "    retro_rate: 0.5"], "record.write.draft"],
@@ -172,7 +172,7 @@ test("a supervised class may declare its own retro_rate, at every supervised spe
   }
 });
 
-test("supervised-live carries a retro_rate because its unsampled remainder is reviewed", () => {
+test("supervised-live carries a retro_rate because its unsampled remainder is reviewed", async () => {
   const load = loadAt(
     policyText([
       "  files.write.*:",
@@ -187,7 +187,7 @@ test("supervised-live carries a retro_rate because its unsampled remainder is re
   assert.equal(resolution.retroRate, 1);
 });
 
-test("a retro_rate the grammar forbids fails the whole policy closed", () => {
+test("a retro_rate the grammar forbids fails the whole policy closed", async () => {
   const cases: Array<[string, string[]]> = [
     ["retro_rate on a manual class", ["  policy.edit:", "    autonomy: manual", "    retro_rate: 0.5"]],
     [
@@ -220,7 +220,7 @@ test("a retro_rate the grammar forbids fails the whole policy closed", () => {
   }
 });
 
-test("a class declaring no retro_rate stays on the global rate", () => {
+test("a class declaring no retro_rate stays on the global rate", async () => {
   const load = loadAt(policyText([...HALF, ...BARE]));
   assert.equal(resolve(load, "record.write.draft").retroRate, null);
   const sampler = resolveSampler(load, ENV);
@@ -238,7 +238,7 @@ test("a class declaring no retro_rate stays on the global rate", () => {
   });
 });
 
-test("the irreversibility floor clears the class rate along with the supervision", () => {
+test("the irreversibility floor clears the class rate along with the supervision", async () => {
   const load = loadAt(policyText(HALF));
   const gated = resolve(load, "record.write.stage", { reversible: false });
   assert.equal(gated.autonomy, "manual");
@@ -249,7 +249,7 @@ test("the irreversibility floor clears the class rate along with the supervision
 // 2. One mechanism: the class rate moves the threshold and nothing else
 // ===========================================================================
 
-test("selection under a class rate is the same HMAC at a different threshold", () => {
+test("selection under a class rate is the same HMAC at a different threshold", async () => {
   const sampler = samplerFor(policyText([...HALF, ...BARE]));
   assert.equal(sampler.enabled, true);
   if (!sampler.enabled) return;
@@ -277,7 +277,7 @@ test("selection under a class rate is the same HMAC at a different threshold", (
   assert.ok(disagreements > 0, "the class rate made no difference to any verdict");
 });
 
-test("identical bytes select identically, across calls and across samplers", () => {
+test("identical bytes select identically, across calls and across samplers", async () => {
   const text = policyText(HALF);
   const first = samplerFor(text);
   const second = samplerFor(text);
@@ -297,7 +297,7 @@ test("identical bytes select identically, across calls and across samplers", () 
   }
 });
 
-test("the sampled fraction tracks the CLASS rate, not the global one", () => {
+test("the sampled fraction tracks the CLASS rate, not the global one", async () => {
   const sampler = samplerFor(policyText([...HALF, ...BARE]));
   assert.equal(sampler.enabled, true);
   if (!sampler.enabled) return;
@@ -314,7 +314,7 @@ test("the sampled fraction tracks the CLASS rate, not the global one", () => {
   assert.ok(globalFraction < 0.05, `global rate 0.02 drew ${String(globalFraction)}`);
 });
 
-test("a class rate of 1 draws everything and the global rate cannot lower it", () => {
+test("a class rate of 1 draws everything and the global rate cannot lower it", async () => {
   const sampler = samplerFor(
     policyText(["  record.write.stage:", "    autonomy: supervised-retro", "    retro_rate: 1"], {
       global: 0.0001,
@@ -331,7 +331,7 @@ test("a class rate of 1 draws everything and the global rate cannot lower it", (
 // 3. The alias
 // ===========================================================================
 
-test("bare supervised honours a retro_rate exactly as supervised-retro does", () => {
+test("bare supervised honours a retro_rate exactly as supervised-retro does", async () => {
   const alias = samplerFor(
     policyText(["  record.write.stage:", "    autonomy: supervised", "    retro_rate: 0.5"]),
   );
@@ -353,7 +353,7 @@ test("bare supervised honours a retro_rate exactly as supervised-retro does", ()
   );
 });
 
-test("the alias note survives a class that also declares a retro_rate", () => {
+test("the alias note survives a class that also declares a retro_rate", async () => {
   const load = loadAt(
     policyText(["  record.write.stage:", "    autonomy: supervised", "    retro_rate: 0.5"]),
   );
@@ -367,7 +367,7 @@ test("the alias note survives a class that also declares a retro_rate", () => {
 // 4. Honesty, per class
 // ===========================================================================
 
-test("a policy whose only rate is per class samples that class and states the rest", () => {
+test("a policy whose only rate is per class samples that class and states the rest", async () => {
   const sampler = samplerFor(policyText([...HALF, ...BARE], { global: null }));
   assert.equal(sampler.enabled, true, "a class rate alone must keep the sampler running");
   if (!sampler.enabled) return;
@@ -394,7 +394,7 @@ test("a policy whose only rate is per class samples that class and states the re
   );
 });
 
-test("a global rate of zero leaves the class rates running and names itself", () => {
+test("a global rate of zero leaves the class rates running and names itself", async () => {
   const text = policyText([...HALF, ...BARE], { global: 0 });
   const sampler = samplerFor(text);
   assert.equal(sampler.enabled, true);
@@ -405,14 +405,14 @@ test("a global rate of zero leaves the class rates running and names itself", ()
   assert.equal(report.find((e) => e.pattern === "record.write.stage")?.rate, 0.5);
 });
 
-test("no rate anywhere is still a plainly disabled sampler", () => {
+test("no rate anywhere is still a plainly disabled sampler", async () => {
   const sampler = samplerFor(policyText(BARE, { global: null }));
   assert.equal(sampler.enabled, false);
   if (sampler.enabled) return;
   assert.equal(sampler.reason, "rate-absent");
 });
 
-test("an unset secret disables every class, whatever rates they declare", () => {
+test("an unset secret disables every class, whatever rates they declare", async () => {
   const text = policyText([...HALF, ...BARE]);
   const sampler = samplerFor(text, {});
   assert.equal(sampler.enabled, false);
@@ -424,7 +424,7 @@ test("an unset secret disables every class, whatever rates they declare", () => 
   }
 });
 
-test("a class rate with no secret named is refused for the same reason a global one is", () => {
+test("a class rate with no secret named is refused for the same reason a global one is", async () => {
   const sampler = samplerFor(policyText(HALF, { global: null, secret: false }));
   assert.equal(sampler.enabled, false);
   if (sampler.enabled) return;
@@ -433,7 +433,7 @@ test("a class rate with no secret named is refused for the same reason a global 
   assert.ok(!sampler.message.includes(SECRET));
 });
 
-test("the serialized sampler carries the rates and never the secret", () => {
+test("the serialized sampler carries the rates and never the secret", async () => {
   const sampler = samplerFor(policyText([...HALF, ...BARE]));
   assert.equal(sampler.enabled, true);
   if (!sampler.enabled) return;
@@ -523,7 +523,7 @@ function ranBoth(text: string): Case {
   return unit;
 }
 
-test("a sweep draws the class at rate 1 and leaves the rateless class alone", () => {
+test("a sweep draws the class at rate 1 and leaves the rateless class alone", async () => {
   const unit = ranBoth(
     policyText(
       ["  record.write.stage:", "    autonomy: supervised-retro", "    retro_rate: 1", ...BARE],
@@ -553,10 +553,10 @@ test("a sweep draws the class at rate 1 and leaves the rateless class alone", ()
 // 6. Reporting: doctor and `approval audit list`
 // ===========================================================================
 
-function runCli(unit: Case, argv: string[]): { code: number; out: string; err: string } {
+async function runCli(unit: Case, argv: string[]): Promise<{ code: number; out: string; err: string }> {
   let out = "";
   let err = "";
-  const code = main(argv, {
+  const code = await main(argv, {
     cwd: unit.dir,
     streams: {
       out: (text) => {
@@ -596,9 +596,9 @@ test("doctor names which classes sample at which rate, and which do not", async 
   assert.ok(!sampling.detail.includes(SECRET));
 });
 
-test("approval audit list reports the per-class coverage beside the backlog", () => {
+test("approval audit list reports the per-class coverage beside the backlog", async () => {
   const unit = ranBoth(policyText([...HALF, ...BARE]));
-  const run = runCli(unit, ["audit", "list", "--json", "--log", unit.logPath]);
+  const run = await runCli(unit, ["audit", "list", "--json", "--log", unit.logPath]);
   assert.equal(run.code, 0, run.err);
   const body = JSON.parse(run.out) as {
     sampling: {
@@ -617,7 +617,7 @@ test("approval audit list reports the per-class coverage beside the backlog", ()
     ],
   );
 
-  const text = runCli(unit, ["audit", "list", "--log", unit.logPath]);
+  const text = await runCli(unit, ["audit", "list", "--log", unit.logPath]);
   assert.ok(text.out.includes("record.write.stage: rate 0.5 (class)"), text.out);
   assert.ok(!text.out.includes(SECRET));
 });
