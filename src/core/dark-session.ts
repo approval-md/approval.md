@@ -131,6 +131,11 @@ export const SESSION_EVENTS: readonly string[] = [
   "task.registered",
   "approval.requested",
   "execution.started",
+  // APRV-214. A tool call the open window let through is recorded rather than
+  // authorized, and it is recorded loudly: a session running behind a window is
+  // the opposite of dark, and counting it as dark would report the one state a
+  // human deliberately created as the state this sweep exists to find.
+  "gate.bypassed",
 ];
 
 /**

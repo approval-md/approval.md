@@ -96,6 +96,13 @@ export const GENESIS_PREV = null;
  * (amended SPEC.md §10.2). It is an observation the RUNTIME makes about a
  * session, never a record written on a session's behalf, so it carries a
  * `system:` actor and the schema refuses any other.
+ * `gate.opened`, `gate.closed` and `gate.bypassed` (APRV-214) are the tenth,
+ * eleventh and twelfth: a human time-boxing a full harness bypass so the gate
+ * itself can be debugged, that human closing it early, and one gated tool call
+ * the hook allowed while it stood (amended SPEC.md §5.2). The window's whole
+ * state is these records, deliberately: a file the runtime read on its own
+ * would let anything able to write it act as the human. The first two carry a
+ * `human:` actor and the schema refuses any other.
  */
 export type EventType =
   | "task.registered"
@@ -122,7 +129,10 @@ export type EventType =
   | "audit.dark_session"
   | "reconciliation.required"
   | "reconciliation.satisfied"
-  | "payload.pruned";
+  | "payload.pruned"
+  | "gate.opened"
+  | "gate.closed"
+  | "gate.bypassed";
 
 /** Caller-supplied content of an event. Chain fields are not accepted. */
 export interface EventInput {

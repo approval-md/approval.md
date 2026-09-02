@@ -83,6 +83,9 @@ Usage:
                       [--restart-backoff <d>] (plus every daemon run flag)
   approval setup service [--platform launchd|systemd] [--uninstall]
                       [--label <name>] [--logs <dir>] [--env-file <path>]
+  approval gate open|close|status [--for <d>] [--reason "<t>"] [--note "<t>"]
+                      [--as human:<id>] [--log <path>] [--json]
+                                              (open: terminal only, no --json)
   approval status     [--policy <path>] [--dir <path>] [--json]
   approval doctor     [--log <path>] [--policy <path>] [--dir <path>]
                       [--api-base <url>] [--json]
@@ -766,6 +769,32 @@ JSON shape: docs/cli-reference.md#expire
 ${GATE_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("expire")}`;
+
+export const GATE_WINDOW_HELP = `approval gate — the open window: a human-only, time-boxed harness bypass
+
+Usage:
+  approval gate open   [--for <duration>] --reason "<text>" [--as human:<id>]
+                       [--log <path>]                     (terminal; no --json)
+  approval gate close  [--note "<text>"] [--as human:<id>] [--log <path>] [--json]
+  approval gate status [--log <path>] [--json]
+
+Flags:
+  --for <duration>  how long the window stands; default 30m, cap 24h
+  --reason "<text>" why it is being opened; required, and recorded
+  --note "<text>"   what was learned, recorded on the close
+  --as human:<id>   the person opening or closing it (or ${"APPROVAL_HUMAN"})
+  --log <path>      log file to read and append to; --json for status and close
+
+While a window is open the harness hook ALLOWS every gated tool call under the
+root and records each as gate.bypassed, ahead of the policy, attestation, the
+loop floor and the human gate. It never reaches .approval/log/, a human-only
+class, a command the classifier cannot read, or a log it cannot verify. open is
+a ceremony: a terminal, and the word \`understood\` typed in full. There is no
+--yes and no --force. State lives in the log; a lapse appends nothing.
+
+JSON shape: docs/cli-reference.md#gate
+${EXIT_CODES_POINTER}
+${why("gate")}`;
 
 export const REINDEX_HELP = `approval reindex — rebuild the SQLite index from the log
 

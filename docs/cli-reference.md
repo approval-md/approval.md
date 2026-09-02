@@ -1332,6 +1332,68 @@ requested, and how much of the TTL is left.
 `pending` is `[]` for an empty inbox. `ttl_remaining_ms` is null when the policy
 declares no `defaults.approval_ttl` (no TTL means no lapse).
 
+## gate
+
+The open window (APRV-214, amended SPEC.md §5.2). The harness hook fails closed
+on every axis, which is right, and which means that when the gate itself is
+broken (an unattested policy, a drifted attestation, a hung daemon, a dark
+channel) every command a session issues dies, including the ones a person would
+use to repair it. Before this the only escape was hand-editing the hook out of
+`.claude/settings.json`: an ungated session nobody records, which is the failure
+this project exists to prevent.
+
+**The state lives in the log and nowhere else.** `gate.opened` starts a window,
+`gate.closed` ends one, and nothing at all is appended when one lapses; a reader
+derives the window from the latest `gate.opened`, its `ts`, its `duration`, and
+the absence of a close naming its seq. A file the runtime read on its own
+authority would let anything able to write that file act as the human, which is
+the `.approval/env` precedent. The consequence is deliberate: a log the hook
+cannot read or verify yields no window, and the hook denies exactly as it always
+did. The window suspends the POLICY; it never suspends the log.
+
+**What it reaches.** Every hook-gated shell command and file edit under the
+root, ahead of the policy load, the attestation check, the loop floor, the
+unattended guard and the human gate. Each allowed call appends one
+`gate.bypassed` naming the window's seq, the tool, the classes, a summary and
+the payload hash, and the record lands BEFORE the allow is printed: an append
+failure is a deny. Bypassed calls are charged to no budget and enter no
+retrospective sample, because nothing authorized them; they were recorded.
+
+**What it never reaches.** Writes aimed at `.approval/log/` (`log.mutate`),
+refused with no policy consulted because a bypass able to rewrite the log could
+rewrite its own authorization; every class the policy reserves to human hands;
+a command the classifier cannot read (`hook-opaque`, `hook-unclassified`,
+`hook-unparseable`), since nothing can establish that an opaque string does not
+write into the log; and a log that cannot be read or verified.
+
+**The ceremony.** `open` needs a terminal and the word `understood`, typed in
+full and matched exactly after trimming. There is no `--yes` and no `--force`,
+and `--json` is refused: an answer shaped for a machine implies a machine asking
+a question only a person answers. `approval gate open` also classifies
+`policy.core`, so a policy holding that class human-only makes the hook refuse
+an agent that tries the verb at all. Default 30m, cap 24h; a record claiming an
+expiry beyond its own `ts + duration` reads as the shorter of the two, and a
+duration over the cap is clamped at read time as well as refused at write time.
+
+`approval status` reports `healthy: false` while a window is open, and adds a
+`gate_window` key. That is intended: a CI check or a `doctor` run keyed on
+`healthy` should go red while a bypass stands.
+
+**`--json`** (`close` and `status`; `open` has no JSON form):
+
+```
+close    {"ok":true,"seq":9,"opened_seq":7,"actor":"human:carter","bypassed":3}
+status   {"ok":true,"open":true,"window":{"seq":7,"opened_at":"...","opened_by":"...",
+          "reason":"...","expires_at":"...","remaining_ms":123456,"bypassed":3,"scope":"hook"}}
+refusal  {"ok":false,"error":{"code":"...","message":"..."}}
+```
+
+`error.code` is one of the frozen `GATE_WINDOW_REFUSAL_CODES`:
+`actor-not-human`, `gate-reason-required`, `gate-duration-too-long`,
+`gate-already-open`, `gate-not-open`, `gate-stdin-not-tty`,
+`gate-confirmation-mismatch`, `log-unreadable`, `log-torn-tail`, `log-corrupt`,
+`append-failed`. Every one of them appends nothing.
+
 ## status
 
 `queue` is what a human must answer; `status` is what an operator must fix.

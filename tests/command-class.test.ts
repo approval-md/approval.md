@@ -137,6 +137,20 @@ const FIXTURES: readonly Fixture[] = [
   // business, and `approval log` with no subcommand names no ritual at all.
   { command: "approval log verify", class: GATE_SELF_CLASS, rule: "approval" },
   { command: "approval log", class: GATE_SELF_CLASS, rule: "approval" },
+  // APRV-214: the open-window ceremony. Opening suspends the policy for every
+  // harness tool call under the root, so it classifies `policy.core` — which
+  // APPROVAL.md holds human-only, and which is what denies an agent running the
+  // ceremony through the hook. Both spellings, and a flag between the words
+  // must not hide the verb here either.
+  { command: "approval gate open --for 5m --reason x", class: "policy.core", rule: "approval-gate-open", row: "approval" },
+  { command: "approval --json gate open", class: "policy.core", rule: "approval-gate-open", row: "approval" },
+  { command: "approval gate close", class: "policy.core", rule: "approval-gate-close", row: "approval" },
+  { command: "node ./cli.js gate open --for 5m --reason x", class: "policy.core", rule: "approval-gate-open", row: "node" },
+  { command: "node dist/src/cli/main.js gate close", class: "policy.core", rule: "approval-gate-close", row: "node" },
+  // Reporting the window is the gate reading itself, and stays pass-through.
+  { command: "approval gate status --json", class: GATE_SELF_CLASS, rule: "approval" },
+  { command: "approval gate", class: GATE_SELF_CLASS, rule: "approval" },
+  { command: "node ./cli.js gate status", class: GATE_SELF_CLASS, rule: "node-approval-cli", row: "node" },
   { command: "npx tsx src/tool.ts", class: "files.write.workspace", rule: "workspace-tool" },
   { command: "mkdir -p src/core", class: "files.write.workspace", rule: "workspace-write" },
   { command: "rm dist/stale.js", class: "files.write.workspace", rule: "rm-workspace", row: "rm" },

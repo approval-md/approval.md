@@ -181,6 +181,10 @@ of it; where the two disagree, `APPROVAL.md` wins, and `approval hook classify
 - Edit `APPROVAL.md` or anything under `.approval/` other than through the
   human's own ceremony (`policy.core`, human-only), or write into the log
   directory by any means (`log.mutate`, human-only)
+- Run `approval gate open` or `approval gate close`: the open window is the
+  human's own ceremony (needs a terminal and a typed `understood`; classifies
+  `policy.core`). An agent that thinks the gate needs opening says so in the
+  journal and stops
 - Rewrite git history on shared branches
 - Mutate `events.jsonl` or fabricate log entries — including in tests;
   test logs are built through the real append path
