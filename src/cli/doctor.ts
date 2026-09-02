@@ -1538,9 +1538,10 @@ function checkKeychainScope(logPath: string, load: PolicyLoadResult): DoctorChec
 function checkLogDrift(logPath: string, records: readonly EventRecord[]): DoctorCheck {
   const outcome = checkLogAnchor({ logPath, records });
   switch (outcome.status) {
-    // A `fix` belongs only to a FAILING row (the rule tests/cli-doctor.test.ts
-    // pins), so the repair a reader of a healthy row might still want is said
-    // in the detail instead of in a field that means "something is wrong here".
+    // A SKIP carries no `fix` — the rule every non-git fixture in
+    // `tests/cli-doctor.test.ts` pins. A check that could not look has nothing
+    // to prescribe, so what a reader might still want to run is said in the
+    // detail. A pass that owes records keeps its `fix`, as this row always has.
     case "skip":
       return {
         check: "log-drift",
@@ -1554,13 +1555,17 @@ function checkLogDrift(logPath: string, records: readonly EventRecord[]): Doctor
         detail:
           outcome.ahead === 0
             ? outcome.detail
-            : `${outcome.detail} — the ordinary state of a checkout that has been recording decisions; \`approval log advance\` commits them onto a records branch`,
+            : `${outcome.detail} — the ordinary state of a checkout that has been recording decisions`,
+        ...(outcome.ahead === 0
+          ? {}
+          : { fix: "approval log advance — commit those records onto a records branch" }),
       };
     case "behind":
       return {
         check: "log-drift",
         status: "pass",
-        detail: `${outcome.detail} — the committed copy carries records this working file does not; \`approval log sync\` fast-forwards and reconciles the chain`,
+        detail: `${outcome.detail} — the committed copy carries records this working file does not`,
+        fix: "approval log sync — fast-forward, then reconcile the chain",
       };
     case "diverged":
       return {

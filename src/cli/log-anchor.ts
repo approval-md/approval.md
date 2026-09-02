@@ -45,6 +45,7 @@ import { dirname } from "node:path";
 import type { EventRecord } from "../core/log.js";
 import type { LogHead } from "../core/verify.js";
 import { verifyText } from "../core/verify.js";
+import { compareChains, describeDrift } from "../core/log-reconcile.js";
 import { git, repoPath, repoRoot, showBlob } from "./git-scope.js";
 
 /**
@@ -377,6 +378,24 @@ export function checkLogAnchor(options: AnchorCheckOptions): AnchorCheck {
 
   const workingHead = options.records[options.records.length - 1] ?? null;
 
+  /**
+   * Where the two chains stop agreeing, in `core/log-reconcile.ts`'s words.
+   *
+   * Computed only on the refusal path, and through the SHARED comparison rather
+   * than a second one written here: a divergence ends with a person deciding
+   * which of two chains is the log, and the sentence they read has to name the
+   * seq. Re-walking the committed copy costs a chain walk, which is the right
+   * price on a path that is about to stop a daemon.
+   */
+  const divergence = (): string => {
+    const compared = compareChains(
+      { label: `the working log ${options.logPath}`, text: working.toString("utf8") },
+      { label: anchor.rev, text: found.copy.bytes.toString("utf8") },
+      options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+    );
+    return compared.ok ? ` ${describeDrift(compared.drift)}.` : "";
+  };
+
   // The working log is shorter than the anchored copy. That is either the
   // ordinary state of a checkout that has just pulled (a strict prefix), or the
   // truncation this whole check exists for.
@@ -401,7 +420,7 @@ export function checkLogAnchor(options: AnchorCheckOptions): AnchorCheck {
         working.length,
       )} bytes and ${anchor.rev} anchors ${String(
         anchor.byteLength,
-      )} bytes through seq ${String(anchor.head.seq)}, and the shorter file is not a prefix of the longer one. A committed copy of the log is the one witness a process with write access to this file cannot rewrite; these two are not the same chain.`,
+      )} bytes through seq ${String(anchor.head.seq)}, and the shorter file is not a prefix of the longer one. A committed copy of the log is the one witness a process with write access to this file cannot rewrite; these two are not the same chain.${divergence()}`,
     };
   }
 
@@ -416,7 +435,7 @@ export function checkLogAnchor(options: AnchorCheckOptions): AnchorCheck {
         options.logPath
       } do not hash to the copy committed at ${anchor.rev} (anchored through seq ${String(
         anchor.head.seq,
-      )} ${anchor.head.hash}). The anchored prefix has been rewritten in this working file; a chain that re-verifies from genesis proves only that whoever rewrote it recomputed the hashes.`,
+      )} ${anchor.head.hash}). The anchored prefix has been rewritten in this working file; a chain that re-verifies from genesis proves only that whoever rewrote it recomputed the hashes.${divergence()}`,
     };
   }
 
@@ -433,7 +452,7 @@ export function checkLogAnchor(options: AnchorCheckOptions): AnchorCheck {
         at === undefined
           ? "carries no record at that seq"
           : `carries ${at.hash} there`
-      }. These are two chains, not one.`,
+      }. These are two chains, not one.${divergence()}`,
     };
   }
 
@@ -450,7 +469,7 @@ export function checkLogAnchor(options: AnchorCheckOptions): AnchorCheck {
           )})`
         : `the working log carries the copy committed at ${anchor.rev} (${describeAnchor(
             anchor,
-          )}) byte for byte and stands ${String(ahead)} record(s) ahead of it`,
+          )}) byte for byte and is ahead by ${String(ahead)} record(s)`,
   };
 }
 

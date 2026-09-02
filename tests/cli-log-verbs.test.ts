@@ -769,14 +769,36 @@ test("both the doctor check and the sync reconcile read one implementation", () 
   // The structural half of the claim: a second copy of the comparison could
   // agree with the first today and drift from it tomorrow, so what is pinned is
   // that there is only one.
-  for (const relative of ["src/cli/doctor.ts", "src/cli/log-sync.ts"]) {
-    const source = readFileSync(join(REPO_ROOT, relative), "utf8");
-    assert.match(
-      source,
-      /import \{[^}]*compareChains[^}]*\} from "\.\.\/core\/log-reconcile\.js"/u,
-      `${relative} does not read the shared chain comparison`,
-    );
-  }
+  //
+  // APRV-219 moved doctor's side of it. The `log-drift` row is no longer a
+  // second call to `compareChains`; it IS `approval log verify --anchor`'s
+  // check, and the module that owns that check is `cli/log-anchor.ts`. The
+  // claim is unchanged, and the drift it guards against is the one that
+  // actually happened: APRV-210 recorded the row saying "this log has never
+  // been committed" about a log with thousands of committed records, because it
+  // resolved its blob path beside everybody else rather than with them.
+  assert.match(
+    readFileSync(join(REPO_ROOT, "src/cli/doctor.ts"), "utf8"),
+    /import \{[^}]*checkLogAnchor[^}]*\} from "\.\/log-anchor\.js"/u,
+    "src/cli/doctor.ts does not read the shared anchor check",
+  );
+  assert.doesNotMatch(
+    codeOf("src/cli/doctor.ts"),
+    /compareChains\(/u,
+    "src/cli/doctor.ts compares two chains itself again; that comparison has one home",
+  );
+  assert.match(
+    readFileSync(join(REPO_ROOT, "src/cli/log-sync.ts"), "utf8"),
+    /import \{[^}]*compareChains[^}]*\} from "\.\.\/core\/log-reconcile\.js"/u,
+    "src/cli/log-sync.ts does not read the shared chain comparison",
+  );
+  // And the anchor check resolves its blob path through git-scope rather than
+  // building a third spelling of the same path.
+  assert.match(
+    codeOf("src/cli/log-anchor.ts"),
+    /repoPath\(root, /u,
+    "src/cli/log-anchor.ts does not resolve its blob path through git-scope",
+  );
 });
 
 // ===========================================================================
