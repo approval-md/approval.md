@@ -945,6 +945,9 @@ test("the DaemonEvent union is frozen public output: every variant, listed", () 
     // APRV-204: the cadence advance's line. Appended to the union, so no
     // existing entry changed meaning.
     advance: true,
+    // APRV-192: the dark-session sweep's line. Appended to the union, so no
+    // existing entry changed meaning.
+    dark_session: true,
     drift: true,
     write_back: true,
     expired: true,
@@ -960,6 +963,7 @@ test("the DaemonEvent union is frozen public output: every variant, listed", () 
 
   assert.deepEqual(Object.keys(variants).sort(), [
     "advance",
+    "dark_session",
     "drift",
     "escalated",
     "escalation_cleared",

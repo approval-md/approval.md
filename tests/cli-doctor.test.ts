@@ -357,6 +357,11 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // stream is gone once nobody is tailing it, and this row answers from the
       // log and from local refs, in whatever process asks.
       "log-advance-cadence",
+      // APRV-192: the detective complement to harness-hook-wiring, appended for
+      // the same reason. That row asks this checkout's settings file whether the
+      // hook is registered; this one asks git what happened and the log whether
+      // it was told, and asks a session nothing at all.
+      "dark-sessions",
     ],
   );
   assert.deepEqual(
@@ -405,6 +410,11 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       "skip",
       "pass",
       "skip",
+      // dark-sessions skips: the fixture is a scratch directory and not a git
+      // checkout, so there is no git activity for the log to owe records
+      // against — the same absence log-drift and log-advance-cadence skip on
+      // (APRV-192).
+      "skip",
     ],
   );
   for (const entry of parsed.checks) {
@@ -443,7 +453,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 17);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 18);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
@@ -902,7 +912,7 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  assert.equal(parsed.checks.length, 17);
+  assert.equal(parsed.checks.length, 18);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);

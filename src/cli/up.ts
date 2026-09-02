@@ -106,6 +106,10 @@ import {
   durationFlag,
   exitForDaemonOutcome,
 } from "./daemon.js";
+import {
+  DEFAULT_DARK_INTERVAL_MS,
+  DEFAULT_DARK_WINDOW_MS,
+} from "../daemon/dark-session.js";
 import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { spawnGloss } from "./gloss.js";
 import { UP_HELP } from "./help.js";
@@ -235,6 +239,10 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--advance-remote": "string",
   "--advance-base": "string",
   "--no-advance-pr": "boolean",
+  // The dark-session sweep (APRV-192), spelled identically to `daemon run`'s.
+  "--dark-sessions": "boolean",
+  "--dark-window": "string",
+  "--dark-interval": "string",
   // The channels'.
   "--as": "string",
   "--payloads": "string",
@@ -531,6 +539,16 @@ export function commandUp(
   const cadence = advanceFlags(flags);
   if (!cadence.ok) return usageError(streams, json, cadence.message);
   if (cadence.cadence !== null) options.advance = cadence.cadence;
+
+  // The dark-session sweep (APRV-192), parsed by the same duration function for
+  // the same reason: one typo, one sentence, on both spellings of this verb.
+  const darkWindow = durationFlag(flags, "--dark-window", DEFAULT_DARK_WINDOW_MS);
+  if (!darkWindow.ok) return usageError(streams, json, darkWindow.message);
+  const darkInterval = durationFlag(flags, "--dark-interval", DEFAULT_DARK_INTERVAL_MS);
+  if (!darkInterval.ok) return usageError(streams, json, darkInterval.message);
+  if (boolFlag(flags, "--dark-sessions")) {
+    options.darkSessions = { windowMs: darkWindow.ms, intervalMs: darkInterval.ms };
+  }
 
   // SPEC.md §8's optional git hardening, judged before the first tick exactly as
   // `daemon run` judges it: an operator who asked for a second evidence layer and

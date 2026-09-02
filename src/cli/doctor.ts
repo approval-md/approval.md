@@ -103,6 +103,11 @@ import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { policyWebPort } from "./channel-web.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { lastAdvance } from "../core/advance-cycle.js";
+import {
+  DEFAULT_DARK_WINDOW_MS,
+  reportDarkSessions,
+  type DarkSessionFinding,
+} from "../core/dark-session.js";
 import { repoPath, repoRoot, showBlob } from "./git-scope.js";
 import { publishedState } from "./log-advance.js";
 import { DOCTOR_HELP } from "./help.js";
@@ -1746,6 +1751,101 @@ function checkHarnessWiring(dir: string): DoctorCheck {
   };
 }
 
+// ---------------------------------------------------------------------------
+// dark sessions (APRV-192)
+// ---------------------------------------------------------------------------
+
+/**
+ * Does the git activity in this checkout have log records beside it?
+ *
+ * The detective complement to `harness-hook-wiring` above. That row reports
+ * whether the settings file is on disk and says plainly that this is not proof
+ * a session loaded it; this row asks the question that does not depend on
+ * session wiring at all — git shows commits and worktrees, and the log either
+ * carries records beside them or it does not.
+ *
+ * Reads only. Doctor never appends, so a dark subject found HERE is reported
+ * and not recorded: the record is the daemon's, written by the sweep it runs on
+ * its own cadence (`approval daemon run --dark-sessions`). Two processes
+ * appending the same observation would be two writers to one fact, and doctor
+ * is a reader.
+ *
+ * This row DOES fail the run, which is where it parts company with
+ * `harness-hook-wiring` above. That row reports a configuration, and a
+ * configuration this runtime cannot verify from disk is not a health verdict.
+ * This one reports an EVENT: work was done in this repository and the log was
+ * not told. "Never silently tolerate it" is the whole of APRV-192, and a row
+ * that reported a dark session in the pass column would be tolerating it
+ * quietly in the one place an operator goes to ask whether anything is wrong.
+ *
+ * An `undetermined` subject is a skip, not a fail, for the reason the daemon
+ * appends nothing for one: what the detector could not see is a gap in the
+ * instrument, and a red row for it would train an operator to ignore red rows.
+ * The gap is named in the detail, never folded into a pass.
+ */
+function checkDarkSessions(
+  logPath: string,
+  dir: string,
+  policyPath: string,
+  records: readonly EventRecord[],
+  verified: boolean,
+): DoctorCheck {
+  const check = "dark-sessions";
+  const root = repoRoot(dir);
+  if (root === null) {
+    return {
+      check,
+      status: "skip",
+      detail: `${dir} is not inside a git repository, so there is no git activity for the log to owe records against`,
+    };
+  }
+
+  // `reportDarkSessions`, never `sweepDarkSessions`: the read-only half of the
+  // same code, so doctor and the daemon reach identical verdicts and only the
+  // daemon writes them down.
+  const { report } = reportDarkSessions({
+    logPath,
+    root,
+    policy: { file: policyPath },
+    windowMs: DEFAULT_DARK_WINDOW_MS,
+    records: verified ? records : null,
+    ...(verified ? {} : { logDetail: "the chain did not verify; see the log check above" }),
+  });
+
+  const dark = report.findings.filter((finding) => finding.verdict === "dark");
+  const undetermined = report.findings.filter((finding) => finding.verdict === "undetermined");
+  const watched = report.findings.length;
+
+  if (dark.length > 0) {
+    return {
+      check,
+      status: "fail",
+      detail: `${String(dark.length)} of ${String(watched)} checkout(s) show git activity the log carries no record of: ${dark
+        .map((finding) => `${finding.subject} [${finding.code ?? "?"}]`)
+        .join(", ")}. ${(dark[0] as DarkSessionFinding).detail}`,
+      fix: "approval doctor --dir <that checkout> — its harness-hook-wiring row, then `approval instructions hook`",
+    };
+  }
+  if (undetermined.length > 0) {
+    return {
+      check,
+      status: "skip",
+      detail: `UNDETERMINED for ${String(undetermined.length)} of ${String(
+        watched,
+      )} checkout(s): ${undetermined
+        .map((finding) => `${finding.subject} [${finding.code ?? "?"}]`)
+        .join(", ")}. ${(undetermined[0] as DarkSessionFinding).detail}`,
+    };
+  }
+  return {
+    check,
+    status: "pass",
+    detail: `${String(watched)} checkout(s) swept over the last ${String(
+      Math.round(DEFAULT_DARK_WINDOW_MS / 3_600_000),
+    )}h and every one of them either produced no git activity or has records beside it. ${report.coverage}`,
+  };
+}
+
 /** The Backlog.md board key a task file's name begins with (`task-3 - Slug.md`). */
 function taskIdFromFileName(name: string): string | null {
   const match = /^([A-Za-z][A-Za-z0-9_]*-\d+)/u.exec(name);
@@ -1911,6 +2011,16 @@ export function commandDoctor(
       // APRV-204: appended, ninth time, same reason. The cadence advance needed
       // a status surface that outlives the daemon's own event stream.
       checkAdvanceCadence(logPath, verified.records),
+      // APRV-192: appended, tenth time, same reason. The detective complement
+      // to harness-hook-wiring above — that row asks this checkout's settings
+      // file, this one asks git and the log and never asks a session anything.
+      checkDarkSessions(
+        logPath,
+        dir,
+        policyPath,
+        verified.records,
+        verified.result.status === "clean",
+      ),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");
