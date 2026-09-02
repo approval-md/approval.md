@@ -2819,7 +2819,8 @@ any shape that already existed:
 ```
 {"event":"preflight_warning","message":"…"}
 {"event":"preflight","commit":"<sha>","detail":"…","behind_by":3,"ahead_by":0,
- "log_touched":false,"dist_stale":true,"action":"fast-forward+rebuild"}
+ "log_touched":false,"dist_stale":true,"action":"fast-forward+rebuild",
+ "reexec":true}
 ```
 
 `action` is one of `none`, `rebuild`, `fast-forward`, `fast-forward+rebuild`,
@@ -2828,11 +2829,27 @@ than on `up_started`, so a consumer that already parses `up_started` does not
 have to learn a new key to keep working. A refusal writes one object to stderr
 instead: `{"error":{"code":…,"message":…,"next":…},"preflight":{…}}`.
 
-One honest caveat: a rebuild replaces `dist/` under a process that has already
-loaded it, so this run goes on executing the code it started with and the NEW
-build takes effect on the next start. The preflight names the commit so that is
-visible rather than implied; a service unit that restarts on exit picks the new
-build up on its own.
+**A rebuild re-execs, so the writer that ends up running is the code that was
+merged.** Node loads its module tree at startup, so a `npm run build` that
+replaces `dist/` underneath a live process changes nothing about what that
+process is executing. Carrying on there would start the daemon on exactly the
+code the fast-forward was meant to leave behind, which is the defect this verb
+exists to remove. So when the preflight rebuilds, it does not continue: it
+spawns the freshly built `dist/src/cli/main.js` — resolved from the checkout
+root, never from the module that is running, which is the stale tree by
+definition — with the same argv plus `--no-preflight`, the same cwd and
+environment, and `stdio` inherited. SIGINT and SIGTERM are forwarded to the
+child, and the verb exits with the child's exit code. The `preflight` line
+carries `"reexec":true` and is printed by the parent before the handover, since
+the child has nothing to say about a fast-forward it did not perform; the human
+line reads `… and rebuilt; now running <sha>, in a fresh process on the new
+build`. `--no-preflight` on the child is the loop guard and the honest setting
+both: the checkout is already current.
+
+`dist_stale` is judged **after** the fast-forward as well as before it. A merge
+that lands three days of `src/` is precisely what makes a build stale, and the
+pre-merge answer would miss it. (`approval doctor`'s row reports the pre-merge
+answer, because doctor merges nothing.)
 
 **The daemon settles the verb; a channel never does.** A channel is a network
 client and the daemon is not. A Bot API that starts refusing sends must not stop

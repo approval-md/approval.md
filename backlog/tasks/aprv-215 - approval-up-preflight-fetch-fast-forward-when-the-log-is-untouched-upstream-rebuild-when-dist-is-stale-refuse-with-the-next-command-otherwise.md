@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-y'
 created_date: '2026-09-02 15:57'
-updated_date: '2026-09-02 20:05'
+updated_date: '2026-09-02 20:25'
 labels:
   - cli
   - dogfood
@@ -102,4 +102,22 @@ Two notes for whoever runs this branch. The worktree had no node_modules, which 
 Final run on 0729bd9 (before the task-file commit): npm test — 3004 tests, 3003 pass, 0 fail, 1 skipped, 663s. npx oxlint src tests — clean, exit 0. tests/cli-up-preflight.test.ts contributes 17 of those, and tests/cli-doctor.test.ts's three bumped pins pass.
 
 One environment note the orchestrator should know about: the harness hook refused two commits mid-session with policy-not-attested against the PRIMARY checkout's policy (once 'never attested', once 'changed since it was attested at seq 7413'), and both succeeded on an immediate retry. Nothing in this lane touches APPROVAL.md or .approval/; it looks like the primary's policy file was being edited underneath, so the hook was reading a moving target. Worth a glance if other lanes saw it too.
+
+## Amendment: the rebuild re-execs (coordinator, after first review)
+
+The caveat in the notes above was the defect, not a footnote on it: the point of the preflight is that the writer Carter just started IS the code that was merged, and a rebuild that replaces dist/ under a process which has already loaded it delivers the opposite. So the preflight no longer continues in-process after a rebuild.
+
+**What it does.** When a build ran, runPreflight hands the caller a ReexecPlan instead of a green light. reexecFreshBuild spawns process.execPath with <root>/dist/src/cli/main.js and process.argv.slice(2) plus --no-preflight, stdio inherited, same cwd and env; SIGINT and SIGTERM are forwarded to the child; the verb exits with the child's exit code. Both approval up and approval daemon run call it.
+
+**Two details that are load-bearing.** The entry is resolved from the CHECKOUT root, never from import.meta.url — this module is running from the stale build, so its own location names precisely the tree being replaced. And argv is what the operator typed rather than a reconstruction from parsed flags, so the child runs the same command including the verb; --no-preflight is both the loop guard and the honest setting, since the checkout is already current.
+
+**dist staleness is now asked twice**, and the post-merge answer is the one that counts. inspectPreflight dates dist/ against the sources as they were BEFORE the fast-forward; a merge that lands three days of src/ is exactly what makes a build stale, and the pre-merge answer would have missed it. Doctor's row keeps the pre-merge answer, because doctor merges nothing.
+
+**Reporting.** PreflightFacts gains reexec: boolean (always false from inspectPreflight, which builds nothing). The preflight line is emitted by the PARENT before the handover, because the child runs with --no-preflight and has nothing to say about a fast-forward it did not perform; the commit is read after the merge, so the line names the code the child is about to run. The human line ends ", in a fresh process on the new build".
+
+**Four new tests**, on a new fixture (newInstallRepo) that is a working clone AND an installation, because the claim only means anything when the upstream commit can change the sources that get run. src/main.js prints "stamp v1" locally and "stamp v2" upstream; the fast-forward lands v2, the rebuild copies it into dist/, the re-exec runs it, and "stamp v2" on stdout can only have come from a process that started after the build. The cases: the re-exec itself (action, dist_stale, reexec, commit, the stamp, and that "stamp v1" appears nowhere), the human line, that exactly one preflight line is printed however deep the handover goes, and that the child's exit code is the verb's (an upstream commit whose main.js exits 3).
+
+The fixture dates src/ an hour into the PAST and leaves the dist marker at now, so the FIRST freshness answer is "fresh" and only the post-merge re-ask sees the staleness the merge created. The first draft dated the marker an hour FORWARD instead, which made the test pass for the wrong reason and then fail: a marker in the future is newer than anything a merge can write, so the re-ask could never fire. Worth knowing if this fixture is ever copied.
+
+docs/cli-reference.md carries all of the above under "up", and the old caveat paragraph is gone.
 <!-- SECTION:NOTES:END -->

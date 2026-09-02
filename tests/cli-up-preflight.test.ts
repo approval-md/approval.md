@@ -180,6 +180,56 @@ function fixtureRoot(stale: boolean): string {
   return root;
 }
 
+/**
+ * A working clone that is ALSO an installation: `cli.js`, a one-file `src/`, a
+ * `dist/` marker, and a `package.json` whose build copies one onto the other.
+ *
+ * The re-exec case needs the two to be one directory, because the whole claim
+ * is that a fast-forward which lands new SOURCES ends with the new sources
+ * RUNNING. With the installation somewhere else there would be nothing for the
+ * upstream commit to change.
+ *
+ * `src/` is dated an hour into the PAST and the `dist/` marker is left at now,
+ * so the preflight's FIRST freshness answer is "fresh". The fast-forward then
+ * rewrites `src/main.js`, which git stamps with the current time, and THAT is
+ * what makes the build stale — so asking again after the merge is the only way
+ * to see it. Dating the marker forward instead would hide the very thing under
+ * test: it would still be newer than anything the merge could write.
+ */
+function newInstallRepo(): Repo {
+  const repo = newRepo();
+  mkdirSync(join(repo.dir, "dist", "src", "cli"), { recursive: true });
+  mkdirSync(join(repo.dir, "src"), { recursive: true });
+  const marker = join(repo.dir, "dist", "src", "cli", "main.js");
+  writeFileSync(join(repo.dir, "cli.js"), "// fixture bin loader\n", "utf8");
+  writeFileSync(join(repo.dir, "src", "main.js"), 'console.log("stamp v1");\n', "utf8");
+  writeFileSync(marker, 'console.log("stamp v1");\n', "utf8");
+  writeFileSync(
+    join(repo.dir, "package.json"),
+    `${JSON.stringify(
+      {
+        name: "install-fixture",
+        private: true,
+        scripts: { build: "cp src/main.js dist/src/cli/main.js" },
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  assert.equal(git(["add", "-A"], repo.dir).code, 0);
+  assert.equal(git(["commit", "-qm", "installation"], repo.dir).code, 0);
+  assert.equal(git(["push", "-q", "origin", "main"], repo.dir).code, 0);
+  assert.equal(git(["pull", "-q", "--ff-only"], repo.peer).code, 0);
+
+  // The directory as well as the file: `newestMtime` walks `src/` and would
+  // otherwise pick up the directory's own mtime, which is right now.
+  const past = Date.now() / 1000 - 3600;
+  utimesSync(join(repo.dir, "src", "main.js"), past, past);
+  utimesSync(join(repo.dir, "src"), past, past);
+  return repo;
+}
+
 /** The daemon, once, with both channels off and every path named explicitly. */
 function upOnce(repo: Repo, extra: string[]): Run {
   return cli(
@@ -209,6 +259,7 @@ interface PreflightLine {
   log_touched: boolean;
   dist_stale: boolean;
   action: string;
+  reexec: boolean;
   commit: string | null;
   detail: string;
 }
@@ -256,6 +307,8 @@ test("preflight: fast-forwards a behind checkout, rebuilds a stale dist, and nam
   assert.equal(line.dist_stale, true);
   assert.equal(line.action, "fast-forward+rebuild");
   assert.equal(line.commit, target);
+  // The rebuild means the daemon runs in a child on the fresh build, never here.
+  assert.equal(line.reexec, true);
 
   // The fast-forward really happened, and the started line names what is running.
   assert.equal(head(repo.dir), target);
@@ -269,6 +322,85 @@ test("preflight: fast-forwards a behind checkout, rebuilds a stale dist, and nam
  * assertion it exists for. The preflight treats the two paths identically, and
  * the diverged case below uses the log itself, where the refusal lands first.
  */
+/**
+ * The point of the whole verb, asserted directly: the writer that ends up
+ * running IS the code that was merged.
+ *
+ * The proof is a string. `src/main.js` says "stamp v1" here and "stamp v2"
+ * upstream; the fast-forward lands v2, the rebuild copies it into `dist/`, and
+ * the re-exec runs it. "stamp v2" on stdout can only have come from a process
+ * that started AFTER the build — the parent had already loaded v1 before the
+ * fetch, and no bytes on disk change what Node has loaded.
+ *
+ * It also pins the freshness re-ask: `dist/` was dated an hour into the future,
+ * so the pre-merge answer was "fresh". Only the post-merge answer sees the
+ * staleness the fast-forward itself created.
+ */
+test("preflight: a rebuild re-execs, and the process that ends up running is the new build", () => {
+  const repo = newInstallRepo();
+  const target = upstreamCommit(repo, "src/main.js", 'console.log("stamp v2");\n', "upstream v2");
+
+  const run = upOnce(repo, ["--json", "--root", repo.dir]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+
+  const line = preflightLineOf(run);
+  assert.equal(line.action, "fast-forward+rebuild");
+  assert.equal(line.dist_stale, true, "the staleness the fast-forward itself created");
+  assert.equal(line.reexec, true);
+  assert.equal(line.commit, target, "the line names the commit the child is running");
+
+  // The child ran, and it ran the NEW build. v1 must not appear at all: seeing
+  // it would mean the parent carried on, or the build did not land.
+  assert.match(run.stdout, /stamp v2/u);
+  assert.doesNotMatch(run.stdout, /stamp v1/u);
+  assert.equal(
+    readFileSync(join(repo.dir, "dist", "src", "cli", "main.js"), "utf8"),
+    'console.log("stamp v2");\n',
+  );
+});
+
+test("preflight: the re-exec is stated in the human line, not left to be inferred", () => {
+  const repo = newInstallRepo();
+  upstreamCommit(repo, "src/main.js", 'console.log("stamp v2");\n', "upstream v2");
+
+  const run = upOnce(repo, ["--root", repo.dir]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.match(run.stdout, /fast-forwarded 1 commit and rebuilt/u);
+  assert.match(run.stdout, /in a fresh process on the new build/u);
+  assert.match(run.stdout, /stamp v2/u);
+});
+
+/**
+ * The child must not preflight again. It is handed --no-preflight, so a second
+ * fetch, a second build and an unbounded chain of re-execs are all impossible;
+ * this asserts the one observable consequence, that exactly one preflight line
+ * is printed however deep the handover goes.
+ */
+test("preflight: the child cannot re-exec again", () => {
+  const repo = newInstallRepo();
+  upstreamCommit(repo, "src/main.js", 'console.log("stamp v2");\n', "upstream v2");
+
+  const run = upOnce(repo, ["--json", "--root", repo.dir]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  const preflights = run.stdout
+    .split("\n")
+    .filter((text) => text.trim().startsWith("{"))
+    .map((text) => JSON.parse(text) as { event: string })
+    .filter((entry) => entry.event === "preflight");
+  assert.equal(preflights.length, 1);
+});
+
+test("preflight: the child's exit code is the verb's exit code", () => {
+  const repo = newInstallRepo();
+  // A build that lands a child which fails: the parent must not report success
+  // for a process it handed the terminal to.
+  upstreamCommit(repo, "src/main.js", "process.exit(3);\n", "upstream exits 3");
+
+  const run = upOnce(repo, ["--json", "--root", repo.dir]);
+  assert.equal(run.code, 3, `${run.stdout}${run.stderr}`);
+  assert.equal(preflightLineOf(run).reexec, true);
+});
+
 test("preflight: a clean working copy plus an upstream change to a protected path fast-forwards", () => {
   const repo = newRepo();
   const target = upstreamCommit(repo, QUEUE_RELATIVE, "# queue v2\n", "upstream queue render");
@@ -441,6 +573,7 @@ test("preflight: the --json line carries exactly the frozen fact set", () => {
     "dist_stale",
     "event",
     "log_touched",
+    "reexec",
   ]);
 });
 
