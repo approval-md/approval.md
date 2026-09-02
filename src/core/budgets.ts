@@ -75,6 +75,17 @@
  * The same applies to an unparseable evaluation timestamp (no window can be
  * computed) and to class-scoped rolling limits offered without the class
  * pattern that scopes their consumption. Silence is never a grant.
+ *
+ * ## What this module does NOT evaluate (APRV-173)
+ *
+ * `max_pending` and `requests_per_hour` (SPEC.md §5.2) are request-volume
+ * limits: they cap the approver's queue rather than the world's exposure, they
+ * are counted from `approval.requested` rather than from authorizations, and
+ * `core/intake-limits.ts` evaluates them at intake. They are skipped by name
+ * here rather than refused as unknown limits, and the skip is exactly the two
+ * names that module owns, read from its own exported list. Neither module's
+ * silence widens a ceiling: every limit name is evaluated by one of them, or
+ * fails closed as unknown in this one.
  */
 
 import type { Policy } from "./policy-load.js";
@@ -85,6 +96,7 @@ import {
   usdToMicros,
   type UsdInput,
 } from "./money.js";
+import { isIntakeLimitName } from "./intake-limits.js";
 import { matchesPattern } from "./policy-match.js";
 
 /** Length of the rolling `daily` window: 24 hours, in milliseconds. */
@@ -371,10 +383,19 @@ export function evaluateBudgets(
     // budget is a refused one. Every applicable limit fails, and says why.
     const verdicts: BudgetVerdict[] = [];
     const why = `evaluation timestamp "${evaluationTs}" is not a parseable RFC 3339 instant; the rolling window cannot be computed, so no limit can be proven satisfied`;
-    for (const name of classLimitNames) verdicts.push(refuse(name, "class", why));
+    // APRV-173: the request-volume names are skipped on this path too, so a
+    // limit is owned by exactly one module on every path rather than on most of
+    // them. They are not admitted by the omission — `core/intake-limits.ts`
+    // fails them closed against the same unparseable instant, and it runs
+    // first.
+    for (const name of classLimitNames) {
+      if (isIntakeLimitName(name)) continue;
+      verdicts.push(refuse(name, "class", why));
+    }
     for (const scopeName of globalScopeNames) {
       const budget = globalBudgets[scopeName] ?? {};
       for (const name of Object.keys(budget).sort()) {
+        if (isIntakeLimitName(name)) continue;
         verdicts.push(refuse(`${scopeName}.${name}`, "global", why));
       }
     }
@@ -404,6 +425,16 @@ export function evaluateBudgets(
     for (const name of classLimitNames) {
       const declared = classLimits[name];
       if (declared === undefined) continue;
+      // APRV-173. The request-volume names of SPEC.md §5.2 are not budget
+      // limits and are not unknown ones either: they cap the approver's QUEUE
+      // rather than the world's exposure, they are counted from a different set
+      // of events, and `core/intake-limits.ts` evaluates them at intake. Passed
+      // over here rather than refused, because a policy that declares the
+      // vocabulary §5.2 blesses must not have every one of its requests refused
+      // `budget-exceeded` by the module that does not own it. The two skip
+      // lists are complements: that module evaluates exactly these names and
+      // ignores every other, so no limit falls between the two.
+      if (isIntakeLimitName(name)) continue;
       if (name === PER_ACTION_USD || name === DAILY_USD || name === DAILY_ACTIONS) {
         const unit: BudgetUnit = name === DAILY_ACTIONS ? "count" : "usd";
         const ceiling = ceilingOf(declared, unit);
@@ -459,6 +490,9 @@ export function evaluateBudgets(
       if (budget === undefined) continue;
       const record = budget as Record<string, unknown>;
       for (const name of Object.keys(record).sort()) {
+        // APRV-173, the global half of the same division of labour: a scope's
+        // `max_pending` is a queue ceiling evaluated by `core/intake-limits.ts`.
+        if (isIntakeLimitName(name)) continue;
         const declared = record[name];
         const label = `${scopeName}.${name}`;
         const unit: BudgetUnit = name === DAILY_ACTIONS ? "count" : "usd";
