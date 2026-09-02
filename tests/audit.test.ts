@@ -229,10 +229,10 @@ function sweep(unit: Case, minutes: number, env: NodeJS.ProcessEnv = ENV) {
   });
 }
 
-function runCli(unit: Case, argv: string[]): { code: number; out: string; err: string } {
+async function runCli(unit: Case, argv: string[]): Promise<{ code: number; out: string; err: string }> {
   let out = "";
   let err = "";
-  const code = main([...argv, "--log", unit.logPath], {
+  const code = await main([...argv, "--log", unit.logPath], {
     cwd: unit.dir,
     streams: {
       out: (text) => {
@@ -250,7 +250,7 @@ function runCli(unit: Case, argv: string[]): { code: number; out: string; err: s
 // The frozen vocabulary
 // ===========================================================================
 
-test("the audit refusal-code union is frozen public API", () => {
+test("the audit refusal-code union is frozen public API", async () => {
   assert.deepEqual(
     [...AUDIT_REFUSAL_CODES],
     [
@@ -274,7 +274,7 @@ test("the audit refusal-code union is frozen public API", () => {
   );
 });
 
-test("the sampler's actor is a system identity, distinct from the daemon's", () => {
+test("the sampler's actor is a system identity, distinct from the daemon's", async () => {
   assert.equal(AUDIT_ACTOR, "system:audit");
   assert.match(AUDIT_ACTOR, /^system:/u);
 });
@@ -283,7 +283,7 @@ test("the sampler's actor is a system identity, distinct from the daemon's", () 
 // Eligibility is derived, never self-reported
 // ===========================================================================
 
-test("only supervised executions are candidates", () => {
+test("only supervised executions are candidates", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   startSupervised(unit, "task-042:read", 3); // autonomous
@@ -328,7 +328,7 @@ test("only supervised executions are candidates", () => {
   assertClean(unit);
 });
 
-test("eligibility follows the policy, not anything written into the event", () => {
+test("eligibility follows the policy, not anything written into the event", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   const all = records(unit);
@@ -346,7 +346,7 @@ test("eligibility follows the policy, not anything written into the event", () =
   assert.equal(supervisedExecutions(all, loadPolicy({ file: strict })).length, 0);
 });
 
-test("an unloadable policy makes everything manual, so nothing is a candidate", () => {
+test("an unloadable policy makes everything manual, so nothing is a candidate", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   const load = loadPolicy({ file: join(unit.dir, "does-not-exist.md") });
@@ -354,7 +354,7 @@ test("an unloadable policy makes everything manual, so nothing is a candidate", 
   assert.deepEqual(supervisedExecutions(records(unit), load), []);
 });
 
-test("the derivation reads the registration and the policy, never a claimed autonomy", () => {
+test("the derivation reads the registration and the policy, never a claimed autonomy", async () => {
   // Structural, in the spirit of tests/ratchet.test.ts: global invariant 4 says
   // self-reported fields never reduce scrutiny, and the cheapest way for that to
   // break here is for a future edit to start trusting a payload key. There is
@@ -378,7 +378,7 @@ test("the derivation reads the registration and the policy, never a claimed auto
 // Sampling
 // ===========================================================================
 
-test("a sweep appends one audit.sampled per selected supervised execution", () => {
+test("a sweep appends one audit.sampled per selected supervised execution", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   startSupervised(unit, "task-042:draft2", 3);
@@ -408,7 +408,7 @@ test("a sweep appends one audit.sampled per selected supervised execution", () =
   assertClean(unit);
 });
 
-test("the secret appears nowhere in the log a sweep produced", () => {
+test("the secret appears nowhere in the log a sweep produced", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   sweep(unit, 5);
@@ -421,7 +421,7 @@ test("the secret appears nowhere in the log a sweep produced", () => {
   );
 });
 
-test("a second sweep appends nothing: exactly once per subject", () => {
+test("a second sweep appends nothing: exactly once per subject", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
 
@@ -436,7 +436,7 @@ test("a second sweep appends nothing: exactly once per subject", () => {
   assertClean(unit);
 });
 
-test("a new supervised execution after a sweep is sampled by the next one", () => {
+test("a new supervised execution after a sweep is sampled by the next one", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   sweep(unit, 5);
@@ -452,7 +452,7 @@ test("a new supervised execution after a sweep is sampled by the next one", () =
   assertClean(unit);
 });
 
-test("rate 0 samples nothing and says so", () => {
+test("rate 0 samples nothing and says so", async () => {
   const unit = ready([
     "audit:",
     "  supervised_sample_rate: 0",
@@ -468,7 +468,7 @@ test("rate 0 samples nothing and says so", () => {
   assert.equal(records(unit).filter((record) => record.event === "audit.sampled").length, 0);
 });
 
-test("a missing secret disables sampling and appends nothing", () => {
+test("a missing secret disables sampling and appends nothing", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   const before = records(unit).length;
@@ -482,7 +482,7 @@ test("a missing secret disables sampling and appends nothing", () => {
   assertClean(unit);
 });
 
-test("a partial rate samples a subset and leaves the rest unsampled", () => {
+test("a partial rate samples a subset and leaves the rest unsampled", async () => {
   const unit = ready([
     "audit:",
     "  supervised_sample_rate: 0.5",
@@ -508,7 +508,7 @@ test("a partial rate samples a subset and leaves the rest unsampled", () => {
 // The daemon hook
 // ===========================================================================
 
-test("the daemon sweep appends through the same path and warns on nothing", () => {
+test("the daemon sweep appends through the same path and warns on nothing", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   const warnings: string[] = [];
@@ -528,7 +528,7 @@ test("the daemon sweep appends through the same path and warns on nothing", () =
   assertClean(unit);
 });
 
-test("the daemon sweep reports a disabled sampler without warning and without writing", () => {
+test("the daemon sweep reports a disabled sampler without warning and without writing", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   const warnings: string[] = [];
@@ -561,7 +561,7 @@ test("the daemon sweep reports a disabled sampler without warning and without wr
 // The backlog and the queue projection
 // ===========================================================================
 
-test("QUEUE.md's sampled-audit backlog fills on sample and clears on review", () => {
+test("QUEUE.md's sampled-audit backlog fills on sample and clears on review", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
 
@@ -598,7 +598,7 @@ test("QUEUE.md's sampled-audit backlog fills on sample and clears on review", ()
   assertClean(unit);
 });
 
-test("a review that precedes its sample does not close it", () => {
+test("a review that precedes its sample does not close it", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   sweep(unit, 5);
@@ -624,7 +624,7 @@ test("a review that precedes its sample does not close it", () => {
 // approval audit review — the human-only verb
 // ===========================================================================
 
-test("review is human-only in core", () => {
+test("review is human-only in core", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   sweep(unit, 5);
@@ -639,7 +639,7 @@ test("review is human-only in core", () => {
   assertClean(unit);
 });
 
-test("review refuses not-sampled, already-reviewed and ambiguous-subject", () => {
+test("review refuses not-sampled, already-reviewed and ambiguous-subject", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   sweep(unit, 5);
@@ -678,7 +678,7 @@ test("review refuses not-sampled, already-reviewed and ambiguous-subject", () =>
   assertClean(unit);
 });
 
-test("the reviewed event names the sample and carries the note", () => {
+test("the reviewed event names the sample and carries the note", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   sweep(unit, 5);
@@ -706,7 +706,7 @@ test("the reviewed event names the sample and carries the note", () => {
   assertClean(unit);
 });
 
-test("the note is optional", () => {
+test("the note is optional", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   sweep(unit, 5);
@@ -719,7 +719,7 @@ test("the note is optional", () => {
   assert.equal((result.record.payload as Record<string, unknown>)["note"], undefined);
 });
 
-test("a seq argument names the sample, not the execution it sampled", () => {
+test("a seq argument names the sample, not the execution it sampled", async () => {
   assert.deepEqual(parseSubjectRef("12"), { kind: "seq", seq: 12 });
   assert.deepEqual(parseSubjectRef("task-042:draft"), {
     kind: "action-key",
@@ -732,12 +732,12 @@ test("a seq argument names the sample, not the execution it sampled", () => {
 // The CLI
 // ===========================================================================
 
-test("approval audit list reports the backlog and whether sampling is on", () => {
+test("approval audit list reports the backlog and whether sampling is on", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   sweep(unit, 5);
 
-  const listed = runCli(unit, ["audit", "list", "--policy", unit.policyPath, "--json"]);
+  const listed = await runCli(unit, ["audit", "list", "--policy", unit.policyPath, "--json"]);
   assert.equal(listed.code, 0, listed.err);
   const body = JSON.parse(listed.out) as Record<string, unknown>;
   assert.equal(body["ok"], true);
@@ -749,13 +749,13 @@ test("approval audit list reports the backlog and whether sampling is on", () =>
   assert.equal(listed.out.includes(SECRET), false);
 });
 
-test("approval audit review appends through the CLI and clears the backlog", () => {
+test("approval audit review appends through the CLI and clears the backlog", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   sweep(unit, 5);
   const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
 
-  const run = runCli(unit, [
+  const run = await runCli(unit, [
     "audit",
     "review",
     String(sample.seq),
@@ -774,41 +774,41 @@ test("approval audit review appends through the CLI and clears the backlog", () 
   assertClean(unit);
 });
 
-test("approval audit review refuses an agent identity as a usage error", () => {
+test("approval audit review refuses an agent identity as a usage error", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   sweep(unit, 5);
   const before = records(unit).length;
 
-  const run = runCli(unit, ["audit", "review", "task-042:draft", "--as", "agent:claude", "--json"]);
+  const run = await runCli(unit, ["audit", "review", "task-042:draft", "--as", "agent:claude", "--json"]);
   assert.equal(run.code, 2, "a non-human identity is rejected before core is called");
   assert.match(run.err, /human:<id>/u);
   assert.equal(records(unit).length, before);
 });
 
-test("approval audit review on an unsampled action refuses with exit 1", () => {
+test("approval audit review on an unsampled action refuses with exit 1", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
 
-  const run = runCli(unit, ["audit", "review", "task-042:draft", "--as", "human:carter", "--json"]);
+  const run = await runCli(unit, ["audit", "review", "task-042:draft", "--as", "human:carter", "--json"]);
   assert.equal(run.code, 1);
   const body = JSON.parse(run.err) as { ok: boolean; error: { code: string } };
   assert.equal(body.ok, false);
   assert.equal(body.error.code, "not-sampled");
 });
 
-test("approval audit rejects an unknown subcommand and offers no way to sample", () => {
+test("approval audit rejects an unknown subcommand and offers no way to sample", async () => {
   const unit = ready();
-  const unknown = runCli(unit, ["audit", "sample", "--json"]);
+  const unknown = await runCli(unit, ["audit", "sample", "--json"]);
   assert.equal(unknown.code, 2);
   assert.match(unknown.err, /unknown subcommand/u);
 
-  const help = runCli(unit, ["audit", "--help"]);
+  const help = await runCli(unit, ["audit", "--help"]);
   assert.equal(help.code, 0);
   assert.match(help.out, /THERE IS NO "approval audit sample"/u);
 });
 
-test("audit list and QUEUE.md agree about what is outstanding", () => {
+test("audit list and QUEUE.md agree about what is outstanding", async () => {
   const unit = ready();
   startSupervised(unit, "task-042:draft", 2);
   startSupervised(unit, "task-042:draft2", 3);
@@ -816,7 +816,7 @@ test("audit list and QUEUE.md agree about what is outstanding", () => {
 
   const rendered = renderQueue(unit.logPath, { policy: { file: unit.policyPath } }, at(6));
   assert.equal(rendered.ok, true);
-  const listed = runCli(unit, ["audit", "list", "--json"]);
+  const listed = await runCli(unit, ["audit", "list", "--json"]);
   const body = JSON.parse(listed.out) as Record<string, unknown>;
   assert.equal(body["open"], rendered.ok ? rendered.auditBacklog : -1);
   assert.equal(sampledSubjects(records(unit)).length, 2);

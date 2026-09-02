@@ -56,4 +56,9 @@ budgets:
 audit:
   supervised_sample_rate: 0.15
   sampling_secret_env: APPROVAL_SAMPLING_SECRET   # name only; secret in the env
+
+daemon:
+  read_proof: incremental
+  full_reproof_every: 50
+  full_reproof_after: 60s
 ```

@@ -39,6 +39,7 @@ import { fileURLToPath } from "node:url";
 
 import { appendAttestation } from "../src/core/attest.js";
 import { compareChains } from "../src/core/log-reconcile.js";
+import { storePayload } from "../src/core/payload-store.js";
 import { verify } from "../src/core/verify.js";
 import { logAdvance } from "../src/cli/log-advance.js";
 import { LOG_SYNC_STEPS, logSync, type LogSyncStep } from "../src/cli/log-sync.js";
@@ -393,7 +394,16 @@ test("the injected-failure table covers every step after the snapshot", () => {
   // section exists to establish.
   assert.deepEqual(
     [...RESTORING_STEPS],
-    ["baseline", "fetch", "ff-check", "merge", "reconcile", "projections", "post-verify"],
+    [
+      "baseline",
+      "fetch",
+      "ff-check",
+      "payloads",
+      "merge",
+      "reconcile",
+      "projections",
+      "post-verify",
+    ],
   );
 });
 
@@ -432,6 +442,157 @@ for (const step of RESTORING_STEPS) {
     );
   });
 }
+
+// ===========================================================================
+// APRV-225 — untracked payload files in the fast-forward's way
+// ===========================================================================
+
+/**
+ * The store directory of a checkout, and the file one payload lands in.
+ *
+ * Every payload below is written through `storePayload`, the real store write,
+ * so the filename is a real content address over the real canonical bytes. A
+ * hand-written `<name>.json` would be testing a fixture's spelling of the store
+ * rather than the store.
+ */
+function storeDirOf(dir: string): string {
+  return join(dir, ".approval", "payloads");
+}
+
+function putPayload(dir: string, value: unknown): { hash: string; relative: string } {
+  const stored = storePayload(storeDirOf(dir), value);
+  assert.equal(stored.ok, true, stored.ok ? "" : stored.message);
+  if (!stored.ok) throw new Error("unreachable");
+  return { hash: stored.hash, relative: `.approval/payloads/${stored.hash}.json` };
+}
+
+test("sync: an untracked payload the incoming commit also carries is reconciled, not refused", () => {
+  const repo = newRepo();
+  const peer = secondClone(repo);
+
+  // The advance that merged carries the payload. This checkout independently
+  // holds the same bytes, untracked — which is the 2026-09-02 state exactly:
+  // content addressing makes the two copies identical by construction.
+  const payload = { to: "+15550100", body: "ship it" };
+  const { relative } = putPayload(peer, payload);
+  push(peer, "records advance carrying a payload");
+  const mine = putPayload(repo.dir, payload);
+  assert.equal(mine.relative, relative, "content addressing did not agree across the two checkouts");
+
+  const localBytes = bytes(join(repo.dir, relative));
+  const logBefore = bytes(repo.logPath);
+
+  // Before the fix this is where `git merge --ff-only` refused, and the verb
+  // reported log-sync-git-failed.
+  const result = logSync({ cwd: repo.dir });
+  assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.message}`);
+  if (!result.ok) throw new Error("unreachable");
+
+  assert.equal(result.report.payloadsReconciled, 1);
+  assert.equal(result.report.pulled, 1);
+  // The bytes survived the round trip, and they are now the committed ones.
+  assert.deepEqual(bytes(join(repo.dir, relative)), localBytes);
+  assert.equal(git(["status", "--porcelain", "--", relative], repo.dir).stdout.trim(), "");
+  // The log is the log: this verb reconciles payload FILES and nothing else.
+  assert.deepEqual(bytes(repo.logPath), logBefore);
+  assert.equal(result.report.headBefore?.seq, result.report.headAfter?.seq);
+  assert.equal(verify(repo.logPath).status, "clean");
+  assert.deepEqual(snapshots(repo.dir), []);
+});
+
+test("sync: a payload whose bytes disagree with the incoming commit refuses and touches nothing", () => {
+  const repo = newRepo();
+  const peer = secondClone(repo);
+
+  const { relative } = putPayload(peer, { to: "+15550100", body: "ship it" });
+  push(peer, "records advance carrying a payload");
+
+  // The same NAME, different bytes: the local file is not the material the
+  // incoming commit says that hash addresses.
+  mkdirSync(storeDirOf(repo.dir), { recursive: true });
+  const local = join(repo.dir, relative);
+  writeFileSync(local, '{"body":"ship something else","to":"+15550199"}', "utf8");
+
+  const localBytes = bytes(local);
+  const logBefore = bytes(repo.logPath);
+  const headBefore = git(["rev-parse", "HEAD"], repo.dir).stdout.trim();
+
+  const result = logSync({ cwd: repo.dir });
+  assert.equal(result.ok, false, "a payload that disagrees was accepted");
+  if (result.ok) throw new Error("unreachable");
+
+  assert.equal(result.code, "log-sync-payload-mismatch");
+  assert.equal(result.step, "payloads");
+  assert.equal(result.restored, true);
+  assert.ok(result.message.includes(relative), "the refusal does not name the file");
+
+  // Nothing was merged, nothing was appended, nothing was deleted.
+  assert.equal(git(["rev-parse", "HEAD"], repo.dir).stdout.trim(), headBefore);
+  assert.deepEqual(bytes(local), localBytes, "the disagreeing payload was overwritten or removed");
+  assert.deepEqual(bytes(repo.logPath), logBefore);
+  assert.equal(verify(repo.logPath).status, "clean");
+  assert.deepEqual(snapshots(repo.dir), []);
+});
+
+test("sync: an untracked payload the incoming commit does not carry is left alone", () => {
+  const repo = newRepo();
+  const peer = secondClone(repo);
+  writeFileSync(join(peer, "README.md"), "# moved on without payloads\n", "utf8");
+  push(peer, "unrelated");
+
+  // A payload this checkout recorded and has not advanced yet. It blocks no
+  // fast-forward, so sync has no business in it.
+  const { relative } = putPayload(repo.dir, { to: "+15550100", body: "not advanced yet" });
+  const localBytes = bytes(join(repo.dir, relative));
+
+  const result = logSync({ cwd: repo.dir });
+  assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.message}`);
+  if (!result.ok) throw new Error("unreachable");
+
+  assert.equal(result.report.payloadsReconciled, 0);
+  assert.deepEqual(bytes(join(repo.dir, relative)), localBytes);
+  // Still untracked, exactly as it was found.
+  assert.match(git(["status", "--porcelain", "--", relative], repo.dir).stdout, /\?\?/u);
+  assert.deepEqual(snapshots(repo.dir), []);
+});
+
+test("sync: a file in the payload store that is not named by a hash is refused, not cleared", () => {
+  const repo = newRepo();
+  const peer = secondClone(repo);
+
+  // The incoming commit carries it, so it WILL block the fast-forward — but the
+  // store is addressed by hash and nothing else, so sync has no way to prove
+  // this file is what the incoming commit holds, and says so instead of guessing.
+  mkdirSync(storeDirOf(peer), { recursive: true });
+  writeFileSync(join(storeDirOf(peer), "notes.json"), '{"a":1}', "utf8");
+  push(peer, "something that is not a payload");
+
+  mkdirSync(storeDirOf(repo.dir), { recursive: true });
+  const local = join(repo.dir, ".approval", "payloads", "notes.json");
+  writeFileSync(local, '{"a":1}', "utf8");
+
+  const result = logSync({ cwd: repo.dir });
+  assert.equal(result.ok, false);
+  if (result.ok) throw new Error("unreachable");
+  assert.equal(result.code, "log-sync-payload-mismatch");
+  assert.ok(result.message.includes("notes.json"));
+  assert.equal(existsSync(local), true, "a file sync could not vouch for was removed anyway");
+});
+
+test("sync: --json reports the payload count", () => {
+  const repo = newRepo();
+  const peer = secondClone(repo);
+  const payload = { to: "+15550100", body: "ship it" };
+  putPayload(peer, payload);
+  push(peer, "records advance carrying a payload");
+  putPayload(repo.dir, payload);
+
+  const run = runCli(["log", "sync", "--json"], repo.dir);
+  assert.equal(run.code, 0, run.stderr);
+  const parsed = JSON.parse(run.stdout) as { ok: boolean; payloads: { reconciled: number } };
+  assert.equal(parsed.ok, true);
+  assert.deepEqual(parsed.payloads, { reconciled: 1 });
+});
 
 // ===========================================================================
 // AC 4 — git stash appears nowhere

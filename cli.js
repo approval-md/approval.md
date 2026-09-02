@@ -23,5 +23,8 @@ if (!existsSync(entry)) {
   process.exitCode = 4;
 } else {
   const { main } = await import(entry.href);
-  process.exitCode = main(process.argv.slice(2));
+  // `main` is asynchronous since APRV-209: every verb is loaded on demand, and
+  // ESM has no synchronous dynamic import. The exit code still travels through
+  // `process.exitCode`, so the flush behaviour described above is unchanged.
+  process.exitCode = await main(process.argv.slice(2));
 }
