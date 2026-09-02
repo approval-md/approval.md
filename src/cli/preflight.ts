@@ -405,6 +405,15 @@ export function inspectPreflight(input: PreflightInput): PreflightReport {
   let base: string;
   let warning: string | null = null;
   if (input.fetch) {
+    // A repository with no remote configured is not an unreachable remote. It
+    // is a repository that has no origin to be behind — a local evidence repo,
+    // a fixture, a checkout somebody made with `git init` — and reporting
+    // "could not reach the remote" there would be a warning about a question
+    // nobody asked. Skipped, and therefore silent.
+    const configured = git(["remote", "get-url", remote], root);
+    if (!configured.ok) {
+      return skipped(`no ${remote} remote is configured in ${root}, so there is nothing to be behind`, root);
+    }
     const fetched = fetchBase(root, remote, branch);
     if (!fetched.ok) {
       return {

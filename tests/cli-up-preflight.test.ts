@@ -394,6 +394,22 @@ test("preflight: a fetch that cannot reach the remote is a warning, and the runt
   assert.deepEqual([line.behind_by, line.ahead_by], [0, 0]);
 });
 
+/**
+ * A repository with no remote is not an unreachable remote. It is a repository
+ * with no origin to be behind — the shape `--git-evidence` creates in the log
+ * home, and any `git init` checkout — and a warning there would be about a
+ * question nobody asked. So it skips, and a skip says nothing at all.
+ */
+test("preflight: a repository with no origin configured is silent, not a warning", () => {
+  const repo = newRepo();
+  assert.equal(git(["remote", "remove", "origin"], repo.dir).code, 0);
+
+  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.doesNotMatch(run.stdout, /"preflight"/u);
+  assert.doesNotMatch(run.stderr, /preflight_warning/u);
+});
+
 test("preflight: --no-preflight skips it entirely, even from a state that would refuse", () => {
   const repo = newRepo();
   writeFileSync(join(repo.dir, "local.txt"), "mine\n", "utf8");

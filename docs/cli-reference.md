@@ -2804,6 +2804,13 @@ has a local log, a local policy, and a human holding the phone. The failure is a
 warning on stderr, the runtime starts on the build it already has, and the
 `preflight` line says `"action":"fetch-failed"`.
 
+**Where there is no question to ask, it says nothing.** Outside a git checkout,
+or in a repository with no `origin` configured (a `--git-evidence` log home, a
+bare `git init`), the preflight skips and prints no line at all: "there is no
+origin here" is a property of the deployment, not an event in it, and a log-only
+install would otherwise open every start with it. `approval doctor`'s
+`main-behind-origin` row is where that state is visible.
+
 `--no-preflight` opts out, on both spellings of the verb.
 `--preflight-remote` and `--preflight-base` default to `origin` and the
 checked-out branch. The `--json` stream gains two additive lines and no field on
