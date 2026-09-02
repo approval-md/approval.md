@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://approval.md/schema/values.schema.json",
+  "title": "APPROVAL.md values block",
+  "description": "SPEC.md §5.3: the parsed YAML of the OPTIONAL second fenced block inside APPROVAL.md, marked ```yaml approval-values```. It is the human-to-agent direction of a file that until now carried control in one direction only: the policy block says what an agent may do, and this block says what the operator values and how they read what comes back. It is human-authored GUIDANCE and it is never policy. No enforcement path reads it — not routing, not policy matching, not the sampler, not budgets, not token minting, not execution — which is SPEC.md §11.1 invariant 10 (\"guidance never reaches enforcement\"), pinned by tests/values-inert.test.ts. A values block that fails this schema never makes the policy block unloadable; the two are parsed and judged independently, and the failure of guidance can never widen or narrow a class. Because the block lives inside APPROVAL.md, editing it changes the file's bytes and therefore invalidates the whole-file attestation, so a values edit goes through the same attestation ceremony as a policy edit (SPEC.md §5.3). Absence is a declaration, never a default: a file with no values block means the operator has declared no values here, and an agent-facing surface must render it as absence rather than inventing a neutral middle.\n\nThe key set is closed (additionalProperties: false at every level) for the same reason the policy block is: an unrecognised key is something the author believed was in force and the runtime did not understand. Keys deliberately REJECTED, recorded here so the rejection is reviewable rather than forgotten: (1) anything class-shaped or override-shaped — a `classes:` map, an `autonomy:`, a `defaults:`, an `overrides:` — because that is policy, and admitting a policy-shaped key into the guidance block would make invariant 10 unprovable: a static guard cannot show that guidance never reaches enforcement once guidance is allowed to LOOK like enforcement; (2) `priority` and `weight`, because a number invites arithmetic and there is no arithmetic to do here — nothing ranks, sums or thresholds these entries, and a field that suggests it does would be read as a knob; (3) `hate`, because a fourth standing grade invites an escalation ladder, and the standing lists are deliberately three (love/like/dislike). Intensity is carried where it is actually observed, by the event vocabulary's `reaction` (disliked|indifferent|liked|loved, SPEC.md §5.2), not by an ever-longer list of nouns in a static file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "SPEC.md §5.3: values format version. The only REQUIRED key: a block with no version cannot be interpreted safely under a future format revision. It is an INTEGER here, unlike the policy block's quoted string version (\"0.1\"), and deliberately so. The policy version is quoted because it is a dotted format identifier that YAML would otherwise coerce to the float 0.1, losing the distinction between \"0.10\" and \"0.1\". This block has no dotted versions and never will: it is a small, closed key set that either is revision 1 or is a revision this runtime does not know, so a bare integer is the honest type and leaves nothing for YAML to coerce.",
+      "examples": [1]
+    },
+    "love": {
+      "$ref": "#/$defs/valueList",
+      "description": "SPEC.md §5.3: what the operator loves, in their own words. The strongest of the three standing grades. Guidance for an agent reading the file, never an input to any decision the runtime makes."
+    },
+    "like": {
+      "$ref": "#/$defs/valueList",
+      "description": "SPEC.md §5.3: what the operator likes. The middle standing grade, and the one that carries most of the ordinary content."
+    },
+    "dislike": {
+      "$ref": "#/$defs/valueList",
+      "description": "SPEC.md §5.3: what the operator dislikes. The negative standing grade. It is NOT a prohibition: a prohibition belongs in the policy block, where it is enforced; an entry here is a preference an agent should weigh in how it works, and a runtime that refused an action because of it would be enforcing guidance."
+    },
+    "wants": {
+      "$ref": "#/$defs/valueList",
+      "description": "SPEC.md §5.3: what the operator wants FROM the agent, as behaviour rather than as taste. Where love/like/dislike describe the operator, this describes the working relationship they are asking for. Examples: \"honest opinions on the work, including when you think a task is wrong\"; \"a journal entry of about five points per milestone\". Still guidance: nothing here is checked, counted, or enforced, and an agent that does not do these things is not refused by anything."
+    },
+    "responds": {
+      "type": "string",
+      "maxLength": 500,
+      "description": "SPEC.md §5.3: how the operator reads and answers — the shape of the human end of the loop, so an agent can read silence, terseness or delay correctly. Deliberately a SINGLE SCALAR rather than a list: a list here would grow into a second rules document sitting beside the policy block, and the one thing this block must never become is a place where rules live outside the enforced file. One sentence or two, and no more room than that.",
+      "examples": [
+        "Usually within the hour on the phone; a bare 'ok' means yes and is not curtness."
+      ]
+    }
+  },
+  "$defs": {
+    "valueList": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 20,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      },
+      "description": "SPEC.md §5.3: a standing list of short human-authored statements. Entries are unique (a repeated entry is an editing accident, and there is no counting here for a repeat to mean anything to) and capped at twenty of at most 200 characters each. The caps are not storage limits: this block is read by a person and by an agent's prompt, and a list long enough to need scrolling is one nobody reads, which is the failure mode guidance has instead of a validation error. An empty array is valid and says the operator considered this grade and had nothing to put in it."
+    }
+  }
+}

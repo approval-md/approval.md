@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "love": [
+    "seeing the real change, not a description of it",
+    "a runbook I can paste into a terminal"
+  ],
+  "like": [
+    "success reported first, caveats after",
+    "small reviewable commits"
+  ],
+  "dislike": [
+    "prose where a command would do",
+    "being asked to approve something I cannot see"
+  ],
+  "wants": [
+    "honest opinions on the work, including when you think a task is wrong",
+    "a journal entry of about five points per milestone"
+  ],
+  "responds": "Usually within the hour on the phone; a bare 'ok' means yes and is not curtness."
+}

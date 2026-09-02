@@ -523,3 +523,108 @@ test("an attestation may name the prompt it answers, and need not", () => {
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// The human-to-agent direction (APRV-237)
+// ---------------------------------------------------------------------------
+
+test("reaction is graded, optional, and never a fifth word (APRV-237)", () => {
+  const review = fixture("audit.reviewed");
+  const reviewPayload = (review["payload"] ?? {}) as Record<string, unknown>;
+
+  // The whole vocabulary, and a note alongside it so the two that require one
+  // are covered by the same loop as the two that do not.
+  for (const reaction of ["disliked", "indifferent", "liked", "loved"]) {
+    const result = validate("event", {
+      ...review,
+      payload: { ...reviewPayload, reaction, note: "said what I thought" },
+    });
+    assert.equal(
+      result.ok,
+      true,
+      `audit.reviewed rejected reaction "${reaction}": ${
+        result.ok ? "" : JSON.stringify(result.errors)
+      }`,
+    );
+  }
+
+  // A fifth word is refused at the write boundary rather than left to
+  // accumulate as a synonym one surface writes and another cannot read.
+  for (const reaction of ["meh", "hated", "OK", "", 1, null]) {
+    assert.equal(
+      validate("event", { ...review, payload: { ...reviewPayload, reaction } }).ok,
+      false,
+      `audit.reviewed accepted reaction ${JSON.stringify(reaction)}`,
+    );
+  }
+
+  // Absence is absence. A review with no reaction is the review this project
+  // has always written, and it must stay valid forever: the field is additive
+  // and its absence is never read as `indifferent`.
+  assert.equal(
+    validate("event", review).ok,
+    true,
+    "audit.reviewed must stay valid with no reaction at all",
+  );
+});
+
+test("the extreme reactions carry a note and the ordinary ones need none (APRV-237)", () => {
+  const review = fixture("audit.reviewed");
+  const reviewPayload = (review["payload"] ?? {}) as Record<string, unknown>;
+
+  // `loved` and `disliked` are the grades an agent is most likely to act on and
+  // least able to interpret alone, so the schema requires the words that say
+  // what happened — and a blank string is not those words.
+  for (const reaction of ["loved", "disliked"]) {
+    assert.equal(
+      validate("event", { ...review, payload: { ...reviewPayload, reaction } }).ok,
+      false,
+      `audit.reviewed accepted "${reaction}" with no note`,
+    );
+    assert.equal(
+      validate("event", { ...review, payload: { ...reviewPayload, reaction, note: "" } }).ok,
+      false,
+      `audit.reviewed accepted "${reaction}" with a blank note`,
+    );
+  }
+
+  // The ordinary readings stay one tap: demanding prose for them turns a signal
+  // into a form, and a form is a signal switched off.
+  for (const reaction of ["liked", "indifferent"]) {
+    assert.equal(
+      validate("event", { ...review, payload: { ...reviewPayload, reaction } }).ok,
+      true,
+      `audit.reviewed required a note for "${reaction}"`,
+    );
+  }
+});
+
+test("a grant may carry the same four-word reaction (APRV-237)", () => {
+  const grant = fixture("approval.granted");
+  const payload = (grant["payload"] ?? {}) as Record<string, unknown>;
+
+  assert.equal(
+    validate("event", {
+      ...grant,
+      payload: { ...payload, reaction: "loved", note: "the one I have been waiting for" },
+    }).ok,
+    true,
+    "approval.granted rejected a loved reaction carrying a note",
+  );
+  assert.equal(
+    validate("event", { ...grant, payload: { ...payload, reaction: "liked" } }).ok,
+    true,
+    "approval.granted rejected a liked reaction",
+  );
+  assert.equal(
+    validate("event", { ...grant, payload: { ...payload, reaction: "hated" } }).ok,
+    false,
+    "approval.granted accepted a fifth word",
+  );
+  // One field name, one enum, two surfaces: the note rule holds here too.
+  assert.equal(
+    validate("event", { ...grant, payload: { note: "", reaction: "disliked" } }).ok,
+    false,
+    "approval.granted accepted a disliked reaction with a blank note",
+  );
+});
