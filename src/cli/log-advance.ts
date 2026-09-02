@@ -2,9 +2,9 @@
  * `approval log advance` (APRV-125) — the commit-and-push half of the log
  * ritual, as a verb.
  *
- * The APRV-92 flow, written down: the log's appends since the last commit are
- * staged, committed with a message naming the seq range they cover, and pushed
- * to a short-lived records branch that exists for exactly that commit. Main is
+ * The APRV-92 flow, written down: the log's appends the remote does not have
+ * yet are gathered into a commit whose message names the seq range they cover,
+ * and pushed to a short-lived records branch that exists for it. Main is
  * protected here, so the commit reaches it through a pull request, and the PR
  * step is `--pr`, which runs the ordinary gated `gh` path.
  *
@@ -21,11 +21,29 @@
  * **`log-advance-checkout-required`.** This verb never checks out anything. The
  * checkout is the footgun: a branch switch with an uncommitted working log
  * rewinds `events.jsonl` under whatever holds it open, which is fork 2 of
- * 2026-08-20. It commits on the branch you are standing on and pushes THAT
- * commit to a records branch by ref, which moves no HEAD and touches no file.
+ * 2026-08-20. It builds the commit with a scratch index and pushes THAT commit
+ * to a records branch by refspec, which moves no HEAD and touches no file.
+ *
+ * ## The base is the remote, not the local branch (APRV-203)
+ *
+ * The verb used to commit on the branch you were standing on, which made the
+ * operator responsible for that branch being current. A checkout whose local
+ * `main` was behind origin produced a records commit parented on a stale tip,
+ * carrying a tree that silently reverted everything main had merged since. So
+ * the verb fetches first and bases its commit on the remote's tip: `git
+ * read-tree` fills a scratch index from origin's tree, the log, the queue
+ * projection and the payload store are laid over it from the working tree, and
+ * `commit-tree` parents the result on origin. HEAD, the operator's index and
+ * every file in the working tree are exactly as they were found.
  *
  * **`log-advance-not-primary`.** Same rule as sync's: the committed log has one
  * home, and it is not a worktree.
+ *
+ * A local branch that is AHEAD of origin with commits this verb did not make is
+ * not a refusal: the advance is based on origin either way, and those commits
+ * are simply not part of it. What IS refused is a working log that origin's log
+ * is not a prefix of, in either direction, because an advance is only ever the
+ * records origin does not have yet.
  *
  * ## This verb appends no event
  *
@@ -42,8 +60,10 @@ import { withAppendLock } from "../core/log.js";
 import type { LogHead } from "../core/verify.js";
 import { verify } from "../core/verify.js";
 import {
+  commitOnBase,
   currentBranch,
   failureText,
+  fetchBase,
   gh,
   git,
   outputLines,
@@ -52,6 +72,7 @@ import {
   showBlob,
 } from "./git-scope.js";
 import { compareChains, type LogDrift } from "../core/log-reconcile.js";
+import { silentProgress, type ProgressReporter } from "./progress.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
 import { DEFAULT_QUEUE_PATH } from "./render.js";
 
@@ -78,6 +99,9 @@ export const LOG_ADVANCE_REFUSAL_CODES = [
   "log-advance-checkout-required",
   "log-advance-unverified",
   "log-advance-locked",
+  "log-advance-fetch-failed",
+  "log-advance-behind-remote",
+  "log-advance-remote-diverged",
   "log-advance-git-failed",
   "log-advance-push-rejected",
   "log-advance-pr-failed",
@@ -90,19 +114,33 @@ export interface LogAdvanceOptions {
   /** The records branch to push to. Default `records-log-<YYYY-MM-DD>`. */
   branch?: string | null;
   remote?: string;
+  /**
+   * The remote branch the records commit is parented on. Defaults to the branch
+   * the checkout is standing on, which in the primary checkout is the trunk.
+   */
+  base?: string | null;
   /** Open the pull request through `gh` as well as pushing. */
   pr?: boolean;
   /** Report what would happen and stage, commit, and push nothing. */
   dryRun?: boolean;
   /** The date the default branch name is built from. Injected by the CLI edge. */
   today?: string;
+  /**
+   * Where the phase narration goes (APRV-167/APRV-203). The CLI edge passes a
+   * reporter over stderr, and `--json` passes none: a machine consumer parses
+   * one object and progress on its stream would corrupt it.
+   */
+  progress?: ProgressReporter;
 }
 
 export interface LogAdvanceReport {
   root: string;
+  /** The branch the checkout is standing on. It is not moved, ever. */
   branch: string;
   recordsBranch: string;
   remote: string;
+  /** The remote branch this commit is parented on, and the sha it was at. */
+  base: { branch: string; sha: string } | null;
   /** The seq range this advance carries, inclusive; null when nothing is owed. */
   range: { from: number; to: number } | null;
   committedHead: LogHead | null;
@@ -204,9 +242,11 @@ interface UnderLock {
 
 function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
   const { root, logPath, branch, remote, dryRun, options } = ctx;
+  const progress = options.progress ?? silentProgress;
 
   // 1. The chain, verified. A commit of a log that does not verify would be
   //    publishing the break.
+  progress.phase("verifying the log chain before anything is committed from it");
   const verified = verify(logPath);
   if (verified.status !== "clean") {
     return {
@@ -240,13 +280,28 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
     };
   }
 
-  // 3. What is owed: the seq range between the committed head and the working
-  //    head. Read through the same comparison sync and doctor read.
-  const committedBlob = showBlob(root, "HEAD", repoPath(root, logPath));
+  // 3. The base: the remote's tip, fetched by this verb rather than by the
+  //    operator (APRV-203). Everything after this is measured against it.
+  const baseBranch = options.base ?? branch;
+  progress.phase(`fetching ${remote}/${baseBranch}: an advance is based on the remote, not on this checkout`);
+  const fetched = fetchBase(root, remote, baseBranch);
+  if (!fetched.ok) {
+    return {
+      ok: false,
+      code: "log-advance-fetch-failed",
+      message: `${fetched.message}. An advance bases its commit on ${remote}/${baseBranch}, so it cannot proceed without knowing where that is. Nothing was committed. Fix the remote (network, credentials, or a branch named something else — pass \`--base <branch>\`) and run this again.`,
+      quote: fetched.quote,
+    };
+  }
+  const baseSha = fetched.sha;
+
+  // 4. What is owed: the seq range between ORIGIN's committed log and the
+  //    working head. Read through the same comparison sync and doctor read.
+  const committedBlob = showBlob(root, baseSha, repoPath(root, logPath));
   const compared = compareChains(
     { label: `the working log ${logPath}`, text: textOfWorking(logPath) },
     {
-      label: `the committed log HEAD:${repoPath(root, logPath)}`,
+      label: `the committed log ${remote}/${baseBranch}:${repoPath(root, logPath)}`,
       text: committedBlob === null ? "" : committedBlob.toString("utf8"),
     },
   );
@@ -257,10 +312,21 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
   if (drift.relation === "diverged") {
     return {
       ok: false,
-      code: "log-advance-unverified",
-      message: `the working log and the committed log part at seq ${String(
+      code: "log-advance-remote-diverged",
+      message: `the working log and ${remote}/${baseBranch}'s log part at seq ${String(
         drift.firstDivergentSeq,
-      )}: two chains, not one. Nothing is advanced over a fork. Run \`approval doctor\` for the log-drift report and reconcile by hand.`,
+      )}: two chains, not one. Nothing is advanced over a fork, and nothing was committed. Run \`approval doctor\` for the log-drift report; hash chains do not merge, so which of the two is the log is a human decision.`,
+    };
+  }
+  if (drift.relation === "behind") {
+    return {
+      ok: false,
+      code: "log-advance-behind-remote",
+      message: `${remote}/${baseBranch} carries records this working log does not (its head is ${String(
+        drift.committedHead?.seq ?? 0,
+      )}, the working head is ${String(
+        drift.workingHead?.seq ?? 0,
+      )}). An advance publishes records the remote lacks, so there is nothing here to publish and committing would propose an older chain than the one already on the remote. Run \`approval log sync\` first, then run this again. Nothing was committed.`,
     };
   }
   const committedSeq = drift.committedHead?.seq ?? 0;
@@ -283,17 +349,18 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
   }
 
   const message = range === null ? "" : advanceMessage(range, branch);
-  const stagedNow = ADVANCE_PATHS.filter((path) => existsSync(join(root, path)));
+  const carried = ADVANCE_PATHS.filter((path) => existsSync(join(root, path)));
 
   const report = (over: Partial<LogAdvanceReport>): LogAdvanceReport => ({
     root,
     branch,
     recordsBranch,
     remote,
+    base: { branch: baseBranch, sha: baseSha },
     range,
     committedHead: drift.committedHead,
     workingHead: drift.workingHead,
-    staged: stagedNow,
+    staged: carried,
     message,
     commit: null,
     pushed: false,
@@ -302,54 +369,71 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
     ...over,
   });
 
-  if (range === null || dryRun) return { ok: true, report: report({ staged: range === null ? [] : stagedNow }) };
+  if (range === null || dryRun) return { ok: true, report: report({ staged: range === null ? [] : carried }) };
 
-  // 4. Stage exactly those paths, by name. Never `git add -A`.
-  const added = git(["add", "--", ...stagedNow], root);
-  if (!added.ok) {
+  // 5. Build the commit on the remote's tip, in a scratch index. Exactly those
+  //    paths, laid over origin's tree; the operator's index is never touched
+  //    and nothing is checked out.
+  progress.phase(
+    `building the records commit on ${remote}/${baseBranch} ${baseSha.slice(0, 12)} (nothing is checked out)`,
+  );
+  const built = commitOnBase(root, { base: baseSha, paths: carried, message });
+  if (!built.ok) {
     return {
       ok: false,
       code: "log-advance-git-failed",
-      message: `\`git add\` failed: ${failureText(added)}; nothing was committed.`,
-      quote: outputLines(added.stderr, added.stdout),
+      message: `${built.message}; nothing was committed and the checkout is untouched.`,
+      quote: built.quote,
     };
   }
-
-  // 5. Commit on the branch we are standing on. No checkout, ever.
-  const committed = git(["commit", "-m", message, "--", ...stagedNow], root);
-  if (!committed.ok) {
-    return {
-      ok: false,
-      code: "log-advance-git-failed",
-      message: `\`git commit\` failed: ${failureText(committed)}`,
-      quote: outputLines(committed.stderr, committed.stdout),
-    };
+  if (built.unchanged) {
+    // The chains said records were owed and the trees say otherwise, which
+    // means the log file on the remote already carries these bytes under a
+    // different commit. Nothing to publish, and an empty commit would say
+    // otherwise.
+    return { ok: true, report: report({ commit: null, staged: [] }) };
   }
-  const commit = git(["rev-parse", "HEAD"], root).stdout.trim();
+  const commit = built.sha;
 
-  // 6. Push THAT commit to the records branch, by refspec. `HEAD:<branch>`
+  // 6. Anchor the commit before pushing, so a rejected push loses nothing. A
+  //    ref under `refs/approval/` rather than a branch: it keeps the object
+  //    reachable without adding a branch nobody asked for, and it moves no HEAD.
+  const anchor = `refs/approval/advance/${recordsBranch}`;
+  git(["update-ref", anchor, commit], root);
+
+  // 7. Push THAT commit to the records branch, by refspec. A sha on the left
   //    moves no local ref and checks nothing out: the operator's branch stays
   //    exactly where they left it.
-  const pushed = git(["push", remote, `HEAD:refs/heads/${recordsBranch}`], root);
+  progress.phase(`pushing ${commit.slice(0, 12)} to ${remote} ${recordsBranch}`);
+  const pushed = git(["push", remote, `${commit}:refs/heads/${recordsBranch}`], root);
   if (!pushed.ok) {
     return {
       ok: false,
       code: "log-advance-push-rejected",
-      message: `the advance is committed LOCALLY on ${branch} as ${commit.slice(
+      message: `the advance is built on ${remote}/${baseBranch} as ${commit.slice(
         0,
         12,
-      )}, but \`git push ${remote} HEAD:refs/heads/${recordsBranch}\` was REJECTED: ${failureText(
+      )} and held at ${anchor}, but \`git push ${remote} ${commit.slice(
+        0,
+        12,
+      )}:refs/heads/${recordsBranch}\` was REJECTED: ${failureText(
         pushed,
-      )}. The commit exists and nothing was lost; push it when the remote will take it.`,
+      )}. The commit exists and nothing was lost; push it when the remote will take it (\`git push ${remote} ${commit.slice(
+        0,
+        12,
+      )}:refs/heads/${recordsBranch}\`). Your checkout is exactly as you left it, on ${branch}.`,
       quote: outputLines(pushed.stderr, pushed.stdout),
     };
   }
 
   if (options.pr !== true) {
+    progress.done();
     return { ok: true, report: report({ commit, pushed: true }) };
   }
 
+  progress.phase(`opening the pull request for ${recordsBranch}`);
   const pr = ghPullRequest(root, recordsBranch, range);
+  progress.done();
   if (!pr.ok) {
     return {
       ok: false,

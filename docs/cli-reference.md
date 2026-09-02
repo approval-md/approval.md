@@ -173,13 +173,33 @@ container, and an event for it would be the log narrating its own filesystem.
 
 ## log advance
 
-The commit-and-push half, and the APRV-92 flow written down. The log's
-uncommitted records are staged, committed with a message naming the seq range
-they cover, and pushed to a short-lived records branch that exists for exactly
-that commit. Main is protected here, so the commit reaches it through a pull
-request; `--pr` opens that pull request through the ordinary `gh` path.
+The commit-and-push half, and the APRV-92 flow written down. The records the
+remote does not have yet are gathered into a commit whose message names the seq
+range they cover, and pushed to a short-lived records branch that exists for
+exactly that commit. Main is protected here, so the commit reaches it through a
+pull request; `--pr` opens that pull request through the ordinary `gh` path.
 
-Three refusals are the point of the verb.
+**You do not fetch or reset first (APRV-203).** The verb owns its own git
+preconditions: it fetches the base branch (the one you are standing on, or
+`--base <name>`), builds the commit on `origin/<base>` in a scratch index rather
+than on your branch's tip, and pushes it by refspec. Your checkout ends the verb
+exactly as it started it: same branch, same index, same working tree. A local
+branch that is AHEAD of origin with commits the verb did not make is not a
+refusal; the advance is based on origin either way and those commits are simply
+not part of it.
+
+Five refusals are the point of the verb.
+
+`log-advance-fetch-failed`: the base branch could not be fetched, so there is no
+base to build on. Nothing is committed.
+
+`log-advance-behind-remote`: `origin/<base>` carries log records this working log
+does not, so there is nothing here to publish and an advance would propose the
+shorter chain. Run `approval log sync` first.
+
+`log-advance-remote-diverged`: the working log and the remote's log are two
+chains rather than one. Hash chains do not merge, so which of them is the log is
+a human decision; `approval doctor` names the first divergent seq.
 
 `log-advance-dirty-stage`: the staged set must be EXACTLY the log, `QUEUE.md`,
 and `.approval/payloads/`. What this prevents is a log commit riding a branch
@@ -190,9 +210,9 @@ decision to make.
 
 `log-advance-checkout-required`: this verb checks out nothing. The checkout is
 the footgun, because a branch switch with an uncommitted working log rewinds
-`events.jsonl` under whatever holds it open. It commits on the branch you are
-standing on and pushes THAT commit by refspec, which moves no local ref and
-leaves your checkout where you left it.
+`events.jsonl` under whatever holds it open. It assembles the commit in a scratch
+index (`GIT_INDEX_FILE`, `read-tree`, `write-tree`, `commit-tree`) and pushes
+that commit by refspec, which moves no local ref and touches no file.
 
 `log-advance-not-primary`: sync's rule, unchanged.
 
@@ -201,7 +221,7 @@ the record of itself, in git, where a reader can see exactly which bytes moved.
 
 ```
 {"ok":true,"root":"…","branch":"main","recordsBranch":"records-log-2026-08-26",
- "remote":"origin","range":{"from":39,"to":41},
+ "remote":"origin","base":{"branch":"main","sha":"…"},"range":{"from":39,"to":41},
  "head":{"committed":{"seq":38,"hash":"…"},"working":{"seq":41,"hash":"…"}},
  "staged":[".approval/log/events.jsonl",".approval/QUEUE.md",".approval/payloads"],
  "message":"Log advance: seq 39..41 (main)","commit":"…","pushed":true,
@@ -322,6 +342,12 @@ verifying the log chain before anything is read from it
   1750/3184 records
   3184/3184 records
 recovering the attested baseline and diffing it against the live policy
+fetching origin/main: the amendment is based on the remote, not on this checkout
+verifying that origin/main 4c1d90ab2f77 is this edit's base
+running the policy suite against the amended file (21 pinned resolutions)
+building the amendment commit on origin/main 4c1d90ab2f77 (nothing is checked out)
+pushing 9b31c0de51aa to origin policy-amend-7413
+opening the pull request for policy-amend-7413
 ```
 
 A terminal gets the counts repainted onto one line under the phase name, erased
@@ -331,13 +357,35 @@ a `--json` refusal emits its error object on stderr and callers parse that
 stream whole, so narration there would break every machine consumer of a
 refusal.
 
+**The ceremony is self-syncing (APRV-203).** Your part is: edit the line, run the
+verb, tap. There is no `git fetch` and no `git reset` to run first, and running
+one is not expected of you. `--commit` fetches the remote itself, bases the
+amendment commit on `origin/<default branch>` rather than on your branch's tip,
+and pushes it by refspec. It checks nothing out: on the branch flow your checkout
+stays on the branch it was on and the commit is held on `policy-amend-<seq>`; on
+the direct flow the branch moves only when it was already sitting on the base, so
+a checkout that had fallen behind is left where it is and told so. A local branch
+AHEAD of the remote is not a refusal — the commit is parented on the remote
+either way — but three things are, all of them before the attestation:
+`fetch-failed`, `base-policy-diverged` (the remote's policy is not the attested
+text this edit was written against, so committing would revert somebody else's
+amendment) and `base-log-diverged` (the remote's log is not a prefix of yours).
+
+**The policy suite runs before the push.** Where the policy being amended is
+this repository's own, `--commit` resolves every pinned class against the AMENDED
+file and refuses `policy-suite-failed` when any of them moved, printing the
+expectation diff. Nothing is attested, committed or pushed on that path. The pins
+live in `src/core/policy-expectations.ts`, which the dogfood suite imports too, so
+the check on the laptop and the check in CI are one list: update the pins, run
+`npm run build`, and re-run the ceremony.
+
 **Branch protection (the two flows).** A protected default branch rejects the
 push that would land the amendment, so this verb detects one and offers the flow
-that works. DIRECT is `git add` + `git commit` on the branch you are standing
-on, then `git push origin <branch>`. BRANCH is `git checkout -b <name>`, the
-same one commit, `git push -u origin <name>`, then `gh pr create` with a title
-naming the seq and a body stating the one-commit rule. Merge that PR with a
-merge commit, so the policy edit and its attestation stay one commit on main.
+that works. DIRECT assembles the commit and pushes it at `origin/<branch>`.
+BRANCH holds the same one commit on `<name>`, pushes it there, then runs `gh pr
+create` with a title naming the seq and a body stating the one-commit rule. Merge
+that PR with a merge commit, so the policy edit and its attestation stay one
+commit on main.
 
 Detection runs `gh api repos/{owner}/{repo}/branches/<default>/protection`: exit
 0 is protected, 404 is unprotected, and no `gh` / no GitHub remote / no readable
@@ -376,7 +424,8 @@ else — a commit that swept in an unrelated staged edit would make "this commit
 is the amendment" false. On the branch flow it also refuses when there is no
 `origin` remote, and when a `--branch` name already exists. Every one of those
 refusals happens BEFORE the attestation, so a refused `--commit` never leaves an
-attested policy without its commit.
+attested policy without its commit. The same holds for the fetch, the two base
+checks and the policy suite above.
 
 `--commit` also pushes, on both flows. When there is no `origin` to push to, the
 direct flow reports the push as still to run rather than listing it among the

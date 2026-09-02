@@ -469,12 +469,13 @@ function committedPaths(dir: string, rev = "HEAD"): string[] {
     .sort();
 }
 
-test("advance: stages exactly the three paths, names the seq range, pushes a records branch", () => {
+test("advance: carries exactly the three paths, names the seq range, pushes a records branch", () => {
   const repo = newRepo();
   const from = appendRecord(repo.dir, "advance-1");
   const to = appendRecord(repo.dir, "advance-2");
   const logBefore = bytes(repo.logPath);
   const branchBefore = git(["rev-parse", "--abbrev-ref", "HEAD"], repo.dir).stdout.trim();
+  const headBefore = git(["rev-parse", "HEAD"], repo.dir).stdout.trim();
 
   // The other two allowed paths, both changed, so all three ride the commit.
   writeFileSync(join(repo.dir, QUEUE_RELATIVE), "# queue, regenerated\n", "utf8");
@@ -493,14 +494,19 @@ test("advance: stages exactly the three paths, names the seq range, pushes a rec
   assert.match(result.report.message, new RegExp(`seq ${String(from)}\\.\\.${String(to)}`, "u"));
   assert.equal(result.report.pushed, true);
 
+  const commit = String(result.report.commit);
   assert.deepEqual(
-    committedPaths(repo.dir),
+    committedPaths(repo.dir, commit),
     [LOG_RELATIVE, QUEUE_RELATIVE, ".approval/payloads/abc.json"].sort(),
   );
-  assert.equal(git(["log", "-1", "--pretty=%s"], repo.dir).stdout.trim(), result.report.message);
+  assert.equal(
+    git(["log", "-1", "--pretty=%s", commit], repo.dir).stdout.trim(),
+    result.report.message,
+  );
 
-  // It checked nothing out, and it appended nothing.
+  // It checked nothing out, it moved no branch, and it appended nothing.
   assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], repo.dir).stdout.trim(), branchBefore);
+  assert.equal(git(["rev-parse", "HEAD"], repo.dir).stdout.trim(), headBefore);
   assert.deepEqual(bytes(repo.logPath), logBefore);
 
   // The commit is on the records branch of the remote, and only there.
@@ -582,16 +588,106 @@ test("advance: --dry-run reports the range and writes nothing", () => {
   assert.equal(git(["rev-list", "--count", "HEAD"], repo.dir).stdout.trim(), commitsBefore);
 });
 
-test("advance: a diverged chain is never advanced", () => {
-  const { repo } = forkedAfterPull();
+test("advance: a diverged chain is never advanced (APRV-203: measured against origin)", () => {
+  // `forked` leaves the REMOTE carrying the other chain and this checkout's
+  // working log carrying ours, which is the state the fetch now walks into: no
+  // local pull is needed for the verb to see the fork.
+  const { repo } = forked();
   const commitsBefore = git(["rev-list", "--count", "HEAD"], repo.dir).stdout.trim();
 
   const result = logAdvance({ cwd: repo.dir });
   assert.equal(result.ok, false);
   if (result.ok) throw new Error("unreachable");
-  assert.equal(result.code, "log-advance-unverified");
+  assert.equal(result.code, "log-advance-remote-diverged");
   assert.match(result.message, /part at seq/u);
+  assert.match(result.message, /nothing was committed/u);
   assert.equal(git(["rev-list", "--count", "HEAD"], repo.dir).stdout.trim(), commitsBefore);
+});
+
+test("advance: a working log BEHIND origin's is refused, not published", () => {
+  // The peer advanced the log and pushed; this checkout never synced. An
+  // advance from here would propose a shorter chain than the remote already has.
+  const repo = newRepo();
+  const peer = secondClone(repo);
+  appendRecord(peer, "records this checkout has not seen");
+  push(peer, "peer advance");
+
+  const commitsBefore = git(["rev-list", "--count", "HEAD"], repo.dir).stdout.trim();
+  const result = logAdvance({ cwd: repo.dir });
+  assert.equal(result.ok, false);
+  if (result.ok) throw new Error("unreachable");
+  assert.equal(result.code, "log-advance-behind-remote");
+  assert.match(result.message, /approval log sync/u);
+  assert.equal(git(["rev-list", "--count", "HEAD"], repo.dir).stdout.trim(), commitsBefore);
+});
+
+test("advance: a remote that cannot be fetched refuses with its own code", () => {
+  const repo = newRepo();
+  appendRecord(repo.dir, "unreachable remote");
+  assert.equal(git(["remote", "set-url", "origin", join(scratch, "no-such-remote.git")], repo.dir).code, 0);
+
+  const result = logAdvance({ cwd: repo.dir });
+  assert.equal(result.ok, false);
+  if (result.ok) throw new Error("unreachable");
+  assert.equal(result.code, "log-advance-fetch-failed");
+  assert.match(result.message, /Nothing was committed/u);
+});
+
+test("advance: a local main BEHIND and DIVERGED from origin still bases on origin (APRV-203)", () => {
+  // The failure this test exists for: the verb used to commit on the local
+  // branch, so a checkout whose main was behind produced a records commit whose
+  // parent was a stale tip and whose tree reverted everything origin had merged.
+  const repo = newRepo();
+  const peer = secondClone(repo);
+  writeFileSync(join(peer, "UPSTREAM.md"), "# merged upstream while you were away\n", "utf8");
+  push(peer, "upstream work");
+  const originTip = git(["rev-parse", "main"], repo.remote).stdout.trim();
+
+  // And this checkout has a commit of its own that origin does not have, so the
+  // two have genuinely diverged. It is NOT a refusal: the advance is based on
+  // origin either way, and this commit is simply not part of it.
+  writeFileSync(join(repo.dir, "LOCAL.md"), "# local, unpushed\n", "utf8");
+  assert.equal(git(["add", "LOCAL.md"], repo.dir).code, 0);
+  assert.equal(git(["commit", "-qm", "local only"], repo.dir).code, 0);
+
+  const from = appendRecord(repo.dir, "advance-over-stale-main");
+  const headBefore = git(["rev-parse", "HEAD"], repo.dir).stdout.trim();
+  const branchBefore = git(["rev-parse", "--abbrev-ref", "HEAD"], repo.dir).stdout.trim();
+  const statusBefore = git(["status", "--porcelain"], repo.dir).stdout;
+  const logBefore = bytes(repo.logPath);
+
+  const result = logAdvance({ cwd: repo.dir, branch: "records-log-stale", today: "2026-09-01" });
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  if (!result.ok) throw new Error("unreachable");
+  assert.deepEqual(result.report.range, { from, to: from });
+  assert.deepEqual(result.report.base, { branch: "main", sha: originTip });
+
+  // The parent is origin's tip, and the commit carries origin's work.
+  const commit = result.report.commit;
+  assert.notEqual(commit, null);
+  assert.equal(git(["rev-parse", `${String(commit)}^`], repo.dir).stdout.trim(), originTip);
+  assert.match(
+    git(["show", `${String(commit)}:UPSTREAM.md`], repo.dir).stdout,
+    /merged upstream/u,
+    "the records commit reverted work that was already on origin",
+  );
+  // The local-only commit is NOT in it: an advance publishes records, not work.
+  assert.equal(git(["cat-file", "-e", `${String(commit)}:LOCAL.md`], repo.dir).code === 0, false);
+  // Only the log actually changed, so only the log is in the diff.
+  assert.deepEqual(committedPaths(repo.dir, String(commit)), [LOG_RELATIVE]);
+
+  // The checkout is exactly as it was found.
+  assert.equal(git(["rev-parse", "HEAD"], repo.dir).stdout.trim(), headBefore);
+  assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], repo.dir).stdout.trim(), branchBefore);
+  assert.equal(git(["status", "--porcelain"], repo.dir).stdout, statusBefore);
+  assert.deepEqual(bytes(repo.logPath), logBefore);
+  assert.equal(git(["diff", "--cached", "--name-only"], repo.dir).stdout.trim(), "");
+
+  // And the commit is on the records branch of the remote, and only there.
+  assert.equal(
+    git(["rev-parse", "--verify", "--quiet", "records-log-stale"], repo.remote).stdout.trim(),
+    commit,
+  );
 });
 
 // ===========================================================================

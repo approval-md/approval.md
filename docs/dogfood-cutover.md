@@ -292,12 +292,18 @@ cd /Users/carter/dev/approval-md
 approval log advance --pr
 ```
 
-`log advance` verifies the chain under the append lock, stages EXACTLY
-`.approval/log/events.jsonl`, `.approval/QUEUE.md` and `.approval/payloads/`,
-commits on the branch you are standing on with the seq range in the message, and
-pushes that commit by refspec to `records-log-<date>`. It checks out nothing, and
-any other staged path is refused (`log-advance-dirty-stage`) rather than
-unstaged. Something that is not a log file and still needs committing —
+`log advance` verifies the chain under the append lock, FETCHES `origin/main`,
+and builds a commit on it carrying EXACTLY `.approval/log/events.jsonl`,
+`.approval/QUEUE.md` and `.approval/payloads/`, with the seq range in the
+message; it pushes that commit by refspec to `records-log-<date>`. You do not
+fetch or reset first — the verb owns its own git preconditions (APRV-203) — and
+your checkout ends the verb exactly as it started it: same branch, same index,
+same working tree. It checks out nothing, a local main ahead of origin is not a
+refusal (the commit is parented on origin either way), a working log the remote's
+log is not a prefix of is refused (`log-advance-behind-remote`,
+`log-advance-remote-diverged`), and any other staged path is refused
+(`log-advance-dirty-stage`) rather than unstaged. Something that is not a log
+file and still needs committing —
 `package-lock.json` from a granted `deps.add`, say — gets its own commit, made by
 hand, because an advance that carried it would be the mixed branch the rule
 forbids.
@@ -347,13 +353,37 @@ codes (`log-sync-not-primary`, `log-advance-not-primary`), and both carry their
 own action classes (`log.sync`, `log.advance`), so a prompt about one says what
 it is instead of `policy.edit`.
 
-Policy amendments take the same shape and the CLI runs it for you:
-`approval policy amend --commit` detects a protected default branch and switches
-to the branch flow on its own, creating `policy-amend-<seq>`, committing the
-policy edit and its attestation as one commit, pushing, and opening the PR.
-`--branch <name>` forces that flow and names the branch; `--direct` forces the
-old in-place commit, and warns before printing a push that protection will
-reject.
+Policy amendments take the same shape and the CLI runs it for you. **The whole
+ceremony, for the human, is three steps: edit the line, run the verb, tap.**
+
+```sh
+cd /Users/carter/dev/approval-md
+$EDITOR APPROVAL.md
+approval policy amend --commit
+```
+
+No `git fetch` and no `git reset --keep origin/main` first. That instruction used
+to precede every ceremony, and it was both a step to forget and a step that could
+fail on its own (`Entry '…' not uptodate. Cannot merge.` on a task file that had
+been edited locally and upstream). Since APRV-203 the verb does it: it fetches,
+bases the amendment commit on `origin/main` rather than on whatever this
+checkout's main happens to be, runs the dogfood policy suite against the amended
+file, pushes by refspec, opens the pull request, and arms the merge. It detects a
+protected default branch and switches to the branch flow on its own, creating
+`policy-amend-<seq>`; `--branch <name>` forces that flow and names the branch;
+`--direct` forces the in-place commit, and warns before printing a push that
+protection will reject.
+
+Your checkout is left exactly as the verb found it: still on `main`, working tree
+carrying the policy edit you made and nothing else, and the amendment commit held
+on `policy-amend-<seq>`. After the pull request merges, `approval log sync`
+brings main down safely. Four things stop the ceremony, all of them before the
+attestation, so nothing is ever half-done: `fetch-failed`,
+`base-policy-diverged` (somebody amended the policy on origin since this edit
+began; bring the checkout up to origin and re-apply the edit),
+`base-log-diverged` (run `approval log sync` first), and `policy-suite-failed`
+(the amended policy no longer resolves the way `src/core/policy-expectations.ts`
+pins it: update the pins, `npm run build`, run the verb again).
 
 ## If an envelope goes missing
 
