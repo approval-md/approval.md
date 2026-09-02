@@ -1052,17 +1052,10 @@ const invoked = process.argv[1];
 if (invoked !== undefined && import.meta.url === pathToFileURL(invoked).href) {
   // `main` resolves rather than returns since APRV-209; the code still reaches
   // the process through `process.exitCode`, so stdout is flushed by the normal
-  // exit path. A rejection here would be a bug in the dispatch itself, so it is
-  // reported as an I/O failure rather than swallowed.
-  main(process.argv.slice(2)).then(
-    (code) => {
-      process.exitCode = code;
-    },
-    (cause: unknown) => {
-      process.stderr.write(
-        `approval: ${cause instanceof Error ? cause.message : String(cause)}\n`,
-      );
-      process.exitCode = EXIT_IO;
-    },
-  );
+  // exit path. The rejection is DELIBERATELY not caught: a throw out of the
+  // dispatch used to be an uncaught exception (stack trace, exit 1) and it stays
+  // one, rather than being dressed up as one of the frozen exit codes.
+  void main(process.argv.slice(2)).then((code) => {
+    process.exitCode = code;
+  });
 }
