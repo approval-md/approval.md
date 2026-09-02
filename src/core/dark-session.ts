@@ -115,6 +115,7 @@ import {
   isGuardedPath,
   type GuardFinding,
   type LogWindow,
+  type ChangeBlobs,
 } from "./protected-path-guard.js";
 import type { EventRecord } from "./log.js";
 
@@ -554,8 +555,47 @@ function judge(checkout: ObservedCheckout, input: DarkSessionInput): DarkSession
       base: input.window.from,
       head: `${checkout.name}@${(substantive[0] as ObservedCommit).sha.slice(0, 12)}`,
     };
+    // APRV-202 made the guard ask whether THIS change was granted, so it needs
+    // the path's bytes on both sides of the change. Here the change is the span
+    // of substantive commits that touched the path: base is the parent of the
+    // oldest of them, head is the newest. A blob git cannot show, or one that
+    // is binary, answers null and the guard fails the path as
+    // change-unreadable rather than falling back to the path-level rule.
+    const blobCache = new Map<string, ChangeBlobs | null>();
+    const blobsFor = (path: string): ChangeBlobs | null => {
+      const cached = blobCache.get(path);
+      if (cached !== undefined) return cached;
+      const touching = substantive.filter((commit) => commit.changedPaths.includes(path));
+      let value: ChangeBlobs | null = null;
+      if (touching.length > 0) {
+        const byTime = [...touching].sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? ""));
+        const baseRev = `${(byTime[0] as ObservedCommit).sha}^`;
+        const headRev = (byTime[byTime.length - 1] as ObservedCommit).sha;
+        const inTree = (rev: string): boolean => {
+          const listed = git(["ls-tree", "--name-only", rev, "--", path], checkout.root);
+          return listed.ok && listed.stdout.trim().length > 0;
+        };
+        const show = (rev: string): string | null => {
+          const shown = git(["show", `${rev}:${path}`], checkout.root);
+          return shown.ok ? shown.stdout : null;
+        };
+        const baseHas = inTree(baseRev);
+        const headHas = inTree(headRev);
+        const baseText = baseHas ? show(baseRev) : null;
+        const headText = headHas ? show(headRev) : null;
+        const unreadable =
+          (baseHas && baseText === null) ||
+          (headHas && headText === null) ||
+          (baseText !== null && baseText.includes("\u0000")) ||
+          (headText !== null && headText.includes("\u0000"));
+        if (!unreadable) value = { base: baseText, head: headText };
+      }
+      blobCache.set(path, value);
+      return value;
+    };
     const report = evaluateProtectedPaths({
       changedPaths: guardedPaths,
+      blobsFor,
       records,
       logStatus: "ok",
       policyProtectedPaths: input.policyProtectedPaths,
