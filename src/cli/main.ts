@@ -620,6 +620,34 @@ function longHelpRequest(argv: readonly string[]): string | null {
 }
 
 /**
+ * Await a verb that may answer asynchronously, and return its code.
+ *
+ * Before APRV-209 the arms that call this could not return the code at all:
+ * `main()` was synchronous, so an asynchronous verb's promise was dropped into
+ * `process.exitCode` and the arm returned {@link EXIT_OK}. Awaiting is now
+ * possible, and it also closes a hole the drop had opened: the entry point's own
+ * assignment to `process.exitCode` could land after the dropped promise's and
+ * overwrite a usage error with a zero.
+ *
+ * `label` is the phrase that named the verb in the old rejection message
+ * ("doctor failed", "MCP server failed"), so those messages are unchanged.
+ */
+async function settle(
+  outcome: number | Promise<number>,
+  streams: Streams,
+  label: string,
+): Promise<number> {
+  try {
+    return await outcome;
+  } catch (cause: unknown) {
+    streams.err(
+      `approval: ${label}: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+    );
+    return EXIT_IO;
+  }
+}
+
+/**
  * Run the CLI. Resolves to the process exit code rather than calling
  * `process.exit`, so buffered stdout is flushed by the normal exit path — a
  * truncated JSON object would be worse than no output at all.
@@ -795,116 +823,46 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
     // `getMe`, a loopback bind probe). It writes nothing anywhere.
     case "doctor": {
       const { commandDoctor } = await import("./doctor.js");
-      const outcome = commandDoctor(rest, streams, cwd);
-      if (typeof outcome === "number") return outcome;
-      void outcome.then(
-        (code) => {
-          process.exitCode = code;
-        },
-        (cause: unknown) => {
-          streams.err(
-            `approval: doctor failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
-          );
-          process.exitCode = EXIT_IO;
-        },
-      );
-      return EXIT_OK;
+      return settle(commandDoctor(rest, streams, cwd), streams, "doctor failed");
     }
     // The channel verbs (APRV-23 cli, APRV-26 telegram). `channel cli` renders
     // the pending queue over the plugin contract and, with a terminal, collects
     // decisions through `recordChannelDecision` — the same human-only gate
-    // `grant` and `reject` call. `channel telegram listen` is the only
-    // LONG-LIVED command in this CLI: it delivers the pending queue and then
-    // long-polls until it is interrupted. Every other command answers and
-    // exits, so `main` stays synchronous and this one case unwraps a promise —
-    // reporting its eventual code through `process.exitCode`, which is what
-    // the direct-execution path at the bottom of this file uses anyway.
-    // Callers that need the code (tests, embedders) call `commandChannel` and
-    // await it directly.
+    // `grant` and `reject` call. `channel telegram listen` is the first of the
+    // LONG-LIVED commands in this CLI: it delivers the pending queue and then
+    // long-polls until it is interrupted. `main` awaits it since APRV-209, so
+    // the promise stays pending for as long as the listener runs and its code
+    // is returned rather than dropped into `process.exitCode`.
     case "channel": {
       const { commandChannel } = await import("./channel.js");
-      const outcome = commandChannel(rest, streams, cwd);
-      if (typeof outcome === "number") return outcome;
-      void outcome.then(
-        (code) => {
-          process.exitCode = code;
-        },
-        (cause: unknown) => {
-          streams.err(
-            `approval: channel listener failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
-          );
-          process.exitCode = EXIT_IO;
-        },
-      );
-      return EXIT_OK;
+      return settle(commandChannel(rest, streams, cwd), streams, "channel listener failed");
     }
     // The daemon verb (APRV-39). `daemon run` is the second LONG-LIVED command
-    // in this CLI and is handled exactly like `channel`: it returns a promise,
-    // and its eventual code reaches the process through `process.exitCode`. It
-    // is the only command that both watches and appends, and the only one whose
-    // ordinary ending is a signal (which is exit 0, not a failure).
+    // in this CLI and is handled exactly like `channel`. It is the only command
+    // that both watches and appends, and the only one whose ordinary ending is a
+    // signal (which is exit 0, not a failure).
     case "daemon": {
       const { commandDaemon } = await import("./daemon.js");
-      const outcome = commandDaemon(rest, streams, cwd);
-      if (typeof outcome === "number") return outcome;
-      void outcome.then(
-        (code) => {
-          process.exitCode = code;
-        },
-        (cause: unknown) => {
-          streams.err(
-            `approval: daemon failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
-          );
-          process.exitCode = EXIT_IO;
-        },
-      );
-      return EXIT_OK;
+      return settle(commandDaemon(rest, streams, cwd), streams, "daemon failed");
     }
     // The ambient runtime (APRV-110). `approval up` is the daemon loop and every
     // channel the policy configures in ONE supervised process, and it is the
-    // fourth LONG-LIVED command here, unwrapped exactly as `channel` and
-    // `daemon` are. `daemon run --with-channels` reaches the same function.
+    // fourth LONG-LIVED command here, awaited exactly as `channel` and `daemon`
+    // are. `daemon run --with-channels` reaches the same function.
     case "up": {
-      // APRV-110. The ambient runtime, loaded beside the daemon it supervises.
       const { commandUp } = await import("./up.js");
-      const outcome = commandUp(rest, streams, cwd);
-      if (typeof outcome === "number") return outcome;
-      void outcome.then(
-        (code) => {
-          process.exitCode = code;
-        },
-        (cause: unknown) => {
-          streams.err(
-            `approval: the ambient runtime failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
-          );
-          process.exitCode = EXIT_IO;
-        },
-      );
-      return EXIT_OK;
+      return settle(commandUp(rest, streams, cwd), streams, "the ambient runtime failed");
     }
     // The binding verb (APRV-29). `payload hash` prints the payload_hash of a
     // JSON document through the same core function the gate uses, so nobody has
     // to import an internal module (or reinvent JCS) to fill in a declaration.
     // It reads no log and writes nothing.
     // `payload agentmail-draft` (APRV-223) reads one draft over HTTPS, so this
-    // verb joins the asynchronous family and is unwrapped the same way; the
-    // `hash` path is still synchronous and returns its code directly.
+    // verb joins the asynchronous family and is awaited the same way; the
+    // `hash` path is still synchronous, and awaiting a number is a number.
     case "payload": {
       const { commandPayload } = await import("./payload.js");
-      const outcome = commandPayload(rest, streams, cwd);
-      if (typeof outcome === "number") return outcome;
-      void outcome.then(
-        (code) => {
-          process.exitCode = code;
-        },
-        (cause: unknown) => {
-          streams.err(
-            `approval: payload failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
-          );
-          process.exitCode = EXIT_IO;
-        },
-      );
-      return EXIT_OK;
+      return settle(commandPayload(rest, streams, cwd), streams, "payload failed");
     }
     // The ungated channel (APRV-195). `journal write` is the one verb in this
     // switch that reaches no policy, no log and no token: it appends free text
@@ -935,20 +893,7 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
     // unwraps a promise exactly as `channel`, `daemon` and `adapter` do.
     case "setup": {
       const { commandSetup } = await import("./setup.js");
-      const outcome = commandSetup(rest, streams, cwd);
-      if (typeof outcome === "number") return outcome;
-      void outcome.then(
-        (code) => {
-          process.exitCode = code;
-        },
-        (cause: unknown) => {
-          streams.err(
-            `approval: setup failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
-          );
-          process.exitCode = EXIT_IO;
-        },
-      );
-      return EXIT_OK;
+      return settle(commandSetup(rest, streams, cwd), streams, "setup failed");
     }
     // The credential verbs (APRV-68). `vault set|list|remove` manage the
     // encrypted store adapters read from, and all three are human-only. There
@@ -967,19 +912,7 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
     // socket), and is unwrapped exactly as `channel` and `daemon` are.
     case "adapter": {
       const { commandAdapter } = await import("./adapter.js");
-      const outcome = commandAdapter(rest, streams, cwd);
-      void outcome.then(
-        (code) => {
-          process.exitCode = code;
-        },
-        (cause: unknown) => {
-          streams.err(
-            `approval: adapter failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
-          );
-          process.exitCode = EXIT_IO;
-        },
-      );
-      return EXIT_OK;
+      return settle(commandAdapter(rest, streams, cwd), streams, "adapter failed");
     }
     // The harness verbs (APRV-82, APRV-133). `hook claude-code` and
     // `hook cursor` each read a pre-tool event on STDIN and answer allow or
@@ -1013,20 +946,7 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
     // operator's act.
     case "mcp": {
       const { commandMcp } = await import("./mcp.js");
-      const outcome = commandMcp(rest, streams, cwd);
-      if (typeof outcome === "number") return outcome;
-      void outcome.then(
-        (code) => {
-          process.exitCode = code;
-        },
-        (cause: unknown) => {
-          streams.err(
-            `approval: MCP server failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
-          );
-          process.exitCode = EXIT_IO;
-        },
-      );
-      return EXIT_OK;
+      return settle(commandMcp(rest, streams, cwd), streams, "MCP server failed");
     }
     case "reindex":
       return commandReindex(rest, streams, cwd);

@@ -539,9 +539,10 @@ async function invoke(
   } else {
     const words = spec.subcommand === undefined ? [] : spec.subcommand.split(" ");
     // `main()` is asynchronous since APRV-209 (every verb is loaded on demand),
-    // so the default arm awaits it. The arms above still exist for the reason
-    // they always did: they need a code `main()` drops into `process.exitCode`
-    // rather than returning.
+    // so the default arm awaits it. `main()` now awaits the asynchronous verbs
+    // too, so the arms above no longer HAVE to exist for the promise's sake;
+    // they are kept because calling the command function is the more direct
+    // route and `run`'s `childIo` seam needs it regardless.
     code = await main([spec.name, ...words, ...argv], { streams, cwd });
   }
 
