@@ -1637,6 +1637,19 @@ The checks, at length:
   process may have been launched with a flag that beat the policy, and its own
   `started` line is where that is visible. It can never FAIL — both modes are
   correct, and they differ in what a repeat read re-proves and how often.
+- **main-behind-origin** — the report half of `approval up`'s startup preflight
+  (APRV-215), from the same module, so the two can never disagree about what a
+  checkout is in. It answers three things: how far behind `origin/<branch>` this
+  checkout is, whether the upstream range rewrites `.approval/log/events.jsonl`
+  or `.approval/QUEUE.md`, and what to run next. **It fetches nothing.** Doctor
+  is a report, and a report that reached the network to be more accurate would
+  be acting on its own account; the answer is as fresh as your last fetch and
+  the detail says so. SKIP outside a git checkout, or where there is no
+  remote-tracking ref to compare `HEAD` against. FAIL when the preflight would
+  refuse, naming the refusal code. The `fix` is an `approval` verb — `approval
+  log sync` for a diverged log, `approval up` otherwise — never a `git` command:
+  a repair line telling an operator to reset a branch would be doctor making the
+  decision this project keeps human.
 
 **`--json`** (one object on stdout):
 
@@ -1654,7 +1667,9 @@ the order listed above.
 `--root <path>` is TEST-ONLY: it points the build-freshness check at another tree
 and moves no other check. Real invocations never pass it, because freshness is
 judged against the installation this binary was loaded from, not against the
-working directory.
+working directory. `approval up` and `approval daemon run` accept the same flag
+for the same test-only reason, where it points the preflight's build-freshness
+half at another tree.
 
 ## audit
 
@@ -2596,6 +2611,13 @@ pidfile, or manage its own lifecycle: in v0.1 backgrounding is the operator's
 business, and systemd, launchd, tmux and `&` all do it better than a bespoke
 daemonizer would.
 
+**It runs `approval up`'s startup preflight first** (APRV-215) — same module,
+same two `--json` lines, same three refusal codes, same `--no-preflight`,
+`--preflight-remote` and `--preflight-base` flags. It is here as well as there
+because the daemon is the writer: a daemon started against a stale checkout is
+exactly what the preflight exists to catch, and `--with-channels` is not the only
+way an operator reaches one. The full description is under [up](#up).
+
 **Watching is a latency optimization, never a correctness dependency.**
 `fs.watch` is bursty and platform-dependent, so every tick re-scans the folder
 and re-derives everything from the verified log, and the periodic tick runs
@@ -2801,6 +2823,93 @@ do when one falls over, and how to stop them all at once. That is why the tests
 for it compose the daemon and telegram suites rather than restating them: the
 question is whether the parts behave identically in one process, and a test that
 described new behaviour would be answering a different question.
+
+**A preflight runs before anything starts (APRV-215).** Deploying a fix in the
+primary checkout used to take four hand-run steps: `git fetch`, a judgment about
+whether the upstream commits touched `.approval/log/events.jsonl` while the
+working log was dirty, `git pull --ff-only`, and `npm run build`. Three of those
+are typing; the second is the one a human cannot make from `git status` alone,
+because `git status` does not say what the upstream range changed. So the verb
+does all four, and `approval daemon run` runs the identical preflight from the
+identical module, printing the identical two lines.
+
+It is allowed exactly two writes: a `--ff-only` merge, and `npm run build`. It
+never resets, never stashes, never checks anything out, and never touches the
+working log. That list is not caution for its own sake: a working `events.jsonl`
+rewound through git underneath a live appender is fork 2 of 2026-08-20, the
+incident `approval log sync` exists to prevent.
+
+**Safe** means both of: this checkout is not AHEAD of the remote, and no path the
+upstream range changes is locally modified. When it is safe, the preflight
+fast-forwards, rebuilds if `dist/` is older than `src/`, and names the commit now
+running. When it is not, it refuses, and changes nothing:
+
+| code | fires when | next |
+|---|---|---|
+| `up-preflight-behind-ahead` | `origin/<branch>..HEAD` is non-empty: this checkout carries commits the remote has never seen. A fast-forward is not the operation for that state, and choosing a side is a decision. | look at them (`git log --oneline origin/main..HEAD`), then push them or `git reset --keep` |
+| `up-preflight-log-diverged` | the upstream range rewrites `.approval/log/events.jsonl` or `.approval/QUEUE.md`, and this working copy has uncommitted changes to one of them. The judgment a human could not make by eye. | `approval log sync` |
+| `up-preflight-dirty-protected` | some other path the upstream range changes is locally modified, so `git merge --ff-only` would refuse rather than overwrite it. | look at the diff, or `approval up --no-preflight` |
+
+**`git reset --hard` is printed on no path, ever**, and a test asserts it. The
+one reset that appears is `--keep`, which refuses rather than discarding
+uncommitted work, and it is the third step of a runbook whose first step is to
+look at what would be dropped. A refusal is rendered in the APRV-129 runbook
+shape — code, YOUR STATE, NEXT STEPS with one runnable command per line — and
+exits 1, "the runtime decided", rather than 4: nothing failed to read or write,
+and a supervisor that read this as an I/O fault would retry a checkout state only
+a human can resolve.
+
+**A fetch that fails is weather, not a fault.** A laptop with no network still
+has a local log, a local policy, and a human holding the phone. The failure is a
+warning on stderr, the runtime starts on the build it already has, and the
+`preflight` line says `"action":"fetch-failed"`.
+
+**Where there is no question to ask, it says nothing.** Outside a git checkout,
+or in a repository with no `origin` configured (a `--git-evidence` log home, a
+bare `git init`), the preflight skips and prints no line at all: "there is no
+origin here" is a property of the deployment, not an event in it, and a log-only
+install would otherwise open every start with it. `approval doctor`'s
+`main-behind-origin` row is where that state is visible.
+
+`--no-preflight` opts out, on both spellings of the verb.
+`--preflight-remote` and `--preflight-base` default to `origin` and the
+checked-out branch. The `--json` stream gains two additive lines and no field on
+any shape that already existed:
+
+```
+{"event":"preflight_warning","message":"…"}
+{"event":"preflight","commit":"<sha>","detail":"…","behind_by":3,"ahead_by":0,
+ "log_touched":false,"dist_stale":true,"action":"fast-forward+rebuild",
+ "reexec":true}
+```
+
+`action` is one of `none`, `rebuild`, `fast-forward`, `fast-forward+rebuild`,
+`refused`, `skipped`, `fetch-failed`. The commit now running is named here rather
+than on `up_started`, so a consumer that already parses `up_started` does not
+have to learn a new key to keep working. A refusal writes one object to stderr
+instead: `{"error":{"code":…,"message":…,"next":…},"preflight":{…}}`.
+
+**A rebuild re-execs, so the writer that ends up running is the code that was
+merged.** Node loads its module tree at startup, so a `npm run build` that
+replaces `dist/` underneath a live process changes nothing about what that
+process is executing. Carrying on there would start the daemon on exactly the
+code the fast-forward was meant to leave behind, which is the defect this verb
+exists to remove. So when the preflight rebuilds, it does not continue: it
+spawns the freshly built `dist/src/cli/main.js` — resolved from the checkout
+root, never from the module that is running, which is the stale tree by
+definition — with the same argv plus `--no-preflight`, the same cwd and
+environment, and `stdio` inherited. SIGINT and SIGTERM are forwarded to the
+child, and the verb exits with the child's exit code. The `preflight` line
+carries `"reexec":true` and is printed by the parent before the handover, since
+the child has nothing to say about a fast-forward it did not perform; the human
+line reads `… and rebuilt; now running <sha>, in a fresh process on the new
+build`. `--no-preflight` on the child is the loop guard and the honest setting
+both: the checkout is already current.
+
+`dist_stale` is judged **after** the fast-forward as well as before it. A merge
+that lands three days of `src/` is precisely what makes a build stale, and the
+pre-merge answer would miss it. (`approval doctor`'s row reports the pre-merge
+answer, because doctor merges nothing.)
 
 **The daemon settles the verb; a channel never does.** A channel is a network
 client and the daemon is not. A Bot API that starts refusing sends must not stop

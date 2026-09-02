@@ -64,6 +64,11 @@ import { DAEMON_HELP, DAEMON_RUN_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { useReadProof } from "../core/state.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
+import {
+  describePreflightEvent,
+  reexecFreshBuild,
+  startupPreflight,
+} from "./preflight.js";
 import { DEFAULT_QUEUE_PATH } from "./render.js";
 import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
@@ -98,6 +103,12 @@ const RUN_FLAGS: Record<string, FlagKind> = {
   "--read-proof": "string",
   "--full-reproof-every": "string",
   "--full-reproof-after": "string",
+  // The startup preflight (APRV-215), spelled identically on `approval up`.
+  "--no-preflight": "boolean",
+  "--preflight-remote": "string",
+  "--preflight-base": "string",
+  // Test-only, spelled exactly as doctor's and `up`'s.
+  "--root": "string",
   "--json": "boolean",
   "--help": "boolean",
   "-h": "boolean",
@@ -462,6 +473,43 @@ export function commandDaemonRun(
   const queuePath = resolvePath(stringFlag(flags, "--out"), DEFAULT_QUEUE_PATH, cwd);
   const tasksFlag = stringFlag(flags, "--tasks");
   const tasksDir = resolvePath(tasksFlag, DEFAULT_TASKS_DIR, cwd);
+
+  // The startup preflight (APRV-215), the same one `approval up` runs, from the
+  // same module, printing the same two lines. It is here as well as there
+  // because the daemon is the writer: a daemon started against a stale checkout
+  // is the failure this preflight exists to catch, and `--with-channels` is not
+  // the only way an operator reaches it. `--no-preflight` opts out on both.
+  if (!boolFlag(flags, "--no-preflight")) {
+    const rootFlag = stringFlag(flags, "--root");
+    const cleared = startupPreflight({
+      logPath,
+      queuePath,
+      root: rootFlag === null ? null : absolute(rootFlag, cwd),
+      remote: stringFlag(flags, "--preflight-remote"),
+      branch: stringFlag(flags, "--preflight-base"),
+      json,
+      emit: (event) => {
+        if (json) {
+          const line = `${JSON.stringify(event)}\n`;
+          if (event.event === "preflight_warning") streams.err(line);
+          else streams.out(line);
+          return;
+        }
+        const rendered = describePreflightEvent(event);
+        if (rendered.stderr) streams.err(`${rendered.text}\n`);
+        else streams.out(`${rendered.text}\n`);
+      },
+      refuse: (text) => streams.err(text),
+    });
+    // Exit 1, "the runtime decided": nothing failed to read or write, and a
+    // supervisor that read this as an I/O fault would retry a checkout state
+    // only a human can resolve.
+    if (!cleared.ok) return EXIT_INTEGRITY;
+    // The same handover `approval up` makes, for the same reason: a rebuild
+    // means this process is the stale build, and the daemon is the writer. See
+    // `cli/preflight.ts`'s `reexecFreshBuild`.
+    if (cleared.reexec !== null) return reexecFreshBuild(cleared.reexec, cwd);
+  }
 
   const check = preflightLog(logPath);
   if (!check.ok) return ioError(streams, json, check.message);
