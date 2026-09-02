@@ -7,7 +7,7 @@
     "conformance/vectors/gate-verdicts.v1.json": "99c63b91b5f606c5ddab3538cd38b12808dda5d4db6ca35110b7e0e728deb757",
     "conformance/vectors/jcs-canonicalization.v1.json": "c077cfc2c7712e747dbff261a7e1f5f12d63323b943a9a898134215d4ffac37f",
     "conformance/vectors/policy-resolution.v1.json": "cc8e1448be4bd5dd28cfdcb78487e4db8f0ffc5f749bdbabc598f989b8a7aaa8",
-    "conformance/vectors/refusal-unions.v1.json": "a009f3c1bf5c1ffad793a65f6b483e2698f562bd70f6a1bf097843222ef09759",
+    "conformance/vectors/refusal-unions.v1.json": "2785e8b4c64d3b48020c24de8cae38b1c0d35bb47da2c9da9794629d56d3d685",
     "conformance/vectors/schema-validation.v1.json": "a7ada8c596a995f3a4de7d5cbf44ddc65965441d2a2c797d36a1c0bc28cbe209",
     "tests/conformance-harness.ts": "57a3135a4563d5c6a0a3a5762ab61198353de667208872e2f38848453255041d"
   }

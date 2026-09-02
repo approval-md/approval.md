@@ -2136,6 +2136,14 @@ test("the refusal-code union is frozen public API", () => {
     "proposal-stale",
     "policy-already-attested",
     "append-failed",
+    // APRV-211, one addition. A request that declared self-delivery can only
+    // reach its own grant through the sealed address the request publishes, so
+    // a private key that cannot be written is a refusal rather than the silent
+    // fallback the operator-configured `sealed` mode takes: a decision spent on
+    // an authorization nobody can open would be a human's attention spent on
+    // nothing. Distinct from every other code here because the repair belongs
+    // to the filesystem rather than to the requester.
+    "token-delivery-unavailable",
   ]);
 });
 
