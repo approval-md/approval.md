@@ -58,6 +58,9 @@ const TOKEN_MODULE = fileURLToPath(new URL("../src/core/token.js", import.meta.u
 /** Same relationship, for the APRV-106 grant/withdraw race. */
 const GATE_MODULE = fileURLToPath(new URL("../src/core/gate.js", import.meta.url));
 
+/** Same again, for `approval run`'s writer in the APRV-236 races. */
+const EXECUTE_MODULE = fileURLToPath(new URL("../src/core/execute.js", import.meta.url));
+
 const scratch = mkdtempSync(join(tmpdir(), "approval-md-race-"));
 let counter = 0;
 
@@ -294,12 +297,22 @@ function runChild(script: string, args: string[]): Promise<Consumer> {
  * requesting process gives up and withdraws. Both read a log that says
  * `requested`; both are therefore authorized, by their own lights, to append.
  *
- * The invariant is that the log records exactly ONE of them — never a grant
- * whose request was withdrawn out from under it, and never a withdrawal that
- * quietly erased a human's answer — and that the loser learns it lost on the
- * compare-and-append precondition (SPEC.md §11.1(5)) rather than by re-reading.
- * Either winner is correct; which one wins is a coin flip and the test does not
- * care, because both outcomes are states the rest of the runtime handles.
+ * The invariant is that the log records exactly ONE of them: never a grant whose
+ * request was withdrawn out from under it, and never a withdrawal that quietly
+ * erased a human's answer. Either winner is correct; which one wins is a coin
+ * flip and the test does not care, because both outcomes are states the rest of
+ * the runtime handles.
+ *
+ * What the LOSER hears changed at APRV-236. It used to be `append-failed` /
+ * `head-moved`, which is a fact about timing dressed up as a verdict: the human
+ * whose `approval grant` lost the race was told to run it again. Both writers
+ * now re-read and re-run their checks against the fresh head, so the loser is
+ * refused for the state the log actually holds — `request-withdrawn` when the
+ * withdrawal landed first, `already-decided` when the grant did — and never for
+ * the lost race. The compare-and-append precondition (SPEC.md §11.1(5)) is
+ * unchanged and is still what stops the second write; what changed is that a
+ * writer reads its refusal as "compute the verdict again" rather than as "the
+ * answer is no".
  *
  * Same mechanism as the token race above: the parent holds the append lock
  * across both children's reads, so both verify against the same log.
@@ -384,9 +397,18 @@ test("a grant and a withdrawal race one pending request: exactly one lands", asy
     );
     assert.equal(settling.length, 1, `round ${round}: the request was settled twice`);
 
+    // APRV-236: the loser re-derived against the fresh head and refused for the
+    // state the log holds. Which of the two codes it is depends on who won, and
+    // the point of the assertion is that it is NEITHER `append-failed`: a lost
+    // race is never what a caller is told, least of all the human at a terminal.
     const loser = losers[0] as Consumer;
-    assert.equal(loser.code, "append-failed", `round ${round}: ${JSON.stringify(loser)}`);
-    assert.equal(loser.append?.code, "head-moved", `round ${round}: ${JSON.stringify(loser)}`);
+    const settled = settling[0] as EventRecord;
+    assert.equal(
+      loser.code,
+      settled.event === "approval.withdrawn" ? "request-withdrawn" : "already-decided",
+      `round ${round}: ${JSON.stringify(loser)}`,
+    );
+    assert.equal(loser.append, undefined, `round ${round}: ${JSON.stringify(loser)}`);
 
     assert.equal(verify(unit.logPath).status, "clean", `round ${round}: log not clean`);
   }
@@ -724,6 +746,529 @@ test("the retry re-derives the budget: a ceiling reached in the window is enforc
       1,
       `round ${round}: the refusal left no budget.exceeded record`,
     );
+    assert.equal(verify(unit.logPath).status, "clean", `round ${round}: log not clean`);
+  }
+});
+
+// ===========================================================================
+// Every other gate writer, under the same race (APRV-236)
+// ===========================================================================
+
+/**
+ * The incident this section exists for, on 2026-09-02: `approval grant` refused
+ * a human's decision with `head moved: expected seq 14218, found 14219` while
+ * two lanes and the daemon were appending, and Carter ran the same command
+ * three times before it took. APRV-150 had already established that a moved
+ * head is a fact about timing rather than a verdict, and had already fixed the
+ * hook's two writers. Everything a person or a session drives by hand was still
+ * losing.
+ *
+ * Same harness as everything above, and for the same reason: the parent holds
+ * the append lock across both children's reads, so both writers are provably
+ * authorized by the same log and the second append provably meets a moved head.
+ * Every record in these logs is written by the real verbs through the real
+ * append path.
+ *
+ * Two shapes are proven per verb, and they are the two halves of the design:
+ *
+ *  - **Independent work lands.** Two writers whose checks do not bear on each
+ *    other both succeed, where before one of them was refused for the other's
+ *    write.
+ *  - **A changed verdict is enforced.** Two writers contending for the SAME
+ *    request settle it once, and the loser is refused for the state the fresh
+ *    head holds — `already-decided`, `request-withdrawn`, `duplicate-request`,
+ *    `task-already-registered`, `token-consumed` — rather than for the race.
+ */
+const WRITER_SOURCE = `
+import { existsSync, writeFileSync } from "node:fs";
+import { decide, register, request, withdraw } from ${JSON.stringify(GATE_MODULE)};
+import { startExecution } from ${JSON.stringify(EXECUTE_MODULE)};
+
+const [verb, logPath, policyFile, ts, actor, key, extra, attempts, ready, go] =
+  process.argv.slice(2);
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+const options = { policy: { file: policyFile }, clock: () => ts };
+if (attempts !== "default") options.retryOnHeadMoved = Number(attempts);
+
+function envelope(task, actionKey, cls) {
+  return {
+    origin: { app: "example-capture", created_by: "human:carter" },
+    state: "proposed",
+    actions: [
+      {
+        class: cls,
+        summary: "A racing action",
+        reversible: false,
+        est_cost_usd: "0.02",
+        idempotency_key: actionKey,
+        payload_hash: ${JSON.stringify(PAYLOAD_HASH)},
+      },
+    ],
+  };
+}
+
+function run() {
+  switch (verb) {
+    case "register":
+      // \`extra\` is the task id, and the class it declares.
+      return register(logPath, { task: extra, envelope: envelope(extra, key, "communicate.email.external") }, actor, options);
+    case "request":
+      return request(
+        logPath,
+        {
+          task: extra,
+          actionKey: key,
+          cls: "communicate.email.external",
+          est_cost_usd: "0.02",
+          reversible: false,
+          payload_hash: ${JSON.stringify(PAYLOAD_HASH)},
+        },
+        actor,
+        options,
+      );
+    case "grant":
+      return decide(logPath, key, "grant", actor, options);
+    case "reject":
+      return decide(logPath, key, "reject", actor, options);
+    case "withdraw":
+      return withdraw(logPath, key, actor, { ...options, reason: "timeout" });
+    case "run":
+      // \`extra\` is the token, or the empty string off the manual path.
+      return startExecution(
+        logPath,
+        key,
+        {
+          ...options,
+          presentedPayloadHash: ${JSON.stringify(PAYLOAD_HASH)},
+          ...(extra === "" ? {} : { token: extra }),
+        },
+        actor,
+      );
+    default:
+      throw new Error("unknown verb " + verb);
+  }
+}
+
+writeFileSync(ready, "ready", "utf8");
+while (!existsSync(go)) sleep(2);
+
+const result = run();
+process.stdout.write(
+  JSON.stringify({
+    ok: result.ok,
+    code: result.code,
+    message: result.message,
+    append: result.append,
+  }),
+);
+`;
+
+const WRITER_TASK = "task-236";
+const KEY_A = `${WRITER_TASK}:a`;
+const KEY_B = `${WRITER_TASK}:b`;
+
+/** Manual for the decision verbs, autonomous for the `approval run` races. */
+const MIXED_POLICY = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: manual",
+  '  approval_ttl: "1h"',
+  "classes:",
+  "  communicate.email.external:",
+  "    autonomy: manual",
+  "  read.shell:",
+  "    autonomy: autonomous",
+  "```",
+  "",
+].join("\n");
+
+interface WriterCase extends RaceCase {
+  tokens: Record<string, string>;
+}
+
+/**
+ * Whether an action of this class declares itself reversible.
+ *
+ * `read.shell` must, because SPEC.md §7's irreversibility floor raises an
+ * irreversible action to `manual` whatever its class says, and the `approval
+ * run` races below are about the autonomous writer. The manual class declares
+ * itself irreversible, exactly as the rest of this file's cases do.
+ */
+function reversible(cls: string): boolean {
+  return cls === "read.shell";
+}
+
+/**
+ * A log carrying an attestation and, unless `cls` is null, a registration of
+ * `KEY_A` and `KEY_B`, then whichever of request and grant `stage` asks for.
+ *
+ * Built entirely through the real verbs, one call at a time, before any race
+ * starts. `stage` names how far along the two actions are when the racers wake
+ * up: `registered`, `requested`, or `granted`.
+ */
+function writerCase(
+  stage: "attested" | "registered" | "requested" | "granted",
+  cls = "communicate.email.external",
+): WriterCase {
+  counter += 1;
+  const dir = join(scratch, `race-${counter}`);
+  mkdirSync(dir, { recursive: true });
+  const policyPath = join(dir, "APPROVAL.md");
+  writeFileSync(policyPath, MIXED_POLICY, "utf8");
+  const logPath = join(dir, ".approval", "log", "events.jsonl");
+  const options = { policy: { file: policyPath } };
+  const tokens: Record<string, string> = {};
+
+  assert.equal(appendAttestation(logPath, policyPath, "human:carter", T0).ok, true);
+  if (stage === "attested") return { dir, logPath, policyPath, token: "", tokens };
+
+  const registered = register(
+    logPath,
+    {
+      task: WRITER_TASK,
+      envelope: {
+        origin: { app: "example-capture", created_by: "human:carter" },
+        state: "proposed",
+        actions: [KEY_A, KEY_B].map((key) => ({
+          class: cls,
+          summary: "A racing action",
+          // Reversible on the autonomous class, or SPEC.md §7's irreversibility
+          // floor raises it to manual and the run races would never reach the
+          // writer they are about.
+          reversible: reversible(cls),
+          est_cost_usd: "0.02",
+          idempotency_key: key,
+          payload_hash: PAYLOAD_HASH,
+        })),
+      },
+    },
+    T0,
+    "agent:claude",
+  );
+  assert.equal(registered.ok, true, registered.ok ? "" : registered.message);
+  if (stage === "registered") return { dir, logPath, policyPath, token: "", tokens };
+
+  for (const key of [KEY_A, KEY_B]) {
+    const requested = request(
+      logPath,
+      {
+        task: WRITER_TASK,
+        actionKey: key,
+        cls,
+        est_cost_usd: "0.02",
+        reversible: reversible(cls),
+        payload_hash: PAYLOAD_HASH,
+      },
+      at(1),
+      "agent:claude",
+      options,
+    );
+    assert.equal(requested.ok, true, requested.ok ? "" : requested.message);
+  }
+  if (stage === "requested") return { dir, logPath, policyPath, token: "", tokens };
+
+  for (const key of [KEY_A, KEY_B]) {
+    const granted = decide(logPath, key, "grant", "human:carter", at(2), options);
+    assert.equal(granted.ok, true, granted.ok ? "" : granted.message);
+    if (!granted.ok || granted.token === undefined) throw new Error("expected a token");
+    tokens[key] = granted.token;
+  }
+  return { dir, logPath, policyPath, token: "", tokens };
+}
+
+/** Two writers, forced to authorize themselves against the same head. */
+async function raceWriters(
+  script: string,
+  unit: RaceCase,
+  left: { verb: string; actor: string; key: string; extra?: string },
+  right: { verb: string; actor: string; key: string; extra?: string },
+  attempts: "default" | number = "default",
+): Promise<Consumer[]> {
+  const go = join(unit.dir, "go");
+  const readyA = join(unit.dir, "ready-a");
+  const readyB = join(unit.dir, "ready-b");
+  const lock = `${unit.logPath}.lock`;
+
+  closeSync(openSync(lock, "wx"));
+
+  const children = [left, right].map((side, index) =>
+    runChild(script, [
+      side.verb,
+      unit.logPath,
+      unit.policyPath,
+      at(3),
+      side.actor,
+      side.key,
+      side.extra ?? "",
+      attempts === "default" ? "default" : String(attempts),
+      index === 0 ? readyA : readyB,
+      go,
+    ]),
+  );
+
+  const deadline = Date.now() + 10_000;
+  while (!(existsSync(readyA) && existsSync(readyB))) {
+    assert.ok(Date.now() < deadline, "children never signalled ready");
+    sleep(5);
+  }
+
+  writeFileSync(go, "go", "utf8");
+  // Both children read the log and reach their append inside this window, where
+  // they block on the lock the parent still holds.
+  sleep(250);
+  unlinkSync(lock);
+
+  return await Promise.all(children);
+}
+
+function writerScript(): string {
+  const script = join(scratch, "writer.mjs");
+  writeFileSync(script, WRITER_SOURCE, "utf8");
+  return script;
+}
+
+function eventsOf(logPath: string, event: string): EventRecord[] {
+  return records(logPath).filter((record) => record.event === event);
+}
+
+/** Both writers landed, the chain is clean, and neither heard about the race. */
+function assertBothLanded(outcomes: Consumer[], logPath: string, round: number): void {
+  for (const outcome of outcomes) {
+    assert.equal(outcome.ok, true, `round ${round}: ${JSON.stringify(outcome)}`);
+  }
+  assert.equal(verify(logPath).status, "clean", `round ${round}: log not clean`);
+}
+
+test("two grants racing one log both land (APRV-236: the incident verb)", async () => {
+  const script = writerScript();
+
+  for (let round = 1; round <= 3; round += 1) {
+    const unit = writerCase("requested");
+    const outcomes = await raceWriters(
+      script,
+      unit,
+      { verb: "grant", actor: "human:carter", key: KEY_A },
+      { verb: "grant", actor: "human:carter", key: KEY_B },
+    );
+
+    // The decision the human made twice used to cost them three commands. Two
+    // independent requests, two independent answers, and the record of the one
+    // that lost the append race is now on the log rather than on their screen.
+    assertBothLanded(outcomes, unit.logPath, round);
+    assert.equal(eventsOf(unit.logPath, "approval.granted").length, 2, `round ${round}`);
+  }
+});
+
+test("a grant and a reject racing ONE request settle it once, and the loser hears already-decided", async () => {
+  const script = writerScript();
+
+  for (let round = 1; round <= 3; round += 1) {
+    const unit = writerCase("requested");
+    const outcomes = await raceWriters(
+      script,
+      unit,
+      { verb: "grant", actor: "human:carter", key: KEY_A },
+      { verb: "reject", actor: "human:dana", key: KEY_A },
+    );
+
+    const winners = outcomes.filter((outcome) => outcome.ok);
+    const losers = outcomes.filter((outcome) => !outcome.ok);
+    assert.equal(winners.length, 1, `round ${round}: expected exactly one winner`);
+    assert.equal(losers.length, 1, `round ${round}: expected exactly one loser`);
+
+    // THE invariant, unchanged: one request, one answer. A retry that re-derives
+    // could not have written a second decision even if it wanted to, because the
+    // fresh read is what it re-derives from.
+    const decided = [
+      ...eventsOf(unit.logPath, "approval.granted"),
+      ...eventsOf(unit.logPath, "approval.rejected"),
+    ].filter((record) => record.action_key === KEY_A);
+    assert.equal(decided.length, 1, `round ${round}: the request was decided twice`);
+
+    const loser = losers[0] as Consumer;
+    assert.equal(loser.code, "already-decided", `round ${round}: ${JSON.stringify(loser)}`);
+    assert.equal(loser.append, undefined, `round ${round}: ${JSON.stringify(loser)}`);
+    assert.equal(verify(unit.logPath).status, "clean", `round ${round}: log not clean`);
+  }
+});
+
+test("two withdrawals racing one log both land", async () => {
+  const script = writerScript();
+
+  for (let round = 1; round <= 3; round += 1) {
+    const unit = writerCase("requested");
+    const outcomes = await raceWriters(
+      script,
+      unit,
+      { verb: "withdraw", actor: "agent:claude", key: KEY_A },
+      { verb: "withdraw", actor: "agent:claude", key: KEY_B },
+    );
+
+    assertBothLanded(outcomes, unit.logPath, round);
+    assert.equal(eventsOf(unit.logPath, "approval.withdrawn").length, 2, `round ${round}`);
+  }
+});
+
+test("two registrations racing one log both land, and a shared key is refused for the collision", async () => {
+  const script = writerScript();
+
+  for (let round = 1; round <= 3; round += 1) {
+    const distinct = writerCase("attested");
+    const both = await raceWriters(
+      script,
+      distinct,
+      { verb: "register", actor: "agent:claude", key: "task-236a:one", extra: "task-236a" },
+      { verb: "register", actor: "agent:claude", key: "task-236b:one", extra: "task-236b" },
+    );
+    assertBothLanded(both, distinct.logPath, round);
+    assert.equal(eventsOf(distinct.logPath, "task.registered").length, 2, `round ${round}`);
+
+    // The same key under two tasks is the §7 collision `register` exists to
+    // refuse (APRV-138). The retry re-runs that scan against the fresh head, so
+    // the loser is refused for the collision rather than for the race, and the
+    // idempotency key still belongs to exactly one task.
+    const shared = writerCase("attested");
+    const outcomes = await raceWriters(
+      script,
+      shared,
+      { verb: "register", actor: "agent:claude", key: "task-236x:one", extra: "task-236a" },
+      { verb: "register", actor: "agent:claude", key: "task-236x:one", extra: "task-236b" },
+    );
+    const losers = outcomes.filter((outcome) => !outcome.ok);
+    assert.equal(losers.length, 1, `round ${round}: expected exactly one loser`);
+    assert.equal(
+      (losers[0] as Consumer).code,
+      "task-already-registered",
+      `round ${round}: ${JSON.stringify(losers[0])}`,
+    );
+    assert.equal(eventsOf(shared.logPath, "task.registered").length, 1, `round ${round}`);
+    assert.equal(verify(shared.logPath).status, "clean", `round ${round}: log not clean`);
+  }
+});
+
+test("two requests racing one log both land, and a shared key is refused duplicate-request", async () => {
+  const script = writerScript();
+
+  for (let round = 1; round <= 3; round += 1) {
+    const distinct = writerCase("registered");
+    const both = await raceWriters(
+      script,
+      distinct,
+      { verb: "request", actor: "agent:claude", key: KEY_A, extra: WRITER_TASK },
+      { verb: "request", actor: "agent:claude", key: KEY_B, extra: WRITER_TASK },
+    );
+    assertBothLanded(both, distinct.logPath, round);
+    assert.equal(eventsOf(distinct.logPath, "approval.requested").length, 2, `round ${round}`);
+
+    // One action key, two requesters: the loser re-derives and finds the live
+    // request the winner opened. A human's queue gets one question, which is the
+    // resource §5.2 counts.
+    const shared = writerCase("registered");
+    const outcomes = await raceWriters(
+      script,
+      shared,
+      { verb: "request", actor: "agent:claude", key: KEY_A, extra: WRITER_TASK },
+      { verb: "request", actor: "agent:mallory", key: KEY_A, extra: WRITER_TASK },
+    );
+    const losers = outcomes.filter((outcome) => !outcome.ok);
+    assert.equal(losers.length, 1, `round ${round}: expected exactly one loser`);
+    assert.equal(
+      (losers[0] as Consumer).code,
+      "duplicate-request",
+      `round ${round}: ${JSON.stringify(losers[0])}`,
+    );
+    assert.equal(eventsOf(shared.logPath, "approval.requested").length, 1, `round ${round}`);
+    assert.equal(verify(shared.logPath).status, "clean", `round ${round}: log not clean`);
+  }
+});
+
+test("two autonomous runs racing one log both start", async () => {
+  const script = writerScript();
+
+  for (let round = 1; round <= 3; round += 1) {
+    const unit = writerCase("registered", "read.shell");
+    const outcomes = await raceWriters(
+      script,
+      unit,
+      { verb: "run", actor: "agent:claude", key: KEY_A },
+      { verb: "run", actor: "agent:mallory", key: KEY_B },
+    );
+
+    assertBothLanded(outcomes, unit.logPath, round);
+    assert.equal(eventsOf(unit.logPath, "execution.started").length, 2, `round ${round}`);
+  }
+});
+
+test("two runs racing ONE granted token spend it once: the loser hears token-consumed", async () => {
+  const script = writerScript();
+
+  for (let round = 1; round <= 3; round += 1) {
+    const unit = writerCase("granted");
+    const token = unit.tokens[KEY_A] ?? "";
+    // Both children present the SAME live token for the same key. The retry
+    // re-enters `consumeToken` whole, so its single-use scan is re-run against
+    // the fresh head rather than skipped: the double-spend refusal is the one
+    // `core/token.ts` always gave, and it is not softened by the retry above it.
+    const outcomes = await raceWriters(
+      script,
+      unit,
+      { verb: "run", actor: "agent:claude", key: KEY_A, extra: token },
+      { verb: "run", actor: "agent:mallory", key: KEY_A, extra: token },
+    );
+
+    const winners = outcomes.filter((outcome) => outcome.ok);
+    const losers = outcomes.filter((outcome) => !outcome.ok);
+    assert.equal(winners.length, 1, `round ${round}: expected exactly one winner`);
+    assert.equal(losers.length, 1, `round ${round}: expected exactly one loser`);
+    assert.equal(
+      (losers[0] as Consumer).code,
+      "token-consumed",
+      `round ${round}: ${JSON.stringify(losers[0])}`,
+    );
+    assert.equal(
+      records(unit.logPath).filter(
+        (record) => record.event === "execution.started" && record.action_key === KEY_A,
+      ).length,
+      1,
+      `round ${round}: one token, one execution`,
+    );
+    assert.equal(verify(unit.logPath).status, "clean", `round ${round}: log not clean`);
+  }
+});
+
+test("an unretried writer that loses the race still reports append-failed, with its attempt count", async () => {
+  const script = writerScript();
+
+  for (let round = 1; round <= 3; round += 1) {
+    // `retryOnHeadMoved: 1` is the pre-APRV-236 writer: one read, one set of
+    // checks, one append. It is how this file pins both shapes with one harness,
+    // and it is the shape a caller still gets once a real bound is spent on a
+    // log under sustained contention.
+    const unit = writerCase("requested");
+    const outcomes = await raceWriters(
+      script,
+      unit,
+      { verb: "grant", actor: "human:carter", key: KEY_A },
+      { verb: "grant", actor: "human:carter", key: KEY_B },
+      1,
+    );
+
+    const losers = outcomes.filter((outcome) => !outcome.ok);
+    assert.equal(losers.length, 1, `round ${round}: expected exactly one loser`);
+    const loser = losers[0] as Consumer;
+    assert.equal(loser.code, "append-failed", `round ${round}: ${JSON.stringify(loser)}`);
+    assert.equal(loser.append?.code, "head-moved", `round ${round}: ${JSON.stringify(loser)}`);
+    // The count is in the message, so a reader can tell one lost race from a log
+    // nobody can get a word in edgeways on.
+    assert.match(String(loser.message), /1 attempt was made/u, `round ${round}`);
+    assert.equal(eventsOf(unit.logPath, "approval.granted").length, 1, `round ${round}`);
     assert.equal(verify(unit.logPath).status, "clean", `round ${round}: log not clean`);
   }
 });

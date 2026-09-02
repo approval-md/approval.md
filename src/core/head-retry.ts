@@ -135,8 +135,8 @@ export function withHeadRetry<T extends HeadRetryable>(attempts: number, cycle: 
  */
 function exhausted<T extends HeadRetryable>(result: T, attempts: number): T {
   const note = `; ${String(attempts)} attempt${
-    attempts === 1 ? "" : "s"
-  } were made, each a fresh read, fresh checks and a fresh compare-and-append, and the head had moved again every time. Nothing was appended.`;
+    attempts === 1 ? " was" : "s were"
+  } made, each a fresh read, fresh checks and a fresh compare-and-append, and the head had moved again every time. Nothing was appended.`;
   // A copy, never a mutation: the caller's refusal objects are values, and the
   // only field that changes is the human-readable one. The cast restores `T`
   // after the spread, which widens `message` to `string | undefined`.
