@@ -449,22 +449,23 @@ ${why("log-advance")}`;
 export const VERIFY_HELP = `approval log verify — verify the log's hash chain
 
 Usage:
-  approval log verify [--log <path>] [--json]
+  approval log verify [--log <path>] [--anchor] [--anchor-rev <rev>] [--json]
 
 Flags:
-  --log <path>   log file to verify (default .approval/log/events.jsonl)
-  --json         machine-readable output
-  -h, --help     this text
+  --log <path>        log file to verify (default .approval/log/events.jsonl)
+  --anchor            also compare the prefix against the committed copy
+  --anchor-rev <rev>  compare against THIS rev's copy (implies --anchor)
+  --json              machine-readable output
+  -h, --help          this text
 
 Walks every complete line: re-derives each record's digest, follows the prev
-chain and the seq succession, and reports the first place the log stops being
-self-consistent. An absent file is an empty log and verifies clean. Nothing is
-written, and a torn tail is never truncated.
+chain and seq succession, and names where the log stops being self-consistent.
+An absent file verifies clean; nothing is written and a torn tail is not cut.
+--anchor also compares the prefix against the copy on a records branch or the
+trunk: a mismatch refuses anchor-diverged; a missing copy skips, never passes.
 
-JSON shape (stdout, one object):
-  {"status":"clean"|"torn-tail"|"corrupt","records","head",
-   "intactThroughSeq"?,"firstBadSeq"?,"reason"?,"message"?,"anomalies"?}
-  A CLEAN LOG WITH ANOMALIES IS CLEAN and still exits 0.
+JSON (one object): "status" clean|torn-tail|corrupt|anchor-diverged, "records",
+"head", optional reason/message/anomalies/anchor. ANOMALIES ARE CLEAN, exit 0.
 
 ${EXIT_CODES_POINTER} (clean 0, corrupt 1, torn-tail 3; an unreadable log is 4)
 ${JSON_ERRORS}

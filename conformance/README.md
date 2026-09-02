@@ -102,7 +102,7 @@ writes — MUST:
 | suite | what it pins |
 |---|---|
 | `jcs-canonicalization` | RFC 8785 serialization: key ordering at every level, string escaping, and ECMAScript number formatting named by IEEE-754 bit pattern. The digest of every record in SPEC.md §8 is taken over these bytes. |
-| `refusal-unions` | The five closed refusal-code unions of SPEC.md §11.1 invariant 6, in definition order. A caller branches on these strings. |
+| `refusal-unions` | The six closed refusal-code unions of SPEC.md §11.1 invariant 6, in definition order. A caller branches on these strings. |
 | `policy-resolution` | SPEC.md §5.2 matching and specificity, §7's irreversibility floor, and the fail-closed rule for a policy that does not parse. |
 | `chain-verification` | SPEC.md §8: mutation, reorder, splice, duplication, truncation (anchored and not), a torn tail, and `alg` tampering, each with the reason a verifier must report. |
 | `schema-validation` | Write-boundary validation of every committed schema fixture, with the constraint each refusal violates named — and the APRV-121 read boundary, where a pre-change monetary amount must still validate. |
@@ -126,9 +126,16 @@ passed 1.0.0 does not pass this.
 `refusal-unions` bumps for the same reason whenever a union grows: the vector
 pins the whole array in definition order, so a longer union is a changed
 expectation rather than a new vector. It reached 2.0.0 when APRV-146 added
-`execution-delegated` to the execute union, and it is 5.0.0 since APRV-145 added
-`not-delegated` and `already-finished` to the gate union — the two refusals the
-SPEC.md §10.2 completion counterpart can produce.
+`execution-delegated` to the execute union, and it reached 5.0.0 when APRV-145
+added `not-delegated` and `already-finished` to the gate union — the two
+refusals the SPEC.md §10.2 completion counterpart can produce.
+
+It is 7.0.0 since APRV-219, which added a sixth union rather than a code:
+`anchor_refusal_codes` (`anchor-diverged`), the refusal the log-anchoring check
+produces when a working log's prefix contradicts the copy already committed to
+a records branch or the trunk. The set of unions is pinned along with each
+one's contents, so an implementation that answers five of them covers five
+sixths of invariant 6 and does not conform.
 
 ## Changing the suite
 
