@@ -160,6 +160,11 @@ of it; where the two disagree, `APPROVAL.md` wins, and `approval hook classify
 - Local git: status, diff, add, commit on feature branches
 - `git push` of a feature branch; opening or updating a pull request against
   it (supervised: proceed, sampled for review)
+- `approval journal write` — the ungated free-text channel. Not classified, not
+  approvable, not logged; say what an exit code cannot (complying while thinking
+  it wrong, an odd instruction, being stuck). It is a local gitignored file
+  (`.approval-journal/`) that Carter reads with `approval journal read`; nothing
+  written there changes any verdict or sampling probability.
 
 ### Require approval first
 - Merges to `main` (including `gh pr merge`), tag creation
@@ -167,10 +172,15 @@ of it; where the two disagree, `APPROVAL.md` wins, and `approval hook classify
 - Adding or upgrading dependencies
 - Deleting files outside the current task's stated scope
 - Any network call beyond package installs (API calls, webhooks, sends)
-- Edits to `APPROVAL.md`, `.approval/`, `CLAUDE.md`, or CI/release config
+- Edits to `CLAUDE.md`, `AGENTS.md`, `SPEC.md`, `design/`, or CI/release config
+  (`policy.edit`, supervised-live: one in ten blocks on the gate, the rest are
+  sampled after the fact)
 
 ### Never
-- Touch credentials, tokens, or the vault
+- Touch credentials, tokens, or the vault (`account.credential`, human-only)
+- Edit `APPROVAL.md` or anything under `.approval/` other than through the
+  human's own ceremony (`policy.core`, human-only), or write into the log
+  directory by any means (`log.mutate`, human-only)
 - Rewrite git history on shared branches
 - Mutate `events.jsonl` or fabricate log entries — including in tests;
   test logs are built through the real append path

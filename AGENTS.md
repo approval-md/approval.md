@@ -82,6 +82,7 @@ Allowed without prompting:
 - Run tests, lint, typecheck, build, local scripts, and lockfile-pinned `npm ci`.
 - Local git status, diff, add, and commit on feature branches.
 - Push feature branches and open or update their pull requests when policy resolves them as supervised.
+- Write to the journal (`approval journal write`). It is ungated by construction, not by permission, and nothing written there is judged.
 
 Require approval first:
 
@@ -90,11 +91,12 @@ Require approval first:
 - Add, upgrade, or remove dependencies.
 - Delete files outside the active task scope.
 - Make mutating or ambiguous network calls.
-- Edit policy, agent instructions, SPEC.md, CI, or release configuration.
+- Edit agent instructions, SPEC.md, design notes, CI, or release configuration (policy.edit, supervised-live).
 
 Never:
 
 - Access or modify credentials, tokens, or the vault.
+- Edit the policy file or anything under the approval home except its log (policy.core, human-only), or write into the log directory by any means (log.mutate, human-only).
 - Rewrite shared history.
 - Mutate the event log or fabricate events.
 
