@@ -52,9 +52,12 @@
         "audit.dark_session",
         "reconciliation.required",
         "reconciliation.satisfied",
-        "payload.pruned"
+        "payload.pruned",
+        "gate.opened",
+        "gate.closed",
+        "gate.bypassed"
       ],
-      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of twenty-four event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, `execution.indeterminate` with `execution.reconciled` (APRV-120) the third and fourth, `reconciliation.required` / `reconciliation.satisfied` (APRV-127) the fifth and sixth, and `policy.proposed` / `policy.declined` (APRV-109) the seventh and eighth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept them all."
+      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of twenty-eight event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, `execution.indeterminate` with `execution.reconciled` (APRV-120) the third and fourth, `reconciliation.required` / `reconciliation.satisfied` (APRV-127) the fifth and sixth, `policy.proposed` / `policy.declined` (APRV-109) the seventh and eighth, `audit.dark_session` (APRV-192) the ninth, and `gate.opened` / `gate.closed` / `gate.bypassed` (APRV-214) the tenth, eleventh and twelfth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept them all."
     },
     "actor": {
       "type": "string",
@@ -557,6 +560,11 @@
                 "minimum": 0,
                 "description": "SPEC.md §10.4: the COUNT of credential-bearing environment variables withheld from the spawned child. Never a name and never a value.",
                 "examples": [3]
+              },
+              "grant_origin": {
+                "enum": ["direct", "carried"],
+                "description": "SPEC.md §10.4 (amended, APRV-200): how the authorization reached the process that spent it, on a harness `execution.started` that names a `grant_seq`. `direct` means the tool call that spent the grant is the tool call that asked for it, so one process observed the whole ordering and nothing this runtime authorized ran before the human answered. `carried` means a LATER tool call spent it under the carryover of §10.2's harness path: the asking invocation had already returned its verdict, and whether the harness honoured that verdict is a fact this runtime never observes, because it decides and the harness executes. The ordering the record implies is therefore guaranteed only for `direct`, and this field is what lets an auditor tell the two apart from the log alone. Derived at the write boundary from the task the request record carries, never from a caller's assertion of it: the value that adds scrutiny is the default and the one that removes it is reachable only by naming a fact already in the verified log, which is §11.1 invariant 4 applied to a marker. OPTIONAL and additive — an execution with no grant reports no origin, and every record written before the field existed still validates and still verifies.",
+                "examples": ["direct"]
               }
             }
           }
@@ -1144,6 +1152,191 @@
                     "format": "date-time"
                   }
                 }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §5.2 (amended, APRV-214), 'The open window': a person opening the harness gate on themselves so the gate can be debugged from inside. The actor MUST be `^human:`, in the schema as well as in `core/gate-window.ts`, for the reason attestation refuses an agent: this is the one act that suspends the policy, and an agent able to author it could authorize its own next command. The window's state lives here and in no file, so what a reader derives is derived from a verified chain and nothing else. Expiry is `ts` plus `duration`, and a record claiming an `expires_at` beyond that reads as the shorter of the two: the field is a convenience for a human reading the log, never the authority.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "gate.opened"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^human:"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "expires_at",
+              "duration",
+              "reason",
+              "scope"
+            ],
+            "properties": {
+              "expires_at": {
+                "type": "string",
+                "format": "date-time",
+                "description": "When the window lapses, as the opener's runtime computed it from the record's own `ts`. Nothing is appended at lapse, so a reader derives closure from this and from the absence of a `gate.closed` naming this record's seq."
+              },
+              "duration": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The duration as it was asked for (`30m`, `2h`). The authority, alongside `ts`: a duration over the 24h cap is clamped at read time, so a hand-written record cannot buy a longer window than the runtime would have granted."
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Why the window was opened, in the opener's words. Required: a bypass nobody stated a reason for is a bypass nobody can review."
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "hook"
+                ],
+                "description": "What the window suspends. One value at v0.1: the harness hook's policy resolution. It is an enum rather than a free string so that a later scope is an explicit schema change and never a value an opener invents."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §5.2 (amended, APRV-214): the human closing an open window early. Human-actor for the same reason `gate.opened` is, though this one only ever TIGHTENS: an agent able to close a window could not thereby authorize anything, and the rule is kept uniform so the pair reads as one ceremony.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "gate.closed"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^human:"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "opened_seq"
+            ],
+            "properties": {
+              "opened_seq": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The `seq` of the `gate.opened` this closes. That the named record exists and is the latest open one is the runtime's check; a schema sees one record and can only constrain the shape."
+              },
+              "note": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Optional: what was learned while the window was open."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §5.2 (amended, APRV-214): one gated tool call the hook allowed because a window was open. Appended BEFORE the allow is printed, so a bypassed command that ran and was not recorded is not a state this runtime can reach (§11.1 invariant 8). Either actor kind: the record says who the harness ran as, and it is a statement about the call rather than an authorization by the caller, so nothing here is a self-report that lowers scrutiny — the authority is the human's `gate.opened`, and this record can only ADD to what a reviewer sees. Summary and payload hash, never the raw command: §11.1 invariant 3 has no exception for a bypass, and the payload store already holds the bytes for every record that binds to them.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "gate.bypassed"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^(human|agent):"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "opened_seq",
+              "tool",
+              "summary",
+              "classes",
+              "payload_hash"
+            ],
+            "properties": {
+              "opened_seq": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The `seq` of the `gate.opened` under which this call was allowed, so every bypassed call is attributable to one human's ceremony."
+              },
+              "tool": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The harness tool the call came through (`Bash`, `Edit`, `Write`)."
+              },
+              "summary": {
+                "type": "string",
+                "maxLength": 160,
+                "description": "The one-line headline, capped at the hook's own `SUMMARY_LIMIT`. A headline and only that: what the bytes were is `payload_hash`."
+              },
+              "classes": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "The classes the command resolved to. The window suspends the POLICY, so the classification still happens and is still recorded: a reviewer reads what would have needed approval."
+              },
+              "payload_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "The `payload_hash` of the binding bytes, computed exactly as the gated path computes it."
+              },
+              "session_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "tool_use_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "cwd": {
+                "type": "string",
+                "minLength": 1
               }
             }
           }

@@ -161,6 +161,10 @@ function emitRefusal(streams: Streams, json: boolean, refusal: GateRefusal): num
     if (refusal.detail !== undefined) error["detail"] = refusal.detail;
     if (refusal.state !== undefined) error["state"] = refusal.state;
     if (refusal.verdicts !== undefined) error["verdicts"] = refusal.verdicts;
+    // APRV-173: the request-volume verdicts behind `queue-full` / `rate-limited`.
+    // Their own key rather than `verdicts`, because a caller reading money out
+    // of a budget refusal must not find queue counts under the same name.
+    if (refusal.limits !== undefined) error["limits"] = refusal.limits;
     if (refusal.errors !== undefined) error["errors"] = refusal.errors;
     if (refusal.record !== undefined) error["seq"] = refusal.record.seq;
     streams.err(`${JSON.stringify({ ok: false, error })}\n`);

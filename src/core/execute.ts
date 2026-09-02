@@ -437,6 +437,31 @@ export function findDeclaration(
   actionKey: string,
 ): Declaration | null {
   let found: Declaration | null = null;
+  for (const { task, key, item } of declaredActions(records)) {
+    if (key !== actionKey) continue;
+    const declaration = declarationOf(task, item);
+    if (declaration === null) continue;
+    found = declaration;
+  }
+  return found;
+}
+
+/**
+ * One declared action, as a `task.registered` record carries it.
+ *
+ * The shared walk behind {@link findDeclaration}, {@link declaringTasks} and
+ * {@link indexDeclarations}: the three ask different questions of exactly the
+ * same records, entries and skip rules, and a fourth copy of those rules is a
+ * fourth place for them to diverge.
+ */
+interface DeclaredAction {
+  task: string;
+  /** The entry's `idempotency_key`, unnormalized: it is compared, never trusted. */
+  key: unknown;
+  item: Record<string, unknown>;
+}
+
+function* declaredActions(records: readonly EventRecord[]): Generator<DeclaredAction> {
   for (const record of records) {
     if (record.event !== "task.registered") continue;
     const task = record.task;
@@ -446,24 +471,76 @@ export function findDeclaration(
     for (const entry of actions) {
       if (typeof entry !== "object" || entry === null) continue;
       const item = entry as Record<string, unknown>;
-      if (item["idempotency_key"] !== actionKey) continue;
-      const cls = item["class"];
-      if (typeof cls !== "string") continue;
-      const cost = item["est_cost_usd"];
-      const reversible = item["reversible"];
-      const summary = item["summary"];
-      const binding = item["payload_hash"];
-      found = {
-        task,
-        class: cls,
-        est_cost_usd: usdOrZero(cost),
-        reversible: typeof reversible === "boolean" ? reversible : null,
-        summary: typeof summary === "string" ? summary : null,
-        payload_hash: isPayloadHash(binding) ? binding : null,
-      };
+      yield { task, key: item["idempotency_key"], item };
     }
   }
-  return found;
+}
+
+/** The {@link Declaration} an entry states, or `null` when it declares no class. */
+function declarationOf(task: string, item: Record<string, unknown>): Declaration | null {
+  const cls = item["class"];
+  if (typeof cls !== "string") return null;
+  const cost = item["est_cost_usd"];
+  const reversible = item["reversible"];
+  const summary = item["summary"];
+  const binding = item["payload_hash"];
+  return {
+    task,
+    class: cls,
+    est_cost_usd: usdOrZero(cost),
+    reversible: typeof reversible === "boolean" ? reversible : null,
+    summary: typeof summary === "string" ? summary : null,
+    payload_hash: isPayloadHash(binding) ? binding : null,
+  };
+}
+
+/**
+ * Every declaration question the log answers, keyed once (APRV-211).
+ *
+ * The three per-key helpers above each scan the whole log, which is the right
+ * shape for the gate (one key, one decision, no bookkeeping to get wrong) and
+ * the wrong shape for a caller asking about thousands of keys: `core/audit.ts`'s
+ * candidate selection asked all three per `execution.started` and spent three
+ * full scans per candidate, which is quadratic in the log and measured at 3.3 s
+ * on a ten-thousand-record log.
+ *
+ * This is a **per-call derivation and nothing more**. It caches nothing across
+ * calls, holds no state, reads no file and no clock, and is built from the
+ * records the caller already verified. The per-key helpers remain the gate's
+ * API: an enforcement path deciding ONE action asks them, because a decision
+ * that depends on an index built somewhere else is a decision that depends on
+ * that index being fresh.
+ */
+export interface DeclarationIndex {
+  /** Per key, the distinct tasks declaring it, exactly as {@link declaringTasks}. */
+  declaringTasks: Map<string, string[]>;
+  /** Per key, the LAST declaration in log order, exactly as {@link findDeclaration}. */
+  declarations: Map<string, Declaration>;
+  /** Keys the log holds an `approval.requested` for, as {@link hasApprovalCycle}. */
+  requested: Set<string>;
+}
+
+export function indexDeclarations(records: readonly EventRecord[]): DeclarationIndex {
+  const tasksByKey = new Map<string, string[]>();
+  const declarations = new Map<string, Declaration>();
+  const requested = new Set<string>();
+
+  for (const { task, key, item } of declaredActions(records)) {
+    if (typeof key !== "string") continue;
+    const tasks = tasksByKey.get(key);
+    if (tasks === undefined) tasksByKey.set(key, [task]);
+    else if (!tasks.includes(task)) tasks.push(task);
+    const declaration = declarationOf(task, item);
+    if (declaration !== null) declarations.set(key, declaration);
+  }
+
+  for (const record of records) {
+    if (record.event !== "approval.requested") continue;
+    const key = record.action_key;
+    if (typeof key === "string") requested.add(key);
+  }
+
+  return { declaringTasks: tasksByKey, declarations, requested };
 }
 
 /**
@@ -475,18 +552,8 @@ export function findDeclaration(
  */
 export function declaringTasks(records: EventRecord[], actionKey: string): string[] {
   const tasks = new Set<string>();
-  for (const record of records) {
-    if (record.event !== "task.registered") continue;
-    const task = record.task;
-    if (typeof task !== "string" || task.length === 0) continue;
-    const actions = payloadOf(record)["actions"];
-    if (!Array.isArray(actions)) continue;
-    for (const entry of actions) {
-      if (typeof entry !== "object" || entry === null) continue;
-      if ((entry as Record<string, unknown>)["idempotency_key"] === actionKey) {
-        tasks.add(task);
-      }
-    }
+  for (const { task, key } of declaredActions(records)) {
+    if (key === actionKey) tasks.add(task);
   }
   return [...tasks];
 }

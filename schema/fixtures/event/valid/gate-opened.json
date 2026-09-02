@@ -1,0 +1,16 @@
+{
+  "seq": 41,
+  "ts": "2026-09-02T14:00:00Z",
+  "event": "gate.opened",
+  "actor": "human:carter",
+  "channel": "cli",
+  "payload": {
+    "expires_at": "2026-09-02T14:30:00Z",
+    "duration": "30m",
+    "reason": "the hook denies every command while the attestation is drifted; opening the window to repair it",
+    "scope": "hook"
+  },
+  "alg": "sha256/jcs",
+  "prev": "7f625051c176f2f260a1f7e25c9a933717ebb49917a8788ac25ae7a4614ebb30",
+  "hash": "1b4f8e2c9a7d05613fbc84a2e0d97c31556a08bf4e2913d7ca60b85f9d3e7042"
+}

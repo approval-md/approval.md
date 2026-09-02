@@ -96,6 +96,13 @@ export const GENESIS_PREV = null;
  * (amended SPEC.md §10.2). It is an observation the RUNTIME makes about a
  * session, never a record written on a session's behalf, so it carries a
  * `system:` actor and the schema refuses any other.
+ * `gate.opened`, `gate.closed` and `gate.bypassed` (APRV-214) are the tenth,
+ * eleventh and twelfth: a human time-boxing a full harness bypass so the gate
+ * itself can be debugged, that human closing it early, and one gated tool call
+ * the hook allowed while it stood (amended SPEC.md §5.2). The window's whole
+ * state is these records, deliberately: a file the runtime read on its own
+ * would let anything able to write it act as the human. The first two carry a
+ * `human:` actor and the schema refuses any other.
  */
 export type EventType =
   | "task.registered"
@@ -122,7 +129,10 @@ export type EventType =
   | "audit.dark_session"
   | "reconciliation.required"
   | "reconciliation.satisfied"
-  | "payload.pruned";
+  | "payload.pruned"
+  | "gate.opened"
+  | "gate.closed"
+  | "gate.bypassed";
 
 /** Caller-supplied content of an event. Chain fields are not accepted. */
 export interface EventInput {
@@ -637,6 +647,33 @@ export function withAppendLock<T>(
   }
 }
 
+/**
+ * Listeners told that this process appended to a log (APRV-217).
+ *
+ * One subscriber exists: the verified-read cache, which marks the log it wrote
+ * for a full re-proof on its next read. It is a registration rather than a call
+ * into `core/state.ts` because a value import that way would close a cycle
+ * through `core/verify.ts`. Nothing a listener does can change what was
+ * appended — the append has already succeeded — and a listener that throws must
+ * not turn a written record into a failed one, so throws are swallowed.
+ */
+const appendListeners: Array<(logPath: string) => void> = [];
+
+/** Subscribe to successful appends. Process-wide, memory-only, additive. */
+export function onLogAppended(listener: (logPath: string) => void): void {
+  appendListeners.push(listener);
+}
+
+function noteAppend(logPath: string): void {
+  for (const listener of appendListeners) {
+    try {
+      listener(logPath);
+    } catch {
+      // A bookkeeping listener may not un-write a record that is on disk.
+    }
+  }
+}
+
 export function appendEvent(
   logPath: string,
   input: EventInput,
@@ -703,5 +740,9 @@ export function appendEvent(
     return { ok: true, record, line };
   }, options);
 
-  return held.ok ? held.value : { ok: false, error: held.error };
+  const result: AppendResult = held.ok ? held.value : { ok: false, error: held.error };
+  // After the lock is released and only for a record that actually landed: the
+  // reader cache must not serve a prefix proof anchored before this write.
+  if (result.ok) noteAppend(logPath);
+  return result;
 }

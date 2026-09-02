@@ -79,11 +79,23 @@ import {
   readEmailSmtpConfig,
   type EmailSmtpConfig,
 } from "../adapters/email.js";
+import {
+  AGENTMAIL_CREDENTIAL_SPECS,
+  AGENTMAIL_SEND_PERMISSIONS,
+  DEFAULT_AGENTMAIL_CREDENTIAL_NAMES,
+  probeAgentmail,
+  readAgentmailConfig,
+  type AgentmailConfig,
+} from "../adapters/agentmail.js";
 import type { CredentialProvider } from "../adapters/contract.js";
 import { vaultCredentialProvider } from "../adapters/vault-provider.js";
 import { isSmtpSecurity, probeSmtp, type SmtpSecurity } from "../adapters/smtp.js";
 import { EXIT_OK } from "./exit-codes.js";
-import { SETUP_ADAPTER_EMAIL_HELP, SETUP_ADAPTER_HELP } from "./help.js";
+import {
+  SETUP_ADAPTER_AGENTMAIL_HELP,
+  SETUP_ADAPTER_EMAIL_HELP,
+  SETUP_ADAPTER_HELP,
+} from "./help.js";
 import { refusal as renderRefusal, style } from "./style.js";
 import type { Streams } from "./main.js";
 import { confirmUntil, type Prompter } from "./prompt.js";
@@ -113,6 +125,13 @@ export interface VerifyContext {
   prompter: Prompter;
   probe: typeof probeSmtp;
   /**
+   * The API root the AgentMail probe reads (APRV-223), or `undefined` for the
+   * public one. Threaded from `SetupDeps.apiBase`, which is how every other
+   * setup verb points a probe at a loopback fixture; there is no relaxation
+   * here to keep inside a test, because the probe is one HTTPS GET.
+   */
+  apiBase?: string | undefined;
+  /**
    * The adapter's own credential provider, over the vault this run just wrote
    * to (APRV-99). Lazy: a first run never opens it, because a first run holds
    * everything already. A partial re-run opens it to probe the MERGED set, and
@@ -134,6 +153,13 @@ export interface AdapterSetupEntry {
   check?(values: Record<string, string>, kept: readonly string[]): string | null;
   /** One line of what this adapter is, for the title. */
   summary: string;
+  /**
+   * This adapter's own help, printed for `--help` and beside every usage error
+   * from here down (APRV-221). On the entry rather than in a `name === "email"`
+   * branch: an adapter's help is the adapter's, and a branch is a place for the
+   * next adapter's help to be forgotten.
+   */
+  help: string;
   /** The non-interactive path: the exact `vault set` calls, generated. */
   hint(context: HintContext): string;
   /** Prove the stored configuration against the far end, sending nothing. */
@@ -361,6 +387,127 @@ async function verifyEmail(
   );
 }
 
+// ---------------------------------------------------------------------------
+// agentmail (APRV-223)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the probe can say about the stored key's own permissions.
+ *
+ * Three answers and not two, because "not disclosed" is not "none". AgentMail
+ * keys carry `draft_send` and `message_send` as separate booleans and the whole
+ * deployment this adapter assumes rests on the vault's key holding both while
+ * the agent's key holds neither. The inbox read this probe already makes is the
+ * only call it will make: probing a second endpoint nobody has confirmed exists
+ * would turn its 404 into a permissions verdict, which is a worse answer than
+ * saying plainly that the check could not be made. So a run that learns nothing
+ * prints the reminder, and only a disclosure names a missing permission.
+ */
+function permissionsLine(disclosed: readonly string[] | null): string {
+  if (disclosed === null) {
+    return `AgentMail disclosed no permissions for this key here, so nothing was checked: the key you\njust stored must carry ${AGENTMAIL_SEND_PERMISSIONS.join(" and ")}, and the key your AGENT holds must not.`;
+  }
+  const missing = AGENTMAIL_SEND_PERMISSIONS.filter((name) => !disclosed.includes(name));
+  if (missing.length === 0) {
+    return `The key carries ${AGENTMAIL_SEND_PERMISSIONS.join(" and ")}, which is what a granted send spends.`;
+  }
+  return `WARNING: this key does not carry ${missing.join(" and ")}. \`approval adapter agentmail\`\nwill be refused agentmail-unauthorized at send time, AFTER a human has granted it.\nStore a key that can send, and leave the one without those permissions to the agent.`;
+}
+
+/**
+ * The AgentMail proof: `GET /v0/inboxes/{inbox_id}`, and nothing else.
+ *
+ * The same read `act` makes before every direct send, for the same two reasons:
+ * it establishes that the key opens this inbox, and it reports the address the
+ * inbox sends as, which is the address every approved message will actually
+ * come from. It puts no message anywhere.
+ */
+async function probeAgentmailAndReport(
+  config: AgentmailConfig,
+  scrub: (text: string) => string,
+  probe: typeof probeAgentmail,
+  apiBase: string | undefined,
+  undo: readonly string[],
+): Promise<VerifyOutcome> {
+  const result = await probe(config, apiBase === undefined ? {} : { apiBase });
+
+  if (result.ok) {
+    return {
+      ok: true,
+      detail: `\nverified: the key opened the inbox ${config.inboxId}, which sends as ${result.address}.\nNo message was sent: the probe is one GET of the inbox.\n${permissionsLine(result.permissions)}\n`,
+    };
+  }
+
+  const lines = undo.map((name) => `  approval vault remove ${name} --as human:<id>`).join("\n");
+  return {
+    ok: false,
+    detail: `${renderRefusal(style(), result.code, scrub(result.message))}\n\nThe values ARE stored — a probe that failed because a laptop is behind a captive\nportal is not a reason to make you type them again. Fix the key or the inbox id\nand re-run this verb, or undo it by hand:\n\n${lines}\n`,
+  };
+}
+
+/**
+ * `setup adapter agentmail`'s verification.
+ *
+ * One shape for both runs, unlike the email adapter's: this manifest is two
+ * values, so a partial re-run is a rotation of the key with the inbox left
+ * alone, and the read that proves it is the same one either way. It goes
+ * through {@link readAgentmailConfig} over the vault whenever the run does not
+ * hold both values, which is the exact path `approval adapter agentmail` takes
+ * at send time and prints nothing.
+ */
+async function verifyAgentmail(
+  values: Record<string, string>,
+  context: VerifyContext,
+): Promise<VerifyOutcome> {
+  const names = DEFAULT_AGENTMAIL_CREDENTIAL_NAMES;
+  const probe = probeAgentmail;
+  const scrub = redactor(Object.values(values));
+
+  if (
+    !confirmUntil(
+      context.streams,
+      context.prompter,
+      `read the inbox from AgentMail to check the key? Nothing is sent`,
+      true,
+    )
+  ) {
+    return {
+      ok: true,
+      declined: true,
+      detail: `\nstored and unverified: no request was made. The first proof will be the first\n\`approval adapter agentmail\` send, which is a proof a human has already granted.\n`,
+    };
+  }
+
+  const inboxId = values[names.inboxId];
+  const apiKey = values[names.apiKey];
+  if (inboxId !== undefined && apiKey !== undefined) {
+    return probeAgentmailAndReport(
+      { inboxId, apiKey },
+      scrub,
+      probe,
+      context.apiBase,
+      context.written,
+    );
+  }
+
+  // A partial re-run: read what the vault holds, the way the adapter reads it.
+  const configured = readAgentmailConfig(context.credentials, names);
+  if (!configured.ok) {
+    return {
+      ok: true,
+      declined: true,
+      detail: `${partialRefusal(context.skipped)}\nthe probe could not run: ${scrub(configured.message)}\n`,
+    };
+  }
+  return probeAgentmailAndReport(
+    configured.config,
+    redactor([...Object.values(values), ...configured.secrets]),
+    probe,
+    context.apiBase,
+    context.written,
+  );
+}
+
 /** Every adapter this verb can configure. Keyed by the `adapter <name>` name. */
 export const ADAPTER_SETUPS: Record<string, AdapterSetupEntry> = {
   email: {
@@ -368,6 +515,7 @@ export const ADAPTER_SETUPS: Record<string, AdapterSetupEntry> = {
     check: (values, kept) => checkEmailCredentialSet(values, DEFAULT_CREDENTIAL_NAMES, kept),
     summary:
       "the SMTP settings `approval adapter email` reads inside the verified-token window",
+    help: SETUP_ADAPTER_EMAIL_HELP,
     hint: (context) => manifestHint(EMAIL_CREDENTIAL_SPECS, context),
     verify: verifyEmail,
     nextSteps: [
@@ -376,6 +524,23 @@ export const ADAPTER_SETUPS: Record<string, AdapterSetupEntry> = {
       `  approval vault list --as human:<id>`,
       ``,
       `The adapter reads them itself, inside the token window; nothing else does.`,
+    ],
+  },
+  agentmail: {
+    specs: AGENTMAIL_CREDENTIAL_SPECS,
+    summary:
+      "the AgentMail inbox and sending key `approval adapter agentmail` reads inside the verified-token window",
+    help: SETUP_ADAPTER_AGENTMAIL_HELP,
+    hint: (context) => manifestHint(AGENTMAIL_CREDENTIAL_SPECS, context),
+    verify: verifyAgentmail,
+    nextSteps: [
+      `Check the names (never the values) with:`,
+      ``,
+      `  approval vault list --as human:<id>`,
+      ``,
+      `The key stored here is the one that CAN send. Give the agent a different key,`,
+      `without ${AGENTMAIL_SEND_PERMISSIONS.join(" or ")}, in AGENTMAIL_API_KEY: that key composes`,
+      `drafts, and \`approval payload agentmail-draft\` snapshots one for a human to read.`,
     ],
   },
 };
@@ -445,7 +610,9 @@ export async function commandSetupAdapter(
       SETUP_ADAPTER_HELP,
     );
   }
-  const entry = ADAPTER_SETUPS[name];
+  // Own keys only, for the reason `cli/adapter.ts` gives (APRV-223): every
+  // string names something on `Object.prototype` before it names an adapter.
+  const entry = Object.hasOwn(ADAPTER_SETUPS, name) ? ADAPTER_SETUPS[name] : undefined;
   if (entry === undefined) {
     return usageError(
       streams,
@@ -454,7 +621,10 @@ export async function commandSetupAdapter(
       SETUP_ADAPTER_HELP,
     );
   }
-  const helpText = name === "email" ? SETUP_ADAPTER_EMAIL_HELP : SETUP_ADAPTER_HELP;
+  // The adapter's own help, from the table entry the name resolved to: the
+  // generic SETUP_ADAPTER_HELP is for the errors that happen BEFORE a name
+  // resolves, and for nothing after this line.
+  const helpText = entry.help;
 
   const outcome = front(
     `adapter ${name}`,
@@ -521,6 +691,7 @@ export async function commandSetupAdapter(
           streams,
           prompter: context.prompter,
           probe,
+          ...(deps.apiBase === undefined ? {} : { apiBase: deps.apiBase }),
           credentials,
         }),
     },

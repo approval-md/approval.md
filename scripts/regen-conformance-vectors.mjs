@@ -71,6 +71,36 @@ const POLICY = [
   "",
 ].join("\n");
 
+/**
+ * SPEC.md §5.2's request-volume limits, one policy per limit (APRV-173).
+ *
+ * Written separately rather than as one policy carrying both, so each vector
+ * pins ONE refusal: with both ceilings at 1 the queue check fires first and the
+ * rate-limit vector would assert a code it never reached.
+ */
+function policyWithLimits(limits) {
+  return [
+    "# Policy",
+    "",
+    "```yaml approval-policy",
+    'version: "0.1"',
+    "defaults:",
+    "  autonomy: manual",
+    '  approval_ttl: "1h"',
+    "  on_expiry: reject",
+    "classes:",
+    "  communicate.email.external:",
+    "    autonomy: manual",
+    "    limits:",
+    ...limits.map((line) => `      ${line}`),
+    "```",
+    "",
+  ].join("\n");
+}
+
+const POLICY_MAX_PENDING = policyWithLimits(["max_pending: 1"]);
+const POLICY_REQUESTS_PER_HOUR = policyWithLimits(["requests_per_hour: 1"]);
+
 /** A policy whose YAML does not parse: everything must fall to `manual`. */
 const POLICY_BROKEN = [
   "# Policy",
@@ -527,6 +557,36 @@ const REQUEST_EMAIL = {
   at: 1,
 };
 
+// A second action of the SAME class, so the request-volume vectors below put
+// two questions of one class in front of one approver (APRV-173).
+const SECOND_EMAIL_ACTION = {
+  class: "communicate.email.external",
+  summary: "Send the second chaser",
+  reversible: false,
+  est_cost_usd: "0.02",
+  idempotency_key: "task-042:chaser-2",
+  payload_hash: INVOICE_HASH,
+};
+
+const REGISTER_TWO_EMAILS = {
+  op: "register",
+  task: "task-042",
+  envelope: envelope([EMAIL_ACTION, SECOND_EMAIL_ACTION]),
+  actor: "agent:claude",
+};
+
+const REQUEST_SECOND_EMAIL = {
+  op: "request",
+  task: "task-042",
+  action: "task-042:chaser-2",
+  class: "communicate.email.external",
+  est_cost_usd: "0.02",
+  reversible: false,
+  payload: INVOICE_PAYLOAD,
+  actor: "agent:claude",
+  at: 2,
+};
+
 const gateVectors = [
   {
     id: "manual-request-is-recorded",
@@ -844,6 +904,36 @@ const gateVectors = [
     },
   },
   {
+    id: "queue-full",
+    description:
+      "SPEC.md §5.2 request-volume limits (APRV-173): the matched rule caps `max_pending` at 1 and one request for the class is already awaiting a decision, so the second is refused `queue-full` at intake. Nothing is appended — the record count is unchanged from before the refused request — because a log line per refused request would hand a queue-flooder the log growth it was refused the queue for",
+    control: true,
+    input: {
+      policy: POLICY_MAX_PENDING,
+      steps: [
+        { op: "attest", actor: "human:carter" },
+        REGISTER_TWO_EMAILS,
+        REQUEST_EMAIL,
+        REQUEST_SECOND_EMAIL,
+      ],
+    },
+  },
+  {
+    id: "rate-limited",
+    description:
+      "SPEC.md §5.2 request-volume limits (APRV-173): the matched rule caps `requests_per_hour` at 1 for this origin and the origin created one a minute ago, so the second is refused `rate-limited`. Distinct from `queue-full`: the queue is not capped here at all, the caller's own volume is the ceiling, and the window is rolling rather than drained by a human. Nothing is appended",
+    control: true,
+    input: {
+      policy: POLICY_REQUESTS_PER_HOUR,
+      steps: [
+        { op: "attest", actor: "human:carter" },
+        REGISTER_TWO_EMAILS,
+        REQUEST_EMAIL,
+        REQUEST_SECOND_EMAIL,
+      ],
+    },
+  },
+  {
     id: "envelope-invalid-bare-number-amount",
     description:
       "APRV-121 at the gate: an envelope declaring `est_cost_usd` as a JSON number is refused at registration, so the number never reaches hashed material",
@@ -898,7 +988,12 @@ const SUITES = [
     // union's `execution-delegated`: that one stops a human recovery verb
     // closing a harness start, this one stops a harness report closing an
     // execution this runtime watched itself.
-    vectors_version: "5.0.0",
+    // 6.0.0 (APRV-173): `gate_refusal_codes` gained `queue-full` and
+    // `rate-limited`, the two refusals SPEC.md §5.2's request-volume limits
+    // produce now that a runtime reads them. The vector pins the whole array in
+    // definition order, so a longer union is a changed expectation and a major
+    // bump, exactly as 4.0.0 and 5.0.0 were.
+    vectors_version: "6.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
@@ -929,7 +1024,10 @@ const SUITES = [
     // fixtures (a completion and a failure carrying `reported_by`, an open
     // `reported_by` string, a non-integer `exit_code`) are new vectors; no
     // existing expectation moved.
-    vectors_version: "1.2.0",
+    // 1.3.0 (swept in by APRV-173's regeneration, authored earlier): the two
+    // `env_stripped` event fixtures were committed without a regen, so the
+    // suite did not cover them. New vectors, no expectation moved: a minor bump.
+    vectors_version: "1.3.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",
@@ -941,8 +1039,11 @@ const SUITES = [
     // 2.0.0, not 1.1.0: APRV-147 moved an expectation. The vector that said
     // intake does not check registration now says it does, and a second
     // implementation that passed 1.0.0 does not pass this.
-    vectors_version: "2.0.0",
-    algorithm: "SPEC.md §6.3/§7/§10: the gate's admission, decision, and refusal paths",
+    // 2.1.0 (APRV-173): a MINOR bump. The `queue-full` and `rate-limited`
+    // vectors are new; no existing expectation moved, because no policy in this
+    // suite declared a request-volume limit before.
+    vectors_version: "2.1.0",
+    algorithm: "SPEC.md §5.2/§6.3/§7/§10: the gate's admission, decision, and refusal paths",
     description:
       "Scripted scenarios over a scratch log: each is a policy, a sequence of gate operations, and the verdict of the last one. A step before the last that refuses is a broken vector and is reported as such rather than counted as a result.",
     vectors: gateVectors,

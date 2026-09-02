@@ -911,6 +911,43 @@ test("a tick publishes the verified-head snapshot, and a corrupt log publishes n
   assert.equal(readFileSync(snapshotPath, "utf8"), before, "a corrupt read publishes nothing");
 });
 
+test("the daemon does not wake itself from its own writes", async () => {
+  // APRV-211. Every clean read publishes a verified-head snapshot into the
+  // directory the daemon watches, and every repaired task file lands in the
+  // other one. Before the watcher learned to ignore its own hand, that made an
+  // idle daemon tick forever: 18 ticks in 45 seconds against a ten-minute
+  // interval, with nothing else writing anything.
+  //
+  // A long interval and a short debounce is what tells the two apart: the only
+  // thing that can produce a second tick here is a watcher event, so a single
+  // tick over a second and a half of idleness is the property, and the watcher
+  // still being LIVE for a real change is the other half of it.
+  const dir = ready(POLICY, "proposed");
+
+  const daemon = new LiveDaemon(dir, ["--interval", "60s", "--debounce", "50ms"]);
+  await until(() => daemon.lines().some((line) => line["event"] === "tick"), "the first tick");
+
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  const idle = daemon.lines().filter((line) => line["event"] === "tick");
+  assert.equal(
+    idle.length,
+    1,
+    `an idle daemon ticked ${String(idle.length)} times in 1.5 s with a 60 s interval: it is waking itself`,
+  );
+
+  // The watcher is not deaf, only deaf to itself: a real append wakes it well
+  // inside the interval.
+  request(dir, "task-042:chaser");
+  await until(
+    () => daemon.lines().filter((line) => line["event"] === "tick").length >= 2,
+    "a tick woken by an external append",
+  );
+
+  const code = await daemon.stopWith("SIGTERM");
+  assert.equal(code, 0, `daemon exited ${code}: ${daemon.stderr}`);
+  assertClean(dir);
+});
+
 test("a torn tail stops the daemon at exit 3", () => {
   const dir = ready(POLICY, "proposed");
   appendFileSync(logPath(dir), "{\"seq\":99", "utf8");

@@ -101,6 +101,12 @@ function isGateTyped(event: string): boolean {
     // human's act recorded at the write boundary; neither takes a caller's
     // clock, so both may be held to the runtime's.
     event.startsWith("reconciliation.") ||
+    // Amended SPEC.md §8 (APRV-214): `gate.*` is written through the write
+    // boundary clock like everything above it. The open window's expiry is
+    // derived from `gate.opened`'s own `ts`, so an opener who could author that
+    // timestamp could author the window's length; holding the trio to the
+    // runtime's clock is what makes §8's skew report cover it.
+    event.startsWith("gate.") ||
     event === "policy.updated"
   );
 }
