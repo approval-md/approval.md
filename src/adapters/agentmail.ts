@@ -436,8 +436,50 @@ function describeBody(body: string): string {
 
 /** The one non-sending read, exported so the setup wizard can probe a key. */
 export type AgentmailProbe =
-  | { ok: true; address: string; http_status: number }
+  | {
+      ok: true;
+      address: string;
+      http_status: number;
+      /**
+       * The permissions the inbox read DISCLOSED about the calling key, or
+       * `null` when it disclosed none (APRV-223).
+       *
+       * Read from the one response this adapter already asks for, never from a
+       * second endpoint: a setup verb that probed a URL nobody has confirmed
+       * exists would report a 404 as a permissions problem, which is a worse
+       * answer than "not disclosed". `null` therefore means UNKNOWN and never
+       * "none", and every caller must treat it as the reminder it is.
+       */
+      permissions: readonly string[] | null;
+    }
   | { ok: false; code: AgentmailFailureCode; message: string };
+
+/** The two permissions a key must hold to send anything for this adapter. */
+export const AGENTMAIL_SEND_PERMISSIONS = ["draft_send", "message_send"] as const;
+
+/**
+ * The permissions an inbox body disclosed, or `null` when it disclosed none.
+ *
+ * Accepts either spelling an API of this shape uses (`permissions`, `scopes`),
+ * at the top level or under a `key`/`api_key` object, and answers `null` for
+ * anything else. Every unknown shape is UNKNOWN rather than empty: an empty
+ * list is the claim "this key holds nothing", and inferring that from silence
+ * would make a setup run refuse a perfectly good key.
+ */
+function disclosedPermissions(body: Record<string, unknown> | null): readonly string[] | null {
+  if (body === null) return null;
+  const holders: unknown[] = [body, body["key"], body["api_key"]];
+  for (const holder of holders) {
+    if (typeof holder !== "object" || holder === null || Array.isArray(holder)) continue;
+    for (const field of ["permissions", "scopes"] as const) {
+      const held = (holder as Record<string, unknown>)[field];
+      if (Array.isArray(held) && held.every((entry) => typeof entry === "string")) {
+        return held as string[];
+      }
+    }
+  }
+  return null;
+}
 
 export interface AgentmailProbeOptions {
   fetch?: AgentmailFetch;
@@ -485,7 +527,12 @@ export async function probeAgentmail(
   }
   const parsed = parseObject(answer.body);
   const address = addressOf(parsed, config.inboxId);
-  return { ok: true, address, http_status: answer.status };
+  return {
+    ok: true,
+    address,
+    http_status: answer.status,
+    permissions: disclosedPermissions(parsed),
+  };
 }
 
 /**
@@ -677,6 +724,150 @@ export function draftDrift(
   return AGENTMAIL_DRAFT_FIELDS.filter(
     (field) => canonicalField(snapshot[field]) !== canonicalField(fetched[field]),
   );
+}
+
+export type AgentmailDraftSnapshot =
+  | { ok: true; payload: AgentmailDraftPayload }
+  | { ok: false; message: string };
+
+/**
+ * The payload a grant should bind to, built from what the API holds RIGHT NOW
+ * (APRV-223).
+ *
+ * `approval payload agentmail-draft` prints this and nothing else, and it lives
+ * here rather than in the CLI for one reason: the bytes it prints are the bytes
+ * {@link draftDrift} will compare against the same draft at send time, so the
+ * two must be one piece of code. A second opinion in the CLI about what "the
+ * draft's cc" is would be a snapshot that drifts from a draft nobody changed.
+ *
+ * The rules follow {@link canonicalField} exactly. `cc`/`bcc` are OMITTED when
+ * the draft holds nothing for them, because absent, `null` and `[]` are one
+ * fact there; `to` is copied through as the array it is, unnormalized, because
+ * a reordered or re-shaped recipient list is a different message. Anything this
+ * function cannot turn into a well-formed snapshot is refused with the reason:
+ * a payload that fails {@link validateAgentmailDraftPayload} at send time is a
+ * refusal a human has already been asked to approve.
+ */
+export function draftSnapshot(
+  inboxId: string,
+  draftId: string,
+  fetched: Record<string, unknown>,
+): AgentmailDraftSnapshot {
+  const to = fetched["to"];
+  if (!isStringArray(to) || to.length === 0) {
+    return {
+      ok: false,
+      message:
+        "the draft's `to` is not a non-empty array of addresses. A snapshot is taken from the draft as the API holds it, and this one could not be sent as it stands",
+    };
+  }
+  const lists: { cc?: string[]; bcc?: string[] } = {};
+  for (const field of ["cc", "bcc"] as const) {
+    const held = fetched[field];
+    if (held === undefined || held === null) continue;
+    if (!isStringArray(held)) {
+      return { ok: false, message: `the draft's \`${field}\`, when present, must be an array of addresses` };
+    }
+    // Empty is the same fact as absent for the drift check, so it is omitted
+    // rather than carried: a snapshot with "cc":[] would hash differently from
+    // an identical one taken by hand.
+    if (held.length > 0) lists[field] = held;
+  }
+  for (const field of ["subject", "text"] as const) {
+    if (typeof fetched[field] !== "string") {
+      return {
+        ok: false,
+        message: `the draft's \`${field}\` is not a string, so there is nothing here for a human to approve`,
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    payload: {
+      inbox_id: inboxId,
+      draft_id: draftId,
+      to,
+      ...(lists.cc === undefined ? {} : { cc: lists.cc }),
+      ...(lists.bcc === undefined ? {} : { bcc: lists.bcc }),
+      subject: fetched["subject"] as string,
+      text: fetched["text"] as string,
+    },
+  };
+}
+
+/** Where `GET`ting one draft lives, so no caller spells the path twice. */
+function draftPathFor(inboxId: string, draftId: string): string {
+  return `${inboxPath(inboxId)}/drafts/${encodeURIComponent(draftId)}`;
+}
+
+export type AgentmailDraftRead =
+  | { ok: true; draft: Record<string, unknown>; http_status: number }
+  | { ok: false; code: AgentmailFailureCode; message: string };
+
+export interface AgentmailDraftReadOptions extends AgentmailProbeOptions {
+  /** The key that reads the draft. The AGENT's key here, not the vault's. */
+  apiKey: string;
+  inboxId: string;
+  draftId: string;
+}
+
+/**
+ * `GET /v0/inboxes/{inbox}/drafts/{draft}`: one draft, read and nothing else.
+ *
+ * The read half of the draft flow, exported for `approval payload
+ * agentmail-draft` (APRV-223), which runs BEFORE any approval exists and with
+ * the agent's own key rather than the vault's. It sends nothing and spends no
+ * token: what it produces is a proposal a human has yet to see.
+ */
+export async function readAgentmailDraft(
+  options: AgentmailDraftReadOptions,
+): Promise<AgentmailDraftRead> {
+  const transport: Transport = {
+    fetch: options.fetch ?? (globalThis.fetch as unknown as AgentmailFetch),
+    apiBase: (options.apiBase ?? AGENTMAIL_DEFAULT_API_BASE).replace(/\/+$/u, ""),
+    timeoutMs: options.timeoutMs ?? AGENTMAIL_DEFAULT_TIMEOUT_MS,
+    apiKey: options.apiKey,
+  };
+  const scrub = (text: string): string => redactSecrets(text, [options.apiKey]).text;
+
+  let answer: HttpAnswer;
+  try {
+    answer = await call(transport, "GET", draftPathFor(options.inboxId, options.draftId));
+  } catch (cause) {
+    return {
+      ok: false,
+      code: "agentmail-unreachable",
+      message: scrub(
+        `the AgentMail API could not be reached to read the draft ${options.draftId}: ${describeThrow(cause)}`,
+      ),
+    };
+  }
+  if (answer.status === 404) {
+    return {
+      ok: false,
+      code: "agentmail-draft-missing",
+      message: `there is no draft ${options.draftId} in the inbox ${options.inboxId}`,
+    };
+  }
+  if (answer.status < 200 || answer.status >= 300) {
+    return {
+      ok: false,
+      code: codeForStatus(answer.status),
+      message: scrub(
+        `reading the draft ${options.draftId} answered HTTP ${String(answer.status)}: ${describeBody(answer.body)}`,
+      ),
+    };
+  }
+  const body = parseObject(answer.body);
+  if (body === null) {
+    return {
+      ok: false,
+      code: "agentmail-draft-drifted",
+      message: `the draft ${options.draftId} did not read back as a JSON object, so no snapshot of it can be taken`,
+    };
+  }
+  return { ok: true, draft: body, http_status: answer.status };
 }
 
 // ---------------------------------------------------------------------------
@@ -895,7 +1086,7 @@ export function agentmailAdapter(options: AgentmailAdapterOptions = {}): Adapter
         };
       }
 
-      const draftPath = `${inboxPath(config.inboxId)}/drafts/${encodeURIComponent(payload.draft_id)}`;
+      const draftPath = draftPathFor(config.inboxId, payload.draft_id);
       const fetched = await read(draftPath, `the draft ${payload.draft_id}`);
       if (!fetched.ok) return { ok: false, code: fetched.code, message: fetched.message };
       if (fetched.answer.status === 404) {

@@ -74,6 +74,7 @@ import {
 
 import { commandAdapter } from "../cli/adapter.js";
 import { commandChannel } from "../cli/channel.js";
+import { commandPayload } from "../cli/payload.js";
 import { commandDoctor } from "../cli/doctor.js";
 import { commandRun } from "../cli/execute.js";
 import { main, type Streams } from "../cli/main.js";
@@ -529,6 +530,12 @@ async function invoke(
   } else if (spec.name === "channel") {
     const words = spec.subcommand === undefined ? [] : spec.subcommand.split(" ");
     code = await commandChannel([...words, ...argv], streams, cwd);
+  } else if (spec.name === "payload") {
+    // `payload agentmail-draft` reads a draft over HTTPS (APRV-223), so this
+    // verb family joined the promise-unwrapping arm of `main()`. `payload hash`
+    // still answers synchronously, and `await` on a number is a number.
+    const words = spec.subcommand === undefined ? [] : spec.subcommand.split(" ");
+    code = await commandPayload([...words, ...argv], streams, cwd);
   } else {
     const words = spec.subcommand === undefined ? [] : spec.subcommand.split(" ");
     code = main([spec.name, ...words, ...argv], { streams, cwd });

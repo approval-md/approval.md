@@ -1563,6 +1563,44 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "payload",
+    subcommand: "agentmail-draft",
+    purpose:
+      "Snapshot one AgentMail draft as the payload a grant can bind to: read the draft with the AGENT's own key (AGENTMAIL_API_KEY, from the environment, and this is the only verb that reads it) and print the canonical {inbox_id, draft_id, to, cc?, bcc?, subject, text} JSON that `approval adapter agentmail` re-reads the draft against at send time. It exists so a human approves THE WORDS rather than the id of a mutable server-side object: a draft edited after the snapshot is refused, not sent. Reads no log, writes no file, spends no token, touches no vault and sends nothing.",
+    human_only: false,
+    human_only_note:
+      "Agent-facing by construction: it is the composing agent's own key that reads its own draft, before any approval exists. The key it reads cannot send — the sending key is in the vault and answers only to a grant — so the verb produces a proposal and no authority.",
+    input: input({
+      positionals: positionals(
+        [
+          { name: "inbox-id", description: "the inbox holding the draft" },
+          { name: "draft-id", description: "the draft to snapshot" },
+        ],
+        2,
+      ),
+      flags: {
+        "--api-base": "string",
+        "--timeout": "string",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    // The canonical payload itself, on stdout: the bytes ARE the result, and an
+    // envelope around them would be a second thing to strip before hashing.
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      OK,
+      {
+        code: 1,
+        meaning: "the draft is gone, unreadable or unusable as a payload; nothing was sent",
+      },
+      USAGE,
+      IO,
+    ],
+  },
+
+  {
     name: "journal",
     subcommand: "write",
     purpose:
@@ -1735,7 +1773,10 @@ const VERBS: VerbSpec[] = [
       "Fill the VAULT with one adapter's credentials, asked for from the manifest that adapter declares, validated by the adapter's own rules, and proved against the service without sending anything. An adapter holds the credentials a side effect spends, so its setup fills .approval/vault.enc. INTERACTIVE ONLY.",
     human_only: true,
     input: input({
-      positionals: positionals([{ name: "name", description: "the adapter name, e.g. email" }], 1),
+      positionals: positionals(
+        [{ name: "name", description: "the adapter name: email or agentmail" }],
+        1,
+      ),
       flags: { ...AS_FLAG, ...LOG_FLAG, ...POLICY_FLAGS, ...HELP_FLAGS },
     }),
     output: null,
@@ -1882,6 +1923,69 @@ const VERBS: VerbSpec[] = [
       {
         ok: { const: true },
         adapter: { const: "email" },
+        action_key: STRING,
+        task: STRING,
+        class: STRING,
+        autonomy: STRING,
+        payload_hash: SHA256,
+        started_seq: INTEGER,
+        outcome: { enum: ["execution.completed", "execution.failed"] },
+        outcome_seq: INTEGER,
+        exit_code: nullable(INTEGER),
+        detail: OPEN_OBJECT,
+        redactions: INTEGER,
+      },
+      [
+        "ok",
+        "adapter",
+        "action_key",
+        "task",
+        "class",
+        "autonomy",
+        "payload_hash",
+        "started_seq",
+        "outcome",
+        "outcome_seq",
+        "exit_code",
+      ],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      OK,
+      INTEGRITY,
+      USAGE,
+      TORN,
+      IO,
+      { code: 5, meaning: "no valid execution token; nothing was appended and nothing was sent" },
+    ],
+  },
+
+  {
+    name: "adapter",
+    subcommand: "agentmail",
+    purpose:
+      "Execute one approved action through the AgentMail adapter: a direct send over the AgentMail API, or the send of a draft the agent already composed. The draft mode re-reads the draft and refuses `agentmail-draft-drifted` when any approved field changed, because a grant is over a snapshot of the words and not over a mutable draft id. AgentMail has no per-message From — the inbox is the sender — so the approved `from` is checked against the inbox's own address before anything is sent. The runtime, not the adapter, recomputes the payload hash, spends the token and writes both execution events, and the vault's sending key leaves it only inside that window.",
+    human_only: false,
+    human_only_note:
+      "Agent-facing for the reason `adapter email` is: it executes inside the token window with a token a human granted for these exact bytes. The split that makes it safe is in the keys, not in the caller — the agent's own AgentMail key cannot send, and the one that can lives in the vault.",
+    input: input({
+      positionals: positionals([{ name: "action-key", description: "the action's idempotency_key" }], 1),
+      flags: {
+        "--token": "string",
+        "--payload": "string",
+        ...AS_FLAG,
+        "--vault": "string",
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        "--timeout": "string",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        adapter: { const: "agentmail" },
         action_key: STRING,
         task: STRING,
         class: STRING,

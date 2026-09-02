@@ -25,17 +25,23 @@
  * not depend on the CLI to know that.
  */
 
+import { agentmailAdapter } from "./agentmail.js";
 import { emailAdapter } from "./email.js";
 import type { Adapter } from "./contract.js";
 
 /**
- * Every adapter this build ships. Constructed with defaults: the question asked
+ * Every adapter this build ships. Since APRV-223 that is two, and both serve
+ * `communicate.email.external`: the union of their declared names is what the
+ * scrub lets through, which is the honest superset {@link
+ * unionRequiredCredentials} was written for rather than a collision to resolve.
+ *
+ * Constructed with defaults: the question asked
  * here is about DECLARED names, and no default answers it differently from a
  * configured instance except by renaming vault entries, which is a deployment's
  * own business and not a reason to open a socket at lookup time.
  */
 export function builtInAdapters(): readonly Adapter[] {
-  return [emailAdapter()];
+  return [emailAdapter(), agentmailAdapter()];
 }
 
 /**

@@ -52,6 +52,7 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
+import { agentmailAdapter } from "../adapters/agentmail.js";
 import { emailAdapter } from "../adapters/email.js";
 import { vaultCredentialProvider } from "../adapters/vault-provider.js";
 import {
@@ -67,7 +68,7 @@ import { passphraseEnvFor, vaultPathFor } from "../core/vault.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { executeRefusalExitCode } from "./execute.js";
-import { ADAPTER_EMAIL_HELP, ADAPTER_HELP } from "./help.js";
+import { ADAPTER_AGENTMAIL_HELP, ADAPTER_EMAIL_HELP, ADAPTER_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
 import { refusal as renderRefusal, style } from "./style.js";
@@ -103,6 +104,10 @@ export const ADAPTER_CLIS: Record<string, AdapterCliEntry> = {
   email: {
     help: ADAPTER_EMAIL_HELP,
     build: (options) => emailAdapter(options),
+  },
+  agentmail: {
+    help: ADAPTER_AGENTMAIL_HELP,
+    build: (options) => agentmailAdapter(options),
   },
 };
 
@@ -353,7 +358,12 @@ export async function commandAdapter(
     streams.out(`${ADAPTER_HELP}\n`);
     return EXIT_OK;
   }
-  const entry = ADAPTER_CLIS[sub];
+  // Own keys only (APRV-223). A plain object inherits `Object.prototype`, so
+  // `ADAPTER_CLIS["constructor"]` is a function and a truthiness check would
+  // dispatch `approval adapter constructor` as though an adapter by that name
+  // had been registered. The table is the dispatch, and the table is what this
+  // asks — an adapter nobody wrote is an unknown adapter.
+  const entry = Object.hasOwn(ADAPTER_CLIS, sub) ? ADAPTER_CLIS[sub] : undefined;
   if (entry !== undefined) return commandAdapterExecute(sub, entry, rest, streams, cwd);
   return usageError(
     streams,

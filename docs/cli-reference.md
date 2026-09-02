@@ -2391,6 +2391,38 @@ defined over the canonical VALUE, so non-JSON input has no defined
 could reproduce. Empty input is the same answer. A file that exists but cannot be
 read is exit 4.
 
+## payload agentmail-draft
+
+An AgentMail draft is mutable server-side state, so an approval of a draft id
+would be an approval of whatever the agent last wrote into it. This verb takes
+the snapshot that fixes that: it reads the draft and prints the canonical
+payload — `{inbox_id, draft_id, to, cc?, bcc?, subject, text}` in RFC 8785 form —
+that `approval adapter agentmail` re-reads the same draft against at send time. A
+field that changed between the snapshot and the send is
+`agentmail-draft-drifted`, and nothing is sent.
+
+The key it reads is the AGENT's, from `AGENTMAIL_API_KEY`, and this is the only
+verb in the CLI that reads that variable. It never opens the vault. The split is
+the design: the agent's key composes drafts and cannot send them, the vault's key
+sends and answers only to a grant, and this verb sits entirely on the composing
+side. It appends nothing, spends no token and sends nothing.
+
+The bytes printed on stdout ARE the result, with `--json` and without: the
+payload is what a declaration carries and what a grant binds to, and an envelope
+around it would be one more thing to strip before hashing. Write it to a file,
+hash it with `approval payload hash`, and hand the same file to `approval request
+--payload`.
+
+`cc` and `bcc` are omitted when the draft holds nothing for them, because absent,
+`null` and `[]` are one fact for the drift check; `to` is copied through exactly
+as the API holds it, order included, because a recipient list in another order is
+another message to the person reading it.
+
+Refusals carry a code an agent can branch on: `agentmail-api-key-unset` (exit 2,
+the variable is not set), `agentmail-draft-missing` (exit 1, there is no such
+draft), `agentmail-draft-unusable` (exit 1, the draft cannot be sent as it
+stands), `agentmail-unreachable`, and the HTTP mappings the adapter uses.
+
 ## render
 
 Writes the queue projection of SPEC.md §9.1: "this is the screenshot; it is never
@@ -2875,6 +2907,66 @@ On a refusal, on stderr:
  "outcome_seq":N,"exit_code":1,"adapter_code":"smtp-550","redactions":0}
 ```
 
+## adapter agentmail
+
+The second executor of `communicate.email.external`, over the AgentMail HTTPS
+API. Both adapters serve the class, and which one an action reaches is which verb
+the caller runs; the credential scrub in front of `approval run` therefore lets
+the union of both declarations through, which is the honest superset rather than
+a guess between them.
+
+The enforcement model it assumes is a split pair of keys. AgentMail keys carry
+`draft_create`, `draft_update`, `draft_read`, `draft_send` and `message_send`
+separately. The agent gets a key WITHOUT the two send permissions, so it can
+compose all day and cannot send; the key WITH them goes in the vault under
+`agentmail.api_key`, readable only inside the verified-token window the contract
+opens. `approval setup adapter agentmail` stores that pair, and
+`approval payload agentmail-draft` is the composing side's own verb.
+
+Two payload modes, told apart by the keys they carry, and a payload carrying
+markers of both is refused rather than guessed at: choosing a send mode by
+inference is choosing a side effect by inference.
+
+```
+direct  {"from":…,"to":[…],"cc":[…],"bcc":[…],"subject":…,"body":…,
+         "content_type":"text/plain"|"text/html"}
+draft   {"inbox_id":…,"draft_id":…,"to":[…],"cc":[…],"bcc":[…],
+         "subject":…,"text":…}
+```
+
+A direct send costs one extra read. AgentMail's send endpoint has no `from`
+field — the inbox is the sender — so an approved `from` would otherwise be a
+claim nothing checked. `GET /v0/inboxes/{inbox_id}` runs first, the approved
+`from` is compared with the inbox's own address case-insensitively, and a
+mismatch is `agentmail-from-mismatch` with nothing sent. That read doubles as the
+credential check: a key that cannot open its own inbox should not discover it by
+half-sending.
+
+A draft send re-reads the draft and canonicalizes the approved fields on both
+sides before calling `POST .../drafts/{draft_id}/send`. The refusal names WHICH
+fields differ and never what they now hold: a drift message is written to a log
+and read by a human who did not approve the new text, and quoting it there would
+publish unapproved content through the refusal path.
+
+**Failure codes** (in `adapter_code`): `agentmail-payload-invalid`,
+`agentmail-payload-ambiguous`, `agentmail-config-invalid`,
+`agentmail-inbox-mismatch`, `agentmail-from-mismatch`,
+`agentmail-draft-missing`, `agentmail-draft-drifted`, `agentmail-unreachable`,
+`agentmail-unauthorized`, `agentmail-not-found`, `agentmail-conflict`,
+`agentmail-rate-limited`, `agentmail-rejected`, `agentmail-server-error`, and
+the contract's own `credential-unavailable` / `credential-refused`.
+
+Every HTTP refusal is a returned failure, so the contract records
+`execution.failed`: the far side answered, and an answer is knowledge. A throw
+from the SEND call is deliberately not caught — `execution.indeterminate` is the
+honest record of a request that may have left the process. A throw from either
+pre-send GET is `agentmail-unreachable`, because nothing was attempted.
+
+**`--json`** carries the adapter contract's own result, unmodified, exactly as
+`adapter email` does, with `"adapter":"agentmail"` and a `detail` of
+`{"mode":"direct"|"draft","message_id":…,"thread_id":…,"payload_hash":…,
+"recipients":N,"http_status":N}`.
+
 ## env
 
 This command is the only thing that reads `.approval/env`, and its default output
@@ -3140,6 +3232,40 @@ the same "not verified: … were left alone this run" sentence the verb printed
 before the offer existed. So does a vault the probe cannot open — a missing or
 wrong passphrase, an altered file — with one more line naming why the probe could
 not run, and no value in it.
+
+## setup adapter agentmail
+
+Two names, and the second one is the whole point:
+
+```
+agentmail.inbox_id  the inbox this runtime sends from
+agentmail.api_key   the key that carries draft_send and message_send
+```
+
+Store the SENDING key here and give the agent a different one. An AgentMail key
+is a mailbox in one string, so a deployment that hands the agent the sending key
+has an agent that can send without asking anybody, and the gate in front of it is
+decoration. The key in the vault is read only inside the verified-token window
+the adapter contract opens.
+
+The probe sends nothing. It is `GET /v0/inboxes/{inbox_id}`, the same read a
+direct send makes first, and it reports the address the inbox sends as, which is
+the address every approved message will actually come from, since AgentMail has
+no per-message From.
+
+Permissions are reported and not assumed. Where that read discloses the calling
+key's own permissions, a missing `draft_send` or `message_send` is named in a
+warning: a key that cannot send fails AFTER a human has granted the send, which
+is the worst moment to find out. Where it discloses none, the probe says so and
+prints the reminder rather than claiming the key can send. It deliberately calls
+no second endpoint to find out, because a 404 from a URL nobody has confirmed
+exists would be reported as a permissions verdict, and "not disclosed" is a
+better answer than a wrong one.
+
+A failed probe keeps the values and prints the undo, exactly as the email
+adapter's does. A re-run that replaced only one name is offered the same probe
+over the stored pair, read through `readAgentmailConfig` over the vault: the
+exact path `approval adapter agentmail` takes at send time, printed by nothing.
 
 ## setup channel
 
