@@ -419,6 +419,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-timeout` | no decision inside `--timeout`; the request stays OPEN, and a decision inside the TTL authorizes an identical retry, once |
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
+| `hook-grant-unverified` | the grant was spent, and the verified log cannot be seen to carry the `execution.started` recording it. On this surface the record IS the authorization, because the harness executes and never sees the gate's return value, so no verdict is printed until the chain carries it. The grant is spent by then: the retry costs one prompt and authorizes nothing meanwhile |
 | `hook-policy-unavailable` | `APPROVAL.md` could not be loaded |
 | `hook-log-unreachable` | no log where the hook was pointed; it writes to an existing log and creates none |
 | `hook-io` | malformed hook input, or an unreadable log |
@@ -487,6 +488,81 @@ reads `requested 4 min ago · expires 10:34 UTC` — the policy's TTL, which is 
 deadline that actually governs. Hook requests no longer declare a `wait_until`,
 because "requester waits until 10:10 UTC" stopped being true the moment a late
 answer started authorizing a retry.
+
+### When the grant can follow the write (APRV-200)
+
+A `hook-timeout` deny and a later grant are the same request seen twice, and that
+raises the question this section answers: can a human's tap arrive *after* the
+bytes it authorizes are already on disk, and if it can, what does the tap mean?
+
+**What the runtime guarantees, and where the guarantee stops.** The hook decides
+before the tool runs and the *harness* runs it. Everything up to the verdict is
+this runtime's: the request, the wait, the spend, and — since APRV-200 — a
+verified re-read establishing that the `execution.started` is in the chain before
+`allow` reaches stdout. Everything after the verdict is Claude Code's. This
+runtime never observes the tool call at all, so it cannot record when the write
+landed, and no field on any event asserts that it did not land early.
+
+**The three ways a tool call can proceed without a verdict.** Each is at the
+harness boundary, and none of them is reachable from inside this runtime:
+
+1. **The hook process is killed** at the `timeout` in `.claude/settings.json`.
+   A killed hook exits non-zero with no JSON, which Claude Code reads as a
+   non-blocking error, and the tool call proceeds. This is why `--timeout` MUST
+   be comfortably below `timeout`: the relation is a requirement, not a
+   nicety, and the runtime cannot check it because a hook is not told the cap
+   it runs under.
+2. **Any non-zero exit that is not 2.** Exit 2 is a block with stderr as the
+   reason; every other non-zero code is a non-blocking error and the tool runs.
+   The verb exits 2 only for a misconfigured hook and otherwise exits 0 with a
+   verdict, which is what keeps a deny a deny.
+3. **The binary cannot be launched at all** — an uninstalled CLI, a wrong path
+   in `command`. Same reading, same outcome, and `approval doctor` will not know
+   to look for it.
+
+**So a grant CAN follow its write, and when it does it authorizes nothing that
+already happened.** A tap that lands after the effect is a *ratification*: it
+says the human would have approved, not that they did approve first. The runtime
+does not treat the two differently, because it cannot tell them apart at the
+moment of the spend — but it now records which window the spend sits in.
+
+**`grant_origin`, on every harness `execution.started` that names a `grant_seq`:**
+
+- `direct` — the tool call that spent the grant is the tool call that asked for
+  it. One process opened the request, waited, saw the decision, spent it and then
+  returned `allow`. The gate observed the whole ordering, and no write it
+  authorized could have preceded the human's answer.
+- `carried` — a *later* tool call spent it, under the carryover or the adoption
+  above. The asking invocation had already returned its verdict, so if that
+  verdict was one of the three cases above the bytes may be on disk. The runtime
+  states the window rather than claiming the ordering.
+
+The field is derived at the write boundary from the task the request record
+carries, not from a caller's claim about itself: `carried` is the default and the
+value a caller reaches by saying nothing, and `direct` is reachable only by naming
+a fact the verified log already holds. That is SPEC.md §11.1 invariant 4 applied
+to a marker — a self-report may add scrutiny and never remove it.
+
+**What an auditor can and cannot derive from the log alone.** They can tell a
+`direct` spend from a `carried` one, which is the only window in which the
+ordering can be false; and they can read the `execution.completed` or
+`execution.failed` a `PostToolUse` registration reports, which is the runtime's
+only evidence that the tool call happened at all. They cannot derive **when the
+tool call applied**, because nothing observes it: the record that would make the
+ordering fully derivable is a harness-side timestamp for the write, and it would
+be a claimed field authored by the party under oversight, which §11.1 invariant 4
+bars from reducing scrutiny. A `carried` spend is therefore evidence to
+investigate, not proof of a violation, and a `direct` spend is proof of the
+ordering.
+
+**Carryover when the bytes are already on disk.** Adoption and carryover do not
+inspect the target, and deliberately so: a grant binds to *bytes*, not to a state
+of the world. A carried grant says a human approved this exact change to this
+exact file, once, inside the TTL. It never says the change had not been made. If
+the ordering matters for a particular class — a policy edit, a release — the
+control is a `manual` floor plus the `carried` marker in review, not a
+best-effort check of the file at spend time, which would be a race the runtime
+would lose to the harness by construction.
 
 ### No token is minted for a hook grant
 

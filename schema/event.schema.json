@@ -557,6 +557,11 @@
                 "minimum": 0,
                 "description": "SPEC.md §10.4: the COUNT of credential-bearing environment variables withheld from the spawned child. Never a name and never a value.",
                 "examples": [3]
+              },
+              "grant_origin": {
+                "enum": ["direct", "carried"],
+                "description": "SPEC.md §10.4 (amended, APRV-200): how the authorization reached the process that spent it, on a harness `execution.started` that names a `grant_seq`. `direct` means the tool call that spent the grant is the tool call that asked for it, so one process observed the whole ordering and nothing this runtime authorized ran before the human answered. `carried` means a LATER tool call spent it under the carryover of §10.2's harness path: the asking invocation had already returned its verdict, and whether the harness honoured that verdict is a fact this runtime never observes, because it decides and the harness executes. The ordering the record implies is therefore guaranteed only for `direct`, and this field is what lets an auditor tell the two apart from the log alone. Derived at the write boundary from the task the request record carries, never from a caller's assertion of it: the value that adds scrutiny is the default and the one that removes it is reachable only by naming a fact already in the verified log, which is §11.1 invariant 4 applied to a marker. OPTIONAL and additive — an execution with no grant reports no origin, and every record written before the field existed still validates and still verifies.",
+                "examples": ["direct"]
               }
             }
           }

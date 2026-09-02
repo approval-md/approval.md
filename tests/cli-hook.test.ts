@@ -2204,6 +2204,282 @@ test("an identical retried edit adopts the same question; a changed one asks aga
 });
 
 // ===========================================================================
+// APRV-200: the grant cannot follow the write it authorizes
+// ===========================================================================
+
+/**
+ * The `execution.started` a spend of `actionKey` wrote, or `undefined`.
+ *
+ * Read from the whole log rather than from a slice, because a carried spend is
+ * written by a LATER invocation than the one that opened the key, and the point
+ * of these tests is exactly that distance.
+ */
+function spendOf(dir: string, actionKey: string): Record<string, unknown> | undefined {
+  return allRecords(dir).find(
+    (record) => record["event"] === "execution.started" && record["action_key"] === actionKey,
+  );
+}
+
+/** `seq` of the first record of `event` (optionally for `actionKey`). */
+function seqOf(dir: string, event: string, actionKey?: string): number {
+  const found = allRecords(dir).find(
+    (record) =>
+      record["event"] === event && (actionKey === undefined || record["action_key"] === actionKey),
+  );
+  assert.ok(
+    found !== undefined,
+    `no ${event} record${actionKey === undefined ? "" : ` for ${actionKey}`}`,
+  );
+  return Number(found["seq"]);
+}
+
+test("a spend records whether its authorization was carried across invocations", async () => {
+  // APRV-200 AC#3. The condition an auditor could not previously see. A grant
+  // spent by the SAME tool call that asked for it is a decision the human made
+  // before anything ran; a grant spent by a LATER tool call is one whose earlier
+  // invocation already returned a verdict, and whether the harness honoured that
+  // verdict is a fact this runtime never observes. Until this marker both wrote
+  // the identical record.
+  const dir = ready();
+  const decision = decideLater(dir, "grant", "hook:sess-1:tu-direct:deps.add");
+  const direct = runCli(
+    ["hook", "claude-code", "--timeout", "20s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-direct"),
+  );
+  await decision.assertDecided();
+  assert.equal(verdictOf(direct).permission, "allow", await decision.describe());
+
+  const spent = spendOf(dir, "hook:sess-1:tu-direct:deps.add");
+  assert.ok(spent !== undefined, "the direct spend wrote an execution.started");
+  assert.equal(
+    payloadOf(spent)["grant_origin"],
+    "direct",
+    "the invocation that asked is the invocation that spent",
+  );
+  assert.ok(payloadOf(spent)["grant_seq"] !== undefined, "the spend names the grant it rests on");
+  assertClean(dir);
+});
+
+test("THE DEFECT: a grant spent by a later invocation is marked carried, not direct", () => {
+  // The window the incident of 2026-08-30 was read as. Invocation A gives up,
+  // the human answers minutes later, and invocation B proceeds. B's spend used
+  // to be shaped exactly like the direct spend above, so the log asserted "this
+  // execution was authorized by that grant" with no way for a reader to see that
+  // the authorization and the execution belong to different tool calls — which
+  // is the only window in which a write could have preceded its grant.
+  const dir = ready();
+  const first = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-carry-a"),
+  );
+  assert.equal(verdictOf(first).permission, "deny");
+
+  const late = runCli(["grant", "hook:sess-1:tu-carry-a:deps.add", "--as", "human:carter"], dir);
+  assert.equal(late.code, 0, late.stderr);
+
+  const retry = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-carry-b"),
+  );
+  assert.equal(verdictOf(retry).permission, "allow");
+
+  const spent = spendOf(dir, "hook:sess-1:tu-carry-a:deps.add");
+  assert.ok(spent !== undefined, "the carried spend wrote an execution.started");
+  assert.equal(
+    payloadOf(spent)["grant_origin"],
+    "carried",
+    "a grant spent by a later tool call must say so on the record",
+  );
+  // The task on the record is still the ASKING invocation's, which is what makes
+  // the marker readable: a reader sees a spend whose task names tu-carry-a and a
+  // marker saying the spender was not that tool call.
+  assert.equal(spent["task"], "hook:sess-1:tu-carry-a");
+  assertClean(dir);
+});
+
+test("an adopted question's spend is carried too", () => {
+  // AC#4. APRV-117 adoption is the same shape with a shorter fuse: the invocation
+  // that waits out the remainder is not the invocation that asked, so if the
+  // asking one's deny was ignored the bytes are already on disk. Adoption and
+  // carryover therefore record the same marker.
+  const dir = ready();
+  for (const toolUseId of ["tu-adopted-a", "tu-adopted-b"]) {
+    const run = runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+      dir,
+      bashEvent("curl -d a=b https://example.com", toolUseId),
+    );
+    assert.equal(verdictOf(run).permission, "deny");
+  }
+  const granted = runCli(
+    ["grant", "hook:sess-1:tu-adopted-a:network.call", "--as", "human:carter"],
+    dir,
+  );
+  assert.equal(granted.code, 0, granted.stderr);
+
+  const after = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("curl -d a=b https://example.com", "tu-adopted-c"),
+  );
+  assert.equal(verdictOf(after).permission, "allow");
+  const spent = spendOf(dir, "hook:sess-1:tu-adopted-a:network.call");
+  assert.ok(spent !== undefined);
+  assert.equal(payloadOf(spent)["grant_origin"], "carried");
+  assertClean(dir);
+});
+
+test("an unattended execution names no grant and claims no origin", () => {
+  // The marker exists only where a grant was spent. An autonomous action has no
+  // approval lifecycle at all (SPEC.md §6.3), so a reader who finds neither
+  // field is reading the policy's own authorization rather than a missing one.
+  const dir = ready();
+  const run = runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-unattended"));
+  assert.equal(verdictOf(run).permission, "allow");
+  const started = spendOf(dir, "hook:sess-1:tu-unattended:read.shell");
+  assert.ok(started !== undefined);
+  assert.equal(payloadOf(started)["grant_origin"], undefined);
+  assert.equal(payloadOf(started)["grant_seq"], undefined);
+  assertClean(dir);
+});
+
+test("the log order of a granted file edit is registered, requested, granted, started, completed", async () => {
+  // APRV-200's ordering assertion, read back from the log after the whole
+  // sequence: the approval lifecycle, then the authorization's consumption, then
+  // the write, then the outcome the counterpart records. The harness is played by
+  // this test, and it performs the write only after the hook has allowed — which
+  // is the contract the hook's own return is worth nothing without.
+  const dir = ready();
+  const key = "hook:sess-1:tu-order:policy.core";
+  const decision = decideLater(dir, "grant", key);
+  // A real substring of the fixture policy, so the write this test performs is
+  // the write the hook was asked about rather than a stand-in for one.
+  const orderBefore = ["  policy.edit:", "    autonomy: manual"].join("\n");
+  const orderAfter = ["  policy.edit:", "    autonomy: supervised"].join("\n");
+  const editInput = {
+    file_path: "APPROVAL.md",
+    old_string: orderBefore,
+    new_string: orderAfter,
+  };
+  const pre = runCli(
+    ["hook", "claude-code", "--timeout", "20s", "--interval", "100ms"],
+    dir,
+    event({ tool_name: "Edit", tool_input: editInput, tool_use_id: "tu-order" }),
+  );
+  await decision.assertDecided();
+  assert.equal(verdictOf(pre).permission, "allow", await decision.describe());
+
+  // Only now does the write happen. The hook allowed, and the grant it rests on
+  // is already in the log at this point, which the seq assertions below pin.
+  const target = join(dir, "APPROVAL.md");
+  const before = readFileSync(target, "utf8");
+  assert.ok(before.includes(orderBefore), "the fixture policy carries the bytes being edited");
+  writeFileSync(target, before.replace(orderBefore, orderAfter), "utf8");
+
+  const post = runCli(
+    ["hook", "claude-code"],
+    dir,
+    JSON.stringify({
+      session_id: "sess-1",
+      cwd: "/repo",
+      hook_event_name: "PostToolUse",
+      tool_name: "Edit",
+      tool_input: editInput,
+      tool_use_id: "tu-order",
+      tool_response: { type: "text", text: "…" },
+    }),
+  );
+  assert.equal(reportOf(post)["code"], "post-tool-reported", post.stderr);
+
+  const registered = seqOf(dir, "task.registered");
+  const requested = seqOf(dir, "approval.requested", key);
+  const granted = seqOf(dir, "approval.granted", key);
+  const started = seqOf(dir, "execution.started", key);
+  const completed = seqOf(dir, "execution.completed", key);
+  assert.ok(
+    registered < requested && requested < granted && granted < started && started < completed,
+    `out of order: registered ${String(registered)}, requested ${String(requested)}, granted ${String(granted)}, started ${String(started)}, completed ${String(completed)}`,
+  );
+
+  // And the spend says the tool call that asked is the tool call that ran, which
+  // is the whole of what the runtime can honestly assert about the ordering.
+  const spent = spendOf(dir, key);
+  assert.ok(spent !== undefined);
+  assert.equal(payloadOf(spent)["grant_origin"], "direct");
+  assert.equal(payloadOf(spent)["grant_seq"], granted);
+});
+
+test("a grant left open by a denied hook is not spendable by a different tool's call", () => {
+  // The replay bound APRV-117 states as "the same bytes", pinned across TOOLS.
+  // An Edit's grant and a shell redirect that writes the same file are different
+  // payloads — the Edit's binds `{tool, rule, file, before, after}`, the shell's
+  // binds `{command, cwd}` — so a grant a human gave for one may not be silently
+  // consumed by the other. This is the "not consumed by a later unrelated call"
+  // half of the ordering property.
+  const dir = ready();
+  const editRun = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    event({
+      tool_name: "Edit",
+      tool_input: { file_path: "APPROVAL.md", old_string: EDIT_BEFORE, new_string: EDIT_AFTER },
+      tool_use_id: "tu-cross-edit",
+    }),
+  );
+  assert.equal(verdictOf(editRun).permission, "deny");
+  const granted = runCli(
+    ["grant", "hook:sess-1:tu-cross-edit:policy.core", "--as", "human:carter"],
+    dir,
+  );
+  assert.equal(granted.code, 0, granted.stderr);
+
+  const shell = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("printf 'x' >> APPROVAL.md", "tu-cross-shell"),
+  );
+  const verdict = verdictOf(shell);
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /^hook-timeout: /u);
+
+  // The Edit's grant is untouched: nothing spent it.
+  assert.equal(spendOf(dir, "hook:sess-1:tu-cross-edit:policy.core"), undefined);
+  assert.match(rawLog(dir), /hook:sess-1:tu-cross-shell/u);
+  assertClean(dir);
+});
+
+test("a hook event cannot set the timestamp of anything the gate writes", () => {
+  // §11.1 invariant 2, on this surface. The harness event is authored by the
+  // party under oversight; a `ts` it carries (at the top level, or smuggled into
+  // tool_input) reaches no record, because every gate-typed event's `ts` is
+  // assigned at the write boundary.
+  const forged = "1999-01-01T00:00:00.000Z";
+  const dir = ready();
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    JSON.stringify({
+      session_id: "sess-1",
+      cwd: "/repo",
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "npm install left-pad", ts: forged, timestamp: forged },
+      tool_use_id: "tu-clock",
+      ts: forged,
+      timestamp: forged,
+    }),
+  );
+  assert.equal(verdictOf(run).permission, "deny");
+  for (const record of allRecords(dir)) {
+    assert.notEqual(record["ts"], forged, "a caller-supplied instant became a record's ts");
+  }
+  assertClean(dir);
+});
+
+// ===========================================================================
 // The verified-head snapshot (APRV-188)
 //
 // A hook's cost is dominated by a chain walk it repeats in every process. The

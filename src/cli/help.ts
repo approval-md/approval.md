@@ -1275,14 +1275,14 @@ Commands:
 
 Flags (claude-code, cursor):
   --as <id>        proposing identity (default agent:claude-code / agent:cursor)
-  --timeout <d>    how long to wait for a decision (default 55s)
-  --interval <d>   poll interval while waiting (default 1s)
+  --timeout/--interval <d>   wait for a decision / poll it (default 55s / 1s)
   --dir/--policy/--log <p>   policy+log root; --dir sets BOTH, default primary
   -h, --help       this text
 
 Deny: hook-unclassified, hook-class-human-only, hook-opaque, hook-unparseable,
 hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout,
-hook-gate-refused:<c>, hook-policy-unavailable, hook-log-unreachable, hook-io.
+hook-gate-refused:<c>, hook-grant-unverified, hook-policy-unavailable,
+hook-log-unreachable, hook-io.
 
 ${EXIT_CODES_POINTER} (harness verbs use 0 and 2 only; 0 is a verdict, never "ask")
 ${why("hook")}`;
