@@ -375,6 +375,29 @@ and never re-chains, because hash chains do not merge and re-chaining is
 fabrication. `QUEUE.md` and the index are rebuilt from the reconciled log rather
 than restored, and any failure at any step puts the snapshot back before exiting.
 
+**Untracked payload files no longer stop it.** An advance commits
+`.approval/payloads/`, so the primary checkout usually already holds those files
+untracked, and `git merge --ff-only` will not write over an untracked file. That
+was a hand step until APRV-225: on 2026-09-02, after the advance to seq 11361
+merged, sync refused `log-sync-git-failed` over 33 payload files, every one of
+them identical to the incoming copy. Sync now proves that rather than assuming
+it. Before the fast-forward it takes the untracked files under
+`.approval/payloads/` that the incoming commit also carries, and for each one
+requires that SHA-256 of the local bytes is the filename and that those bytes
+equal the incoming blob. Only when every file has passed does it clear them out
+of the way, and the run reports how many it reconciled:
+
+```
+payloads      33 untracked file(s) proved identical to the incoming commit
+```
+
+A payload that disagrees refuses `log-sync-payload-mismatch` naming the file,
+pulls nothing, appends nothing and leaves the working tree as you left it. That
+one is yours: a payload is the material evidence an approval bound to, so two
+versions of one is a question about which bytes were approved, and no verb here
+will pick. A payload you hold that the incoming commit does not carry (recorded
+and not yet advanced, usually) blocks nothing and is left alone.
+
 Neither verb appends an event. Both move the file the log lives in, and the log
 records decisions rather than its own housekeeping.
 
