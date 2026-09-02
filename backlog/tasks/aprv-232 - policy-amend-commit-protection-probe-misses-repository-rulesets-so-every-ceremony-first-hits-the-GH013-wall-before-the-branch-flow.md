@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:fable-lane-q'
 created_date: '2026-09-02 20:12'
-updated_date: '2026-09-02 20:59'
+updated_date: '2026-09-02 21:03'
 labels:
   - cli
   - ceremony
@@ -61,4 +61,6 @@ Seen 2026-09-02 at the seq 13704 ceremony: approval policy amend --commit probed
 `npm run build` clean. `npx oxlint src tests` clean (two unicorn warnings from the new test were fixed by using endsWith). Per-file runs against dist: `node --test dist/tests/cli-amend.test.js` 84 tests, all pass after the one fix to the UNKNOWN reason text (first run 83/84, second targeted run of the eight protection cases 8/8); `node --test dist/tests/cli-long-help.test.js` 21/21 (the 25-line help cap holds; help text untouched). Full `npm test` was started in the background with a 10 minute ceiling on a loaded machine; the only failure it had reported by the time of these notes is `every production dependency's engines.node admits the Node floor` (tests/ci-guard.test.ts), which reads <root>/node_modules/<dep>/package.json and this agent worktree has no node_modules of its own (the same worktree artifact APRV-203 recorded; it passes in the primary checkout and in CI where npm ci runs).
 
 Full npm test did NOT finish inside the session's 10 minute ceiling on the loaded machine: the log stopped at 577 tests reported (576 pass, 1 fail: the ci-guard engines.node worktree artifact above) and no summary line was written. AC4 is left unchecked for the orchestrator to confirm with a full run in the primary checkout. Files run to completion here with exit codes: dist/tests/cli-amend.test.js (84/84, exit 0), dist/tests/cli-long-help.test.js (21/21, exit 0); npx oxlint src tests exit 0, no warnings.
+
+Correction: the full npm test run DID complete after the note above was written. 3020 tests, 3018 pass, 1 skipped, 1 fail, npm test exit 1. The single failure is the same ci-guard engines.node case (this agent worktree has no node_modules; it passes in the primary checkout and in CI). No test touched by this task failed. AC4 is left unchecked because the run exited non-zero here; the orchestrator can check it from a green run in the primary checkout.
 <!-- SECTION:NOTES:END -->
