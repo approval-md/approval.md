@@ -85,6 +85,11 @@ approval daemon run &              # watch, drift, TTL, QUEUE.md — the sole wr
 approval channel telegram listen   # pushes requests to the phone, records taps
 ```
 
+With several sessions appending at once the daemon ticks after every append;
+the `tick` line's `ms` says what each costs, and `--debounce` is the knob when
+that times the append rate approaches a core. See "Sustained append rate" under
+`daemon run` in `docs/cli-reference.md` and the 2026-09-02 postmortem.
+
 To have the runtime there without starting it by hand, `approval setup service`
 writes the launchd agent (macOS) or systemd user unit (Linux) that runs
 `approval up` at login. It prints the whole unit for you to read before it writes

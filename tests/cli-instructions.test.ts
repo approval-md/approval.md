@@ -254,6 +254,9 @@ function captureLiveOutputs(): Capture[] {
     "err",
   );
   capture("status", "healthy system", runCli(["status", "--json"], dir, env));
+  // APRV-214: no window open, which is the shape every repository is in until
+  // somebody performs the ceremony at a terminal.
+  capture("gate status", "no window open", runCli(["gate", "status", "--json"], dir, env));
   capture("log verify", "clean chain", runCli(["log", "verify", "--json"], dir, env));
   capture("log tail", "three records", runCli(["log", "tail", "--json"], dir, env));
   capture("log export", "whole log", runCli(["log", "export", "--json"], dir, env));
@@ -356,6 +359,7 @@ test("registry: real --json output validates against every declared output schem
     "vault list",
     "doctor",
     "hook classify",
+    "gate status",
     "import agents-md",
     "grant",
     "token",
@@ -409,6 +413,13 @@ const HUMAN_ONLY: readonly string[] = [
   "vault set",
   "vault list",
   "vault remove",
+  // APRV-214. Opening the window SUSPENDS the policy for every gated tool call
+  // under the root, which is the most consequential thing this CLI can do;
+  // closing is the other half of the same ceremony. Neither may be published as
+  // a tool an agent can call, and `gate open` additionally cannot be performed
+  // without a terminal and a typed word.
+  "gate open",
+  "gate close",
 ];
 
 const AGENT_FACING: readonly string[] = [
@@ -439,6 +450,10 @@ const AGENT_FACING: readonly string[] = [
   "policy check",
   "policy test",
   "payload hash",
+  // APRV-223. The composing half of the AgentMail flow: the agent's own key
+  // reads the agent's own draft, before any approval exists, and that key
+  // cannot send. What the verb produces is a proposal and no authority.
+  "payload agentmail-draft",
   // APRV-195. The ungated channel is agent-facing at both ends. `journal write`
   // has to be, or it is not a channel the party under oversight can rely on;
   // `journal read` is human-FACING and still not human-only, because it
@@ -454,9 +469,14 @@ const AGENT_FACING: readonly string[] = [
   "audit obligations",
   "channel telegram health",
   "adapter email",
+  "adapter agentmail",
   "hook claude-code",
   "hook cursor",
   "hook classify",
+  // APRV-214. Reporting the window establishes no authority and changes
+  // nothing; an agent that can see a bypass window is standing is better placed
+  // than one that cannot.
+  "gate status",
 ];
 
 test("registry: the human-only verbs are marked, and only those", () => {
@@ -487,7 +507,14 @@ test("registry: a human_only decision that needed an argument carries its note",
       `"${label}" is a judgment call and must record why`,
     );
   }
-  for (const label of ["adapter email", "hook claude-code", "hook cursor", "consume"]) {
+  for (const label of [
+    "adapter email",
+    "adapter agentmail",
+    "payload agentmail-draft",
+    "hook claude-code",
+    "hook cursor",
+    "consume",
+  ]) {
     const spec = findVerb(label);
     assert.equal(spec.human_only, false);
     assert.ok(

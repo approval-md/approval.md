@@ -1,9 +1,13 @@
 /**
- * `approval adapter email` — execute an approved email through the adapter
- * contract (SPEC.md §10.4; APRV-69).
+ * `approval adapter <name>` — execute an approved action through the adapter
+ * contract (SPEC.md §10.4; APRV-69, generalized in APRV-221).
  *
- * This is the CLI face of `src/adapters/email.ts`, and it is deliberately the
- * thinnest one in the repository. It resolves paths and identity, reads the
+ * This is the CLI face of the adapters in {@link ADAPTER_CLIS} (`email` at
+ * v0.1), and it is deliberately the thinnest one in the repository. The name is
+ * a table lookup and the body below it is adapter-agnostic: a second adapter is
+ * an entry in the table and nothing else in this file.
+ *
+ * It resolves paths and identity, reads the
  * payload bytes at the edge, builds the vault-backed credential provider, calls
  * {@link executeThroughAdapter} once, and maps the result onto the frozen exit
  * table. It does not verify a token, hash a payload, append an event, or open a
@@ -48,10 +52,12 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
+import { agentmailAdapter } from "../adapters/agentmail.js";
 import { emailAdapter } from "../adapters/email.js";
 import { vaultCredentialProvider } from "../adapters/vault-provider.js";
 import {
   executeThroughAdapter,
+  type Adapter,
   type AdapterExecuteResult,
   type JsonValue,
 } from "../adapters/contract.js";
@@ -62,16 +68,65 @@ import { passphraseEnvFor, vaultPathFor } from "../core/vault.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { executeRefusalExitCode } from "./execute.js";
-import { ADAPTER_EMAIL_HELP, ADAPTER_HELP } from "./help.js";
+import { ADAPTER_AGENTMAIL_HELP, ADAPTER_EMAIL_HELP, ADAPTER_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
 import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
+// ---------------------------------------------------------------------------
+// The table
+// ---------------------------------------------------------------------------
+
+/** One adapter, as `approval adapter <name>` needs to see it. */
+export interface AdapterCliEntry {
+  /** The verb's own help: printed for --help, and beside every usage error. */
+  help: string;
+  /**
+   * The adapter instance to execute through, built per invocation because
+   * `--timeout` is per invocation. Nothing else about the adapter is this
+   * verb's business: the contract routes, hashes, spends and appends.
+   */
+  build(options: { timeoutMs?: number }): Adapter;
+}
+
+/**
+ * Every adapter this verb can execute, keyed by the `adapter <name>` name.
+ *
+ * The table IS the dispatch (APRV-221): a second adapter is a second entry
+ * here, and no line below this one names an adapter. `cli/setup-adapter.ts`
+ * holds the matching table for the credential side and `adapters/registry.ts`
+ * the roster the credential scrub reads. An adapter that ships is an entry in
+ * all three, which is three small tables rather than one import cycle between
+ * the CLI and the adapters.
+ */
+export const ADAPTER_CLIS: Record<string, AdapterCliEntry> = {
+  email: {
+    help: ADAPTER_EMAIL_HELP,
+    build: (options) => emailAdapter(options),
+  },
+  agentmail: {
+    help: ADAPTER_AGENTMAIL_HELP,
+    build: (options) => agentmailAdapter(options),
+  },
+};
+
+/** The known names, sorted, for a usage error and for the help text. */
+export function knownAdapterNames(): string[] {
+  return Object.keys(ADAPTER_CLIS).sort();
+}
+
 /** Identity accepted here: a person or an agent, never the runtime. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
 
-const EMAIL_FLAGS: Record<string, FlagKind> = {
+/**
+ * The flags every adapter verb takes. One set and not one per adapter: what the
+ * runtime needs in order to execute an approved action (the token, the bytes,
+ * the identity, the log, the vault) is the same question whoever answers it,
+ * and a per-adapter flag table would be a per-adapter way to drift from
+ * `approval run`. An adapter with a flag of its own adds it here, beside these.
+ */
+const ADAPTER_FLAGS: Record<string, FlagKind> = {
   "--token": "string",
   "--payload": "string",
   "--as": "string",
@@ -117,24 +172,35 @@ function refusalExit(result: AdapterExecuteResult & { ok: false }): number {
   return result.execute === undefined ? EXIT_INTEGRITY : executeRefusalExitCode(result.execute);
 }
 
-/** `approval adapter email <action-key> --token <t> --payload <file|->`. */
-export async function commandAdapterEmail(
+/**
+ * `approval adapter <name> <action-key> --token <t> --payload <file|->`.
+ *
+ * One implementation for every entry in {@link ADAPTER_CLIS}: the name and the
+ * entry are arguments, and everything this function does (the flags, the
+ * payload read, the identity check, the vault, the exit table) is the same
+ * whichever adapter is on the other end. What differs between adapters is the
+ * contract's business, and the contract is not here.
+ */
+export async function commandAdapterExecute(
+  name: string,
+  entry: AdapterCliEntry,
   argv: string[],
   streams: Streams,
   cwd: string,
 ): Promise<number> {
+  const help = entry.help;
   const json = argv.includes("--json");
-  const parsed = parseFlags(argv, EMAIL_FLAGS);
-  if (!parsed.ok) return usageError(streams, json, parsed.message, ADAPTER_EMAIL_HELP);
+  const parsed = parseFlags(argv, ADAPTER_FLAGS);
+  if (!parsed.ok) return usageError(streams, json, parsed.message, help);
   if (boolFlag(parsed.flags, "--help") || boolFlag(parsed.flags, "-h")) {
-    streams.out(`${ADAPTER_EMAIL_HELP}\n`);
+    streams.out(`${help}\n`);
     return EXIT_OK;
   }
   const { flags, positionals } = parsed;
 
   const actionKey = positionals[0];
   if (actionKey === undefined) {
-    return usageError(streams, json, "missing <action-key> argument", ADAPTER_EMAIL_HELP);
+    return usageError(streams, json, "missing <action-key> argument", help);
   }
   const extra = positionals[1];
   if (extra !== undefined) {
@@ -142,7 +208,7 @@ export async function commandAdapterEmail(
       streams,
       json,
       `unexpected argument ${JSON.stringify(extra)}`,
-      ADAPTER_EMAIL_HELP,
+      help,
     );
   }
 
@@ -152,7 +218,7 @@ export async function commandAdapterEmail(
       streams,
       json,
       "missing --token <t>: an adapter executes only against the single-use token `approval grant` printed",
-      ADAPTER_EMAIL_HELP,
+      help,
     );
   }
 
@@ -162,7 +228,7 @@ export async function commandAdapterEmail(
       streams,
       json,
       "missing --payload <file|->: the bytes the grant approved. There is no flag that takes the message inline — a body on a command line is a body in the shell history",
-      ADAPTER_EMAIL_HELP,
+      help,
     );
   }
 
@@ -175,7 +241,7 @@ export async function commandAdapterEmail(
       asFlag === null
         ? `no identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id> | agent:<id>`
         : `--as expects human:<id> or agent:<id>, got ${JSON.stringify(asFlag)}`,
-      ADAPTER_EMAIL_HELP,
+      help,
     );
   }
 
@@ -188,7 +254,7 @@ export async function commandAdapterEmail(
         streams,
         json,
         `--timeout expects a whole number of milliseconds, got ${JSON.stringify(timeoutFlag)}`,
-        ADAPTER_EMAIL_HELP,
+        help,
       );
     }
     timeoutMs = parsedTimeout;
@@ -204,7 +270,7 @@ export async function commandAdapterEmail(
     return ioError(streams, json, `${where} could not be read: ${detail(cause)}`);
   }
   if (raw.trim().length === 0) {
-    return usageError(streams, json, `${where} is empty; there is no payload`, ADAPTER_EMAIL_HELP);
+    return usageError(streams, json, `${where} is empty; there is no payload`, help);
   }
   let payload: JsonValue;
   try {
@@ -214,7 +280,7 @@ export async function commandAdapterEmail(
       streams,
       json,
       `${where} is not valid JSON: ${detail(cause)}. payload_hash is defined over the RFC 8785 canonical serialization of the payload VALUE, so bytes that do not parse cannot be the bytes a grant bound to`,
-      ADAPTER_EMAIL_HELP,
+      help,
     );
   }
 
@@ -244,7 +310,7 @@ export async function commandAdapterEmail(
   );
 
   const result = await executeThroughAdapter(
-    emailAdapter(timeoutMs === null ? {} : { timeoutMs }),
+    entry.build(timeoutMs === null ? {} : { timeoutMs }),
     { logPath, actionKey, payload, actor },
     { token, policy: policyLocation, credentials },
   );
@@ -269,13 +335,13 @@ export async function commandAdapterEmail(
   if (json) streams.out(`${JSON.stringify(result)}\n`);
   else {
     streams.out(
-      `sent ${actionKey} through the email adapter: execution.started at seq ${String(result.started_seq)}, execution.completed at seq ${String(result.outcome_seq)}\n`,
+      `sent ${actionKey} through the ${name} adapter: execution.started at seq ${String(result.started_seq)}, execution.completed at seq ${String(result.outcome_seq)}\n`,
     );
   }
   return EXIT_OK;
 }
 
-/** `approval adapter <name>` — one adapter at v0.1: `email`. */
+/** `approval adapter <name>` — resolve the name through {@link ADAPTER_CLIS}. */
 export async function commandAdapter(
   argv: string[],
   streams: Streams,
@@ -292,11 +358,17 @@ export async function commandAdapter(
     streams.out(`${ADAPTER_HELP}\n`);
     return EXIT_OK;
   }
-  if (sub === "email") return commandAdapterEmail(rest, streams, cwd);
+  // Own keys only (APRV-223). A plain object inherits `Object.prototype`, so
+  // `ADAPTER_CLIS["constructor"]` is a function and a truthiness check would
+  // dispatch `approval adapter constructor` as though an adapter by that name
+  // had been registered. The table is the dispatch, and the table is what this
+  // asks — an adapter nobody wrote is an unknown adapter.
+  const entry = Object.hasOwn(ADAPTER_CLIS, sub) ? ADAPTER_CLIS[sub] : undefined;
+  if (entry !== undefined) return commandAdapterExecute(sub, entry, rest, streams, cwd);
   return usageError(
     streams,
     json,
-    `unknown adapter ${JSON.stringify(sub)} for \`approval adapter\``,
+    `unknown adapter ${JSON.stringify(sub)} for \`approval adapter\`; known adapters: ${knownAdapterNames().join(", ")}`,
     ADAPTER_HELP,
   );
 }

@@ -68,6 +68,16 @@
  * through the full check ladder (parse, `alg`, schema, hash recompute, `seq`
  * succession, `prev` link) by this process, over exactly these bytes.
  *
+ * **APRV-217 makes the last sentence conditional, and only under a policy that
+ * says so.** Under the default proof (`full`) the paragraph above is exactly
+ * what happens on every cached read. Under `incremental`, an operator's policy
+ * trades "re-hash the whole prefix on every read" for "hash the appended bytes,
+ * and re-hash the whole prefix on a cadence" — same guards, same walk, same
+ * verdicts, a bounded window in which an in-place rewrite of the prefix would be
+ * served from cache. The argument for that trade, and what it costs, is in the
+ * "incremental prefix proof" section below and in
+ * `docs/proposals/incremental-prefix-proof.md`.
+ *
  * That is still a large win, because the two costs are not comparable: hashing
  * bytes is a single linear pass at memory bandwidth, while the walk it replaces
  * is a JSON parse, an Ajv schema validation, a JCS canonicalization, and a
@@ -111,15 +121,15 @@
  * `tests/state-cache.test.ts` asserts scenario by scenario.
  */
 
-import { createHash } from "node:crypto";
-import { closeSync, openSync, readFileSync, statSync } from "node:fs";
+import { createHash, type Hash } from "node:crypto";
+import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { isPolicySha256, POLICY_HASH_FIELD } from "./attest.js";
-import type { EventRecord, LogHead } from "./log.js";
+import { onLogAppended, type EventRecord, type LogHead } from "./log.js";
 import { normalizeUsd } from "./money.js";
 import { isPayloadHash } from "./payload.js";
-import { publishSnapshot, snapshotPrefix } from "./verified-snapshot.js";
+import { publishVerifiedPrefix, snapshotPrefix } from "./verified-snapshot.js";
 import {
   verifyText,
   verifyWithRecords,
@@ -197,6 +207,16 @@ export interface ReadVerifiedOptions extends VerifyOptions {
    * file to hash it could endorse a digest of bytes nobody walked.
    */
   publishSnapshot?: boolean;
+  /**
+   * Which prefix proof a cached read runs (APRV-217).
+   *
+   * Absent means {@link FULL_READ_PROOF}: today's behaviour, byte for byte, for
+   * every caller that does not ask otherwise. It is set by exactly one kind of
+   * caller — a long-lived process (the daemon) that was handed a policy or a
+   * flag naming `incremental`. One-shot processes, the hook included, never set
+   * it, and a `cache: null` read ignores it entirely.
+   */
+  readProof?: ReadProof;
 }
 
 /**
@@ -215,6 +235,36 @@ export interface ReadVerifiedOptions extends VerifyOptions {
  * with the rest served from the cache the first one seeded.
  */
 let snapshotReads = false;
+
+/**
+ * The proof this process's cached reads run when a call names none (APRV-217).
+ *
+ * `null` means {@link FULL_READ_PROOF}, and that is what every process starts
+ * with: a CLI verb, a hook, a test, and a daemon before its own startup line.
+ *
+ * It is a process-wide switch for the reason `snapshotReads` above is one. The
+ * daemon's tick reads are only some of the reads its process makes: the queue
+ * renderer and the pending-queue builder read the same log through call paths
+ * that thread no options of their own, and a per-call option could not reach
+ * them. What sets this is `approval daemon run` / `approval up`, once, from the
+ * mode they printed on the `started` line. Nothing an agent runs sets it.
+ */
+let processReadProof: ReadProof | null = null;
+
+/**
+ * Set (or clear, with `null`) the default proof for this process's reads.
+ *
+ * Called by exactly one kind of caller: the two long-lived operator verbs, at
+ * startup, after they have resolved the flag against the policy.
+ */
+export function useReadProof(proof: ReadProof | null): void {
+  processReadProof = proof;
+}
+
+/** The default proof in force here. Diagnostics and tests. */
+export function readProofInForce(): ReadProof {
+  return processReadProof ?? FULL_READ_PROOF;
+}
 
 /** Opt this process into (or out of) snapshot-resumed reads. */
 export function useVerifiedSnapshots(enabled: boolean): void {
@@ -249,6 +299,85 @@ export function headOf(records: EventRecord[]): LogHead | null {
 // ---------------------------------------------------------------------------
 
 const NEWLINE = 0x0a;
+
+// ---------------------------------------------------------------------------
+// The incremental prefix proof (APRV-217)
+//
+// `docs/proposals/incremental-prefix-proof.md` is the design; the part that
+// binds here is what the two modes claim.
+//
+// Under `full` (the default, and what every reader gets unless an operator's
+// policy says otherwise) nothing below changes: every cached read re-hashes the
+// whole proved prefix and compares the digest, which is the APRV-43 proof
+// written out in the module header.
+//
+// Under `incremental` a repeat read carries the UN-FINALISED SHA-256 state at
+// `byteLength` from the last full pass, feeds it the appended bytes, and keeps
+// the copy. The cheap guards (schema key, not shrunk, same-size-implies-same-
+// mtime, head line byte-identical at its offset) run exactly as they do today
+// and can still only reject. What the read no longer re-proves on EVERY pass is
+// that the bytes strictly inside the prefix, other than the head line, are
+// unchanged; that is re-proved on a cadence (`everyReads` / `afterMs`), on the
+// first read of a log in a process, after this process's own `appendEvent`, and
+// on any guard failure, which is a cold walk and stronger still.
+//
+// The verdicts are the same verdicts. The incremental path walks the appended
+// tail with `verifyText` from the cached head exactly as the full path does, so
+// `clean` / `torn-tail` / `corrupt` come out of the same walk with the same
+// codes and the same messages, and a guard failure falls back to a whole-file
+// read and a walk from genesis.
+// ---------------------------------------------------------------------------
+
+/** Which prefix proof a read runs. `full` is today's, byte for byte. */
+export type ReadProofMode = "full" | "incremental";
+
+/** Reads between full re-proofs under `incremental` (SPEC-signed default). */
+export const DEFAULT_FULL_REPROOF_EVERY = 50;
+
+/** Milliseconds between full re-proofs under `incremental`. */
+export const DEFAULT_FULL_REPROOF_AFTER_MS = 60_000;
+
+/** The proof a read runs, with the cadence that bounds `incremental`. */
+export interface ReadProof {
+  mode: ReadProofMode;
+  /** A full re-proof runs at least this often, counted in reads. */
+  everyReads: number;
+  /** …and at least this often in wall-clock milliseconds. */
+  afterMs: number;
+}
+
+/**
+ * What a reader gets when it asks for nothing: today's proof on every read.
+ *
+ * The default is `full` because it is the behaviour this repository has today
+ * and the one an operator has attested to. `incremental` is reached only by a
+ * caller that was handed a policy (or a flag) saying so.
+ */
+export const FULL_READ_PROOF: ReadProof = Object.freeze({
+  mode: "full",
+  everyReads: DEFAULT_FULL_REPROOF_EVERY,
+  afterMs: DEFAULT_FULL_REPROOF_AFTER_MS,
+});
+
+/**
+ * Bytes fed to SHA-256 by this module since the last reset.
+ *
+ * The one seam the APRV-217 tests need: "the incremental path hashes only the
+ * appended bytes" is a claim about work, and work is invisible in a result by
+ * design. A wall-clock assertion would measure the machine instead of the code,
+ * so the tests count bytes here. Nothing in the runtime reads it.
+ */
+let hashedBytes = 0;
+
+/** Bytes hashed by the verified-read cache so far. Diagnostics and tests. */
+export function hashedByteCount(): number {
+  return hashedBytes;
+}
+
+/** Reset {@link hashedByteCount}. Tests only. */
+export function resetHashedByteCount(): void {
+  hashedBytes = 0;
+}
 
 /**
  * How many distinct logs one process remembers. A process reads one log; a test
@@ -294,10 +423,76 @@ interface CacheEntry {
   records: readonly EventRecord[];
   /** Staleness hint only: it may discard an entry, never validate one. */
   mtimeMs: number;
+  /**
+   * The un-finalised SHA-256 state at `byteLength` (APRV-217), or `null` when
+   * this entry was remembered under `full` and carries none. `null` reads as
+   * "a full re-proof is due": an incremental read has nothing to anchor to.
+   */
+  hashState: Hash | null;
+  /** Epoch ms of the last pass that hashed the whole prefix. */
+  lastFullReproofAt: number;
+  /** Reads served incrementally since that pass. */
+  readsSinceFullReproof: number;
+  /**
+   * Set by {@link VerifiedReadCache.requireFullReproof} after this process
+   * appended to the log. Belt and braces: an append moves the head line, so the
+   * incremental path would re-prove only the tail anyway, and the writer is the
+   * party whose bytes matter most.
+   */
+  forceFullReproof: boolean;
 }
 
 function sha256(bytes: Uint8Array): string {
+  hashedBytes += bytes.length;
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** A SHA-256 state over `bytes`, counted for {@link hashedByteCount}. */
+function hashState(bytes: Uint8Array): Hash {
+  hashedBytes += bytes.length;
+  return createHash("sha256").update(bytes);
+}
+
+/** Feed `bytes` to `state`, counted. Mutates and returns the state given. */
+function feedHash(state: Hash, bytes: Uint8Array): Hash {
+  hashedBytes += bytes.length;
+  state.update(bytes);
+  return state;
+}
+
+/**
+ * Is a full re-proof owed for `entry`?
+ *
+ * Every answer here is "prove more", never "prove less": the `true` branches
+ * send the read down the whole-file path, which is today's behaviour exactly.
+ */
+function fullReproofDue(entry: CacheEntry, proof: ReadProof, now: number): boolean {
+  if (entry.forceFullReproof) return true;
+  if (entry.hashState === null) return true;
+  // `everyReads` counts the reads a single full pass may cover, the anchoring
+  // read included: at 1 every read re-proves in full, at 50 one pass anchors
+  // itself and the 49 reads that follow it.
+  if (entry.readsSinceFullReproof + 1 >= proof.everyReads) return true;
+  return now - entry.lastFullReproofAt >= proof.afterMs;
+}
+
+/**
+ * Read exactly `into.length` bytes at `position`. Returns false for a short
+ * read, which is a file that changed under us and therefore a guard failure.
+ */
+function readExactly(fd: number, into: Buffer, position: number): boolean {
+  let done = 0;
+  while (done < into.length) {
+    let got: number;
+    try {
+      got = readSync(fd, into, done, into.length - done, position + done);
+    } catch {
+      return false;
+    }
+    if (got <= 0) return false;
+    done += got;
+  }
+  return true;
 }
 
 /**
@@ -334,6 +529,12 @@ export class VerifiedReadCache {
    * because another process's verification was re-proved over these bytes.
    */
   #resumed = 0;
+  /**
+   * Reads that hashed the whole prefix — a full digest compare, or a cold walk
+   * (APRV-217). Equal to `hits + misses` under `full`, which is the point: it
+   * is how a tick line says which path its reads took.
+   */
+  #fullReproofs = 0;
 
   /** Forget everything. Tests use this to force a genuinely cold read. */
   clear(): void {
@@ -341,6 +542,7 @@ export class VerifiedReadCache {
     this.#hits = 0;
     this.#misses = 0;
     this.#resumed = 0;
+    this.#fullReproofs = 0;
   }
 
   /** How many logs are remembered. Diagnostics and tests only. */
@@ -355,8 +557,25 @@ export class VerifiedReadCache {
    * prefix is *designed* to be invisible in the result, so a test that wants to
    * assert "this tamper discarded the cache" has nothing else to look at.
    */
-  get stats(): { hits: number; misses: number; resumed: number } {
-    return { hits: this.#hits, misses: this.#misses, resumed: this.#resumed };
+  get stats(): { hits: number; misses: number; resumed: number; fullReproofs: number } {
+    return {
+      hits: this.#hits,
+      misses: this.#misses,
+      resumed: this.#resumed,
+      fullReproofs: this.#fullReproofs,
+    };
+  }
+
+  /**
+   * Require a full re-proof of `logPath` on this cache's next read (APRV-217).
+   *
+   * Called by `core/log.ts` after a successful append, through the listener it
+   * registers below. Can only add work: the next read hashes the whole prefix
+   * exactly as a `full` read does.
+   */
+  requireFullReproof(logPath: string): void {
+    const entry = this.#entries.get(resolve(logPath));
+    if (entry !== undefined) entry.forceFullReproof = true;
   }
 
   /**
@@ -365,8 +584,48 @@ export class VerifiedReadCache {
    * The whole file is read once, and every decision is made from that single
    * snapshot: nothing is re-`stat`ed and re-read behind its own conclusion.
    */
-  read(logPath: string, options: VerifyOptions, snapshot: SnapshotUse = {}): VerifiedLog {
+  read(
+    logPath: string,
+    options: VerifyOptions,
+    snapshot: SnapshotUse = {},
+    proof: ReadProof = FULL_READ_PROOF,
+  ): VerifiedLog {
     const key = resolve(logPath);
+    const entry = this.#entries.get(key);
+
+    // The incremental path (APRV-217), taken only when every precondition holds
+    // and the cadence has not come due. It reads the head line and the appended
+    // bytes and nothing else; on ANY guard failure it returns `null` and this
+    // read falls back to the whole-file path below, which is a cold walk.
+    if (
+      proof.mode === "incremental" &&
+      entry !== undefined &&
+      entry.schemaKey === (options.schemaDir === undefined ? "" : resolve(options.schemaDir)) &&
+      !fullReproofDue(entry, proof, Date.now())
+    ) {
+      const incremental = this.#readTail(logPath, key, entry, options, snapshot);
+      if (incremental !== null) return incremental;
+    }
+
+    return this.#readWhole(logPath, key, options, snapshot, proof.mode);
+  }
+
+  /**
+   * Today's read, unchanged: the whole file, the whole prefix hash, the walk.
+   *
+   * Every `full` read lands here, and so does every `incremental` read whose
+   * cadence came due or whose guards rejected. The only APRV-217 addition is
+   * the hash state handed to {@link VerifiedReadCache.#remember}, which is
+   * built from the same single pass over the bytes rather than a second one.
+   */
+  #readWhole(
+    logPath: string,
+    key: string,
+    options: VerifyOptions,
+    snapshot: SnapshotUse,
+    mode: ReadProofMode,
+  ): VerifiedLog {
+    this.#fullReproofs += 1;
 
     let raw: Buffer;
     try {
@@ -431,14 +690,187 @@ export class VerifiedReadCache {
       entry !== undefined && cached !== null && raw.length === entry.byteLength
         ? entry.prefixHash
         : provedDigest;
-    this.#remember(key, raw, schemaKey, mtimeMs, verified, known);
-    if (snapshot.publish === true) {
-      const result = verified.result;
-      if (result.status === "clean" && result.head !== null) {
-        publishSnapshot(logPath, raw, result.records, result.head, options.schemaDir);
+
+    // The digest of these bytes, computed at most ONCE per read and shared by
+    // everything that wants it (APRV-211). Only a clean read has anything to
+    // remember or to publish, so a torn or corrupt log is never hashed here at
+    // all, and `#remember` still owns the rule about which reads qualify.
+    const result = verified.result;
+    if (result.status === "clean" && result.head !== null) {
+      // Under `full` this is today's line, unchanged. Under `incremental` the
+      // entry must also carry the un-finalised state at these bytes, so the
+      // digest is taken FROM that state: still one pass over the file, never
+      // two, and the state is reused outright when the file has not grown.
+      let carried: Hash | null;
+      let digest: string;
+      if (entry !== undefined && cached !== null && raw.length === entry.byteLength) {
+        // The file has not grown since an entry whose bytes were just re-proved:
+        // its digest stands, and so does the state it carries. A `full` read
+        // carries that state forward untouched rather than dropping it, so a
+        // reader that mixes modes (the daemon's tick reads and the queue
+        // renderer's, in one process) does not thrash the anchor.
+        digest = entry.prefixHash;
+        carried =
+          entry.hashState ?? (mode === "incremental" ? hashState(raw) : null);
+      } else if (known !== null) {
+        // A snapshot admission proved these bytes and hashed them elsewhere.
+        // There is no state to carry without a second pass, so none is kept;
+        // the next read anchors one.
+        digest = known;
+        carried = null;
+      } else {
+        // The one hash of these bytes this read pays, in both modes: `full`
+        // spent exactly this before APRV-217, through `sha256(raw)`.
+        carried = hashState(raw);
+        digest = carried.copy().digest("hex");
       }
+      this.#remember(key, raw, schemaKey, mtimeMs, verified, digest, carried);
+      // The publisher is handed the digest rather than left to recompute it: it
+      // endorses exactly the bytes this read proved, and a second hash of the
+      // same megabytes was the larger half of a daemon tick.
+      if (snapshot.publish === true) {
+        publishVerifiedPrefix(
+          logPath,
+          raw.length,
+          raw.length > 0 && raw[raw.length - 1] === NEWLINE,
+          digest,
+          result.records,
+          result.head,
+          options.schemaDir,
+        );
+      }
+    } else {
+      this.#remember(key, raw, schemaKey, mtimeMs, verified, known, null);
     }
     return verified;
+  }
+
+  /**
+   * The incremental read (APRV-217): the head line and the appended bytes.
+   *
+   * Returns `null` for every guard failure, which sends the caller to the
+   * whole-file path — a cold walk, the same fallback a mismatched prefix hash
+   * has always taken. Nothing here can produce a verdict the cold walk would
+   * not: the tail is handed to the same `verifyText`, chained onto the same
+   * cached head, with the same schema options.
+   */
+  #readTail(
+    logPath: string,
+    key: string,
+    entry: CacheEntry,
+    options: VerifyOptions,
+    snapshot: SnapshotUse,
+  ): VerifiedLog | null {
+    let fd: number;
+    try {
+      fd = openSync(logPath, "r");
+    } catch {
+      return null;
+    }
+    try {
+      let size: number;
+      let mtimeMs: number;
+      try {
+        const stats = fstatSync(fd);
+        if (!stats.isFile()) return null;
+        size = stats.size;
+        mtimeMs = stats.mtimeMs;
+      } catch {
+        return null;
+      }
+
+      // Guards 2 to 4 of the design's ladder, in the order `reusablePrefix`
+      // runs them, over the same facts. Guard 1 (the schema key) was answered
+      // by the caller; guard 5 (the full digest) is what the cadence decides,
+      // and this path is reached only when it is not due.
+      if (size < entry.byteLength) return null;
+      if (size === entry.byteLength && mtimeMs !== entry.mtimeMs) return null;
+
+      const headLineEnd = entry.headLineStart + entry.headLine.length;
+      if (headLineEnd + 1 !== entry.byteLength) return null;
+      const headBytes = Buffer.allocUnsafe(entry.headLine.length + 1);
+      if (!readExactly(fd, headBytes, entry.headLineStart)) return null;
+      if (headBytes[headBytes.length - 1] !== NEWLINE) return null;
+      if (!headBytes.subarray(0, entry.headLine.length).equals(entry.headLine)) return null;
+
+      const tail = Buffer.allocUnsafe(size - entry.byteLength);
+      if (tail.length > 0 && !readExactly(fd, tail, entry.byteLength)) return null;
+
+      // Step 6: the appended bytes go to a COPY of the state, and the copy
+      // becomes the state of the entry this read leaves behind. The digest of
+      // the whole file falls out of it, so the snapshot publisher and the entry
+      // below are served without hashing a byte twice.
+      const state = entry.hashState === null ? null : entry.hashState.copy();
+      if (state === null) return null;
+      if (tail.length > 0) feedHash(state, tail);
+      const digest = state.copy().digest("hex");
+
+      this.#hits += 1;
+      const prefix: VerifiedPrefix = {
+        byteLength: entry.byteLength,
+        lines: entry.lines,
+        head: entry.head,
+        records: entry.records,
+      };
+      const verified = verifyText(logPath, tail.toString("utf8"), options, prefix);
+      const result = verified.result;
+      if (result.status !== "clean" || result.head === null) {
+        // The same rule the whole-file path applies: nothing is resumed from a
+        // read that found damage, and the entry that led here is dropped.
+        this.#entries.delete(key);
+        return verified;
+      }
+
+      // The head line of the file as it now stands. With no appended bytes it
+      // is the one the entry already holds; otherwise it is the last line of
+      // the tail, whose first byte follows the newline before it.
+      let headLineStart = entry.headLineStart;
+      let headLine = entry.headLine;
+      if (tail.length > 0) {
+        const relative = tail.lastIndexOf(NEWLINE, tail.length - 2) + 1;
+        headLineStart = entry.byteLength + relative;
+        headLine = Buffer.from(tail.subarray(relative, tail.length - 1));
+      }
+
+      const records = [...verified.records];
+      for (const record of records) deepFreeze(record);
+      this.#store(key, {
+        schemaKey: entry.schemaKey,
+        byteLength: size,
+        lines: result.records,
+        prefixHash: digest,
+        headLineStart,
+        headLine,
+        head: result.head,
+        records,
+        mtimeMs,
+        hashState: state,
+        // The cadence carries forward: this read did not re-prove the prefix,
+        // so it does not re-anchor the clock or the count.
+        lastFullReproofAt: entry.lastFullReproofAt,
+        readsSinceFullReproof: entry.readsSinceFullReproof + 1,
+        forceFullReproof: false,
+      });
+
+      if (snapshot.publish === true) {
+        publishVerifiedPrefix(
+          logPath,
+          size,
+          true,
+          digest,
+          result.records,
+          result.head,
+          options.schemaDir,
+        );
+      }
+      return verified;
+    } finally {
+      try {
+        closeSync(fd);
+      } catch {
+        // Nothing actionable: the read is done and the descriptor is the OS's.
+      }
+    }
   }
 
   /**
@@ -457,6 +889,11 @@ export class VerifiedReadCache {
      * against a stored one (APRV-206). `null` means "hash them".
      */
     knownDigest: string | null,
+    /**
+     * The un-finalised SHA-256 state at these bytes (APRV-217), or `null` under
+     * `full`, where no state is kept and nothing is spent building one.
+     */
+    state: Hash | null,
   ): void {
     const result = verified.result;
     if (result.status !== "clean" || result.head === null) {
@@ -470,12 +907,7 @@ export class VerifiedReadCache {
     const records = [...verified.records];
     for (const record of records) deepFreeze(record);
 
-    this.#entries.delete(key);
-    if (this.#entries.size >= MAX_CACHED_LOGS) {
-      const oldest = this.#entries.keys().next();
-      if (!oldest.done) this.#entries.delete(oldest.value);
-    }
-    this.#entries.set(key, {
+    this.#store(key, {
       schemaKey,
       byteLength: raw.length,
       lines: result.records,
@@ -485,7 +917,23 @@ export class VerifiedReadCache {
       head: result.head,
       records,
       mtimeMs,
+      hashState: state,
+      // This read hashed the whole prefix, so it IS the anchor: the cadence
+      // starts again here, and any pending force is discharged.
+      lastFullReproofAt: Date.now(),
+      readsSinceFullReproof: 0,
+      forceFullReproof: false,
     });
+  }
+
+  /** Put `entry` in, evicting by insertion order. The one writer of the map. */
+  #store(key: string, entry: CacheEntry): void {
+    this.#entries.delete(key);
+    if (this.#entries.size >= MAX_CACHED_LOGS) {
+      const oldest = this.#entries.keys().next();
+      if (!oldest.done) this.#entries.delete(oldest.value);
+    }
+    this.#entries.set(key, entry);
   }
 }
 
@@ -541,6 +989,20 @@ function reusablePrefix(
 export const processReadCache = new VerifiedReadCache();
 
 /**
+ * Tell the process cache when this process appends (APRV-217).
+ *
+ * Registered here rather than called from `core/log.ts` because the dependency
+ * runs this way: `core/state.ts` already knows about the log, and a value
+ * import in the other direction would close a cycle through `core/verify.ts`.
+ * The listener can only ADD work — the named log's next read hashes its whole
+ * prefix — so a process that never loads this module simply reads as it always
+ * did.
+ */
+onLogAppended((logPath) => {
+  processReadCache.requireFullReproof(logPath);
+});
+
+/**
  * Read the log and refuse unless the whole chain verifies.
  *
  * An absent log is an empty log (nothing has happened yet), exactly as
@@ -577,7 +1039,7 @@ export function readVerifiedRecords(
     );
   }
 
-  const { cache: requested, publishSnapshot: publish, ...verifyOptions } = options;
+  const { cache: requested, publishSnapshot: publish, readProof, ...verifyOptions } = options;
   const cache = requested === undefined ? processReadCache : requested;
   // `cache: null` is the explicit cold read an audit asks for, and it stays
   // cold: a caller that opted out of this process's own proved prefix has not
@@ -585,10 +1047,15 @@ export function readVerifiedRecords(
   const verified =
     cache === null
       ? verifyWithRecords(logPath, verifyOptions)
-      : cache.read(logPath, verifyOptions, {
-          consume: snapshotReads,
-          ...(publish === undefined ? {} : { publish }),
-        });
+      : cache.read(
+          logPath,
+          verifyOptions,
+          {
+            consume: snapshotReads,
+            ...(publish === undefined ? {} : { publish }),
+          },
+          readProof ?? processReadProof ?? FULL_READ_PROOF,
+        );
 
   switch (verified.result.status) {
     case "clean":

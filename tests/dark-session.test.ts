@@ -258,9 +258,12 @@ test("the verdict and code unions are frozen public API, listed", () => {
     ],
   );
   // The events a hooked session cannot avoid writing, named in one place.
+  // APRV-214 adds `gate.bypassed`: a session running behind an open window
+  // writes no request and no execution, and it is the opposite of dark — every
+  // call it made is recorded, loudly, by a hook that fired.
   assert.deepEqual(
     [...SESSION_EVENTS],
-    ["task.registered", "approval.requested", "execution.started"],
+    ["task.registered", "approval.requested", "execution.started", "gate.bypassed"],
   );
 });
 

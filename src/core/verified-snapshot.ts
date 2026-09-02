@@ -169,23 +169,80 @@ function pathIdentity(path: string): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * What this process last published for a log: the endorsement, not the file.
+ *
+ * A clean read of an unchanged log endorses the same bytes it endorsed last
+ * time, and writing that fact again is a rename into a directory the daemon
+ * itself watches — which schedules a tick, which reads, which publishes
+ * (APRV-211: measured at 18 ticks in 45 seconds with a ten-minute interval and
+ * no external writer). The memo is a **write suppressor and never an admission
+ * rule**: nothing is read from it, no reader is affected by it, and the worst a
+ * stale entry can do is leave a correct snapshot on disk unrewritten.
+ */
+const published = new Map<string, { byteLength: number; sha256: string }>();
+
+/** Forget what this process published. For tests, and for {@link clearSnapshot}. */
+export function forgetPublishedSnapshots(logPath?: string): void {
+  if (logPath === undefined) published.clear();
+  else published.delete(pathIdentity(logPath));
+}
+
+/**
  * Publish a snapshot for a log the caller has just verified clean.
  *
- * `raw` must be the exact bytes the caller verified, `head` the head that walk
- * produced and `lines` its record count: this function checks none of that and
- * cannot — it is the caller's own verification being published. Every caller is
- * therefore immediately after a `clean` verdict over these bytes.
+ * `raw` must be the exact bytes the caller verified, `sha256` their digest,
+ * `head` the head that walk produced and `lines` its record count: this function
+ * checks none of that and cannot — it is the caller's own verification being
+ * published. Every caller is therefore immediately after a `clean` verdict over
+ * these bytes. The digest is a parameter rather than a recomputation because the
+ * caller has just proved it (APRV-206's argument, and APRV-211's measurement:
+ * hashing megabytes twice per read was 45% of a tick).
  *
  * The write is atomic (a temp file in the same directory, then `rename`) so a
  * reader never sees half a snapshot, and mode 0600 so the ownership argument in
  * the module header holds. Any failure is swallowed: a snapshot is an
  * optimization, and a daemon must not die because a cache file could not be
  * written. The return value says whether it landed, for the tests and the
- * doctor row.
+ * doctor row; `false` also covers "these exact bytes are already published",
+ * which is a write skipped rather than a write that failed.
  */
 export function publishSnapshot(
   logPath: string,
   raw: Uint8Array,
+  digest: string,
+  lines: number,
+  head: LogHead,
+  schemaDir: string | undefined,
+  now: () => string = () => new Date().toISOString(),
+): boolean {
+  return publishVerifiedPrefix(
+    logPath,
+    raw.length,
+    raw.length > 0 && raw[raw.length - 1] === NEWLINE,
+    digest,
+    lines,
+    head,
+    schemaDir,
+    now,
+  );
+}
+
+/**
+ * {@link publishSnapshot} for a caller that never held the whole file.
+ *
+ * The incremental read (APRV-217) reads the head line and the appended bytes
+ * and proves the digest from a carried hash state, so it has the two facts this
+ * function needs — how long the verified prefix is and whether it ends at a
+ * line boundary — without a buffer of the log to derive them from. Nothing else
+ * differs: the same suppression memo, the same atomic 0600 write, the same
+ * snapshot fields. `publishSnapshot` is this function with those two facts read
+ * off a buffer.
+ */
+export function publishVerifiedPrefix(
+  logPath: string,
+  byteLength: number,
+  endsWithNewline: boolean,
+  digest: string,
   lines: number,
   head: LogHead,
   schemaDir: string | undefined,
@@ -193,14 +250,18 @@ export function publishSnapshot(
 ): boolean {
   // A prefix that does not end at a line boundary cannot be resumed from, so it
   // is never published. In practice a clean log always ends with a newline.
-  if (raw.length === 0 || raw[raw.length - 1] !== NEWLINE) return false;
+  if (byteLength === 0 || !endsWithNewline) return false;
+
+  const identity = pathIdentity(logPath);
+  const last = published.get(identity);
+  if (last !== undefined && last.byteLength === byteLength && last.sha256 === digest) return false;
 
   const snapshot: VerifiedSnapshot = {
     v: SNAPSHOT_VERSION,
-    log: pathIdentity(logPath),
+    log: identity,
     schema_dir: schemaDir === undefined ? "" : pathIdentity(schemaDir),
-    byte_length: raw.length,
-    sha256: sha256(raw),
+    byte_length: byteLength,
+    sha256: digest,
     lines,
     head,
     verified_at: now(),
@@ -216,6 +277,7 @@ export function publishSnapshot(
     // would otherwise keep whatever mode it had.
     chmodSync(temp, 0o600);
     renameSync(temp, target);
+    published.set(identity, { byteLength, sha256: digest });
     return true;
   } catch {
     try {
@@ -578,6 +640,10 @@ export function snapshotSummary(logPath: string): SnapshotRead {
 
 /** Remove a snapshot. Used by tests and by anything that invalidates one. */
 export function clearSnapshot(logPath: string): void {
+  // The memo describes a file; removing the file removes what it described, and
+  // the next clean read must publish again rather than believe this process's
+  // own bookkeeping.
+  forgetPublishedSnapshots(logPath);
   try {
     unlinkSync(snapshotPathFor(logPath));
   } catch {

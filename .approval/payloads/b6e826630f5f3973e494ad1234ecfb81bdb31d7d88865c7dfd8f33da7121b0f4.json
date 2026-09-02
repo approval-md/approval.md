@@ -1,0 +1,1 @@
+{"command":"gh pr update-branch 201 2>&1 | tail -1; gh pr view 201 --json autoMergeRequest,mergeStateStatus --jq '\"201 auto=\\(.autoMergeRequest != null) \\(.mergeStateStatus)\"'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/project-luma-event-relevance-3d2cb0"}

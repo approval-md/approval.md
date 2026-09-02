@@ -100,11 +100,17 @@ import {
   type GateOptions,
 } from "../core/gate.js";
 import {
+  openGateWindow,
+  recordGateBypass,
+  type OpenWindow,
+} from "../core/gate-window.js";
+import {
   harnessLoopFloor,
   isLoopEscalated,
   UNKNOWN_SESSION,
   type HarnessLoopState,
 } from "../core/loop.js";
+import type { EventRecord } from "../core/log.js";
 import { payloadHash } from "../core/payload.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
 import { humanOnlyRefusal, resolve as resolvePolicy } from "../core/policy-match.js";
@@ -1238,11 +1244,20 @@ function unattendedGuard(
   logPath: string,
   policyPath: string,
   task: string,
+  /**
+   * Records this invocation has ALREADY read and verified (APRV-214). The
+   * window lookup near the top of `runHarnessHook` performs a verified read
+   * before the policy is loaded, and handing its result down means the closed
+   * path still costs one verified read rather than gaining a third (APRV-209).
+   * `null` where that read did not happen or did not verify, and then this does
+   * its own, exactly as it always did.
+   */
+  known: EventRecord[] | null = null,
 ): UnattendedRefusal | null {
   // The VERIFIED log, as every enforcement path reads it (SPEC.md §11.1): an
   // attestation or a failure streak read off unverified bytes is whatever the
   // last writer of the file wanted it to be.
-  const read = readVerifiedRecords(logPath);
+  const read = known === null ? readVerifiedRecords(logPath) : { ok: true as const, records: known };
   if (!read.ok) return { code: "hook-io", detail: read.message };
 
   const refusal = attestationRefusal(checkAttestation(read.records, policyPath));
@@ -1282,7 +1297,14 @@ type FloorLookup =
  * bucket it is counted in, which is what stops an agent shedding a streak by
  * rotating a string.
  */
-function harnessFloor(logPath: string, task: string, actor: string): FloorLookup {
+function harnessFloor(
+  logPath: string,
+  task: string,
+  actor: string,
+  /** Already-verified records from this invocation's window lookup (APRV-214). */
+  known: EventRecord[] | null = null,
+): FloorLookup {
+  if (known !== null) return { ok: true, floor: harnessLoopFloor(known, task, actor) };
   const read = readVerifiedRecords(logPath);
   if (!read.ok) return { ok: false, detail: read.message };
   return { ok: true, floor: harnessLoopFloor(read.records, task, actor) };
@@ -1821,6 +1843,280 @@ function runPostToolUse(
 }
 
 /** The verb body, wrapped by {@link commandHarnessHook}'s try/catch. */
+// ===========================================================================
+// The open window (APRV-214)
+// ===========================================================================
+
+/**
+ * What this tool call is asking for: the classes, the binding bytes, the
+ * headline, and whatever the refinements had to say.
+ *
+ * One site, shared by the gated path and the bypass path (APRV-214). The window
+ * suspends the POLICY, never the classification, so both paths must answer
+ * "what is this command" identically; two copies of this block would be two
+ * answers waiting to diverge.
+ */
+type ToolDescription =
+  | {
+      kind: "gated";
+      classes: string[];
+      payload: unknown;
+      headline: string;
+      notes: string[];
+    }
+  /** A tool call this hook does not gate at all. */
+  | { kind: "allow"; reason: string }
+  /** The classifier could not read it, or the input was malformed. */
+  | { kind: "deny"; code: string; detail: string };
+
+function describeToolCall(
+  input: HookInput,
+  adapter: HarnessAdapter,
+  protectedPaths: readonly string[],
+  cwd: string,
+): ToolDescription {
+  if (input.toolName === adapter.shellTool) {
+    const raw = readString(input.toolInput, "command");
+    if (raw === null) {
+      return {
+        kind: "deny",
+        code: "hook-io",
+        detail: `${adapter.shellTool} tool_input carries no command string`,
+      };
+    }
+    // Unchanged since APRV-117, deliberately: the payload is the WHOLE command
+    // and the directory it runs in, so the FULL PAYLOAD block on the phone
+    // carries every byte the harness will execute. Only `summary` is shortened.
+    const payload = { command: raw, cwd: input.cwd };
+    const classified = classifyCommand(raw, protectedPaths);
+    if (!classified.ok) {
+      return {
+        kind: "deny",
+        code: `hook-${classified.code}`,
+        detail: `${classified.detail} (segment: ${classified.segment}). Rewrite it as a command the classifier can read, or run the effect through \`approval run\` with a granted token.`,
+      };
+    }
+    // APRV-108: a local rewrite of history this checkout never published is a
+    // commit. Runs in the hook's own cwd, after classification and never inside
+    // it, and downgrades nothing it cannot establish from git.
+    const refined = refineRewrite(classified, cwd);
+    const answer = refined.result.ok ? refined.result : classified;
+    return {
+      kind: "gated",
+      classes: answer.classes.filter((cls) => cls !== GATE_SELF_CLASS),
+      payload,
+      headline: raw,
+      notes: refined.notes,
+    };
+  }
+
+  const gated = fileToolGate(input.toolName, input.toolInput, protectedPaths, cwd);
+  if (gated === null) {
+    return { kind: "allow", reason: `${input.toolName} is not a gated edit` };
+  }
+  return {
+    kind: "gated",
+    classes: [gated.cls],
+    payload: gated.payload,
+    headline: gated.summary,
+    // The tier rides in the verdict's note as well as in the payload, so an
+    // `allow` says which checkout it authorized (APRV-124).
+    notes: [fileTierNote(gated)],
+  };
+}
+
+/** The window standing over `logPath`, and the records it was derived from. */
+interface WindowLookup {
+  window: OpenWindow | null;
+  /**
+   * The verified records, when the read succeeded. Handed to `harnessFloor` and
+   * `unattendedGuard` so the closed path pays for ONE verified read (APRV-209),
+   * and `null` where the log could not be read or did not verify — which is
+   * also, and not coincidentally, the case where there is no window.
+   */
+  records: EventRecord[] | null;
+}
+
+/**
+ * Is a window open over this log?
+ *
+ * Fails closed on every axis and reports NOTHING when it does. An absent log,
+ * an unreadable one, a torn tail, a chain that does not verify: each yields no
+ * window, and the caller falls through to the path it has always taken, where
+ * `hook-log-unreachable` and `hook-io` fire in the same words at the same
+ * places. A bypass derived from bytes nobody verified would be a bypass anyone
+ * able to write the file could grant themselves, which is the whole reason the
+ * window's state lives in the log rather than beside it.
+ *
+ * The existence probe is the same one the gated path makes further down, and it
+ * is made FIRST so that a hook pointed at a directory with no log does no
+ * verification work before saying so.
+ */
+function lookupWindow(logPath: string): WindowLookup {
+  if (!existsSync(logPath) && !existsSync(dirname(logPath))) {
+    return { window: null, records: null };
+  }
+  const read = readVerifiedRecords(logPath);
+  if (!read.ok) return { window: null, records: null };
+  return { window: openGateWindow(read.records), records: read.records };
+}
+
+/**
+ * The banner every bypassed call prints to STDERR.
+ *
+ * Loud, and on stderr rather than in the decision reason, because the two have
+ * different readers: the reason is read by the harness and by the agent, and
+ * this is read by the person who opened the window and may have forgotten it is
+ * open. It names the seq of the record that authorized the bypass and the one
+ * that recorded it, so both ends are greppable from the log alone.
+ */
+function bypassBanner(window: OpenWindow, classes: readonly string[], seq: number): string {
+  return [
+    "!! APPROVAL GATE OPEN — this command was NOT approved !!",
+    `   window seq ${String(window.seq)}, opened by ${window.openedBy}, expires ${window.expiresAt}`,
+    `   reason: ${window.reason}`,
+    `   classes: ${classes.join(", ")}; recorded as gate.bypassed seq ${String(seq)}`,
+    "   close it with `approval gate close`",
+    "",
+  ].join("\n");
+}
+
+/**
+ * The bypass path: classify anyway, refuse the things the window never reaches,
+ * record the call, and only then allow it.
+ *
+ * ### What the window does NOT reach, and why each one stays
+ *
+ *  - **A command the classifier cannot read** (`hook-opaque`,
+ *    `hook-unclassified`, `hook-unparseable`). The window is a suspension of the
+ *    policy's ANSWER, and an opaque command has no question to suspend: nothing
+ *    here can establish that a `bash -c` string does not write into the log.
+ *  - **`log.mutate`.** The window suspends the policy; the log is what the
+ *    window itself is derived from, and a bypass that could rewrite the log
+ *    could rewrite its own authorization. Refused unconditionally, with no
+ *    policy consulted, because this rule is not the policy's to relax.
+ *  - **Any class the policy reserves to human hands** (§11.1 invariant 9). A
+ *    human-only class is inert to agents by construction, and a window opened by
+ *    a human does not lend an agent the human's hands.
+ *
+ * ### The policy is loaded, best-effort
+ *
+ * For the protected-path set the classifier needs, and for the human-only
+ * check. A policy that will not load is exactly the failure a window is opened
+ * to repair, so a load failure is a NOTE on the verdict rather than a refusal;
+ * the protected-path set is then empty and the human-only check has nothing to
+ * resolve against, which the note says in as many words.
+ *
+ * ### Record, then allow
+ *
+ * §11.1 invariant 8, and the same order `recordUnattended` uses: a bypassed
+ * command that ran and left no record is the one state this feature must not be
+ * able to reach, so an append failure is a deny.
+ */
+function runBypass(
+  streams: Streams,
+  input: HookInput,
+  adapter: HarnessAdapter,
+  cwd: string,
+  logPath: string,
+  flags: Record<string, string | boolean>,
+  actor: string,
+  window: OpenWindow,
+): number {
+  const scope = hookScope(flags, cwd);
+  const load = loadPolicy(
+    scope.options.policy?.file === undefined
+      ? { dir: scope.options.policy?.dir ?? cwd }
+      : { file: scope.options.policy.file },
+  );
+  const protectedPaths = load.ok ? (load.policy.protected_paths ?? []) : [];
+  const policyNote = load.ok
+    ? null
+    : `the policy did not load (${load.code}: ${load.message}), so no protected path beyond the built-ins was known here and no class could be resolved to human-only`;
+
+  const described = describeToolCall(input, adapter, protectedPaths, cwd);
+  if (described.kind === "deny") {
+    return deny(
+      streams,
+      described.code,
+      `${described.detail} The open window does not reach this: a command the classifier cannot read is a command nothing here can establish is safe to run unapproved.`,
+      adapter.kind,
+    );
+  }
+  if (described.kind === "allow") return allow(streams, described.reason, adapter.kind);
+
+  const classes = described.classes;
+  if (classes.length === 0) {
+    // The gate's own CLI, including `approval gate close`. Allowed with no
+    // record for the reason it is allowed outside a window: gating the gate
+    // with the gate recurses, and a window that recorded its own closing verb
+    // would be recording the act that ends it.
+    return allow(
+      streams,
+      "the approval CLI is the gate itself and is not gated by it",
+      adapter.kind,
+    );
+  }
+
+  const mutation = classes.find((cls) => cls === "log.mutate");
+  if (mutation !== undefined) {
+    return deny(
+      streams,
+      "hook-class-human-only",
+      `${mutation} is never reachable through the open window: the window suspends the POLICY, and the log is what the window itself is derived from. A bypass able to write the log could rewrite its own authorization. Nothing was appended; a human writes the log directory by hand or not at all.`,
+      adapter.kind,
+    );
+  }
+
+  if (load.ok) {
+    const reserved = classes.find(
+      (cls) => resolvePolicy(load, cls).autonomy === "human-only",
+    );
+    if (reserved !== undefined) {
+      return deny(
+        streams,
+        "hook-class-human-only",
+        `${humanOnlyRefusal(reserved, "this command may not run under an agent")} An open window does not reach it: the window suspends what the policy DECIDES, and a human-only class is one the policy reserves to human hands, which a window opened by a human does not lend to an agent (SPEC.md §11.1 invariant 9).`,
+        adapter.kind,
+      );
+    }
+  }
+
+  const recorded = recordGateBypass(
+    logPath,
+    {
+      tool: input.toolName,
+      summary: truncate(described.headline, SUMMARY_LIMIT),
+      classes,
+      payloadHash: payloadHash(described.payload),
+      ...(input.sessionId === UNKNOWN_SESSION ? {} : { sessionId: input.sessionId }),
+      ...(input.toolUseId === null ? {} : { toolUseId: input.toolUseId }),
+      ...(input.cwd.length === 0 ? {} : { cwd: input.cwd }),
+    },
+    actor,
+    {},
+  );
+  if (!recorded.ok) {
+    // Invariant 8: the record lands before the allow, so a refusal here is a
+    // deny even though a window is open. `append-failed` reaches the caller
+    // through the family reserved for a code the writer produced.
+    return deny(
+      streams,
+      `hook-gate-refused:${recorded.code}`,
+      `${recorded.message} A window being open does not let a call run unrecorded: the record is what makes the bypass reviewable, so nothing runs without it.`,
+      adapter.kind,
+    );
+  }
+
+  streams.err(bypassBanner(window, classes, recorded.record.seq));
+  const notes = [...described.notes, ...(policyNote === null ? [] : [policyNote])];
+  return allow(
+    streams,
+    `gate-open: ${classes.join(", ")} bypassed by the window opened at seq ${String(window.seq)} by ${window.openedBy} (expires ${window.expiresAt}); recorded as gate.bypassed seq ${String(recorded.record.seq)}${notes.length === 0 ? "" : ` (${notes.join("; ")})`}`,
+    adapter.kind,
+  );
+}
+
 function runHarnessHook(
   argv: string[],
   streams: Streams,
@@ -1911,6 +2207,23 @@ function runHarnessHook(
 
   const { logPath, root, options } = hookScope(parsed.flags, cwd);
 
+  // APRV-214, amended SPEC.md §5.2: the open window, looked up HERE — after the
+  // scope is resolved and before the policy is loaded — because the whole point
+  // of it is to be reachable when the things below are broken. A window opened
+  // by a human puts every gated tool call through `runBypass` instead, so an
+  // unparseable policy, a drifted attestation, a loop floor, a dark channel and
+  // a hung daemon are all bypassed.
+  //
+  // The lookup is SELF-GATING, which is what makes placing it this early safe:
+  // it reads the same verified log every enforcement path reads, and an absent,
+  // torn or unverifiable log yields no window at all. The hook then falls
+  // through to the path it has always taken and refuses there, in the same
+  // words. The window suspends the POLICY; it never suspends the log.
+  const looked = lookupWindow(logPath);
+  if (looked.window !== null) {
+    return runBypass(streams, input, adapter, cwd, logPath, parsed.flags, actor, looked.window);
+  }
+
   // The policy is read BEFORE the command is classified (APRV-107): the
   // protected-path set is built-ins plus `policy.protected_paths`, so what
   // counts as a protected path is a policy question and the classifier cannot be
@@ -1934,56 +2247,18 @@ function runHarnessHook(
   }
   const protectedPaths = load.policy.protected_paths ?? [];
 
-  // What is being asked for, as one or more classes.
-  let classes: string[];
-  /** The binding bytes, and the headline the approver's summary line carries. */
-  let payload: unknown;
-  let headline: string;
-  /** What the history-rewrite refinement did, for the decision reason. */
-  let notes: string[] = [];
-  if (input.toolName === adapter.shellTool) {
-    const raw = readString(input.toolInput, "command");
-    if (raw === null) {
-      return deny(
-        streams,
-        "hook-io",
-        `${adapter.shellTool} tool_input carries no command string`,
-        adapter.kind,
-      );
-    }
-    // Unchanged since APRV-117, deliberately: the payload is the WHOLE command
-    // and the directory it runs in, so the FULL PAYLOAD block on the phone
-    // carries every byte the harness will execute. Only `summary` is shortened.
-    payload = { command: raw, cwd: input.cwd };
-    headline = raw;
-    const classified = classifyCommand(raw, protectedPaths);
-    if (!classified.ok) {
-      return deny(
-        streams,
-        `hook-${classified.code}`,
-        `${classified.detail} (segment: ${classified.segment}). Rewrite it as a command the classifier can read, or run the effect through \`approval run\` with a granted token.`,
-        adapter.kind,
-      );
-    }
-    // APRV-108: a local rewrite of history this checkout never published is a
-    // commit. Runs in the hook's own cwd, after classification and never inside
-    // it, and downgrades nothing it cannot establish from git.
-    const refined = refineRewrite(classified, cwd);
-    notes = refined.notes;
-    const answer = refined.result.ok ? refined.result : classified;
-    classes = answer.classes.filter((cls) => cls !== GATE_SELF_CLASS);
-  } else {
-    const gated = fileToolGate(input.toolName, input.toolInput, protectedPaths, cwd);
-    if (gated === null) {
-      return allow(streams, `${input.toolName} is not a gated edit`, adapter.kind);
-    }
-    classes = [gated.cls];
-    payload = gated.payload;
-    headline = gated.summary;
-    // The tier rides in the verdict's note as well as in the payload, so an
-    // `allow` says which checkout it authorized (APRV-124).
-    notes = [fileTierNote(gated)];
+  // What is being asked for, as one or more classes. One description site for
+  // both paths since APRV-214 (see `describeToolCall`): the open window
+  // classifies exactly as the closed one does, and a second copy of this would
+  // be a second answer to "what is this command".
+  const described = describeToolCall(input, adapter, protectedPaths, cwd);
+  if (described.kind === "deny") {
+    return deny(streams, described.code, described.detail, adapter.kind);
   }
+  if (described.kind === "allow") return allow(streams, described.reason, adapter.kind);
+  const { classes, payload, headline } = described;
+  /** What the history-rewrite refinement did, for the decision reason. */
+  const notes: string[] = [...described.notes];
 
   if (classes.length === 0) {
     return allow(
@@ -2062,7 +2337,7 @@ function runHarnessHook(
   // sibling to fall back on. Every class that would otherwise have proceeded is
   // routed to the human gate for this invocation; a class that already resolves
   // manual is untouched, because it was already going there.
-  const floored = harnessFloor(logPath, task, actor);
+  const floored = harnessFloor(logPath, task, actor, looked.records);
   if (!floored.ok) return deny(streams, "hook-io", floored.detail, adapter.kind);
   const floor = floored.floor;
   if (floor !== null) {
@@ -2083,7 +2358,7 @@ function runHarnessHook(
   /** No class here needs a human, so nothing downstream will ask for one. */
   const unattended = floor === null && autonomies.every((autonomy) => autonomy !== "manual");
   if (unattended) {
-    const refused = unattendedGuard(logPath, load.source.path, task);
+    const refused = unattendedGuard(logPath, load.source.path, task, looked.records);
     if (refused !== null) return deny(streams, refused.code, refused.detail, adapter.kind);
   }
 

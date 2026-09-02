@@ -402,6 +402,72 @@ provably outside the checkout is live-tier. It changes no policy semantics —
 every tier resolves exactly as the path's own protected class resolves — only what the prompt
 says.
 
+## Opening the gate to debug it (APRV-214)
+
+A hook that fails closed on every axis strands the session that would fix it:
+an unattested policy, a drifted attestation, a hung daemon, or a dark channel
+denies every command, including the ones a human would use to find out why.
+The escape is a window, and only a human can open one:
+
+```
+approval gate open --for 30m --reason "debugging the protected-path tier" --as human:carter
+```
+
+The verb prints what the window will do and reads one line. Only a typed
+`understood` opens it; anything else, an end of input included, refuses
+`gate-confirmation-mismatch` and appends nothing. stdin has to be a terminal
+and there is no `--yes`: a Claude Code Bash tool has no terminal, which is one
+of the two locks. The other is classification: `approval gate open` and
+`approval gate close` are `policy.core`, so a hook that is on denies an agent
+the ceremony with `hook-class-human-only`. `approval gate status` stays
+pass-through.
+
+The state is the log. `gate open` appends `gate.opened` (human actor, runtime
+`ts`, `expires_at` derived from the duration, default 30m, cap 24h), and
+`gate close` appends `gate.closed` naming it. Expiry appends nothing. There is
+no flag file: a file the hook read on its own would let anything able to write
+it act as the human.
+
+While a window is open the hook reads it from the verified log before it loads
+the policy, so every policy-side failure is bypassed. Each gated tool call is
+still classified, then recorded as `gate.bypassed` (the window's seq, the tool,
+the classes, a bounded summary and the payload hash), and only then allowed:
+
+```
+{"permissionDecision":"allow","permissionDecisionReason":"gate-open: vcs.push.main bypassed by the window opened at seq 41 by human:carter (expires 2026-09-02T11:14:02Z); recorded as gate.bypassed seq 57"}
+```
+
+with a banner on stderr every time:
+
+```
+!! APPROVAL GATE OPEN — this command was NOT approved !!
+   window seq 41, opened by human:carter, expires 2026-09-02T11:14:02Z
+   reason: debugging the protected-path tier
+   classes: vcs.push.main; recorded as gate.bypassed seq 57
+   close it with `approval gate close`
+```
+
+Three things the window does not reach:
+
+- `log.mutate`, unconditionally, and any class the policy resolves to
+  `human-only`: both deny `hook-class-human-only` as they do with the gate
+  closed. Under a policy that does not load nothing resolves, so only the
+  `log.mutate` refusal applies there, and the allow reason says the policy
+  did not load.
+- A command the classifier cannot read (`hook-opaque`, `hook-unclassified`,
+  `hook-unparseable`). The window bypasses the policy, and a command the hook
+  cannot read is one it cannot show to be neither of the above.
+- A log it cannot reach or cannot verify. The window is derived from verified
+  records, so `hook-log-unreachable` and `hook-io` fire exactly as before, and
+  an append that fails denies `hook-gate-refused:append-failed` rather than
+  allowing with no record.
+
+`approval status` reports the window and goes unhealthy for as long as it is
+open, and any check keyed on `healthy` (doctor, CI) goes red with it. Close it
+early with `approval gate close`; nothing bypassed under it was charged to a
+budget or entered in the retrospective sample, because none of it was
+authorized, only recorded.
+
 ## Deny reasons
 
 The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen in
@@ -691,8 +757,8 @@ Three verdicts pass, ordered by how much they prove.
 | verdict | what it establishes |
 |---|---|
 | `attested` | CONTENT-level. The policy file's bytes at the head commit hash to a digest some `policy.updated` record carries, which is what `approval policy amend --commit` writes. No grant is sought, which is how amendment pull requests pass — they have an attestation and would never have a `policy.edit` grant. |
-| `granted-file` | PATH-level. An `approval.granted` of class `policy.edit`/`policy.core` whose `payload_hash` resolves in the committed payload store to material whose `file` names this path. Since APRV-124 the hook binds the CHANGE rather than the touch, so this is a grant against the actual bytes. |
-| `granted-command` | PATH-level, one notch weaker. The granted command is re-run through this runtime's own `classifyCommand`, and it counts only when a segment classifies as a granting class BECAUSE of a word naming this path (`ClassifiedSegment.path`). A mention is not a grant: `cat SPEC.md` is `read.shell` and proves nothing. |
+| `granted-file` | HUNK-level. An `approval.granted` of class `policy.edit`/`policy.core` whose `payload_hash` resolves in the committed payload store to material whose `file` names this path. Since APRV-124 the hook binds the CHANGE rather than the touch, so the payload carries the exact edit, and since APRV-202 that is what is checked: the granted `after` bytes must occur verbatim in the blob at head, the `before` bytes in the blob at base, and the lines they contain are the ones they cover. |
+| `granted-command` | ATTRIBUTED, one notch weaker. The granted command is re-run through this runtime's own `classifyCommand`, and it counts only when a segment classifies as a granting class BECAUSE of a word naming this path (`ClassifiedSegment.path`, or another word of that same segment that resolves exactly to this checkout's copy of the path — a batch names several files and the field holds one). A mention is not a grant: `cat SPEC.md` is `read.shell` and proves nothing. A command payload describes no bytes, so it covers the whole path only with the three tests below. |
 
 There is deliberately **no class-level pass**. A `policy.edit` grant that exists
 but names some other file is not evidence that anybody saw this edit, and
@@ -718,13 +784,46 @@ grant shortly after is the grant-follows-write anomaly (APRV-200), which is a
 defect in its own right but a complete consent trail, and not this guard's to
 adjudicate.
 
-Two limits of that bound, stated rather than buried. A repeat edit to the same
-path inside the window still inherits the earlier grant; closing that needs
-hunk-level coverage, tracing every added region of the diff to the
-`after`/`content` bytes of some grant. And when git cannot date the change at
-all, no bound is applied rather than a weaker one invented — a bound against the
-head commit would pass everything, since every record in the log at head is
-already before it. The finding says which of the two it got, every time.
+When git cannot date the change at all, no bound is applied rather than a weaker
+one invented: a bound against the head commit would pass everything, since every
+record in the log at head is already before it. The finding says which of the two
+it got, every time.
+
+The bound used to be the whole answer, and that was the guard's weakest joint: a
+repeat edit to the same path inside the window inherited the earlier grant, and
+PR #187, #196 and #207 each passed on a grant that authorized some earlier edit.
+Since APRV-202 the window is a pre-filter and coverage is the verdict.
+
+### Coverage: the change, not the path
+
+The guard reads the blob at base and at head, reduces the difference to the
+substantive lines added and removed, and requires every one to trace to the
+bound material of some in-window grant. Coverage may be assembled from several
+grants, and the finding lists every contributor.
+
+- A **file grant** covers the lines its own `before`/`after` (or `content`)
+  bytes contain, and only when those bytes are anchored: the after-state occurs
+  verbatim in the blob at head, the before-state in the blob at base. A granted
+  edit whose after-state is not in head approved something that did not land,
+  and it covers nothing.
+- A **command grant** has no bytes to check, so it is attributed instead, and
+  three tests all have to hold. Its write has to land at THIS checkout's copy of
+  the path (the payload's `cwd` joined with the repository-relative path equals
+  the word the classifier matched); the log has to carry the RUN, an
+  `execution.started` for the grant's `action_key`, because a grant nobody spent
+  authorized a command that never ran; and that run has to sit within six hours
+  of the commit and NOT after it, because a command's effect follows its own
+  `execution.started`. The finding names the run it attributed the change to.
+- A change that alters no substantive line (whitespace, a mode bit) has no hunk
+  to cover, and a grant naming the path inside the window is still required. A
+  change that only REORDERS lines is an uncovered hunk, not an empty diff.
+
+Three limits, stated rather than buried. Coverage is by line text and not by
+position, so an added line whose exact text appears in some granted edit counts
+as covered wherever it landed; tightening that to positions would fail every
+rebase and re-indent. Blank lines neither need coverage nor give it. And a
+command grant still authorizes the whole file for the duration of its run, which
+is as fine as a payload naming a script can get.
 
 ### The log lags, so ordering is a rule
 
@@ -757,11 +856,21 @@ it would have caught.
 ### Fail closed
 
 A missing log (`log-missing`), a log that does not pass chain verification
-(`log-unverified`), and a protected path with no evidence (`no-evidence`) are all
-failures. The first two fire before any evidence is sought, so an unreadable log
-is never mistaken for "no protected paths changed", and records that have not
-passed verification are never read for evidence at all (SPEC.md §11.1 invariant 1
-applied to a new surface).
+(`log-unverified`), a protected path nothing in the log names (`no-evidence`), a
+change whose lines trace to no granted material even though grants DO name the
+path (`uncovered-hunk`), and a change whose blobs could not be read at both
+commits (`change-unreadable`) are all failures. The first two fire before any
+evidence is sought, so an unreadable log is never mistaken for "no protected
+paths changed", and records that have not passed verification are never read for
+evidence at all (SPEC.md §11.1 invariant 1 applied to a new surface).
+
+`uncovered-hunk` and `no-evidence` are separate because the reader's next move
+differs. `no-evidence` says nobody approved anything about this file, and the
+question is whether the hook fired at all. `uncovered-hunk` says somebody
+approved something about this file and it was not this: the grant is real, the
+consent trail for THESE bytes is missing, and the fix is to take the change to
+the gate rather than to hunt for a lost record. The failure prints the uncovered
+lines and why each naming grant was set aside.
 
 ### Prior art
 

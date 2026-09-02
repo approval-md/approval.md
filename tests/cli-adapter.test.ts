@@ -28,6 +28,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { knownAdapterNames } from "../src/cli/adapter.js";
 import { ROOT_HELP } from "../src/cli/help.js";
 import { payloadHash } from "../src/core/payload.js";
 import { assertLoopback, startMockSmtp } from "./smtp-mock.js";
@@ -491,6 +492,12 @@ test("usage errors exit 2 and append nothing", async () => {
       /unknown flag --tokne/u,
     ],
     ["an unknown adapter", ["adapter", "carrier-pigeon"], /unknown adapter/u],
+    // APRV-223. The table is a plain object, so every name on
+    // `Object.prototype` was a name the lookup used to resolve: `constructor`
+    // found a function and the verb dispatched it as an adapter. An adapter
+    // nobody registered is an unknown adapter, whatever JavaScript thinks.
+    ["an inherited property", ["adapter", "constructor"], /unknown adapter "constructor"/u],
+    ["another inherited property", ["adapter", "toString"], /unknown adapter "toString"/u],
   ];
 
   for (const [label, argv, pattern] of cases) {
@@ -568,6 +575,19 @@ test("the help texts state the rules a reader must not have to infer", async () 
         "smtp-<NNN>",
       ],
     ],
+    // APRV-223: the second adapter's own help, from the table entry the name
+    // resolves to. The two claims a reader must not have to infer are the mode
+    // discrimination and which key lives in the vault.
+    [
+      ["adapter", "agentmail", "--help"],
+      [
+        "TWO PAYLOAD MODES",
+        "agentmail-draft-drifted",
+        "agentmail.api_key",
+        "draft_send and message_send",
+        "AgentMail has no From",
+      ],
+    ],
   ] as const) {
     const run = await runCli([...argv], unit.dir, GREEN);
     assert.equal(run.code, 0, run.stderr);
@@ -579,5 +599,24 @@ test("the help texts state the rules a reader must not have to infer", async () 
 
 test("the root help lists the adapter verb", async () => {
   assert.match(ROOT_HELP, /approval adapter email <action-key> --token <t> --payload <file\|->/u);
+  assert.match(ROOT_HELP, /approval adapter agentmail <action-key> --token <t> --payload <file\|->/u);
   assert.match(ROOT_HELP, /\n {2}adapter {3}execute an approved action through a side-effect adapter/u);
+});
+
+test("the adapter help and the usage error name every adapter in the table", async () => {
+  const unit = await ready();
+  const help = await runCli(["adapter", "--help"], unit.dir, GREEN);
+  assert.equal(help.code, 0, help.stderr);
+  for (const name of knownAdapterNames()) {
+    assert.ok(help.stdout.includes(name), `\`approval adapter --help\` omits ${name}`);
+  }
+
+  // The usage error lists the same set, generated from the same table: a name
+  // that resolves and a name the error offers cannot drift apart.
+  const unknown = await runCli(["adapter", "carrier-pigeon", "--json"], unit.dir, GREEN);
+  assert.equal(unknown.code, 2);
+  assert.match(
+    String(jsonErr(unknown)["message"]),
+    new RegExp(`known adapters: ${knownAdapterNames().join(", ")}`, "u"),
+  );
 });

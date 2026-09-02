@@ -44,9 +44,18 @@ import {
   type AdapterConformanceCase,
   type AdapterConformanceHarness,
 } from "../src/adapters/conformance.js";
+import {
+  AGENTMAIL_CLASS,
+  DEFAULT_AGENTMAIL_CREDENTIAL_NAMES,
+  agentmailAdapter,
+} from "../src/adapters/agentmail.js";
 import { EXECUTE_REFUSAL_CODES } from "../src/core/execute.js";
 import { payloadHash } from "../src/core/payload.js";
 import { MOCK_CLASS, MOCK_CREDENTIAL, mockAdapter } from "./adapter-mock.js";
+import {
+  assertLocal as assertAgentmailLocal,
+  startMockAgentmail,
+} from "./agentmail-mock.js";
 import { decide, register, request } from "./clock-adapters.js";
 import { verify } from "../src/core/verify.js";
 import { at, attest, fixedClock, newScenario, scratchRoot, T0 } from "./scenario.js";
@@ -92,13 +101,17 @@ function payloadFor(index: number): JsonValue {
  * A fresh log holding one granted, unspent manual action, built through the
  * real gate. Returns everything an adapter execution needs.
  */
-function granted(cls: string = MOCK_CLASS): AdapterConformanceCase {
+function granted(
+  cls: string = MOCK_CLASS,
+  /** The bytes to bind. Defaults to this file's own shape (APRV-222). */
+  bytes?: JsonValue,
+): AdapterConformanceCase {
   counter += 1;
   const unit = newScenario(scratch.root, POLICY);
   attest(unit, T0);
 
   const actionKey = `${TASK}:send-${counter}:2026-08-05`;
-  const payload = payloadFor(counter);
+  const payload = bytes ?? payloadFor(counter);
 
   const registered = register(
     unit.logPath,
@@ -658,4 +671,54 @@ test("a completed adapter execution leaves a clean chain and the two events", as
     "execution.completed",
   ]);
   assert.equal(verify(unit.logPath).status, "clean", "the chain did not verify after an execution");
+});
+
+// ---------------------------------------------------------------------------
+// 4. The agentmail adapter, against the same suite (APRV-222)
+// ---------------------------------------------------------------------------
+
+/**
+ * The AgentMail adapter runs the shared suite here rather than only in its own
+ * file, so that the two adapters this repository ships are held to the contract
+ * side by side and a change to the contract fails against both at once.
+ *
+ * Everything it touches is the loopback mock in `agentmail-mock.ts`, whose
+ * `assertLocal` is called on the `apiBase` below: no check in this file reaches
+ * the network.
+ */
+const AGENTMAIL_KEY = "am-key-conformance-4d17ba-DO-NOT-USE";
+const AGENTMAIL_INBOX = "conformance@agentmail.invalid";
+
+const agentmailMock = await startMockAgentmail({
+  apiKey: AGENTMAIL_KEY,
+  inboxId: AGENTMAIL_INBOX,
+});
+after(() => agentmailMock.close());
+
+let agentmailCounter = 0;
+
+const AGENTMAIL_CONFORMANCE: AdapterConformanceHarness = {
+  setup: () => {
+    agentmailCounter += 1;
+    return granted(AGENTMAIL_CLASS, {
+      from: AGENTMAIL_INBOX,
+      to: [`ap-${String(agentmailCounter)}@vendor.invalid`],
+      subject: `Invoice ${String(agentmailCounter)} chaser`,
+      body: `Following up on invoice ${String(agentmailCounter)}.`,
+    });
+  },
+  // The one the suite hunts for in the log and in every field of the result.
+  credential: { name: DEFAULT_AGENTMAIL_CREDENTIAL_NAMES.apiKey, value: AGENTMAIL_KEY },
+  get credentials() {
+    return { [DEFAULT_AGENTMAIL_CREDENTIAL_NAMES.inboxId]: AGENTMAIL_INBOX };
+  },
+  foreignClass: "financial.spend",
+};
+
+test("the agentmail adapter conforms to the adapter contract", async (t) => {
+  await runAdapterConformance(
+    t,
+    () => agentmailAdapter({ apiBase: assertAgentmailLocal(agentmailMock.url), timeoutMs: 5_000 }),
+    AGENTMAIL_CONFORMANCE,
+  );
 });

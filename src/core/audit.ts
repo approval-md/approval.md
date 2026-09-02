@@ -72,7 +72,7 @@
  */
 
 import { tick, type ClockOptions } from "./clock.js";
-import { declaringTasks, findDeclaration, hasApprovalCycle } from "./execute.js";
+import { findDeclaration, indexDeclarations } from "./execute.js";
 import {
   appendEvent,
   type AppendError,
@@ -205,6 +205,16 @@ export function supervisedExecutions(
   const autonomyByClass = new Map<string, string>();
   const candidates: AuditCandidate[] = [];
 
+  // One forward pass over the log answers, for every key at once, the three
+  // questions this loop used to ask per candidate with a full scan each
+  // (APRV-211): which tasks declare the key (declaringTasks), what the last
+  // registration declared (findDeclaration), and whether a human was ever asked
+  // (hasApprovalCycle). Same records, same answers, same order — the index is a
+  // per-call derivation of this call's own verified records and nothing is
+  // remembered between sweeps. `tests/audit-index.test.ts` pins it against the
+  // per-key helpers, key by key, and against this function's previous algorithm.
+  const index = indexDeclarations(all);
+
   for (const record of all) {
     if (record.event !== "execution.started") continue;
     const actionKey = record.action_key;
@@ -212,7 +222,7 @@ export function supervisedExecutions(
 
     // A key declared by more than one task is a refused collision (APRV-138);
     // do not sample from an ambiguous declaration.
-    if (declaringTasks(all, actionKey).length > 1) continue;
+    if ((index.declaringTasks.get(actionKey)?.length ?? 0) > 1) continue;
 
     // APRV-127. An action a human was already asked about is not a candidate for
     // review of an unreviewed decision — there was a decision. The case is a
@@ -221,8 +231,11 @@ export function supervisedExecutions(
     // without this line it would be drawn a second time into a backlog asking a
     // person to review the answer they themselves gave. Costs nothing for every
     // other supervised action, which never carries an approval cycle.
-    if (hasApprovalCycle(all, actionKey)) continue;
-    const declared = findDeclaration(all, actionKey);
+    if (index.requested.has(actionKey)) continue;
+    // `index.declarations` holds, per key, exactly what findDeclaration returns
+    // for it: the class comes from the `task.registered` record the log carries
+    // and from nowhere else.
+    const declared = index.declarations.get(actionKey) ?? null;
     if (declared === null) continue;
 
     let autonomy = autonomyByClass.get(declared.class);

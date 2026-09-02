@@ -1,0 +1,1 @@
+{"command":"git fetch -q origin && git reset -q --hard origin/main && git log --oneline -1 && node \"$TMPDIR/apply-batch2.mjs\" /Users/carter/dev/approval-md/.claude/worktrees/project-luma-event-relevance-3d2cb0 SPEC.md CLAUDE.md AGENTS.md","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/project-luma-event-relevance-3d2cb0"}

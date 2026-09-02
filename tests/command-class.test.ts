@@ -23,6 +23,9 @@ import {
   CLASSIFIER_CLASSES,
   COMMAND_RULES,
   GATE_SELF_CLASS,
+  NON_SECRET_ENV_NAMES,
+  SECRET_ENV_PREFIXES,
+  isSecretEnvName,
 } from "../src/core/command-class.js";
 
 interface Fixture {
@@ -137,6 +140,20 @@ const FIXTURES: readonly Fixture[] = [
   // business, and `approval log` with no subcommand names no ritual at all.
   { command: "approval log verify", class: GATE_SELF_CLASS, rule: "approval" },
   { command: "approval log", class: GATE_SELF_CLASS, rule: "approval" },
+  // APRV-214: the open-window ceremony. Opening suspends the policy for every
+  // harness tool call under the root, so it classifies `policy.core` — which
+  // APPROVAL.md holds human-only, and which is what denies an agent running the
+  // ceremony through the hook. Both spellings, and a flag between the words
+  // must not hide the verb here either.
+  { command: "approval gate open --for 5m --reason x", class: "policy.core", rule: "approval-gate-open", row: "approval" },
+  { command: "approval --json gate open", class: "policy.core", rule: "approval-gate-open", row: "approval" },
+  { command: "approval gate close", class: "policy.core", rule: "approval-gate-close", row: "approval" },
+  { command: "node ./cli.js gate open --for 5m --reason x", class: "policy.core", rule: "approval-gate-open", row: "node" },
+  { command: "node dist/src/cli/main.js gate close", class: "policy.core", rule: "approval-gate-close", row: "node" },
+  // Reporting the window is the gate reading itself, and stays pass-through.
+  { command: "approval gate status --json", class: GATE_SELF_CLASS, rule: "approval" },
+  { command: "approval gate", class: GATE_SELF_CLASS, rule: "approval" },
+  { command: "node ./cli.js gate status", class: GATE_SELF_CLASS, rule: "node-approval-cli", row: "node" },
   { command: "npx tsx src/tool.ts", class: "files.write.workspace", rule: "workspace-tool" },
   { command: "mkdir -p src/core", class: "files.write.workspace", rule: "workspace-write" },
   { command: "rm dist/stale.js", class: "files.write.workspace", rule: "rm-workspace", row: "rm" },
@@ -808,6 +825,14 @@ const CREDENTIAL_FIXTURES: ReadonlyArray<{ command: string; rule: string }> = [
   { command: "echo $APPROVAL_TG_TOKEN", rule: "credential-env" },
   { command: "echo ${APPROVAL_VAULT_PASSPHRASE}", rule: "credential-env" },
   { command: 'curl -H "Authorization: Bearer $TELEGRAM_BOT_TOKEN" https://example.com', rule: "credential-env" },
+  // APRV-224: an AgentMail API key is a mailbox in one string, so the prefix
+  // reads like the other three.
+  { command: "printenv AGENTMAIL_API_KEY", rule: "printenv-secret" },
+  { command: "echo $AGENTMAIL_API_KEY", rule: "credential-env" },
+  {
+    command: 'curl -H "Authorization: Bearer ${AGENTMAIL_API_KEY}" https://api.agentmail.to/v0/inboxes',
+    rule: "credential-env",
+  },
 
   // Reads of the credential files, including by binaries the table does not know.
   { command: "cat .approval/vault.enc", rule: "credential-path" },
@@ -832,6 +857,32 @@ for (const fixture of CREDENTIAL_FIXTURES) {
     assert.equal(result.segments[0]?.rule, fixture.rule);
   });
 }
+
+/**
+ * The credential-bearing prefixes, and AgentMail's place among them (APRV-224).
+ *
+ * One list answers two questions in two modules: the classifier asks it of a
+ * word it read in a command, and `core/child-env.ts` asks it of a real
+ * environment before it spawns a granted child. Pinning the membership here
+ * keeps a prefix from being added for one caller and forgotten by the other.
+ */
+test("AGENTMAIL_ is a credential-bearing prefix, name by name", () => {
+  assert.deepEqual(
+    [...SECRET_ENV_PREFIXES],
+    ["APPROVAL_", "TELEGRAM_", "VAULT_", "AGENTMAIL_"],
+    "the credential-bearing prefixes changed; core/child-env.ts asks this same list of a real environment",
+  );
+  for (const name of ["AGENTMAIL_API_KEY", "AGENTMAIL_INBOX_ID", "AGENTMAIL_X"]) {
+    assert.equal(isSecretEnvName(name), true, `${name} is not read as credential-bearing`);
+  }
+  // The prefix alone is not a name under it, and the allowlist is untouched.
+  assert.equal(isSecretEnvName("AGENTMAIL_"), false);
+  assert.equal(isSecretEnvName("AGENTMAIL"), false);
+  assert.equal(isSecretEnvName("MY_AGENTMAIL_KEY"), false);
+  for (const name of NON_SECRET_ENV_NAMES) {
+    assert.equal(isSecretEnvName(name), false, `${name} left the allowlist`);
+  }
+});
 
 test("cat .approval/vault.enc is no longer read.shell (APRV-194 AC2)", () => {
   // The regression this task was filed for. `read.*` is autonomous in the

@@ -48,6 +48,9 @@ const EVENT_TYPES = [
   "reconciliation.required",
   "reconciliation.satisfied",
   "payload.pruned",
+  "gate.opened",
+  "gate.closed",
+  "gate.bypassed",
 ] as const;
 
 /** Fields each event type requires beyond the base record shape. */
@@ -89,6 +92,13 @@ const EXTRA_REQUIRED: Record<string, readonly string[]> = {
   // binding) is prunable and has no task or action to name. `payload` is the
   // required one, because the event's whole content is which bytes went.
   "payload.pruned": ["payload"],
+  // APRV-214. The window's whole state is these records, so each one must carry
+  // the payload that states it: an opening with no duration or reason, a close
+  // naming no opening, or a bypass naming no window is a record nobody can
+  // derive the window from.
+  "gate.opened": ["payload"],
+  "gate.closed": ["payload"],
+  "gate.bypassed": ["payload"],
 };
 
 function fixture(event: string): Record<string, unknown> {
@@ -173,6 +183,48 @@ test("audit review must come from a human actor (SPEC.md §5.2)", () => {
       `audit.reviewed accepted a non-human actor "${actor}"`,
     );
   }
+});
+
+test("the open window is opened and closed by a human alone (APRV-214)", () => {
+  for (const event of ["gate.opened", "gate.closed"]) {
+    const record = fixture(event);
+    assert.equal(validate("event", record).ok, true);
+    // The ceremony is human-only in `core/gate-window.ts` AND here. This is the
+    // one act that suspends the policy, so an agent able to author the record
+    // could authorize its own next command.
+    for (const actor of ["agent:claude-code", "system:daemon"]) {
+      assert.equal(
+        validate("event", { ...record, actor }).ok,
+        false,
+        `${event} accepted a non-human actor "${actor}"`,
+      );
+    }
+  }
+});
+
+test("a bypassed call records who ran it, human or agent (APRV-214)", () => {
+  const record = fixture("gate.bypassed");
+  for (const actor of ["agent:claude-code", "human:carter"]) {
+    assert.equal(
+      validate("event", { ...record, actor }).ok,
+      true,
+      `gate.bypassed rejected actor "${actor}"`,
+    );
+  }
+  // The record is a statement about a tool call, never one the runtime makes on
+  // its own: there is no `system:` bypass because nothing but a harness call
+  // reaches this path.
+  assert.equal(validate("event", { ...record, actor: "system:daemon" }).ok, false);
+});
+
+test("gate.opened refuses a scope it was not given (APRV-214)", () => {
+  const record = fixture("gate.opened");
+  const payload = record["payload"] as Record<string, unknown>;
+  assert.equal(
+    validate("event", { ...record, payload: { ...payload, scope: "everything" } }).ok,
+    false,
+    "an opener may not invent a scope",
+  );
 });
 
 test("non-decision events accept agent and system actors", () => {
