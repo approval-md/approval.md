@@ -102,6 +102,7 @@ export function commandLogSync(argv: string[], streams: Streams, cwd: string): n
         ahead: report.ahead,
         behind: report.behind,
         restored: report.restored,
+        payloads: { reconciled: report.payloadsReconciled },
         queue: report.queue,
         index: report.index,
       })}\n`,
@@ -117,6 +118,13 @@ export function commandLogSync(argv: string[], streams: Streams, cwd: string): n
       { left: "chain", right: describeRelation(report.relation, report.ahead, report.behind) },
       { left: "head", right: describeHead(report.headAfter) },
       { left: "snapshot", right: report.restored ? "restored over the pulled baseline" : "not needed" },
+      {
+        left: "payloads",
+        right:
+          report.payloadsReconciled === 0
+            ? "none in the fast-forward's way"
+            : `${String(report.payloadsReconciled)} untracked file(s) proved identical to the incoming commit`,
+      },
       {
         left: "projections",
         right: `QUEUE.md rebuilt (${String(report.queue.bytes)} bytes), index ${report.index}`,

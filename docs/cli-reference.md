@@ -143,17 +143,36 @@ chain.
 5. **Fetch, a fast-forward CHECK, then the merge.** A non-fast-forward is named
    and refused (`log-sync-not-fast-forward`): a merge commit over the log would
    be a merge of two hash chains, and chains do not merge.
-6. **Reconcile.** The committed chain must be a prefix of the snapshot, equal to
+6. **Untracked payload files, between the check and the merge.** `git merge
+   --ff-only` refuses to write over an untracked working-tree file, and a records
+   advance commits the payload store, so a checkout that already held those
+   payloads untracked used to stop the fast-forward with `log-sync-git-failed`
+   and a hand step (seen 2026-09-02, after the advance to seq 11361 merged: 33
+   files, every one identical). Sync lists the untracked, non-ignored files under
+   `.approval/payloads/` that the incoming commit also carries, and proves each
+   one twice before a single byte moves: SHA-256 of its bytes is its own
+   filename (the store writes canonical bytes, so a payload file is
+   self-addressed), and its bytes equal the incoming blob. The comparison is over
+   bytes read with `git show`, never git's blob id, which is SHA-1 over a header
+   plus the content and is a different hash of a different thing. Only once every
+   file has passed are the local copies removed, and the count is reported. A
+   file that fails either test refuses `log-sync-payload-mismatch`, naming it: a
+   payload is the material evidence an approval bound to, and two versions of one
+   is a question about which bytes a human said yes to rather than a merge
+   conflict. Nothing is pulled, nothing is appended, and the working tree is left
+   as it was found. A local payload the incoming commit does **not** carry blocks
+   nothing and is not touched.
+7. **Reconcile.** The committed chain must be a prefix of the snapshot, equal to
    it, or an extension of it. Prefix: the snapshot goes back, because the longer
    chain contains the shorter one whole. Extension: the pulled file stays, for
    the same reason in the other direction. Anything else is a fork:
    `log-diverged`, both heads, the first divergent seq, snapshot restored,
    nothing else touched. Re-chaining is fabrication and this verb will not do it.
-7. **Projections are REBUILT, never copied back.** `QUEUE.md` is re-rendered from
+8. **Projections are REBUILT, never copied back.** `QUEUE.md` is re-rendered from
    the reconciled log and the index is reindexed from it. The direction is
    load-bearing: a projection restored from before the pull would be a
    screenshot asserting something the log no longer says.
-8. **Post-verify**, and only then is the snapshot removed.
+9. **Post-verify**, and only then is the snapshot removed.
 
 Any failure at any step restores the snapshot before exiting, so the working log
 is never left in a half state, and a restore that itself fails is its own loud
@@ -168,6 +187,7 @@ container, and an event for it would be the log narrating its own filesystem.
  "commit":{"before":"…","after":"…","pulled":2},
  "head":{"before":{"seq":41,"hash":"…"},"after":{"seq":41,"hash":"…"}},
  "relation":"ahead","ahead":3,"behind":0,"restored":true,
+ "payloads":{"reconciled":33},
  "queue":{"path":"…","bytes":1180},"index":"rebuilt"}
 ```
 
