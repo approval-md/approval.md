@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-y'
 created_date: '2026-09-02 15:57'
-updated_date: '2026-09-02 20:25'
+updated_date: '2026-09-02 20:32'
 labels:
   - cli
   - dogfood
@@ -120,4 +120,19 @@ The caveat in the notes above was the defect, not a footnote on it: the point of
 The fixture dates src/ an hour into the PAST and leaves the dist marker at now, so the FIRST freshness answer is "fresh" and only the post-merge re-ask sees the staleness the merge created. The first draft dated the marker an hour FORWARD instead, which made the test pass for the wrong reason and then fail: a marker in the future is newer than anything a merge can write, so the re-ask could never fire. Worth knowing if this fixture is ever copied.
 
 docs/cli-reference.md carries all of the above under "up", and the old caveat paragraph is gone.
+
+## Merge from origin/main
+
+Merged origin/main at ec2c984 (merge commit 5954d96), no rebase and no conflicts: 48 files, +6544/-601, carrying APRV-211 (daemon advance adoption), APRV-216 (paced telegram), APRV-209 (hook entry / async dispatch), APRV-225 (log sync payload reconciliation), the seq 13704 policy amendment, and APRV-231's task file.
+
+Nothing had to be reconciled by hand. The reason is that this lane's surface barely overlaps theirs: APRV-211 rewrote src/daemon/advance.ts and added src/daemon/advance-child.ts, while this task touched src/cli/daemon.ts only in the flag table and the startup block. APRV-209's new tests/hook-module-graph.test.ts was the one to watch, since cli/preflight.ts is new in the CLI's module graph, and it passes untouched.
+
+Verified on the merge commit, one suite at a time:
+
+- dist/tests/cli-up-preflight.test.js: 21/21
+- dist/tests/cli-doctor.test.js: 55/55
+- dist/tests/daemon-advance-adopt.test.js: 7/7
+- dist/tests/read-proof-cli.test.js: 7/7
+
+Plus three the merge could plausibly have disturbed, run for the same reason: cli-long-help (the 25-line cap, which APRV-225 also spent budget against), hook-module-graph, daemon-git-evidence — 35/35 together; and up + daemon, 45/45. npx oxlint src tests clean.
 <!-- SECTION:NOTES:END -->
