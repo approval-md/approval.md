@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-x'
 created_date: '2026-09-02 08:06'
-updated_date: '2026-09-02 19:25'
+updated_date: '2026-09-02 20:07'
 labels:
   - performance
   - hook
@@ -24,11 +24,11 @@ Measured by the APRV-188 lane on a quiet machine: a cold gated hook invocation i
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A cold pass-through hook invocation (read.shell on a 10k fixture log) loads at most the modules the hook needs, measured by a test that asserts the MCP SDK, better-sqlite3 and the channel modules are not in the loaded module list
-- [ ] #2 Before and after timings for cold pass-through and cold gated invocations on 1k and 10k fixture logs are recorded in the notes; the pass-through case improves by at least 50 ms on a quiet machine
-- [ ] #3 Every hook test and both hook docs guards pass unchanged; the verdict JSON and exit codes are byte-identical for every fixture
-- [ ] #4 If the settings.json command string must change, the exact new entry is drafted in the notes and docs/claude-code-hook.md describes both forms
-- [ ] #5 npm test passes; lint clean
+- [x] #1 A cold pass-through hook invocation (read.shell on a 10k fixture log) loads at most the modules the hook needs, measured by a test that asserts the MCP SDK, better-sqlite3 and the channel modules are not in the loaded module list
+- [x] #2 Before and after timings for cold pass-through and cold gated invocations on 1k and 10k fixture logs are recorded in the notes; the pass-through case improves by at least 50 ms on a quiet machine
+- [x] #3 Every hook test and both hook docs guards pass unchanged; the verdict JSON and exit codes are byte-identical for every fixture
+- [x] #4 If the settings.json command string must change, the exact new entry is drafted in the notes and docs/claude-code-hook.md describes both forms
+- [x] #5 npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -207,4 +207,33 @@ None weakened. This is a module-loading change: no policy resolution, gate
 check, timestamp source, append path or refusal shape moved. `core/gate.ts`,
 `core/policy-match.ts` and `src/cli/hook.ts` are untouched, and the hook
 suites (88 + 31 cases) pass with the same verdicts and exit codes.
+
+## Validation
+
+- `npm test`: 2988 tests, 2987 pass, 0 fail (one skipped), exit 0.
+- `npx oxlint`: clean.
+- Hook suites specifically: cli-hook (88), cli-hook-cursor + cli-hook-rewrite +
+  cli-hook-scope (31), plus the two docs guards (the rule/deny-code table in
+  cli-hook.test.ts and the classifier table in command-class.test.ts). All pass
+  with unchanged verdicts and exit codes, and the interleaved A/B produced
+  identical verdict objects from the pre- and post-change CLIs on every case.
+- New: tests/hook-module-graph.test.ts (AC #1).
+
+### Two regressions the async main() introduced, both caught and fixed
+
+1. **Dropped exit codes.** The arms that unwrapped a verb's promise set
+   `process.exitCode` and returned EXIT_OK. With an async main the entry
+   point's own assignment could land AFTER the verb's, overwriting a usage
+   error with a zero: `approval setup adapter agentmail` and the mcp http flag
+   refusals exited 0 instead of 2. Fixed by a `settle` helper that awaits the
+   outcome and returns the code, keeping every rejection message and EXIT_IO
+   verbatim. The long-lived verbs (channel listen, daemon run, up, mcp serve)
+   now keep main()'s promise pending while they run.
+2. **A guard that read the signature.** tests/cli-instructions.test.ts locates
+   main() in the source by a literal string to read the switch labels; the
+   literal said `export function main(`, so the guard failed on its own
+   precondition. It matches the signature with or without `async` now.
+
+Both are worth knowing for review: neither is visible in the hook suites, and
+the first is exactly the class of bug a mechanical async conversion produces.
 <!-- SECTION:NOTES:END -->
