@@ -608,7 +608,10 @@ test("instructions: --help and an unexpected argument", () => {
 /** The top-level dispatch of `main()`, read from the source. */
 function dispatchedCommands(): Set<string> {
   const source = readFileSync(MAIN_SOURCE, "utf8");
-  const start = source.indexOf("export function main(");
+  // `main` became async in APRV-209 (every verb is reached through a dynamic
+  // import), so the signature is matched rather than spelled out.
+  const signature = /export (?:async )?function main\(/u.exec(source);
+  const start = signature?.index ?? -1;
   assert.ok(start > 0, "could not find main() in main.ts");
   const body = source.slice(start);
   const found = new Set<string>();
