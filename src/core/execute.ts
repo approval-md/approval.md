@@ -285,6 +285,20 @@ export interface ExecuteOptions extends ClockOptions {
   /** Lock tuning for the append path. */
   append?: AppendOptions;
   /**
+   * How many credential-bearing variables the executor withheld from the child
+   * it is about to spawn (APRV-205), recorded on `execution.started` as
+   * `env_stripped`.
+   *
+   * A COUNT, never a name and never a value: a name is half of a credential,
+   * and SPEC.md §11.1's raw-secrets invariant is not satisfied by leaking the
+   * other half slowly. It is informational — nothing in the gate reads it back
+   * and no decision turns on it, which is what keeps it clear of §11.1's
+   * "self-reported fields never reduce scrutiny". No CLI flag sets it: it is
+   * computed by `core/child-env.ts` at the spawn site, in the same process that
+   * spawns.
+   */
+  envStripped?: number;
+  /**
    * Where per-request private keys live (APRV-105). Defaults to `.approval/keys/`
    * beside the log. Read when no `token` is passed and a grant carries a
    * `token_sealed`; unlinked once the token is spent.
@@ -677,6 +691,9 @@ export function startExecution(
       ...(options.presentedPayloadHash === undefined
         ? {}
         : { presentedPayloadHash: options.presentedPayloadHash }),
+      // APRV-205: the manual path's `execution.started` is appended by
+      // `consumeToken`, so the count travels with the spend.
+      ...(options.envStripped === undefined ? {} : { envStripped: options.envStripped }),
       // One moment for the whole operation: the timestamp already read above is
       // the one the spend records, so `startExecution` and the `execution.started`
       // it produces cannot disagree about when this happened.
@@ -826,6 +843,11 @@ export function startExecution(
         class: declared.class,
         est_cost_usd: declared.est_cost_usd,
         payload_hash: declared.payload_hash,
+        // APRV-205: how many credential-bearing variables the child was starved
+        // of. Additive and optional — an execution that spawns nothing (an
+        // adapter's `act`, which runs in this process) records no count at all,
+        // because "none withheld" and "no child" are different facts.
+        ...(options.envStripped === undefined ? {} : { env_stripped: options.envStripped }),
       },
     },
     options,

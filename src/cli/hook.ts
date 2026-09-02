@@ -69,6 +69,7 @@ import {
 } from "node:path";
 
 import { attestationRefusal, checkAttestation } from "../core/attest.js";
+import { childEnvironment } from "../core/child-env.js";
 import {
   classifyCommand,
   GATE_SELF_CLASS,
@@ -486,9 +487,22 @@ const REWRITE_UNPUBLISHED_RULE = "rewrite-unpublished";
 const REWRITE_CLASS = "vcs.history.rewrite";
 const UNPUBLISHED_CLASS = "vcs.commit.branch";
 
+/**
+ * The environment every git child of this verb receives (APRV-205).
+ *
+ * The hook spawns no granted command — it answers allow or deny and the harness
+ * runs the command itself — so nothing here is the task's load-bearing case.
+ * These git children are still children of a process holding the session's
+ * credentials, and `git rev-parse` has no use for a Telegram token. Built
+ * through the one helper so there is one list.
+ */
+function gitEnvironment(): Record<string, string> {
+  return childEnvironment().env;
+}
+
 /** Trimmed stdout of a successful git command, or `null` for any failure. */
 function gitOutput(cwd: string, args: readonly string[]): string | null {
-  const result = spawnSync("git", [...args], { cwd, encoding: "utf8" });
+  const result = spawnSync("git", [...args], { cwd, encoding: "utf8", env: gitEnvironment() });
   if (result.error !== undefined || result.status !== 0) return null;
   return result.stdout.trim();
 }
@@ -504,6 +518,7 @@ function isAncestor(cwd: string, ancestor: string, descendant: string): boolean 
   const result = spawnSync("git", ["merge-base", "--is-ancestor", ancestor, descendant], {
     cwd,
     encoding: "utf8",
+    env: gitEnvironment(),
   });
   if (result.error !== undefined) return null;
   if (result.status === 0) return true;
