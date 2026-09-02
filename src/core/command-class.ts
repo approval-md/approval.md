@@ -344,8 +344,22 @@ const CREDENTIAL_WRITE_BINS: readonly string[] = [
  *
  * Exported since APRV-205: `core/child-env.ts` starves a spawned child of the
  * same family, and two copies of this list would be one list that drifts.
+ *
+ * `AGENTMAIL_` joins the family with the AgentMail adapter (APRV-224). An
+ * AgentMail API key is a mailbox in one string, and the deployment the adapter
+ * assumes hands the agent a key that cannot send while the sending key waits in
+ * the vault (SPEC.md §10.4). A key of either half in a granted child's
+ * environment would undo that split, so the prefix is withheld like the rest.
+ * The adapter's own declared credentials are vault names (`agentmail.api_key`,
+ * `agentmail.inbox_id`), so nothing under this prefix passes through by
+ * declaration either.
  */
-export const SECRET_ENV_PREFIXES: readonly string[] = ["APPROVAL_", "TELEGRAM_", "VAULT_"];
+export const SECRET_ENV_PREFIXES: readonly string[] = [
+  "APPROVAL_",
+  "TELEGRAM_",
+  "VAULT_",
+  "AGENTMAIL_",
+];
 
 /**
  * The runtime's own variables under those prefixes that hold no secret: an

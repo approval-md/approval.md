@@ -15,6 +15,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { requiredAgentmailCredentials } from "../src/adapters/agentmail.js";
 import type { Adapter } from "../src/adapters/contract.js";
 import { emailAdapter } from "../src/adapters/email.js";
 import {
@@ -37,6 +38,7 @@ const SESSION: NodeJS.ProcessEnv = {
   APPROVAL_VAULT_PASSPHRASE: FIXTURE,
   TELEGRAM_BOT_TOKEN: FIXTURE,
   VAULT_TOKEN: FIXTURE,
+  AGENTMAIL_API_KEY: FIXTURE,
   APPROVAL_HUMAN: "human:carter",
   APPROVAL_AGENT: "agent:claude",
   APPROVAL_ASCII: "1",
@@ -53,6 +55,7 @@ test("every credential-bearing name is withheld from the child", () => {
     "APPROVAL_VAULT_PASSPHRASE",
     "TELEGRAM_BOT_TOKEN",
     "VAULT_TOKEN",
+    "AGENTMAIL_API_KEY",
   ]) {
     assert.equal(built.env[name], undefined, `${name} reached the child`);
   }
@@ -83,7 +86,9 @@ test("the APRV-194 allowlist survives the scrub", () => {
 
 test("the count is of what was withheld, and names nothing", () => {
   const built = childEnvironment({ source: SESSION });
-  assert.equal(built.stripped, 5);
+  // Six: five from APRV-205 plus the AgentMail key APRV-224 added to the
+  // prefixes. `env_stripped` counts it like any other credential-bearing name.
+  assert.equal(built.stripped, 6);
   assert.equal(built.passed, 0);
   assert.equal(childEnvironment({ source: { PATH: "/bin" } }).stripped, 0);
 });
@@ -109,12 +114,13 @@ test("an adapter-declared credential is passed, and nothing else under the prefi
   });
   assert.equal(built.env["APPROVAL_TG_TOKEN"], FIXTURE, "the declared credential was withheld");
   assert.equal(built.passed, 1);
-  assert.equal(built.stripped, 4);
+  assert.equal(built.stripped, 5);
   for (const name of [
     "APPROVAL_TG_CHAT",
     "APPROVAL_VAULT_PASSPHRASE",
     "TELEGRAM_BOT_TOKEN",
     "VAULT_TOKEN",
+    "AGENTMAIL_API_KEY",
   ]) {
     assert.equal(built.env[name], undefined, `${name} rode in on the declaration`);
   }
@@ -149,10 +155,51 @@ test("the child's environment is a copy: mutating it does not touch the source",
 
 test("the pass-through set comes from the adapter's own declaration (APRV-169)", () => {
   const declared = declaredCredentialsForClass("communicate.email.external");
-  assert.deepEqual([...declared], [...(emailAdapter().requiredCredentials ?? [])]);
+  // A superset rather than an equality: a second adapter serving this class
+  // (AgentMail, APRV-223) adds its own names to the union, and the property
+  // under test is that the email adapter's declaration is honoured whole.
+  for (const name of emailAdapter().requiredCredentials ?? []) {
+    assert.ok(declared.includes(name), `the email adapter's ${name} is not in the class's union`);
+  }
   assert.ok(declared.length > 0, "the email adapter declares no required credential");
   assert.deepEqual(declaredCredentialsForClass("files.write.local"), []);
   assert.deepEqual(declaredCredentialsForClass("no.such.class"), []);
+});
+
+/**
+ * The AgentMail declaration, and why it lets nothing through the scrub
+ * (APRV-224).
+ *
+ * `AGENTMAIL_` is a credential-bearing prefix now, so the obvious worry is that
+ * the adapter's own declaration reopens the hole the prefix closes: a name a
+ * declaration passes is a name the child gets. It does not, and the reason is
+ * structural rather than lucky. Every name this adapter declares is a VAULT
+ * name (`agentmail.api_key`, `agentmail.inbox_id`), read inside the verified
+ * token window through the credential provider, and no vault name can match an
+ * environment variable under the prefix. So the declaration is honoured in
+ * full, and an `AGENTMAIL_`-prefixed variable in the session is still withheld
+ * and still counted.
+ */
+test("the agentmail adapter declares vault names, so nothing AGENTMAIL_ passes", () => {
+  const declaredCredentials = requiredAgentmailCredentials();
+  assert.deepEqual([...declaredCredentials], ["agentmail.inbox_id", "agentmail.api_key"]);
+  for (const name of declaredCredentials) {
+    assert.equal(
+      name.startsWith("AGENTMAIL_"),
+      false,
+      `${name} is an environment-shaped declaration; a vault name cannot open the scrub`,
+    );
+  }
+
+  const built = childEnvironment({ source: SESSION, declaredCredentials });
+  assert.equal(built.env["AGENTMAIL_API_KEY"], undefined, "the AgentMail key reached the child");
+  assert.equal(built.passed, 0, "a vault name matched an environment variable");
+  assert.equal(built.stripped, 6);
+  assert.equal(
+    Object.values(built.env).includes(FIXTURE),
+    false,
+    "a credential value reached the child under some other name",
+  );
 });
 
 /**
