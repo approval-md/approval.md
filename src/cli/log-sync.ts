@@ -40,20 +40,59 @@
  *  5. **Fetch, then a fast-forward CHECK, then the merge.** A non-fast-forward
  *     is named and refused rather than merged; a merge commit over a log is a
  *     merge of two hash chains, which is not a thing that exists.
- *  6. **Reconcile.** The committed chain must be a prefix of the snapshot, or
+ *  6. **Payload reconciliation, between the check and the merge.** See the
+ *     section below: untracked payload files the incoming tree also carries are
+ *     proved byte-identical and then removed, so the fast-forward has a clean
+ *     path to write them onto.
+ *  7. **Reconcile.** The committed chain must be a prefix of the snapshot, or
  *     equal to it, or an extension of it. Anything else is a fork:
  *     `log-diverged`, both heads, the first divergent seq, snapshot restored,
  *     nothing else touched. The comparison is `core/log-reconcile.ts`, shared
  *     with doctor's `log-drift` check.
- *  7. **Projections are REBUILT, never copied back.** QUEUE.md is re-rendered
+ *  8. **Projections are REBUILT, never copied back.** QUEUE.md is re-rendered
  *     from the reconciled log and the index is reindexed from it. The direction
  *     is load-bearing: a projection restored from before the pull would be a
  *     screenshot asserting something the log no longer says.
- *  8. **Post-verify**, and only then is the snapshot removed.
+ *  9. **Post-verify**, and only then is the snapshot removed.
  *
  * Any failure at any step restores the snapshot before returning. The working
  * log is never left in a half state, and the snapshot outlives every failure
  * path that could need it.
+ *
+ * ## Untracked payload files, and why the merge used to stop on them (APRV-225)
+ *
+ * On 2026-09-02, after a records advance to seq 11361 merged, `log sync` in the
+ * primary checkout refused `log-sync-git-failed`: `git merge --ff-only` will not
+ * write over an untracked working-tree file, and the advance had committed 33
+ * payload files that this checkout already held untracked. Every one of them was
+ * byte-identical to the incoming blob — they are content-addressed, so identical
+ * by construction — and the only way forward was a hand step: move them aside,
+ * sync, put them back.
+ *
+ * That hand step is now step 6, on the same reasoning as the whole verb: when a
+ * hand-ritual is provably safe, it becomes deterministic code, and when it is
+ * NOT provably safe it refuses rather than guessing. The proof is per file, and
+ * every part of it runs before a single byte is removed:
+ *
+ * - the local file is **self-addressed** — SHA-256 of its bytes is its own name
+ *   (the store writes RFC 8785 canonical bytes, so this holds for anything
+ *   `storePayload` wrote); the `{"$ref": …}` reference form is the store's
+ *   documented exception and is carried on byte equality alone.
+ * - the local bytes **equal the incoming blob**, compared as bytes read through
+ *   `git show`. Not git's blob id: that is SHA-1 over a header plus the content
+ *   and has nothing to do with the SHA-256 content address the store uses, so
+ *   comparing names to blob ids would be comparing two different hashes of two
+ *   different things and calling the disagreement a fork.
+ *
+ * A payload that fails either test refuses `log-sync-payload-mismatch`, naming
+ * the file. A payload is the material evidence an approval bound to: two
+ * different versions of one is not a merge conflict to be resolved, it is a
+ * question about which bytes a human said yes to. Nothing is merged, nothing is
+ * appended, and the working tree is left as it was found.
+ *
+ * A local payload the incoming tree does **not** carry is not this verb's
+ * business and is not touched: it blocks nothing, and it is very likely a
+ * payload this checkout has recorded and not yet advanced.
  *
  * ## This verb appends no event
  *
@@ -73,6 +112,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 
 import { writeQueue } from "../channels/render-queue.js";
@@ -83,6 +123,8 @@ import {
   type LogDrift,
   type LogRelation,
 } from "../core/log-reconcile.js";
+import { isPayloadHash } from "../core/payload.js";
+import { payloadStoreDirFor } from "../core/payload-store.js";
 import { reindex } from "../core/reindex.js";
 import type { LogHead } from "../core/verify.js";
 import { verify } from "../core/verify.js";
@@ -109,6 +151,7 @@ export const LOG_SYNC_STEPS = [
   "baseline",
   "fetch",
   "ff-check",
+  "payloads",
   "merge",
   "reconcile",
   "projections",
@@ -129,6 +172,7 @@ export const LOG_SYNC_REFUSAL_CODES = [
   "log-sync-no-branch",
   "log-sync-unverified",
   "log-sync-not-fast-forward",
+  "log-sync-payload-mismatch",
   "log-diverged",
   "log-sync-locked",
   "log-sync-git-failed",
@@ -177,6 +221,11 @@ export interface LogSyncReport {
   behind: number;
   /** True when the snapshot was written back (the working chain was ahead). */
   restored: boolean;
+  /**
+   * How many untracked payload files were proved byte-identical to the incoming
+   * tree and stood aside so the fast-forward could write them (APRV-225).
+   */
+  payloadsReconciled: number;
   queue: { path: string; bytes: number };
   index: "rebuilt" | "absent";
 }
@@ -374,6 +423,14 @@ function syncUnderLock(ctx: UnderLock): LogSyncResult {
   }
 
   /**
+   * Payload files this run removed so the fast-forward had a clean path, with
+   * the bytes they held. Every one of them was proved identical to the incoming
+   * blob before it was removed, so putting them back is putting back exactly
+   * what was found — and {@link abort} does, on every failure after step 6.
+   */
+  const removedPayloads: RemovedPayload[] = [];
+
+  /**
    * Put everything back and refuse. Every failure path below goes through here,
    * which is what makes "the working log is never left in a half state" a
    * property of the code rather than of the author's diligence.
@@ -384,6 +441,7 @@ function syncUnderLock(ctx: UnderLock): LogSyncResult {
     message: string,
     extra: { drift?: LogDrift; quote?: readonly string[] } = {},
   ): LogSyncResult => {
+    restorePayloads(removedPayloads);
     const restored = restoreAll(guarded);
     if (!restored) {
       return {
@@ -445,6 +503,46 @@ function syncUnderLock(ctx: UnderLock): LogSyncResult {
       `${remote}/${branch} (${short(target)}) is not a fast-forward of HEAD (${short(commitBefore)}): this checkout carries commits the remote does not. Sync only fast-forwards, because a merge commit over ${DEFAULT_LOG_PATH} is a merge of two hash chains, and chains do not merge. Land your commits first (\`approval log advance\`), then sync.`,
     );
   }
+
+  // ---- step 6: untracked payload files the incoming tree also carries ----
+  //
+  // Here and not earlier: the fast-forward is known to be possible, so removing
+  // a file the merge is about to write is a step towards a merge that WILL run.
+  // Here and not later: `git merge --ff-only` is what stops on these, so they
+  // have to be gone before it is asked.
+  if (fails("payloads")) {
+    return abort("payloads", "log-sync-io", "injected failure before the payload reconciliation");
+  }
+  const overlapping = overlappingPayloads(root, logPath, "FETCH_HEAD");
+  if (!overlapping.ok) {
+    return abort("payloads", "log-sync-git-failed", overlapping.message, { quote: overlapping.quote });
+  }
+  // Two passes, and the order is the safety property: every file is proved
+  // before any file is removed, so a mismatch in the last one cannot have
+  // deleted the first.
+  const confirmed: { relative: string; path: string; bytes: Buffer }[] = [];
+  for (const relative of overlapping.paths) {
+    const checked = checkPayload(root, relative, "FETCH_HEAD");
+    if (!checked.ok) {
+      return abort("payloads", "log-sync-payload-mismatch", checked.message);
+    }
+    confirmed.push({ relative, path: join(root, relative), bytes: checked.bytes });
+  }
+  for (const entry of confirmed) {
+    try {
+      rmSync(entry.path, { force: true });
+      removedPayloads.push({ path: entry.path, bytes: entry.bytes });
+    } catch (cause) {
+      return abort(
+        "payloads",
+        "log-sync-io",
+        `the untracked payload ${entry.relative} could not be moved out of the fast-forward's way: ${detail(
+          cause,
+        )}. Nothing was pulled.`,
+      );
+    }
+  }
+  const payloadsReconciled = confirmed.length;
 
   // ---- step 5c: the merge itself ----
   if (fails("merge")) {
@@ -579,10 +677,179 @@ function syncUnderLock(ctx: UnderLock): LogSyncResult {
       ahead: drift.ahead,
       behind: drift.behind,
       restored,
+      payloadsReconciled,
       queue: { path: rendered.path, bytes: rendered.bytes },
       index,
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Untracked payload files (APRV-225)
+// ---------------------------------------------------------------------------
+
+/** One payload file the ceremony removed, with the bytes it held. */
+interface RemovedPayload {
+  path: string;
+  bytes: Buffer;
+}
+
+/**
+ * Put back every payload file this run removed.
+ *
+ * Deliberately quiet, and deliberately not part of `restoreAll`'s success
+ * answer: each of these was proved byte-identical to a blob the remote holds
+ * before it was removed, so the worst case of a failure here is a file that has
+ * to be checked out again, never a byte anyone can no longer obtain. The log's
+ * restore is the one that must be loud, and it stays the one that is.
+ */
+function restorePayloads(removed: readonly RemovedPayload[]): void {
+  for (const entry of removed) {
+    if (existsSync(entry.path)) continue;
+    try {
+      placeAtomically(entry.path, entry.bytes);
+    } catch {
+      // See above: recoverable from the remote, and never worth masking the
+      // refusal that brought us here.
+    }
+  }
+}
+
+/** Repo-relative paths of everything git lists, as trimmed non-empty lines. */
+function pathLines(stdout: string): string[] {
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+/**
+ * Untracked, non-ignored payload files that `rev` also carries.
+ *
+ * The intersection is the whole point. An untracked payload the incoming tree
+ * does not have blocks nothing and is left alone; a tracked one is git's
+ * business and rides the fast-forward like any other file. What is left is
+ * exactly the set `git merge --ff-only` refuses to write over.
+ *
+ * `--exclude-standard` is on: an ignored file is not one git would refuse to
+ * overwrite, so including it here would make sync stricter than the merge it is
+ * clearing the way for.
+ */
+function overlappingPayloads(
+  root: string,
+  logPath: string,
+  rev: string,
+): { ok: true; paths: string[] } | { ok: false; message: string; quote: readonly string[] } {
+  const storeRelative = repoPath(root, payloadStoreDirFor(logPath));
+  // A store outside the repository is not something a fast-forward can collide
+  // with, so there is nothing here to reconcile.
+  if (storeRelative.startsWith("..")) return { ok: true, paths: [] };
+
+  const untracked = git(["ls-files", "--others", "--exclude-standard", "--", storeRelative], root);
+  if (!untracked.ok) {
+    return {
+      ok: false,
+      message: `\`git ls-files --others\` over ${storeRelative} failed: ${failureText(untracked)}. Nothing was pulled and the working log is back as it was.`,
+      quote: outputLines(untracked.stderr, untracked.stdout),
+    };
+  }
+  const local = new Set(pathLines(untracked.stdout));
+  if (local.size === 0) return { ok: true, paths: [] };
+
+  const incoming = git(["ls-tree", "-r", "--name-only", "-z", rev, "--", storeRelative], root);
+  if (!incoming.ok) {
+    return {
+      ok: false,
+      message: `\`git ls-tree ${rev}\` over ${storeRelative} failed: ${failureText(incoming)}. Nothing was pulled and the working log is back as it was.`,
+      quote: outputLines(incoming.stderr, incoming.stdout),
+    };
+  }
+  const carried = new Set(
+    incoming.stdout
+      .split("\0")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0),
+  );
+
+  return { ok: true, paths: [...local].filter((path) => carried.has(path)).sort() };
+}
+
+/** SHA-256 of some bytes, lowercase hex: the store's content address. */
+function sha256(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** Is this the store's `{"$ref": "<uri>"}` form, and nothing else? */
+function isReferenceForm(bytes: Buffer): boolean {
+  let value: unknown;
+  try {
+    value = JSON.parse(bytes.toString("utf8")) as unknown;
+  } catch {
+    return false;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value as Record<string, unknown>);
+  return keys.length === 1 && keys[0] === "$ref" && typeof (value as { $ref: unknown }).$ref === "string";
+}
+
+/**
+ * Prove one untracked payload safe to remove, and answer the bytes it holds.
+ *
+ * Two independent facts, both required, neither inferred from the other:
+ * the file is self-addressed, and its bytes are the incoming bytes. The second
+ * is what makes removal safe; the first is what catches a local file that was
+ * already wrong before any of this started, so that sync is not the step that
+ * quietly discards it.
+ */
+function checkPayload(
+  root: string,
+  relative: string,
+  rev: string,
+): { ok: true; bytes: Buffer } | { ok: false; message: string } {
+  const path = join(root, relative);
+  const name = relative.slice(relative.lastIndexOf("/") + 1);
+  const stem = name.endsWith(".json") ? name.slice(0, -".json".length) : name;
+
+  const local = readIfPresent(path);
+  if (local === null) {
+    return {
+      ok: false,
+      message: `the untracked payload ${relative} disappeared while sync was reading it. Nothing was pulled and the working log is back as it was.`,
+    };
+  }
+
+  if (!isPayloadHash(stem)) {
+    return {
+      ok: false,
+      message: `${relative} sits in the payload store and is not named by a payload hash (SHA-256, lowercase hex). The store is addressed by hash and nothing else, so sync will not clear this file out of a fast-forward's way. Move it somewhere that is not the payload store and run \`approval log sync\` again.`,
+    };
+  }
+
+  const digest = sha256(local);
+  if (digest !== stem && !isReferenceForm(local)) {
+    return {
+      ok: false,
+      message: `the untracked payload ${relative} does not hash to its own name: its bytes are ${digest}. A payload file is the material evidence an approval bound to, and one that is not what it says it is has to be accounted for by a human before anything overwrites it. Nothing was pulled, nothing was appended, and the working tree is as you left it.`,
+    };
+  }
+
+  const incoming = showBlob(root, rev, relative);
+  if (incoming === null) {
+    return {
+      ok: false,
+      message: `the incoming commit lists ${relative} and git could not read its bytes. Nothing was pulled and the working log is back as it was.`,
+    };
+  }
+  if (!incoming.equals(local)) {
+    return {
+      ok: false,
+      message: `the untracked payload ${relative} is not the payload the incoming commit carries: local bytes hash to ${digest}, incoming bytes to ${sha256(
+        incoming,
+      )}. Two different versions of one content-addressed payload is a question about which bytes an approval bound to, not a merge conflict, so sync removes neither. Nothing was pulled, nothing was appended, and the working tree is as you left it.`,
+    };
+  }
+
+  return { ok: true, bytes: local };
 }
 
 /** A refusal from before the snapshot exists: there is nothing to put back. */

@@ -413,9 +413,16 @@ reconciles: the committed chain must be a prefix of the snapshot, equal to it, o
 an extension of it, and anything else is log-diverged with nothing merged.
 QUEUE.md and the index are REBUILT from the reconciled log; any failure at any
 step restores the snapshot first; no event is appended. PRIMARY CHECKOUT ONLY.
+
+Untracked files under .approval/payloads/ that the incoming commit also carries
+are proved byte-identical (SHA-256 of the bytes is the filename, and the bytes
+equal the incoming blob) and then stood aside so the fast-forward can write them.
+A payload that disagrees is log-sync-payload-mismatch, naming the file; one the
+incoming commit does not carry is left alone.
+
 Refusals: log-sync-not-primary, log-sync-unverified, log-sync-not-fast-forward,
-log-diverged, log-sync-locked, log-sync-git-failed, log-sync-projection-failed,
-log-sync-restore-failed, log-sync-io.
+log-sync-payload-mismatch, log-diverged, log-sync-locked, log-sync-git-failed,
+log-sync-projection-failed, log-sync-restore-failed, log-sync-io.
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
