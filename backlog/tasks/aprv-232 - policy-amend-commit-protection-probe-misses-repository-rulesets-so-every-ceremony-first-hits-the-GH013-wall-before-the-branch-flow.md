@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:fable-lane-q'
 created_date: '2026-09-02 20:12'
-updated_date: '2026-09-02 20:51'
+updated_date: '2026-09-02 20:59'
 labels:
   - cli
   - ceremony
@@ -55,4 +55,10 @@ Seen 2026-09-02 at the seq 13704 ceremony: approval policy amend --commit probed
 **Global invariants touched (SPEC §11).** None weakened. The probe influences only which publication flow runs (direct push or branch plus PR); the attestation, the commit contents and the log are identical on both flows. No enforcement path changed what it reads, nothing is appended to the log by this change, and no self-reported field was introduced.
 
 **Tests.** tests/cli-amend.test.ts: the gh stub gains `rulesets: ruleset | none | error` (default follows `protection`: none when classic says unprotected, error otherwise, so every pre-existing case resolves as it did). Six new cases: ruleset-governed main with a remote that refuses direct pushes goes straight to the branch flow with no rejection text on either stream and both endpoints read in order (AC1); JSON report names the rule types; classic protected does not read rulesets; classic 404 plus unreadable rulesets is UNKNOWN; classic unreadable plus empty rules is UNKNOWN; classic 404 plus empty rules is unprotected (AC2, alongside the existing protected, unprotected and gh-absent cases which still pass). Help text unchanged, still under the 25-line cap.
+
+## Verification
+
+`npm run build` clean. `npx oxlint src tests` clean (two unicorn warnings from the new test were fixed by using endsWith). Per-file runs against dist: `node --test dist/tests/cli-amend.test.js` 84 tests, all pass after the one fix to the UNKNOWN reason text (first run 83/84, second targeted run of the eight protection cases 8/8); `node --test dist/tests/cli-long-help.test.js` 21/21 (the 25-line help cap holds; help text untouched). Full `npm test` was started in the background with a 10 minute ceiling on a loaded machine; the only failure it had reported by the time of these notes is `every production dependency's engines.node admits the Node floor` (tests/ci-guard.test.ts), which reads <root>/node_modules/<dep>/package.json and this agent worktree has no node_modules of its own (the same worktree artifact APRV-203 recorded; it passes in the primary checkout and in CI where npm ci runs).
+
+Full npm test did NOT finish inside the session's 10 minute ceiling on the loaded machine: the log stopped at 577 tests reported (576 pass, 1 fail: the ci-guard engines.node worktree artifact above) and no summary line was written. AC4 is left unchecked for the orchestrator to confirm with a full run in the primary checkout. Files run to completion here with exit codes: dist/tests/cli-amend.test.js (84/84, exit 0), dist/tests/cli-long-help.test.js (21/21, exit 0); npx oxlint src tests exit 0, no warnings.
 <!-- SECTION:NOTES:END -->
