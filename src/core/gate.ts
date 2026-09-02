@@ -2146,6 +2146,12 @@ export type DecideResult =
        * The raw single-use execution token, on `grant` only (APRV-17). Returned
        * here and nowhere else: the log carries only its SHA-256, so this value
        * is unrecoverable once the caller drops it.
+       *
+       * Absent — on a grant that DID mint one — when the request declared
+       * self-delivery and the token was sealed to its address (APRV-211). The
+       * authorization is complete; the granting surface simply has no copy to
+       * print, because the requester is a process that opens the seal itself.
+       * See {@link RequestInput.delivery}.
        */
       token?: string;
     }
@@ -2508,12 +2514,27 @@ export function decide(
       //
       // The raw token is STILL returned to this caller and still printed once on
       // the granting surface. Sealing adds a second reader; it removes none.
-      const recipient = payloadOf(requestRecord(read.records, actionKey))[RECIPIENT_KEY_FIELD];
+      //
+      // APRV-211 adds the one request for which it DOES remove one. A request
+      // that declared self-delivery was minted by a process that will open the
+      // seal itself (the daemon's own advance), so every copy of the token that
+      // leaves this function is a copy nobody needs: the observed defect was the
+      // Telegram listener printing "copy it now" on Carter's terminal for an
+      // action he was not going to run. Withheld HERE, at the single choke
+      // point, rather than at each granting surface — a value never handed out
+      // cannot be printed by a surface written later. Only when the seal was
+      // actually written: an unopenable grant with no returned token would be a
+      // decision spent on nothing.
+      const declared = payloadOf(requestRecord(read.records, actionKey));
+      const recipient = declared[RECIPIENT_KEY_FIELD];
       if (isRecipientKey(recipient)) {
         const sealed = sealToken(token, recipient, actionKey);
         // An unusable recipient key drops the convenience and never the grant:
         // a human's yes must not be voidable by a malformed delivery address.
-        if (sealed !== null) payload[SEALED_TOKEN_FIELD] = { ...sealed };
+        if (sealed !== null) {
+          payload[SEALED_TOKEN_FIELD] = { ...sealed };
+          if (declared[SELF_DELIVERY_FIELD] === "self") token = undefined;
+        }
       }
     }
   }

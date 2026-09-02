@@ -33,6 +33,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { after, test } from "node:test";
 
+import { lastAdvance } from "../src/core/advance-cycle.js";
 import { appendAttestation } from "../src/core/attest.js";
 import { decide, register } from "../src/core/gate.js";
 import { readVerifiedRecords } from "../src/core/state.js";
@@ -306,13 +307,28 @@ test("adopt: a rejection is honoured and nothing re-asks until the owed span cha
 // AC 4 — the payload hash still moves with the owed span
 // ===========================================================================
 
-test("hash: the payload hash is stable per owed span and changes when the span does", () => {
+/**
+ * Note the shape of this one. The span is moved between the two questions by
+ * ANSWERING the first, not by letting records pile up behind it: while a
+ * question is open the tick adopts it however much the owed span has grown,
+ * because a grant on it publishes the log as it stands and a second question
+ * about the same work is the tap this task exists to remove. What AC4 asks for —
+ * one draw per DISTINCT advance, never a re-roll of the same one — is a property
+ * of distinct spans, and two distinct spans are what this builds.
+ */
+test("hash: a different owed span is a different action, with a different payload hash", () => {
   const repo = newRepo();
   appendRecord(repo.dir, "one");
   runDaemon(repo, cadence());
   runDaemon(repo, cadence());
   const first = records(repo).filter((record) => record.event === "approval.requested");
-  assert.equal(first.length, 1);
+  assert.equal(first.length, 1, "an unanswered question was asked twice");
+
+  const key = requestsIn(repo)[0] ?? "";
+  const rejected = decide(repo.logPath, key, "reject", "human:carter", {
+    policy: { file: join(repo.dir, "APPROVAL.md") },
+  });
+  assert.equal(rejected.ok, true, rejected.ok ? "" : rejected.message);
 
   appendRecord(repo.dir, "two");
   runDaemon(repo, cadence());
@@ -320,27 +336,26 @@ test("hash: the payload hash is stable per owed span and changes when the span d
   assert.equal(all.length, 2);
   const hashes = all.map((record) => (record.payload as Record<string, unknown>)["payload_hash"]);
   assert.notEqual(hashes[0], hashes[1], "a different owed span reused the same payload hash");
+  assert.notEqual(all[0]?.action_key, all[1]?.action_key, "two distinct spans shared one key");
 });
 
 // ===========================================================================
 // AC 3 — a failed advance says why
 // ===========================================================================
 
-test("failure: a diverged records branch is reported by code and message, not as exit 1", () => {
+/**
+ * What the live failure was cannot be recovered, and that IS the defect: seq
+ * 10186 records `execution.failed` with `exit_code: 1` and nothing else, so the
+ * only surface that outlives the daemon's event stream could not say why. What
+ * is reproduced here is the SHAPE — a granted advance whose git work fails —
+ * and the property is that the reason now travels with the outcome, onto
+ * `execution.failed` and through `lastAdvance` onto the doctor's row. The cause
+ * chosen is an unreachable remote, because it fails inside the verb, in one
+ * phase, on every platform.
+ */
+test("failure: a failed advance is reported by code and message, not as exit 1", () => {
   const repo = newRepo();
   appendRecord(repo.dir, "one");
-
-  // The day's records branch is already on the remote, carrying history this
-  // advance is not parented on: the shape of the 2026-09-02 exit-1 failure.
-  const foreign = join(scratch, `foreign-${String(counter)}`);
-  assert.equal(git(["clone", "-q", repo.remote, foreign], scratch).code, 0);
-  git(["config", "user.email", "test@example.invalid"], foreign);
-  git(["config", "user.name", "Test"], foreign);
-  assert.equal(git(["checkout", "-qb", `records-log-${TODAY.slice(0, 10)}`], foreign).code, 0);
-  writeFileSync(join(foreign, "FOREIGN.md"), "# not ours\n", "utf8");
-  assert.equal(git(["add", "-A"], foreign).code, 0);
-  assert.equal(git(["commit", "-qm", "foreign"], foreign).code, 0);
-  assert.equal(git(["push", "-q", "origin", "HEAD"], foreign).code, 0);
 
   const key = (() => {
     runDaemon(repo, cadence());
@@ -351,24 +366,37 @@ test("failure: a diverged records branch is reported by code and message, not as
   });
   assert.equal(granted.ok, true, granted.ok ? "" : granted.message);
 
+  // The remote goes away between the decision and the advance.
+  assert.equal(
+    git(["remote", "set-url", "origin", join(scratch, "no-such-remote.git")], repo.dir).code,
+    0,
+  );
+
   const events = runDaemon(repo, cadence());
   const advance = events.find(
     (event): event is Extract<DaemonEvent, { event: "advance" }> => event.event === "advance",
   );
   assert.ok(advance !== undefined, "no advance event was emitted");
-  if (advance?.outcome === "failed") {
-    assert.ok(
-      (advance.code ?? "").startsWith("log-advance-"),
-      `the failure carried no verb refusal code: ${JSON.stringify(advance.code)}`,
-    );
-    const failure = records(repo).find((record) => record.event === "execution.failed");
-    assert.ok(failure !== undefined, "the failure was not recorded in the log");
-    const payload = (failure?.payload ?? {}) as Record<string, unknown>;
-    assert.equal(
-      payload["code"],
-      advance.code,
-      "execution.failed carried an exit code and no reason",
-    );
-    assert.equal(typeof payload["message"], "string");
-  }
+  assert.equal(advance?.outcome, "failed", `the advance did not fail: ${advance?.message ?? ""}`);
+  assert.ok(
+    (advance?.code ?? "").startsWith("log-advance-"),
+    `the failure carried no verb refusal code: ${JSON.stringify(advance?.code)}`,
+  );
+  const failure = records(repo).find((record) => record.event === "execution.failed");
+  assert.ok(failure !== undefined, "the failure was not recorded in the log");
+  const payload = (failure?.payload ?? {}) as Record<string, unknown>;
+  assert.equal(payload["exit_code"], 1, "the failure lost its exit code");
+  assert.equal(
+    payload["code"],
+    advance?.code,
+    "execution.failed carried an exit code and no reason",
+  );
+  assert.equal(typeof payload["message"], "string");
+
+  // And the doctor's row — the surface an operator reads hours later, in
+  // another process — carries the same two fields off the log.
+  const last = lastAdvance(records(repo));
+  assert.equal(last?.outcome, "failed");
+  assert.equal(last?.code, advance?.code, "the doctor row could not say why the advance failed");
+  assert.equal(typeof last?.message, "string");
 });
