@@ -1,0 +1,1 @@
+{"after":"moves what stays denied (`tests/gate-window.test.ts`, `tests/cli-gate-window.test.ts`).","before":"moves what stays denied (`tests/gate-window.test.ts`, `tests/cli-gate.test.ts`).","file":"/Users/carter/dev/approval-md/.claude/worktrees/approval-message-ui-37ea86/SPEC.md","replace_all":false,"rule":"protected-path-proposal","tool":"Edit"}

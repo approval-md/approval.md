@@ -1,0 +1,1 @@
+{"after":"`audit.sampled`, `audit.reviewed`, `payload.pruned`, `gate.opened`, `gate.closed`, `gate.bypassed`.\n","before":"`audit.sampled`, `audit.reviewed`, `payload.pruned`.\n","file":"/Users/carter/dev/approval-md/.claude/worktrees/approval-message-ui-37ea86/SPEC.md","replace_all":false,"rule":"protected-path-proposal","tool":"Edit"}
