@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - 'agent:fable-lane-o'
 created_date: '2026-09-02 17:01'
-updated_date: '2026-09-02 21:38'
+updated_date: '2026-09-02 21:48'
 labels:
   - enhancement
 dependencies: []
@@ -52,4 +52,6 @@ Invariants touched (SPEC §11.1): inv. 9 (human-only inert) is respected, not we
 Tests: tests/command-class.test.ts fixtures for every spelling in AC 1 plus negatives (319 pass); tests/cli-hook.test.ts 'a harness self-update is gated as deps.upgrade, not refused as unclassified' under the fixture policy: hook-timeout deny (the ordinary manual path), a task.registered in the log carrying class deps.upgrade, not hook-unclassified. Docs: docs/claude-code-hook.md rule table gained both rows; docs/integrations-considered.md UCA table notes the post-APRV-228 classification.
 
 SPEC draft, if the class table wants a sentence (deps.* row of §7): 'A harness self-update (the harness binary's own update verb, or an unattended updater driving it) is a deps.upgrade: it swaps the binary that hosts the hook, and an implementation SHOULD classify it by name rather than refuse it as unclassified, so the refusal names a class a human can grant.'
+
+docs/cursor-hook.md rule table also gained both rows: tests/cli-hook-cursor.test.ts pins that the Cursor doc names every COMMAND_RULES id (8/8 pass after the edit). Suite results: command-class 319/319, dogfood 32/32, cli-hook 89 (88 pass + the APRV-228 test, which failed once on a payload-field assumption and passes after the log-record rewrite), cli-hook-cursor 8/8, oxlint clean.
 <!-- SECTION:NOTES:END -->
