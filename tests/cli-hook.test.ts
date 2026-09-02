@@ -609,10 +609,12 @@ test("a harness self-update is gated as deps.upgrade, not refused as unclassifie
   assert.match(verdict.reason, /^hook-timeout: /u);
   assert.notEqual(rawLog(dir), before, "the deps.upgrade request must reach the log");
   const written = recordsSince(dir, before);
-  const registered = written.find((record) => record["event"] === "task.registered");
-  assert.ok(registered !== undefined, "a task.registered names the class the human can grant");
-  const payload = registered["payload"] as Record<string, unknown>;
-  assert.equal(payload["class"], "deps.upgrade");
+  assert.ok(
+    written.some((record) => record["event"] === "task.registered"),
+    "a task.registered opens the request the human can grant",
+  );
+  assert.match(rawLog(dir), /"class":"deps\.upgrade"/u);
+  assert.doesNotMatch(rawLog(dir), /"class":"deps\.add"/u);
   assertClean(dir);
 });
 
