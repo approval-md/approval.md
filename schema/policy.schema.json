@@ -194,6 +194,13 @@
               "minLength": 1,
               "description": "SPEC.md §5.1: name of the environment variable holding the Telegram bot token.",
               "examples": ["APPROVAL_TG_TOKEN"]
+            },
+            "delivery": {
+              "type": "string",
+              "enum": ["paced", "burst"],
+              "default": "paced",
+              "description": "SPEC.md §10.3 (APRV-216): how a listener puts the pending set in front of the approver. `paced`, the default and what an absent key means, sends one summary line and the OLDEST pending request, then the next one once that request is decided, skipped, or passed over; the bot commands /queue, /skip and /next drive it. `burst` sends every pending request the process has not sent yet, on every cycle, behind the APRV-196 re-delivery banner. Neither mode changes what is pending: that is re-derived from the verified log on every cycle in both, and the order and the currently shown item are process memory whose loss costs a re-send and nothing else. The enum is closed because an unrecognised mode cannot be ordered against these two; a policy naming one fails validation, which fails closed to all-manual rather than to a guessed delivery.",
+              "examples": ["paced", "burst"]
             }
           }
         },

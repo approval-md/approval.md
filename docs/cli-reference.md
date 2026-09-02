@@ -143,17 +143,36 @@ chain.
 5. **Fetch, a fast-forward CHECK, then the merge.** A non-fast-forward is named
    and refused (`log-sync-not-fast-forward`): a merge commit over the log would
    be a merge of two hash chains, and chains do not merge.
-6. **Reconcile.** The committed chain must be a prefix of the snapshot, equal to
+6. **Untracked payload files, between the check and the merge.** `git merge
+   --ff-only` refuses to write over an untracked working-tree file, and a records
+   advance commits the payload store, so a checkout that already held those
+   payloads untracked used to stop the fast-forward with `log-sync-git-failed`
+   and a hand step (seen 2026-09-02, after the advance to seq 11361 merged: 33
+   files, every one identical). Sync lists the untracked, non-ignored files under
+   `.approval/payloads/` that the incoming commit also carries, and proves each
+   one twice before a single byte moves: SHA-256 of its bytes is its own
+   filename (the store writes canonical bytes, so a payload file is
+   self-addressed), and its bytes equal the incoming blob. The comparison is over
+   bytes read with `git show`, never git's blob id, which is SHA-1 over a header
+   plus the content and is a different hash of a different thing. Only once every
+   file has passed are the local copies removed, and the count is reported. A
+   file that fails either test refuses `log-sync-payload-mismatch`, naming it: a
+   payload is the material evidence an approval bound to, and two versions of one
+   is a question about which bytes a human said yes to rather than a merge
+   conflict. Nothing is pulled, nothing is appended, and the working tree is left
+   as it was found. A local payload the incoming commit does **not** carry blocks
+   nothing and is not touched.
+7. **Reconcile.** The committed chain must be a prefix of the snapshot, equal to
    it, or an extension of it. Prefix: the snapshot goes back, because the longer
    chain contains the shorter one whole. Extension: the pulled file stays, for
    the same reason in the other direction. Anything else is a fork:
    `log-diverged`, both heads, the first divergent seq, snapshot restored,
    nothing else touched. Re-chaining is fabrication and this verb will not do it.
-7. **Projections are REBUILT, never copied back.** `QUEUE.md` is re-rendered from
+8. **Projections are REBUILT, never copied back.** `QUEUE.md` is re-rendered from
    the reconciled log and the index is reindexed from it. The direction is
    load-bearing: a projection restored from before the pull would be a
    screenshot asserting something the log no longer says.
-8. **Post-verify**, and only then is the snapshot removed.
+9. **Post-verify**, and only then is the snapshot removed.
 
 Any failure at any step restores the snapshot before exiting, so the working log
 is never left in a half state, and a restore that itself fails is its own loud
@@ -168,6 +187,7 @@ container, and an event for it would be the log narrating its own filesystem.
  "commit":{"before":"…","after":"…","pulled":2},
  "head":{"before":{"seq":41,"hash":"…"},"after":{"seq":41,"hash":"…"}},
  "relation":"ahead","ahead":3,"behind":0,"restored":true,
+ "payloads":{"reconciled":33},
  "queue":{"path":"…","bytes":1180},"index":"rebuilt"}
 ```
 
@@ -2093,15 +2113,55 @@ nobody sees — though the stderr warnings thin out after a few consecutive
 failures for the same request. A failure during the STARTUP send still exits
 non-zero, so a mistyped token or chat id is immediate.
 
+**One question at a time, by default** (`channels.telegram.delivery: paced`). A
+start with several requests pending sends one summary line — how many are
+waiting, how long the oldest has waited, which classes they are — and then the
+OLDEST request with its buttons. Nothing else. The next request goes out on the
+first cycle after the shown one is decided (at any surface: a button here, the
+terminal channel, a withdrawal, an expiry), skipped, or passed over. The summary
+is sent again whenever the pending set has grown while nothing was in front of
+you, so a queue that fills up while you are away still says so.
+
+Three bot commands drive it. Type them in the approver chat; a message from any
+other chat is ignored, and an unrecognised `/command` is counted and not replied
+to.
+
+| Command  | What it does |
+| -------- | ------------ |
+| `/queue` | Replies with the summary and a numbered list of every pending request (action key, task, class, age), marking the one currently shown. Derived from the verified log at reply time, and it works while a request is on screen. |
+| `/skip`  | Shows the next request; the skipped one goes to the BACK of this process's order and comes round again after the rest. |
+| `/next`  | Shows the next request; this process does not show the passed-over one again. |
+
+**None of the three decides anything.** They have no path to the gate: a
+decision is a button, because a button carries the nonce and action reference
+that bind an answer to the bytes you were shown, and a typed word carries
+neither. `/skip` and `/next` leave the message already in the chat live, its
+buttons still deciding the same request, so passing over a question never takes
+it away from you.
+
+Pacing withholds attention, never the queue: every request stays pending in the
+log whether or not it has been shown, `approval queue` and `/queue` list them
+all, and nothing expires sooner for having waited its turn. Digest grouping
+still applies to the request being shown, so a set of similar requests is one
+thing to read.
+
+`channels.telegram.delivery: burst` restores the pre-APRV-216 behaviour: every
+pending request this process has not sent yet, on every cycle, behind the
+re-delivery banner. Bot commands are not read in that mode, and the listener
+asks Telegram for callback updates only.
+
 A callback from any chat other than the configured one is ignored: counted as an
 anomaly, answered with a refusal, never turned into a decision and never written
 to the log. A second tap on an already-decided request is refused
 `already-decided` by the gate.
 
-**Delivery bookkeeping is in memory only** (channels hold no state, §10.3). A
-restarted listener re-sends everything still pending and the buttons on its
-older messages stop resolving. Duplicated messages are the acceptable failure
-mode; an approval that depended on a channel's memory would not be.
+**Delivery bookkeeping is in memory only** (channels hold no state, §10.3), and
+so are the paced order and the request currently shown. A restarted listener
+re-derives the pending set from the verified log and shows the oldest again
+(under `burst`, re-sends everything still pending). What a crash costs is your
+place in the walkthrough and a duplicate message, never a pending request nobody
+is shown; an approval that depended on a channel's memory would not be an
+acceptable trade.
 
 **The execution token is printed on this terminal's stdout and is never sent to
 Telegram.** A chat transcript is stored on someone else's servers, backed up to

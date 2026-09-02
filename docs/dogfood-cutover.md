@@ -117,12 +117,14 @@ day gets its message on the phone within one poll cycle, with no restart. The
 M5 proof ran the other way round (request first, listener second) and so never
 exercised this; the order no longer matters.
 
-Two consequences worth knowing at the terminal. A restarted listener re-sends
-everything still pending, because the "already sent" set lives only in the
-process (SPEC.md §10.3: channels hold no state that is truth): a duplicate on
-the phone, never a request nobody sees. Since APRV-196 that re-delivery
-announces itself and the older copies keep working; the section below is the
-operator's view of it. And a send that fails is retried on every later cycle
+Two consequences worth knowing at the terminal. A restarted listener starts its
+walkthrough over — it re-derives the pending set from the verified log and shows
+the oldest again, or under `channels.telegram.delivery: burst` re-sends
+everything still pending — because the "already sent" set and the order live
+only in the process (SPEC.md §10.3: channels hold no state that is truth): a
+duplicate on the phone, never a request nobody sees. Since APRV-196 the older
+copies keep working, and since APRV-216 there is one request on screen at a
+time; the section below is the operator's view of both. And a send that fails is retried on every later cycle
 without an attempt limit, so a phone out of signal or a Bot API outage delays
 delivery rather than dropping it; the stderr warnings thin out after a few
 consecutive failures for the same request. Only a failure during the startup
@@ -139,7 +141,26 @@ above are the same behaviour, reached on a timer instead of by your hand.
 every page load, so a refresh shows what is pending now. `approval channel cli`
 is one-shot by design; running the verb again is its refresh.
 
-### What a restart looks like on the phone (APRV-196)
+### What a restart looks like on the phone (APRV-216, and APRV-196 before it)
+
+**There is no wall any more.** The default since APRV-216 is
+`channels.telegram.delivery: paced`, and a restart with five pending requests
+sends two things: one summary line (`5 pending — oldest 2h 10m ago —
+policy.edit ×3, network.call ×2`) and the OLDEST request, with its buttons. The
+next one arrives on the first cycle after you decide that one, `/skip` it (it
+comes round again, last) or `/next` past it (this process does not show it
+again). `/queue` lists everything pending at any time, including while a request
+is on screen, and that list is read from the log rather than from the chat, so it
+is right even when the chat is not.
+
+Nothing is withheld by this. Every request is still pending in the log, still
+listed by `approval queue`, and still decidable from any copy of its message
+already in the chat. What is paced is your attention.
+
+The rest of this section is what a restart looked like before, and what it still
+looks like under `channels.telegram.delivery: burst`. Read it that way: the
+duplicate-copy rules and every toast below hold in both modes, because they are
+properties of the buttons rather than of the pacing.
 
 The re-delivery above used to arrive as a wall: five pending requests, five new
 messages with no warning, sitting under five older copies whose buttons had
@@ -147,7 +168,7 @@ quietly stopped working. Taps on the older copies did nothing at all, so the
 natural response (tap it again, harder) was the one response that could not
 help. Three things changed.
 
-**A restart announces itself.** The first batch a listener process sends is
+**A restart announces itself.** Under `burst`, the first batch a listener sends is
 preceded by one line: `LISTENER STARTED — re-sending N pending requests`,
 followed by the requests. A flood that says what it is is a re-delivery; the
 same flood in silence is an incident. Later cycles send no banner, because a
@@ -374,6 +395,29 @@ means the pulled file stays, and anything else is a fork it refuses as
 and never re-chains, because hash chains do not merge and re-chaining is
 fabrication. `QUEUE.md` and the index are rebuilt from the reconciled log rather
 than restored, and any failure at any step puts the snapshot back before exiting.
+
+**Untracked payload files no longer stop it.** An advance commits
+`.approval/payloads/`, so the primary checkout usually already holds those files
+untracked, and `git merge --ff-only` will not write over an untracked file. That
+was a hand step until APRV-225: on 2026-09-02, after the advance to seq 11361
+merged, sync refused `log-sync-git-failed` over 33 payload files, every one of
+them identical to the incoming copy. Sync now proves that rather than assuming
+it. Before the fast-forward it takes the untracked files under
+`.approval/payloads/` that the incoming commit also carries, and for each one
+requires that SHA-256 of the local bytes is the filename and that those bytes
+equal the incoming blob. Only when every file has passed does it clear them out
+of the way, and the run reports how many it reconciled:
+
+```
+payloads      33 untracked file(s) proved identical to the incoming commit
+```
+
+A payload that disagrees refuses `log-sync-payload-mismatch` naming the file,
+pulls nothing, appends nothing and leaves the working tree as you left it. That
+one is yours: a payload is the material evidence an approval bound to, so two
+versions of one is a question about which bytes were approved, and no verb here
+will pick. A payload you hold that the incoming commit does not carry (recorded
+and not yet advanced, usually) blocks nothing and is left alone.
 
 Neither verb appends an event. Both move the file the log lives in, and the log
 records decisions rather than its own housekeeping.

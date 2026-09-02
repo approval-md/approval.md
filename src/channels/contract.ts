@@ -563,7 +563,16 @@ export type DecisionOutcome =
       state: RequestState;
       /** The appended `approval.granted` / `approval.rejected` record. */
       record: EventRecord;
-      /** A single-use execution token was minted (grant only). Never its value. */
+      /**
+       * A single-use execution token reached THIS surface (grant only). Never
+       * its value.
+       *
+       * False on a grant that minted one and withheld it: a harness-executed
+       * request mints none at all (APRV-106), and a self-delivered one seals it
+       * to the requester's own address and hands this caller no copy
+       * (APRV-211). Neither is a grant without authorization; both are grants
+       * whose token was never this surface's to hold.
+       */
       tokenIssued: boolean;
     }
   | GateRefusal;

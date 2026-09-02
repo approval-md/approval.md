@@ -504,8 +504,16 @@ function clockText(ms: number, nowMs: number): string {
   return `${String(at.getUTCDate())} ${MONTHS[at.getUTCMonth()] ?? "?"} ${clock}`;
 }
 
-/** `just now`, `4 min ago`, `2h 05m ago` — how long the question has waited. */
-function ageText(ms: number): string {
+/**
+ * `just now`, `4 min ago`, `2h 05m ago` — how long the question has waited.
+ *
+ * Exported since APRV-216 so the Telegram queue summary states a request's age
+ * in the same words the request's own prompt does. One phrasing and one
+ * rounding: a summary calling a question `2h 05m` old beside a prompt that
+ * calls it something else leaves a reader deciding which of the two the
+ * runtime meant.
+ */
+export function ageText(ms: number): string {
   const minutes = Math.floor(ms / 60_000);
   if (minutes < 1) return "just now";
   if (minutes < 60) return `${String(minutes)} min ago`;

@@ -42,10 +42,10 @@ const HELP_TEXTS: Array<[string, string]> = Object.entries(help).filter(
   (entry): entry is [string, string] => typeof entry[1] === "string" && entry[0].endsWith("_HELP"),
 );
 
-function capture(argv: string[], cwd: string): { code: number; out: string; err: string } {
+async function capture(argv: string[], cwd: string): Promise<{ code: number; out: string; err: string }> {
   let out = "";
   let err = "";
-  const code = main(argv, {
+  const code = await main(argv, {
     cwd,
     streams: {
       out: (text) => {
@@ -67,7 +67,7 @@ function scratch(): string {
 // 1. The exit-code table has one home
 // ---------------------------------------------------------------------------
 
-test("only the root help prints the frozen exit-code table", () => {
+test("only the root help prints the frozen exit-code table", async () => {
   assert.ok(HELP_TEXTS.length > 40, "the help module stopped exporting its constants");
   assert.match(help.ROOT_HELP, /Exit codes \(frozen public API\)/u);
 
@@ -86,7 +86,7 @@ test("only the root help prints the frozen exit-code table", () => {
   }
 });
 
-test("every help text opens with its verb and a usage block", () => {
+test("every help text opens with its verb and a usage block", async () => {
   for (const [name, text] of HELP_TEXTS) {
     assert.match(text.split("\n", 1)[0] ?? "", /^approval\b.* — /u, `${name} has no title line`);
     assert.ok(text.includes("\nUsage:\n"), `${name} has no Usage: block`);
@@ -97,7 +97,7 @@ test("every help text opens with its verb and a usage block", () => {
 // 2. Usage errors are a message and a pointer
 // ---------------------------------------------------------------------------
 
-test("a usage error prints a pointer, not the help page", () => {
+test("a usage error prints a pointer, not the help page", async () => {
   const dir = scratch();
 
   // Not an argument-shape error: the command line parsed, the runtime refused.
@@ -108,7 +108,7 @@ test("a usage error prints a pointer, not the help page", () => {
   );
 
   // An argument-shape error carries the synopsis, because the forms ARE the fix.
-  const shape = capture(["log", "tail", "--nope"], dir);
+  const shape = await capture(["log", "tail", "--nope"], dir);
   assert.equal(shape.code, 2);
   assert.match(shape.err, /unknown flag --nope/u);
   assert.match(shape.err, /Usage:\n {2}approval log tail/u);
@@ -123,9 +123,9 @@ test("a usage error prints a pointer, not the help page", () => {
   );
 });
 
-test("the synopsis is capped, so the root's forms cannot become the error", () => {
+test("the synopsis is capped, so the root's forms cannot become the error", async () => {
   const dir = scratch();
-  const unknown = capture(["frobnicate"], dir);
+  const unknown = await capture(["frobnicate"], dir);
   assert.equal(unknown.code, 2);
   assert.match(unknown.err, /unknown command "frobnicate"/u);
   assert.match(unknown.err, /see: approval --help/u);
@@ -138,7 +138,7 @@ test("the synopsis is capped, so the root's forms cannot become the error", () =
   );
 });
 
-test("shape classification is a property of the message", () => {
+test("shape classification is a property of the message", async () => {
   for (const message of [
     "missing <task> argument",
     "unknown flag --jsno",
@@ -159,7 +159,7 @@ test("shape classification is a property of the message", () => {
   }
 });
 
-test("the pointer names the verb the help belongs to", () => {
+test("the pointer names the verb the help belongs to", async () => {
   assert.equal(verbOf(help.ROOT_HELP), "approval");
   assert.equal(verbOf(help.TAIL_HELP), "approval log tail");
   assert.equal(verbOf(help.SETUP_CHANNEL_TELEGRAM_HELP), "approval setup channel telegram");
@@ -204,7 +204,7 @@ test("a scripted setup run cites no SPEC section on any line it prints", async (
   );
 });
 
-test("the CLI's own usage and refusal lines cite no SPEC section", () => {
+test("the CLI's own usage and refusal lines cite no SPEC section", async () => {
   const dir = scratch();
   const runs = [
     ["log", "tail", "--nope"],
@@ -223,7 +223,7 @@ test("the CLI's own usage and refusal lines cite no SPEC section", () => {
     ["mcp", "frobnicate"],
   ];
   for (const argv of runs) {
-    const result = capture(argv, dir);
+    const result = await capture(argv, dir);
     assert.doesNotMatch(
       result.err + result.out,
       /SPEC\.md §/u,
@@ -280,7 +280,7 @@ function anchorsOf(markdown: string): Set<string> {
   return anchors;
 }
 
-test("every why: pointer resolves to a heading in docs/cli-reference.md", () => {
+test("every why: pointer resolves to a heading in docs/cli-reference.md", async () => {
   const anchors = anchorsOf(REFERENCE);
   let pointers = 0;
   for (const [name, text] of HELP_TEXTS) {
@@ -296,7 +296,7 @@ test("every why: pointer resolves to a heading in docs/cli-reference.md", () => 
   assert.ok(pointers > 30, `only ${pointers} help texts point at the reference`);
 });
 
-test("the reference carries the rationale the help texts stopped printing", () => {
+test("the reference carries the rationale the help texts stopped printing", async () => {
   for (const claim of [
     // vault: the threat model (was VAULT_THREAT_MODEL, in three help texts).
     "What the vault DEFENDS",
