@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-v'
 created_date: '2026-09-02 08:44'
-updated_date: '2026-09-02 19:32'
+updated_date: '2026-09-02 20:00'
 labels:
   - doctor
   - bug
@@ -28,7 +28,7 @@ Observed 2026-09-02 on the primary checkout right after syncing to main and rebu
 - [x] #1 On a scratch repo whose HEAD commit carries the log, log-drift passes and reports the committed seq; it never prints 'never been committed' when git show HEAD:<log> succeeds
 - [x] #2 On a scratch repo with a bare remote whose trunk carries seq 1..N and a working log at seq N+k, log-advance-cadence reports k owed, not N+k, and names the ref it read
 - [x] #3 Both rows resolve paths repo-relative from the checkout root via git-scope helpers; no row builds a HEAD:<absolute path> spec
-- [ ] #4 npm test passes; lint clean
+- [x] #4 npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -56,4 +56,6 @@ log-advance-cadence (AC2) counts what the remote trunk and the records refs alre
 TESTS (AC4 in part). In tests/log-anchor.test.ts: 'log-drift never says never been committed when git show HEAD:<log> succeeds' asserts the premise with real git first; 'log-drift resolves the log through a symlinked spelling of the checkout' is the reproduction, a real symlink to the checkout; 'log-advance-cadence counts what the trunk carries and names the ref' builds a bare remote whose trunk carries seq 1..2 with a working log at seq 4 and asserts 2 owed, not 4, plus the ref name, and cross-checks publishedState directly. tests/cli-doctor.test.ts row names, order and count are UNCHANGED (20 rows): both rows kept their name and position.
 
 One behaviour note. log-drift's skip no longer carries a fix field (a fix belongs to a failing row, which is the rule every non-git doctor fixture pins); what a reader might still run is said in the detail instead. The pass-that-owes-records and the behind rows keep the fixes they always had.
+
+VALIDATION. Full npm test on the final tree: 3011 tests, 3010 pass, 0 fail, 1 pre-existing skip. npx oxlint exit 0. tests/cli-doctor.test.ts 55/55 with its row names, order and count unchanged; the three new reproduction tests live in tests/log-anchor.test.ts and pass.
 <!-- SECTION:NOTES:END -->
