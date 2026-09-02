@@ -109,6 +109,11 @@ import {
   type AdvanceOutcome,
 } from "./advance.js";
 import { sweepAuditSampling } from "./audit.js";
+import {
+  sweepDarkSessions,
+  type DarkSessionSweepOptions,
+  type DarkSessionWatch,
+} from "./dark-session.js";
 import type { GitEvidenceRecorder } from "./git-evidence.js";
 import { prunePayloads, type PruneReason } from "./prune.js";
 import {
@@ -263,6 +268,32 @@ export type DaemonEvent =
       /** True when this attempt was the graceful-shutdown flush. */
       flush: boolean;
     }
+  | {
+      /**
+       * One subject of a dark-session sweep (APRV-192). Additive: the union
+       * grows and no existing entry changes meaning.
+       *
+       * One line per subject that is NOT clean — dark, or undetermined —
+       * because the sweep's whole point is the thing nobody was told about, and
+       * a line per healthy worktree would bury it. A `dark` line names the
+       * `audit.dark_session` record it appended, or says the log already
+       * carried this observation; an `undetermined` line names what could not
+       * be established, which is never reported as a pass.
+       */
+      event: "dark_session";
+      verdict: "dark" | "undetermined";
+      /** The checkout: a worktree directory's name, or `primary`. */
+      subject: string;
+      branch: string | null;
+      code: string;
+      /** Commits observed on this subject inside the window. */
+      commits: number;
+      /** `seq` of the appended record, `null` when nothing was appended. */
+      seq: number | null;
+      /** True when a prior record already carried this observation key. */
+      already_recorded: boolean;
+      message: string;
+    }
   | { event: "escalated"; task: string; consecutive_failures: number }
   | { event: "escalation_cleared"; task: string }
   | {
@@ -325,6 +356,13 @@ export const DAEMON_WARNING_CODES = [
    * again — the cadence interval is the retry bound, so there is no hot loop.
    */
   "advance-refused",
+  /**
+   * A dark-session sweep (APRV-192) found git activity it could not judge, or
+   * could not append the observation it did reach. Uncertainty is reported as
+   * uncertainty and never as a pass; nothing is escalated on it, because a
+   * detector reports and the gate decides.
+   */
+  "dark-session-undetermined",
 ] as const;
 
 export type DaemonWarningCode = (typeof DAEMON_WARNING_CODES)[number];
@@ -375,6 +413,22 @@ export interface DaemonOptions {
    * exists to prevent. `approval daemon run --advance` turns it on.
    */
   advance?: AdvanceCadence;
+  /**
+   * The dark-session sweep (APRV-192), off unless the operator asked for it.
+   *
+   * Opt-in for the reason `gitEvidence` and `advance` are, though a milder one:
+   * it runs `git log` over every worktree of the checkout on a cadence, which
+   * on a large repository is real work, and a daemon that started doing it
+   * because a default moved under an operator would be the surprise this
+   * project exists to prevent. `approval daemon run --dark-sessions` turns it
+   * on. It is READ-ONLY against git and appends only its own observations.
+   */
+  darkSessions?: DarkSessionWatch;
+  /**
+   * Test seam for the sweep's observer: an answer that does not run git. The
+   * daemon never sets it, exactly as it never sets `today`.
+   */
+  observeGit?: DarkSessionSweepOptions["observe"];
   /** The day the records branch is named for. Injected by tests. */
   today?: string;
   sink: DaemonSink;
@@ -447,6 +501,8 @@ export class Daemon {
   private lastAdvance: AdvanceAttempt | null = null;
   /** How many substantive records were owed at the last attempt. */
   private lastAdvanceOwed: number | null = null;
+  /** Epoch ms of the last dark-session sweep (APRV-192); `null` before the first. */
+  private lastDarkSweepAt: number | null = null;
   private reportedEscalations = new Set<string>();
   private settle: ((outcome: DaemonOutcome) => void) | null = null;
   private finished = false;
@@ -665,6 +721,13 @@ export class Daemon {
           }),
       });
 
+      // The dark-session sweep (APRV-192), on its own cadence. Placed with the
+      // audit sweep because it is the same kind of thing — a detective control
+      // that re-derives its whole question from the verified log and the world,
+      // appends what is new, and changes no verdict. It runs BEFORE the prune so
+      // that an observation it appends is counted by this tick's closing head.
+      this.sweepDark();
+
       // Payload retention (APRV-41), after the TTL sweep so a request expired on
       // this tick is judged against the record the sweep just wrote. The pruner
       // owns the rule, the append and the unlink; the daemon owns only the
@@ -705,6 +768,96 @@ export class Daemon {
     } finally {
       this.ticking = false;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // The dark-session sweep (APRV-192)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Ask git what happened, and the log whether it was told.
+   *
+   * On its own interval rather than every tick: the tick is 30 seconds by
+   * default and a `git log` per worktree at that rate is work spent to re-read
+   * an unchanged answer. The interval is a floor and never a ceiling — a sweep
+   * missed because the daemon was down is simply made by the next one, since
+   * the sweep holds no cursor and re-derives its whole question from the window
+   * it is given.
+   *
+   * The daemon owns the SCHEDULING and nothing else, which is the division the
+   * drift scan, the TTL sweep and the audit sweep already keep.
+   */
+  private sweepDark(): void {
+    const watch = this.options.darkSessions;
+    if (watch === undefined) return;
+
+    const now = Date.parse(readClock(this.clockOptions()));
+    if (
+      this.lastDarkSweepAt !== null &&
+      !Number.isNaN(now) &&
+      now - this.lastDarkSweepAt < watch.intervalMs
+    ) {
+      return;
+    }
+    this.lastDarkSweepAt = Number.isNaN(now) ? 0 : now;
+
+    const read = this.read();
+    const result = sweepDarkSessions({
+      logPath: this.options.logPath,
+      root: this.options.cwd,
+      policy: this.options.policy,
+      ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
+      ...(this.options.clock === undefined ? {} : { clock: this.options.clock }),
+      ...(this.options.observeGit === undefined ? {} : { observe: this.options.observeGit }),
+      windowMs: watch.windowMs,
+      records: read.ok ? read.records : null,
+      ...(read.ok ? {} : { logDetail: read.message }),
+    });
+
+    for (const entry of result.appended) {
+      this.emit({
+        event: "dark_session",
+        verdict: "dark",
+        subject: entry.finding.subject,
+        branch: entry.finding.branch,
+        code: entry.finding.code ?? "no-records",
+        commits: entry.finding.commits,
+        seq: entry.seq,
+        already_recorded: false,
+        message: entry.finding.detail,
+      });
+    }
+    for (const finding of result.repeated) {
+      this.emit({
+        event: "dark_session",
+        verdict: "dark",
+        subject: finding.subject,
+        branch: finding.branch,
+        code: finding.code ?? "no-records",
+        commits: finding.commits,
+        seq: null,
+        already_recorded: true,
+        message: finding.detail,
+      });
+    }
+    for (const finding of result.undetermined) {
+      this.emit({
+        event: "dark_session",
+        verdict: "undetermined",
+        subject: finding.subject,
+        branch: finding.branch,
+        code: finding.code ?? "git-unavailable",
+        commits: finding.commits,
+        seq: null,
+        already_recorded: false,
+        message: finding.detail,
+      });
+      this.warn(
+        "dark-session-undetermined",
+        `the dark-session sweep could not establish ${finding.subject} (${finding.code ?? "?"}): ${finding.detail}`,
+      );
+    }
+    for (const message of result.refusals) this.warn("append-refused", message);
   }
 
   // -------------------------------------------------------------------------
