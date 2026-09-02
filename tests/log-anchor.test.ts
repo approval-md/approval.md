@@ -32,6 +32,8 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { appendAttestation } from "../src/core/attest.js";
+import { APPEND_ERROR_CODES } from "../src/core/log.js";
+import { GATE_REFUSAL_CODES } from "../src/core/gate.js";
 import { verify, verifyWithRecords } from "../src/core/verify.js";
 import {
   ANCHOR_REFUSAL_CODES,
@@ -167,6 +169,24 @@ function forge(repo: Repo, keep: number, marker: string): void {
   assert.equal(verify(repo.logPath).status, "clean", "a forged chain must still walk clean");
   forgetAnchorBlobs();
 }
+
+// ===========================================================================
+// The refusal union (SPEC.md §11.1 invariant 6)
+// ===========================================================================
+
+test("the anchor refusal union is frozen public API, in definition order", () => {
+  // Pinned here for the reason every other union in this runtime is pinned in
+  // its own suite: a caller branches on these strings, so adding, removing or
+  // renaming one is a breaking change and has to show up as a diff. The
+  // conformance suite pins the same array under `anchor_refusal_codes`.
+  assert.deepEqual([...ANCHOR_REFUSAL_CODES], ["anchor-diverged"]);
+  // And it is distinct from every other union: a caller that saw this code
+  // where a gate or append code was expected would branch on a stranger.
+  for (const code of ANCHOR_REFUSAL_CODES) {
+    assert.equal((GATE_REFUSAL_CODES as readonly string[]).includes(code), false, code);
+    assert.equal((APPEND_ERROR_CODES as readonly string[]).includes(code), false, code);
+  }
+});
 
 // ===========================================================================
 // AC 1 — the comparison itself
