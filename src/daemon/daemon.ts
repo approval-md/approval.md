@@ -106,9 +106,12 @@ import { publishedState } from "../cli/log-advance.js";
 import { repoRoot } from "../cli/git-scope.js";
 import { checkLogAnchor, resolveAnchor, type AnchorCheck } from "../cli/log-anchor.js";
 import {
-  attemptAdvance,
+  authorizeAdvance,
+  runAdvanceAsync,
+  runAdvanceSync,
   type AdvanceAttempt,
   type AdvanceCadence,
+  type AdvanceInput,
   type AdvanceOutcome,
 } from "./advance.js";
 import { sweepAuditSampling } from "./audit.js";
@@ -480,6 +483,11 @@ export interface DaemonOptions {
    */
   advance?: AdvanceCadence;
   /**
+   * The child that runs a periodic tick's advance (APRV-211). A test seam;
+   * production spawns `daemon/advance-child.js`. See {@link AdvanceInput.runner}.
+   */
+  advanceRunner?: { command: string; args: readonly string[] };
+  /**
    * The dark-session sweep (APRV-192), off unless the operator asked for it.
    *
    * Opt-in for the reason `gitEvidence` and `advance` are, though a milder one:
@@ -613,6 +621,14 @@ export class Daemon {
   private lastAdvance: AdvanceAttempt | null = null;
   /** How many substantive records were owed at the last attempt. */
   private lastAdvanceOwed: number | null = null;
+  /**
+   * The advance whose git work is still running in a child (APRV-211).
+   *
+   * One slot, and a tick that finds it taken makes no attempt at all: two
+   * advances against one log would race for the append lock and for the records
+   * branch, and the second would have nothing to publish anyway.
+   */
+  private advanceInFlight: Promise<void> | null = null;
   /** Epoch ms of the last dark-session sweep (APRV-192); `null` before the first. */
   private lastDarkSweepAt: number | null = null;
   private reportedEscalations = new Set<string>();
@@ -721,6 +737,17 @@ export class Daemon {
     // advance is `spawnSync` throughout, so there is nothing to await and
     // nothing that could outlive the process.
     if (outcome.kind === "stopped") {
+      // An advance whose child is still running (APRV-211). The flush below
+      // declines to start a second one, and this says so rather than letting a
+      // dangling `execution.started` be discovered later by a reader of the log:
+      // the child settles and the execution is closed if this process outlives
+      // it, and does not if it does not.
+      if (this.advanceInFlight !== null) {
+        this.warn(
+          "advance-refused",
+          "an advance was still running in a child when the daemon stopped; its outcome is recorded only if this process outlives it, and `approval status` shows the execution as open until then",
+        );
+      }
       try {
         this.advanceIfDue(true);
       } catch (cause) {
@@ -1134,6 +1161,10 @@ export class Daemon {
   private advanceIfDue(flush: boolean): void {
     const cadence = this.options.advance;
     if (cadence === undefined) return;
+    // An advance is already running in a child (APRV-211). Its records are not
+    // on a branch yet and its execution is not closed yet, so a second attempt
+    // now would ask about work that is already authorised and already moving.
+    if (this.advanceInFlight !== null) return;
 
     const read = this.read();
     if (!read.ok) return;
@@ -1165,18 +1196,51 @@ export class Daemon {
 
     this.lastAdvanceAt = Number.isNaN(now) ? 0 : now;
     this.lastAdvanceOwed = state.substantive;
-    const attempt = attemptAdvance(
-      {
-        logPath: this.options.logPath,
-        cwd: root,
-        policy: this.options.policy,
-        cadence,
-        ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
-        ...(this.options.clock === undefined ? {} : { clock: this.options.clock }),
-        ...(this.options.today === undefined ? {} : { today: this.options.today }),
-      },
-      read.records,
-    );
+    const input: AdvanceInput = {
+      logPath: this.options.logPath,
+      cwd: root,
+      policy: this.options.policy,
+      cadence,
+      ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
+      ...(this.options.clock === undefined ? {} : { clock: this.options.clock }),
+      ...(this.options.today === undefined ? {} : { today: this.options.today }),
+      ...(this.options.advanceRunner === undefined ? {} : { runner: this.options.advanceRunner }),
+    };
+
+    // The gate, always here: the `supervised-live` draw reads a secret that
+    // `core/child-env.ts` strips from every child, so authorization cannot
+    // leave this process (APRV-205, APRV-211).
+    const auth = authorizeAdvance(input, read.records);
+    if (!auth.authorized) {
+      this.reportAdvance(auth.attempt, flush);
+      return;
+    }
+
+    // The git side effect, which may leave. A blocking `git push` on this stack
+    // is a Telegram callback answered past its window (APRV-211), so the
+    // periodic tick hands the verb to a child and returns to the loop. The
+    // shutdown flush and `--once` keep the synchronous path: the first has no
+    // loop left to return to, and the second is a process that exits at the end
+    // of this tick, where an advance settling afterwards would be an advance
+    // nobody recorded.
+    if (flush || this.options.once === true) {
+      this.reportAdvance(runAdvanceSync(input, auth), flush);
+      return;
+    }
+    this.advanceInFlight = runAdvanceAsync(input, auth)
+      .then((attempt) => {
+        this.reportAdvance(attempt, flush);
+      })
+      .catch((cause: unknown) => {
+        this.warn("advance-refused", `the advance child could not be settled: ${errorMessage(cause)}`);
+      })
+      .finally(() => {
+        this.advanceInFlight = null;
+      });
+  }
+
+  /** Record and report one finished attempt, from either runner. */
+  private reportAdvance(attempt: AdvanceAttempt, flush: boolean): void {
     this.lastAdvance = attempt;
     if (attempt.outcome === "nothing-owed") return;
 

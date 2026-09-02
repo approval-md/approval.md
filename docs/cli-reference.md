@@ -2144,15 +2144,55 @@ nobody sees — though the stderr warnings thin out after a few consecutive
 failures for the same request. A failure during the STARTUP send still exits
 non-zero, so a mistyped token or chat id is immediate.
 
+**One question at a time, by default** (`channels.telegram.delivery: paced`). A
+start with several requests pending sends one summary line — how many are
+waiting, how long the oldest has waited, which classes they are — and then the
+OLDEST request with its buttons. Nothing else. The next request goes out on the
+first cycle after the shown one is decided (at any surface: a button here, the
+terminal channel, a withdrawal, an expiry), skipped, or passed over. The summary
+is sent again whenever the pending set has grown while nothing was in front of
+you, so a queue that fills up while you are away still says so.
+
+Three bot commands drive it. Type them in the approver chat; a message from any
+other chat is ignored, and an unrecognised `/command` is counted and not replied
+to.
+
+| Command  | What it does |
+| -------- | ------------ |
+| `/queue` | Replies with the summary and a numbered list of every pending request (action key, task, class, age), marking the one currently shown. Derived from the verified log at reply time, and it works while a request is on screen. |
+| `/skip`  | Shows the next request; the skipped one goes to the BACK of this process's order and comes round again after the rest. |
+| `/next`  | Shows the next request; this process does not show the passed-over one again. |
+
+**None of the three decides anything.** They have no path to the gate: a
+decision is a button, because a button carries the nonce and action reference
+that bind an answer to the bytes you were shown, and a typed word carries
+neither. `/skip` and `/next` leave the message already in the chat live, its
+buttons still deciding the same request, so passing over a question never takes
+it away from you.
+
+Pacing withholds attention, never the queue: every request stays pending in the
+log whether or not it has been shown, `approval queue` and `/queue` list them
+all, and nothing expires sooner for having waited its turn. Digest grouping
+still applies to the request being shown, so a set of similar requests is one
+thing to read.
+
+`channels.telegram.delivery: burst` restores the pre-APRV-216 behaviour: every
+pending request this process has not sent yet, on every cycle, behind the
+re-delivery banner. Bot commands are not read in that mode, and the listener
+asks Telegram for callback updates only.
+
 A callback from any chat other than the configured one is ignored: counted as an
 anomaly, answered with a refusal, never turned into a decision and never written
 to the log. A second tap on an already-decided request is refused
 `already-decided` by the gate.
 
-**Delivery bookkeeping is in memory only** (channels hold no state, §10.3). A
-restarted listener re-sends everything still pending and the buttons on its
-older messages stop resolving. Duplicated messages are the acceptable failure
-mode; an approval that depended on a channel's memory would not be.
+**Delivery bookkeeping is in memory only** (channels hold no state, §10.3), and
+so are the paced order and the request currently shown. A restarted listener
+re-derives the pending set from the verified log and shows the oldest again
+(under `burst`, re-sends everything still pending). What a crash costs is your
+place in the walkthrough and a duplicate message, never a pending request nobody
+is shown; an approval that depended on a channel's memory would not be an
+acceptable trade.
 
 **The execution token is printed on this terminal's stdout and is never sent to
 Telegram.** A chat transcript is stored on someone else's servers, backed up to

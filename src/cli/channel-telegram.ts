@@ -116,6 +116,7 @@ import {
   type DeliveryId,
 } from "../channels/contract.js";
 import {
+  ageText,
   buildPendingQueue,
   type ChannelTagRefusalCode,
   type TagOptions,
@@ -130,9 +131,11 @@ import {
   telegramTokenEnvFor,
   TELEGRAM_TERMINAL_HEADLINES,
   utcClock,
+  type TelegramCommand,
   type TelegramConfig,
   type TelegramTerminalState,
 } from "../channels/telegram.js";
+import { telegramDeliveryFor, type TelegramDelivery } from "../core/telegram-config.js";
 import { loadPolicy } from "../core/policy-load.js";
 import { passphraseEnvFor } from "../core/vault.js";
 import {
@@ -237,6 +240,17 @@ export interface ListenSetup {
   once: boolean;
   gateOptions: DecideOptions;
   tagOptions: TagOptions;
+  /**
+   * How this listener puts the pending set in front of the approver (APRV-216):
+   * `paced`, one question at a time, or `burst`, everything not yet sent on
+   * every cycle.
+   *
+   * REQUIRED rather than defaulted, so that every construction site states
+   * which of the two it means. The policy's answer is resolved once, in
+   * {@link prepareListen}, and the default that answer falls back to lives in
+   * `core/telegram-config.ts` beside the other Telegram policy readings.
+   */
+  delivery: TelegramDelivery;
   /**
    * How the one-sentence model gloss is obtained (APRV-144).
    *
@@ -421,6 +435,11 @@ export function prepareListen(request: ListenRequest): ListenPreparation {
       actor,
       json: request.json,
       once: request.once,
+      // APRV-216. Read from the policy that was already loaded above for the
+      // credential NAMES, so one load answers every question this preparation
+      // asks of the policy file, and a policy that failed to load leaves the
+      // default (paced) in force rather than a mode nobody chose.
+      delivery: telegramDeliveryFor(policyLoad),
       gateOptions: { policy: request.policy },
       tagOptions: {
         policy: request.policy,
@@ -616,6 +635,123 @@ export function bannerLines(pending: number): string[] {
   ];
 }
 
+// ---------------------------------------------------------------------------
+// Paced delivery (APRV-216) — one question at a time
+// ---------------------------------------------------------------------------
+
+/**
+ * The summary line that precedes a paced send, and the body of `/queue`.
+ *
+ * One message, and everything in it is arithmetic on the verified log at the
+ * instant it is written: how many requests are pending, how long the oldest has
+ * waited, and which classes they are. Nothing is remembered between calls, so
+ * two summaries a minute apart can disagree only because the log moved.
+ *
+ * The class tally is the part worth the space. The count alone says how much
+ * work is waiting; the classes say what KIND of work, which is what tells an
+ * approver whether the queue is six identical `network.call`s they can walk
+ * through or one `policy.edit` they should read carefully.
+ */
+export function summaryLines(requests: ChannelRequest[], now: string): string[] {
+  if (requests.length === 0) return ["Nothing pending — the queue is empty."];
+
+  const nowMs = Date.parse(now);
+  const oldest = requests[0] as ChannelRequest;
+  const oldestMs = Date.parse(oldest.requested_ts.value);
+  const age =
+    Number.isNaN(nowMs) || Number.isNaN(oldestMs) ? "unknown age" : ageText(nowMs - oldestMs);
+
+  const tally = new Map<string, number>();
+  for (const request of requests) {
+    const cls = request.class.value;
+    tally.set(cls, (tally.get(cls) ?? 0) + 1);
+  }
+  const classes = [...tally.entries()]
+    .map(([cls, count]) => (count === 1 ? cls : `${cls} ×${String(count)}`))
+    .join(", ");
+
+  return [
+    `${String(requests.length)} pending — oldest ${age} — ${classes}`,
+  ];
+}
+
+/**
+ * `/queue`'s reply: the summary, then one numbered line per pending request.
+ *
+ * Derived, like the summary, from the verified log at reply time and not from
+ * anything this process is holding: the numbering is positional and names no
+ * button, so a stale copy of this list cannot be used to decide anything. The
+ * marker says which one is currently in front of the approver, because the
+ * question `/queue` is usually asked to answer is "what else is there besides
+ * the one I am looking at".
+ */
+export function queueLines(
+  requests: ChannelRequest[],
+  now: string,
+  shown: readonly string[],
+): string[] {
+  const lines = summaryLines(requests, now);
+  if (requests.length === 0) return lines;
+
+  const nowMs = Date.parse(now);
+  const current = new Set(shown);
+  requests.forEach((request, index) => {
+    const key = request.action_key.value;
+    const requestedMs = Date.parse(request.requested_ts.value);
+    const age =
+      Number.isNaN(nowMs) || Number.isNaN(requestedMs)
+        ? "unknown age"
+        : ageText(nowMs - requestedMs);
+    const task = request.task.value ?? "no task";
+    lines.push(
+      `${String(index + 1)}. ${key} — ${task} — ${request.class.value} — ${age}${
+        current.has(key) ? " — shown now" : ""
+      }`,
+    );
+  });
+  lines.push(
+    "Tap the buttons on the message above to decide the one being shown. /skip shows it again later, /next moves past it.",
+  );
+  return lines;
+}
+
+/**
+ * What this process is showing, and in what order (APRV-216). **In memory
+ * only**, like every other field of {@link DispatchState} and for the same
+ * reason (SPEC.md §10.3).
+ *
+ * None of this is truth, and the check that proves it is what happens when it
+ * is lost: a restarted listener re-derives the pending set from the verified
+ * log, rebuilds the order from log order, and shows the oldest — which is
+ * exactly what a fresh start does anyway. What a crash costs is the human's
+ * place in a walkthrough, never a request that stays pending in the log and is
+ * never shown.
+ */
+export interface PacedState {
+  /**
+   * Every pending action key, in the order this process will show them.
+   *
+   * Seeded from log order (oldest first, which is what `buildPendingQueue`
+   * returns) and rearranged by `/skip` alone. Keys the log no longer calls
+   * pending are dropped on every cycle, and newly pending ones join the back.
+   */
+  order: string[];
+  /**
+   * The action keys of the unit in front of the approver, or `null` when
+   * nothing is.
+   *
+   * A unit rather than a key because a digest (APRV-115) is one thing to read
+   * and several things to decide. It is released when the log says none of its
+   * members is pending any more, which is what makes a decision — at any
+   * surface, on any copy — advance the walkthrough.
+   */
+  current: string[] | null;
+  /** Whether any summary has been sent yet, i.e. whether this is the start. */
+  summarySent: boolean;
+  /** The pending count the last summary named, so growth can be recognised. */
+  announced: number;
+}
+
 /**
  * Note when a key was delivered, for the retention sweep (APRV-196).
  *
@@ -691,6 +827,13 @@ export interface DispatchState {
    * nothing worse.
    */
   readonly annotated: Set<string>;
+  /**
+   * The walkthrough this process is running under `delivery: paced`
+   * (APRV-216). Present under `burst` too and simply never read there, so that
+   * one state shape serves both modes and a policy change between two runs
+   * needs no different bookkeeping.
+   */
+  readonly paced: PacedState;
 }
 
 export function newDispatchState(): DispatchState {
@@ -701,6 +844,7 @@ export function newDispatchState(): DispatchState {
     attempts: new Map(),
     warned: new Set(),
     annotated: new Set(),
+    paced: { order: [], current: null, summarySent: false, announced: 0 },
   };
 }
 
@@ -735,6 +879,15 @@ export interface DispatchResult {
    * that precedes a startup batch and says how many requests are coming.
    */
   banner?: { delivery_id: DeliveryId; pending: number };
+  /**
+   * The paced summary this cycle sent, when it sent one (APRV-216): the line
+   * that precedes the request being shown and says how many are waiting behind
+   * it. Sent by the first paced cycle that has something to show, and again
+   * whenever the pending set has grown while nothing was in front of the
+   * approver. Never both this and {@link banner}: they are the two modes'
+   * openings, and a process runs one mode.
+   */
+  summary?: { delivery_id: DeliveryId; pending: number };
   /**
    * Action keys dropped from the delivery bookkeeping this cycle (APRV-196),
    * with why. Neither kind can cost a re-send: the pending queue is the log's
@@ -1011,15 +1164,30 @@ export async function dispatchPending(
     );
   }
 
-  // APRV-115. The window is this cycle: whatever is pending and undelivered
-  // right now is grouped, and a group of similar requests goes out as one
-  // digest instead of one message each. Nothing waits for more — there is no
-  // new latency mechanism here, and a lone request is delivered exactly as it
-  // always was.
+  // Everything the log calls pending that this process has not put on the
+  // phone. Both modes start here and differ only in how much of it they send.
+  const undecided = queue.requests.filter(
+    (request) => !state.delivered.has(request.action_key.value),
+  );
+
+  // APRV-216. Under `paced` this cycle sends at most ONE unit, and `null` means
+  // it sends nothing because a question is already in front of the approver.
+  // Under `burst` it sends everything, which is what this file did before.
+  const selected =
+    setup.delivery === "paced" ? pacedSelection(state, queue.requests, undecided) : undecided;
+  if (selected === null) return result;
+
+  // APRV-115. The window is this cycle: whatever is being sent right now is
+  // grouped, and a group of similar requests goes out as one digest instead of
+  // one message each. Nothing waits for more — there is no new latency
+  // mechanism here, and a lone request is delivered exactly as it always was.
+  //
+  // The gloss is attached to the SELECTED requests and to no others (APRV-216):
+  // under `paced` the rest of the queue is not being rendered this cycle, and
+  // paying 10-15 seconds of subprocess for a sentence nobody will read before
+  // the next decision would be the terminal walker's mistake made here.
   const tally = { asked: 0, absent: 0 };
-  const undelivered = queue.requests
-    .filter((request) => !state.delivered.has(request.action_key.value))
-    .map((request) => withGloss(setup, request, tally));
+  const undelivered = selected.map((request) => withGloss(setup, request, tally));
 
   // APRV-197. One line per cycle, and only when a model was actually asked and
   // did not answer. Absence used to be silent by design, which was right for
@@ -1030,6 +1198,32 @@ export async function dispatchPending(
     streams.err(glossAbsenceLine("telegram", tally.absent, tally.asked, GLOSS_TIMEOUT_MS));
   }
 
+  // APRV-216. The paced opening: one line saying how many are waiting and what
+  // kind, in front of the one being shown. Sent by the first cycle that has
+  // something to show, and again whenever the pending set has GROWN while
+  // nothing was in front of the approver — which is the only moment a count
+  // they were told is stale in the direction that matters.
+  if (setup.delivery === "paced" && undelivered.length > 0) {
+    const pending = queue.requests.length;
+    if (!state.paced.summarySent || pending > state.paced.announced) {
+      state.paced.summarySent = true;
+      state.paced.announced = pending;
+      try {
+        const deliveryId = await setup.channel.announce(summaryLines(queue.requests, now));
+        result.summary = { delivery_id: deliveryId, pending };
+      } catch (cause) {
+        // Cosmetic, exactly like the banner: the request below it is the point,
+        // and withholding a question because its preamble failed to send would
+        // be the wrong direction on the only axis that matters here.
+        streams.err(
+          `approval: telegram could not send the queue summary: ${
+            cause instanceof Error ? cause.message : String(cause)
+          } — the request below is unaffected\n`,
+        );
+      }
+    }
+  }
+
   // APRV-196. The STARTUP batch gets one line in front of it, and only that
   // one: a later cycle delivers what has just been requested, which is a
   // notification and not a re-delivery, and a banner over it would say
@@ -1038,7 +1232,8 @@ export async function dispatchPending(
   // started against an empty queue has no re-delivery to announce, ever. See
   // {@link bannerLines} for why this is a banner rather than an edit of the
   // copies that came before.
-  const announcing = !state.banner.sent && undelivered.length > 0;
+  const announcing =
+    setup.delivery === "burst" && !state.banner.sent && undelivered.length > 0;
   state.banner.sent = true;
   if (announcing) {
     try {
@@ -1053,6 +1248,8 @@ export async function dispatchPending(
       );
     }
   }
+
+  const deliveredBefore = result.delivered.length;
 
   for (const group of groupForDigest(undelivered)) {
     if (group.length < 2) {
@@ -1108,7 +1305,78 @@ export async function dispatchPending(
     }
   }
 
+  // APRV-216. What is in front of the approver is what actually reached the
+  // chat, which is why this reads the RESULT rather than the selection: a send
+  // that failed leaves `current` null, so the next cycle retries the same unit
+  // instead of standing still behind a message nobody ever received.
+  if (setup.delivery === "paced") {
+    const sent = result.delivered.slice(deliveredBefore).map((entry) => entry.action_key);
+    state.paced.current = sent.length === 0 ? null : sent;
+  }
+
   return result;
+}
+
+/**
+ * What a paced cycle sends: one unit, or nothing (APRV-216).
+ *
+ * It re-reconciles the walkthrough against the verified log first, and that
+ * order is the whole design:
+ *
+ * 1. **The log decides what exists.** Keys the derivation no longer carries
+ *    leave the order and leave the shown unit, however they left the queue —
+ *    granted here, rejected from the terminal, withdrawn by their requester,
+ *    expired by the daemon. So a decision made anywhere advances the
+ *    walkthrough, and nothing this process remembers can keep a settled
+ *    question on the phone or a live one off it.
+ * 2. **The order is this process's.** Newly pending keys join the back in log
+ *    order (oldest first); `/skip` is the only thing that rearranges it.
+ * 3. **One at a time.** A unit still holding a pending member means a question
+ *    is in front of the approver, and this cycle sends nothing.
+ *
+ * The unit is a digest group rather than a single request when the oldest
+ * pending request has similar company (APRV-115): what is being paced is the
+ * approver's ATTENTION, and four identical `network.call`s are one thing to
+ * read whether or not they are four things to decide.
+ */
+function pacedSelection(
+  state: DispatchState,
+  pending: ChannelRequest[],
+  undelivered: ChannelRequest[],
+): ChannelRequest[] | null {
+  const paced = state.paced;
+  const pendingKeys = pending.map((request) => request.action_key.value);
+  const pendingSet = new Set(pendingKeys);
+
+  paced.order = paced.order.filter((key) => pendingSet.has(key));
+  const known = new Set(paced.order);
+  for (const key of pendingKeys) {
+    if (!known.has(key)) paced.order.push(key);
+  }
+
+  if (paced.current !== null) {
+    paced.current = paced.current.filter((key) => pendingSet.has(key));
+    if (paced.current.length === 0) paced.current = null;
+  }
+
+  // A count the approver was told that is now too high is not a growth to
+  // announce; it is the number they watched go down. Clamping here is what
+  // makes "the pending set grew" mean growth from wherever it actually is.
+  paced.announced = Math.min(paced.announced, pendingKeys.length);
+
+  if (paced.current !== null) return null;
+
+  const available = new Map(
+    undelivered.map((request) => [request.action_key.value, request] as const),
+  );
+  const nextKey = paced.order.find((key) => available.has(key));
+  if (nextKey === undefined) return null;
+
+  return (
+    groupForDigest(undelivered).find((group) =>
+      group.some((request) => request.action_key.value === nextKey),
+    ) ?? null
+  );
 }
 
 /**
@@ -1264,6 +1532,104 @@ function handlerFor(setup: ListenSetup, streams: Streams): (d: ChannelDecision) 
 }
 
 /**
+ * `/queue`, `/skip`, `/next` — the paced walkthrough's three verbs (APRV-216).
+ *
+ * **None of them appends anything**, and the reason is structural rather than
+ * careful: this function never touches `recordChannelDecision`, so there is no
+ * path from a typed word to the log. A decision is a button, always, because a
+ * button carries the nonce and the action reference that bind an answer to the
+ * bytes an approver was shown, and a word typed into a chat carries neither.
+ *
+ * What they do move is process memory:
+ *
+ * - `/queue` reads the verified log and replies with the summary and a numbered
+ *   list. It changes nothing, and it works while an item is shown, because the
+ *   list is derived and not held.
+ * - `/skip` sends the shown unit to the BACK of this process's order and
+ *   forgets having delivered it, so the next cycle shows the next question and
+ *   this one comes round again after the rest. The copy already in the chat
+ *   keeps its buttons, and they still decide the same request by action
+ *   reference (APRV-196), so a skip is "later", never "gone".
+ * - `/next` releases the shown unit without reordering, so this process moves
+ *   past it and does not show it again. The same copy stays live in the chat:
+ *   the approver has kept the question and given up their place in the queue,
+ *   which is the opposite trade from `/skip`.
+ *
+ * A command that finds nothing to do says so, because silence in a chat window
+ * is indistinguishable from a listener that has died.
+ */
+export function commandHandlerFor(
+  setup: ListenSetup,
+  streams: Streams,
+  state: DispatchState,
+  /**
+   * When the command arrived. A clock read in production, because a command is
+   * answered when a human types it; injectable for the same reason
+   * {@link dispatchPending} takes `now` as a parameter, since the ages a reply
+   * states are arithmetic against it and a suite must be able to choose them.
+   */
+  clock: () => string = () => new Date().toISOString(),
+): (command: TelegramCommand) => Promise<void> {
+  const say = async (lines: string[]): Promise<void> => {
+    try {
+      await setup.channel.announce(lines);
+    } catch (cause) {
+      streams.err(
+        `approval: telegram could not answer a command: ${
+          cause instanceof Error ? cause.message : String(cause)
+        } — nothing was appended and the listener is still up\n`,
+      );
+    }
+  };
+
+  return async (command) => {
+    const now = clock();
+
+    if (command === "queue") {
+      const queue = buildPendingQueue(setup.logPath, setup.tagOptions, now);
+      if (!queue.ok) {
+        // SPEC.md §11.1(1): a sentence a human reads about what the log says is
+        // derived from a log that verified, or it is not derived at all. So the
+        // reply names the refusal rather than a queue nobody could derive.
+        streams.err(
+          `approval: telegram cannot read the pending queue for /queue (${queue.code}): ${queue.message}\n`,
+        );
+        await say([
+          "The queue could not be read.",
+          `The log did not verify or could not be read (${queue.code}). Nothing is decided and nothing is lost; the listener retries every cycle.`,
+        ]);
+        return;
+      }
+      await say(queueLines(queue.requests, now, state.paced.current ?? []));
+      return;
+    }
+
+    const shown = state.paced.current;
+    if (shown === null) {
+      await say([
+        command === "skip"
+          ? "Nothing to skip — no request is in front of you."
+          : "Nothing is in front of you right now.",
+        "The next pending request is sent as soon as there is one. /queue lists what the log is holding.",
+      ]);
+      return;
+    }
+
+    state.paced.current = null;
+    if (command === "skip") {
+      for (const key of shown) {
+        // Forgotten as well as reordered: the delivery bookkeeping is what stops
+        // a re-send, so a request that must be SHOWN again has to leave it. The
+        // message already in the chat is untouched and still decides.
+        forget(state, key);
+        state.paced.order = state.paced.order.filter((entry) => entry !== key);
+        state.paced.order.push(key);
+      }
+    }
+  };
+}
+
+/**
  * How one run of the listen loop ended (APRV-110).
  *
  * `stopped` is the ordinary ending: a signal, or `--once` completing. The two
@@ -1306,6 +1672,14 @@ export function startListener(setup: ListenSetup, streams: Streams): RunningList
   // pre-restart copies still decide the same request, so what a restart costs
   // the approver is a longer transcript rather than a stuck one.
   const state = newDispatchState();
+
+  // APRV-216. Registering the command handler is also what makes the channel
+  // ask for `message` updates at all, so a burst listener consumes none and
+  // `approval setup channel telegram`'s chat discovery is untouched by this
+  // task. See `TelegramChannel.onCommand`.
+  if (setup.delivery === "paced") {
+    channel.onCommand(commandHandlerFor(setup, streams, state));
+  }
 
   let stopping = false;
   const stop = (): void => {

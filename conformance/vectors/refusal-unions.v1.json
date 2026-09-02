@@ -53,7 +53,8 @@
           "proposal-not-found",
           "proposal-stale",
           "policy-already-attested",
-          "append-failed"
+          "append-failed",
+          "token-delivery-unavailable"
         ]
       }
     },
