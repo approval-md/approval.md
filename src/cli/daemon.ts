@@ -42,6 +42,10 @@ import {
 } from "../daemon/daemon.js";
 import { defaultCadence, type AdvanceCadence } from "../daemon/advance.js";
 import { enableGitEvidence, type GitEvidenceEvent } from "../daemon/git-evidence.js";
+import {
+  DEFAULT_DARK_INTERVAL_MS,
+  DEFAULT_DARK_WINDOW_MS,
+} from "../daemon/dark-session.js";
 import { parseDuration } from "../core/policy-load.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
@@ -77,6 +81,11 @@ const RUN_FLAGS: Record<string, FlagKind> = {
   "--advance-remote": "string",
   "--advance-base": "string",
   "--no-advance-pr": "boolean",
+  // The dark-session sweep (APRV-192). Opt-in for the reason above, in a milder
+  // form: it runs `git log` over every worktree of the checkout on a cadence.
+  "--dark-sessions": "boolean",
+  "--dark-window": "string",
+  "--dark-interval": "string",
   "--json": "boolean",
   "--help": "boolean",
   "-h": "boolean",
@@ -247,6 +256,27 @@ export function describeDaemonEvent(event: DaemonEvent): { text: string; stderr:
                 event.records_branch ?? "any records branch"
               }`,
         stderr: event.outcome !== "advanced",
+      };
+    case "dark_session":
+      // Both verdicts go to stderr. A dark session is the loudest thing this
+      // loop can say — git activity nobody was told about — and an undetermined
+      // one is a gap in the detector's own sight; neither belongs in the stream
+      // an operator scrolls past.
+      return {
+        text: renderRefusal(
+          style(),
+          event.verdict === "dark" ? `dark-session:${event.code}` : `dark-session-undetermined:${event.code}`,
+          `${event.subject}${event.branch === null ? "" : ` (branch ${event.branch})`}: ${
+            event.message
+          }${
+            event.seq === null
+              ? event.already_recorded
+                ? " — already recorded in this log; nothing appended"
+                : ""
+              : ` — recorded at seq ${String(event.seq)}`
+          }`,
+        ),
+        stderr: true,
       };
     case "escalated":
       return {
@@ -421,6 +451,18 @@ export function commandDaemonRun(
   const cadence = advanceFlags(flags);
   if (!cadence.ok) return usageError(streams, json, cadence.message, DAEMON_RUN_HELP);
   if (cadence.cadence !== null) options.advance = cadence.cadence;
+
+  // The dark-session sweep (APRV-192). Its two durations are refused for a typo
+  // in exactly the words every other duration flag is, for the reason
+  // `advanceFlags` states: a daemon that accepted `--dark-window twelve` and
+  // quietly swept the default would be lying about what it looked at.
+  const darkWindow = durationFlag(flags, "--dark-window", DEFAULT_DARK_WINDOW_MS);
+  if (!darkWindow.ok) return usageError(streams, json, darkWindow.message, DAEMON_RUN_HELP);
+  const darkInterval = durationFlag(flags, "--dark-interval", DEFAULT_DARK_INTERVAL_MS);
+  if (!darkInterval.ok) return usageError(streams, json, darkInterval.message, DAEMON_RUN_HELP);
+  if (boolFlag(flags, "--dark-sessions")) {
+    options.darkSessions = { windowMs: darkWindow.ms, intervalMs: darkInterval.ms };
+  }
 
   // SPEC.md §8's optional git hardening (APRV-42). Opt-in, checked here and
   // never later: an operator who asked for a second evidence layer and silently

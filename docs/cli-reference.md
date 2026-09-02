@@ -1531,6 +1531,19 @@ The checks, at length:
   the running session loaded it. The check that trusts no session is the
   CI-side grant cross-check (`scripts/protected-path-guard.mjs`) over the
   committed log.
+- **verified-snapshot** — whether the daemon's verified-head snapshot
+  (`.approval/log/verified-head.json`, APRV-188) is in place and still covers
+  the live log, so a hook re-proves one SHA-256 instead of re-walking the chain
+  per gated tool call. SKIP when there is none: the daemon has not run here, and
+  every hook verifies the log from genesis, which is correct and slower. PASS
+  when it applies, naming how much of the log it endorses; PASS, with the
+  reason, when it no longer applies, because a snapshot a reader refuses is a
+  snapshot that never existed. The one FAIL is a snapshot every reader would
+  refuse for a reason an operator should act on — a foreign owner, or a mode
+  that lets somebody else write it — and the fix is to delete it and let the
+  daemon republish. This row can never report a correctness fault: the file
+  endorses bytes, the reader re-proves them, and nothing is authorized on its
+  word.
 
 **`--json`** (one object on stdout):
 
@@ -1864,6 +1877,11 @@ other way: on `channel telegram listen` and `up` the gloss is ON by default,
 with `--no-gloss` to drop it. The phone is where an approver meets a request
 they did not watch being made, and the seconds are spent inside a dispatch cycle
 that is already waiting on the network, blocking nobody.
+
+The subprocess is spawned starved (APRV-207): it gets the same scrubbed
+environment a granted child gets, so no `APPROVAL_*`, `TELEGRAM_*` or `VAULT_*`
+variable and no vault passphrase reaches it, while its own auth (`ANTHROPIC_*`,
+`CLAUDE_CODE_OAUTH_TOKEN`), `PATH`, `HOME` and the locale pass through.
 
 The gloss is never load-bearing: it is attached at render time to a request the
 tagger has finished building, the payload hash does not cover it, the log never
@@ -2435,6 +2453,18 @@ log is the truth and the file is its projection. Exactly the `state:` line
 changes; every other byte, key, comment and line ending is preserved. So a drift
 record marks a file found wrong AND fixed; a file that keeps drifting is one
 another writer is fighting over.
+
+**The verified-head snapshot (APRV-188).** Every clean read a tick makes is
+published to `.approval/log/verified-head.json`: an endorsement of the exact
+bytes the daemon just walked, so a hook process re-proves one SHA-256 instead of
+re-verifying the chain from genesis per gated tool call. It is written at mode
+0600, is gitignored, and carries no records. A reader re-proves the digest over
+its own read of the log, re-derives the head and the line count from its own
+parse, and walks anything appended past the endorsed prefix; a snapshot that
+fails any of that is ignored and the reader walks the whole log. Nothing is
+authorized on the file's word, no verdict depends on it, and deleting it costs
+latency and nothing else. `approval doctor`'s `verified-snapshot` row reports
+its state, and `docs/claude-code-hook.md` states the trust boundary in full.
 
 **Git evidence (`--git-evidence`, off by default).** SPEC.md §8's optional
 hardening: a second, independent record of the same bytes, one an operator can

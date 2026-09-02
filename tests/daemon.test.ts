@@ -26,6 +26,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
@@ -871,6 +872,45 @@ test("a log that does not verify stops the daemon at exit 1 and it appends nothi
   assert.equal(readFileSync(logPath(dir), "utf8"), before, "the daemon wrote to a corrupt log");
 });
 
+test("a tick publishes the verified-head snapshot, and a corrupt log publishes none", () => {
+  // APRV-188. The daemon is the process that has already walked the chain, so
+  // it is the one that publishes what it walked. Two properties matter here and
+  // nothing else: the file lands at mode 0600 (the ownership argument in
+  // `core/verified-snapshot.ts` rests on it), and it describes the log the tick
+  // actually read. What a READER does with it is `tests/verified-snapshot.ts`.
+  const dir = ready(POLICY, "proposed");
+  request(dir, "task-042:chaser");
+  const snapshotPath = join(dir, ".approval", "log", "verified-head.json");
+  assert.ok(!existsSync(snapshotPath), "nothing publishes it before the daemon runs");
+
+  const run = runCli(["daemon", "run", "--once", "--json"], dir);
+  assert.equal(run.code, 0, run.stderr);
+  assert.ok(existsSync(snapshotPath), "one tick publishes it");
+  assert.equal((statSync(snapshotPath).mode & 0o777).toString(8), "600");
+
+  const snapshot = JSON.parse(readFileSync(snapshotPath, "utf8")) as Record<string, unknown>;
+  const log = readFileSync(logPath(dir));
+  assert.equal(snapshot["log"], realpathSync(logPath(dir)));
+  assert.equal(snapshot["byte_length"], log.length, "it endorses the log as the tick left it");
+  assert.equal(
+    snapshot["lines"],
+    readFileSync(logPath(dir), "utf8").split("\n").filter((line) => line).length,
+  );
+  assert.equal(
+    snapshot["sha256"],
+    createHash("sha256").update(log).digest("hex"),
+    "the digest is of the bytes on disk",
+  );
+
+  // A log that stops verifying leaves the old snapshot alone rather than
+  // endorsing anything: only a clean read publishes.
+  const before = readFileSync(snapshotPath, "utf8");
+  appendFileSync(logPath(dir), `${JSON.stringify({ seq: 99, hash: "0".repeat(64) })}\n`, "utf8");
+  const broken = runCli(["daemon", "run", "--once", "--json"], dir);
+  assert.equal(broken.code, 1);
+  assert.equal(readFileSync(snapshotPath, "utf8"), before, "a corrupt read publishes nothing");
+});
+
 test("a torn tail stops the daemon at exit 3", () => {
   const dir = ready(POLICY, "proposed");
   appendFileSync(logPath(dir), "{\"seq\":99", "utf8");
@@ -945,6 +985,9 @@ test("the DaemonEvent union is frozen public output: every variant, listed", () 
     // APRV-204: the cadence advance's line. Appended to the union, so no
     // existing entry changed meaning.
     advance: true,
+    // APRV-192: the dark-session sweep's line. Appended to the union, so no
+    // existing entry changed meaning.
+    dark_session: true,
     drift: true,
     write_back: true,
     expired: true,
@@ -960,6 +1003,7 @@ test("the DaemonEvent union is frozen public output: every variant, listed", () 
 
   assert.deepEqual(Object.keys(variants).sort(), [
     "advance",
+    "dark_session",
     "drift",
     "escalated",
     "escalation_cleared",
