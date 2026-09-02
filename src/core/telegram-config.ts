@@ -47,6 +47,52 @@ export function telegramChatEnvFor(load: PolicyLoadResult): string {
 }
 
 /**
+ * How a listener puts the pending set in front of the approver (APRV-216).
+ *
+ * `paced` sends one summary line and the oldest pending request, and the next
+ * one only once that request is decided, skipped, or passed over. `burst` is
+ * the pre-APRV-216 behaviour: every pending request this process has not sent
+ * yet, on every cycle, behind the APRV-196 re-delivery banner.
+ *
+ * Not a credential and not a name, so it sits beside the two that are for one
+ * reason: it is the third thing a caller asks the policy about the Telegram
+ * channel, and a second resolver module would be a second place for the
+ * fallback rule to drift.
+ */
+export type TelegramDelivery = "paced" | "burst";
+
+/**
+ * What an absent `channels.telegram.delivery` means.
+ *
+ * Paced, since APRV-216. The incident behind it is the one APRV-196 softened
+ * rather than closed: a restart with six pending policy edits put six prompts
+ * on a phone at once, and an approver reading a wall of near-identical
+ * questions is an approver who taps rather than reads. A default is a claim
+ * about which failure is worse, and the worse one here is inattentive approval
+ * rather than a slower queue: pacing withholds nothing, because every request
+ * stays pending in the log whether or not it has been shown, and `/queue`
+ * lists the whole set on demand.
+ */
+export const TELEGRAM_DEFAULT_DELIVERY: TelegramDelivery = "paced";
+
+/**
+ * The delivery mode this policy declares, or the default.
+ *
+ * Fail-soft in the same direction as the two name resolvers above: a policy
+ * that did not load declares nothing, and a delivery mode is not a permission,
+ * so an unrelated policy typo must not decide how requests are shown. The
+ * schema closes the enum, so a policy that LOADED can only carry one of the
+ * two; anything else reaching here (a hand-built load result, a key from a
+ * later version) falls back rather than being guessed at.
+ */
+export function telegramDeliveryFor(load: PolicyLoadResult): TelegramDelivery {
+  if (!load.ok) return TELEGRAM_DEFAULT_DELIVERY;
+  const declared = load.policy.channels?.["telegram"]?.["delivery"];
+  if (declared === "paced" || declared === "burst") return declared;
+  return TELEGRAM_DEFAULT_DELIVERY;
+}
+
+/**
  * The Telegram channel's credential manifest (APRV-79).
  *
  * The same shape an adapter declares (`core/credential-spec.ts`), for the same

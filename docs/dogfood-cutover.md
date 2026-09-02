@@ -117,12 +117,14 @@ day gets its message on the phone within one poll cycle, with no restart. The
 M5 proof ran the other way round (request first, listener second) and so never
 exercised this; the order no longer matters.
 
-Two consequences worth knowing at the terminal. A restarted listener re-sends
-everything still pending, because the "already sent" set lives only in the
-process (SPEC.md §10.3: channels hold no state that is truth): a duplicate on
-the phone, never a request nobody sees. Since APRV-196 that re-delivery
-announces itself and the older copies keep working; the section below is the
-operator's view of it. And a send that fails is retried on every later cycle
+Two consequences worth knowing at the terminal. A restarted listener starts its
+walkthrough over — it re-derives the pending set from the verified log and shows
+the oldest again, or under `channels.telegram.delivery: burst` re-sends
+everything still pending — because the "already sent" set and the order live
+only in the process (SPEC.md §10.3: channels hold no state that is truth): a
+duplicate on the phone, never a request nobody sees. Since APRV-196 the older
+copies keep working, and since APRV-216 there is one request on screen at a
+time; the section below is the operator's view of both. And a send that fails is retried on every later cycle
 without an attempt limit, so a phone out of signal or a Bot API outage delays
 delivery rather than dropping it; the stderr warnings thin out after a few
 consecutive failures for the same request. Only a failure during the startup
@@ -139,7 +141,26 @@ above are the same behaviour, reached on a timer instead of by your hand.
 every page load, so a refresh shows what is pending now. `approval channel cli`
 is one-shot by design; running the verb again is its refresh.
 
-### What a restart looks like on the phone (APRV-196)
+### What a restart looks like on the phone (APRV-216, and APRV-196 before it)
+
+**There is no wall any more.** The default since APRV-216 is
+`channels.telegram.delivery: paced`, and a restart with five pending requests
+sends two things: one summary line (`5 pending — oldest 2h 10m ago —
+policy.edit ×3, network.call ×2`) and the OLDEST request, with its buttons. The
+next one arrives on the first cycle after you decide that one, `/skip` it (it
+comes round again, last) or `/next` past it (this process does not show it
+again). `/queue` lists everything pending at any time, including while a request
+is on screen, and that list is read from the log rather than from the chat, so it
+is right even when the chat is not.
+
+Nothing is withheld by this. Every request is still pending in the log, still
+listed by `approval queue`, and still decidable from any copy of its message
+already in the chat. What is paced is your attention.
+
+The rest of this section is what a restart looked like before, and what it still
+looks like under `channels.telegram.delivery: burst`. Read it that way: the
+duplicate-copy rules and every toast below hold in both modes, because they are
+properties of the buttons rather than of the pacing.
 
 The re-delivery above used to arrive as a wall: five pending requests, five new
 messages with no warning, sitting under five older copies whose buttons had
@@ -147,7 +168,7 @@ quietly stopped working. Taps on the older copies did nothing at all, so the
 natural response (tap it again, harder) was the one response that could not
 help. Three things changed.
 
-**A restart announces itself.** The first batch a listener process sends is
+**A restart announces itself.** Under `burst`, the first batch a listener sends is
 preceded by one line: `LISTENER STARTED — re-sending N pending requests`,
 followed by the requests. A flood that says what it is is a re-delivery; the
 same flood in silence is an incident. Later cycles send no banner, because a

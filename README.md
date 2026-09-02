@@ -505,6 +505,7 @@ believed was in force. Full semantics: SPEC.md section 5.
 | `vault.passphrase_env` | Name of the variable holding the vault passphrase. Absent means `APPROVAL_VAULT_PASSPHRASE` (§5.2, §10.4). |
 | `channels.telegram.token_env` | Name of the variable holding the bot token. Default `APPROVAL_TG_TOKEN` (§5.1). |
 | `channels.telegram.chat_id_env` | Name of the variable holding the approver chat id. Default `APPROVAL_TG_CHAT` (§5.1). |
+| `channels.telegram.delivery` | `paced` (the default) shows one summary line and the oldest pending request, then the next one after a decision, `/skip` or `/next`; `burst` sends every pending request the listener has not sent yet (§10.3). |
 | `channels.web.port` | TCP port for the local approval UI, bound on loopback only (§5.1). |
 | `channels.<other>` | An unknown channel name is accepted as an object, so a third-party transport does not fail the whole policy closed (§10.3). |
 
