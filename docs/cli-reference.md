@@ -915,6 +915,25 @@ to decide whether to fix itself, stop retrying, or ask a human.
 - `already-executed` — the action key already has an `execution.started`.
 - `budget-exceeded` — budget verdicts failed; a `budget.exceeded` event WAS
   appended and `error.verdicts` lists the failures.
+- `queue-full` — the approver's queue is at the ceiling the policy declared
+  (SPEC.md §5.2's `limits.max_pending`, per class or on a `budgets` scope), so
+  the request was not added to it. `error.limits` lists the failing verdicts
+  (`limit`, `scope`, `observed`, `ceiling`). **Nothing is appended**, unlike
+  `budget-exceeded`: a log line per refused request would hand a queue-flooder
+  the log growth it was refused the queue for. Retrying at once gets the same
+  answer; the queue drains when a human decides, a requester withdraws, or a
+  TTL lapses. `.approval/QUEUE.md` shows each declared ceiling and how close the
+  queue is to it, which is where a human sees the standing condition.
+- `rate-limited` — this origin created more requests in the last hour than
+  `limits.requests_per_hour` allows. Origin is the requesting actor, which the
+  runtime assigns rather than the caller, so re-labelling does not buy a fresh
+  hour. Counted over request CREATION, so a request answered a minute after it
+  was made still spent the origin's share. Nothing is appended, and the window
+  is rolling: the oldest request in it ages out on its own. Distinct from
+  `queue-full`, and the distinction is the repair — that one says wait for an
+  approver, this one says slow down. Where both ceilings are met the answer is
+  `queue-full`, because an agent that backs off for a minute and retries into a
+  full queue was told the smaller of the two facts.
 - `class-human-only` — the action's class resolves to `human-only`: the policy
   reserves it to human hands, and a person performs it outside agent execution.
   Distinct from every rejection, and the distinction is the whole of the code:

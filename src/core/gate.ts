@@ -120,6 +120,12 @@ import {
   type AttestationRefusalDetail,
 } from "./attest.js";
 import { evaluateBudgetsWithTask, type BudgetScope, type BudgetVerdict } from "./budgets.js";
+import {
+  evaluateIntakeLimits,
+  intakeRefusalOf,
+  type IntakeScope,
+  type IntakeVerdict,
+} from "./intake-limits.js";
 import { tick, type ClockOptions } from "./clock.js";
 import { readTaskFile } from "./frontmatter.js";
 import {
@@ -280,6 +286,50 @@ export const GATE_REFUSAL_CODES = [
    * `verdicts` and in the appended event's payload.
    */
   "budget-exceeded",
+  /**
+   * The approver's queue is at the ceiling the policy declared (SPEC.md §5.2's
+   * `limits.max_pending`, per class or on a `budgets` scope; APRV-173).
+   *
+   * A limit on ATTENTION rather than on money, which is why it is its own code
+   * and why it fires where it does: after the legality checks that say whether
+   * this request may exist at all, and before budgets, which are about the
+   * world's exposure rather than the human's. An agent that floods the queue
+   * with cheap in-budget requests spends nothing and still defeats the gate,
+   * because an approver facing two hundred prompts stops reading them and
+   * starts clearing them.
+   *
+   * Nothing is appended, deliberately, and this is the one refusal shaped
+   * differently from `budget-exceeded` on purpose (Carter's approved reading,
+   * 2026-08-31). A `budget.exceeded` record exists because a budget refusal is
+   * a fact about a commitment audit must be able to reconstruct; a record per
+   * refused flood request would hand the flooder the log growth it was refused
+   * the queue for. `error.limits` carries the failing verdicts, and the
+   * requests that WERE admitted are all in the log to count from.
+   *
+   * Transient in the sense that matters to a caller: the queue drains when a
+   * human decides, a requester withdraws, or a TTL lapses. Retrying at once
+   * gets the same answer.
+   */
+  "queue-full",
+  /**
+   * This origin created more requests in the last hour than the policy's
+   * `limits.requests_per_hour` allows (SPEC.md §5.2, APRV-173).
+   *
+   * Distinct from `queue-full`, and the distinction is the repair. That code
+   * says the queue is full whoever is asking, so the caller waits for an
+   * approver; this one says the caller's own recent volume is the problem, so
+   * it slows down. Origin is the requesting actor at v0.1, which the runtime
+   * assigns rather than the caller (see `core/intake-limits.ts`), so a
+   * requester cannot re-label itself into a fresh hour.
+   *
+   * Counted over request CREATION, not over live requests: a request that was
+   * answered a minute after it was made still spent the origin's share of the
+   * hour. A ceiling that forgot each request as it was answered could be
+   * cleared by withdrawing every request as fast as it was made.
+   *
+   * Nothing is appended, for the same reason `queue-full` appends nothing.
+   */
+  "rate-limited",
   /**
    * The action resolves to `manual` and its registered declaration carries no
    * `payload_hash` (amended SPEC.md §6.2: MUST for `manual` actions).
@@ -510,6 +560,14 @@ export interface GateRefusal {
   state?: RequestState;
   /** The failing verdicts, when `code` is `budget-exceeded`. */
   verdicts?: BudgetVerdict[];
+  /**
+   * The failing request-volume verdicts, when `code` is `queue-full` or
+   * `rate-limited` (APRV-173). Separate from `verdicts` because they are a
+   * different measurement with a different shape, and because a caller that
+   * branched on `verdicts` to read money out of a budget refusal must not find
+   * queue counts there.
+   */
+  limits?: IntakeVerdict[];
   /** Schema errors, when `code` is `envelope-invalid`. */
   errors?: ValidationError[];
   /** The underlying append error, when `code` is `append-failed`. */
@@ -736,6 +794,26 @@ function ttlOf(load: PolicyLoadResult): number | null {
 }
 
 function budgetScopeOf(load: PolicyLoadResult, resolution: Resolution): BudgetScope {
+  return {
+    classLimits: resolution.limits,
+    classPattern: resolution.matched === null ? null : resolution.matched.pattern,
+    globalBudgets: load.ok ? load.policy.budgets ?? null : null,
+  };
+}
+
+/**
+ * The request-volume scope (APRV-173): the same three fields the budget scope
+ * carries, read from the same resolution and the same load.
+ *
+ * Identical by construction rather than by coincidence. A queue ceiling written
+ * on a rule must be attributed by that rule's pattern for the reason SPEC.md
+ * §5.2 gives budgets: one `financial.*` rule is one ceiling shared by every
+ * class it governs, and a limit taken from a rule that did not win would be
+ * compared against a window it does not scope. A policy that fails to load
+ * offers no limits at all here, exactly as it offers no budgets: everything is
+ * `manual` in that case, and the human gate is the ceiling.
+ */
+function intakeScopeOf(load: PolicyLoadResult, resolution: Resolution): IntakeScope {
   return {
     classLimits: resolution.limits,
     classPattern: resolution.matched === null ? null : resolution.matched.pattern,
@@ -1763,6 +1841,60 @@ export function request(
       "already-executed",
       `action ${input.actionKey} already executed (execution.started at seq ${String(derivation.execution.started)}); an idempotency key is single-use`,
       { state: derivation.state },
+    );
+  }
+
+  // APRV-173, SPEC.md §5.2's request-volume limits, enforced here and nowhere
+  // else. Placed AFTER the legality checks above and BEFORE budgets, and both
+  // halves of that placement are deliberate.
+  //
+  // After `duplicate-request` and `already-executed`, because those say the
+  // request may not exist at all: a second request for a live action key is
+  // refused for being a duplicate rather than for the queue it would have
+  // joined, and a caller told `queue-full` about an action that already
+  // executed would be sent to wait for a queue to drain instead of to stop.
+  //
+  // Before budgets, because these limits protect the approver's attention and
+  // budgets protect the world's exposure. The cheaper measurement guards the
+  // scarcer resource: a flood of in-budget requests passes every budget verdict
+  // and still empties the one thing this system cannot refill, which is a
+  // human's willingness to read a prompt.
+  //
+  // Off the manual path this code is unreachable, and correctly so: the
+  // `proceed: true` return above happens first. An autonomous or unsampled
+  // supervised action appends no `approval.requested` (§6.3), joins no queue,
+  // and puts nothing in front of anyone, so a queue ceiling has nothing to
+  // measure it against.
+  //
+  // A refusal here appends NOTHING: no event, no payload file, no recipient
+  // key. So a refused request consumes no budget (nothing was authorized), no
+  // window (the window counts `approval.requested` records and none was
+  // written), and no attention.
+  const intake = evaluateIntakeLimits(
+    read.records,
+    intakeScopeOf(load, resolution),
+    { class: input.cls, origin: actor },
+    ts,
+    ttlOf(load),
+  );
+  if (!intake.pass) {
+    const failedLimits = intake.verdicts.filter((entry) => !entry.pass);
+    // Never null on this branch: `pass` is false only when a verdict failed.
+    const code = intakeRefusalOf(intake) ?? "queue-full";
+    const detail = failedLimits
+      .map(
+        (entry) =>
+          `${entry.limit} (${entry.scope}, ${String(entry.observed)} of ${
+            entry.ceiling === null ? "an unreadable ceiling" : String(entry.ceiling)
+          }${entry.note === undefined ? "" : `: ${entry.note}`})`,
+      )
+      .join(", ");
+    return refuse(
+      code,
+      code === "queue-full"
+        ? `the approver's queue is at its declared ceiling, so action ${input.actionKey} was not added to it: ${detail}. SPEC.md §5.2 caps simultaneously pending requests because approver attention is the resource this gate spends. Nothing was appended and no budget was consumed; the request can be made again once a pending request is decided, withdrawn, or lapses.`
+        : `request intake is rate-limited for ${actor}: ${detail}. SPEC.md §5.2 caps request creation per origin over a rolling hour. Nothing was appended and no budget was consumed; the window is rolling, so the oldest request in it ages out on its own.`,
+      { limits: failedLimits },
     );
   }
 

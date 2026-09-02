@@ -284,6 +284,10 @@ test("every gate refusal code a scripted scenario can reach is pinned by a vecto
     "not-requester",
     "payload-hash-required",
     "policy-not-attested",
+    // APRV-173: both request-volume refusals are reachable through the DSL, so
+    // both are required to be pinned rather than merely permitted.
+    "queue-full",
+    "rate-limited",
     "request-withdrawn",
     "task-already-registered",
   ];

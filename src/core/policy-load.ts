@@ -242,7 +242,17 @@ export interface Policy {
   protected_paths?: string[];
   approvers?: Record<string, { channels: string[] }>;
   classes?: Record<string, PolicyClassRule>;
-  budgets?: Record<string, { daily_usd?: number; daily_actions?: number }>;
+  /**
+   * Named budget scopes (SPEC.md §5.1/§5.2). `max_pending` has been in
+   * `policy.schema.json` since v0.1 and was missing from this type until
+   * APRV-173, which is what a key nobody read looks like from the inside: the
+   * schema accepted it, the loader carried it, and no reader could see it.
+   * `core/intake-limits.ts` evaluates it at intake; `core/budgets.ts` skips it.
+   */
+  budgets?: Record<
+    string,
+    { daily_usd?: number; daily_actions?: number; max_pending?: number }
+  >;
   audit?: {
     supervised_sample_rate?: number;
     /**
