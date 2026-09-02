@@ -556,6 +556,29 @@ test("sync: an untracked payload the incoming commit does not carry is left alon
   assert.deepEqual(snapshots(repo.dir), []);
 });
 
+test("sync: a file in the payload store that is not named by a hash is refused, not cleared", () => {
+  const repo = newRepo();
+  const peer = secondClone(repo);
+
+  // The incoming commit carries it, so it WILL block the fast-forward — but the
+  // store is addressed by hash and nothing else, so sync has no way to prove
+  // this file is what the incoming commit holds, and says so instead of guessing.
+  mkdirSync(storeDirOf(peer), { recursive: true });
+  writeFileSync(join(storeDirOf(peer), "notes.json"), '{"a":1}', "utf8");
+  push(peer, "something that is not a payload");
+
+  mkdirSync(storeDirOf(repo.dir), { recursive: true });
+  const local = join(repo.dir, ".approval", "payloads", "notes.json");
+  writeFileSync(local, '{"a":1}', "utf8");
+
+  const result = logSync({ cwd: repo.dir });
+  assert.equal(result.ok, false);
+  if (result.ok) throw new Error("unreachable");
+  assert.equal(result.code, "log-sync-payload-mismatch");
+  assert.ok(result.message.includes("notes.json"));
+  assert.equal(existsSync(local), true, "a file sync could not vouch for was removed anyway");
+});
+
 test("sync: --json reports the payload count", () => {
   const repo = newRepo();
   const peer = secondClone(repo);

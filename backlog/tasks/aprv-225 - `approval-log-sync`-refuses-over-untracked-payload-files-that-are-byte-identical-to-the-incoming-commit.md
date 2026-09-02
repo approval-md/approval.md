@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-t'
 created_date: '2026-09-02 16:52'
-updated_date: '2026-09-02 19:29'
+updated_date: '2026-09-02 19:43'
 labels:
   - daemon
   - dogfood
@@ -44,3 +44,23 @@ Seen 2026-09-02 after PR #226 (log advance to seq 11361) merged: `approval log s
 8. Tests in tests/cli-log-verbs.test.ts: identical, mismatch, absent-from-incoming, plus the injected-failure table guard updated.
 9. Docs: docs/cli-reference.md log sync section and docs/dogfood-cutover.md.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented as a new step 'payloads' in the log sync ceremony (src/cli/log-sync.ts), placed between the fast-forward CHECK and the merge. Placement is the design: after ff-check the fast-forward is known possible, so removing a file the merge is about to write is a step towards a merge that WILL run; before merge because git merge --ff-only is what stops on untracked files.
+
+What it does: git ls-files --others --exclude-standard -z over the store dir (payloadStoreDirFor(logPath), repo-relative via repoPath) intersected with git ls-tree -r --name-only -z FETCH_HEAD over the same path. --exclude-standard is deliberate: an ignored file is not one git refuses to overwrite, so including it would make sync stricter than the merge it is clearing the way for. -z on BOTH listings so quoted and unquoted spellings of an unusual name cannot silently fail to intersect.
+
+Per file, two independent proofs, both before any byte moves: (1) SHA-256 of the local bytes equals the filename stem (storePayload writes RFC 8785 canonical bytes, so a payload file is self-addressed); the store's documented {\"\$ref\": …} form is the exception and rides on byte equality alone. (2) local bytes equal the incoming blob, read with showBlob (git show). Explicitly NOT git's blob id: that is SHA-1 over a header plus content, a different hash of a different thing, and comparing it to a SHA-256 content address would manufacture disagreements.
+
+Two passes on purpose: every file is confirmed, then the removals happen. A mismatch in the last file cannot have deleted the first. Removed bytes are held in memory and restorePayloads() re-places them from abort(), so every failure path after the step leaves the working tree as found.
+
+Refusal code chosen: log-sync-payload-mismatch (added to LOG_SYNC_REFUSAL_CODES, the help, and both docs). It maps to EXIT_IO via the existing refusalExit table, which is right: it is a filesystem fact, not a statement about the chain's integrity.
+
+Report/CLI: LogSyncReport.payloadsReconciled; --json gains payloads:{reconciled:N}; the human table gains a payloads row.
+
+Invariant paths touched: none of SPEC §11's global invariants change. Worth naming anyway, since the step deletes files: it appends nothing (no appendEvent on any path here, and the existing 'neither verb appends an event' test still passes), it never touches events.jsonl, and the delete-only-after-proof ordering is the fail-closed reading — an unprovable payload refuses rather than being cleared. No SPEC amendment needed: §9's payload store contract is unchanged, and §10.1's 'sync appends no event' still holds.
+
+No new dependencies.
+<!-- SECTION:NOTES:END -->

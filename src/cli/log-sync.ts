@@ -715,12 +715,16 @@ function restorePayloads(removed: readonly RemovedPayload[]): void {
   }
 }
 
-/** Repo-relative paths of everything git lists, as trimmed non-empty lines. */
+/**
+ * Repo-relative paths out of a NUL-separated git listing.
+ *
+ * `-z` on both listings, so the two sets are spelled the same way. Without it
+ * git quotes any path it considers unusual, and a quoted name on one side would
+ * simply fail to match its unquoted self on the other — dropping the file out of
+ * the intersection, which is to say handling it by not noticing it.
+ */
 function pathLines(stdout: string): string[] {
-  return stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
+  return stdout.split("\0").filter((line) => line.length > 0);
 }
 
 /**
@@ -745,7 +749,10 @@ function overlappingPayloads(
   // with, so there is nothing here to reconcile.
   if (storeRelative.startsWith("..")) return { ok: true, paths: [] };
 
-  const untracked = git(["ls-files", "--others", "--exclude-standard", "--", storeRelative], root);
+  const untracked = git(
+    ["ls-files", "--others", "--exclude-standard", "-z", "--", storeRelative],
+    root,
+  );
   if (!untracked.ok) {
     return {
       ok: false,
@@ -764,12 +771,7 @@ function overlappingPayloads(
       quote: outputLines(incoming.stderr, incoming.stdout),
     };
   }
-  const carried = new Set(
-    incoming.stdout
-      .split("\0")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0),
-  );
+  const carried = new Set(pathLines(incoming.stdout));
 
   return { ok: true, paths: [...local].filter((path) => carried.has(path)).sort() };
 }
