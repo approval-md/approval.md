@@ -87,15 +87,25 @@ import {
   TELEGRAM_PROMPT_HEADING,
   TELEGRAM_STALE_COPY_PREFIX,
   TELEGRAM_STALE_UNKNOWN,
+  parseBotCommand,
+  TELEGRAM_COMMANDS,
   type TelegramConfig,
   type TelegramPollResult,
 } from "../src/channels/telegram.js";
 import {
+  telegramDeliveryFor,
+  TELEGRAM_DEFAULT_DELIVERY,
+  type TelegramDelivery,
+} from "../src/core/telegram-config.js";
+import {
   bannerLines,
+  commandHandlerFor,
   describeActionFor,
   dispatchPending,
   glossWiring,
   newDispatchState,
+  queueLines,
+  summaryLines,
   DISPATCH_RETENTION_MS,
   type ListenSetup,
 } from "../src/cli/channel-telegram.js";
@@ -2665,6 +2675,14 @@ function setupFor(
   world: Live,
   channel: TelegramChannel,
   gloss?: GlossRunner,
+  /**
+   * APRV-216. The PRODUCT default is `paced`; this helper defaults to `burst`
+   * because the cases below it were written against burst and are what proves
+   * `delivery: burst` still restores that behaviour (AC 5). The paced cases
+   * ask for `paced` by name, so both modes are exercised and neither is
+   * exercised by accident.
+   */
+  delivery: TelegramDelivery = "burst",
 ): ListenSetup {
   return {
     channel,
@@ -2672,6 +2690,7 @@ function setupFor(
     actor: HUMAN,
     json: false,
     once: false,
+    delivery,
     gateOptions: world.unit.options,
     tagOptions: world.tagOptions,
     // Absent unless a test hands one over. No suite in this repository may

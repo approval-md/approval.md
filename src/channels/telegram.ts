@@ -538,6 +538,14 @@ export const TELEGRAM_ANOMALY_KINDS = [
    * over. Always answered with a toast that names the state.
    */
   "stale-copy",
+  /**
+   * A message in the approver chat that began with `/` and named no command
+   * this channel answers (APRV-216). Counted rather than replied to: the chat
+   * belongs to a human, other bots and other slash commands live in it, and a
+   * channel that answered every unrecognised one would be noise in the one
+   * place an approver's attention is supposed to be scarce.
+   */
+  "unknown-command",
 ] as const;
 
 export type TelegramAnomalyKind = (typeof TELEGRAM_ANOMALY_KINDS)[number];
@@ -561,6 +569,45 @@ export interface TelegramStats {
    * restart is costing the approver a wrong tap.
    */
   staleCopyDecisions: number;
+  /**
+   * Bot commands handed to the runtime's command handler (APRV-216). Never a
+   * decision and never a log event: a command reorders what this process shows
+   * and nothing else.
+   */
+  commands: number;
+}
+
+/**
+ * The bot commands the paced listener answers (APRV-216).
+ *
+ * A closed set, and deliberately a small one. Each is a verb about ATTENTION —
+ * what to put in front of the approver next — and none of them is a verb about
+ * the log: there is no `/grant`, and there will not be one, because a decision
+ * must name the request it decides and a typed command names nothing the
+ * runtime could bind a payload hash to. Buttons decide; commands navigate.
+ */
+export const TELEGRAM_COMMANDS = ["queue", "skip", "next"] as const;
+
+export type TelegramCommand = (typeof TELEGRAM_COMMANDS)[number];
+
+/**
+ * The command a message's text names, or `null` (APRV-216).
+ *
+ * Pure, and exported so the listener's tests can exercise the grammar without
+ * a transport. Telegram delivers a command in a group chat as `/skip@thebot`,
+ * so the `@suffix` is stripped; the bot's own username is not checked, because
+ * this channel only ever reads ONE chat and a message in it that says `/skip`
+ * to some other bot is a message the approver still meant as a skip more often
+ * than not. Anything after the command word is ignored: none of these three
+ * takes an argument, and silently discarding one is better than refusing a
+ * command a human typed with a stray word on the end.
+ */
+export function parseBotCommand(text: unknown): TelegramCommand | null {
+  if (typeof text !== "string") return null;
+  const first = text.trim().split(/\s+/u)[0];
+  if (first === undefined || !first.startsWith("/")) return null;
+  const word = first.slice(1).split("@")[0]?.toLowerCase();
+  return TELEGRAM_COMMANDS.find((command) => command === word) ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1317,6 +1364,8 @@ export interface TelegramPollResult {
   outcomes: { action_key: string; outcome: DecisionOutcome }[];
   /** Callbacks ignored in this batch, with the reason. */
   ignored: { kind: TelegramAnomalyKind; detail: string }[];
+  /** Bot commands handed to the runtime in this batch, in order (APRV-216). */
+  commands: TelegramCommand[];
 }
 
 export interface TelegramListenOptions {
@@ -1395,6 +1444,12 @@ export class TelegramChannel implements TestableChannel {
   private ack: { id: string; answered: boolean } | null = null;
 
   private handler: ((decision: ChannelDecision) => DecisionOutcome) | null = null;
+  /**
+   * What to do with a bot command (APRV-216). Absent unless the runtime asked
+   * for commands, and its absence is what keeps `message` out of
+   * `allowed_updates` — see {@link onCommand}.
+   */
+  private commandHandler: ((command: TelegramCommand) => Promise<void> | void) | null = null;
   private readonly deliveries = new Map<string, Delivery>();
   /** Digest message id -> what is on it. Delivery bookkeeping, never truth. */
   private readonly digests = new Map<DeliveryId, DigestState>();
@@ -1417,8 +1472,10 @@ export class TelegramChannel implements TestableChannel {
       "unknown-callback": 0,
       "key-mismatch": 0,
       "stale-copy": 0,
+      "unknown-command": 0,
     },
     staleCopyDecisions: 0,
+    commands: 0,
   };
 
   constructor(config: TelegramConfig) {
@@ -1452,6 +1509,25 @@ export class TelegramChannel implements TestableChannel {
 
   onDecision(handler: (decision: ChannelDecision) => DecisionOutcome): void {
     this.handler = handler;
+  }
+
+  /**
+   * Register what to do with `/queue`, `/skip` and `/next` (APRV-216).
+   *
+   * **Registering is what makes this channel read messages at all.** Until a
+   * handler is here, `getUpdates` asks for `callback_query` only, exactly as it
+   * did before this task, so a listener in `burst` delivery consumes no message
+   * updates — which matters because `approval setup channel telegram`
+   * discovers the approver chat by reading one (APRV-74), and a listener that
+   * swallowed it would break the bootstrap of the very channel it runs on.
+   *
+   * The handler owns whatever answer the human gets. This class sends nothing
+   * of its own for a command: it holds no queue to summarise (SPEC.md §10.3),
+   * so the sentence a command produces is written where the pending set is
+   * re-derived, in `cli/channel-telegram.ts`.
+   */
+  onCommand(handler: (command: TelegramCommand) => Promise<void> | void): void {
+    this.commandHandler = handler;
   }
 
   health(): ChannelHealth {
@@ -2025,12 +2101,17 @@ export class TelegramChannel implements TestableChannel {
       {
         offset: this.offset,
         timeout: this.pollTimeoutSeconds,
-        allowed_updates: ["callback_query"],
+        // APRV-216. `message` is asked for only while a command handler is
+        // registered: see {@link onCommand} for why a listener that reads
+        // messages nobody asked for would break `approval setup channel
+        // telegram`'s chat discovery.
+        allowed_updates:
+          this.commandHandler === null ? ["callback_query"] : ["callback_query", "message"],
       },
       this.requestTimeoutMs ?? (this.pollTimeoutSeconds + 10) * 1000,
     );
 
-    const result: TelegramPollResult = { updates: 0, outcomes: [], ignored: [] };
+    const result: TelegramPollResult = { updates: 0, outcomes: [], ignored: [], commands: [] };
     for (const raw of updates) {
       const update = (raw ?? {}) as Record<string, unknown>;
       const id = update["update_id"];
@@ -2071,7 +2152,20 @@ export class TelegramChannel implements TestableChannel {
     result: TelegramPollResult,
   ): Promise<void> {
     const callback = update["callback_query"];
-    if (typeof callback !== "object" || callback === null) return;
+    if (typeof callback !== "object" || callback === null) {
+      // APRV-216. Swallowed for the same reason a thrown decision handler is:
+      // letting it out would reach `pollOnce`, and a listener that dropped into
+      // backoff because one command failed would be a listener that stopped
+      // listening over something that wrote nothing.
+      try {
+        await this.handleMessage(update, result);
+      } catch (cause) {
+        this.complain(
+          `approval: telegram failed while handling a command: ${this.describe(cause)} — nothing was appended and the listener is still up`,
+        );
+      }
+      return;
+    }
     const query = callback as Record<string, unknown>;
     const callbackId = typeof query["id"] === "string" ? query["id"] : "";
 
@@ -2090,6 +2184,71 @@ export class TelegramChannel implements TestableChannel {
         await this.safeAnswer(callbackId, TELEGRAM_ACK_FALLBACK);
       }
     }
+  }
+
+  /**
+   * A `message` update: the bot-command path (APRV-216).
+   *
+   * Three rules, in this order, and each of them is a refusal to act on
+   * something the network said:
+   *
+   * 1. **No handler, no reading.** A channel with no command handler wants no
+   *    message updates and did not ask for any; one that arrives anyway (a
+   *    webhook backlog, a poll issued before the handler was registered) is
+   *    dropped without a counter, because there is nothing wrong with it.
+   * 2. **The configured chat only.** A message from anywhere else is counted
+   *    `foreign-chat` and answered with nothing at all. Not even a refusal
+   *    reply: a stranger who can reach the bot learns from silence that the
+   *    bot is there, and learns from a reply what it is for.
+   * 3. **A closed vocabulary.** `/queue`, `/skip`, `/next`. Anything else
+   *    beginning with `/` is counted `unknown-command`; anything not beginning
+   *    with `/` is ordinary chat and is ignored silently.
+   *
+   * A command decides nothing and appends nothing — it cannot, because it
+   * never reaches {@link handler}. The handler it does reach reorders what the
+   * runtime shows next, which is process memory on the runtime's side of the
+   * boundary (SPEC.md §10.3).
+   */
+  private async handleMessage(
+    update: Record<string, unknown>,
+    result: TelegramPollResult,
+  ): Promise<void> {
+    const handler = this.commandHandler;
+    if (handler === null) return;
+
+    const raw = update["message"];
+    if (typeof raw !== "object" || raw === null) return;
+    const message = raw as Record<string, unknown>;
+    const text = message["text"];
+    if (typeof text !== "string" || !text.trim().startsWith("/")) return;
+
+    const chat = (message["chat"] ?? {}) as Record<string, unknown>;
+    const chatId = chat["id"] === undefined ? "" : String(chat["id"]);
+    if (chatId !== this.chatId) {
+      this.counters.anomalies["foreign-chat"] += 1;
+      result.ignored.push({
+        kind: "foreign-chat",
+        detail: `command from chat ${JSON.stringify(chatId)}, which is not the configured approver chat`,
+      });
+      this.complain(
+        `approval: telegram ignored a command (foreign-chat): from chat ${JSON.stringify(chatId)}, which is not the configured approver chat`,
+      );
+      return;
+    }
+
+    const command = parseBotCommand(text);
+    if (command === null) {
+      this.counters.anomalies["unknown-command"] += 1;
+      result.ignored.push({ kind: "unknown-command", detail: this.redact(text.trim()) });
+      return;
+    }
+
+    this.counters.commands += 1;
+    result.commands.push(command);
+    // A throw here is caught by `handleUpdate`, which complains and carries on:
+    // a command that failed must not cost the batch or the poll after it, and
+    // there is nothing to undo, because a command writes nothing.
+    await handler(command);
   }
 
   private async routeCallback(
