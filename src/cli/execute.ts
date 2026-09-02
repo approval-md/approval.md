@@ -57,8 +57,11 @@ import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
 import { openObligations } from "../core/audit.js";
 import { evaluateBudgets, type BudgetVerdict } from "../core/budgets.js";
+import { declaredCredentialsForClass } from "../adapters/registry.js";
+import { childEnvironment, type ChildEnvironment } from "../core/child-env.js";
 import {
   danglingExecutions,
+  findDeclaration,
   finishExecution,
   indeterminateExecutions,
   isReconcileResolution,
@@ -78,6 +81,7 @@ import { withdraw } from "../core/gate.js";
 import { keyStoreDirFor } from "../core/seal.js";
 import { readVerifiedRecords, requestState } from "../core/state.js";
 import { deliveredToken } from "../core/token.js";
+import { passphraseEnvFor } from "../core/vault.js";
 import type { EventRecord } from "../core/log.js";
 import { loadPolicy, parseDuration, POLICY_FILENAMES } from "../core/policy-load.js";
 import { verify } from "../core/verify.js";
@@ -235,6 +239,42 @@ function executeOptions(
     policy: policyLocation(flags, cwd),
     ...(token === null ? {} : { token }),
   };
+}
+
+/**
+ * The environment the granted child gets, and the count of what was withheld
+ * (APRV-205).
+ *
+ * Three inputs, none of them a flag. The policy names the passphrase variable
+ * (`vault.passphrase_env`); the credential-bearing prefixes and their allowlist
+ * come from the classifier's own list (APRV-194, exported for this); and the
+ * pass-through set is whatever adapter serves the DECLARED class of this action
+ * named in its `requiredCredentials` (APRV-169). The declaration is read from
+ * verified records — SPEC.md §11.1's first invariant, and the reason this is a
+ * second read of the log rather than a peek at the task file.
+ *
+ * A log this cannot read yields the empty pass-through set and a scrub that
+ * removes more, which is the fail-closed direction: `startExecution` is about to
+ * refuse the same read anyway, and if it somehow does not, the child is starved
+ * rather than fed.
+ */
+function childEnvFor(
+  logPath: string,
+  actionKey: string,
+  flags: Record<string, string | boolean>,
+  cwd: string,
+): ChildEnvironment {
+  const location = policyLocation(flags, cwd);
+  const load = loadPolicy(
+    location.file === undefined ? { dir: location.dir ?? cwd } : { file: location.file },
+  );
+  const read = readVerifiedRecords(logPath);
+  const declared = read.ok ? findDeclaration(read.records, actionKey) : null;
+  return childEnvironment({
+    passphraseEnv: passphraseEnvFor(load),
+    declaredCredentials:
+      declared === null ? [] : declaredCredentialsForClass(declared.class),
+  });
 }
 
 /** `defaults.approval_ttl` in force, or `null` when the policy declares none. */
@@ -435,6 +475,14 @@ export function commandRun(
     });
   }
 
+  // APRV-205. The child's environment is built BEFORE `execution.started`,
+  // because the count of what was withheld is recorded on that event and a
+  // number written after the fact would be a number nobody measured. The child
+  // gets everything the session holds except the credential-bearing names: see
+  // `core/child-env.ts` for the three rules and for what this deliberately does
+  // NOT do (it is a scrub, not the sandbox APRV-193 designs).
+  const childEnv = childEnvFor(logPath, actionKey, flags, cwd);
+
   // execution.started is appended HERE, before the child exists. A crash from
   // this line until the finish below leaves a dangling execution, which
   // `approval status` reports and nothing repairs on its own.
@@ -444,6 +492,7 @@ export function commandRun(
     {
       ...executeOptions(flags, cwd, stringFlag(flags, "--token")),
       presentedPayloadHash: payloadHash,
+      envStripped: childEnv.stripped,
     },
     actor,
   );
@@ -453,6 +502,7 @@ export function commandRun(
     cwd,
     stdio: childIo.stdio,
     encoding: "utf8",
+    env: childEnv.env,
   });
   if (childIo.onOutput !== undefined) {
     childIo.onOutput({ stdout: child.stdout ?? "", stderr: child.stderr ?? "" });

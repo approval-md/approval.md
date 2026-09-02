@@ -599,6 +599,18 @@ export interface TokenOptions extends ClockOptions {
    * omitting this field succeeds. Omitting it is a mismatch.
    */
   presentedPayloadHash?: string;
+  /**
+   * How many credential-bearing variables the executor withheld from the child
+   * it is about to spawn (APRV-205), recorded on the `execution.started` this
+   * spend appends.
+   *
+   * The manual path's copy of `ExecuteOptions.envStripped`, and it exists
+   * because the manual path's `execution.started` is written HERE rather than
+   * in `core/execute.ts`. A count recorded on one of the two start events and
+   * not the other would be a field an auditor could not rely on. A count, never
+   * a name and never a value.
+   */
+  envStripped?: number;
 }
 
 export type ConsumeResult =
@@ -779,6 +791,10 @@ export function consumeToken(
         // execution and the approval named the same payload. Unconditional: a
         // grant with no binding was refused above and never reaches this line.
         [PAYLOAD_HASH_FIELD]: verified.payloadHash,
+        // APRV-205: how many credential-bearing variables the child was starved
+        // of. Optional and additive; an execution with no child records none,
+        // because "none withheld" and "no child" are different facts.
+        ...(options.envStripped === undefined ? {} : { env_stripped: options.envStripped }),
       },
     },
     {

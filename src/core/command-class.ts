@@ -341,15 +341,18 @@ const CREDENTIAL_WRITE_BINS: readonly string[] = [
  * environment: it cannot know which `APPROVAL_*` holds a token, so it treats
  * the family alike and lets the allowlist below carve out the runtime's own
  * non-secret names. Erring wide costs one approval prompt.
+ *
+ * Exported since APRV-205: `core/child-env.ts` starves a spawned child of the
+ * same family, and two copies of this list would be one list that drifts.
  */
-const SECRET_ENV_PREFIXES: readonly string[] = ["APPROVAL_", "TELEGRAM_", "VAULT_"];
+export const SECRET_ENV_PREFIXES: readonly string[] = ["APPROVAL_", "TELEGRAM_", "VAULT_"];
 
 /**
  * The runtime's own variables under those prefixes that hold no secret: an
  * identity, a rendering switch, a path. Listed rather than pattern-matched so
  * that adding one is a deliberate act with a reviewer.
  */
-const NON_SECRET_ENV_NAMES: readonly string[] = [
+export const NON_SECRET_ENV_NAMES: readonly string[] = [
   "APPROVAL_HUMAN",
   "APPROVAL_AGENT",
   "APPROVAL_ASCII",
@@ -358,8 +361,14 @@ const NON_SECRET_ENV_NAMES: readonly string[] = [
   "APPROVAL_DIR",
 ];
 
-/** Does this bare variable name name credential material? */
-function isSecretEnvName(name: string): boolean {
+/**
+ * Does this bare variable name name credential material?
+ *
+ * Exported since APRV-205 for the same reason the two lists are: the scrub that
+ * builds a granted child's environment asks exactly this question, of a real
+ * environment rather than of command text, and it must ask it the same way.
+ */
+export function isSecretEnvName(name: string): boolean {
   if (NON_SECRET_ENV_NAMES.includes(name)) return false;
   return SECRET_ENV_PREFIXES.some((prefix) => name.startsWith(prefix) && name.length > prefix.length);
 }

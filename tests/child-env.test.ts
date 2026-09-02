@@ -1,0 +1,151 @@
+/**
+ * The starved child environment (APRV-205).
+ *
+ * `core/child-env.ts` is pure over a supplied environment map, so these cases
+ * hand it one and read the answer. Nothing here reads the real environment, and
+ * nothing here touches a vault, a key or `.approval/env`: every credential-shaped
+ * value in this file is a fixture invented for the assertion beside it.
+ *
+ * The end-to-end proof — a real value exported into a real child of `approval
+ * run`, absent from the child's own printed environment and absent from the log
+ * — lives in `tests/cli-run.test.ts`, because the thing under test there is the
+ * spawn.
+ */
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import { emailAdapter } from "../src/adapters/email.js";
+import { declaredCredentialsForClass } from "../src/adapters/registry.js";
+import { childEnvironment } from "../src/core/child-env.js";
+
+/** A fixture value, never a real one. */
+const FIXTURE = "fixture-value-not-a-credential";
+
+const SESSION: NodeJS.ProcessEnv = {
+  PATH: "/usr/bin:/bin",
+  HOME: "/home/fixture",
+  LANG: "en_US.UTF-8",
+  TMPDIR: "/tmp/fixture",
+  APPROVAL_TG_TOKEN: FIXTURE,
+  APPROVAL_TG_CHAT: FIXTURE,
+  APPROVAL_VAULT_PASSPHRASE: FIXTURE,
+  TELEGRAM_BOT_TOKEN: FIXTURE,
+  VAULT_TOKEN: FIXTURE,
+  APPROVAL_HUMAN: "human:carter",
+  APPROVAL_AGENT: "agent:claude",
+  APPROVAL_ASCII: "1",
+  APPROVAL_MD: "APPROVAL.md",
+  APPROVAL_HOME: "/home/fixture/.approval",
+  APPROVAL_DIR: "/repo",
+};
+
+test("every credential-bearing name is withheld from the child", () => {
+  const built = childEnvironment({ source: SESSION });
+  for (const name of [
+    "APPROVAL_TG_TOKEN",
+    "APPROVAL_TG_CHAT",
+    "APPROVAL_VAULT_PASSPHRASE",
+    "TELEGRAM_BOT_TOKEN",
+    "VAULT_TOKEN",
+  ]) {
+    assert.equal(built.env[name], undefined, `${name} reached the child`);
+  }
+  assert.equal(
+    Object.values(built.env).includes(FIXTURE),
+    false,
+    "a credential value reached the child under some other name",
+  );
+});
+
+test("the working environment passes through unchanged", () => {
+  const built = childEnvironment({ source: SESSION });
+  assert.equal(built.env["PATH"], "/usr/bin:/bin");
+  assert.equal(built.env["HOME"], "/home/fixture");
+  assert.equal(built.env["LANG"], "en_US.UTF-8");
+  assert.equal(built.env["TMPDIR"], "/tmp/fixture");
+});
+
+test("the APRV-194 allowlist survives the scrub", () => {
+  const built = childEnvironment({ source: SESSION });
+  assert.equal(built.env["APPROVAL_HUMAN"], "human:carter");
+  assert.equal(built.env["APPROVAL_AGENT"], "agent:claude");
+  assert.equal(built.env["APPROVAL_ASCII"], "1");
+  assert.equal(built.env["APPROVAL_MD"], "APPROVAL.md");
+  assert.equal(built.env["APPROVAL_HOME"], "/home/fixture/.approval");
+  assert.equal(built.env["APPROVAL_DIR"], "/repo");
+});
+
+test("the count is of what was withheld, and names nothing", () => {
+  const built = childEnvironment({ source: SESSION });
+  assert.equal(built.stripped, 5);
+  assert.equal(built.passed, 0);
+  assert.equal(childEnvironment({ source: { PATH: "/bin" } }).stripped, 0);
+});
+
+test("the variable the policy names is withheld even outside the prefixes", () => {
+  const source: NodeJS.ProcessEnv = { PATH: "/bin", HOUSE_KEY: FIXTURE };
+  const built = childEnvironment({ source, passphraseEnv: "HOUSE_KEY" });
+  assert.equal(built.env["HOUSE_KEY"], undefined);
+  assert.equal(built.env["PATH"], "/bin");
+  assert.equal(built.stripped, 1);
+});
+
+test("a passphrase variable that is absent costs no count", () => {
+  const built = childEnvironment({ source: { PATH: "/bin" }, passphraseEnv: "HOUSE_KEY" });
+  assert.equal(built.stripped, 0);
+  assert.deepEqual(built.env, { PATH: "/bin" });
+});
+
+test("an adapter-declared credential is passed, and nothing else under the prefixes", () => {
+  const built = childEnvironment({
+    source: SESSION,
+    declaredCredentials: ["APPROVAL_TG_TOKEN"],
+  });
+  assert.equal(built.env["APPROVAL_TG_TOKEN"], FIXTURE, "the declared credential was withheld");
+  assert.equal(built.passed, 1);
+  assert.equal(built.stripped, 4);
+  for (const name of [
+    "APPROVAL_TG_CHAT",
+    "APPROVAL_VAULT_PASSPHRASE",
+    "TELEGRAM_BOT_TOKEN",
+    "VAULT_TOKEN",
+  ]) {
+    assert.equal(built.env[name], undefined, `${name} rode in on the declaration`);
+  }
+});
+
+test("a declaration beats the policy's passphrase name too", () => {
+  const built = childEnvironment({
+    source: { PATH: "/bin", HOUSE_KEY: FIXTURE },
+    passphraseEnv: "HOUSE_KEY",
+    declaredCredentials: ["HOUSE_KEY"],
+  });
+  assert.equal(built.env["HOUSE_KEY"], FIXTURE);
+  assert.equal(built.stripped, 0);
+  assert.equal(built.passed, 1);
+});
+
+test("a declared name that is unset is not invented", () => {
+  const built = childEnvironment({
+    source: { PATH: "/bin" },
+    declaredCredentials: ["APPROVAL_TG_TOKEN"],
+  });
+  assert.equal("APPROVAL_TG_TOKEN" in built.env, false);
+  assert.equal(built.passed, 0);
+});
+
+test("the child's environment is a copy: mutating it does not touch the source", () => {
+  const source: NodeJS.ProcessEnv = { PATH: "/bin" };
+  const built = childEnvironment({ source });
+  built.env["PATH"] = "/elsewhere";
+  assert.equal(source["PATH"], "/bin");
+});
+
+test("the pass-through set comes from the adapter's own declaration (APRV-169)", () => {
+  const declared = declaredCredentialsForClass("communicate.email.external");
+  assert.deepEqual([...declared], [...(emailAdapter().requiredCredentials ?? [])]);
+  assert.ok(declared.length > 0, "the email adapter declares no required credential");
+  assert.deepEqual(declaredCredentialsForClass("files.write.local"), []);
+  assert.deepEqual(declaredCredentialsForClass("no.such.class"), []);
+});

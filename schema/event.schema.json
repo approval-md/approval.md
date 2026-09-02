@@ -533,6 +533,36 @@
       }
     },
     {
+      "$comment": "SPEC.md §10.4 (amended, APRV-205): an executor that spawns a child builds that child's environment rather than inheriting one, withholding every variable under the credential-bearing prefixes (less the runtime's non-secret allowlist) and the variable the policy's `vault.passphrase_env` names. `env_stripped` records HOW MANY were withheld and nothing else: a variable's name is half of a credential, and §11.1's raw-secrets invariant is not satisfied by leaking the other half slowly. The field is informational — nothing in the gate reads it back and no decision turns on it, which is why it does not collide with §11.1's rule that self-reported fields never reduce scrutiny. OPTIONAL and additive: an execution with no child (an adapter's `act`, which runs in the runtime's own process) records no count, every record written before the field existed still validates and still verifies, and only the SHAPE is constrained here.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "execution.started"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "env_stripped": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "SPEC.md §10.4: the COUNT of credential-bearing environment variables withheld from the spawned child. Never a name and never a value.",
+                "examples": [3]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "SPEC.md §10.3 (amended, APRV-38): a decision collected as part of a batch gesture carries the batch's channel delivery id as a first-class payload field. Optional — a unit decision has no batch — and constrained only when present, so the field can never arrive as an empty string or a number that audit would have to guess at.",
       "if": {
         "type": "object",

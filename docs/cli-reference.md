@@ -1121,10 +1121,39 @@ Exit 5 is an addition to the frozen table, emitted by this verb alone, and it is
 distinct from 1 because the repair is distinct: request the action, have a human
 grant it, and pass the token that grant printed once.
 
+**The child's environment is built, never inherited** (APRV-205). `run` used to
+hand the child a copy of the whole session environment, which meant the gate
+held the Telegram token and gave it to every command it launched. It now
+constructs the child's environment instead:
+
+- **Withheld**: every variable under the credential-bearing prefixes
+  (`APPROVAL_*`, `TELEGRAM_*`, `VAULT_*`), and the variable the policy's
+  `vault.passphrase_env` names, wherever that name falls. These are the same
+  prefixes the command classifier uses (APRV-194), read from the same list.
+- **Kept**: the runtime's own non-secret names under those prefixes
+  (`APPROVAL_HUMAN`, `APPROVAL_AGENT`, `APPROVAL_ASCII`, `APPROVAL_MD`,
+  `APPROVAL_HOME`, `APPROVAL_DIR`), and any credential the adapter serving this
+  action's class declared in `requiredCredentials` (APRV-169). That declaration
+  is the adapter's own static code; there is no flag that names a variable to
+  keep, because a flag like that hands the token back to whoever passes it.
+- **Untouched**: everything else. `PATH`, `HOME`, `TMPDIR`, locale, proxy
+  settings and the rest of a working environment pass through as they are.
+
+`execution.started` records `env_stripped`, the COUNT of what was withheld, and
+never a name and never a value: a variable's name is half of a credential. The
+count is informational, and nothing in the gate reads it back.
+
+This is a scrub and not a sandbox. The child keeps the network, the filesystem,
+and every other ambient capability of the session, so a granted command can
+still reach anything the session could reach. Taking those away is APRV-193's
+subject, and `approval run` says nothing here that pretends otherwise.
+
 **What it does, in this order.**
 
-1. appends `execution.started` BEFORE the child is spawned, never after;
-2. spawns the command with inherited stdio (the child owns the terminal);
+1. appends `execution.started` BEFORE the child is spawned, never after,
+   carrying `env_stripped`;
+2. spawns the command with inherited stdio (the child owns the terminal) and a
+   built environment (the child owns no credential);
 3. appends `execution.completed` (child exit 0) or `execution.failed` (anything
    else), carrying `payload.exit_code`, the real number, unmapped;
 4. exits with THE CHILD'S EXIT CODE.
