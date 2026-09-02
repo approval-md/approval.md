@@ -101,6 +101,13 @@ import {
   type ReadRecordsResult,
 } from "../core/state.js";
 import { validate } from "../core/validate.js";
+import { publishedState } from "../cli/log-advance.js";
+import {
+  attemptAdvance,
+  type AdvanceAttempt,
+  type AdvanceCadence,
+  type AdvanceOutcome,
+} from "./advance.js";
 import { sweepAuditSampling } from "./audit.js";
 import type { GitEvidenceRecorder } from "./git-evidence.js";
 import { prunePayloads, type PruneReason } from "./prune.js";
@@ -228,6 +235,34 @@ export type DaemonEvent =
       skipped: number;
       audit_backlog: number;
     }
+  | {
+      /**
+       * The log was advanced onto a records branch, or an attempt to advance it
+       * ended some other way (APRV-204). Additive: the union grows and no
+       * existing entry changes meaning.
+       *
+       * One line per ATTEMPT, including the refused and gated ones, because the
+       * thing an operator needs to see is that the cadence is running and what
+       * it met — an advance that silently did not happen is the failure mode
+       * this whole feature exists to remove.
+       */
+      event: "advance";
+      outcome: AdvanceOutcome;
+      /** Records not yet on a records branch, at the moment of the attempt. */
+      records_pending: number;
+      records_branch: string | null;
+      /** The seq range this attempt published, or `null` when it published none. */
+      range: { from: number; to: number } | null;
+      commit: string | null;
+      pr_url: string | null;
+      /** True when this attempt opened the day's pull request rather than updating it. */
+      pr_created: boolean;
+      /** The refusal or failure code, when the outcome carries one. */
+      code: string | null;
+      message: string;
+      /** True when this attempt was the graceful-shutdown flush. */
+      flush: boolean;
+    }
   | { event: "escalated"; task: string; consecutive_failures: number }
   | { event: "escalation_cleared"; task: string }
   | {
@@ -283,6 +318,13 @@ export const DAEMON_WARNING_CODES = [
    * log is untouched; the message carries `core/task-file.ts`'s own code.
    */
   "write-back-refused",
+  /**
+   * A cadence advance did not publish (APRV-204): the gate sent it to a human,
+   * refused it, or the verb itself failed. Nothing was committed, the outcome
+   * is on the `advance` line beside this warning, and the next tick tries
+   * again — the cadence interval is the retry bound, so there is no hot loop.
+   */
+  "advance-refused",
 ] as const;
 
 export type DaemonWarningCode = (typeof DAEMON_WARNING_CODES)[number];
@@ -324,6 +366,17 @@ export interface DaemonOptions {
    * change any verdict this loop reaches. See `daemon/git-evidence.ts`.
    */
   gitEvidence?: GitEvidenceRecorder;
+  /**
+   * The cadence advance (APRV-204), off unless the operator asked for it.
+   *
+   * Opt-in for the reason `gitEvidence` is: it pushes commits and opens pull
+   * requests on a remote, and a daemon that started doing that on an upgrade
+   * because a default changed under it would be the surprise this project
+   * exists to prevent. `approval daemon run --advance` turns it on.
+   */
+  advance?: AdvanceCadence;
+  /** The day the records branch is named for. Injected by tests. */
+  today?: string;
   sink: DaemonSink;
 }
 
@@ -389,6 +442,11 @@ export class Daemon {
   private expiries = 0;
   private renders = 0;
   private lastRender: RenderSummary | null = null;
+  /** Epoch ms of the last advance ATTEMPT, refusals included (APRV-204). */
+  private lastAdvanceAt: number | null = null;
+  private lastAdvance: AdvanceAttempt | null = null;
+  /** How many substantive records were owed at the last attempt. */
+  private lastAdvanceOwed: number | null = null;
   private reportedEscalations = new Set<string>();
   private settle: ((outcome: DaemonOutcome) => void) | null = null;
   private finished = false;
@@ -401,6 +459,13 @@ export class Daemon {
   run(): Promise<DaemonOutcome> {
     return new Promise<DaemonOutcome>((resolve) => {
       this.settle = resolve;
+      // The cadence clock starts when the daemon does (APRV-204), so a restart
+      // does not publish a records branch the moment it comes up: a daemon
+      // restarted in a loop would otherwise open a pull request per restart.
+      // The RECORD-COUNT trigger is unaffected, which is what keeps a busy
+      // repository from waiting out an interval it does not need to.
+      const started = Date.parse(readClock(this.clockOptions()));
+      this.lastAdvanceAt = Number.isNaN(started) ? 0 : started;
 
       if (!this.options.once) this.attachWatchers();
       this.emit({
@@ -456,6 +521,25 @@ export class Daemon {
       }
     }
     this.watchers.length = 0;
+
+    // The shutdown flush (APRV-204). A clean stop with unpublished records
+    // publishes them before it goes: the daemon is the log's writer, and a
+    // writer that exits leaving hours of records on nobody's branch hands the
+    // problem back to whoever has to remember. Only on a CLEAN stop — the three
+    // failure outcomes are all "this log is not fit to be committed from", and
+    // the advance would refuse them a second time anyway.
+    //
+    // Synchronous, inside the shutdown path, before the `stopped` line: the
+    // advance is `spawnSync` throughout, so there is nothing to await and
+    // nothing that could outlive the process.
+    if (outcome.kind === "stopped") {
+      try {
+        this.advanceIfDue(true);
+      } catch (cause) {
+        // A flush that throws must not stop the daemon from stopping.
+        this.warn("advance-refused", `the shutdown flush threw: ${errorMessage(cause)}`);
+      }
+    }
 
     this.emit({
       event: "stopped",
@@ -595,6 +679,13 @@ export class Daemon {
       const wrote = this.writeBack();
       if (wrote !== null) return wrote;
 
+      // The cadence advance (APRV-204), after every append this tick can make
+      // and before the closing read, so the head this tick reports is the head
+      // the advance published against. It appends through the gate rather than
+      // through this loop, and everything it appends is picked up by the read
+      // below like any other writer's.
+      this.advanceIfDue(false);
+
       const closing = this.read();
       if (!closing.ok) return this.fatal(closing);
       const escalated = this.surfaceEscalations(closing.records);
@@ -614,6 +705,109 @@ export class Daemon {
     } finally {
       this.ticking = false;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // The cadence advance (APRV-204)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Advance the log if the cadence says it is due, or if this is the flush.
+   *
+   * The trigger, in one place: enough SUBSTANTIVE records have accrued
+   * (`afterRecords`), or the interval has elapsed since the last attempt and at
+   * least one substantive record is owed. "Substantive" excludes the advance
+   * cycle's own bookkeeping — see `daemon/advance.ts` on why counting it would
+   * make an idle repository advance forever.
+   *
+   * The last-attempt clock is set for every attempt, successful or not, which
+   * is what keeps a refusal off the hot path: a gate that says no costs one
+   * attempt per interval and no more.
+   *
+   * The flush ignores the interval and the count, and only the interval and the
+   * count: it still asks the gate, and it still does nothing when nothing is
+   * owed.
+   */
+  private advanceIfDue(flush: boolean): void {
+    const cadence = this.options.advance;
+    if (cadence === undefined) return;
+
+    const read = this.read();
+    if (!read.ok) return;
+    const root = this.options.cwd;
+    const today = this.options.today ?? readClock(this.clockOptions());
+    const state = publishedState(root, this.options.logPath, read.records, cadence, today);
+    if (state.substantive === 0) return;
+
+    // The flush does not re-ask a question this process just asked. A tick
+    // whose advance was gated or refused leaves a request in the queue; a flush
+    // a moment later, against the same owed records, would put a SECOND
+    // identical question in front of the same human. Measured in SUBSTANTIVE
+    // records rather than in head seq, because the gated attempt's own request
+    // moved the head and answered nothing. The retry is the next tick's
+    // business, and the next daemon's.
+    if (
+      flush &&
+      this.lastAdvance !== null &&
+      this.lastAdvance.outcome !== "advanced" &&
+      this.lastAdvanceOwed !== null &&
+      state.substantive <= this.lastAdvanceOwed
+    ) {
+      return;
+    }
+
+    const now = Date.parse(readClock(this.clockOptions()));
+    const elapsed = this.lastAdvanceAt === null || Number.isNaN(now) || now - this.lastAdvanceAt >= cadence.intervalMs;
+    if (!flush && state.substantive < cadence.afterRecords && !elapsed) return;
+
+    this.lastAdvanceAt = Number.isNaN(now) ? 0 : now;
+    this.lastAdvanceOwed = state.substantive;
+    const attempt = attemptAdvance(
+      {
+        logPath: this.options.logPath,
+        cwd: root,
+        policy: this.options.policy,
+        cadence,
+        ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
+        ...(this.options.clock === undefined ? {} : { clock: this.options.clock }),
+        ...(this.options.today === undefined ? {} : { today: this.options.today }),
+      },
+      read.records,
+    );
+    this.lastAdvance = attempt;
+    if (attempt.outcome === "nothing-owed") return;
+
+    this.emit({
+      event: "advance",
+      outcome: attempt.outcome,
+      records_pending: attempt.recordsPending,
+      records_branch: attempt.recordsBranch,
+      range: attempt.range,
+      commit: attempt.commit,
+      pr_url: attempt.prUrl,
+      pr_created: attempt.prCreated,
+      code: attempt.code,
+      message: attempt.message,
+      flush,
+    });
+    if (attempt.outcome !== "advanced") {
+      this.warn(
+        "advance-refused",
+        `the cadence advance did not publish (${attempt.outcome}${
+          attempt.code === null ? "" : `, ${attempt.code}`
+        }): ${attempt.message}`,
+      );
+    }
+  }
+
+  /** The clock this loop reads, as the options every core writer takes it. */
+  private clockOptions(): { clock?: Clock } {
+    return this.options.clock === undefined ? {} : { clock: this.options.clock };
+  }
+
+  /** The last attempt this process made, for a caller that wants to assert on it. */
+  lastAdvanceAttempt(): AdvanceAttempt | null {
+    return this.lastAdvance;
   }
 
   private fatal(read: LogReadRefusal): DaemonOutcome {

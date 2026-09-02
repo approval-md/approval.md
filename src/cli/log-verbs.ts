@@ -247,6 +247,8 @@ export function commandLogAdvance(argv: string[], streams: Streams, cwd: string)
         recordsBranch: report.recordsBranch,
         remote: report.remote,
         base: report.base,
+        parent: report.parent ?? null,
+        reusedRecordsBranch: report.reusedRecordsBranch ?? false,
         range: report.range,
         head: { committed: report.committedHead, working: report.workingHead },
         staged: report.staged,
@@ -254,6 +256,7 @@ export function commandLogAdvance(argv: string[], streams: Streams, cwd: string)
         commit: report.commit,
         pushed: report.pushed,
         prUrl: report.prUrl,
+        prCreated: report.prCreated ?? false,
         dryRun: report.dryRun,
       })}\n`,
     );
@@ -285,6 +288,16 @@ export function commandLogAdvance(argv: string[], streams: Streams, cwd: string)
             ? "(unknown)"
             : `${report.remote}/${report.base.branch}  ${st.muted(short(report.base.sha))}`,
       },
+      ...(report.parent === undefined || report.parent.ref === `${report.remote}/${report.base?.branch ?? ""}`
+        ? []
+        : [
+            {
+              left: "parent",
+              right: `${report.parent.ref}  ${st.muted(
+                `${short(report.parent.sha)} — the day's records branch, updated rather than re-created`,
+              )}`,
+            },
+          ]),
       { left: "carries", right: report.staged.join(", ") },
       { left: "commit", right: report.commit === null ? "(dry run)" : short(report.commit) },
       {

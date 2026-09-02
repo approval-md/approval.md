@@ -102,7 +102,9 @@ import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { policyWebPort } from "./channel-web.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
+import { lastAdvance } from "../core/advance-cycle.js";
 import { repoPath, repoRoot, showBlob } from "./git-scope.js";
+import { publishedState } from "./log-advance.js";
 import { DOCTOR_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
@@ -1472,6 +1474,67 @@ function checkLogDrift(logPath: string): DoctorCheck {
 }
 
 // ---------------------------------------------------------------------------
+// 13. log-advance-cadence (APRV-204)
+// ---------------------------------------------------------------------------
+
+/**
+ * How far the log has run ahead of any records branch, and how the daemon's
+ * last advance ended.
+ *
+ * This is the status surface the cadence needed and `approval daemon` did not
+ * have. There is no `approval daemon status` subcommand and no status file: the
+ * daemon reports live on its own event stream, which is gone the moment nobody
+ * is tailing it, and a status file would be a second copy of facts the log
+ * already carries. So the answer is read from the log itself (the advance
+ * cycles the daemon registers under `daemon-advance-*`) plus git's local refs,
+ * which is why it can be answered by a DIFFERENT process from the one that made
+ * the attempt, and why an operator gets the same answer whether or not a daemon
+ * is running at all.
+ *
+ * Reads only, and never fetches: the same rule `log-drift` holds itself to.
+ * Advisory rather than failing — records waiting to be published is the normal
+ * state of a checkout that has been recording decisions, and only the reader
+ * knows how long is too long.
+ */
+function checkAdvanceCadence(logPath: string, records: readonly EventRecord[]): DoctorCheck {
+  const check = "log-advance-cadence";
+  const root = repoRoot(dirname(logPath));
+  if (root === null) {
+    return {
+      check,
+      status: "skip",
+      detail: `${logPath} is not inside a git repository, so there is no records branch for anything to be waiting for`,
+    };
+  }
+
+  const today = new Date().toISOString();
+  const state = publishedState(root, logPath, records, { remote: "origin", base: null }, today);
+  const last = lastAdvance(records);
+  const attempt =
+    last === null
+      ? "no daemon advance cycle is in this log yet (the cadence is opt-in: `approval daemon run --advance`)"
+      : `the last daemon advance (through seq ${String(last.toSeq)}, ${last.ts}) ended ${last.outcome}`;
+
+  if (state.pending === 0) {
+    return {
+      check,
+      status: "pass",
+      detail: `every record through seq ${String(state.publishedSeq)} is on a records branch or the trunk; ${attempt}`,
+    };
+  }
+  return {
+    check,
+    status: "pass",
+    detail: `${String(state.pending)} record(s) are not yet on a records branch (${String(
+      state.substantive,
+    )} of them are not the daemon's own advance bookkeeping); published through seq ${String(
+      state.publishedSeq,
+    )}, working head seq ${String(state.workingSeq)}. ${attempt}`,
+    fix: "approval log advance --pr — publish them now, or run the daemon with --advance",
+  };
+}
+
+// ---------------------------------------------------------------------------
 // harness hook outcome reporting (APRV-145)
 // ---------------------------------------------------------------------------
 
@@ -1845,6 +1908,9 @@ export function commandDoctor(
       // APRV-178: appended, eighth time, same reason. The sharing this reports
       // is what put a demo gate on the production bot.
       checkKeychainScope(logPath, policyLoad),
+      // APRV-204: appended, ninth time, same reason. The cadence advance needed
+      // a status surface that outlives the daemon's own event stream.
+      checkAdvanceCadence(logPath, verified.records),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

@@ -40,6 +40,7 @@ import {
   type DaemonOptions,
   type DaemonOutcome,
 } from "../daemon/daemon.js";
+import { defaultCadence, type AdvanceCadence } from "../daemon/advance.js";
 import { enableGitEvidence, type GitEvidenceEvent } from "../daemon/git-evidence.js";
 import { parseDuration } from "../core/policy-load.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
@@ -67,6 +68,15 @@ const RUN_FLAGS: Record<string, FlagKind> = {
   "--debounce": "string",
   "--once": "boolean",
   "--git-evidence": "boolean",
+  // The cadence advance (APRV-204). Opt-in, like `--git-evidence`: it pushes to
+  // a remote and opens pull requests, which a daemon must never start doing
+  // because a default moved under an operator who did not ask.
+  "--advance": "boolean",
+  "--advance-interval": "string",
+  "--advance-after": "string",
+  "--advance-remote": "string",
+  "--advance-base": "string",
+  "--no-advance-pr": "boolean",
   "--json": "boolean",
   "--help": "boolean",
   "-h": "boolean",
@@ -109,6 +119,47 @@ export function durationFlag(
     };
   }
   return { ok: true, ms };
+}
+
+/**
+ * The cadence-advance flags, as one cadence or none (APRV-204).
+ *
+ * Exported for `approval up`, which accepts every `daemon run` flag and must
+ * refuse a typo in exactly the same words — the reason {@link durationFlag} is
+ * exported, and the reason this parsing is not written twice.
+ *
+ * Every duration and count is judged HERE, before the first tick: a daemon that
+ * accepted `--advance-after twenty` and quietly advanced on the default would be
+ * lying about its own configuration for as long as it ran.
+ */
+export function advanceFlags(
+  flags: Record<string, string | boolean>,
+): { ok: true; cadence: AdvanceCadence | null } | { ok: false; message: string } {
+  if (!boolFlag(flags, "--advance")) return { ok: true, cadence: null };
+  const fallback = defaultCadence();
+
+  const interval = durationFlag(flags, "--advance-interval", fallback.intervalMs);
+  if (!interval.ok) return { ok: false, message: interval.message };
+
+  const afterRaw = stringFlag(flags, "--advance-after");
+  const after = afterRaw === null ? fallback.afterRecords : Number.parseInt(afterRaw, 10);
+  if (!Number.isInteger(after) || after < 1) {
+    return {
+      ok: false,
+      message: `--advance-after expects a positive whole number of records, got ${JSON.stringify(afterRaw)}`,
+    };
+  }
+
+  return {
+    ok: true,
+    cadence: {
+      intervalMs: interval.ms,
+      afterRecords: after,
+      remote: stringFlag(flags, "--advance-remote") ?? fallback.remote,
+      base: stringFlag(flags, "--advance-base"),
+      pr: !boolFlag(flags, "--no-advance-pr"),
+    },
+  };
 }
 
 /**
@@ -179,6 +230,23 @@ export function describeDaemonEvent(event: DaemonEvent): { text: string; stderr:
           event.audit_backlog,
         )} awaiting audit review)`,
         stderr: false,
+      };
+    case "advance":
+      // The refused and gated outcomes go to stderr beside their warning, for
+      // the reason every warning does: a records branch that did not move is a
+      // complaint, and a complaint belongs where an operator's eye is.
+      return {
+        text:
+          event.outcome === "advanced"
+            ? `log advance: ${event.message}${event.flush ? " (shutdown flush)" : ""}${
+                event.pr_created ? " — pull request opened" : ""
+              }`
+            : `log advance ${event.outcome}${event.code === null ? "" : ` (${event.code})`}: ${
+                event.message
+              } — ${String(event.records_pending)} record(s) still off ${
+                event.records_branch ?? "any records branch"
+              }`,
+        stderr: event.outcome !== "advanced",
       };
     case "escalated":
       return {
@@ -349,6 +417,10 @@ export function commandDaemonRun(
       },
     },
   };
+
+  const cadence = advanceFlags(flags);
+  if (!cadence.ok) return usageError(streams, json, cadence.message, DAEMON_RUN_HELP);
+  if (cadence.cadence !== null) options.advance = cadence.cadence;
 
   // SPEC.md §8's optional git hardening (APRV-42). Opt-in, checked here and
   // never later: an operator who asked for a second evidence layer and silently

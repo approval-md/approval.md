@@ -100,6 +100,7 @@ import {
   type RunningWebChannel,
 } from "./channel-web.js";
 import {
+  advanceFlags,
   describeDaemonEvent,
   describeGitEvidence,
   durationFlag,
@@ -227,6 +228,13 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--debounce": "string",
   "--once": "boolean",
   "--git-evidence": "boolean",
+  // The cadence advance (APRV-204), spelled identically to `daemon run`'s.
+  "--advance": "boolean",
+  "--advance-interval": "string",
+  "--advance-after": "string",
+  "--advance-remote": "string",
+  "--advance-base": "string",
+  "--no-advance-pr": "boolean",
   // The channels'.
   "--as": "string",
   "--payloads": "string",
@@ -517,6 +525,12 @@ export function commandUp(
       },
     },
   };
+
+  // The cadence advance (APRV-204), parsed by `daemon run`'s own function so a
+  // typo is refused in the same words on both spellings of this verb.
+  const cadence = advanceFlags(flags);
+  if (!cadence.ok) return usageError(streams, json, cadence.message);
+  if (cadence.cadence !== null) options.advance = cadence.cadence;
 
   // SPEC.md §8's optional git hardening, judged before the first tick exactly as
   // `daemon run` judges it: an operator who asked for a second evidence layer and
