@@ -342,7 +342,18 @@ export class VerifiedReadCache {
     const text = prefix === null ? raw.toString("utf8") : raw.toString("utf8", prefix.byteLength);
     const verified = verifyText(logPath, text, options, prefix);
 
-    this.#remember(key, raw, schemaKey, mtimeMs, verified);
+    // APRV-206. When the file has not grown since the entry that was just
+    // re-proved, the digest of these bytes is the digest that entry holds: the
+    // prefix hash covered the whole file, and `reusablePrefix` has just shown
+    // the file is those same bytes. Re-deriving it would hash the same megabytes
+    // a second time in one read, which on a repeat reader (the listener between
+    // taps) is the larger half of the read. Nothing is admitted on trust: this
+    // is only reached when the hash comparison above passed.
+    const known =
+      entry !== undefined && prefix !== null && raw.length === entry.byteLength
+        ? entry.prefixHash
+        : null;
+    this.#remember(key, raw, schemaKey, mtimeMs, verified, known);
     return verified;
   }
 
@@ -357,6 +368,11 @@ export class VerifiedReadCache {
     schemaKey: string,
     mtimeMs: number,
     verified: VerifiedLog,
+    /**
+     * The digest of exactly these bytes, when the caller already re-proved them
+     * against a stored one (APRV-206). `null` means "hash them".
+     */
+    knownDigest: string | null,
   ): void {
     const result = verified.result;
     if (result.status !== "clean" || result.head === null) {
@@ -379,7 +395,7 @@ export class VerifiedReadCache {
       schemaKey,
       byteLength: raw.length,
       lines: result.records,
-      prefixHash: sha256(raw),
+      prefixHash: knownDigest ?? sha256(raw),
       headLineStart,
       headLine: Buffer.from(raw.subarray(headLineStart, raw.length - 1)),
       head: result.head,

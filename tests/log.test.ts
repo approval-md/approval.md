@@ -454,6 +454,49 @@ test("the module exposes no mutation, reorder, or truncate operation", async () 
   );
 });
 
+test("a record larger than the tail read window is still chained onto (APRV-206)", () => {
+  // The append reads the END of the file rather than all of it, in a window it
+  // doubles until the last line is whole inside it. A record bigger than the
+  // first window is the case that exercises the doubling, and this repository
+  // writes them: a policy proposal carries the policy text, and a payload
+  // census carries a rendering.
+  const logPath = freshLog();
+  appendOrThrow(logPath, REGISTERED);
+
+  const huge: EventInput = {
+    ...REGISTERED,
+    task: "task-huge",
+    payload: { title: "x".repeat(200_000) },
+  };
+  const big = appendOrThrow(logPath, huge);
+  assert.ok(big.hash.length === 64);
+
+  // The next append must chain onto that oversized line, which means it must
+  // have read the whole of it back.
+  const next = appendOrThrow(logPath, REQUESTED);
+  assert.equal(next.seq, 3);
+  assert.equal(next.prev, big.hash);
+
+  const records = readRecords(logPath);
+  assert.equal(records.length, 3);
+  const stored = (records[1] as EventRecord).payload?.["title"];
+  assert.equal(typeof stored === "string" ? stored.length : -1, 200_000);
+  for (const record of readRecords(logPath)) assert.ok(verifyRecordHash(record));
+});
+
+test("a multi-byte character in the last line survives the tail read (APRV-206)", () => {
+  // The tail window is cut at a newline before it is decoded, so a character
+  // whose bytes straddle the cut cannot be mangled into a different `prev`.
+  const logPath = freshLog();
+  const accented = appendOrThrow(logPath, {
+    ...REGISTERED,
+    payload: { title: "£1,200 — naïve — 🧾".repeat(64) },
+  });
+  const next = appendOrThrow(logPath, REQUESTED);
+  assert.equal(next.prev, accented.hash);
+  for (const record of readRecords(logPath)) assert.ok(verifyRecordHash(record));
+});
+
 test("withAppendLock grants exclusion and no write primitive", async () => {
   const { withAppendLock } = await import("../src/core/log.js");
   const logPath = freshLog();
