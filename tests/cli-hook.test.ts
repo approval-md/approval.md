@@ -590,6 +590,32 @@ test("an unclassified command denies without touching the log", () => {
   assert.equal(rawLog(dir), before);
 });
 
+test("a harness self-update is gated as deps.upgrade, not refused as unclassified (APRV-228)", () => {
+  // Before APRV-228 `claude update` fell to `hook-unclassified`: denied, but
+  // as "no rule", with no class an approver could grant. The fixture policy
+  // does not declare deps.upgrade, so it resolves to the manual default, the
+  // hook opens a request naming that class, and the deny is the ordinary
+  // timeout of a manual class awaiting a person.
+  const dir = ready();
+  const before = rawLog(dir);
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("claude update"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.doesNotMatch(verdict.reason, /^hook-unclassified: /u);
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.notEqual(rawLog(dir), before, "the deps.upgrade request must reach the log");
+  const written = recordsSince(dir, before);
+  const registered = written.find((record) => record["event"] === "task.registered");
+  assert.ok(registered !== undefined, "a task.registered names the class the human can grant");
+  const payload = registered["payload"] as Record<string, unknown>;
+  assert.equal(payload["class"], "deps.upgrade");
+  assertClean(dir);
+});
+
 test("an opaque command denies", () => {
   const dir = ready();
   const run = runCli(["hook", "claude-code"], dir, bashEvent("bash -c 'git push --force'"));

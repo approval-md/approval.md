@@ -109,6 +109,11 @@ on the assessment date:
 | `uca` | unclassified (denied) |
 | `uca service install` | unclassified (denied) |
 
+Since APRV-228 the four unclassified rows classify `deps.upgrade` (rules
+`harness-update` and `harness-updater` in `docs/claude-code-hook.md`), which
+the reference policy leaves on the manual default: still denied unattended,
+now with a class a human can grant.
+
 ### Fit
 
 Poor, on three counts.
