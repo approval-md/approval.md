@@ -118,6 +118,7 @@ import {
   type DarkSessionSweepOptions,
   type DarkSessionWatch,
 } from "./dark-session.js";
+import type { DrawServeResult } from "./draw.js";
 import type { GitEvidenceRecorder } from "./git-evidence.js";
 import { prunePayloads, type PruneReason } from "./prune.js";
 import {
@@ -172,6 +173,15 @@ export type DaemonEvent =
        * to see without asking the process anything.
        */
       read_proof: "full" | "incremental";
+      /**
+       * Where this run is answering live draws, or `null` when it is not
+       * (APRV-208). Additive, and on the first line for the reason `read_proof`
+       * is: whether `supervised-live` is actually live on this machine is a
+       * configuration an operator must be able to see without asking the process
+       * anything, and the difference between "sampled at 10%" and "gated at
+       * 100%" is exactly this field being a path rather than `null`.
+       */
+      draw?: string | null;
     }
   | {
       event: "drift";
@@ -406,6 +416,15 @@ export const DAEMON_WARNING_CODES = [
    * detector reports and the gate decides.
    */
   "dark-session-undetermined",
+  /**
+   * The live-draw socket could not be served (APRV-208). Nothing is degraded:
+   * every asker fails closed to a human decision, which is exactly what happens
+   * on a machine where no daemon runs at all. It is a warning rather than a
+   * silence because the operator's `supervised-live` classes are gating at 100%
+   * while it stands, and that is a thing to know rather than to discover from a
+   * month of taps.
+   */
+  "draw-unavailable",
 ] as const;
 
 export type DaemonWarningCode = (typeof DAEMON_WARNING_CODES)[number];
@@ -499,6 +518,20 @@ export interface DaemonOptions {
    * cannot drift from the mode its `started` line printed.
    */
   readProof?: { mode: "full" | "incremental"; everyReads: number; afterMs: number };
+  /**
+   * The live-draw server (APRV-208), or absent when this run answers no draws.
+   *
+   * Constructed by the CALLER, not here, and the reason is the sampling secret:
+   * the CLI resolves it from the environment the operator established (the one
+   * `eval "$(approval env)"` writes) and hands down a server that has closed
+   * over it. `DaemonOptions` therefore never carries a secret, this loop never
+   * sees one, and a daemon started in a shell where the secret does not resolve
+   * simply gets no server and every supervised-live action keeps gating, which
+   * is the behaviour of every release before this one.
+   *
+   * Typed structurally rather than as `DrawServer` so a test can inject one.
+   */
+  draw?: { start(): DrawServeResult; close(): void };
   sink: DaemonSink;
 }
 
@@ -597,6 +630,8 @@ export class Daemon {
   private previousSelfWrites = new Set<string>();
   private settle: ((outcome: DaemonOutcome) => void) | null = null;
   private finished = false;
+  /** Whether {@link DaemonOptions.draw} actually bound (APRV-208). */
+  private drawServing = false;
 
   constructor(options: DaemonOptions) {
     this.options = options;
@@ -615,6 +650,23 @@ export class Daemon {
       this.lastAdvanceAt = Number.isNaN(started) ? 0 : started;
 
       if (!this.options.once) this.attachWatchers();
+      // APRV-208. Before the `started` line, so that line can say truthfully
+      // whether this run is answering draws. A refusal is reported and the loop
+      // continues: askers fail closed to a human, which is where they were
+      // going with no daemon at all.
+      let drawPath: string | null = null;
+      if (this.options.draw !== undefined) {
+        const served = this.options.draw.start();
+        if (served.ok) {
+          drawPath = served.path;
+          this.drawServing = true;
+        } else {
+          this.warn(
+            "draw-unavailable",
+            `live draws are not being served (${served.reason}): ${served.detail}. Every supervised-live action gates to a human until this is fixed.`,
+          );
+        }
+      }
       this.emit({
         event: "started",
         log: this.display(this.options.logPath),
@@ -624,6 +676,7 @@ export class Daemon {
         debounce_ms: this.options.debounceMs,
         watching: this.watching,
         read_proof: this.options.readProof?.mode ?? "full",
+        draw: drawPath,
       });
 
       const outcome = this.tick();
@@ -669,6 +722,19 @@ export class Daemon {
       }
     }
     this.watchers.length = 0;
+
+    // APRV-208. The socket goes with the process that served it: a socket file
+    // outliving its server is a hook connecting to nothing, which is a slower
+    // road to the same gated verdict but a confusing one. Closed before the
+    // shutdown flush, because nothing in the flush answers draws.
+    if (this.drawServing && this.options.draw !== undefined) {
+      this.drawServing = false;
+      try {
+        this.options.draw.close();
+      } catch {
+        // A server that will not close cannot stop the daemon from stopping.
+      }
+    }
 
     // The shutdown flush (APRV-204). A clean stop with unpublished records
     // publishes them before it goes: the daemon is the log's writer, and a

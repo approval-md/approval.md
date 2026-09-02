@@ -104,6 +104,7 @@ import {
   snapshotPathFor,
   snapshotSummary,
 } from "../core/verified-snapshot.js";
+import { drawSocketPathFor } from "../core/live-draw.js";
 import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { policyWebPort } from "./channel-web.js";
@@ -825,6 +826,73 @@ function checkVerifiedSnapshot(logPath: string): DoctorCheck {
     check: "verified-snapshot",
     status: "pass",
     detail: `${path} endorses ${currency}: ${String(read.snapshot.lines)} record(s) through seq ${String(read.snapshot.head.seq)}, published ${read.snapshot.verified_at}. A hook re-proves the digest rather than re-walking the chain.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 7d. the live draw (APRV-208)
+// ---------------------------------------------------------------------------
+
+/**
+ * Is a daemon answering live draws for this log?
+ *
+ * The row exists because the difference it reports is invisible everywhere else
+ * and expensive: with nothing answering, a class an operator declared
+ * `supervised-live` at 0.1 is gated at 100% — safely, silently, and for as long
+ * as nobody notices, which is the state APRV-184 found this repository in for a
+ * fortnight. "Every policy edit asks for a tap" and "one in ten policy edits
+ * asks for a tap" look identical from inside the policy file.
+ *
+ * `skip` when the policy declares no `supervised-live` class: there is nothing
+ * to draw, and a row announcing a missing socket for a feature nobody uses is
+ * noise. Otherwise `pass` with the socket, or `fail` — this row's one `fail` —
+ * when a live class is declared and no usable socket is there, because that IS
+ * the operator's control not being in force.
+ *
+ * It asks the daemon nothing. It looks at the socket exactly as an asker does
+ * and reports what an asker would conclude.
+ */
+function checkLiveDraw(logPath: string, load: PolicyLoadResult): DoctorCheck {
+  const path = drawSocketPathFor(logPath);
+  const liveClasses = load.ok
+    ? Object.entries(load.policy.classes ?? {})
+        .filter(([, rule]) => rule?.autonomy === "supervised-live")
+        .map(([pattern]) => pattern)
+        .sort()
+    : [];
+  if (liveClasses.length === 0) {
+    return {
+      check: "live-draw",
+      status: "skip",
+      detail: `this policy declares no supervised-live class, so no draw is ever made and ${path} is not needed.`,
+    };
+  }
+
+  const declared = liveClasses.join(", ");
+  let stats;
+  try {
+    stats = statSync(path);
+  } catch {
+    return {
+      check: "live-draw",
+      status: "fail",
+      detail: `no draw socket at ${path}, so every action of ${declared} gates to a human instead of being sampled: a gate process holds no sampling secret, and there is no daemon to ask.`,
+      fix: 'eval "$(approval env)" && approval up — start the ambient runtime in a shell where the sampling secret resolves, so it can answer draws',
+    };
+  }
+  const euid = typeof process.geteuid === "function" ? process.geteuid() : null;
+  if (!stats.isSocket() || euid === null || stats.uid !== euid || (stats.mode & 0o077) !== 0) {
+    return {
+      check: "live-draw",
+      status: "fail",
+      detail: `${path} exists but every asker would refuse it (owner uid ${String(stats.uid)}, mode ${(stats.mode & 0o777).toString(8)}), so ${declared} gates to a human on every action.`,
+      fix: "stop the daemon, remove the socket, and start it again as the user who owns this approval home",
+    };
+  }
+  return {
+    check: "live-draw",
+    status: "pass",
+    detail: `${path} is present and owner-only, so a gate process with no sampling secret can have its draw answered and ${declared} is sampled at its declared rate rather than gated at 100%. A daemon that stops removes its socket, so this row falling to fail is the signal.`,
   };
 }
 
@@ -2170,6 +2238,9 @@ export function commandDoctor(
       // APRV-217: appended, twelfth time, same reason. A configuration row: it
       // reads the policy, never a running daemon's memory.
       checkReadProof(policyLoad),
+      // APRV-208: appended, thirteenth time, same reason. The one row that says
+      // whether supervised-live is actually live on this machine.
+      checkLiveDraw(logPath, policyLoad),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

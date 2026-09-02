@@ -56,9 +56,73 @@ import {
 } from "../core/live-draw.js";
 import { loadPolicy, type LoadPolicyOptions } from "../core/policy-load.js";
 import { resolve as resolveClass } from "../core/policy-match.js";
-import { isSampled } from "../core/sampler.js";
+import {
+  isSampled,
+  resolveLiveSelector,
+  type LiveSelectorUnavailableReason,
+} from "../core/sampler.js";
 import { readVerifiedRecords } from "../core/state.js";
 import type { EventRecord } from "../core/log.js";
+
+/**
+ * The server this environment can run, or the reason it cannot (APRV-208).
+ *
+ * ## Where the secret comes from, and why that is the whole opt-in
+ *
+ * From the daemon's OWN environment, and nowhere else. `.approval/env` is a
+ * source MAP and `core/env-file.ts`'s load-bearing rule is that no verb reads it
+ * into its own environment (the reason is `APPROVAL_HUMAN`: a working-tree file
+ * that could set identity would put the human-only gate one `echo >>` away from
+ * being nobody's gate). That rule is not weakened here. The operator runs `eval
+ * "$(approval env)"` in the terminal they start the daemon from — the same act
+ * `approval setup sampling` already documents, resolving the keychain item or the
+ * env file's declared source — and this reads what that established.
+ *
+ * That act is also the feature's opt-in, which is why there is no flag to turn
+ * it on. Serving draws changes VERDICTS: a class an operator declared
+ * `supervised-live` at 0.1 goes from gating 100% to gating 10%, and a default
+ * that moved that under someone on an upgrade would be the surprise this project
+ * exists to prevent. But it moves only for an operator who has exported the
+ * secret into the daemon's shell on purpose, having already amended their policy
+ * to declare the class live. Both halves are deliberate acts by the human. What
+ * exists instead is a way OUT — `approval daemon run --no-draw` — because the
+ * one thing an operator must always be able to do is take a control back.
+ */
+export function drawServerFor(
+  options: Omit<DrawServerOptions, "secret"> & { env?: NodeJS.ProcessEnv },
+): { ok: true; server: DrawServer } | { ok: false; reason: LiveSelectorUnavailableReason; message: string } {
+  const where: LoadPolicyOptions =
+    options.policy.file !== undefined
+      ? { file: options.policy.file }
+      : { dir: options.policy.dir ?? process.cwd() };
+  if (options.schemaDir !== undefined) where.schemaDir = options.schemaDir;
+  const load = loadPolicy(where);
+  const env = options.env ?? process.env;
+
+  // The availability question is asked through `core/sampler.ts`, so this and
+  // the in-process draw agree on what "no usable secret" means and on the words
+  // for each way of not having one. The secret itself is read here rather than
+  // there because a MAC needs the key and `resolveLiveSelector` returns a
+  // closure over it, deliberately.
+  const selector = resolveLiveSelector(load, env);
+  if (!selector.available) {
+    return { ok: false, reason: selector.reason, message: selector.message };
+  }
+  const secret = env[selector.secretEnv];
+  if (typeof secret !== "string" || secret.length === 0) {
+    return { ok: false, reason: "secret-unset", message: "the sampling secret is unset in this process" };
+  }
+  return {
+    ok: true,
+    server: new DrawServer({
+      logPath: options.logPath,
+      policy: options.policy,
+      ...(options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir }),
+      ...(options.now === undefined ? {} : { now: options.now }),
+      secret,
+    }),
+  };
+}
 
 /** Why the server declined to listen. Reported, never fatal to the daemon. */
 export type DrawServeRefusal =
@@ -318,9 +382,10 @@ export class DrawServer {
       return undefined;
     }
 
-    const read = readVerifiedRecords(this.options.logPath, {
-      ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
-    });
+    const read = readVerifiedRecords(
+      this.options.logPath,
+      this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir },
+    );
     if (!read.ok) {
       refuse(`this daemon's log does not verify (${read.code}), so it will answer nothing`);
       return undefined;
