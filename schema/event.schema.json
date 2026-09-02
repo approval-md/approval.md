@@ -49,6 +49,7 @@
         "envelope.drift",
         "audit.sampled",
         "audit.reviewed",
+        "audit.dark_session",
         "reconciliation.required",
         "reconciliation.satisfied",
         "payload.pruned"
@@ -1072,6 +1073,84 @@
         "properties": {
           "task": {
             "$ref": "#/properties/task"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §10.2 (amended, APRV-192): the dark-session observation. The daemon correlates the git activity it can see against the records the log carries, and appends this when a checkout produced gated-class git activity for which no hook record exists. It is a statement by the RUNTIME about what it observed, never a record written on a session's behalf, so the actor MUST be `system:`-prefixed: an agent- or human-authored dark-session record would be the party under oversight (or the party it reports to) authoring the detector's findings, and §11.1 invariant 4 forbids a self-reported value from lowering scrutiny. The payload names the subject checkout, the verdict's stable code, the observation key that makes the append idempotent across ticks, and the counts. No commit message, no diff, no command text: §11.1 invariant 3 has no exception for diagnostics, and what this record establishes is an ABSENCE, which needs no content to state.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "audit.dark_session"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^system:"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "subject",
+              "code",
+              "observation_key"
+            ],
+            "properties": {
+              "subject": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The checkout the observation is about, named as the worktree directory's base name."
+              },
+              "code": {
+                "type": "string",
+                "enum": [
+                  "no-records",
+                  "no-evidence"
+                ],
+                "description": "Which arm found it: `no-records` is git activity with no attributable hook record at all, `no-evidence` is a guarded path changed with no evidence a human decided it (the spelling APRV-151's CI guard already uses)."
+              },
+              "observation_key": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Subject plus the state of the world it was observed in. The sweep re-derives it every tick and appends nothing for a key the verified log already carries, so a standing dark worktree produces one record rather than one per tick."
+              },
+              "commits": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "guarded_paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "window": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "to": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                }
+              }
+            }
           }
         }
       }

@@ -606,8 +606,62 @@ so nobody hunts for a token that was deliberately never created.
   is asking the party under oversight to report its own oversight. The backstop
   is `scripts/protected-path-guard.mjs`, below, which asks from outside.
 - **Latency.** Every gated tool call pays a Node start-up plus a verified read of
-  the log. SPEC.md §13's post-v1 Rust fast-path is the accelerator for exactly
-  this loop.
+  the log. The read is accelerated when the daemon is running (see below);
+  the start-up is not, and SPEC.md §13's post-v1 Rust fast-path is the
+  accelerator for exactly this loop.
+
+## Where the hook's reads come from (APRV-188)
+
+A hook is a fresh process per gated tool call, so it starts with nothing
+remembered and verifies the chain from genesis before it may decide anything.
+That cost is linear in the log: measured on a ten-thousand-record log it was
+65 ms of a 371 ms invocation, growing by about 6.5 ms per further thousand
+records. The daemon, meanwhile, holds a warm cache and re-verifies only the
+appended tail on every tick.
+
+So the daemon publishes what it verified, at
+`.approval/log/verified-head.json`, and a hook uses it instead of walking:
+
+```json
+{"v":1,"log":"/repo/.approval/log/events.jsonl","schema_dir":"",
+ "byte_length":3391938,"sha256":"…","lines":10008,
+ "head":{"seq":10008,"hash":"…"},"verified_at":"…","pid":812}
+```
+
+**It is an endorsement of bytes, not a source of records.** It says: the first
+`byte_length` bytes of this log, whose SHA-256 is this, verified clean and end
+at this head. The hook then, on its own:
+
+1. reads the log itself and computes the SHA-256 of those bytes — the proof, and
+   the same one the in-process cache pays on every cached read;
+2. parses the endorsed lines itself and re-derives the head and the line count,
+   so a snapshot naming a head those bytes do not reach is refused by arithmetic
+   rather than trusted;
+3. re-checks the chain links (`alg`, `seq` succession, `prev` linkage) over its
+   own parse;
+4. walks everything appended past the endorsed prefix in full, cold, exactly as
+   it walks a whole log today.
+
+**Anything it cannot prove, it ignores.** A snapshot that is absent, stale,
+truncated, for another log, verified against other schemas, owned by another
+user, writable by group or other, malformed, of an unknown version, or wrong in
+any of the checks above is dropped without comment and the hook verifies from
+genesis. There is no failure mode where a hook is *worse off* for a bad
+snapshot; the worst case is the behaviour of a machine that has never run the
+daemon. `approval doctor`'s `verified-snapshot` row says which of the two is
+happening.
+
+What the hook takes on the publisher's word is exactly two checks over bytes it
+has itself proved are the bytes the publisher named: the `event` schema
+validation and the per-record hash recompute. That residue is not a new
+capability. A snapshot can only endorse bytes already in the log file, and
+anyone who can write `verified-head.json` can write `events.jsonl` beside it —
+where, the chain being unkeyed, they could recompute a self-consistent forged
+log that passes a cold walk too. The ownership and permission checks are what
+keep that sentence true under a loose umask.
+
+The file is local, derived, gitignored, and never evidence. Deleting it costs
+latency and nothing else.
 
 ## The backstop outside the session: `scripts/protected-path-guard.mjs`
 

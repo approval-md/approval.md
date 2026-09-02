@@ -77,8 +77,10 @@ import {
 } from "../channels/contract.js";
 import { buildPendingQueue, type TagOptions } from "../channels/tagging.js";
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
+import { loadPolicy } from "../core/policy-load.js";
+import { passphraseEnvFor } from "../core/vault.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind, type ParsedFlags } from "./args.js";
-import { spawnGloss, GLOSS_TIMEOUT_MS, type GlossRunner } from "./gloss.js";
+import { glossRunnerFor, GLOSS_TIMEOUT_MS, type GlossRunner } from "./gloss.js";
 import { attachGloss, glossAbsenceLine } from "./gloss-attach.js";
 import {
   EXIT_INTEGRITY,
@@ -266,7 +268,14 @@ export function commandChannelCli(argv: string[], streams: Streams, cwd: string)
 
   // See the module header: the prompt loop is asynchronous, so its exit code is
   // assigned to process.exitCode when it settles.
-  void interactiveLoop(queue.requests, logPath, policy, actor, streams, glossRunner(flags)).then(
+  void interactiveLoop(
+    queue.requests,
+    logPath,
+    policy,
+    actor,
+    streams,
+    glossRunner(flags, policy),
+  ).then(
     (code) => {
       process.exitCode = code;
     },
@@ -296,9 +305,17 @@ export function commandChannelCli(argv: string[], streams: Streams, cwd: string)
  * deterministic one — `command_breakdown`, derived by the classifier from the
  * bound bytes, free, and marked `[computed]`. A sentence from a model that no
  * party vouches for is worth asking for, and worth asking for ON PURPOSE.
+ *
+ * The policy is read for one thing only (APRV-207): the NAME of its passphrase
+ * variable, so the scrub that starves the subprocess removes a renamed one too.
  */
-function glossRunner(flags: ParsedFlags): GlossRunner | undefined {
-  return boolFlag(flags, "--gloss") ? spawnGloss : undefined;
+function glossRunner(
+  flags: ParsedFlags,
+  policy: { dir?: string; file?: string },
+): GlossRunner | undefined {
+  return boolFlag(flags, "--gloss")
+    ? glossRunnerFor(passphraseEnvFor(loadPolicy(policy)))
+    : undefined;
 }
 
 function reportSkipped(

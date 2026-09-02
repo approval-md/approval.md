@@ -46,8 +46,12 @@ import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
 import { loadPolicy } from "../src/core/policy-load.js";
 import { harnessLoopEscalation, loopEscalation } from "../src/core/loop.js";
-import { readVerifiedRecords } from "../src/core/state.js";
-import { HOOK_DENY_CODES, SUMMARY_LIMIT } from "../src/cli/hook.js";
+import {
+  processReadCache,
+  readVerifiedRecords,
+  VerifiedReadCache,
+} from "../src/core/state.js";
+import { commandHook, HOOK_DENY_CODES, SUMMARY_LIMIT } from "../src/cli/hook.js";
 
 /** dist/tests/cli-hook.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -2472,5 +2476,134 @@ test("a hook event cannot set the timestamp of anything the gate writes", () => 
   for (const record of allRecords(dir)) {
     assert.notEqual(record["ts"], forged, "a caller-supplied instant became a record's ts");
   }
+  assertClean(dir);
+});
+
+// ===========================================================================
+// The verified-head snapshot (APRV-188)
+//
+// A hook's cost is dominated by a chain walk it repeats in every process. The
+// daemon publishes what it verified; the hook re-proves a digest over the bytes
+// it reads itself instead of re-walking. The cases below pin both halves: the
+// verdict and the records are IDENTICAL either way, and the walk is really
+// skipped.
+// ===========================================================================
+
+const SNAPSHOT = ".approval/log/verified-head.json";
+
+/** Publish a snapshot the way `approval daemon run` does: on a verified read. */
+function publishSnapshotFor(dir: string): void {
+  const read = readVerifiedRecords(join(dir, LOG), {
+    cache: new VerifiedReadCache(),
+    publishSnapshot: true,
+  });
+  assert.equal(read.ok, true, "the publishing read must be clean");
+}
+
+test("a snapshot changes neither the verdict nor what reaches the log", () => {
+  // Every gated shape the hook has, run twice against the same policy: once with
+  // no snapshot and once behind a fresh one. Same verdict, same records.
+  const shapes: [string, string][] = [
+    ["autonomous", bashEvent("ls -la", "tu-snap-auto")],
+    ["supervised", bashEvent("git push origin main", "tu-snap-sup")],
+    ["unclassified", bashEvent("vim CLAUDE.md", "tu-snap-unc")],
+    [
+      "manual",
+      event({
+        tool_name: "Write",
+        tool_input: { file_path: "APPROVAL.md" },
+        tool_use_id: "tu-snap-man",
+      }),
+    ],
+  ];
+
+  for (const [label, input] of shapes) {
+    const bare = ready();
+    const snapped = ready();
+    publishSnapshotFor(snapped);
+    assert.ok(existsSync(join(snapped, SNAPSHOT)), `${label}: the snapshot was published`);
+
+    const args = ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"];
+    const without = verdictOf(runCli(args, bare, input));
+    const withSnapshot = verdictOf(runCli(args, snapped, input));
+
+    assert.equal(withSnapshot.permission, without.permission, label);
+    assert.equal(withSnapshot.reason, without.reason, label);
+    assert.deepEqual(
+      recordsSince(snapped, "").map((record) => record["event"]),
+      recordsSince(bare, "").map((record) => record["event"]),
+      `${label}: the same records reach the log either way`,
+    );
+    assertClean(snapped);
+  }
+});
+
+test("a snapshot the daemon published lets a hook skip the chain walk", () => {
+  // AC1, on the read cache's own counters rather than with a stopwatch:
+  // `resumed` counts reads served from a published snapshot, and a hook that
+  // walked the chain shows none. Run in process, deliberately — the counters are
+  // the evidence, and a spawned CLI cannot report them. The rest of this file
+  // spawns, and the two cases above cover what the harness observes.
+  const dir = ready();
+
+  // The publisher is the real daemon, one tick, exactly as an operator runs it.
+  const daemon = runCli(["daemon", "run", "--once", "--json"], dir);
+  assert.equal(daemon.code, 0, daemon.stderr);
+  assert.ok(existsSync(join(dir, SNAPSHOT)), "a daemon tick publishes the snapshot");
+
+  const out: string[] = [];
+  const streams = { out: (text: string) => out.push(text), err: () => undefined };
+  const runHook = (toolUseId: string): { resumed: number; misses: number } => {
+    processReadCache.clear();
+    const code = commandHook(
+      ["claude-code", "--as", "agent:claude-code", "--dir", dir],
+      streams,
+      dir,
+      () => bashEvent("ls -la", toolUseId),
+    );
+    assert.equal(code, 0);
+    return { resumed: processReadCache.stats.resumed, misses: processReadCache.stats.misses };
+  };
+
+  const served = runHook("tu-snap-served");
+  assert.equal(served.resumed, 1, "the cold read was served from the daemon's snapshot");
+  const verdictWithSnapshot = out.join("");
+
+  // AC2: with the snapshot gone — the daemon stopped, or never ran here — the
+  // same call walks the log and says the same thing.
+  out.length = 0;
+  rmSync(join(dir, SNAPSHOT));
+  const walked = runHook("tu-snap-walked");
+  assert.equal(walked.resumed, 0, "with no snapshot the hook verifies from genesis");
+  assert.ok(walked.misses >= 1, "and it really did read cold");
+  const decisionOf = (text: string): unknown =>
+    (JSON.parse(text) as { hookSpecificOutput: Record<string, unknown> }).hookSpecificOutput[
+      "permissionDecision"
+    ];
+  assert.equal(decisionOf(out.join("")), decisionOf(verdictWithSnapshot));
+  assertClean(dir);
+});
+
+test("a snapshot that does not match the log is ignored, not obeyed", () => {
+  // AC3, end to end. The digest is the whole proof, so a snapshot endorsing
+  // bytes that are not the log's must leave no trace on the answer.
+  const dir = ready();
+  publishSnapshotFor(dir);
+  const snapshotPath = join(dir, SNAPSHOT);
+  const honest = JSON.parse(readFileSync(snapshotPath, "utf8")) as Record<string, unknown>;
+  writeFileSync(snapshotPath, `${JSON.stringify({ ...honest, sha256: "a".repeat(64) })}\n`, {
+    mode: 0o600,
+  });
+
+  const before = rawLog(dir);
+  const run = runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-snap-liar"));
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /^autonomous: /u);
+  assert.deepEqual(
+    recordsSince(dir, before).map((record) => record["event"]),
+    ["execution.started"],
+    "the same records as an unaccelerated run",
+  );
   assertClean(dir);
 });
