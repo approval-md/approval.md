@@ -80,6 +80,9 @@ import {
   TELEGRAM_DIGEST_MAX_MEMBERS,
   TELEGRAM_GLOSS_SUFFIX,
   TELEGRAM_ACK_FALLBACK,
+  TELEGRAM_ACK_HEARD,
+  TELEGRAM_HANDLER_FAILED,
+  TELEGRAM_NOT_RECORDED,
   TELEGRAM_MAX_CALLBACK_BYTES,
   TELEGRAM_PROMPT_HEADING,
   TELEGRAM_STALE_COPY_PREFIX,
@@ -1679,7 +1682,14 @@ test("Approve all is N decisions: one event per member, each bound to its own ac
   assert.equal(edits.length, 1, "one tap over the set is one redraw");
   assert.match(String(edits[0]?.text), /ALL 3 REQUESTS DECIDED/u);
   assert.equal(edits[0]?.replyMarkup, undefined);
-  assert.match(mock.answerTexts().join("\n"), /Approved 3 — one log event each\./u);
+  // APRV-206: the tap's one answer is the early ack, sent before any of the
+  // three decisions ran. The tally the toast used to carry is on the operator's
+  // terminal, and the outcome the approver reads is the redraw above.
+  assert.equal(mock.answerTexts().at(-1), TELEGRAM_ACK_HEARD);
+  assert.ok(
+    complaints.some((line) => line.includes("Approved 3 — one log event each.")),
+    `no digest tally on the operator stream: ${complaints.join("\n")}`,
+  );
   assertNoTokenInEdits();
 });
 
@@ -1717,7 +1727,13 @@ test("Approve all after a member was decided elsewhere records only the rest", a
     before + 2,
     "a refused member must append nothing, and must not stop the others",
   );
-  assert.match(mock.answerTexts().join("\n"), /Approved 2; 1 refused \(already-decided\)/u);
+  // APRV-206: acked before the members were decided, so the tally is the
+  // operator's line rather than the toast.
+  assert.equal(mock.answerTexts().at(-1), TELEGRAM_ACK_HEARD);
+  assert.ok(
+    complaints.some((line) => /Approved 2; 1 refused \(already-decided\)/u.test(line)),
+    `no digest tally on the operator stream: ${complaints.join("\n")}`,
+  );
   assertClean(world.unit);
 });
 
@@ -2114,10 +2130,16 @@ test("a tap on a withdrawn request is refused and appends nothing", async () => 
   assert.equal(outcome?.ok, false, "a withdrawn request must not be grantable");
   if (outcome !== undefined && !outcome.ok) assert.equal(outcome.code, "request-withdrawn");
   assert.equal(recordsOf(world.unit.logPath).length, before, "nothing was appended");
+  // APRV-206. The tap's one answer went out before the gate ran, so the refusal
+  // is in the message edit — where it outlives the toast that used to carry it.
+  assert.equal(mock.answerTexts().at(-1), TELEGRAM_ACK_HEARD);
+  const refused = mock.edits().at(-1);
+  assert.match(String(refused?.text), /NOT RECORDED/u);
   assert.match(
-    mock.answerTexts().join("\n"),
+    String(refused?.text),
     /Withdrawn — the requester took this back and is no longer waiting/u,
   );
+  assert.equal(refused?.replyMarkup, undefined, "a refused tap must leave no live button");
   assertClean(world.unit);
 });
 
@@ -3772,8 +3794,12 @@ test("every callback query is acked exactly once, on every path (APRV-196)", asy
   assert.deepEqual(stale, [TELEGRAM_STALE_UNKNOWN]);
 
   // And the accepted decision, which is the one path that was never in doubt.
+  // Since APRV-206 its one answer is the early ack — sent before the gate ran,
+  // so it says the tap arrived and claims nothing about the log. What the log
+  // recorded is in the message edit, asserted by the APRV-113 cases and by
+  // tests/telegram-tap-latency.test.ts.
   const accepted = await tap(live_);
-  assert.deepEqual(accepted, ["Approved — recorded in the log."]);
+  assert.deepEqual(accepted, [TELEGRAM_ACK_HEARD]);
 
   // The second tap on the same button — Telegram redelivers on its own — is
   // acked too, and appends nothing.
@@ -4010,11 +4036,48 @@ test("a handler that throws still answers the tap, and the loop survives (APRV-1
   const poll = await channel.pollOnce();
 
   assert.deepEqual(poll.outcomes, [], "a thrown handler produced an outcome");
-  assert.deepEqual(answersSince(from), [TELEGRAM_ACK_FALLBACK], "the tap went unanswered");
+  // APRV-206: exactly one answer, still — but it is now the early ack, which
+  // went out before the handler was called. The fallback toast the wrapper used
+  // to send is a no-op behind it, so the sentence the approver would have got
+  // from it is put on the message instead.
+  assert.deepEqual(answersSince(from), [TELEGRAM_ACK_HEARD], "the tap went unanswered");
+  const failed = mock.edits().at(-1);
+  assert.match(String(failed?.text), new RegExp(TELEGRAM_NOT_RECORDED, "u"));
+  assert.ok(
+    String(failed?.text).includes(TELEGRAM_HANDLER_FAILED.split("`")[0] as string),
+    `the failure was not put on the message: ${String(failed?.text)}`,
+  );
   assert.ok(
     complaints.some((entry) => entry.includes("failed while handling a callback")),
     "a thrown handler was not reported to the operator",
   );
   assert.equal(recordsOf(world.unit.logPath).length, events, "a thrown handler appended");
+  assertClean(world.unit);
+});
+
+test("a throw BEFORE any ack still falls back to the wrapper's toast (APRV-196)", async () => {
+  // The other side of APRV-206's early ack: it is sent once the tap has been
+  // resolved to a live delivery, so a branch that throws before that point has
+  // still answered nothing. The wrapper's fallback is what covers it, and this
+  // is the case that keeps it exercised — `describeAction` is the listener's
+  // verified-log probe, and a log it cannot read is a real way for it to throw.
+  const world = live(1);
+  const channel = channelFor({
+    describeAction: () => {
+      throw new Error("the probe fell over");
+    },
+  });
+  channel.onDecision(handlerFor(world, at(2)));
+
+  const from = mock.answerTexts().length;
+  mock.queueUpdate(
+    callbackUpdate({
+      data: `g:nosuchnonce:${actionRefOf("task-999:elsewhere")}`,
+      chatId: CHAT,
+    }),
+  );
+  await channel.pollOnce();
+
+  assert.deepEqual(answersSince(from), [TELEGRAM_ACK_FALLBACK], "the tap went unanswered");
   assertClean(world.unit);
 });

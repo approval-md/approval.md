@@ -24,7 +24,11 @@
  * 2. **Refuse to build on a corrupt tail.** If the file's last line is
  *    truncated (no terminating newline) or unparseable, the append is
  *    rejected. Chaining onto a half-written record would bake the corruption
- *    into every subsequent hash.
+ *    into every subsequent hash. Since APRV-206 that tail is read from the END
+ *    of the file rather than by reading the whole log: an append needs the last
+ *    line and nothing else, and paying one full read of an ever-growing file per
+ *    append put log length into the latency of every grant. Every refusal above
+ *    is unchanged, byte for byte.
  * 3. **The runtime stamps the chain fields.** Callers supply content only;
  *    `seq`, `prev`, `alg`, and `hash` are computed here. `alg` is always
  *    `sha256/jcs` (SPEC.md §8 defines exactly one value at v0.1).
@@ -47,9 +51,10 @@
 import { createHash } from "node:crypto";
 import {
   closeSync,
+  fstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
+  readSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
@@ -336,18 +341,44 @@ interface TailState {
 type TailOutcome = { ok: true; tail: TailState } | { ok: false; error: AppendError };
 
 /**
- * Determine the next `seq`/`prev` from the existing file. Refuses on any tail
- * that is not a complete, parseable record: a missing trailing newline means a
- * previous writer died mid-line, and chaining onto it would make the damage
- * permanent.
+ * How many bytes of the file's end {@link readLastLine} reads first, doubling
+ * until it has a whole line. One record of this log is a few hundred bytes, so
+ * a single read almost always suffices.
  */
-function readTail(logPath: string): TailOutcome {
-  let raw: string;
+const TAIL_WINDOW_BYTES = 64 * 1024;
+
+/** The byte a log line ends with. */
+const NEWLINE_BYTE = 0x0a;
+
+type LastLineOutcome =
+  | { ok: true; last: string | null; terminated: boolean }
+  | { ok: false; error: AppendError };
+
+/**
+ * The file's final line, read from the END of the file rather than by reading
+ * the whole log (APRV-206).
+ *
+ * An append needs exactly two facts about the existing file: whether it ends
+ * with a newline, and what its last complete line says. Reading the entire log
+ * to learn them made every append — every grant, every tap — pay one full read
+ * of a file that only grows. This reads a window off the tail and doubles it
+ * until the window either contains a newline before the final one (so the last
+ * line is whole inside it) or has reached the start of the file.
+ *
+ * `last` is `null` for an empty file. `terminated` is false when the file's last
+ * byte is not a newline, which is the torn tail {@link readTail} refuses.
+ *
+ * The window is decoded as UTF-8 only after being cut at a newline boundary, so
+ * a multi-byte character can never be split across the cut: every byte of the
+ * returned line came from between two newlines (or from the start of the file).
+ */
+function readLastLine(logPath: string): LastLineOutcome {
+  let fd: number;
   try {
-    raw = readFileSync(logPath, "utf8");
+    fd = openSync(logPath, "r");
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
-      return { ok: true, tail: { seq: 0, hash: GENESIS_PREV } };
+      return { ok: true, last: null, terminated: true };
     }
     return {
       ok: false,
@@ -355,9 +386,74 @@ function readTail(logPath: string): TailOutcome {
     };
   }
 
-  if (raw.length === 0) return { ok: true, tail: { seq: 0, hash: GENESIS_PREV } };
+  try {
+    const size = fstatSync(fd).size;
+    if (size === 0) return { ok: true, last: null, terminated: true };
 
-  if (!raw.endsWith("\n")) {
+    for (let window = TAIL_WINDOW_BYTES; ; window *= 2) {
+      const length = Math.min(window, size);
+      const start = size - length;
+      const buffer = Buffer.allocUnsafe(length);
+      // `read(2)` may return short. Loop until the window is full rather than
+      // trusting one call: a short read would leave uninitialised bytes in the
+      // buffer and a garbage "last line" built out of them.
+      for (let filled = 0; filled < length; ) {
+        const got = readSync(fd, buffer, filled, length - filled, start + filled);
+        if (got === 0) {
+          return {
+            ok: false,
+            error: {
+              code: "io",
+              message: `log ${logPath} ended early while reading its tail: wanted ${String(length)} bytes at offset ${String(start)}, got ${String(filled)}`,
+            },
+          };
+        }
+        filled += got;
+      }
+
+      const terminated = buffer[length - 1] === NEWLINE_BYTE;
+      // The last line runs from just after the newline before it, to the end of
+      // the file (minus its own terminator when it has one).
+      const end = terminated ? length - 1 : length;
+      const cut = buffer.lastIndexOf(NEWLINE_BYTE, end - 1);
+      if (cut === -1 && start > 0) {
+        // The line is longer than this window and the window does not reach the
+        // start of the file: widen and look again.
+        continue;
+      }
+      return {
+        ok: true,
+        last: buffer.toString("utf8", cut + 1, end),
+        terminated,
+      };
+    }
+  } catch (cause) {
+    return {
+      ok: false,
+      error: { code: "io", message: `log ${logPath} could not be read: ${errorMessage(cause)}` },
+    };
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      // Nothing actionable: the read is done and the result stands.
+    }
+  }
+}
+
+/**
+ * Determine the next `seq`/`prev` from the existing file. Refuses on any tail
+ * that is not a complete, parseable record: a missing trailing newline means a
+ * previous writer died mid-line, and chaining onto it would make the damage
+ * permanent.
+ */
+function readTail(logPath: string): TailOutcome {
+  const tailRead = readLastLine(logPath);
+  if (!tailRead.ok) return { ok: false, error: tailRead.error };
+
+  if (tailRead.last === null) return { ok: true, tail: { seq: 0, hash: GENESIS_PREV } };
+
+  if (!tailRead.terminated) {
     return {
       ok: false,
       error: {
@@ -367,10 +463,8 @@ function readTail(logPath: string): TailOutcome {
     };
   }
 
-  const lines = raw.split("\n");
-  lines.pop(); // trailing "" after the final newline
-  const last = lines[lines.length - 1];
-  if (last === undefined || last.trim().length === 0) {
+  const last = tailRead.last;
+  if (last.trim().length === 0) {
     return {
       ok: false,
       error: {

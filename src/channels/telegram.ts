@@ -198,6 +198,7 @@ import type {
   TaggedField,
   TestableChannel,
 } from "./contract.js";
+import type { GateRefusal } from "../core/gate.js";
 import { commandPayloadView, payloadRegionText } from "./payload-view.js";
 
 // ---------------------------------------------------------------------------
@@ -238,6 +239,48 @@ export const TELEGRAM_REJECT_NOTE = "rejected via telegram";
  */
 export const TELEGRAM_ACK_FALLBACK =
   "Received — this listener could not finish reading your tap. Nothing was recorded by it; check the message above for the outcome.";
+
+/**
+ * The toast a tap gets the instant it is recognized, BEFORE the gate runs
+ * (APRV-206).
+ *
+ * Telegram gives a callback query exactly one answer, and until it arrives the
+ * button spins on the approver's phone. Sending it after the decision made the
+ * spinner as long as the decision — which grew with the log — and the human,
+ * with no way to tell a slow tap from a swallowed one, tapped again.
+ *
+ * So this is what the single answer says, and its wording is load-bearing: it
+ * claims only that the tap ARRIVED. It must never say granted, rejected,
+ * approved, recorded, or anything else a reader could take as "the log now says
+ * so", because at the moment it is sent nothing has been appended and the gate
+ * may still refuse. What became of the request is said by the message edit that
+ * follows, which is written from the record the gate actually appended (or from
+ * its refusal). The toast vanishes; the message stays.
+ */
+export const TELEGRAM_ACK_HEARD = "Heard — deciding. The message will say what the log recorded.";
+
+/**
+ * The headline on a message whose tap the gate refused (APRV-206).
+ *
+ * Before the early ack, a refusal was a toast and the message was left alone.
+ * Now that the single answer is spent on "heard", the refusal has to reach the
+ * approver here or nowhere. The buttons go with it ({@link annotate} disarms),
+ * which is the right outcome in both directions: a request the gate calls
+ * terminal has no live decision left to collect, and a request that is still
+ * pending is re-delivered by the next dispatch cycle as a fresh prompt.
+ */
+export const TELEGRAM_NOT_RECORDED = "✗ NOT RECORDED";
+
+/**
+ * The detail line under {@link TELEGRAM_NOT_RECORDED} when the runtime's
+ * decision handler threw (APRV-206).
+ *
+ * The wording is careful about what it does not know: a handler that threw may
+ * have thrown before or after its append, so this says where to look rather
+ * than what happened. The log is the thing that knows.
+ */
+export const TELEGRAM_HANDLER_FAILED =
+  "This listener failed while recording your tap. Check `approval queue` — the log is what says whether anything was recorded.";
 
 /** Prefixed to the toast when the tap arrived on a pre-restart copy (APRV-196). */
 export const TELEGRAM_STALE_COPY_PREFIX = "Earlier copy of this request — ";
@@ -2016,6 +2059,12 @@ export class TelegramChannel implements TestableChannel {
    * malformed update would cost the whole batch and the poll after it. Nothing
    * is lost by continuing — the gate has already appended whatever it appended,
    * and the log is what says so.
+   *
+   * APRV-206 moved WHEN that one answer is sent on the decision path: it now
+   * goes out before the gate runs, so the spinner on the phone is one Bot API
+   * call long instead of one decision long. The guarantee is unchanged and is
+   * now enforced in one place — {@link safeAnswer} answers a query at most once,
+   * so the fallback below cannot follow an early ack with a second call.
    */
   private async handleUpdate(
     update: Record<string, unknown>,
@@ -2163,7 +2212,31 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
-    const outcome = this.handler(decision);
+    // APRV-206. The ack goes out BEFORE the gate runs, and it is the only
+    // answer this query will get. Everything below — reading the verified log,
+    // re-checking the budgets, appending under the lock — used to happen while
+    // the button spun, so the spinner's length was the log's length. It claims
+    // no decision (see {@link TELEGRAM_ACK_HEARD}): at this instant nothing has
+    // been appended, and the annotation below is what says what the log holds.
+    await this.safeAnswer(
+      callbackId,
+      `${viaStaleCopy ? TELEGRAM_STALE_COPY_PREFIX : ""}${TELEGRAM_ACK_HEARD}`,
+    );
+
+    // APRV-206. A handler that throws is the one case the early ack cannot be
+    // taken back: the human has been told their tap arrived, and the toast that
+    // used to say "this listener could not finish reading your tap" is spent. So
+    // the message says it instead, and the throw still reaches `handleUpdate`,
+    // which complains and keeps the poll loop alive exactly as before.
+    let outcome: DecisionOutcome;
+    try {
+      outcome = this.handler(decision);
+    } catch (cause) {
+      await this.annotateQuietly(delivery.deliveryId, delivery.actionKey, TELEGRAM_NOT_RECORDED, [
+        TELEGRAM_HANDLER_FAILED,
+      ]);
+      throw cause;
+    }
     this.counters.decisions += 1;
     if (viaStaleCopy) {
       this.counters.staleCopyDecisions += 1;
@@ -2172,26 +2245,25 @@ export class TelegramChannel implements TestableChannel {
       );
     }
     result.outcomes.push({ action_key: delivery.actionKey, outcome });
-    // Best effort, and before the edit: the toast is what the tapping human is
-    // waiting on, and a Bot API that refuses it (a callback older than
-    // Telegram's own window, most often) must not cost them the annotation the
-    // message is about to get.
-    await this.safeAnswer(
-      callbackId,
-      `${viaStaleCopy ? TELEGRAM_STALE_COPY_PREFIX : ""}${this.answerFor(decision, outcome)}`,
-    );
 
-    // APRV-113. The tap is now visible in the transcript, not only in a toast
-    // that vanishes. The outcome word comes from the record the gate actually
-    // appended, so a refused tap (already decided, withdrawn, expired) edits
-    // nothing and the message keeps whatever the poll cycle later gives it.
+    // APRV-113, and since APRV-206 the ONLY place the outcome is stated. The
+    // tap is visible in the transcript rather than in a toast that vanishes,
+    // and the words come from the record the gate actually appended.
     //
-    // AFTER the toast, and never before it: the toast is the thing the tapping
-    // human is waiting on, and a slow edit must not delay it. Best effort in
-    // the same sense `retract` is — a failed edit is complained about and
-    // dropped, because the decision is already in the log and nothing about it
-    // depends on a chat message being redrawn.
-    if (!outcome.ok) return;
+    // Best effort in the same sense `retract` is — a failed edit is complained
+    // about and dropped, because the decision is already in the log and nothing
+    // about it depends on a chat message being redrawn.
+    if (!outcome.ok) {
+      // APRV-206. A refusal used to be a toast; the single answer is now spent
+      // on the ack, so it is said here or nowhere. `annotate` disarms the
+      // message, which is right in both directions: a terminal request has no
+      // decision left to collect, and a still-pending one is re-delivered as a
+      // fresh prompt by the next dispatch cycle.
+      await this.annotateQuietly(delivery.deliveryId, delivery.actionKey, TELEGRAM_NOT_RECORDED, [
+        this.answerFor(outcome),
+      ]);
+      return;
+    }
     const record = outcome.record;
     const headline =
       outcome.decision === "grant"
@@ -2261,6 +2333,11 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
+    // APRV-206, and this path needs it most: an "all" tap runs one gate
+    // decision per open member, so its old post-hoc toast made the spinner N
+    // decisions long. The redraw below is what says how each member ended.
+    await this.safeAnswer(callbackId, TELEGRAM_ACK_HEARD);
+
     const open = digest.members.filter((member) => member.settled === null);
     let landed = 0;
     const refusals: string[] = [];
@@ -2304,7 +2381,10 @@ export class TelegramChannel implements TestableChannel {
       refusals.length === 0
         ? `${word} ${landed} — one log event each.`
         : `${word} ${landed}; ${refusals.length} refused (${[...new Set(refusals)].join(", ")}). Nothing was recorded for those.`;
-    await this.safeAnswer(callbackId, summary);
+    // APRV-206: the summary is no longer a toast (the tap's one answer was
+    // spent acknowledging it). The approver reads the outcome off the redrawn
+    // digest, member by member, and the operator gets the tally here.
+    this.complain(`approval: telegram digest ${digest.deliveryId}: ${summary}`);
 
     try {
       await this.redraw(digest);
@@ -2316,19 +2396,38 @@ export class TelegramChannel implements TestableChannel {
   }
 
   /**
-   * What the tapping human sees in the toast.
+   * {@link annotate}, with a failed edit complained about rather than thrown
+   * (APRV-206).
+   *
+   * Every caller on the decision path wants the same thing from a failed edit:
+   * say so on the operator's terminal and carry on, because whatever the gate
+   * did or did not append has already happened and no chat message changes it.
+   */
+  private async annotateQuietly(
+    deliveryId: DeliveryId,
+    actionKey: string,
+    headline: string,
+    detail: string[],
+  ): Promise<void> {
+    try {
+      await this.annotate(deliveryId, headline, detail, actionKey);
+    } catch (cause) {
+      this.complain(
+        `approval: telegram could not annotate ${actionKey} (message ${deliveryId}): ${this.describe(cause)} — the log is what it is; only the message is stale`,
+      );
+    }
+  }
+
+  /**
+   * What a refused tap is told, in the message edit (APRV-206; it was the toast
+   * until the single answer moved to the early ack).
    *
    * The duplicate case is the one worth naming: a second tap on a request the
    * gate has already decided produces `already-decided`, no second event, and
    * this text. Telegram redelivers callbacks on its own, so this path is
    * ordinary traffic, not an error.
    */
-  private answerFor(decision: ChannelDecision, outcome: DecisionOutcome): string {
-    if (outcome.ok) {
-      return decision.decision === "grant"
-        ? "Approved — recorded in the log."
-        : "Rejected — recorded in the log.";
-    }
+  private answerFor(outcome: GateRefusal): string {
     if (outcome.code === "already-decided") {
       return "Already decided — the first answer stands; nothing was recorded.";
     }
@@ -2377,9 +2476,20 @@ export class TelegramChannel implements TestableChannel {
    *
    * The attempt is recorded either way, so {@link handleUpdate}'s guarantee
    * does not turn one failed ack into a second doomed call.
+   *
+   * **Idempotent per callback query since APRV-206.** A query that has already
+   * been answered in this handling is not answered again: the early ack the
+   * decision path sends is THE answer, and every later sentence — a branch's
+   * own toast, the wrapper's fallback — becomes a no-op rather than a second
+   * `answerCallbackQuery`. APRV-196's "exactly one per callback" therefore
+   * holds structurally, in this one method, instead of by every branch
+   * remembering to return.
    */
   private async safeAnswer(callbackId: string, text: string): Promise<void> {
-    if (this.ack !== null && this.ack.id === callbackId) this.ack.answered = true;
+    if (this.ack !== null && this.ack.id === callbackId) {
+      if (this.ack.answered) return;
+      this.ack.answered = true;
+    }
     if (callbackId.length === 0) return;
     try {
       await this.answer(callbackId, text);
