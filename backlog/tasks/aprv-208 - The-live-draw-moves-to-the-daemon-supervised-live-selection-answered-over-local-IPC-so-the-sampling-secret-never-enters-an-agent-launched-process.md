@@ -3,10 +3,11 @@ id: APRV-208
 title: >-
   The live draw moves to the daemon: supervised-live selection answered over
   local IPC, so the sampling secret never enters an agent-launched process
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - 'agent:opus-lane-u'
 created_date: '2026-09-02 08:03'
-updated_date: '2026-09-02 08:21'
+updated_date: '2026-09-02 19:40'
 labels:
   - sampling
   - daemon

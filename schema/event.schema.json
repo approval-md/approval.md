@@ -108,6 +108,48 @@
           "$ref": "#/$defs/usd_amount",
           "description": "SPEC.md §5.2 budgets contract (amended, APRV-121): the authorization's declared cost in USD as a decimal string. Recorded on `approval.requested`, `approval.granted`, `execution.started` and `budget.exceeded`; a JSON number is the pre-APRV-121 form and is accepted on read, never on write."
         },
+        "live_draw": {
+          "type": "object",
+          "description": "SPEC.md §6 (amended, APRV-208): how a `supervised-live` action's draw was made, present on `approval.requested` ONLY when the draw was delegated to the daemon over the local draw socket because the deciding process held no sampling secret. Absent for an in-process draw, which is why a sampled request made where the secret resolves stays byte-for-byte identical to a manual one (APRV-127). A delegated verdict is an assertion by another process, so it is recorded with the MAC that makes it checkable — HMAC-SHA-256 over a domain separator, the canonical question and the verdict, keyed by the sampling secret, reconstructible from the record's own `action_key`, `payload_hash` and `policy_sha256` plus this object's `live_rate` — or, when no usable answer came back, with the distinct machine-readable reason the action gated instead. It never carries the secret, the selection value, or any clock: a self-reported field that reduces scrutiny must arrive with a proof its author could not forge (§11).",
+          "required": ["v", "source", "reason", "live_rate"],
+          "properties": {
+            "v": {
+              "type": "integer",
+              "const": 1,
+              "description": "The draw protocol version the answer was made under. A reader that does not know this version must not treat the record as an evidenced draw."
+            },
+            "source": {
+              "type": "string",
+              "enum": ["daemon", "unavailable"],
+              "description": "`daemon`: a MAC'd answer from the daemon holding the secret. `unavailable`: no usable answer, so the action gated; `reason` says which refusal."
+            },
+            "reason": {
+              "type": "string",
+              "enum": ["selected", "draw-daemon-absent", "draw-daemon-stale", "draw-answer-invalid"],
+              "description": "`selected`: the daemon's draw put this action in the live fraction. The three refusals are distinct because an operator's action differs — no socket at all (start the daemon), a socket that will not answer or whose daemon is gone (it is wedged or was killed), and an answer that could not be matched to the question asked (something answered and it was not this operator's daemon)."
+            },
+            "live_rate": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1,
+              "description": "The rate the draw was made at, as the DAEMON resolved it from its own policy. Recorded so a verifier can reconstruct the question without re-resolving a policy that may have been amended since."
+            },
+            "selected": {
+              "type": "boolean",
+              "description": "The daemon's verdict, present only with a `mac` to check it against. Always `true` on a recorded request: an unselected action appends no `approval.requested` at all (§6.3)."
+            },
+            "mac": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "description": "The MAC over the question and the verdict. A digest under a key no party to this record holds, which is what makes it evidence rather than a claim."
+            },
+            "daemon_pid": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "The process that answered, for an operator correlating a draw with a daemon's own logs. Carries no authority: a pid is not a proof, and the MAC is."
+            }
+          }
+        },
         "budget": {
           "type": "object",
           "description": "SPEC.md §6.2 `budget`, copied onto `task.registered` at registration so the task's own cap is read from the log rather than from a file that may have been edited since.",
