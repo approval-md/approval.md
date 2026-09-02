@@ -647,6 +647,33 @@ export function withAppendLock<T>(
   }
 }
 
+/**
+ * Listeners told that this process appended to a log (APRV-217).
+ *
+ * One subscriber exists: the verified-read cache, which marks the log it wrote
+ * for a full re-proof on its next read. It is a registration rather than a call
+ * into `core/state.ts` because a value import that way would close a cycle
+ * through `core/verify.ts`. Nothing a listener does can change what was
+ * appended — the append has already succeeded — and a listener that throws must
+ * not turn a written record into a failed one, so throws are swallowed.
+ */
+const appendListeners: Array<(logPath: string) => void> = [];
+
+/** Subscribe to successful appends. Process-wide, memory-only, additive. */
+export function onLogAppended(listener: (logPath: string) => void): void {
+  appendListeners.push(listener);
+}
+
+function noteAppend(logPath: string): void {
+  for (const listener of appendListeners) {
+    try {
+      listener(logPath);
+    } catch {
+      // A bookkeeping listener may not un-write a record that is on disk.
+    }
+  }
+}
+
 export function appendEvent(
   logPath: string,
   input: EventInput,
@@ -713,5 +740,9 @@ export function appendEvent(
     return { ok: true, record, line };
   }, options);
 
-  return held.ok ? held.value : { ok: false, error: held.error };
+  const result: AppendResult = held.ok ? held.value : { ok: false, error: held.error };
+  // After the lock is released and only for a record that actually landed: the
+  // reader cache must not serve a prefix proof anchored before this write.
+  if (result.ok) noteAppend(logPath);
+  return result;
 }

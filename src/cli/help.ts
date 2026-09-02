@@ -1587,15 +1587,15 @@ export const DAEMON_RUN_HELP = `approval daemon run — watch, expire, re-render
 Usage:
   approval daemon run [--log <path>] [--tasks <dir>] [--out <path>]
                       [--policy <path>] [--dir <path>] [--interval <duration>]
-                      [--debounce <duration>] [--once] [--with-channels] [--json]
+                      [--debounce <d>] [--read-proof <mode>] [--once] [--json]
 
 Flags:
-  --log <path> / --out <path>      the log to append to / the queue to write
-  --tasks <dir>    task folder to watch (default backlog/tasks)
+  --log <p> / --out <p> / --tasks <d>  log / queue / task folder (backlog/tasks)
   --policy <path> / --dir <path>   the policy file, or where to discover it
   --interval <d> / --debounce <d>  tick period (30s) / event settle time (250ms)
   --once / --json  one tick then exit / machine-readable, one object per line
   --git-evidence / --advance / --dark-sessions  three OPT-INs, off by default
+  --read-proof full|incremental    prefix proof per read; full is the default
   --with-channels  the channels in this process too: SAME VERB as "approval up"
   -h, --help       this text
 

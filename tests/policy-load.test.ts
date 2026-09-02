@@ -324,6 +324,76 @@ for (const text of DURATION_REJECTS) {
 }
 
 // ---------------------------------------------------------------------------
+// The `daemon` read-proof block (APRV-217)
+// ---------------------------------------------------------------------------
+
+test("a policy with no daemon block reads as full, at the reference defaults", () => {
+  const result = expectOk(loadFixture("valid", "minimal.md"));
+  assert.deepEqual(result.daemon, {
+    readProof: "full",
+    fullReproofEvery: 50,
+    fullReproofAfterMs: 60_000,
+    declared: false,
+  });
+});
+
+test("the daemon block is parsed, and its duration resolved once", () => {
+  const result = expectOk(loadFixture("valid", "daemon-read-proof.md"));
+  assert.equal(result.policy.daemon?.read_proof, "incremental");
+  assert.deepEqual(result.daemon, {
+    readProof: "incremental",
+    fullReproofEvery: 20,
+    fullReproofAfterMs: 30_000,
+    declared: true,
+  });
+});
+
+test("a misspelt read_proof fails the whole policy closed", () => {
+  const failed = expectFail(loadFixture("invalid", "schema-invalid-read-proof.md"), "schema-invalid");
+  assert.ok(
+    (failed.errors ?? []).some((error) => error.path.includes("read_proof")),
+    `the rejection must name the key: ${JSON.stringify(failed.errors)}`,
+  );
+});
+
+test("an unparseable full_reproof_after fails the load exactly as approval_ttl does", () => {
+  // A compound duration, which the schema's pattern and the loader's grammar
+  // both reject. The schema gets there first — exactly as it does for
+  // `defaults.approval_ttl`, whose loader branch is a fail-closed backstop
+  // rather than a live path — and the rejection names the key either way.
+  const path = join(scratch, "bad-reproof.md");
+  writeFileSync(
+    path,
+    [
+      "```yaml approval-policy",
+      'version: "0.1"',
+      "daemon:",
+      '  full_reproof_after: "1h30m"',
+      "```",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const failed = expectFail(loadPolicy({ file: path }), "schema-invalid");
+  assert.ok(
+    (failed.errors ?? []).some((error) => error.path.includes("full_reproof_after")),
+    `the rejection must name the key: ${JSON.stringify(failed.errors)}`,
+  );
+});
+
+test("an unknown key inside the daemon block fails closed like any other", () => {
+  const path = join(scratch, "unknown-daemon-key.md");
+  writeFileSync(
+    path,
+    ["```yaml approval-policy", 'version: "0.1"', "daemon:", "  read_prof: full", "```", ""].join(
+      "\n",
+    ),
+    "utf8",
+  );
+  expectFail(loadPolicy({ file: path }), "schema-invalid");
+});
+
+// ---------------------------------------------------------------------------
 // Real repository policy (smoke check; full dogfood suite is APRV-13)
 // ---------------------------------------------------------------------------
 

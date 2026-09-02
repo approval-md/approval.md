@@ -46,7 +46,12 @@ import {
   DEFAULT_DARK_INTERVAL_MS,
   DEFAULT_DARK_WINDOW_MS,
 } from "../daemon/dark-session.js";
-import { parseDuration } from "../core/policy-load.js";
+import {
+  DEFAULT_POLICY_DAEMON_READ,
+  loadPolicy,
+  parseDuration,
+  type LoadPolicyOptions,
+} from "../core/policy-load.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
   EXIT_INTEGRITY,
@@ -57,6 +62,7 @@ import {
 } from "./exit-codes.js";
 import { DAEMON_HELP, DAEMON_RUN_HELP } from "./help.js";
 import type { Streams } from "./main.js";
+import { useReadProof } from "../core/state.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
 import { DEFAULT_QUEUE_PATH } from "./render.js";
 import { refusal as renderRefusal, style } from "./style.js";
@@ -86,6 +92,12 @@ const RUN_FLAGS: Record<string, FlagKind> = {
   "--dark-sessions": "boolean",
   "--dark-window": "string",
   "--dark-interval": "string",
+  // The prefix proof (APRV-217). A flag here beats the `daemon` policy block
+  // for this run and nothing else; the policy is what an unattended service
+  // reads.
+  "--read-proof": "string",
+  "--full-reproof-every": "string",
+  "--full-reproof-after": "string",
   "--json": "boolean",
   "--help": "boolean",
   "-h": "boolean",
@@ -172,6 +184,51 @@ export function advanceFlags(
 }
 
 /**
+ * The prefix-proof flags, resolved against the policy (APRV-217).
+ *
+ * Precedence is the one every override in this CLI uses: the flag wins for this
+ * run, the policy governs when no flag was typed, and an unloadable policy
+ * yields the default — which here is `full`, the strictest and most expensive
+ * proof, so a policy nobody could read cannot buy a cheaper one.
+ *
+ * Exported for `approval up`, which accepts every `daemon run` flag and must
+ * refuse a typo in exactly the same words — the reason {@link durationFlag} and
+ * {@link advanceFlags} are exported.
+ */
+export function readProofFlags(
+  flags: Record<string, string | boolean>,
+  policy: LoadPolicyOptions,
+):
+  | { ok: true; readProof: { mode: "full" | "incremental"; everyReads: number; afterMs: number } }
+  | { ok: false; message: string } {
+  const loaded = loadPolicy(policy);
+  const configured = loaded.ok ? loaded.daemon : DEFAULT_POLICY_DAEMON_READ;
+
+  const modeRaw = stringFlag(flags, "--read-proof");
+  if (modeRaw !== null && modeRaw !== "full" && modeRaw !== "incremental") {
+    return {
+      ok: false,
+      message: `--read-proof expects full or incremental, got ${JSON.stringify(modeRaw)}`,
+    };
+  }
+  const mode = modeRaw === null ? configured.readProof : modeRaw;
+
+  const everyRaw = stringFlag(flags, "--full-reproof-every");
+  const everyReads = everyRaw === null ? configured.fullReproofEvery : Number.parseInt(everyRaw, 10);
+  if (!Number.isInteger(everyReads) || everyReads < 1) {
+    return {
+      ok: false,
+      message: `--full-reproof-every expects a positive whole number of reads, got ${JSON.stringify(everyRaw)}`,
+    };
+  }
+
+  const after = durationFlag(flags, "--full-reproof-after", configured.fullReproofAfterMs);
+  if (!after.ok) return { ok: false, message: after.message };
+
+  return { ok: true, readProof: { mode, everyReads, afterMs: after.ms } };
+}
+
+/**
  * One daemon event as a human sentence.
  *
  * Warnings go to stderr and everything else to stdout, so `approval daemon run >
@@ -181,9 +238,15 @@ export function describeDaemonEvent(event: DaemonEvent): { text: string; stderr:
   switch (event.event) {
     case "started":
       return {
+        // The prefix proof is named on the line an operator already reads
+        // (APRV-217): which proof the reads of this run pay is configuration,
+        // and configuration nobody is told about is the failure mode this
+        // project exists to prevent.
         text: `daemon: watching ${event.tasks} and ${event.log}; queue ${event.queue}; tick every ${String(
           event.interval_ms,
-        )}ms${event.watching ? "" : " (fs watch unavailable — polling only)"}`,
+        )}ms; read proof ${event.read_proof}${
+          event.watching ? "" : " (fs watch unavailable — polling only)"
+        }`,
         stderr: false,
       };
     case "drift":
@@ -454,6 +517,19 @@ export function commandDaemonRun(
   const cadence = advanceFlags(flags);
   if (!cadence.ok) return usageError(streams, json, cadence.message, DAEMON_RUN_HELP);
   if (cadence.cadence !== null) options.advance = cadence.cadence;
+
+  // APRV-217. Resolved here, before the first tick, for the reason every other
+  // configuration is: a daemon that accepted `--read-proof incrementel` and
+  // quietly ran the default would be lying about its own proof for as long as
+  // it ran, and the mode it resolves to is printed on its first line.
+  const proof = readProofFlags(flags, policy);
+  if (!proof.ok) return usageError(streams, json, proof.message, DAEMON_RUN_HELP);
+  options.readProof = proof.readProof;
+  // Process-wide as well as per-read: the loop's own reads carry the option,
+  // and the queue renderer's reads — same process, same log, no options of
+  // their own — pick it up from here. Set only in this long-lived operator
+  // process, and never by a CLI verb an agent runs.
+  useReadProof(proof.readProof);
 
   // The dark-session sweep (APRV-192). Its two durations are refused for a typo
   // in exactly the words every other duration flag is, for the reason
