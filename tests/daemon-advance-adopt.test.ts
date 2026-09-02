@@ -31,14 +31,18 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { after, test } from "node:test";
+import { fileURLToPath } from "node:url";
 
+import { TelegramChannel } from "../src/channels/telegram.js";
 import { lastAdvance } from "../src/core/advance-cycle.js";
 import { appendAttestation } from "../src/core/attest.js";
 import { decide, register } from "../src/core/gate.js";
 import { readVerifiedRecords } from "../src/core/state.js";
 import { Daemon, type DaemonEvent, type DaemonOptions } from "../src/daemon/daemon.js";
 import { defaultCadence, type AdvanceCadence } from "../src/daemon/advance.js";
+import { assertLocal, callbackUpdate, startMockBotApi } from "./telegram-mock.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-advance-adopt-")));
 let counter = 0;
@@ -51,6 +55,32 @@ const LOG_RELATIVE = ".approval/log/events.jsonl";
 const QUEUE_RELATIVE = ".approval/QUEUE.md";
 const MARKER_RELATIVE = ".approval/attest-marker.md";
 const TODAY = "2026-09-01T09:00:00.000Z";
+
+/** A plausible-looking but entirely fake bot token, as in the main suite. */
+const BOT_TOKEN = "7654321:AA-approval-md-fake-token-for-tests-only-DO-NOT-USE";
+const CHAT = "9911";
+
+/** The advance child that holds itself open, for the one case that needs one. */
+const SLOW_ADVANCE = fileURLToPath(
+  new URL("../../tests/fixtures/advance/slow-advance.mjs", import.meta.url),
+);
+
+/**
+ * Poll `probe` until it answers, or fail after `limitMs`.
+ *
+ * A loop over `setTimeout` rather than a fixed wait: the child settles when it
+ * settles, and a test that slept for a guessed duration would be a flake on a
+ * loaded machine and slow on an idle one.
+ */
+async function until<T>(probe: () => T | null, limitMs: number): Promise<T> {
+  const deadline = Date.now() + limitMs;
+  for (;;) {
+    const answer = probe();
+    if (answer !== null) return answer;
+    if (Date.now() > deadline) throw new Error(`nothing settled within ${String(limitMs)}ms`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
 
 /** Every advance stops for a human, which is the shape the incident had. */
 const POLICY_MANUAL = [
@@ -399,4 +429,109 @@ test("failure: a failed advance is reported by code and message, not as exit 1",
   assert.equal(last?.outcome, "failed");
   assert.equal(last?.code, advance?.code, "the doctor row could not say why the advance failed");
   assert.equal(typeof last?.message, "string");
+});
+
+// ===========================================================================
+// AC 7 — the advance runs off the channel loop
+// ===========================================================================
+
+/**
+ * The second half of the 2026-09-02 incident: `answerCallbackQuery: HTTP 400`,
+ * repeatedly, around the grants. Telegram drops a callback query that is not
+ * answered inside its window; `approval up` runs the daemon and the listener on
+ * ONE loop; and the advance is `spawnSync` from `git fetch` to `gh pr create`.
+ * So every tap that arrived during an advance waited for the push, and the
+ * human got a button that never toasted.
+ *
+ * The pre-fix behaviour needs no test to be established, because it is not a
+ * bug in any branch: synchronous work on a single-threaded loop delays
+ * everything else on that loop, by construction, whatever it is wrapped in.
+ * What needs proving is that the advance no longer runs there. So: a real
+ * daemon, a real Bot API listener over loopback, and an advance child that
+ * holds itself open for five seconds. The tap must be answered while it is
+ * still open.
+ */
+test("off the loop: a tap is answered while an advance is in flight", async () => {
+  const repo = newRepo();
+  appendRecord(repo.dir, "one");
+  runDaemon(repo, cadence());
+
+  const key = requestsIn(repo)[0] ?? "";
+  const granted = decide(repo.logPath, key, "grant", "human:carter", {
+    policy: { file: join(repo.dir, "APPROVAL.md") },
+  });
+  assert.equal(granted.ok, true, granted.ok ? "" : granted.message);
+
+  const mock = await startMockBotApi(BOT_TOKEN);
+  const events: DaemonEvent[] = [];
+  const daemon = new Daemon({
+    logPath: repo.logPath,
+    tasksDir: join(repo.dir, "backlog", "tasks"),
+    queuePath: join(repo.dir, QUEUE_RELATIVE),
+    policy: { file: join(repo.dir, "APPROVAL.md") },
+    cwd: repo.dir,
+    // One tick and no second: this is about what happens DURING the first.
+    intervalMs: 3_600_000,
+    debounceMs: 10,
+    once: false,
+    today: TODAY,
+    sink: { emit: (event) => events.push(event) },
+    advance: cadence(),
+    advanceRunner: { command: process.execPath, args: [SLOW_ADVANCE] },
+  });
+
+  const channel = new TelegramChannel({
+    token: BOT_TOKEN,
+    chatId: CHAT,
+    apiBase: assertLocal(mock.url),
+    pollTimeoutSeconds: 0,
+    requestTimeoutMs: 3_000,
+    backoffMs: 5,
+    maxBackoffMs: 20,
+    log: () => {},
+  });
+
+  // The tick runs on this stack: it adopts the grant, appends
+  // `execution.started`, spawns the child, and returns to the loop.
+  const stopped = daemon.run();
+  const advancesSoFar = (): number => events.filter((event) => event.event === "advance").length;
+  assert.equal(advancesSoFar(), 0, "the advance settled on the tick's own stack");
+  assert.equal(
+    records(repo).filter((record) => record.event === "execution.started").length,
+    1,
+    "the tick did not start the execution it was authorised for",
+  );
+
+  // A tap arrives. Nothing about it touches the log — an unplaceable callback is
+  // acked and dropped — because what is being measured is the LOOP, and a loop
+  // held by a synchronous advance answers nothing at all.
+  mock.queueUpdate(callbackUpdate({ data: "not-a-callback", chatId: CHAT }));
+  const asked = performance.now();
+  await channel.pollOnce();
+  const waited = performance.now() - asked;
+
+  assert.equal(mock.answerTexts().length, 1, "the tap was never answered");
+  assert.ok(waited < 1_000, `the tap waited ${String(Math.round(waited))}ms for an ack`);
+  assert.equal(advancesSoFar(), 0, "the advance had already finished; nothing was in flight");
+
+  // And it does settle, in the daemon's own process, with the child's refusal
+  // reason carried onto the event stream and into the log.
+  const settled = await until(() => (advancesSoFar() > 0 ? events : null), 20_000);
+  const advance = settled.find(
+    (event): event is Extract<DaemonEvent, { event: "advance" }> => event.event === "advance",
+  );
+  assert.equal(advance?.outcome, "failed");
+  assert.equal(advance?.code, "log-advance-push-rejected");
+
+  daemon.stop("test over");
+  await stopped;
+  await mock.close();
+
+  const failure = records(repo).find((record) => record.event === "execution.failed");
+  assert.ok(failure !== undefined, "the child's outcome was never recorded");
+  assert.equal(
+    ((failure?.payload ?? {}) as Record<string, unknown>)["code"],
+    "log-advance-push-rejected",
+    "the child's reason did not reach the log",
+  );
 });
