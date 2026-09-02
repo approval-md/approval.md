@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-y'
 created_date: '2026-09-02 15:57'
-updated_date: '2026-09-02 19:57'
+updated_date: '2026-09-02 20:05'
 labels:
   - cli
   - dogfood
@@ -36,7 +36,7 @@ Deploying the APRV-212 fix took four manual steps in the primary (git fetch, jud
 - [x] #3 A fetch that fails on the network is a warning, not a refusal: it starts on the current build and says so
 - [x] #4 --no-preflight skips the preflight; --json carries the preflight facts (behind_by, ahead_by, log_touched, dist_stale, action taken)
 - [x] #5 approval doctor row main-behind-origin reports behind-by, whether upstream touched the log, and the same next command
-- [ ] #6 Tests run the real CLI against a scratch remote for each branch of the decision; docs/cli-reference.md up and doctor sections updated; npm test passes; lint clean
+- [x] #6 Tests run the real CLI against a scratch remote for each branch of the decision; docs/cli-reference.md up and doctor sections updated; npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -96,4 +96,10 @@ None weakened. Two are adjacent and want the orchestrator's eye:
 tests/cli-up-preflight.test.ts, 17 cases, a real bare remote plus a working clone per case, driving the built CLI: fast-forward plus rebuild naming the commit now running, the safe upstream change to a protected path, the up-to-date no-op, all three refusals (each pinning that HEAD did not move and the working log is byte-identical), the runbook shape, two "reset --hard" canaries, the fetch-failure warning, the no-origin silence, --no-preflight, the frozen --json fact set, daemon run sharing the preflight and its own --no-preflight, the frozen code union, and doctor's row in three states. Nothing reaches the network or the live log: local bare remotes, explicit --log / --out / --dir under a scratch directory, and --once with both channels off.
 
 Two notes for whoever runs this branch. The worktree had no node_modules, which made tests/ci-guard.test.ts's engines check fail on a package it could not open before anything of mine ran; npm ci fixed it, and it was not a regression. And daemon.test.ts's live TTL sweep failed once under a 645s full-suite run and passes on its own and on a rerun of the file: a load flake, not this change.
+
+## Validation
+
+Final run on 0729bd9 (before the task-file commit): npm test — 3004 tests, 3003 pass, 0 fail, 1 skipped, 663s. npx oxlint src tests — clean, exit 0. tests/cli-up-preflight.test.ts contributes 17 of those, and tests/cli-doctor.test.ts's three bumped pins pass.
+
+One environment note the orchestrator should know about: the harness hook refused two commits mid-session with policy-not-attested against the PRIMARY checkout's policy (once 'never attested', once 'changed since it was attested at seq 7413'), and both succeeded on an immediate retry. Nothing in this lane touches APPROVAL.md or .approval/; it looks like the primary's policy file was being edited underneath, so the hook was reading a moving target. Worth a glance if other lanes saw it too.
 <!-- SECTION:NOTES:END -->
