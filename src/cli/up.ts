@@ -120,6 +120,7 @@ import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
 import {
   describePreflightEvent,
+  reexecFreshBuild,
   startupPreflight,
   type PreflightEvent,
 } from "./preflight.js";
@@ -427,6 +428,12 @@ export function commandUp(
     // write, and a supervisor that read this as an I/O fault would retry a
     // checkout state only a human can resolve.
     if (!cleared.ok) return EXIT_INTEGRITY;
+    // A rebuild happened, so THIS process is the stale build the preflight just
+    // replaced: Node loaded it at startup and no amount of new bytes on disk
+    // changes that. Carrying on here would start the writer on exactly the code
+    // the operator was trying to leave behind, which is the defect this
+    // preflight exists to remove. Become the fresh build, and exit as it exits.
+    if (cleared.reexec !== null) return reexecFreshBuild(cleared.reexec, cwd);
   }
 
   const check = preflightLog(logPath);

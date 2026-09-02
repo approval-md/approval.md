@@ -61,12 +61,13 @@
  * as the last fetch.
  */
 
-import { readdirSync, statSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
 import { dirname, join, resolve as resolvePathSegments } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { DoctorCheck } from "./doctor.js";
+import { EXIT_IO, EXIT_OK } from "./exit-codes.js";
 import {
   currentBranch,
   failureText,
@@ -287,6 +288,15 @@ export interface PreflightFacts {
   log_touched: boolean;
   dist_stale: boolean;
   action: PreflightAction;
+  /**
+   * True when the preflight rebuilt and the runtime therefore re-executed into
+   * the fresh build rather than carrying on in the process that dated it.
+   *
+   * Always false from {@link inspectPreflight}: inspection builds nothing, so
+   * it can never be the reason a process was replaced. Doctor's row reads that
+   * answer and never this one.
+   */
+  reexec: boolean;
 }
 
 /** A refusal, in the APRV-129 runbook's own vocabulary. */
@@ -336,6 +346,7 @@ const ZERO: Omit<PreflightFacts, "action"> = {
   ahead_by: 0,
   log_touched: false,
   dist_stale: false,
+  reexec: false,
 };
 
 /** `git status --porcelain -uno` as a set of repo-relative paths. */
@@ -459,6 +470,7 @@ export function inspectPreflight(input: PreflightInput): PreflightReport {
     log_touched: logTouched,
     dist_stale: stale,
     action,
+    reexec: false,
   });
 
   // 1. Ahead. Nothing else is worth judging: whatever the upstream range holds,
@@ -605,7 +617,14 @@ function plural(count: number, noun: string): string {
 
 /** What {@link runPreflight} did, with the facts as they ended up. */
 export type PreflightOutcome =
-  | { ok: true; facts: PreflightFacts; detail: string; warning: string | null }
+  | {
+      ok: true;
+      facts: PreflightFacts;
+      detail: string;
+      warning: string | null;
+      /** Present when a rebuild happened: the caller must become this child. */
+      reexec?: ReexecPlan;
+    }
   | { ok: false; facts: PreflightFacts; refusal: PreflightRefusal }
   /** A write the preflight attempted and could not complete. Also a refusal. */
   | { ok: false; facts: PreflightFacts; failed: { step: string; message: string } };
@@ -627,7 +646,7 @@ export function runPreflight(
   if (!report.ok) return { ok: false, facts: report.facts, refusal: report.refusal };
 
   const { facts } = report;
-  if (facts.action === "skipped" || facts.action === "fetch-failed" || facts.action === "none") {
+  if (facts.action === "skipped" || facts.action === "fetch-failed") {
     return { ok: true, facts, detail: report.detail, warning: report.warning };
   }
 
@@ -642,22 +661,130 @@ export function runPreflight(
     }
   }
 
+  // Staleness is asked AGAIN, after the merge, and the second answer is the one
+  // that counts. `inspectPreflight` dated `dist/` against the sources as they
+  // were BEFORE the fast-forward; a fast-forward that lands three days of `src/`
+  // is precisely what makes a build stale, and reporting the pre-merge answer
+  // would leave the operator running a binary older than the code just pulled.
+  // Doctor's row keeps the pre-merge answer because doctor merges nothing.
+  const stale = (report.root === null ? facts.dist_stale : distStale(input.root)) ?? facts.dist_stale;
+  const settled: PreflightFacts = {
+    ...facts,
+    dist_stale: stale,
+    action:
+      facts.behind_by > 0
+        ? stale
+          ? "fast-forward+rebuild"
+          : "fast-forward"
+        : stale
+          ? "rebuild"
+          : "none",
+  };
+
   // Built in the INSTALLATION root, which is the tree whose `dist/` was dated —
   // not in the repository root, which is where the fast-forward happened. In the
   // primary checkout they are the same directory; anywhere they are not, dating
   // one tree and compiling another would be the preflight lying about its work.
-  if (facts.dist_stale) {
+  if (stale) {
     const built = spawnBuild(input.root);
     if (!built.ok) {
       return {
         ok: false,
-        facts: { ...facts, action: "refused" },
+        facts: { ...settled, action: "refused" },
         failed: { step: "npm run build", message: built.message },
       };
     }
   }
 
-  return { ok: true, facts, detail: report.detail, warning: report.warning };
+  // A rebuild means the process that ran the preflight is no longer the build
+  // the preflight produced (APRV-215, coordinator's amendment). Node has already
+  // loaded this module tree, so continuing here would start the writer on the
+  // code the operator was trying to leave behind — which is the exact defect
+  // this task exists to remove. Hand the caller a plan to re-exec into the
+  // fresh build instead. See {@link reexecPlan} for why it is a plan rather
+  // than a spawn.
+  const plan = stale ? reexecPlan(input.root) : null;
+  return {
+    ok: true,
+    facts: { ...settled, reexec: plan !== null },
+    detail: report.detail,
+    warning: report.warning,
+    ...(plan === null ? {} : { reexec: plan }),
+  };
+}
+
+/** Where the fresh build lives, and what to run it with. */
+export interface ReexecPlan {
+  /** `<root>/dist/src/cli/main.js` — resolved from the CHECKOUT, never from `import.meta`. */
+  entry: string;
+  /** This process's own argv, plus `--no-preflight` so the child cannot loop. */
+  argv: string[];
+}
+
+/**
+ * The plan to re-exec, or `null` when there is nothing to re-exec into.
+ *
+ * The entry is resolved against the checkout root rather than against this
+ * module's own location, and that distinction is the whole point: this module
+ * is running FROM the stale build, so `import.meta.url` names exactly the tree
+ * being replaced. `<root>/dist/src/cli/main.js` is the file `cli.js` loads and
+ * the file `checkBuildFreshness` dates, so it is the one the build just wrote.
+ *
+ * `process.argv.slice(2)` rather than a reconstruction of the parsed flags: the
+ * child must run the command the operator actually typed, including the verb,
+ * and a rebuilt argv would be this module's opinion of what they meant.
+ * `--no-preflight` is appended so the child cannot preflight again, which is
+ * both the loop guard and the honest thing — the checkout is already current.
+ */
+function reexecPlan(root: string): ReexecPlan | null {
+  const entry = join(root, "dist", "src", "cli", "main.js");
+  if (!existsSync(entry)) return null;
+  const argv = process.argv.slice(2);
+  if (argv.includes("--no-preflight")) return null;
+  return { entry, argv: [...argv, "--no-preflight"] };
+}
+
+/**
+ * Run the fresh build in a child process and become its exit code.
+ *
+ * `stdio: "inherit"` so the child owns the terminal exactly as the parent would
+ * have: the daemon's lines, the token panel, a channel's prompts and an
+ * operator's ctrl-c all behave as though no re-exec happened. SIGINT and
+ * SIGTERM are forwarded rather than handled, because the child is the writer
+ * and the shutdown sequence that matters is its own.
+ *
+ * A child killed by the signal we forwarded exits 0: the operator asked the
+ * runtime to stop and it stopped, which is a clean stop under any spelling.
+ * Any other signal is reported as an I/O failure, because a writer that
+ * vanished is a fact about the machine rather than a decision of the runtime.
+ */
+export function reexecFreshBuild(plan: ReexecPlan, cwd: string): Promise<number> {
+  return new Promise<number>((resolve) => {
+    const child = spawn(process.execPath, [plan.entry, ...plan.argv], {
+      cwd,
+      stdio: "inherit",
+      env: process.env,
+    });
+    const forward = (signal: NodeJS.Signals) => (): void => {
+      child.kill(signal);
+    };
+    const onInt = forward("SIGINT");
+    const onTerm = forward("SIGTERM");
+    process.on("SIGINT", onInt);
+    process.on("SIGTERM", onTerm);
+    const done = (code: number): void => {
+      process.removeListener("SIGINT", onInt);
+      process.removeListener("SIGTERM", onTerm);
+      resolve(code);
+    };
+    child.on("error", () => {
+      done(EXIT_IO);
+    });
+    child.on("exit", (code, signal) => {
+      if (code !== null) return done(code);
+      done(signal === "SIGINT" || signal === "SIGTERM" ? EXIT_OK : EXIT_IO);
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -693,7 +820,11 @@ export function describePreflightEvent(event: PreflightEvent): { text: string; s
     "fetch-failed": "could not reach the remote, so this is the build it already had",
   };
   const running = event.commit === null ? "" : `; now running ${event.commit.slice(0, 12)}`;
-  return { text: `up: preflight — ${did[event.action]}${running}`, stderr: false };
+  // The re-exec is stated, not implied. An operator watching a foreground
+  // process replace itself deserves to be told, and it is the sentence that
+  // makes "now running <sha>" a claim about THIS process rather than a wish.
+  const handover = event.reexec ? ", in a fresh process on the new build" : "";
+  return { text: `up: preflight — ${did[event.action]}${running}${handover}`, stderr: false };
 }
 
 /** How a caller emits one line. `up` and `daemon run` route theirs identically. */
@@ -719,7 +850,9 @@ export interface StartupPreflightInput {
  * needs has already been written by `refuse`, and the caller's only remaining
  * job is to return the exit code.
  */
-export function startupPreflight(input: StartupPreflightInput): { ok: boolean } {
+export function startupPreflight(
+  input: StartupPreflightInput,
+): { ok: boolean; reexec: ReexecPlan | null } {
   const outcome = runPreflight({
     logPath: input.logPath,
     queuePath: input.queuePath,
@@ -731,25 +864,29 @@ export function startupPreflight(input: StartupPreflightInput): { ok: boolean } 
 
   if (!outcome.ok) {
     input.refuse(renderPreflightRefusal(outcome, input.json));
-    return { ok: false };
+    return { ok: false, reexec: null };
   }
   // A preflight with no repository to look at says nothing. The line reports
   // what the preflight DID, and "there is no origin here" is a property of the
   // deployment rather than an event in it: a log-only install outside git would
   // otherwise open every start with a line about a question it cannot ask.
   // Doctor's `main-behind-origin` row is where that state is visible.
-  if (outcome.facts.action === "skipped") return { ok: true };
+  if (outcome.facts.action === "skipped") return { ok: true, reexec: null };
 
   if (outcome.warning !== null) {
     input.emit({ event: "preflight_warning", message: outcome.warning });
   }
+  // Emitted BEFORE the re-exec, and by the parent, because this is the only
+  // place the whole story is known: the child runs with `--no-preflight` and
+  // has nothing to say about a fast-forward it did not perform. The commit is
+  // read after the merge, so the line names the code the child is about to run.
   input.emit({
     event: "preflight",
     commit: headCommit(input.logPath),
     detail: outcome.detail,
     ...outcome.facts,
   });
-  return { ok: true };
+  return { ok: true, reexec: outcome.reexec ?? null };
 }
 
 /** The short sha this checkout is on, or `null` when git will not say. */

@@ -64,7 +64,11 @@ import { DAEMON_HELP, DAEMON_RUN_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { useReadProof } from "../core/state.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
-import { describePreflightEvent, startupPreflight } from "./preflight.js";
+import {
+  describePreflightEvent,
+  reexecFreshBuild,
+  startupPreflight,
+} from "./preflight.js";
 import { DEFAULT_QUEUE_PATH } from "./render.js";
 import { refusal as renderRefusal, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
@@ -501,6 +505,10 @@ export function commandDaemonRun(
     // supervisor that read this as an I/O fault would retry a checkout state
     // only a human can resolve.
     if (!cleared.ok) return EXIT_INTEGRITY;
+    // The same handover `approval up` makes, for the same reason: a rebuild
+    // means this process is the stale build, and the daemon is the writer. See
+    // `cli/preflight.ts`'s `reexecFreshBuild`.
+    if (cleared.reexec !== null) return reexecFreshBuild(cleared.reexec, cwd);
   }
 
   const check = preflightLog(logPath);
