@@ -2029,12 +2029,22 @@ const VERBS: VerbSpec[] = [
     name: "mcp",
     subcommand: "serve",
     purpose:
-      "Serve the verbs of this registry as MCP tools over stdio, in the foreground, sharing the CLI's code paths (SPEC.md §10.5). The published tool list is this registry filtered by human_only false, less `consume` (internal plumbing) and `hook claude-code` / `hook cursor` (each reads a stdin this transport owns), and every tool's input schema is the verb's own with `--as` removed. It runs as ONE agent identity, fixed at startup, that no tool call can supply or change.",
+      "Serve the verbs of this registry as MCP tools, in the foreground, sharing the CLI's code paths (SPEC.md §10.5). Over stdio by default; `--http` serves the streamable-HTTP transport instead, one MCP session per connection, binding 127.0.0.1 unless `--listen` names another interface in full. The published tool list is this registry filtered by human_only false, less `consume` (internal plumbing) and `hook claude-code` / `hook cursor` (each reads a stdin this transport owns), and every tool's input schema is the verb's own with `--as` removed. Identity is the SERVER's under both transports and no tool call can supply or change it: one fixed agent identity by default, or, under `--http --guest`, one `agent:guest-<id>` minted per session before that session's transport exists.",
     human_only: true,
     human_only_note:
       "An OPERATOR process, like `daemon run`: long-lived, launched by a person, and holding the agent identity every tool call is recorded under. It publishes no human-only verb, so an agent that could start one would gain no authority it lacked; what it would gain is a second writer against the log nobody supervises, and a choice of identity that belongs to the human who launched the process. Marked human_only so no wrapper offers a wrapper.",
     input: input({
-      flags: { ...AS_FLAG, ...POLICY_FLAGS, ...LOG_FLAG, ...JSON_FLAG, ...HELP_FLAGS },
+      flags: {
+        ...AS_FLAG,
+        "--http": "boolean",
+        "--port": "string",
+        "--listen": "string",
+        "--guest": "boolean",
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
     }),
     output: null,
     error: ERROR_SCHEMA,

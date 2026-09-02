@@ -3231,3 +3231,67 @@ under whatever environment the operator launched it with, exactly as every other
 POST-V1: mapping the MCP tasks/elicitation extension onto `awaiting`. SPEC.md
 §10.5 says that MAY happen "when client support stabilizes"; until then the wait
 tool blocks and answers, and its timeout is an answer of its own.
+
+### `--http`: many clients, one session each (APRV-174)
+
+`--http` serves the MCP streamable-HTTP transport instead of stdio. One listener
+holds one `Server` and one transport per MCP session, routed by the
+`mcp-session-id` header the transport mints at `initialize`. A session is dropped
+when its transport closes. Tool calls still run serially across the whole
+process, because the reason they do (`wait` blocks the event loop, `run` spawns
+synchronously) is a property of the process.
+
+`--port <n>` picks the port (default 4681) and always binds `127.0.0.1`.
+`--listen <[host:]port>` is the only way to bind anything else, and passing both
+is a usage error. A non-loopback bind prints a banner on stderr, every time: this
+server authenticates NOBODY, has no TLS, and the supported deployment is a
+loopback bind behind a tunnel the operator controls. Session opens and closes are
+logged on stderr with the session id and the actor; stdout stays empty.
+
+Two caps bound what strangers can spend: 20 sessions at once and 200 over the
+life of the process. An `initialize` over either one is refused with a plain HTTP
+503 whose body carries `mcp-session-cap` or `mcp-session-lifetime-cap`, and no
+session is created for it. A request with an unknown `mcp-session-id` is a 404
+(`mcp-unknown-session`); a non-initialize POST with no session header is a 400
+(`mcp-session-required`).
+
+### `--guest`: one identity per session
+
+Plain `--http` runs every session as the operator's own `--as` / `APPROVAL_AGENT`
+identity, which is stdio behavior with more connections. `--guest` mints a fresh
+`agent:guest-<6 hex>` for each session instead, before that session's transport
+exists, so the log, the budgets and the refusals see one stranger per connection
+rather than one crowd. `--guest` is exclusive with `--as` (a guest's identity is
+not the operator's to choose) and is a usage error without `--http`.
+
+**A client still cannot name an identity, and this is the reason the scheme is
+safe.** Nothing a caller sends reaches the actor: not a header, not the URL, not
+`clientInfo.name` in the initialize payload, not a tool argument. SPEC.md §11
+says a self-reported field never reduces scrutiny, and an identity a caller could
+name would be one a caller could escalate. A client name is a label; the actor is
+the server's.
+
+**What a guest may call.** Guest mode also narrows the tool list to a positive
+allowlist: `instructions`, `register`, `request`, `wait`, `status`, `queue`,
+`log_verify`, `policy_check`, `policy_test`. Those declare, ask and observe.
+Everything else is withheld because it executes on, or spends the credentials
+of, the machine hosting the gate: `run` spawns argv there, `adapter_email` spends
+vault credentials, `token` hands out spend material, `journal_write` writes a
+local file. The list is positive rather than a set of exclusions, so a verb that
+lands next is withheld until someone decides otherwise, and it is intersected
+with the ordinary filter, so guest mode can only ever take tools away.
+
+**The advertised list is not the enforcement.** A guest that crafts a request for
+a withheld name is refused at CALL time with `mcp-guest-restricted`, whose
+message names the verb and what a guest may call instead. A human-only name still
+gets the human-only refusal, which is checked first and is true of every session
+on every transport. This is the same defence in depth as `mcp-identity-fixed`:
+`tools/list` describes the boundary, and the call handler is the boundary.
+
+**`wait` is clamped to five seconds** for a guest, appended last so a caller's
+larger `--timeout` loses, while a caller asking for less keeps what they asked
+for. `wait` blocks the event loop and every HTTP session shares one invoke
+queue, so an unbounded guest wait is one stranger stalling every other session.
+The guest instructions string says so, tells the caller to poll `status`, and
+states plainly that a granted request executes nowhere: the demo is the approval
+flow itself.
