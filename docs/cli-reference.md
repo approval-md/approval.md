@@ -3219,3 +3219,28 @@ safe.** Nothing a caller sends reaches the actor: not a header, not the URL, not
 says a self-reported field never reduces scrutiny, and an identity a caller could
 name would be one a caller could escalate. A client name is a label; the actor is
 the server's.
+
+**What a guest may call.** Guest mode also narrows the tool list to a positive
+allowlist: `instructions`, `register`, `request`, `wait`, `status`, `queue`,
+`log_verify`, `policy_check`, `policy_test`. Those declare, ask and observe.
+Everything else is withheld because it executes on, or spends the credentials
+of, the machine hosting the gate: `run` spawns argv there, `adapter_email` spends
+vault credentials, `token` hands out spend material, `journal_write` writes a
+local file. The list is positive rather than a set of exclusions, so a verb that
+lands next is withheld until someone decides otherwise, and it is intersected
+with the ordinary filter, so guest mode can only ever take tools away.
+
+**The advertised list is not the enforcement.** A guest that crafts a request for
+a withheld name is refused at CALL time with `mcp-guest-restricted`, whose
+message names the verb and what a guest may call instead. A human-only name still
+gets the human-only refusal, which is checked first and is true of every session
+on every transport. This is the same defence in depth as `mcp-identity-fixed`:
+`tools/list` describes the boundary, and the call handler is the boundary.
+
+**`wait` is clamped to five seconds** for a guest, appended last so a caller's
+larger `--timeout` loses, while a caller asking for less keeps what they asked
+for. `wait` blocks the event loop and every HTTP session shares one invoke
+queue, so an unbounded guest wait is one stranger stalling every other session.
+The guest instructions string says so, tells the caller to poll `status`, and
+states plainly that a granted request executes nowhere: the demo is the approval
+flow itself.

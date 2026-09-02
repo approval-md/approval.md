@@ -126,7 +126,11 @@ export interface HttpServeOptions extends ServerPaths {
    * session mints its own. Already validated by `resolveAgentActor`.
    */
   actor: string | null;
-  /** Guest mode: per-session identity (APRV-174) and, since APRV-175, a narrowed tool list. */
+  /**
+   * Guest mode: per-session identity (APRV-174), plus the narrowed tool list,
+   * the `mcp-guest-restricted` call-time refusal and the `wait` clamp that
+   * `./server.ts` applies (APRV-175).
+   */
   guest: boolean;
   /** Interface to bind. Defaults to `127.0.0.1`; the CLI owns the widening decision. */
   host?: string;
@@ -309,7 +313,12 @@ export async function serveApprovalMcpHttp(
       },
     });
 
-    const server = createApprovalMcpServer({ ...paths, actor, serialize });
+    const server = createApprovalMcpServer({
+      ...paths,
+      actor,
+      serialize,
+      ...(options.guest ? { guest: true } : {}),
+    });
 
     const session = (id: string): Session => ({
       id,

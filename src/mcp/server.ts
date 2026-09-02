@@ -37,6 +37,19 @@
  * schema rather than quietly ignored. Two mechanisms for one rule, because the
  * rule is the reason this server is safe to run at all.
  *
+ * ## Guest mode narrows, and never widens (APRV-175)
+ *
+ * A server built with `guest: true` publishes {@link GUEST_VERBS} INTERSECTED
+ * with the list above, refuses anything else at call time with
+ * `mcp-guest-restricted` even when a client crafted the name itself, clamps
+ * `wait` to {@link GUEST_WAIT_TIMEOUT_MS}, and says all of that in
+ * {@link GUEST_INSTRUCTIONS}. Two properties are worth stating plainly: the
+ * intersection means guest mode can only ever take tools away, so no name the
+ * full server withholds becomes reachable by turning it on; and the refusal
+ * lives at CALL time, so `tools/list` describes the boundary rather than being
+ * it. The human-only arm is unchanged and is checked first, because "no session
+ * on any transport may do this" outranks "this session may not".
+ *
  * ## What this server does NOT do
  *
  * - It reads no `.approval/env` (SPEC.md §11.1 invariant 7). The environment a
@@ -70,6 +83,7 @@ import {
   type JsonSchema,
   type VerbSpec,
 } from "../cli/verb-registry.js";
+import { parseDuration } from "../core/policy-load.js";
 import { SPEC_VERSION } from "../core/version.js";
 
 // ---------------------------------------------------------------------------
@@ -97,16 +111,62 @@ export const EXCLUDED_VERBS: ReadonlyMap<string, string> = new Map([
   ],
 ]);
 
+/**
+ * The verbs a GUEST session may call (APRV-175), as registry labels.
+ *
+ * A POSITIVE allowlist, and the direction is the whole point. Guest mode exists
+ * so strangers can drive a gate over the network without executing anything on
+ * the host, and the two verbs that make that dangerous are not the only ones:
+ * `run` spawns argv on the server machine, `adapter email` spends vault
+ * credentials, `token` hands out spend material, `journal write` writes a local
+ * file the operator reads. A deny list would have to name each of those and
+ * every one that lands next; this list names what a guest MAY do, so a verb
+ * added tomorrow is absent until someone decides otherwise. Fail closed, per
+ * SPEC.md §11.
+ *
+ * The list is the demo's shape: read the guide (`instructions`), declare and
+ * ask (`register`, `request`), watch (`wait`, `status`, `queue`), and inspect
+ * (`log verify`, `policy check`, `policy test`). Nothing here executes a side
+ * effect, and nothing here is a human's authority — those are `human_only` in
+ * the registry and were never published on any transport.
+ *
+ * This narrows and never widens: {@link publishedVerbs} intersects it with the
+ * ordinary filter, so a name the full server does not publish cannot become a
+ * tool by turning guest mode on.
+ */
+export const GUEST_VERBS: ReadonlySet<string> = new Set([
+  "instructions",
+  "register",
+  "request",
+  "wait",
+  "status",
+  "queue",
+  "log verify",
+  "policy check",
+  "policy test",
+]);
+
+/** Guest `wait` never blocks the shared queue for longer than this. */
+export const GUEST_WAIT_TIMEOUT_MS = 5_000;
+
 /** `<name>_<subcommand words>` — `log_verify`, `channel_telegram_health`. */
 export function toolName(spec: VerbSpec): string {
   const words = spec.subcommand === undefined ? [] : spec.subcommand.split(" ");
   return [spec.name, ...words].join("_");
 }
 
-/** The verbs this server publishes, in registry order. */
-export function publishedVerbs(): VerbSpec[] {
+/**
+ * The verbs this server publishes, in registry order.
+ *
+ * Under `guest`, the ordinary filter is INTERSECTED with {@link GUEST_VERBS}:
+ * guest mode subtracts and can never add.
+ */
+export function publishedVerbs(guest = false): VerbSpec[] {
   return VERB_REGISTRY.filter(
-    (spec) => !spec.human_only && !EXCLUDED_VERBS.has(verbLabel(spec)),
+    (spec) =>
+      !spec.human_only &&
+      !EXCLUDED_VERBS.has(verbLabel(spec)) &&
+      (!guest || GUEST_VERBS.has(verbLabel(spec))),
   );
 }
 
@@ -135,8 +195,8 @@ export function toolInputSchema(spec: VerbSpec): JsonSchema {
 }
 
 /** The `tools/list` answer, derived entirely from the registry. */
-export function toolDefinitions(): Tool[] {
-  return publishedVerbs().map((spec) => ({
+export function toolDefinitions(guest = false): Tool[] {
+  return publishedVerbs(guest).map((spec) => ({
     name: toolName(spec),
     title: `approval ${verbLabel(spec)}`,
     description: spec.purpose,
@@ -216,6 +276,12 @@ export interface ServerOptions extends ServerPaths {
    * is a property of the process, not of the connection.
    */
   serialize?: <T>(work: () => Promise<T>) => Promise<T>;
+  /**
+   * Guest mode (APRV-175): the tool list narrows to {@link GUEST_VERBS}, a call
+   * to anything else is refused `mcp-guest-restricted` at CALL time, and `wait`
+   * is clamped to {@link GUEST_WAIT_TIMEOUT_MS}.
+   */
+  guest?: boolean;
 }
 
 /** The flag names one verb accepts, from its registry input schema. */
@@ -229,6 +295,25 @@ function flagNamesOf(spec: VerbSpec): Set<string> {
 function acceptsTrailing(spec: VerbSpec): boolean {
   const input = spec.input as { properties?: Record<string, unknown> };
   return (input.properties ?? {})["trailing"] !== undefined;
+}
+
+/**
+ * The `--timeout` a guest's `wait` actually runs with (APRV-175).
+ *
+ * A clamp rather than an override: a caller asking for less than the ceiling
+ * gets what they asked for, and anything larger, unparseable or absent becomes
+ * {@link GUEST_WAIT_TIMEOUT_MS}. It is appended LAST, the same mechanism that
+ * pins `--as`, so the caller's own value loses without being rejected.
+ *
+ * The ceiling is not politeness. `wait` blocks the event loop (`Atomics.wait`)
+ * and every HTTP session shares one invoke queue, so an unbounded `wait` is one
+ * stranger stalling every other session and the listener with them.
+ */
+export function guestWaitTimeout(rawFlags: unknown): string {
+  const flags = (rawFlags ?? {}) as Record<string, unknown>;
+  const asked = typeof flags["--timeout"] === "string" ? parseDuration(flags["--timeout"]) : null;
+  const ms = asked === null ? GUEST_WAIT_TIMEOUT_MS : Math.min(asked, GUEST_WAIT_TIMEOUT_MS);
+  return `${ms}ms`;
 }
 
 export type ArgvBuild =
@@ -351,6 +436,9 @@ export function buildArgv(
   // Injected LAST so the operator's pins and the server's identity win over
   // anything the caller supplied: `parseFlags` keeps the last occurrence.
   const injected: string[] = [];
+  if (options.guest === true && verbLabel(spec) === "wait") {
+    injected.push("--timeout", guestWaitTimeout(rawFlags));
+  }
   if (options.log !== undefined && accepted.has("--log")) injected.push("--log", options.log);
   if (options.policy !== undefined && accepted.has("--policy")) {
     injected.push("--policy", options.policy);
@@ -558,6 +646,19 @@ export function serializer(): <T>(work: () => Promise<T>) => Promise<T> {
   };
 }
 
+/**
+ * What a GUEST session is told at connect time (APRV-175).
+ *
+ * Distinct from the full text because the situation is distinct, and the two
+ * facts a guest most needs are the two a full client never needs: `wait` comes
+ * back fast, and a granted request executes NOWHERE. Saying the second one
+ * plainly matters more than it looks. A stranger who saw their action granted
+ * and assumed an email went out has learned the wrong thing about this system;
+ * what they are driving is the approval flow itself.
+ */
+export const GUEST_INSTRUCTIONS =
+  "approval.md gates agent actions that touch the world, and you are connected to it as a GUEST. The tools here are a narrow slice of the agent surface: read the guide (`instructions`), declare an action in a task envelope and register it (`register`), ask for it (`request`), then watch (`wait`, `status`, `queue`) and inspect (`log_verify`, `policy_check`, `policy_test`). Calling anything else is refused `mcp-guest-restricted` whether or not it is listed, because everything else executes on, or spends the credentials of, the machine hosting this gate. Two things to expect. `wait` returns FAST: a guest's timeout is clamped to five seconds server-side, so treat it as a poll and call `status` again rather than asking for a longer one. And NOTHING YOU ARE GRANTED EXECUTES ANYWHERE: there is no `run` here, no adapter, and no side effect at the end of the flow. What you are driving is the approval flow itself — a real request, a real human decision, a real hash-chained record of both. Your identity is this session's alone (`agent:guest-<id>`, chosen by the server), and everything you do is recorded under it.";
+
 /** Build the MCP server. Nothing is connected until {@link Server.connect}. */
 export function createApprovalMcpServer(options: ServerOptions): Server {
   const server = new Server(
@@ -565,14 +666,17 @@ export function createApprovalMcpServer(options: ServerOptions): Server {
     {
       capabilities: { tools: {} },
       instructions:
-        "approval.md gates agent actions that touch the world. The tools here are the AGENT surface only: declare an action in a task envelope, register it, request it, wait for a decision, then run it. There is deliberately no grant, reject, revoke, attest or vault tool — those record a human's authority and are not available to a client of this server (SPEC.md §11). One tool is not gated at all: `journal_write` appends free text to a local file, is never classified or routed through policy, can be neither approved nor denied, and writes no event — it is there so you can say what an exit code cannot (that you are complying and think this is wrong, that something reads as odd, that you are stuck). The operator reads it; nothing written there changes any verdict. Call `instructions` first; it prints the full guide.",
+        options.guest === true
+          ? GUEST_INSTRUCTIONS
+          : "approval.md gates agent actions that touch the world. The tools here are the AGENT surface only: declare an action in a task envelope, register it, request it, wait for a decision, then run it. There is deliberately no grant, reject, revoke, attest or vault tool — those record a human's authority and are not available to a client of this server (SPEC.md §11). One tool is not gated at all: `journal_write` appends free text to a local file, is never classified or routed through policy, can be neither approved nor denied, and writes no event — it is there so you can say what an exit code cannot (that you are complying and think this is wrong, that something reads as odd, that you are stuck). The operator reads it; nothing written there changes any verdict. Call `instructions` first; it prints the full guide.",
     },
   );
 
-  const byName = new Map(publishedVerbs().map((spec) => [toolName(spec), spec]));
+  const guest = options.guest === true;
+  const byName = new Map(publishedVerbs(guest).map((spec) => [toolName(spec), spec]));
   const serialize = options.serialize ?? serializer();
 
-  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: toolDefinitions() }));
+  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: toolDefinitions(guest) }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
     const name = request.params.name;
@@ -581,12 +685,31 @@ export function createApprovalMcpServer(options: ServerOptions): Server {
       const human = VERB_REGISTRY.find(
         (candidate) => toolName(candidate) === name && candidate.human_only,
       );
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        human === undefined
-          ? `unknown tool ${JSON.stringify(name)}`
-          : `unknown tool ${JSON.stringify(name)}: \`approval ${verbLabel(human)}\` records or establishes a human's authority and this server publishes no tool for it. An MCP client is an agent's harness, and SPEC.md §11 makes the agent the untrusted policy; the human decides at their own surface (\`approval channel cli\`, the web page, or Telegram)`,
-      );
+      if (human !== undefined) {
+        // Checked FIRST, and the same answer for a guest as for anyone else:
+        // this verb records a human's authority, which is true of no session on
+        // any transport. Invariant 9 is not a guest-mode feature.
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `unknown tool ${JSON.stringify(name)}: \`approval ${verbLabel(human)}\` records or establishes a human's authority and this server publishes no tool for it. An MCP client is an agent's harness, and SPEC.md §11 makes the agent the untrusted policy; the human decides at their own surface (\`approval channel cli\`, the web page, or Telegram)`,
+        );
+      }
+
+      // The advertised list is NEVER the enforcement (APRV-175). A guest who
+      // crafted the request name reaches this arm, which is the same defence in
+      // depth `mcp-identity-fixed` is: the refusal is here, at call time, and
+      // `tools/list` merely describes it.
+      const withheld = guest
+        ? publishedVerbs().find((candidate) => toolName(candidate) === name)
+        : undefined;
+      if (withheld !== undefined) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `mcp-guest-restricted: \`approval ${verbLabel(withheld)}\` is not available to a guest session. This server runs in GUEST mode, where a session may call only ${[...byName.keys()].join(", ")} — the verbs that declare, ask and observe. Everything else executes on, or spends the credentials of, the machine hosting this gate, which is not what a guest connected to`,
+        );
+      }
+
+      throw new McpError(ErrorCode.InvalidParams, `unknown tool ${JSON.stringify(name)}`);
     }
 
     const built = buildArgv(spec, request.params.arguments, options);
