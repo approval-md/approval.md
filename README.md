@@ -676,6 +676,12 @@ inventory. `approval --help` lists them grouped by what they are for. `approval
 [docs/cli-reference.md](docs/cli-reference.md). `approval instructions` is the
 agent-facing guide, and `--schemas` prints the verb registry as JSON.
 
+Every external adapter, harness, updater or gateway this project has weighed
+for integration has an entry in
+[docs/integrations-considered.md](docs/integrations-considered.md): what it
+exposes, how it fits, the verdict, and the next step, so the question is
+answered once.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
