@@ -57,7 +57,15 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { accessSync, constants, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePathSegments, sep } from "node:path";
 
@@ -68,7 +76,14 @@ import {
   policyFileHash,
   resolveHumanActor,
 } from "../core/attest.js";
+import { compareChains } from "../core/log-reconcile.js";
 import { diffPolicies, renderDiff, SPEC_NAMESPACES, type PolicyDiff } from "../core/policy-diff.js";
+import {
+  checkPolicyExpectations,
+  describeFailure,
+  expectationsFor,
+  EXPECTATIONS_MODULE,
+} from "../core/policy-expectations.js";
 import {
   loadPolicy,
   parseDuration,
@@ -93,7 +108,8 @@ import {
 import { POLICY_AMEND_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
-import { createProgress, silentProgress } from "./progress.js";
+import { commitOnBase, fetchBase, showBlob } from "./git-scope.js";
+import { createProgress, silentProgress, type ProgressReporter } from "./progress.js";
 import { readLineFromStdin } from "./prompt.js";
 import {
   refusal as renderRefusal,
@@ -159,6 +175,16 @@ type AmendErrorCode =
   | "io"
   | "load-failed"
   | "commit-preconditions"
+  // APRV-203: the ceremony owns its own git preconditions. Each of these three
+  // ends with NOTHING attested, committed or pushed.
+  /** The remote could not be fetched, so there is no base to build on. */
+  | "fetch-failed"
+  /** The remote's policy is not the attested baseline this edit was made against. */
+  | "base-policy-diverged"
+  /** The remote's log is not a prefix of the working log: two chains. */
+  | "base-log-diverged"
+  /** The amended policy does not resolve the way its pins say it must. */
+  | "policy-suite-failed"
   | "git-failed"
   | "push-rejected"
   | "pr-failed"
@@ -1087,12 +1113,72 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   // after the attestation would recreate the very interregnum this verb exists
   // to close: an attested policy with no commit carrying it.
   let commitPlan: { root: string; policyArg: string; logArg: string } | null = null;
+  /**
+   * The remote tip this ceremony's commit will be parented on (APRV-203).
+   *
+   * Captured HERE, before the attestation, and used unchanged afterwards: a
+   * ceremony that re-read the remote after the tap could build its commit on a
+   * base nobody checked.
+   */
+  let commitBase: { remote: string | null; branch: string; sha: string } | null = null;
   if (wantCommit && !dryRun) {
     const plan = planCommit(policyPath, logPath, useBranch ? { branch: branchFlag } : null);
     if (!plan.ok) {
       return refuse(streams, json, "commit-preconditions", plan.message, EXIT_USAGE);
     }
     commitPlan = plan.plan;
+
+    const prepared = prepareBase(
+      { root: commitPlan.root, policyArg: commitPlan.policyArg, logPath, progress },
+      probe,
+      attested?.sha256 ?? null,
+    );
+    if (!prepared.ok) {
+      return refuse(streams, json, prepared.code, prepared.message, EXIT_IO, prepared.human);
+    }
+    commitBase = prepared.base;
+
+    // The dogfood pins, run against the AMENDED file before anything is
+    // attested or pushed (APRV-203). A policy edit whose pins nobody updated
+    // used to be found by CI, hours later, on a pull request that was already
+    // open and already carrying an attestation.
+    const expectations = expectationsFor(policyPath);
+    if (expectations !== null) {
+      progress.phase(
+        `running the policy suite against the amended file (${String(expectations.length)} pinned resolutions)`,
+      );
+      const checked = checkPolicyExpectations(liveLoad, expectations);
+      progress.done();
+      if (!checked.ok) {
+        return refuse(
+          streams,
+          json,
+          "policy-suite-failed",
+          `the amended policy does not match its pins: ${checked.failures
+            .map(describeFailure)
+            .join("; ")}. Nothing was attested, committed or pushed`,
+          EXIT_USAGE,
+          runbook(st, "policy-suite-failed", "the amended policy does not match its pins", {
+            state: [
+              "nothing was attested: the policy edit is still only a working-tree change",
+              "nothing was committed and nothing was pushed",
+              ...checked.failures.map(describeFailure),
+            ],
+            steps: [
+              {
+                command: `$EDITOR ${EXPECTATIONS_MODULE}`,
+                note: "make the pins say what the amendment means them to say",
+              },
+              { command: "npm run build", note: "the ceremony reads the compiled pins" },
+              { command: "approval policy amend --commit", note: "re-run; it starts over cleanly" },
+            ],
+            footer: [
+              "this is the check CI runs: failing it here costs a minute, failing it there costs a red pull request carrying an attestation",
+            ],
+          }),
+        );
+      }
+    }
   }
 
   /**
@@ -1123,9 +1209,14 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     `git commit -m ${JSON.stringify(`Policy: ${summary} (attested seq ${seq})`)}`,
   ];
   const gitCommands = (seq: string): string[] => {
+    // APRV-203: `--commit` runs none of these; it assembles the commit on the
+    // remote's tip without a checkout. These are the HAND procedure, and they
+    // start where `--commit` starts: at the remote, so the branch is not built
+    // on a local trunk that has fallen behind.
     if (useBranch) {
       return [
-        `git checkout -b ${branchName(seq)}`,
+        "git fetch origin",
+        `git checkout -b ${branchName(seq)} origin/${probe.defaultBranch ?? "main"}`,
         ...commitCommands(seq),
         `git push -u origin ${branchName(seq)}`,
         `gh pr create --title ${JSON.stringify(prTitle(summary, seq))} --body ${JSON.stringify(prBody(seq))}`,
@@ -1517,40 +1608,83 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     );
   };
 
-  if (commitPlan !== null) {
-    if (branch !== null) {
-      const checkout = git(["checkout", "-b", branch], commitPlan.root);
-      if (!checkout.ok) {
-        return gitFailed(
-          `git checkout -b ${branch}`,
-          checkout.stderr.trim(),
-          `the attestation was appended at seq ${seq}, but \`git checkout -b ${branch}\` failed: ${checkout.stderr.trim()}; run the printed commands by hand`,
-          commands,
-        );
+  if (commitPlan !== null && commitBase !== null) {
+    // APRV-203. The commit is ASSEMBLED, never checked out: a scratch index is
+    // filled from the remote's tree, the two ceremony files are laid over it
+    // from the working tree, and the result is parented on the remote. HEAD does
+    // not move, the operator's index is not touched, and the working tree ends
+    // the ceremony carrying exactly the policy edit it started with.
+    const message = `Policy: ${summary} (attested seq ${seq})`;
+    /** `origin/main abc123`, or `HEAD abc123` where there is no remote. */
+    const baseLabel = `${commitBase.remote === null ? "HEAD" : `${commitBase.remote}/${commitBase.branch}`} ${commitBase.sha.slice(0, 12)}`;
+    progress.phase(`building the amendment commit on ${baseLabel} (nothing is checked out)`);
+    const built = commitOnBase(commitPlan.root, {
+      base: commitBase.sha,
+      paths: [commitPlan.policyArg, commitPlan.logArg],
+      message,
+    });
+    progress.done();
+    if (!built.ok) {
+      return gitFailed(
+        built.step,
+        built.quote.join(" | "),
+        `the attestation was appended at seq ${seq}, but ${built.message}; the checkout is untouched, so run the printed commands by hand`,
+        commands,
+      );
+    }
+    if (built.unchanged) {
+      return gitFailed(
+        "git write-tree",
+        `${baseLabel} already carries these exact bytes`,
+        `the attestation was appended at seq ${seq}, but the amendment tree is identical to ${baseLabel}: there is nothing to commit`,
+        commands,
+      );
+    }
+    const commitSha = built.sha;
+
+    /**
+     * The direct flow, when this checkout was already sitting on the base.
+     *
+     * Moving the branch ref here is exactly what `git commit` would have done:
+     * the tree of the new commit is the base tree plus the two files the working
+     * tree already carries, so the status afterwards is clean. It is done ONLY
+     * when HEAD is the base — a checkout that had fallen behind is left where it
+     * is, because moving it would rewrite the working tree, and rewriting the
+     * working tree around a live log is the whole thing this verb never does.
+     */
+    const headSha = git(["rev-parse", "HEAD"], commitPlan.root).stdout.trim();
+    const inPlace =
+      branch === null &&
+      probe.currentBranch !== null &&
+      headSha === commitBase.sha &&
+      git(["update-ref", `refs/heads/${probe.currentBranch}`, commitSha, headSha], commitPlan.root).ok;
+    if (inPlace) {
+      // The index has to follow the ref, or every one of the two files reads as
+      // a staged modification of a commit that already contains it. `read-tree`
+      // without `-u` writes the index and never the working tree, which is the
+      // half of `git commit` the ref move did not do.
+      git(["read-tree", commitSha], commitPlan.root);
+    }
+
+    // Otherwise the commit is anchored on a ref of its own before anything is
+    // pushed, so a rejected push leaves an object a human can still find and
+    // push. The branch flow anchors on ITS branch, because that is the name the
+    // recovery instructions use; the direct flow anchors under `refs/approval/`,
+    // where it claims no branch name that the recovery might later need.
+    const fallbackRef = `refs/approval/amend/${String(seq)}`;
+    let anchor = fallbackRef;
+    if (!inPlace) {
+      if (branch !== null && git(["branch", branch, commitSha], commitPlan.root).ok) {
+        anchor = branch;
+      } else {
+        git(["update-ref", fallbackRef, commitSha], commitPlan.root);
       }
     }
-    const add = git(["add", "--", commitPlan.policyArg, commitPlan.logArg], commitPlan.root);
-    if (!add.ok) {
-      return gitFailed(
-        "git add",
-        add.stderr.trim(),
-        `the attestation was appended at seq ${seq}, but \`git add\` failed: ${add.stderr.trim()}; run the two commands by hand`,
-        branch === null ? commands : commands.slice(1),
-      );
-    }
-    const message = `Policy: ${summary} (attested seq ${seq})`;
-    const commit = git(["commit", "-m", message, "--", commitPlan.policyArg, commitPlan.logArg], commitPlan.root);
-    if (!commit.ok) {
-      const failure = commit.stderr.trim() || commit.stdout.trim();
-      return gitFailed(
-        "git commit",
-        failure,
-        `the attestation was appended at seq ${seq}, but \`git commit\` failed: ${failure}; run the two commands by hand`,
-        branch === null ? commands : commands.slice(1),
-      );
-    }
+
     committed = true;
-    output = `${commit.stdout}${commit.stderr}`.trim();
+    output = inPlace
+      ? `${commitSha.slice(0, 12)} on ${probe.currentBranch ?? "HEAD"} (built on ${baseLabel})`
+      : `${commitSha.slice(0, 12)} on ${baseLabel} (held at ${anchor}; your checkout was not moved)`;
 
     /** `gh pr create …` as the operator would type it, for both flows. */
     const prCreateCommand = (head: string): string =>
@@ -1579,18 +1713,21 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       publishing.attempted = true;
       publishing.via = "branch";
       publishing.branch = branch;
-      const push = git(["push", "-u", "origin", branch], commitPlan.root);
+      progress.phase(`pushing ${commitSha.slice(0, 12)} to origin ${branch}`);
+      const push = git(["push", "origin", `${commitSha}:refs/heads/${branch}`], commitPlan.root);
+      progress.done();
       publishing.steps.push({ command: `git push -u origin ${branch}`, ok: push.ok });
       if (!push.ok) {
         const prCreate = `gh pr create --title ${JSON.stringify(prTitle(summary, String(seq)))} --body ${JSON.stringify(prBody(String(seq)))}`;
         return stalled(
           "push-rejected",
-          `the remote REJECTED \`git push -u origin ${branch}\``,
+          `the remote REJECTED \`git push origin ${branch}\``,
           push,
-          `the attestation was appended at seq ${seq} and committed on ${branch}, but \`git push -u origin ${branch}\` was REJECTED: ${pushFailureText(push)}. STATE: the amendment commit exists LOCALLY on ${branch} and nowhere else; origin still carries the previous policy. Next: \`git push -u origin ${branch} && ${prCreate}\`, and merge that pull request with a merge commit`,
+          `the attestation was appended at seq ${seq} and committed as ${commitSha.slice(0, 12)} on ${commitBase.remote}/${commitBase.branch}, but \`git push origin ${commitSha.slice(0, 12)}:refs/heads/${branch}\` was REJECTED: ${pushFailureText(push)}. STATE: the amendment commit exists LOCALLY on ${branch} and nowhere else; origin still carries the previous policy. Next: \`git push -u origin ${branch} && ${prCreate}\`, and merge that pull request with a merge commit`,
           [
             `attestation appended at seq ${seq}: it is in the log, on disk`,
-            `committed LOCALLY on ${branch}, and nowhere else`,
+            `committed LOCALLY on ${branch} (${commitSha.slice(0, 12)}, parented on ${commitBase.remote}/${commitBase.branch}), and nowhere else`,
+            "your checkout was never moved: same branch, same working tree",
             "NOT on origin: origin still carries the previous policy",
           ],
           [
@@ -1653,20 +1790,33 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       if (target !== null && hasOrigin(commitPlan.root)) {
         publishing.attempted = true;
         publishing.via = "direct";
-        const push = git(["push", "origin", target], commitPlan.root);
+        progress.phase(`pushing ${commitSha.slice(0, 12)} to origin ${target}`);
+        const push = git(["push", "origin", `${commitSha}:refs/heads/${target}`], commitPlan.root);
+        progress.done();
         publishing.steps.push({ command: `git push origin ${target}`, ok: push.ok });
         if (push.ok) {
           pushed = true;
           publishing.pushed = true;
           publishing.complete = true;
           output = `${output}\n${`${push.stdout}${push.stderr}`.trim()}`.trim();
+          // APRV-203: the commit was assembled on the remote's tip and pushed
+          // there, so the operator's own branch does not carry it yet. Say so,
+          // rather than letting them find out from a `git status` later.
+          if (!inPlace) {
+            note(
+              `${st.glyph("ok")} pushed to origin ${target}; your ${target} does not carry the commit yet — \`approval log sync\` brings it down safely`,
+            );
+          }
         } else {
           // ---- the ceremony finishes its own job ----
           const recovery = branchName(String(seq));
           publishing.via = "recovery";
           publishing.branch = recovery;
           const owed: RunbookStep[] = [
-            { command: `git branch ${recovery}`, note: "the same commit, on a branch" },
+            {
+              command: `git branch ${recovery} ${commitSha.slice(0, 12)}`,
+              note: "the assembled commit, on a branch",
+            },
             { command: `git push -u origin ${recovery}` },
             { command: prCreateCommand(recovery) },
             { command: `gh pr merge ${recovery} --merge`, note: "or merge it in the web UI" },
@@ -1674,19 +1824,23 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
           /** The state lines every stop on this path shares, plus its own. */
           const state = (last: string): string[] => [
             `attestation appended at seq ${seq}: it is in the log, on disk`,
-            `committed LOCALLY on ${target}, one commit ahead of origin`,
+            `committed as ${commitSha.slice(0, 12)} on ${commitBase.remote}/${commitBase.branch}, held LOCALLY on ${recovery}`,
+            `your checkout was never moved: still on ${target}, working tree as you left it`,
             `${target} is protected, whatever the probe reported: the remote just refused`,
             last,
           ];
-          const preamble = `the attestation was appended at seq ${seq} and committed on ${target}, but \`git push origin ${target}\` was REJECTED by the remote: ${pushFailureText(push)}. ${target} is protected (whatever the protection probe reported: the remote just refused the push), so this ceremony published through branch ${recovery} instead`;
+          const preamble = `the attestation was appended at seq ${seq} and committed as ${commitSha.slice(0, 12)} on ${commitBase.remote}/${commitBase.branch}, but \`git push origin ${target}\` was REJECTED by the remote: ${pushFailureText(push)}. ${target} is protected (whatever the protection probe reported: the remote just refused the push), so this ceremony published through branch ${recovery} instead`;
 
           note(
             `${st.warn(`${target} is protected:`)} the direct push was refused, so this amendment publishes through branch ${recovery}`,
           );
           quoteUnder(push);
 
-          // 1. The branch. A ref copy: HEAD does not move.
-          const branched = git(["branch", recovery], commitPlan.root);
+          // 1. The branch. A ref copy at the assembled commit (APRV-203: at the
+          //    COMMIT rather than at HEAD, which never carried it). A name
+          //    already taken is still a refusal: this verb does not overwrite
+          //    somebody else's branch to finish its own ceremony.
+          const branched = git(["branch", recovery, commitSha], commitPlan.root);
           publishing.steps.push({ command: `git branch ${recovery}`, ok: branched.ok });
           if (!branched.ok) {
             return stalled(
@@ -1950,6 +2104,133 @@ function planCommit(
     }
   }
   return { ok: true, plan: { root, policyArg, logArg } };
+}
+
+/**
+ * Fetch the remote and establish that this ceremony may be based on it (APRV-203).
+ *
+ * The ceremony used to commit on whatever branch the operator was standing on,
+ * which made the operator responsible for that branch being current. On
+ * 2026-09-01 it was not: origin's main had moved, the amendment commit went onto
+ * the stale local tip, and the pull request carried a parent missing everything
+ * main had merged since — including the test pins the previous ceremony landed.
+ * CI went red and the branch had to be rebased by hand. So the verb fetches, and
+ * it bases its commit on the remote.
+ *
+ * Two things are checked before that base is accepted, and both are refusals
+ * with their own codes rather than reconciliations:
+ *
+ * - the remote's POLICY must be the attested bytes this edit was made against.
+ *   If the remote carries a policy this working tree never saw, the edit in the
+ *   working tree is an edit to a different document.
+ * - the remote's LOG must be a prefix of the working log. The amendment commit
+ *   carries the log, so a remote log this working log does not contain would be
+ *   reverted by it, and two chains do not merge.
+ *
+ * A local branch AHEAD of the remote is deliberately not checked at all: the
+ * commit is parented on the remote either way, so those commits are simply not
+ * part of the ceremony.
+ */
+function prepareBase(
+  ctx: { root: string; policyArg: string; logPath: string; progress: ProgressReporter },
+  probe: ProtectionProbe,
+  attestedSha256: string | null,
+):
+  | { ok: true; base: { remote: string | null; branch: string; sha: string } }
+  | { ok: false; code: AmendErrorCode; message: string; human?: string } {
+  const remote = "origin";
+  // A repository with no remote has nothing to fetch and nothing to diverge
+  // from: its own HEAD is the base, which is what this ceremony always used.
+  if (!hasOrigin(ctx.root)) {
+    const head = git(["rev-parse", "HEAD"], ctx.root);
+    const sha = head.stdout.trim();
+    if (!head.ok || sha.length === 0) {
+      return {
+        ok: false,
+        code: "fetch-failed",
+        message: `${ctx.root} has no "origin" remote and no HEAD commit to base this amendment on; nothing was attested. Make the first commit, or add the remote`,
+      };
+    }
+    return { ok: true, base: { remote: null, branch: probe.currentBranch ?? "HEAD", sha } };
+  }
+  const branch = probe.defaultBranch ?? probe.currentBranch;
+  if (branch === null) {
+    return {
+      ok: false,
+      code: "fetch-failed",
+      message: `no branch could be resolved to base this amendment on (${probe.reason}); nothing was attested. Check out the trunk in this checkout, or add an "origin" remote`,
+    };
+  }
+
+  ctx.progress.phase(
+    `fetching ${remote}/${branch}: the amendment is based on the remote, not on this checkout`,
+  );
+  const fetched = fetchBase(ctx.root, remote, branch);
+  ctx.progress.done();
+  if (!fetched.ok) {
+    return {
+      ok: false,
+      code: "fetch-failed",
+      message: `${fetched.message}. The amendment commit is based on ${remote}/${branch}, so the ceremony cannot proceed without knowing where that is; nothing was attested. Fix the remote (network, credentials, or no origin at all) and run this again`,
+    };
+  }
+  const sha = fetched.sha;
+
+  ctx.progress.phase(`verifying that ${remote}/${branch} ${sha.slice(0, 12)} is this edit's base`);
+  const remotePolicy = showBlob(ctx.root, sha, ctx.policyArg);
+  const remoteSha256 =
+    remotePolicy === null ? null : createHash("sha256").update(remotePolicy).digest("hex");
+  if (attestedSha256 !== null && remoteSha256 !== attestedSha256) {
+    ctx.progress.done();
+    return {
+      ok: false,
+      code: "base-policy-diverged",
+      message: `${remote}/${branch} carries a policy this amendment was not written against: ${
+        remoteSha256 === null
+          ? `it has no ${ctx.policyArg} at all`
+          : `${remote}/${branch}:${ctx.policyArg} hashes ${remoteSha256}`
+      }, and the attested baseline this edit is a diff from is ${attestedSha256}. Somebody amended the policy since this edit began, so committing it would revert their amendment. Nothing was attested. Bring this checkout up to ${remote}/${branch} and re-apply the edit on top of it`,
+    };
+  }
+
+  const remoteLog = showBlob(ctx.root, sha, repoPath(ctx.root, ctx.logPath));
+  const compared = compareChains(
+    { label: `the working log ${ctx.logPath}`, text: readLogText(ctx.logPath) },
+    {
+      label: `${remote}/${branch}:${repoPath(ctx.root, ctx.logPath)}`,
+      text: remoteLog === null ? "" : remoteLog.toString("utf8"),
+    },
+  );
+  ctx.progress.done();
+  if (!compared.ok) {
+    return { ok: false, code: "base-log-diverged", message: `${compared.message}; nothing was attested` };
+  }
+  if (compared.drift.relation === "diverged" || compared.drift.relation === "behind") {
+    const drift = compared.drift;
+    return {
+      ok: false,
+      code: "base-log-diverged",
+      message:
+        drift.relation === "diverged"
+          ? `the working log and ${remote}/${branch}'s log part at seq ${String(drift.firstDivergentSeq)}: two chains, not one. The amendment commit carries the log, and hash chains do not merge, so nothing was attested. Run \`approval doctor\` for the log-drift report; which of the two is the log is a human decision`
+          : `${remote}/${branch} carries log records this checkout does not (its head is seq ${String(
+              drift.committedHead?.seq ?? 0,
+            )}, the working head is seq ${String(
+              drift.workingHead?.seq ?? 0,
+            )}). An amendment commit built on the remote would carry this shorter log over the longer one, dropping records. Nothing was attested. Run \`approval log sync\` first, then run this again`,
+    };
+  }
+
+  return { ok: true, base: { remote, branch, sha } };
+}
+
+/** The working log's text, or the empty string when there is no file yet. */
+function readLogText(path: string): string {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return "";
+  }
 }
 
 function loadSummary(load: PolicyLoadResult): { ok: boolean; code: string | null; message: string | null } {

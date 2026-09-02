@@ -22,8 +22,13 @@ import { after, before, test } from "node:test";
 
 import { CLASSIFIER_CLASSES } from "../src/core/command-class.js";
 import { loadPolicy, type PolicyLoadResult } from "../src/core/policy-load.js";
-import { resolve, type Provenance } from "../src/core/policy-match.js";
-import type { Autonomy } from "../src/core/policy-load.js";
+import { resolve } from "../src/core/policy-match.js";
+import {
+  checkPolicyExpectations,
+  describeFailure,
+  expectationsFor,
+  REPO_POLICY_EXPECTATIONS,
+} from "../src/core/policy-expectations.js";
 
 /**
  * Repo root. This file compiles to `dist/tests/dogfood.test.js`, so the root is
@@ -102,109 +107,15 @@ test("APPROVAL.md declares approver carter on the cli channel", () => {
 // 3. Matching: every declared class, plus defaults and the floor
 // ---------------------------------------------------------------------------
 
-interface Expectation {
-  actionClass: string;
-  autonomy: Autonomy;
-  provenance: Provenance;
-  note?: string;
-}
-
-const EXPECTATIONS: readonly Expectation[] = [
-  // manual — the side-effecting and self-modifying classes
-  { actionClass: "deps.add", autonomy: "manual", provenance: "rule" },
-  {
-    actionClass: "network.call",
-    autonomy: "manual",
-    provenance: "rule",
-    note: "re-tightened 2026-08-20 (attested seq 293) once APRV-114 taught the classifier that GET-shaped fetches are read.web; this class now covers only the mutating and ambiguous remainder",
-  },
-  { actionClass: "release.publish", autonomy: "manual", provenance: "rule" },
-  {
-    actionClass: "policy.edit",
-    autonomy: "supervised",
-    provenance: "rule",
-    note: "supervised-live 0.1 since the seq 5147 ceremony (APRV-184): one edit in ten blocks on the gate, the rest execute and stay in the retrospective pool; with no usable sampling secret live selection fails closed and every edit gates",
-  },
-  { actionClass: "files.delete.out_of_scope", autonomy: "manual", provenance: "rule" },
-
-  // human-only — a person acts; no verb mints or withdraws authority (APRV-185); declared at the seq 7355 ceremony
-  {
-    actionClass: "vcs.history.rewrite",
-    autonomy: "human-only",
-    provenance: "rule",
-    note: "manual until seq 7355; a person rewrites shared history, never an agent",
-  },
-  {
-    actionClass: "policy.core",
-    autonomy: "human-only",
-    provenance: "rule",
-    note: "APPROVAL.md and .approval/* outside the log; split out of policy.edit by APRV-198 so the 0.1 sample never sits on the gate's own organs",
-  },
-  {
-    actionClass: "log.mutate",
-    autonomy: "human-only",
-    provenance: "rule",
-    note: "any write aimed at .approval/log/ (APRV-198)",
-  },
-  {
-    actionClass: "account.credential",
-    autonomy: "human-only",
-    provenance: "rule",
-    note: "keychain readers, APPROVAL_*/TELEGRAM_*/VAULT_* probes, vault/keys/env reads (APRV-194)",
-  },
-
-  // autonomous — reads and in-workspace/branch-local writes
-  {
-    actionClass: "log.sync",
-    autonomy: "autonomous",
-    provenance: "rule",
-    note: "manual from seq 513 until the seq 7413 ceremony reached the APRV-125 end state: an ff-pull with chain reconcile decides nothing, the chain and CI verify it",
-  },
-  {
-    actionClass: "read.web",
-    autonomy: "autonomous",
-    provenance: "rule",
-    note: "member of the read.* namespace",
-  },
-  {
-    actionClass: "read.files.workspace",
-    autonomy: "autonomous",
-    provenance: "rule",
-    note: "read.* trailing wildcard spans more than one segment",
-  },
-  { actionClass: "files.write.workspace", autonomy: "autonomous", provenance: "rule" },
-  { actionClass: "vcs.commit.branch", autonomy: "autonomous", provenance: "rule" },
-  { actionClass: "vcs.push.branch", autonomy: "autonomous", provenance: "rule" },
-
-  // supervised — pushing to main is sampled, not free
-  { actionClass: "vcs.push.main", autonomy: "supervised", provenance: "rule" },
-  {
-    actionClass: "log.advance",
-    autonomy: "supervised",
-    provenance: "rule",
-    note: "supervised-live 0.1 since the seq 7413 ceremony (APRV-125 end state): committing the record of what already happened is bookkeeping, sampled after the fact; with no usable sampling secret live selection fails closed and every advance gates",
-  },
-
-  // defaults — undeclared classes fall to defaults.autonomy (manual)
-  {
-    actionClass: "communicate.email.external",
-    autonomy: "manual",
-    provenance: "default",
-    note: "undeclared class: the absence of a grant is not a grant",
-  },
-  {
-    actionClass: "read",
-    autonomy: "manual",
-    provenance: "default",
-    // SPEC.md §5.2 (amended): a trailing `.*` matches ONE OR MORE segments, so
-    // `read.*` is the namespace *under* `read` and does not cover the bare
-    // class `read`. A policy wanting the bare class covered must list it as its
-    // own rule; the repo policy does not, so `read` falls to the manual default.
-    note: "bare namespace is NOT matched by read.* (SPEC.md §5.2)",
-  },
-];
-
-for (const { actionClass, autonomy, provenance, note } of EXPECTATIONS) {
+/**
+ * The pins themselves live in `src/core/policy-expectations.ts` (APRV-203).
+ *
+ * They moved out of this file so that `approval policy amend` can read them: the
+ * ceremony runs the same check against the AMENDED file before it pushes, which
+ * is what turns "CI went red after the ceremony" into a refusal on the laptop.
+ * This suite is still their other reader, and still the thing CI runs.
+ */
+for (const { actionClass, autonomy, provenance, note } of REPO_POLICY_EXPECTATIONS) {
   const label = note === undefined ? "" : ` (${note})`;
   test(`APPROVAL.md resolves ${actionClass} → ${autonomy}/${provenance}${label}`, () => {
     const load = loadRepoPolicy();
@@ -214,6 +125,24 @@ for (const { actionClass, autonomy, provenance, note } of EXPECTATIONS) {
     assert.equal(resolution.floorApplied, false);
   });
 }
+
+test("the shared expectation check passes against the live policy (APRV-203)", () => {
+  // The exact call `approval policy amend` makes before it pushes. When this
+  // fails, the ceremony refuses on the laptop instead of on CI.
+  const checked = checkPolicyExpectations(loadRepoPolicy(), REPO_POLICY_EXPECTATIONS);
+  assert.deepEqual(
+    checked.failures.map(describeFailure),
+    [],
+    "the live policy no longer matches its pins; update src/core/policy-expectations.ts in the same ceremony that changed the policy",
+  );
+  assert.equal(checked.ok, true);
+});
+
+test("this repository's own policy file resolves to this repository's pins", () => {
+  assert.equal(expectationsFor(APPROVAL_MD), REPO_POLICY_EXPECTATIONS);
+  // Somebody else's policy is not governed by them.
+  assert.equal(expectationsFor("/APPROVAL.md"), null);
+});
 
 test("APPROVAL.md + irreversibility floor: vcs.push.main reversible:false → manual/floor", () => {
   // SPEC.md §7 (amended): an irreversible action MUST NOT run under

@@ -519,6 +519,10 @@ function withoutProgress(text: string): string {
     .filter(
       (line) =>
         !/^(verifying the log chain|recovering the attested baseline)/u.test(line) &&
+        // APRV-203's phases: the ceremony's own git preconditions, narrated.
+        !/^(fetching |verifying that |running the policy suite|building the amendment commit|pushing )/u.test(
+          line,
+        ) &&
         !/^ {2}\d+\/\d+ records$/u.test(line),
     )
     .join("\n");
@@ -1209,13 +1213,24 @@ test("a protected default branch turns --commit into branch, push, and a PR of o
   );
 
   assert.equal(run.code, 0, run.stderr);
-  // A branch, created fresh, named for the seq the attestation got.
-  assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "policy-amend-2");
-  // One commit on top of main, carrying exactly the two files.
+  // A branch, created fresh, named for the seq the attestation got — and the
+  // checkout STAYS on main: nothing is checked out any more (APRV-203).
+  assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "main");
   assert.equal(
-    git(["rev-list", "--count", "main..policy-amend-2"], dir).stdout.trim(),
+    git(["rev-parse", "--verify", "--quiet", "refs/heads/policy-amend-2"], dir).code,
+    0,
+    "the amendment commit is held on a local branch of its own",
+  );
+  // One commit on top of ORIGIN's main, carrying exactly the two files.
+  assert.equal(
+    git(["rev-list", "--count", "origin/main..policy-amend-2"], dir).stdout.trim(),
     "1",
     "the amendment branch must carry exactly one commit",
+  );
+  assert.equal(
+    git(["rev-parse", "policy-amend-2^"], dir).stdout.trim(),
+    git(["rev-parse", "origin/main"], dir).stdout.trim(),
+    "the amendment's parent is origin/main, not the local branch tip",
   );
   assert.deepEqual(remoteFiles(remote, "policy-amend-2"), [
     ".approval/log/events.jsonl",
@@ -1265,10 +1280,13 @@ test("the branch flow reports its protection, branch, push and PR in JSON", () =
   assert.equal(gitPlan["pushed"], true);
   assert.equal(gitPlan["prUrl"], "https://github.test/o/r/pull/8");
   assert.equal(gitPlan["warning"], null);
+  // The printed HAND procedure starts at the remote, exactly where `--commit`
+  // starts (APRV-203): fetch, then branch off origin's default branch.
   const commands = gitPlan["commands"] as string[];
-  assert.match(commands[0] as string, /^git checkout -b policy-amend-2$/u);
-  assert.match(commands[3] as string, /^git push -u origin policy-amend-2$/u);
-  assert.match(commands[4] as string, /^gh pr create --title/u);
+  assert.match(commands[0] as string, /^git fetch origin$/u);
+  assert.match(commands[1] as string, /^git checkout -b policy-amend-2 origin\/main$/u);
+  assert.match(commands[4] as string, /^git push -u origin policy-amend-2$/u);
+  assert.match(commands[5] as string, /^gh pr create --title/u);
 });
 
 test("--branch forces the branch flow even where nothing is protected", () => {
@@ -1287,7 +1305,9 @@ test("--branch forces the branch flow even where nothing is protected", () => {
   );
 
   assert.equal(run.code, 0, run.stderr);
-  assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "policy-tuesday");
+  // The named branch holds the commit; the checkout never left main.
+  assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "main");
+  assert.equal(git(["rev-parse", "--verify", "--quiet", "refs/heads/policy-tuesday"], dir).code, 0);
   assert.deepEqual(remoteFiles(remote, "policy-tuesday"), [
     ".approval/log/events.jsonl",
     "APPROVAL.md",
@@ -1715,10 +1735,14 @@ test("push-rejected renders a headline, YOUR STATE, and numbered NEXT STEPS", ()
   assert.match(run.stderr, /\n {4}.*pre-receive hook declined/u);
 
   const state = sectionLines(run.stderr, "YOUR STATE");
-  assert.ok(state.length >= 3 && state.length <= 4, `YOUR STATE has ${String(state.length)} lines`);
+  // Five since APRV-203, which added the line saying the checkout never moved.
+  assert.ok(state.length >= 3 && state.length <= 5, `YOUR STATE has ${String(state.length)} lines`);
   assert.ok(state.every((line) => line.length <= 90), `a YOUR STATE line is a paragraph:\n${state.join("\n")}`);
   assert.match(state.join("\n"), /seq 2/u);
-  assert.match(state.join("\n"), /committed LOCALLY on main/u);
+  // APRV-203: the commit is on origin/main's tip and held on a branch of its
+  // own; "locally on main" is no longer where it is.
+  assert.match(state.join("\n"), /held LOCALLY on policy-amend-2/u);
+  assert.match(state.join("\n"), /your checkout was never moved/u);
   assert.match(state.join("\n"), /NOT on origin/u);
 
   // ONE runnable command per line, numbered, with at most a trailing comment.
@@ -2332,4 +2356,196 @@ test("policy --help and the root help both mention amend", () => {
   const dir = caseDir();
   assert.match(runCli(["policy", "--help"], dir).stdout, /amend/u);
   assert.match(runCli(["--help"], dir).stdout, /policy amend/u);
+});
+
+// ---------------------------------------------------------------------------
+// APRV-203: the ceremony fetches, bases on origin, and leaves the checkout alone
+// ---------------------------------------------------------------------------
+
+/** The repository's own policy file, read (never written) for the pin cases. */
+const REPO_POLICY = readFileSync(
+  fileURLToPath(new URL("../../APPROVAL.md", import.meta.url)),
+  "utf8",
+);
+
+/** A second checkout of `remote`, for the cases where somebody else pushed first. */
+function peerClone(remote: string, label: string): string {
+  counter += 1;
+  const dir = join(scratch, `peer-${label}-${String(counter)}`);
+  git(["clone", "-q", remote, dir], scratch);
+  git(["config", "user.email", "test@example.invalid"], dir);
+  git(["config", "user.name", "Test"], dir);
+  return dir;
+}
+
+test("APRV-203: a local main BEHIND and DIVERGED from origin still bases the amendment on origin", () => {
+  const { dir, remote } = repoWithRemote();
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/11" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+
+  // Somebody else merged work into origin/main after this checkout last looked.
+  const peer = peerClone(remote, "pins");
+  writeFileSync(join(peer, "PINS.md"), "# the pins the last ceremony landed\n", "utf8");
+  git(["add", "-A"], peer);
+  git(["commit", "-qm", "test pins"], peer);
+  git(["push", "-q", "origin", "main"], peer);
+  const originTip = git(["rev-parse", "main"], remote).stdout.trim();
+
+  // ...and this checkout has a commit of its own that origin does not have, so
+  // local main is behind AND diverged. Not a refusal: the base is origin.
+  writeFileSync(join(dir, "SCRATCH.md"), "# local only\n", "utf8");
+  git(["add", "SCRATCH.md"], dir);
+  git(["commit", "-qm", "local only"], dir);
+
+  writePolicy(dir, AFTER);
+  const headBefore = git(["rev-parse", "HEAD"], dir).stdout.trim();
+  const policyBefore = readFileSync(join(dir, "APPROVAL.md"), "utf8");
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+
+  // The parent is origin's tip, and the amendment carries origin's work with it.
+  assert.equal(
+    git(["rev-parse", "policy-amend-2^"], dir).stdout.trim(),
+    originTip,
+    "the amendment was stacked on the stale local tip",
+  );
+  assert.match(git(["show", "policy-amend-2:PINS.md"], dir).stdout, /the pins the last ceremony/u);
+
+  // The checkout is where it was, carrying what it carried.
+  assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "main");
+  assert.equal(git(["rev-parse", "HEAD"], dir).stdout.trim(), headBefore);
+  assert.equal(readFileSync(join(dir, "APPROVAL.md"), "utf8"), policyBefore);
+  assert.match(git(["status", "--porcelain"], dir).stdout, /APPROVAL\.md/u);
+
+  // The narration named each phase, on stderr.
+  assert.match(run.stderr, /^fetching origin\/main/mu);
+  assert.match(run.stderr, /^building the amendment commit on origin\/main/mu);
+  assert.match(run.stderr, /^pushing /mu);
+});
+
+test("APRV-203: --json narrates nothing on stderr while the ceremony fetches and pushes", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/12" });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(run.stderr, "", "--json narrated onto the machine surface");
+});
+
+test("APRV-203: a remote that cannot be fetched refuses BEFORE anything is attested", () => {
+  const { dir } = repoWithRemote();
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  const recordsBefore = logRecords(dir).length;
+  git(["remote", "set-url", "origin", join(scratch, "no-such-remote.git")], dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"], dir);
+  assert.notEqual(run.code, 0);
+  assert.equal(errorOf(run).code, "fetch-failed");
+  assert.match(errorOf(run).message, /nothing was attested/u);
+  assert.equal(logRecords(dir).length, recordsBefore);
+});
+
+test("APRV-203: a policy amended on origin since this edit began is refused, not reverted", () => {
+  const { dir, remote } = repoWithRemote();
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+
+  // Somebody else's amendment reached origin first.
+  const peer = peerClone(remote, "policy");
+  writeFileSync(join(peer, "APPROVAL.md"), AFTER, "utf8");
+  git(["add", "-A"], peer);
+  git(["commit", "-qm", "their amendment"], peer);
+  git(["push", "-q", "origin", "main"], peer);
+
+  const recordsBefore = logRecords(dir).length;
+  writePolicy(dir, AFTER);
+  const run = runCli(["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"], dir);
+  assert.notEqual(run.code, 0);
+  assert.equal(errorOf(run).code, "base-policy-diverged");
+  assert.match(errorOf(run).message, /would revert their amendment/u);
+  assert.equal(logRecords(dir).length, recordsBefore);
+});
+
+test("APRV-203: the dogfood pins are checked against the amended file, and a failure pushes nothing", () => {
+  // The pins govern the approval-md package's own policy, so the fixture says
+  // it is that package, and its policy is the repository's real one.
+  const { dir } = repoWithRemote(REPO_POLICY);
+  writeFileSync(join(dir, "package.json"), `${JSON.stringify({ name: "approval-md" })}\n`, "utf8");
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/13" });
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "package"], dir);
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+
+  // An amendment that unpins a class: deps.add is pinned manual, and this makes
+  // it autonomous. Exactly the shape CI used to catch, hours later.
+  const broken = REPO_POLICY.replace(
+    "deps.add:                  { autonomy: manual }",
+    "deps.add:                  { autonomy: autonomous }",
+  );
+  assert.notEqual(broken, REPO_POLICY, "the fixture policy no longer carries the pinned line");
+  writeFileSync(join(dir, "APPROVAL.md"), broken, "utf8");
+
+  const recordsBefore = logRecords(dir).length;
+  const failed = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.notEqual(failed.code, 0);
+  assert.equal(errorOf(failed).code, "policy-suite-failed");
+  assert.match(errorOf(failed).message, /deps\.add: expected manual\/rule, got autonomous\/rule/u);
+  assert.match(errorOf(failed).message, /Nothing was attested, committed or pushed/u);
+  assert.equal(logRecords(dir).length, recordsBefore, "the ceremony attested over a failing suite");
+  assert.equal(
+    git(["ls-remote", "--heads", "origin", "policy-amend-*"], dir).stdout.trim(),
+    "",
+    "a policy branch reached origin from a ceremony whose suite failed",
+  );
+
+  // The same ceremony, once the amendment respects the pins, runs clean: this
+  // one only widens a budget, which no pin speaks to.
+  const allowed = REPO_POLICY.replace("daily_actions: 20000", "daily_actions: 20001");
+  assert.notEqual(allowed, REPO_POLICY, "the fixture policy no longer carries the budget line");
+  writeFileSync(join(dir, "APPROVAL.md"), allowed, "utf8");
+  const passed = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(passed.code, 0, passed.stderr);
+  assert.match(passed.stderr, /^running the policy suite against the amended file/mu);
+  assert.match(
+    git(["ls-remote", "--heads", "origin"], dir).stdout,
+    /policy-amend-/u,
+    "the clean re-run did not publish its branch",
+  );
 });

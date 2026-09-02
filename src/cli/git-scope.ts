@@ -13,8 +13,9 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { realpathSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve as resolvePathSegments, sep } from "node:path";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve as resolvePathSegments, sep } from "node:path";
 
 /** One git invocation's result. `ok` is "exit status 0", nothing more. */
 export interface GitRun {
@@ -31,9 +32,19 @@ function absolute(value: string, cwd: string): string {
   return isAbsolute(value) ? value : resolvePathSegments(cwd, value);
 }
 
-/** Run git in `cwd`. Never throws: a git that did not run is `ok: false`. */
-export function git(args: string[], cwd: string): GitRun {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+/**
+ * Run git in `cwd`. Never throws: a git that did not run is `ok: false`.
+ *
+ * `env` is merged over `process.env`, and exists for exactly one caller:
+ * {@link commitOnBase} points `GIT_INDEX_FILE` at a scratch index so that a
+ * commit can be assembled without going anywhere near the operator's own.
+ */
+export function git(args: string[], cwd: string, env: Record<string, string> = {}): GitRun {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    ...(Object.keys(env).length === 0 ? {} : { env: { ...process.env, ...env } }),
+  });
   if (result.error !== undefined || result.status === null) {
     return { ok: false, stdout: "", stderr: detail(result.error ?? "git did not run") };
   }
@@ -153,6 +164,121 @@ export function outputLines(...texts: readonly string[]): string[] {
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Basing a ceremony commit on the remote, without checking anything out
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch one branch from one remote and answer the sha it now points at.
+ *
+ * The ceremony verbs (`policy amend`, `log advance`) own this step rather than
+ * asking the operator to run it first (APRV-203). The failure that made it
+ * theirs: a ceremony run in a checkout whose local `main` was behind origin
+ * built its commit on the stale tip, so the pull request carried a parent that
+ * was missing everything main had merged since, and CI went red for reasons
+ * that had nothing to do with the amendment.
+ *
+ * `FETCH_HEAD` is read rather than `refs/remotes/<remote>/<branch>`, because a
+ * fetch of an explicit refspec always writes the former and a repository
+ * configured without remote-tracking refs would not have the latter.
+ */
+export function fetchBase(
+  root: string,
+  remote: string,
+  branch: string,
+): { ok: true; sha: string } | { ok: false; message: string; quote: readonly string[] } {
+  const fetched = git(["fetch", remote, branch], root);
+  if (!fetched.ok) {
+    return {
+      ok: false,
+      message: `\`git fetch ${remote} ${branch}\` failed: ${failureText(fetched)}`,
+      quote: outputLines(fetched.stderr, fetched.stdout),
+    };
+  }
+  const resolved = git(["rev-parse", "--verify", "--quiet", "FETCH_HEAD^{commit}"], root);
+  const sha = resolved.stdout.trim();
+  if (!resolved.ok || sha.length === 0) {
+    return {
+      ok: false,
+      message: `\`git fetch ${remote} ${branch}\` succeeded and named no commit: ${failureText(resolved)}`,
+      quote: outputLines(resolved.stderr, resolved.stdout),
+    };
+  }
+  return { ok: true, sha };
+}
+
+/** What {@link commitOnBase} is asked to build. */
+export interface CommitOnBase {
+  /** The commit the new one is parented on, as a sha. */
+  base: string;
+  /** Repo-relative paths taken from the WORKING TREE, laid over the base tree. */
+  paths: readonly string[];
+  message: string;
+}
+
+/**
+ * Build a commit on `base` carrying the working-tree state of `paths`, without
+ * checking anything out (APRV-203).
+ *
+ * The whole method is one scratch index: `GIT_INDEX_FILE` points at a temporary
+ * file, `read-tree` fills it from the base commit's tree, `add -A` lays the
+ * named working-tree paths over it, and `write-tree` plus `commit-tree` turn
+ * that into an object. HEAD never moves, the operator's index is never read or
+ * written, and no file in the working tree is touched — which is what lets a
+ * verb that MUST NOT check anything out (a branch switch rewinds `events.jsonl`
+ * underneath whatever holds it open) still base its commit on the remote.
+ *
+ * `unchanged` is the honest answer when the base tree already carries exactly
+ * these bytes: there is nothing to commit, and inventing an empty commit would
+ * be the verb narrating its own no-op.
+ */
+export function commitOnBase(
+  root: string,
+  request: CommitOnBase,
+):
+  | { ok: true; sha: string; unchanged: false }
+  | { ok: true; sha: null; unchanged: true }
+  | { ok: false; step: string; message: string; quote: readonly string[] } {
+  const scratch = mkdtempSync(join(tmpdir(), "approval-index-"));
+  const env = { GIT_INDEX_FILE: join(scratch, "index") };
+  const failed = (
+    step: string,
+    run: GitRun,
+  ): { ok: false; step: string; message: string; quote: readonly string[] } => ({
+    ok: false,
+    step,
+    message: `\`${step}\` failed: ${failureText(run)}`,
+    quote: outputLines(run.stderr, run.stdout),
+  });
+
+  try {
+    const read = git(["read-tree", request.base], root, env);
+    if (!read.ok) return failed(`git read-tree ${request.base}`, read);
+
+    const added = git(["add", "-A", "--", ...request.paths], root, env);
+    if (!added.ok) return failed("git add", added);
+
+    const tree = git(["write-tree"], root, env);
+    if (!tree.ok) return failed("git write-tree", tree);
+    const treeSha = tree.stdout.trim();
+
+    const baseTree = git(["rev-parse", `${request.base}^{tree}`], root);
+    if (baseTree.ok && baseTree.stdout.trim() === treeSha) {
+      return { ok: true, sha: null, unchanged: true };
+    }
+
+    const commit = git(["commit-tree", treeSha, "-p", request.base, "-m", request.message], root, env);
+    if (!commit.ok) return failed("git commit-tree", commit);
+    const sha = commit.stdout.trim();
+    if (sha.length === 0) {
+      return { ok: false, step: "git commit-tree", message: "git commit-tree printed no sha", quote: [] };
+    }
+    return { ok: true, sha, unchanged: false };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 /** The same, folded onto one line for a `--json` message string. */

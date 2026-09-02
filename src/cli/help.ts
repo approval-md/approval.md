@@ -395,23 +395,23 @@ ${why("log-sync")}`;
 export const LOG_ADVANCE_HELP = `approval log advance — commit and push the log's new records
 
 Usage:
-  approval log advance [--remote <n>] [--branch <n>] [--pr] [--dry-run] [--json]
+  approval log advance [--remote <n>] [--branch <n>] [--base <n>] [--pr]
+                       [--dry-run] [--json]
 
 Flags:
   --remote <name>  remote to push to (default origin)
   --branch <name>  records branch (default records-log-<date>); never main
+  --base <name>    branch to parent the commit on (default: the one you are on)
   --pr / --dry-run   open the pull request through gh / write nothing at all
-  --json           machine-readable output
-  -h, --help       this text
+  --json / -h, --help   machine-readable output / this text
 
-Verifies the chain under the append lock, stages EXACTLY the log, QUEUE.md and
-.approval/payloads/, commits on the branch you are standing on with the seq range
-in the message, and pushes that commit to a records branch by refspec. It CHECKS
-OUT NOTHING and appends no event; any other staged path is refused rather than
-unstaged. PRIMARY CHECKOUT ONLY. Refusals: log-advance-not-primary,
-log-advance-dirty-stage, log-advance-checkout-required, log-advance-unverified,
-log-advance-locked, log-advance-git-failed, log-advance-push-rejected,
-log-advance-pr-failed.
+Verifies the chain under the append lock, FETCHES the base branch, builds a
+commit on <remote>/<base> carrying EXACTLY the log, QUEUE.md and payloads, and
+pushes it by refspec. You do not fetch or reset first; the checkout is left as
+found, nothing is checked out, no event is appended, and any other staged path
+is refused. PRIMARY CHECKOUT ONLY. Refusals, each prefixed log-advance-:
+not-primary, dirty-stage, checkout-required, unverified, locked, fetch-failed,
+behind-remote, remote-diverged, git-failed, push-rejected, pr-failed.
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}

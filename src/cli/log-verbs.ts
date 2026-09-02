@@ -18,6 +18,7 @@ import { LOG_ADVANCE_HELP, LOG_SYNC_HELP } from "./help.js";
 import { logAdvance, type LogAdvanceResult } from "./log-advance.js";
 import { logSync, short, type LogSyncResult } from "./log-sync.js";
 import type { Streams } from "./main.js";
+import { createProgress, silentProgress } from "./progress.js";
 import { describeHead } from "../core/log-reconcile.js";
 import { relPath, refusal as renderRefusal, runbook, style } from "./style.js";
 import { usageErrorText } from "./usage.js";
@@ -33,6 +34,7 @@ const SYNC_FLAGS: Record<string, FlagKind> = {
 const ADVANCE_FLAGS: Record<string, FlagKind> = {
   "--remote": "string",
   "--branch": "string",
+  "--base": "string",
   "--pr": "boolean",
   "--dry-run": "boolean",
   "--json": "boolean",
@@ -216,11 +218,19 @@ export function commandLogAdvance(argv: string[], streams: Streams, cwd: string)
 
   // The one clock read on this path: the default records branch carries the
   // date, and a verb that read the clock twice could name two different days.
+  const base = stringFlag(parsed.flags, "--base");
+  if (base !== null && base.trim().length === 0) {
+    return usageError(streams, json, "--base expects a branch name", LOG_ADVANCE_HELP);
+  }
+
   const result = logAdvance({
     cwd,
     today: new Date().toISOString(),
+    // APRV-167/APRV-203: the phases go to stderr, and `--json` gets none.
+    progress: json ? silentProgress : createProgress(streams),
     ...(remote === null ? {} : { remote }),
     ...(branch === null ? {} : { branch }),
+    ...(base === null ? {} : { base }),
     ...(boolFlag(parsed.flags, "--pr") ? { pr: true } : {}),
     ...(boolFlag(parsed.flags, "--dry-run") ? { dryRun: true } : {}),
   });
@@ -236,6 +246,7 @@ export function commandLogAdvance(argv: string[], streams: Streams, cwd: string)
         branch: report.branch,
         recordsBranch: report.recordsBranch,
         remote: report.remote,
+        base: report.base,
         range: report.range,
         head: { committed: report.committedHead, working: report.workingHead },
         staged: report.staged,
@@ -267,7 +278,14 @@ export function commandLogAdvance(argv: string[], streams: Streams, cwd: string)
   for (const line of st
     .table([
       { left: "message", right: report.message },
-      { left: "staged", right: report.staged.join(", ") },
+      {
+        left: "based on",
+        right:
+          report.base === null
+            ? "(unknown)"
+            : `${report.remote}/${report.base.branch}  ${st.muted(short(report.base.sha))}`,
+      },
+      { left: "carries", right: report.staged.join(", ") },
       { left: "commit", right: report.commit === null ? "(dry run)" : short(report.commit) },
       {
         left: "pushed",
@@ -278,10 +296,15 @@ export function commandLogAdvance(argv: string[], streams: Streams, cwd: string)
     .split("\n")) {
     streams.out(`  ${line}\n`);
   }
-  if (!report.dryRun && report.pushed && report.prUrl === null) {
+  if (!report.dryRun && report.pushed) {
     streams.out(
-      `\n  ${st.muted("open the pull request and merge it with a MERGE COMMIT (--pr opens it for you)")}\n`,
+      `\n  ${st.muted(`your checkout is exactly as you left it, on ${report.branch}: nothing was checked out, staged or moved`)}\n`,
     );
+    if (report.prUrl === null) {
+      streams.out(
+        `  ${st.muted("open the pull request and merge it with a MERGE COMMIT (--pr opens it for you)")}\n`,
+      );
+    }
   }
   return EXIT_OK;
 }
