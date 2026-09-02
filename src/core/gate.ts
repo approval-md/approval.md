@@ -2520,7 +2520,7 @@ export function decide(
       // seal itself (the daemon's own advance), so every copy of the token that
       // leaves this function is a copy nobody needs: the observed defect was the
       // Telegram listener printing "copy it now" on Carter's terminal for an
-      // action he was not going to run. Withheld HERE, at the single choke
+      // action they were not going to run. Withheld HERE, at the single choke
       // point, rather than at each granting surface — a value never handed out
       // cannot be printed by a surface written later. Only when the seal was
       // actually written: an unopenable grant with no returned token would be a
