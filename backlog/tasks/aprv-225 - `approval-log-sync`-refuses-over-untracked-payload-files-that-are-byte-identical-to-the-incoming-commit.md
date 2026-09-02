@@ -3,11 +3,11 @@ id: APRV-225
 title: >-
   `approval log sync` refuses over untracked payload files that are
   byte-identical to the incoming commit
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-t'
 created_date: '2026-09-02 16:52'
-updated_date: '2026-09-02 20:06'
+updated_date: '2026-09-02 20:30'
 labels:
   - daemon
   - dogfood
@@ -72,4 +72,21 @@ Verification evidence (node --test against the built CLI, real git topologies wi
 - npm run lint (oxlint src tests): clean.
 
 Pre-existing, unrelated failure: tests/ci-guard.test.ts 'every production dependency's engines.node admits the Node floor' fails with ENOENT on node_modules/@modelcontextprotocol/sdk/package.json. This worktree has no node_modules of its own (imports resolve by walking up to the primary checkout's), and the test reads a path under its own REPO_ROOT. Confirmed pre-existing by checking out the base commit's source and re-running: 27/28 there too. Nothing to do with this change.
+
+Correction to the verification note above, and the full-suite numbers as actually recorded.
+
+The completed full run (npm test, exit 1) finished: tests 2989, pass 2986, fail 2, skipped 1. Both failures are unrelated to this change, but the run was NOT clean and an earlier reading of it as 3004/3003/fail 0 was wrong.
+
+1. ci-guard.test.ts 'every production dependency engines.node admits the Node floor' — ENOENT on node_modules/@modelcontextprotocol/sdk/package.json. This worktree has no node_modules of its own (imports resolve by walking up to the primary checkout); the test reads a path under its own REPO_ROOT. Confirmed pre-existing by checking out the base commit source and re-running: 27/28 there too.
+2. telegram-tap-latency.test.ts — failed at file level (19.2s) under full-suite load. It passes 5/5 in isolation, three times in a row. Its assertions are latency bounds (ack within 300 ms on a 10k-record log; the decision path is not linear in log length), so it is load-sensitive on a busy machine rather than broken. It passed in the earlier full run and failed in the later one with no change to any path it touches.
+
+The two runs totals reconcile exactly, which is the check that the second failure is a file-level abort rather than lost coverage: run 1 was 2992 total with telegram-tap-latency 5 subtests counted; run 2 is 2989, being -5 subtests +1 file-level failure +1 newly added log-verbs test.
+
+Targeted evidence for this change, all green after the final build: cli-log-verbs 38/38; cli-help + cli-long-help 70/70; and the six other suites that name log sync (cli-doctor, command-class, cli-instructions, log, cli-amend, sealed-delivery) 482/482. oxlint clean.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+approval log sync reconciles untracked payload files the incoming records commit already carries: each is proven twice (SHA-256 of the bytes equals the filename stem; bytes equal the incoming blob via git show) before any removal, then the fast-forward completes and the count is reported; a mismatch refuses with log-sync-payload-mismatch naming the file, appends nothing and leaves the tree as found. Verified by cli-log-verbs 38/38 (identical, mismatch, absent-from-incoming, not-a-hash, json count), help suites 70/70, lint clean; the full-suite failures were environmental (ci-guard node_modules path, telegram-tap-latency under load), recorded in the notes; merged in PR #238.
+<!-- SECTION:FINAL_SUMMARY:END -->
