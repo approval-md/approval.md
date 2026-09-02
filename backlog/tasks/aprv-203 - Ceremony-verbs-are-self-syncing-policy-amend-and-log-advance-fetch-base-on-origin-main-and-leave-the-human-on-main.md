@@ -7,7 +7,7 @@ status: Done
 assignee:
   - 'agent:opus-lane-h'
 created_date: '2026-09-02 00:29'
-updated_date: '2026-09-02 02:10'
+updated_date: '2026-09-02 02:28'
 labels:
   - dogfood
   - cli
@@ -85,4 +85,6 @@ Today's two amend ceremonies (seq 7355 and 7413) and the advance between them ea
 ## Verification
 
 `npm run lint` clean. `npm run build` clean. `npm test`: **2636 tests, 2635 pass, 1 fail**. The single failure is `every production dependency's engines.node admits the Node floor` (tests/ci-guard.test.ts), which reads `<repo root>/node_modules/<dep>/package.json`; this agent worktree has no `node_modules` of its own (resolution walks up to the primary checkout), so the read is ENOENT. It is a worktree artifact and not a TTL flake: it will pass in the primary checkout and in CI, where `npm ci` runs. No other test failed, and no test was skipped.
+
+Orchestrator (2026-09-02): SPEC section 10.1 text applied verbatim under a policy.edit grant in PR #196; the drafted section 11.2 rows were NOT applied because the new codes (fetch-failed, base-policy-diverged, base-log-diverged, policy-suite-failed, log-advance-fetch-failed, log-advance-behind-remote, log-advance-remote-diverged) are CLI-level refusals outside the frozen gate_refusal_codes union that section 11.2 registers; they are documented in docs/cli-reference.md. Code merged in PR #195. Decisions 1-5 accepted as built.
 <!-- SECTION:NOTES:END -->
