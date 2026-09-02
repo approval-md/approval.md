@@ -78,6 +78,7 @@ import { isPayloadHash, runPayloadHash } from "../core/payload.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
 import { withdraw } from "../core/gate.js";
+import { openGateWindow } from "../core/gate-window.js";
 import { keyStoreDirFor } from "../core/seal.js";
 import { readVerifiedRecords, requestState } from "../core/state.js";
 import { deliveredToken } from "../core/token.js";
@@ -1157,6 +1158,13 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
     obligation: item.obligation,
     review_seq: item.reviewSeq,
   }));
+  // APRV-214, amended SPEC.md §5.2. An open window is a suspension of the
+  // policy for every gated tool call under this root, so it belongs in the one
+  // report an operator reads to answer "is this repository in a normal state".
+  // It counts toward `healthy` DELIBERATELY: a CI check or a `doctor` run keyed
+  // on `healthy` should go red while a bypass stands, and a window nobody
+  // noticed was left open is the failure mode of the whole feature.
+  const gateWindow = openGateWindow(records);
   const budgets = budgetHeadroom(records, flags, cwd, now());
   // Informational: the store's state never moves `healthy` or the exit code.
   // A repo that has never made a `--payload` request has no store, and an
@@ -1195,7 +1203,8 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
     // reconciliation obligation is a denial nobody has answered for yet.
     indeterminate.length === 0 &&
     escalations.length === 0 &&
-    obligations.length === 0;
+    obligations.length === 0 &&
+    gateWindow === null;
 
   if (json) {
     emitJson(streams, {
@@ -1220,6 +1229,21 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       reconciliation: obligations,
       payload_store: payloadStore,
       ...(anomalies.length === 0 ? {} : { anomalies }),
+      // Present only while a window stands, exactly as `anomalies` and
+      // `indeterminate` are: a repository with no window emits the object it
+      // has always emitted, byte for byte.
+      ...(gateWindow === null
+        ? {}
+        : {
+            gate_window: {
+              seq: gateWindow.seq,
+              opened_at: gateWindow.openedAt,
+              opened_by: gateWindow.openedBy,
+              reason: gateWindow.reason,
+              expires_at: gateWindow.expiresAt,
+              bypassed: gateWindow.bypassCount,
+            },
+          }),
     });
   } else {
     const st = style({ json });
@@ -1333,6 +1357,26 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
         right: st.muted(
           `${harnessOutcomes.started} started, ${harnessOutcomes.reported} reported, ${harnessOutcomes.unreported} unreported`,
         ),
+      },
+      {
+        // APRV-214. Its own row and not a footnote: while this says OPEN, the
+        // policy is deciding nothing for the harness, and the person reading
+        // this report is the person who can end that.
+        left: "gate window",
+        right:
+          gateWindow === null
+            ? st.muted("closed")
+            : st.warn(
+                `OPEN until ${gateWindow.expiresAt}, opened by ${gateWindow.openedBy}, ${String(gateWindow.bypassCount)} call(s) bypassed`,
+              ),
+        ...(gateWindow === null
+          ? {}
+          : {
+              under: [
+                `seq ${String(gateWindow.seq)}  reason: ${gateWindow.reason}`,
+                "every gated tool call under this root is allowed without approval — `approval gate close`",
+              ],
+            }),
       },
       {
         left: "reconciliation",

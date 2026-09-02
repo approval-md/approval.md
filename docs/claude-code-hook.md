@@ -402,6 +402,72 @@ provably outside the checkout is live-tier. It changes no policy semantics —
 every tier resolves exactly as the path's own protected class resolves — only what the prompt
 says.
 
+## Opening the gate to debug it (APRV-214)
+
+A hook that fails closed on every axis strands the session that would fix it:
+an unattested policy, a drifted attestation, a hung daemon, or a dark channel
+denies every command, including the ones a human would use to find out why.
+The escape is a window, and only a human can open one:
+
+```
+approval gate open --for 30m --reason "debugging the protected-path tier" --as human:carter
+```
+
+The verb prints what the window will do and reads one line. Only a typed
+`understood` opens it; anything else, an end of input included, refuses
+`gate-confirmation-mismatch` and appends nothing. stdin has to be a terminal
+and there is no `--yes`: a Claude Code Bash tool has no terminal, which is one
+of the two locks. The other is classification: `approval gate open` and
+`approval gate close` are `policy.core`, so a hook that is on denies an agent
+the ceremony with `hook-class-human-only`. `approval gate status` stays
+pass-through.
+
+The state is the log. `gate open` appends `gate.opened` (human actor, runtime
+`ts`, `expires_at` derived from the duration, default 30m, cap 24h), and
+`gate close` appends `gate.closed` naming it. Expiry appends nothing. There is
+no flag file: a file the hook read on its own would let anything able to write
+it act as the human.
+
+While a window is open the hook reads it from the verified log before it loads
+the policy, so every policy-side failure is bypassed. Each gated tool call is
+still classified, then recorded as `gate.bypassed` (the window's seq, the tool,
+the classes, a bounded summary and the payload hash), and only then allowed:
+
+```
+{"permissionDecision":"allow","permissionDecisionReason":"gate-open: vcs.push.main bypassed by the window opened at seq 41 by human:carter (expires 2026-09-02T11:14:02Z); recorded as gate.bypassed seq 57"}
+```
+
+with a banner on stderr every time:
+
+```
+!! APPROVAL GATE OPEN — this command was NOT approved !!
+   window seq 41, opened by human:carter, expires 2026-09-02T11:14:02Z
+   reason: debugging the protected-path tier
+   classes: vcs.push.main; recorded as gate.bypassed seq 57
+   close it with `approval gate close`
+```
+
+Three things the window does not reach:
+
+- `log.mutate`, unconditionally, and any class the policy resolves to
+  `human-only`: both deny `hook-class-human-only` as they do with the gate
+  closed. Under a policy that does not load nothing resolves, so only the
+  `log.mutate` refusal applies there, and the allow reason says the policy
+  did not load.
+- A command the classifier cannot read (`hook-opaque`, `hook-unclassified`,
+  `hook-unparseable`). The window bypasses the policy, and a command the hook
+  cannot read is one it cannot show to be neither of the above.
+- A log it cannot reach or cannot verify. The window is derived from verified
+  records, so `hook-log-unreachable` and `hook-io` fire exactly as before, and
+  an append that fails denies `hook-gate-refused:append-failed` rather than
+  allowing with no record.
+
+`approval status` reports the window and goes unhealthy for as long as it is
+open, and any check keyed on `healthy` (doctor, CI) goes red with it. Close it
+early with `approval gate close`; nothing bypassed under it was charged to a
+budget or entered in the retrospective sample, because none of it was
+authorized, only recorded.
+
 ## Deny reasons
 
 The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen in

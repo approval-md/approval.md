@@ -1289,6 +1289,109 @@ const VERBS: VerbSpec[] = [
     exit_codes: [OK, USAGE, TORN, IO],
   },
 
+  // APRV-214, amended SPEC.md §5.2: the open window. Three entries because the
+  // three subcommands answer to different people — a person opening a bypass, a
+  // person ending one, and anybody at all asking whether one stands.
+  {
+    name: "gate",
+    subcommand: "open",
+    purpose:
+      "Open the harness gate for a bounded time so the gate itself can be debugged: while the window stands, the hook ALLOWS every gated shell command and file edit under the root, recording each as gate.bypassed, ahead of the policy load, the attestation check, the loop floor and the human gate. Default 30m, cap 24h, --reason required. The window's whole state is the log (gate.opened, closed by gate.closed or by lapsing, which appends nothing); no file holds it. It never reaches .approval/log/, a class the policy reserves to human hands, a command the classifier cannot read, or a log that cannot be verified. Bypassed calls are charged to no budget and enter no retrospective sample.",
+    human_only: true,
+    human_only_note:
+      "It suspends the policy. There is no --yes and no --force: stdin must be a terminal and the word `understood` must be typed in full, which is what puts it out of reach of a harness shell tool. It also classifies `policy.core`, so a policy holding that human-only makes the hook refuse an agent that tries.",
+    input: input({
+      positionals: positionals(
+        [{ name: "open", description: "the subcommand" }],
+        1,
+      ),
+      flags: {
+        "--for": "string",
+        "--reason": "string",
+        ...AS_FLAG,
+        ...LOG_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    // No `--json` success shape exists, and that is the contract: `--json` on
+    // this verb is refused with `gate-stdin-not-tty`, because an answer shaped
+    // for a machine implies a machine asking a question only a person answers.
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
+    name: "gate",
+    subcommand: "close",
+    purpose:
+      "End the open window now rather than at its expiry, appending gate.closed naming the seq of the gate.opened it ends. Human-only like the opening, though this half only ever TIGHTENS: there is no confirmation to type, because a ceremony guarding the safe direction is one people learn to type past. Refuses `gate-not-open` when no window stands, which includes one that has already lapsed — a lapse appends nothing and needs no closing record.",
+    human_only: true,
+    human_only_note:
+      "The pair is one ceremony and both halves are the human's, so the actor rule is uniform. An agent closing a window could authorize nothing by it, and the uniformity is what makes the rule statable in one sentence.",
+    input: input({
+      positionals: positionals([{ name: "close", description: "the subcommand" }], 1),
+      flags: { "--note": "string", ...AS_FLAG, ...LOG_FLAG, ...JSON_FLAG, ...HELP_FLAGS },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        seq: INTEGER,
+        opened_seq: INTEGER,
+        actor: STRING,
+        bypassed: INTEGER,
+      },
+      ["ok", "seq", "opened_seq", "actor", "bypassed"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
+    name: "gate",
+    subcommand: "status",
+    purpose:
+      "Report whether a window is open, and if so which: the seq of the gate.opened, who opened it, their reason, when it expires, how long is left, and how many calls have been bypassed under it. Derived from the verified log alone, so it is the same fact the hook and `approval status` derive. Reads only; appends nothing and decides nothing.",
+    human_only: false,
+    input: input({
+      positionals: positionals([{ name: "status", description: "the subcommand" }], 1),
+      flags: { ...LOG_FLAG, ...JSON_FLAG, ...HELP_FLAGS },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        open: BOOLEAN,
+        window: nullable(
+          object(
+            {
+              seq: INTEGER,
+              opened_at: STRING,
+              opened_by: STRING,
+              reason: STRING,
+              expires_at: STRING,
+              remaining_ms: INTEGER,
+              bypassed: INTEGER,
+              scope: STRING,
+            },
+            [
+              "seq",
+              "opened_at",
+              "opened_by",
+              "reason",
+              "expires_at",
+              "remaining_ms",
+              "bypassed",
+              "scope",
+            ],
+          ),
+        ),
+      },
+      ["ok", "open", "window"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, INTEGRITY, USAGE, TORN, IO],
+  },
+
   {
     name: "status",
     purpose:
@@ -1316,6 +1419,10 @@ const VERBS: VerbSpec[] = [
         reconciliation: arrayOf(OPEN_OBJECT),
         payload_store: OPEN_OBJECT,
         anomalies: arrayOf(OPEN_OBJECT),
+        // APRV-214: present only while a window stands, so a repository with
+        // none emits the object it always emitted. It counts toward `healthy`,
+        // which is why it is reported here rather than only by `gate status`.
+        gate_window: OPEN_OBJECT,
       },
       [
         "ok",

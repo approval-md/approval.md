@@ -1151,7 +1151,7 @@ function isGateEntrypoint(path: string): boolean {
 }
 
 /**
- * The two `approval` invocations that are NOT pass-through (APRV-125).
+ * The `approval` invocations that are NOT pass-through (APRV-125, APRV-214).
  *
  * Everything else this CLI does is the enforcement path itself, and gating the
  * gate with the gate deadlocks or recurses (see {@link GATE_SELF_CLASS}). `log
@@ -1159,6 +1159,15 @@ function isGateEntrypoint(path: string): boolean {
  * they drive git against a shared remote, which is a real-world effect, and the
  * policy has to be able to hold them at manual while trust builds and to relax
  * them independently later.
+ *
+ * `gate open` and `gate close` (APRV-214, amended SPEC.md §5.2) are different
+ * in the same way and more so: opening the window SUSPENDS the policy for every
+ * harness tool call under the root, which makes it the most consequential thing
+ * this CLI can do. Classified `policy.core` it lands where APPROVAL.md already
+ * puts the policy's own machinery, which today is `human-only`, so the hook
+ * denies an agent running the ceremony with `hook-class-human-only` — the
+ * classification lock, sitting behind the terminal lock and the typed word.
+ * `gate status` reports and writes nothing, so it stays pass-through.
  *
  * Naming them here is also what stops the prompt lying. Performed by hand, the
  * ritual reached the approver's phone as `policy.edit` over a protected path —
@@ -1168,10 +1177,18 @@ function isGateEntrypoint(path: string): boolean {
  * hide the verb: `approval --json log sync` is the same invocation.
  */
 function refineApprovalVerb(positionals: readonly string[]): Refinement | null {
-  if (positionals[0] !== "log") return null;
+  const verb = positionals[0];
   const sub = positionals[1];
-  if (sub === "sync") return { class: "log.sync", rule: "approval-log-sync" };
-  if (sub === "advance") return { class: "log.advance", rule: "approval-log-advance" };
+  if (verb === "log") {
+    if (sub === "sync") return { class: "log.sync", rule: "approval-log-sync" };
+    if (sub === "advance") return { class: "log.advance", rule: "approval-log-advance" };
+    return null;
+  }
+  if (verb === "gate") {
+    if (sub === "open") return { class: "policy.core", rule: "approval-gate-open" };
+    if (sub === "close") return { class: "policy.core", rule: "approval-gate-close" };
+    return null;
+  }
   return null;
 }
 
@@ -1329,14 +1346,14 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     id: "node",
     bins: ["node"],
     class: "files.write.workspace",
-    emits: [GATE_SELF_CLASS, "log.sync", "log.advance"],
+    emits: [GATE_SELF_CLASS, "log.sync", "log.advance", "policy.core"],
     refine: refineNode,
   },
   {
     id: "approval",
     bins: ["approval"],
     class: GATE_SELF_CLASS,
-    emits: ["log.sync", "log.advance"],
+    emits: ["log.sync", "log.advance", "policy.core"],
     refine: refineApproval,
   },
   {
