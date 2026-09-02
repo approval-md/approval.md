@@ -65,7 +65,6 @@ import {
   unlinkSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve as resolvePathSegments } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { WEB_DEFAULT_PORT } from "../channels/web.js";
 import {
@@ -115,10 +114,17 @@ import {
   type DarkSessionFinding,
 } from "../core/dark-session.js";
 import { repoRoot } from "./git-scope.js";
+import {
+  ScanError,
+  checkBuildFreshness,
+  checkMainBehindOrigin,
+  installationRoot,
+} from "./preflight.js";
 import { publishedState } from "./log-advance.js";
 import { DOCTOR_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
+import { DEFAULT_QUEUE_PATH } from "./render.js";
 import { style, type Glyph, type Style, type TableRow } from "./style.js";
 import { usageErrorText } from "./usage.js";
 
@@ -213,136 +219,12 @@ function ioError(streams: Streams, json: boolean, message: string): number {
 // ---------------------------------------------------------------------------
 // 1. build freshness
 // ---------------------------------------------------------------------------
-
-/**
- * The installation root: the directory holding `cli.js`, `src/`, `dist/`.
- *
- * Derived from this module's own location rather than from `cwd`, because the
- * question is "is the code I am running stale", and the answer must not change
- * when the operator runs the CLI from somewhere else. Compiled, this file is
- * `<root>/dist/src/cli/doctor.js`, hence three levels up.
- */
-function installationRoot(): string {
-  return resolvePathSegments(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-}
-
-/** Thrown out of the source walk so a real I/O denial can become exit 4. */
-class ScanError extends Error {}
-
-/**
- * Newest mtime under `dir`, or `null` when `dir` does not exist.
- *
- * ENOENT anywhere in the walk is "not there", which is an answer. Anything else
- * — a permission bit, a vanished mount — is doctor failing to look, and is
- * raised so the caller can report {@link EXIT_IO} rather than quietly reporting
- * a build as fresh because half the tree was invisible.
- */
-function newestMtime(path: string): number | null {
-  let stats;
-  try {
-    stats = statSync(path);
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw new ScanError(`${path} could not be stat'd: ${detailOf(cause)}`);
-  }
-  if (!stats.isDirectory()) return stats.mtimeMs;
-
-  let newest = stats.mtimeMs;
-  let entries;
-  try {
-    entries = readdirSync(path, { withFileTypes: true });
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return newest;
-    throw new ScanError(`${path} could not be listed: ${detailOf(cause)}`);
-  }
-  for (const entry of entries) {
-    const child = newestMtime(join(path, entry.name));
-    if (child !== null && child > newest) newest = child;
-  }
-  return newest;
-}
-
-/**
- * Is the built CLI at least as new as the sources it was built from?
- *
- * The marker is `dist/src/cli/main.js` — the exact file `cli.js` loads, so the
- * thing being timestamped is the thing that will actually run. It is compared
- * against the newest mtime under `src/` and of `tsconfig.json` (a compiler
- * option change invalidates a build as surely as an edit does).
- *
- * Three shapes are distinguished because their repairs differ:
- *
- * - `cli.js` present, `dist/` absent — the placeholder-binary shape from the
- *   ceremony. The loader exists, so the checkout *looks* installed; nothing
- *   behind it does.
- * - marker older than sources — the stale-checkout shape. Verbs that exist in
- *   `src/` are missing from the binary.
- * - no `src/` at all — a published install, where freshness is not a question
- *   that can be asked. `skip`, not a silent pass.
- *
- * Note the self-reference: doctor itself runs *from* `dist`, so a completely
- * absent `dist` means `cli.js` already refused and this code never ran. The
- * check is still implemented for that shape because `--root` can point it at
- * another tree, and because "the binary you ran is not the tree you edited" is
- * exactly the confusion it exists to name.
- */
-function checkBuildFreshness(root: string): DoctorCheck {
-  const loader = join(root, "cli.js");
-  const marker = join(root, "dist", "src", "cli", "main.js");
-  const sources = join(root, "src");
-  const tsconfig = join(root, "tsconfig.json");
-
-  const loaderMtime = newestMtime(loader);
-  const markerMtime = newestMtime(marker);
-
-  if (markerMtime === null) {
-    return {
-      check: "build-freshness",
-      status: "fail",
-      detail:
-        loaderMtime === null
-          ? `neither ${loader} nor ${marker} exists — ${root} is not an approval.md installation`
-          : `${loader} exists but ${marker} does not: this is an unbuilt checkout, a bin loader with no build behind it`,
-      fix: 'npm run build — in this checkout; if you are not sure this is the checkout you meant, `node -p "process.argv[1]"` names the one you just ran',
-    };
-  }
-
-  if (loaderMtime === null) {
-    return {
-      check: "build-freshness",
-      status: "fail",
-      detail: `${marker} exists but the bin loader ${loader} does not: \`approval\` on PATH cannot reach this build`,
-      fix: "node dist/src/cli/main.js — invoke the build directly, or reinstall the package so `approval` on PATH reaches it",
-    };
-  }
-
-  const sourceMtime = newestMtime(sources);
-  if (sourceMtime === null) {
-    return {
-      check: "build-freshness",
-      status: "skip",
-      detail: `${sources} is absent (a published install carries no sources), so the build cannot be dated against them; ${marker} is present`,
-    };
-  }
-
-  const configMtime = newestMtime(tsconfig) ?? 0;
-  const newestSource = Math.max(sourceMtime, configMtime);
-
-  if (newestSource > markerMtime) {
-    return {
-      check: "build-freshness",
-      status: "fail",
-      detail: `${marker} is older than the source tree (build ${new Date(markerMtime).toISOString()}, newest source ${new Date(newestSource).toISOString()}): you are running a STALE BUILD, and verbs added since it was compiled are simply absent`,
-      fix: "npm run build",
-    };
-  }
-
-  return {
-    check: "build-freshness",
-    status: "pass",
-    detail: `${marker} built ${new Date(markerMtime).toISOString()}, not older than the source tree`,
-  };
-}
+//
+// `installationRoot`, `ScanError`, `newestMtime` and `checkBuildFreshness`
+// moved to `cli/preflight.ts` (APRV-215), where the startup preflight needs the
+// same answer before it decides whether to rebuild. They are imported back
+// above and their behaviour is unchanged; this note is here so the numbered
+// walk through doctor's checks still has a first step to stand on.
 
 // ---------------------------------------------------------------------------
 // 2. identity
@@ -2090,6 +1972,10 @@ export function commandDoctor(
   const policyFlag = stringFlag(parsed.flags, "--policy");
   const policyPath = resolvePolicyPath(policyFlag, dir, cwd);
   const logPath = resolvePath(stringFlag(parsed.flags, "--log"), DEFAULT_LOG_PATH, cwd);
+  // The second path the startup preflight must not let a fast-forward clobber.
+  // Spelled from `--dir` rather than from a flag of its own: doctor has no
+  // `--out`, and inventing one for a single row would be a new surface.
+  const queuePath = join(dir, DEFAULT_QUEUE_PATH);
 
   // ONE walk of the log for both the attestation check and the log check: two
   // walks could disagree, and doctor is the last place a reader wants to be
@@ -2151,6 +2037,12 @@ export function commandDoctor(
       // APRV-217: appended, twelfth time, same reason. A configuration row: it
       // reads the policy, never a running daemon's memory.
       checkReadProof(policyLoad),
+      // APRV-215: appended, thirteenth time, same reason. The report half of
+      // `approval up`'s startup preflight, and the only row that reads the
+      // remote-tracking refs. It fetches NOTHING: a report that reached the
+      // network to be more accurate would be acting on its own account, so the
+      // answer is as fresh as the operator's last fetch and says so.
+      checkMainBehindOrigin(logPath, queuePath, root),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");
