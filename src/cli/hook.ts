@@ -54,6 +54,19 @@
  * A retry while the question is pending adopts it instead of asking twice; a
  * retry after a grant lands proceeds on it, once, inside the TTL. That is why
  * the wait no longer ends in a withdrawal: a late tap now authorizes something.
+ *
+ * **An allow follows its record, and says which window it sits in (APRV-200).**
+ * The harness executes and never sees this process's return value, so what
+ * authorizes the tool call is the record and not the verdict. Every allow that
+ * rests on a grant therefore spends it, RE-READS the verified log to establish
+ * that the `execution.started` is in the chain, and only then prints — a
+ * `hook-grant-unverified` deny where it cannot. The record itself carries
+ * `grant_origin`: `direct` where the tool call that spent the grant is the tool
+ * call that asked for it, `carried` where a later one spent it under the
+ * carryover above. Only `direct` states an ordering this runtime observed;
+ * `carried` is the window in which a grant can be a ratification of a write the
+ * harness already applied, and naming it is what makes that visible to an
+ * auditor holding the log alone. See `docs/claude-code-hook.md`.
  */
 
 import { spawnSync } from "node:child_process";
@@ -181,6 +194,21 @@ export const HOOK_DENY_CODES = [
   "hook-timeout",
   /** The gate refused intake; the gate's own code follows a colon. */
   "hook-gate-refused",
+  /**
+   * The grant was spent and the VERIFIED log does not show it (APRV-200).
+   *
+   * Distinct from `hook-gate-refused:append-failed`, which says the write was
+   * refused and nothing landed. This one says the write reported success and the
+   * chain cannot be seen to carry it, which is a different fact with a different
+   * repair: nothing here is retried, the log is checked (`approval log verify`).
+   *
+   * On this surface the record IS the authorization — the harness executes and
+   * never sees the gate's return value — so a verdict is not printed until the
+   * verified chain carries the execution the harness is about to perform. The
+   * grant is spent by the time this fires, which is the fail-closed direction:
+   * one more prompt on the retry, and nothing authorized meanwhile.
+   */
+  "hook-grant-unverified",
   /** The policy could not be loaded, so no class can be resolved. */
   "hook-policy-unavailable",
   /**
@@ -1093,15 +1121,69 @@ function consumeGrants(
   run: HookRun,
   keys: readonly string[],
   hash: string,
+  /**
+   * This invocation's own task id (APRV-200). The gate compares it against the
+   * task the request record carries and records `grant_origin: "direct"` only
+   * when they are the same tool call; anything else records `carried`.
+   */
+  task: string,
 ): { code: string; message: string } | null {
   for (const key of keys) {
     const spent = consumeHarnessGrant(run.logPath, key, run.actor, {
       ...run.options,
       presentedPayloadHash: hash,
+      spendingTask: task,
     });
     if (!spent.ok) return { code: spent.code, message: `${key}: ${spent.message}` };
   }
   return null;
+}
+
+/**
+ * Establish, from the VERIFIED log, that every grant this verdict rests on is
+ * spent and recorded — before the allow is printed (APRV-200).
+ *
+ * ## Why a second read
+ *
+ * {@link consumeGrants} appends through compare-and-append and reports what the
+ * gate returned, which is the write side of §11.1 invariant 8. This is the read
+ * side, and on this surface it is not redundant. Everywhere else in the runtime
+ * the process that appends `execution.started` is the process that then performs
+ * the side effect, so an append that returned success is an append the same
+ * process is about to act on. Here the executor is the HARNESS: the hook prints
+ * `allow` and a different program does the thing. What that program is authorized
+ * by is not the gate's return value, which it never sees; it is the record. So
+ * the record is what the hook checks, through the same verified path every
+ * enforcement read in this module uses (§11.1 invariant 1), and a verdict is
+ * printed only once the chain carries it.
+ *
+ * A failure here denies with the grant already spent. That is the fail-closed
+ * direction and the same trade `consumeGrants` documents: the retry costs one
+ * more prompt and authorizes nothing, where the reverse ordering would hand the
+ * harness a permission the log cannot show.
+ */
+function verifySpent(
+  run: HookRun,
+  keys: readonly string[],
+): { code: string; detail: string } | null {
+  const read = readVerifiedRecords(run.logPath);
+  if (!read.ok) {
+    return {
+      code: "hook-grant-unverified",
+      detail: `the grant(s) for ${keys.join(", ")} were spent, but the log could not be re-read verified afterwards (${read.message}), so this hook cannot show that the record authorizing the tool call is in the chain. Nothing is allowed on an authorization the log cannot be seen to carry.`,
+    };
+  }
+  const missing = keys.filter(
+    (key) =>
+      !read.records.some(
+        (record) => record.event === "execution.started" && record.action_key === key,
+      ),
+  );
+  if (missing.length === 0) return null;
+  return {
+    code: "hook-grant-unverified",
+    detail: `the spend of ${missing.join(", ")} reported success and the verified log does not carry its execution.started; the tool call is denied rather than allowed on a record that is not there.`,
+  };
 }
 
 /** A refusal the unattended guard raises, shaped like every other hook deny. */
@@ -1430,10 +1512,12 @@ function gateAndWait(
     }
     // Every gated class carried an unspent grant: a human already answered this
     // exact question about these exact bytes, and nobody is asked again.
-    const failed = consumeGrants(run, spendKeys, hash);
+    const failed = consumeGrants(run, spendKeys, hash, task);
     if (failed !== null) {
       return sayDeny(`hook-gate-refused:${failed.code}`, failed.message);
     }
+    const unverified = verifySpent(run, spendKeys);
+    if (unverified !== null) return sayDeny(unverified.code, unverified.detail);
     return sayAllow(`granted: ${classes.join(", ")}${provenance}${note}`);
   }
 
@@ -1501,10 +1585,12 @@ function gateAndWait(
         if (states.every((state) => state === "granted")) {
           // The grants are spent before the allow is printed, so this exact
           // command cannot ride the same authorization twice.
-          const failed = consumeGrants(run, spendKeys, hash);
+          const failed = consumeGrants(run, spendKeys, hash, task);
           if (failed !== null) {
             return sayDeny(`hook-gate-refused:${failed.code}`, failed.message);
           }
+          const unverified = verifySpent(run, spendKeys);
+          if (unverified !== null) return sayDeny(unverified.code, unverified.detail);
           return sayAllow(`granted: ${task} (${classes.join(", ")})${provenance}${note}`);
         }
         // Not a wait outcome: the log disagrees with itself about keys this

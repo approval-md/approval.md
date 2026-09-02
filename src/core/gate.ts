@@ -2697,7 +2697,47 @@ export interface ConsumeHarnessOptions extends GateOptions {
    * than a compile error a caller could silence with a placeholder.
    */
   presentedPayloadHash?: string;
+  /**
+   * The task id of the invocation doing the spending (APRV-200).
+   *
+   * Used for one thing and nothing else: to decide whether the recorded
+   * {@link HARNESS_GRANT_ORIGIN} is `direct` or `carried`. It never gates the
+   * spend, never changes a refusal, and never appears on the record itself.
+   *
+   * It is a CLAIM, in §9's computed-versus-claimed vocabulary, and it is bounded
+   * the way §11.1 invariant 4 bounds every claim: the only value it can produce
+   * unaided is the one that ADDS scrutiny. `direct` is reachable solely by
+   * presenting the task the request record already carries, which is a fact the
+   * gate reads out of the verified log rather than out of the caller; anything
+   * else, absence included, records `carried`.
+   */
+  spendingTask?: string;
 }
+
+/**
+ * How the authorization reached the process that spent it (APRV-200).
+ *
+ * `direct` — the tool call that spent this grant is the tool call that asked for
+ * it. One process opened the request, waited, saw the decision and proceeded, so
+ * the gate observed the whole ordering: nothing this runtime authorized could
+ * have run before the human answered.
+ *
+ * `carried` — a LATER tool call spent it, under APRV-117's carryover or its
+ * adoption sibling. The asking invocation had already returned a verdict (a
+ * `hook-timeout` deny, which leaves the request open), and whether the harness
+ * honoured that verdict is a fact this runtime never observes: it decides, and
+ * the harness executes. So the ordering the record implies — grant, then
+ * execution — is only guaranteed for `direct`, and this marker is what lets an
+ * auditor tell the two apart from the committed log alone. See
+ * `docs/claude-code-hook.md`, "When the grant can follow the write".
+ *
+ * Absent on an `execution.started` that names no `grant_seq`: an unattended
+ * execution has no grant, so it has no origin to report (SPEC.md §6.3).
+ */
+export type HarnessGrantOrigin = "direct" | "carried";
+
+/** The payload field {@link HarnessGrantOrigin} is recorded under. */
+export const HARNESS_GRANT_ORIGIN = "grant_origin";
 
 export type ConsumeHarnessResult = { ok: true; record: EventRecord } | GateRefusal;
 
@@ -2749,6 +2789,18 @@ export type ConsumeHarnessResult = { ok: true; record: EventRecord } | GateRefus
  * authorization was charged at `approval.granted`, and `core/budgets.ts`'s
  * consumption contract already dedupes a start event against a grant carrying
  * the same `action_key`.
+ *
+ * ## What the record says about ORDER (APRV-200)
+ *
+ * The start carries `grant_origin`, which answers a question the log could not
+ * previously be asked: was the tool call that spent this grant the tool call
+ * that asked for it? `direct` says yes, and the gate observed the whole ordering
+ * in one process. `carried` says a LATER invocation spent it — APRV-117's
+ * carryover, or its adoption sibling — which means the asking invocation had
+ * already returned a verdict, and this runtime never sees whether the harness
+ * honoured it. A grant that arrives after the effect it names is a ratification
+ * and not an approval, and `carried` is the window in which that is possible.
+ * See {@link HarnessGrantOrigin} and `docs/claude-code-hook.md`.
  */
 export function consumeHarnessGrant(
   logPath: string,
@@ -2943,6 +2995,15 @@ function attemptHarnessConsume(
     // that states none were both refused above. Every execution.started this
     // module writes names the bytes that ran.
     payload_hash: declaredHash,
+    // APRV-200: whether the tool call that spent this grant is the tool call
+    // that asked for it. Derived here, from the request's own task as the
+    // verified log records it, so the laxer of the two values is unreachable by
+    // assertion alone.
+    [HARNESS_GRANT_ORIGIN]: (options.spendingTask !== undefined &&
+    derivation.task !== null &&
+    options.spendingTask === derivation.task
+      ? "direct"
+      : "carried") satisfies HarnessGrantOrigin,
   };
   if (derivation.decisionSeq !== null) payload["grant_seq"] = derivation.decisionSeq;
 
