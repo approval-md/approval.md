@@ -1562,6 +1562,13 @@ export function commandHandlerFor(
   setup: ListenSetup,
   streams: Streams,
   state: DispatchState,
+  /**
+   * When the command arrived. A clock read in production, because a command is
+   * answered when a human types it; injectable for the same reason
+   * {@link dispatchPending} takes `now` as a parameter, since the ages a reply
+   * states are arithmetic against it and a suite must be able to choose them.
+   */
+  clock: () => string = () => new Date().toISOString(),
 ): (command: TelegramCommand) => Promise<void> {
   const say = async (lines: string[]): Promise<void> => {
     try {
@@ -1576,7 +1583,7 @@ export function commandHandlerFor(
   };
 
   return async (command) => {
-    const now = new Date().toISOString();
+    const now = clock();
 
     if (command === "queue") {
       const queue = buildPendingQueue(setup.logPath, setup.tagOptions, now);
