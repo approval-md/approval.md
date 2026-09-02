@@ -126,18 +126,6 @@ const EXPECTATIONS: readonly Expectation[] = [
     note: "supervised-live 0.1 since the seq 5147 ceremony (APRV-184): one edit in ten blocks on the gate, the rest execute and stay in the retrospective pool; with no usable sampling secret live selection fails closed and every edit gates",
   },
   { actionClass: "files.delete.out_of_scope", autonomy: "manual", provenance: "rule" },
-  {
-    actionClass: "log.sync",
-    autonomy: "manual",
-    provenance: "rule",
-    note: "declared 2026-08-26 (attested seq 513); the APRV-125 sign-off names sync=autonomous as the candidate end state once trust builds",
-  },
-  {
-    actionClass: "log.advance",
-    autonomy: "manual",
-    provenance: "rule",
-    note: "declared 2026-08-26 (attested seq 513); the APRV-125 sign-off names advance=supervised as the candidate end state once trust builds",
-  },
 
   // human-only — a person acts; no verb mints or withdraws authority (APRV-185); declared at the seq 7355 ceremony
   {
@@ -167,6 +155,12 @@ const EXPECTATIONS: readonly Expectation[] = [
 
   // autonomous — reads and in-workspace/branch-local writes
   {
+    actionClass: "log.sync",
+    autonomy: "autonomous",
+    provenance: "rule",
+    note: "manual from seq 513 until the seq 7413 ceremony reached the APRV-125 end state: an ff-pull with chain reconcile decides nothing, the chain and CI verify it",
+  },
+  {
     actionClass: "read.web",
     autonomy: "autonomous",
     provenance: "rule",
@@ -184,6 +178,12 @@ const EXPECTATIONS: readonly Expectation[] = [
 
   // supervised — pushing to main is sampled, not free
   { actionClass: "vcs.push.main", autonomy: "supervised", provenance: "rule" },
+  {
+    actionClass: "log.advance",
+    autonomy: "supervised",
+    provenance: "rule",
+    note: "supervised-live 0.1 since the seq 7413 ceremony (APRV-125 end state): committing the record of what already happened is bookkeeping, sampled after the fact; with no usable sampling secret live selection fails closed and every advance gates",
+  },
 
   // defaults — undeclared classes fall to defaults.autonomy (manual)
   {

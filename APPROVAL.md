@@ -47,8 +47,8 @@ classes:
   policy.core:               { autonomy: human-only }   # APPROVAL.md and .approval/* except the log (APRV-198)
   log.mutate:                { autonomy: human-only }   # any write aimed at .approval/log/ (APRV-198)
   account.credential:        { autonomy: human-only }   # keychain, APPROVAL_*/TELEGRAM_*/VAULT_* probes, vault/keys/env reads (APRV-194)
-  log.sync:                  { autonomy: manual }       # ff-pull with chain reconcile; APRV-125
-  log.advance:               { autonomy: manual }       # records commit to a records branch; APRV-125
+  log.sync:                  { autonomy: autonomous }       # ff-pull with chain reconcile; APRV-125
+  log.advance:               { autonomy: supervised-live, live_rate: 0.1 }       # records commit to a records branch; APRV-125
 
 budgets:
   global: { daily_actions: 20000 }
