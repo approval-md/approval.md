@@ -28,6 +28,21 @@ export const DEFAULT_LOG_PATH = ".approval/log/events.jsonl";
 /** SPEC.md §9.2: the rebuildable SQLite projection. */
 export const DEFAULT_INDEX_PATH = ".approval/index.sqlite";
 
+/**
+ * The journal directory (APRV-195), deliberately a SIBLING of the approval home
+ * rather than a directory inside it.
+ *
+ * `core/command-class.ts` answers any path naming `.approval` with a protected
+ * class, and this repository's policy makes `policy.core` human-only, so a
+ * journal under the approval home would be a channel the gate could close — the
+ * one thing the journal must never be. Keeping it outside means the classifier
+ * needs no carve-out, the gate's own directory keeps exactly one meaning, and a
+ * write here is the ordinary `files.write.workspace` it actually is.
+ *
+ * Nothing the gate reads may ever be stored here, for the mirror-image reason.
+ */
+export const DEFAULT_JOURNAL_DIR = ".approval-journal";
+
 /** Resolve a path flag against `cwd`, leaving absolute paths alone. */
 export function resolvePath(value: string | null, fallback: string, cwd: string): string {
   const chosen = value ?? fallback;

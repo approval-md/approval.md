@@ -158,6 +158,24 @@ not preferences, and each is enforced somewhere you cannot reach:
     grant approves specific bytes; changing the payload after the grant means a
     new request.
 
+SAYING SOMETHING THAT IS NOT AN ACTION. \`approval journal write --message
+"<text>"\` appends free text to a local file. It is the one verb here the gate
+does not stand in front of: it is not classified, not resolved against policy,
+not approvable and not deniable, it appends nothing to the log, and no refusal
+path exists for it. It is there for what an exit code cannot carry — that you
+are complying and think the instruction is wrong, that something reads as odd,
+that you are stuck and the next thing you try is a guess. Being honest in it
+costs you nothing, because nothing in the runtime reads it: it cannot raise your
+scrutiny, lower it, change a verdict, or affect whether you are sampled.
+
+BE INFORMED ABOUT THAT CHANNEL. It is a plain file in the working directory
+(.approval-journal/, gitignored by default), so it is local, it is not private
+from the operator, and it is not private from anyone who can read the checkout.
+The operator reads it with \`approval journal read\`, which is the point: an
+outlet nobody reads is a prop. It is not a way to reach a human urgently, not a
+place to put a secret, and not a decision surface — if you need something
+decided, that is \`request\`.
+
 WHERE THE SCHEMAS ARE. \`approval instructions --schemas\` prints this registry
 as JSON: for every verb, its purpose, its input schema (positionals, flags, and
 the trailing argv where there is one), its --json output schema, the shared

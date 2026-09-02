@@ -113,6 +113,15 @@ export const GITIGNORE_MARKER = "# approval.md";
  *   match what those two actually produce, at both levels of the tree. A crashed
  *   write leaves one behind; nobody should be asked to review it.
  *
+ * - `.approval-journal/` — the ungated free-text channel of `approval journal`
+ *   (APRV-195). Ignored rather than tracked because it is not truth and not
+ *   evidence: the log is the record of what happened and it is committed, while
+ *   the journal is what an agent said about working here, which the operator
+ *   reads locally. Committing it would also turn an outlet into a publication,
+ *   and an agent writing for a public repository is an agent writing for an
+ *   audience — the pressure this channel exists to be free of. An operator who
+ *   wants the history keeps it by deleting the line.
+ *
  * `.approval/log/` is deliberately absent: the log is the truth and belongs in
  * the history. So is `.approval/payloads/`, which holds the bytes each approval
  * bound to — evidence defaults to tracked, and the next steps `init` prints say
@@ -124,6 +133,7 @@ export const GITIGNORE_ENTRIES: readonly string[] = [
   ".approval/env",
   ".approval/keys/",
   ".approval/**/*.tmp-*",
+  ".approval-journal/",
 ];
 
 /** The same entries, indented for the help text so the two cannot disagree. */

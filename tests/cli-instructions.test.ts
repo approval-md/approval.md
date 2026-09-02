@@ -439,6 +439,13 @@ const AGENT_FACING: readonly string[] = [
   "policy check",
   "policy test",
   "payload hash",
+  // APRV-195. The ungated channel is agent-facing at both ends. `journal write`
+  // has to be, or it is not a channel the party under oversight can rely on;
+  // `journal read` is human-FACING and still not human-only, because it
+  // establishes no authority and an agent that can read back what it wrote can
+  // tell whether the channel is working.
+  "journal write",
+  "journal read",
   "doctor",
   "reindex",
   "render",

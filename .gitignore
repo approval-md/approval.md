@@ -15,3 +15,7 @@ dist/
 # Private strategy notes: never committed, never published (Pages serves repo root)
 private/*
 !private/README.md
+
+# The ungated agent journal (APRV-195): local signal for the operator, not
+# truth and not evidence. The log is the record that gets committed.
+.approval-journal/

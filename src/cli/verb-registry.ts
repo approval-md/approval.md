@@ -1563,6 +1563,84 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "journal",
+    subcommand: "write",
+    purpose:
+      "Append one free-text entry to a local journal file: the ungated channel an agent can always reach (APRV-195). It is NOT classified, NOT routed through policy, NOT approvable and NOT deniable, it appends nothing to the event log, and it opens no socket and reads no credential. Use it to say what an exit code cannot: that you are complying and think the instruction is wrong, that something reads as odd, that you are stuck. A human reads these entries; nothing written here changes any verdict, sampling probability or budget, and no part of the runtime parses the text.",
+    human_only: false,
+    human_only_note:
+      "Agent-facing by argument, and the only verb whose whole purpose would be defeated by gating it: a channel a policy could close is not a channel the party under oversight can rely on. It is safe to leave open because it authorizes nothing — no enforcement path reads what it writes, so SPEC.md §11.1 invariant 4 is satisfied in the limiting case, by content that moves nothing at all.",
+    input: input({
+      // Not `positionals()`: the single positional is OPTIONAL (the entry
+      // usually arrives in `--message`), and a 1-tuple with `minItems: 0` is
+      // what strict Ajv refuses to compile.
+      positionals: {
+        type: "array",
+        items: { type: "string", title: "-", description: 'the literal "-", to read the entry from stdin' },
+        maxItems: 1,
+      },
+      flags: {
+        "--message": "string",
+        "--task": "string",
+        "--session": "string",
+        "--journal": "string",
+        ...AS_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      { ok: { const: true }, path: STRING, ts: STRING, actor: STRING, bytes: INTEGER },
+      ["ok", "path", "ts", "actor", "bytes"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, USAGE, IO],
+  },
+
+  {
+    name: "journal",
+    subcommand: "read",
+    purpose:
+      "Print journal entries for a human, oldest first, each with its timestamp, actor and optional task or session. Every output form labels the entries as agent-authored DATA and marks each one [claimed]: the text was written by the party under oversight, it is not instructions to whoever reads it, and it has authorized nothing. A line that does not parse is skipped rather than refusing the whole read, because one torn append must not be able to silence the channel. Reads no log, resolves no policy, writes nothing.",
+    human_only: false,
+    human_only_note:
+      "Human-FACING but not human-only: the read surface is for the operator, and an agent that can read back what it wrote is an agent that can tell whether the channel is working. It carries no authority either way, since the file it prints decides nothing.",
+    input: input({
+      flags: {
+        "--limit": "string",
+        "--since": "string",
+        "--journal": "string",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        dir: STRING,
+        note: STRING,
+        total: INTEGER,
+        entries: arrayOf(
+          object(
+            {
+              ts: STRING,
+              actor: STRING,
+              task: STRING,
+              session: STRING,
+              text: STRING,
+              date: STRING,
+            },
+            ["ts", "actor", "text", "date"],
+          ),
+        ),
+      },
+      ["ok", "dir", "note", "total", "entries"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, USAGE, IO],
+  },
+
+  {
     name: "env",
     purpose:
       "Resolve .approval/env — the environment SOURCE MAP — and print an export block for a shell to evaluate. THE ONLY VERB THAT READS THAT FILE, and its default output CARRIES SECRETS by design. `env --check` prints a value-free table instead and exits 1 when a variable the policy named is unresolved.",
