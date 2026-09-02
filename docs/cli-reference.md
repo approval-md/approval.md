@@ -418,9 +418,20 @@ create` with a title naming the seq and a body stating the one-commit rule. Merg
 that PR with a merge commit, so the policy edit and its attestation stay one
 commit on main.
 
-Detection runs `gh api repos/{owner}/{repo}/branches/<default>/protection`: exit
-0 is protected, 404 is unprotected, and no `gh` / no GitHub remote / no readable
-answer is UNKNOWN. It is read-only and it never fails the command: a probe that
+Detection reads two endpoints, because GitHub protects a branch two ways and
+answers each from its own place (APRV-232). The classic probe is `gh api
+repos/{owner}/{repo}/branches/<default>/protection`: exit 0 is protected, and
+that ends the lookup. On a 404 (or any other refusal) the rulesets probe runs:
+`gh api repos/{owner}/{repo}/rules/branches/<default>` lists the rules that
+govern the branch, and a non-empty list (a merge queue, required status checks,
+whatever the ruleset carries) is protected; an empty list, or a 404, is no
+rules. Resolution: either probe protected is protected; classic 404 AND no
+rules is unprotected; anything else (no `gh`, no GitHub remote, a token that
+cannot read either endpoint, a body that is not JSON) is UNKNOWN. The classic
+endpoint alone answered 404 for this project's own main, which a ruleset
+governs, so the pre-APRV-232 probe called it unprotected and every ceremony
+printed the remote's GH013 rejection before recovering onto the branch flow.
+Both probes are read-only and neither ever fails the command: a probe that
 could not answer leaves an attestation that already happened exactly where it
 was. When the direct flow is about to push a protected default branch, the
 report prints a one-line warning before the push command rather than letting
