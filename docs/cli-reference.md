@@ -1546,6 +1546,15 @@ The checks, at length:
   daemon republish. This row can never report a correctness fault: the file
   endorses bytes, the reader re-proves them, and nothing is authorized on its
   word.
+- **read-proof** — which prefix proof this policy configures for its long-lived
+  readers (`daemon.read_proof`, APRV-217). SKIP when the policy declares no
+  `daemon` block: nobody wrote a mode, and every reader re-hashes the whole
+  verified prefix on every read, which is the default and the strictest setting.
+  PASS naming the mode when one is declared, with the cadence when it is
+  `incremental`. It reads the POLICY and never a running daemon's memory: a
+  process may have been launched with a flag that beat the policy, and its own
+  `started` line is where that is visible. It can never FAIL — both modes are
+  correct, and they differ in what a repeat read re-proves and how often.
 
 **`--json`** (one object on stdout):
 
@@ -2503,6 +2512,32 @@ REPORTED is the honest one. `approval doctor`'s `log-advance-cadence` row report
 both, plus the last advance attempt and how it ended, read from the log — so the
 answer survives the daemon's own process.
 
+**The prefix proof (`--read-proof`, default `full`).** A long-lived reader keeps
+a verified-read cache, and before it reuses a prefix it already walked it proves
+that prefix is still the bytes it walked. `full` re-hashes every byte of that
+prefix on every read: correct, and linear in log size on every read forever.
+`incremental` carries the un-finalised SHA-256 state at the end of the prefix,
+feeds it only the appended bytes, and re-proves the whole prefix on a cadence.
+The cheap guards run in both modes (schema key, file not shrunk,
+same-size-implies-same-mtime, head line byte-identical at its recorded offset),
+the appended tail is parsed, schema-checked and chain-walked from the cached head
+in both, and any guard failure in either falls back to a walk from genesis. The
+verdicts are identical; what `incremental` gives up between full re-proofs is
+detection of a rewrite STRICTLY INSIDE the prefix that preserves the file length,
+the head line and the mtime, which is an edit only a party with write access to
+the log can make.
+
+A full re-proof runs regardless: on the first read of a log in a process, every
+`--full-reproof-every` reads (default 50) or `--full-reproof-after` (default
+`60s`), whichever comes first, immediately after this process's own append, and
+on any guard failure. `approval log verify`, `approval doctor` and every reader
+that passes no cache are unaffected — they always walk. The Claude Code hook is
+unaffected too: a one-shot process has no prior full pass to anchor a state to,
+so it proves the snapshot's digest in full whatever the policy says.
+
+The flag beats the policy's `daemon` block for that run, a bad value is a usage
+error before the first tick, and the `started` line prints the mode in force.
+
 **Each tick, in order.**
 
 - ENVELOPE DRIFT — a task file whose `state:` contradicts the log gets an
@@ -2533,9 +2568,11 @@ One tick against a 10k-record, 6.5 MB log costs about 200 ms after APRV-212
 (it was 2.9 s before: one verified read per task file and a quadratic audit
 candidate scan; see `docs/postmortem-2026-09-02-daemon-tick-cpu.md`). Most of
 what remains is five verified reads, each re-proving the whole file's digest,
-so the cost still grows with log size. The `tick` line reports `ms`,
-`reads` and per-phase `phases` so an operator can see what a tick costs on their
-log before it becomes a load problem.
+so the cost still grows with log size under the default `full` proof; under
+`--read-proof incremental` those reads hash only the bytes appended since the
+last one. The `tick` line reports `ms`, `reads`, `reproof` and per-phase
+`phases` so an operator can see what a tick costs on their log before it becomes
+a load problem.
 
 The daemon never wakes itself: the verified-head snapshot it publishes beside
 the log, `QUEUE.md`, and its own task-file write-backs are filtered out of the
@@ -2553,7 +2590,7 @@ with the log idle is a bug: file it with the `tick` line's `phases`.
 ```
 {"event":"started","log":".approval/log/events.jsonl","tasks":"backlog/tasks",
  "queue":".approval/QUEUE.md","interval_ms":30000,"debounce_ms":250,
- "watching":true}
+ "watching":true,"read_proof":"full"}
 {"event":"drift","task":"task-042","file":"backlog/tasks/task-042.md",
  "declared_state":"approved","derived_state":"awaiting","seq":9}
 {"event":"expired","action_key":"task-042:chaser","task":"task-042","seq":10}
@@ -2570,8 +2607,8 @@ with the log idle is a bug: file it with the `tick` line's `phases`.
  "commit":"<40hex>","pr_url":"https://github.com/…","pr_created":true,
  "code":null,"message":"seq 4..10 is on records-log-2026-09-01","flush":false}
 {"event":"tick","n":1,"head":10,"drift":1,"expired":1,"escalated":0,
- "ms":41,"reads":8,"phases":{"drift":9,"ttl":3,"audit":6,"dark":0,"prune":1,
- "write_back":4,"advance":0,"escalations":1,"render":12}}
+ "ms":41,"reads":8,"reproof":"full","phases":{"drift":9,"ttl":3,"audit":6,
+ "dark":0,"prune":1,"write_back":4,"advance":0,"escalations":1,"render":12}}
 {"event":"stopped","reason":"SIGINT","ticks":3,"drift":1,"expired":1,
  "renders":3}
 {"event":"git_evidence","commit":"a1b2c3d","seq":10,
@@ -2666,6 +2703,12 @@ would have broken a stream an operator already parses.
 milliseconds and the channel's poll takes as long as the long poll does, so the
 fast part waits for the slow one rather than cutting it short. The queue page is
 a pull channel with no cycle to run, so `--once` does not serve one.
+
+It accepts every `daemon run` flag unchanged, `--read-proof`,
+`--full-reproof-every` and `--full-reproof-after` included, parsed by the same
+functions so a typo is refused in the same words on both spellings. The mode it
+resolves to governs every reader in the process — the loop's tick reads and the
+queue renderer's alike — and is printed on the `started` line.
 
 Like `daemon run`, it does not fork, write a pidfile, or manage its own
 lifecycle. `launchd` and `systemd` do that better, and `approval setup service`

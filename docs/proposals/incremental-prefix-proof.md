@@ -1,6 +1,8 @@
 # Incremental prefix proof for the verified-read cache (APRV-217)
 
-Status: DESIGN, awaiting Carter's sign-off. Nothing here is built.
+Status: SIGNED OFF and BUILT (APRV-217). §12 records the decisions; the "as
+built" note at the end records where the implementation differs from the text
+above it.
 
 ## 1. The problem in one paragraph
 
@@ -229,10 +231,43 @@ column. Self-wake probe unchanged (1 tick in 45 s).
   if it ever matters).
 - Rust. SHA-256 already runs in OpenSSL; the cost is the bytes fed to it.
 
-## 12. Questions for the sign-off
+## 12. The sign-off, as recorded
 
-1. Defaults: `full` as proposed, or `incremental` from the start with the
-   60 s / 50-read cadence? Recommendation: `full` now, flip the live policy
-   after a week of `tick` lines under `incremental` in the primary.
-2. Cadence defaults: 50 reads / 60 s, or tighter?
-3. The tail-only disk read (§8, last bullet): in the same change or after?
+1. **Defaults: `full`.** As proposed, and for the reason proposed: it is the
+   behaviour Carter has today, and the live policy flips only after a week of
+   `tick` lines under `incremental` in the primary, through the ceremony like
+   any other policy amendment.
+2. **Cadence defaults: 50 reads / 60 s.** As proposed.
+3. **The tail-only disk read: in the same change.** It is what makes an
+   incremental read O(tail) end to end rather than O(file) in the read and
+   O(tail) in the hash.
+
+## 13. As built
+
+Built as designed, with three notes a reader of §4 to §9 needs.
+
+The proof is BOTH a per-read option and a process-wide default. §8 called for a
+`DaemonOptions` field, and the daemon's own tick reads carry one; but the daemon
+process makes reads the tick does not — the queue renderer and the pending-queue
+builder read the same log through call paths that thread no options of their own
+— and a mode that reached only the tick left a third of a tick's reads hashing
+the whole file, and worse, dropped the carried hash state on every one of them.
+So `core/state.ts` also has `useReadProof`, the process-wide switch
+`useVerifiedSnapshots` already established for the same structural reason, set
+once by `approval daemon run` and `approval up` from the mode they printed. No
+other verb sets it, so a hook, a CLI verb, `approval log verify` and every test
+read exactly as they did before. A cached entry now carries its hash state under
+BOTH modes (a `full` read builds one from the single pass it already paid for,
+and carries an existing one forward untouched), which is what keeps a mixed-mode
+process from thrashing its own anchor; nothing else about a `full` read changed,
+and the same bytes are hashed the same number of times.
+
+The `tick` line's `reproof` is measured around the loop's OWN reads rather than
+over the process cache's counters for the whole tick, so it answers for the
+reads the line's `reads` field counts.
+
+The design's §3 window is narrower in practice than §3 states, and the test
+matrix says so: guard 3 (same size implies same mtime) rejects an in-place
+same-length rewrite outright, in both modes, so the interior-rewrite window
+requires an attacker who also restores the mtime. `tests/read-proof.test.ts`
+pins the mtime on both sides to reach the case at all.

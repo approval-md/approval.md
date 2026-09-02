@@ -271,6 +271,16 @@ export interface Policy {
      */
     skew_tolerance?: string;
   };
+  /**
+   * Amended SPEC.md §5.2 (APRV-217): how the long-lived readers of this log
+   * prove a cached prefix. Latency only, and its strictest value is the
+   * default, so an absent block is the behaviour that existed before it.
+   */
+  daemon?: {
+    read_proof?: "full" | "incremental";
+    full_reproof_every?: number;
+    full_reproof_after?: string;
+  };
   channels?: Record<string, Record<string, unknown>>;
   /**
    * Amended SPEC.md §5.2 (APRV-68): the credential vault's configuration. One
@@ -300,6 +310,36 @@ export interface PolicyDurations {
    */
   skewToleranceMs: number | null;
 }
+
+/**
+ * The `daemon` block resolved, with the reference runtime's defaults applied
+ * (APRV-217), so no reader re-derives them and no two readers disagree.
+ *
+ * Every default is the strict end: `full` proves the whole prefix on every
+ * read, which is what the runtime did before this block existed. The counts are
+ * meaningful only under `incremental`.
+ */
+export interface PolicyDaemonRead {
+  readProof: "full" | "incremental";
+  /** Reads one full re-proof may cover, the anchoring read included. */
+  fullReproofEvery: number;
+  /** Wall-clock milliseconds one full re-proof may cover. */
+  fullReproofAfterMs: number;
+  /**
+   * Whether the policy declared a `daemon` block at all. Display only — the
+   * three fields above are complete either way — and read by `approval doctor`,
+   * which skips its row rather than reporting a mode nobody wrote.
+   */
+  declared: boolean;
+}
+
+/** The defaults a policy that declares no `daemon` block is read under. */
+export const DEFAULT_POLICY_DAEMON_READ: PolicyDaemonRead = Object.freeze({
+  readProof: "full",
+  fullReproofEvery: 50,
+  fullReproofAfterMs: 60_000,
+  declared: false,
+});
 
 /** Where the loaded policy came from. */
 export interface PolicySource {
@@ -331,6 +371,12 @@ export type PolicyLoadResult =
       policy: Policy;
       source: PolicySource;
       durations: PolicyDurations;
+      /**
+       * The `daemon` block resolved (APRV-217), defaults applied. Present for
+       * every loaded policy, declared or not, for the reason `durations` is:
+       * one parse of the grammar, one number every reader shares.
+       */
+      daemon: PolicyDaemonRead;
       /**
        * Amended SPEC.md §5.2 (APRV-127): observations about a policy that is in
        * force. Empty for almost every policy. Never a reason to fail closed.
@@ -713,11 +759,43 @@ export function loadPolicyText(
     }
   }
 
+  // The `daemon` block (APRV-217), read the same way: one parse here, defaults
+  // applied once, and an unparseable duration fails the WHOLE policy rather
+  // than leaving a key the author believed was in force quietly unread.
+  const reproofText = policy.daemon?.full_reproof_after;
+  let fullReproofAfterMs = DEFAULT_POLICY_DAEMON_READ.fullReproofAfterMs;
+  if (reproofText !== undefined) {
+    const parsedMs = parseDuration(reproofText);
+    if (parsedMs === null) {
+      return failure(
+        "schema-invalid",
+        `${resolved.path}: daemon.full_reproof_after "${reproofText}" is not a valid duration`,
+        [
+          {
+            path: "/daemon/full_reproof_after",
+            keyword: "duration",
+            message: "expected <positive integer><unit> with unit in ms|s|m|h|d|w",
+          },
+        ],
+        parsed.value,
+      );
+    }
+    fullReproofAfterMs = parsedMs;
+  }
+  const daemonRead: PolicyDaemonRead = {
+    readProof: policy.daemon?.read_proof ?? DEFAULT_POLICY_DAEMON_READ.readProof,
+    fullReproofEvery:
+      policy.daemon?.full_reproof_every ?? DEFAULT_POLICY_DAEMON_READ.fullReproofEvery,
+    fullReproofAfterMs,
+    declared: policy.daemon !== undefined,
+  };
+
   return {
     ok: true,
     policy,
     source: { path: resolved.path, filename: basename(resolved.path) },
     durations: { approvalTtlMs, skewToleranceMs },
+    daemon: daemonRead,
     notes: aliasNotes(policy),
   };
 }

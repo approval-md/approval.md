@@ -829,6 +829,56 @@ function checkVerifiedSnapshot(logPath: string): DoctorCheck {
 }
 
 // ---------------------------------------------------------------------------
+// 7c. the prefix proof long-lived readers run (APRV-217)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which prefix proof this policy configures for its long-lived readers.
+ *
+ * A configuration row, and only that. It reads the POLICY and never a running
+ * daemon: the mode a process is actually using is on that process's own
+ * `started` line, a daemon may have been launched with a flag that beat the
+ * policy, and a doctor that reported a live process's memory would be reporting
+ * something it cannot verify. Nothing here is ever a `fail` — both modes are
+ * correct, they differ in what a repeat read re-proves and how often — and a
+ * policy that declares no `daemon` block skips the row rather than announcing a
+ * default nobody wrote.
+ */
+function checkReadProof(policyLoad: PolicyLoadResult): DoctorCheck {
+  if (!policyLoad.ok) {
+    return {
+      check: "read-proof",
+      status: "skip",
+      detail: `the policy did not load (${policyLoad.code}), so no daemon read proof is configured; every reader proves the whole prefix on every read, which is the strict default. The policy failure itself is reported by \`approval policy check\`.`,
+    };
+  }
+  const configured = policyLoad.daemon;
+  if (!configured.declared) {
+    return {
+      check: "read-proof",
+      status: "skip",
+      detail: `${policyLoad.source.filename} declares no \`daemon\` block, so long-lived readers re-hash the whole verified prefix on every read (read_proof: full). That is the default and the strictest setting; \`daemon.read_proof: incremental\` trades it for a cadence-bounded proof of the appended bytes.`,
+    };
+  }
+  if (configured.readProof === "full") {
+    return {
+      check: "read-proof",
+      status: "pass",
+      detail: `${policyLoad.source.filename} sets daemon.read_proof: full — every cached read re-hashes the whole verified prefix and compares the digest. One-shot processes and \`approval log verify\` do that regardless.`,
+    };
+  }
+  return {
+    check: "read-proof",
+    status: "pass",
+    detail: `${policyLoad.source.filename} sets daemon.read_proof: incremental — a long-lived reader hashes only the appended bytes, re-proving the whole prefix at least every ${String(
+      configured.fullReproofEvery,
+    )} read(s) or ${String(
+      configured.fullReproofAfterMs,
+    )} ms, whichever comes first, and after every append it makes. The Claude Code hook, \`approval log verify\` and \`approval doctor\` prove in full whatever this says.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 8. audit sampling
 // ---------------------------------------------------------------------------
 
@@ -2106,6 +2156,9 @@ export function commandDoctor(
       ),
       // APRV-188: appended, eleventh time, same reason.
       checkVerifiedSnapshot(logPath),
+      // APRV-217: appended, twelfth time, same reason. A configuration row: it
+      // reads the policy, never a running daemon's memory.
+      checkReadProof(policyLoad),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

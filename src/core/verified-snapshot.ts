@@ -215,19 +215,52 @@ export function publishSnapshot(
   schemaDir: string | undefined,
   now: () => string = () => new Date().toISOString(),
 ): boolean {
+  return publishVerifiedPrefix(
+    logPath,
+    raw.length,
+    raw.length > 0 && raw[raw.length - 1] === NEWLINE,
+    digest,
+    lines,
+    head,
+    schemaDir,
+    now,
+  );
+}
+
+/**
+ * {@link publishSnapshot} for a caller that never held the whole file.
+ *
+ * The incremental read (APRV-217) reads the head line and the appended bytes
+ * and proves the digest from a carried hash state, so it has the two facts this
+ * function needs — how long the verified prefix is and whether it ends at a
+ * line boundary — without a buffer of the log to derive them from. Nothing else
+ * differs: the same suppression memo, the same atomic 0600 write, the same
+ * snapshot fields. `publishSnapshot` is this function with those two facts read
+ * off a buffer.
+ */
+export function publishVerifiedPrefix(
+  logPath: string,
+  byteLength: number,
+  endsWithNewline: boolean,
+  digest: string,
+  lines: number,
+  head: LogHead,
+  schemaDir: string | undefined,
+  now: () => string = () => new Date().toISOString(),
+): boolean {
   // A prefix that does not end at a line boundary cannot be resumed from, so it
   // is never published. In practice a clean log always ends with a newline.
-  if (raw.length === 0 || raw[raw.length - 1] !== NEWLINE) return false;
+  if (byteLength === 0 || !endsWithNewline) return false;
 
   const identity = pathIdentity(logPath);
   const last = published.get(identity);
-  if (last !== undefined && last.byteLength === raw.length && last.sha256 === digest) return false;
+  if (last !== undefined && last.byteLength === byteLength && last.sha256 === digest) return false;
 
   const snapshot: VerifiedSnapshot = {
     v: SNAPSHOT_VERSION,
     log: identity,
     schema_dir: schemaDir === undefined ? "" : pathIdentity(schemaDir),
-    byte_length: raw.length,
+    byte_length: byteLength,
     sha256: digest,
     lines,
     head,
@@ -244,7 +277,7 @@ export function publishSnapshot(
     // would otherwise keep whatever mode it had.
     chmodSync(temp, 0o600);
     renameSync(temp, target);
-    published.set(identity, { byteLength: raw.length, sha256: digest });
+    published.set(identity, { byteLength, sha256: digest });
     return true;
   } catch {
     try {

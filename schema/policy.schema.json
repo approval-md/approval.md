@@ -133,6 +133,33 @@
         }
       }
     },
+    "daemon": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "APRV-217 (docs/proposals/incremental-prefix-proof.md): how the long-lived readers of this log prove a cached prefix before they reuse it. Read by `approval daemon run` and `approval up` and by nothing else: one-shot processes, the Claude Code hook included, always prove in full, and `approval log verify` and `approval doctor` never use the cache at all. Every key here is a LATENCY setting whose strictest value is the default, so a policy that omits the block, or the whole block, behaves exactly as the runtime did before it existed.",
+      "properties": {
+        "read_proof": {
+          "type": "string",
+          "enum": ["full", "incremental"],
+          "default": "full",
+          "description": "Which proof a repeat read runs over the prefix it already verified. `full` (THE DEFAULT, and what an absent key means): re-hash every byte of the proved prefix on every read and compare the digest, which is the APRV-43 behaviour byte for byte. `incremental`: carry the un-finalised SHA-256 state at the end of the prefix, feed it only the appended bytes, and re-prove the whole prefix on the cadence below. The cheap guards (schema key, file not shrunk, same-size-implies-same-mtime, head line byte-identical at its offset) run in both modes, and the appended tail is parsed, schema-checked and chain-walked in both. What `incremental` gives up, between full re-proofs, is the detection of a rewrite STRICTLY INSIDE the prefix that preserves the file length, the head line and the mtime — an edit only a party with write access to the log can make, who can already recompute a self-consistent forged chain because the chain is unkeyed. The default is `full` because it is the behaviour an operator has attested to, and moving it is a policy amendment like any other.",
+          "examples": ["full", "incremental"]
+        },
+        "full_reproof_every": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 50,
+          "description": "APRV-217: how many reads one full re-proof may cover under `read_proof: incremental`, the anchoring read included. `1` means every read hashes the whole prefix, which is `full` reached by another spelling. Ignored under `full`. Bounds the window in which an in-place rewrite of the prefix would be served from cache, together with `full_reproof_after`, whichever comes first.",
+          "examples": [50]
+        },
+        "full_reproof_after": {
+          "$ref": "#/$defs/duration",
+          "default": "60s",
+          "description": "APRV-217: how much wall-clock time one full re-proof may cover under `read_proof: incremental`. Duration string, `<positive integer><unit>` with unit in ms|s|m|h|d|w, the same grammar `defaults.approval_ttl` uses. Ignored under `full`. The binding bound on an idle daemon, where the read count grows slowly: at the default 30 s tick this makes every second tick re-prove in full.",
+          "examples": ["60s", "5m"]
+        }
+      }
+    },
     "vault": {
       "type": "object",
       "additionalProperties": false,

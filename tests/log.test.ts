@@ -443,6 +443,14 @@ test("the module exposes no mutation, reorder, or truncate operation", async () 
       "GENESIS_PREV",
       "appendEvent",
       "computeRecordHash",
+      // APRV-217 added a subscription to successful appends. It is a
+      // NOTIFICATION registrar: a listener is handed a path and no handle, it
+      // runs after the record is already on disk, it cannot change what was
+      // written, and a listener that throws is swallowed rather than turning a
+      // written record into a failed one. Nothing here mutates, reorders, or
+      // truncates. Its one subscriber is the verified-read cache, which uses it
+      // to prove MORE on its next read.
+      "onLogAppended",
       "serializeRecord",
       "verifyRecordHash",
       // APRV-125 added the whole-operation lock holder. It hands its callback

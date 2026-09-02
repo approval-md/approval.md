@@ -153,7 +153,10 @@ function warmed(count = 5): { logPath: string; cache: VerifiedReadCache } {
   const cache = new VerifiedReadCache();
   const first = readVerifiedRecords(logPath, { cache });
   assert.equal(first.ok, true, "the warm-up read must be clean");
-  assert.deepEqual(cache.stats, { hits: 0, misses: 1, resumed: 0 });
+  // `fullReproofs` (APRV-217) equals `hits + misses` throughout this file, and
+  // that is the assertion: these reads run the DEFAULT proof, under which every
+  // one of them hashes the whole prefix exactly as it did before that task.
+  assert.deepEqual(cache.stats, { hits: 0, misses: 1, resumed: 0, fullReproofs: 1 });
   return { logPath, cache };
 }
 
@@ -174,7 +177,7 @@ test("tamper before the cached head, preserving size and head bytes, is refused"
   const { code, message } = refusal(result);
   assert.equal(code, "log-corrupt");
   assert.match(message, /hash-mismatch at seq 2/u);
-  assert.deepEqual(cache.stats, { hits: 0, misses: 2, resumed: 0 }, "the prefix hash must discard the entry");
+  assert.deepEqual(cache.stats, { hits: 0, misses: 2, resumed: 0, fullReproofs: 2 }, "the prefix hash must discard the entry");
 });
 
 test("tamper at the cached head is refused", () => {
@@ -184,7 +187,7 @@ test("tamper at the cached head is refused", () => {
   const { code, message } = refusal(readVerifiedRecords(logPath, { cache }));
   assert.equal(code, "log-corrupt");
   assert.match(message, /hash-mismatch at seq 5/u);
-  assert.deepEqual(cache.stats, { hits: 0, misses: 2, resumed: 0 });
+  assert.deepEqual(cache.stats, { hits: 0, misses: 2, resumed: 0, fullReproofs: 2 });
 });
 
 test("tamper in the appended suffix is refused on the resumed walk", () => {
@@ -198,7 +201,7 @@ test("tamper in the appended suffix is refused on the resumed walk", () => {
   const { code, message } = refusal(readVerifiedRecords(logPath, { cache }));
   assert.equal(code, "log-corrupt");
   assert.match(message, /hash-mismatch at seq 6/u);
-  assert.deepEqual(cache.stats, { hits: 1, misses: 1, resumed: 0 }, "an intact prefix is reused");
+  assert.deepEqual(cache.stats, { hits: 1, misses: 1, resumed: 0, fullReproofs: 2 }, "an intact prefix is reused");
 });
 
 test("a forged suffix record that does not link is refused", () => {
@@ -214,7 +217,7 @@ test("a forged suffix record that does not link is refused", () => {
   const { code, message } = refusal(readVerifiedRecords(logPath, { cache }));
   assert.equal(code, "log-corrupt");
   assert.match(message, /prev-mismatch at seq 6/u);
-  assert.deepEqual(cache.stats, { hits: 1, misses: 1, resumed: 0 });
+  assert.deepEqual(cache.stats, { hits: 1, misses: 1, resumed: 0, fullReproofs: 2 });
 });
 
 test("a shrunken log reports its own head, never the remembered one", () => {
@@ -226,7 +229,7 @@ test("a shrunken log reports its own head, never the remembered one", () => {
   if (!result.ok) throw new Error("unreachable");
   assert.equal(result.records.length, 4, "the removed record must not survive in the cache");
   assert.equal(result.head?.seq, 4);
-  assert.deepEqual(cache.stats, { hits: 0, misses: 2, resumed: 0 }, "a shorter file discards the entry");
+  assert.deepEqual(cache.stats, { hits: 0, misses: 2, resumed: 0, fullReproofs: 2 }, "a shorter file discards the entry");
 });
 
 test("a reordered log is refused", () => {
@@ -239,7 +242,7 @@ test("a reordered log is refused", () => {
 
   const { code } = refusal(readVerifiedRecords(logPath, { cache }));
   assert.equal(code, "log-corrupt");
-  assert.deepEqual(cache.stats, { hits: 0, misses: 2, resumed: 0 });
+  assert.deepEqual(cache.stats, { hits: 0, misses: 2, resumed: 0, fullReproofs: 2 });
 });
 
 test("a same-size, same-mtime substitution of the whole log is still caught", () => {
@@ -274,7 +277,7 @@ test("a same-size, same-mtime substitution of the whole log is still caught", ()
     lines(substituteLog).map((line) => (JSON.parse(line) as EventRecord).hash),
     "the records returned are the file's, not the remembered ones",
   );
-  assert.deepEqual(cache.stats, { hits: 0, misses: 2, resumed: 0 }, "the prefix hash must discard the entry");
+  assert.deepEqual(cache.stats, { hits: 0, misses: 2, resumed: 0, fullReproofs: 2 }, "the prefix hash must discard the entry");
 });
 
 test("an honest append verifies only the suffix and agrees with a cold read", () => {
@@ -285,7 +288,7 @@ test("an honest append verifies only the suffix and agrees with a cold read", ()
   const cold = readVerifiedRecords(logPath, { cache: null });
   assert.deepEqual(cached, cold);
   assert.equal(cached.ok && cached.records.length, 6);
-  assert.deepEqual(cache.stats, { hits: 1, misses: 1, resumed: 0 });
+  assert.deepEqual(cache.stats, { hits: 1, misses: 1, resumed: 0, fullReproofs: 2 });
 });
 
 test("a re-read of an unchanged log is identical to the cold read of the same bytes", () => {
@@ -293,7 +296,7 @@ test("a re-read of an unchanged log is identical to the cold read of the same by
   const cached = readVerifiedRecords(logPath, { cache });
   const cold = readVerifiedRecords(logPath, { cache: null });
   assert.deepEqual(cached, cold);
-  assert.deepEqual(cache.stats, { hits: 1, misses: 1, resumed: 0 });
+  assert.deepEqual(cache.stats, { hits: 1, misses: 1, resumed: 0, fullReproofs: 2 });
 });
 
 test("records handed out of the cache are frozen against mutation", () => {
@@ -315,12 +318,12 @@ test("a schema directory change discards the entry: other schemas are other evid
   const elsewhere = join(scratch, "no-such-schema-dir");
   const refused = readVerifiedRecords(logPath, { cache, schemaDir: elsewhere });
   assert.equal(refused.ok, false, "a missing schema dir fails closed");
-  assert.deepEqual(cache.stats, { hits: 0, misses: 2, resumed: 0 });
+  assert.deepEqual(cache.stats, { hits: 0, misses: 2, resumed: 0, fullReproofs: 2 });
 
   // And the failed read left nothing behind that the default schemas could reuse.
   const back = readVerifiedRecords(logPath, { cache });
   assert.equal(back.ok, true);
-  assert.deepEqual(cache.stats, { hits: 0, misses: 3, resumed: 0 });
+  assert.deepEqual(cache.stats, { hits: 0, misses: 3, resumed: 0, fullReproofs: 3 });
 });
 
 test("caches are per-instance, and eviction costs correctness nothing", () => {
@@ -336,7 +339,7 @@ test("caches are per-instance, and eviction costs correctness nothing", () => {
 
   const isolated = new VerifiedReadCache();
   assert.equal(isolated.size, 0);
-  assert.deepEqual(isolated.stats, { hits: 0, misses: 0, resumed: 0 });
+  assert.deepEqual(isolated.stats, { hits: 0, misses: 0, resumed: 0, fullReproofs: 0 });
 });
 
 // ---------------------------------------------------------------------------

@@ -96,6 +96,7 @@ import { payloadHash } from "../core/payload.js";
 import { loadPolicy, type LoadPolicyOptions } from "../core/policy-load.js";
 import { rewriteTaskFile, writeTaskFileAtomic, type RewriteOptions } from "../core/task-file.js";
 import {
+  processReadCache,
   readVerifiedRecords,
   type LogReadRefusal,
   type ReadRecordsResult,
@@ -161,6 +162,13 @@ export type DaemonEvent =
       interval_ms: number;
       debounce_ms: number;
       watching: boolean;
+      /**
+       * Which prefix proof this run's verified reads run (APRV-217). Additive,
+       * like every other growth of this union. It is on the FIRST line the
+       * daemon prints because it is a configuration an operator has to be able
+       * to see without asking the process anything.
+       */
+      read_proof: "full" | "incremental";
     }
   | {
       event: "drift";
@@ -314,6 +322,15 @@ export type DaemonEvent =
       ms: number;
       /** Verified log reads this tick made. Bounded by structure, not by size. */
       reads: number;
+      /**
+       * Which path this tick's reads took (APRV-217). Additive. `full` when any
+       * read this tick hashed the whole prefix — a full re-proof, a cadence
+       * boundary, a guard failure, or a cold walk — and `incremental` when
+       * every one of them was served from a carried hash state. Under
+       * `read_proof: full` it is `full` on every tick, which is the honest
+       * report: that is the path those reads took.
+       */
+      reproof: "full" | "incremental";
       /** Per-phase duration in milliseconds, in the order the tick runs them. */
       phases: {
         drift: number;
@@ -464,6 +481,16 @@ export interface DaemonOptions {
    * costs hook latency and nothing else.
    */
   snapshot?: boolean;
+  /**
+   * Which prefix proof this loop's verified reads run (APRV-217).
+   *
+   * Absent means `full`: every read re-hashes the whole proved prefix, which is
+   * the behaviour of every release before this one. The CLI resolves it from
+   * the `daemon` policy block and the `--read-proof` family, flag first, and
+   * hands the answer down here so the loop itself reads no policy for it and
+   * cannot drift from the mode its `started` line printed.
+   */
+  readProof?: { mode: "full" | "incremental"; everyReads: number; afterMs: number };
   sink: DaemonSink;
 }
 
@@ -546,6 +573,8 @@ export class Daemon {
   private reportedEscalations = new Set<string>();
   /** Verified reads made during the current tick (APRV-211). Reset at tick start. */
   private reads = 0;
+  /** Did any of this tick's own reads hash the whole prefix (APRV-217)? */
+  private fullReproofThisTick = false;
   /** Basenames {@link writeBack} placed this tick, so the watcher can ignore them. */
   private selfWrites = new Set<string>();
   /** The previous tick's, kept one generation: watch events arrive after the write. */
@@ -578,6 +607,7 @@ export class Daemon {
         interval_ms: this.options.intervalMs,
         debounce_ms: this.options.debounceMs,
         watching: this.watching,
+        read_proof: this.options.readProof?.mode ?? "full",
       });
 
       const outcome = this.tick();
@@ -789,6 +819,7 @@ export class Daemon {
     try {
       this.ticks += 1;
       this.reads = 0;
+      this.fullReproofThisTick = false;
       // One generation of the daemon's own task-file writes is kept, because a
       // watch event arrives after the write that caused it and often after the
       // tick that made it has ended.
@@ -888,6 +919,7 @@ export class Daemon {
         escalated,
         ms: Math.round((performance.now() - startedAt) * 10) / 10,
         reads: this.reads,
+        reproof: this.fullReproofThisTick ? "full" : "incremental",
         phases: {
           drift: Math.round(phases.drift * 10) / 10,
           ttl: Math.round(phases.ttl * 10) / 10,
@@ -1129,9 +1161,25 @@ export class Daemon {
    */
   private read(): ReadRecordsResult {
     this.reads += 1;
+    // APRV-217. Measured around THIS read, so the tick line reports the path
+    // the loop's own reads took: other readers in the same process (the queue
+    // renderer) have their own answer and their own line to be judged on.
+    const fullBefore = processReadCache.stats.fullReproofs;
+    try {
+      return this.readOnce();
+    } finally {
+      if (processReadCache.stats.fullReproofs > fullBefore) this.fullReproofThisTick = true;
+    }
+  }
+
+  private readOnce(): ReadRecordsResult {
     return readVerifiedRecords(this.options.logPath, {
       ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
       publishSnapshot: this.options.snapshot !== false,
+      // APRV-217. Absent on the options means absent here, which the read cache
+      // reads as `full`: the daemon asks for the cheaper proof only when an
+      // operator's policy or flag said so.
+      ...(this.options.readProof === undefined ? {} : { readProof: this.options.readProof }),
     });
   }
 
