@@ -3,11 +3,11 @@ id: APRV-215
 title: >-
   approval up preflight: fetch, fast-forward when the log is untouched upstream,
   rebuild when dist is stale, refuse with the next command otherwise
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-y'
 created_date: '2026-09-02 15:57'
-updated_date: '2026-09-02 20:32'
+updated_date: '2026-09-02 22:19'
 labels:
   - cli
   - dogfood
@@ -136,3 +136,9 @@ Verified on the merge commit, one suite at a time:
 
 Plus three the merge could plausibly have disturbed, run for the same reason: cli-long-help (the 25-line cap, which APRV-225 also spent budget against), hook-module-graph, daemon-git-evidence — 35/35 together; and up + daemon, 45/45. npx oxlint src tests clean.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+approval up and daemon run preflight: fetch, report behind/ahead and whether upstream touched the working log, fast-forward with --ff-only when safe, rebuild when dist is stale, then re-exec the fresh build so the commit named is the one running; refuse otherwise in the runbook shape with a distinct code and the next command (never reset --hard); fetch failure is a warning; --no-preflight and --json; doctor row main-behind-origin. Verified by tests/cli-up-preflight.test.ts (21 cases incl. the re-exec proven by a stamp only the new build prints), doctor/daemon/read-proof suites, lint clean; merged in PR #243. Carter's first run confirmed: 'already at the remote tip, on a build no older than the sources'.
+<!-- SECTION:FINAL_SUMMARY:END -->

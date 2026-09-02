@@ -3,11 +3,11 @@ id: APRV-219
 title: >-
   Log anchoring verification: refuse a working log whose prefix diverges from
   the last committed records anchor, and fix the doctor's log-drift row
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-v'
 created_date: '2026-09-02 16:26'
-updated_date: '2026-09-02 19:58'
+updated_date: '2026-09-02 22:16'
 labels:
   - core
   - log
@@ -36,7 +36,7 @@ An unkeyed hash chain means a process with write access to .approval/log/events.
 - [x] #2 A missing anchor (no records branch, no git, detached) is reported as a skip with a reason and never as a pass
 - [x] #3 The daemon runs the anchor check at startup and on each full re-proof; divergence stops the daemon with a distinct outcome, and the tick/started lines name the anchor in use
 - [x] #4 approval doctor's log-drift row is this check's result and no longer misreads the checkout (APRV-210's two reproductions pass)
-- [ ] #5 The refusal code joins the pinned code union (SPEC §11.1 inv. 6); SPEC.md §9 or §11 gains the anchoring sentence via a gated edit
+- [x] #5 The refusal code joins the pinned code union (SPEC §11.1 inv. 6); SPEC.md §9 or §11 gains the anchoring sentence via a gated edit
 - [x] #6 docs/cli-reference.md and docs/git-evidence.md updated; npm test passes; lint clean
 <!-- AC:END -->
 
@@ -96,3 +96,9 @@ One real regression was caught by the suite and fixed: VERIFY_HELP went to 33 li
 
 AC6 met. AC5 is HALF met and left unchecked on purpose: the refusal code has joined the pinned union (a new closed union anchor_refusal_codes, pinned in tests/log-anchor.test.ts and in conformance vectors at 7.0.0), but the SPEC.md sentence and the invariant-6 file-list row are drafted in the notes above for the orchestrator to apply under a grant. SPEC.md is protected and was not edited by this agent.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+approval log verify --anchor compares the working log against the newest committed copy reachable from origin/main and refs/approval/advance/* (read-only git show, never a fetch): byte-prefix digest and the record at the anchored head, refusing anchor-diverged (new closed union anchor_refusal_codes, conformance refusal-unions 7.0.0); a missing anchor is a skip naming the revs tried; the daemon checks at startup and on every full re-proof and stops with a distinct outcome. Verified by tests/log-anchor.test.ts (24 cases on real git topologies), full suite 3010 pass, lint clean; merged in PR #241. SPEC 9 anchoring sentence and invariant 6 row applied in the protected batch.
+<!-- SECTION:FINAL_SUMMARY:END -->
