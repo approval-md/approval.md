@@ -1,0 +1,1 @@
+{"after":"Adapters (e.g. `adapter-email`, `adapter-agentmail`, `adapter-gcal`) hold the actual credentials","before":"Adapters (e.g. `adapter-email`, `adapter-gcal`) hold the actual credentials","file":"/Users/carter/dev/approval-md/.claude/worktrees/nango-listing-decision-5b91f7/SPEC.md","replace_all":false,"rule":"protected-path-proposal","tool":"Edit"}
