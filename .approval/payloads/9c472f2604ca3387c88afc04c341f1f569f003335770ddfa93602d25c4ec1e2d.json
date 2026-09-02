@@ -1,0 +1,1 @@
+{"command":"npm run build 2>&1|tail -1; node dist/src/cli/main.js log advance --help | wc -l; node --test dist/tests/cli-long-help.test.js 2>&1 | grep -E \"ℹ (pass|fail)\"","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a1336c4ddf3460332"}

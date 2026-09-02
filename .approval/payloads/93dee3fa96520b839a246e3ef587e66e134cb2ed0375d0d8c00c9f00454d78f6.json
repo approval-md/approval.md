@@ -1,0 +1,1 @@
+{"command":"node dist/src/cli/main.js log advance --help | cat -n | tail -12","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a1336c4ddf3460332"}
