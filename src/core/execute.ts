@@ -959,6 +959,25 @@ export interface FailureReason {
 /** {@link ExecuteOptions} plus the reason a non-zero exit carries (APRV-211). */
 export interface FinishOptions extends ExecuteOptions {
   reason?: FailureReason;
+  /**
+   * The same shape for a SUCCESS that is worth explaining (APRV-234).
+   *
+   * `reason` covers the failure case and deliberately says nothing when the
+   * exit was zero, because a completion usually has nothing to explain.
+   * Sometimes it does: the daemon's advance rebuilds the day's records branch
+   * on the trunk when the trunk has moved under it, and a status surface
+   * reading this log a day later cannot tell that from an exit status. So the
+   * executor may state it, in the same closed `{code, message}` shape, recorded
+   * on `execution.completed` only and only when the caller supplies it.
+   *
+   * A REPORT and never an authorization, exactly as {@link FailureReason} is:
+   * nothing in the gate reads it back, no decision anywhere turns on it, and
+   * SPEC.md §11.1's rule that self-reported fields never reduce scrutiny is
+   * untouched. Like the reason, it is written by this runtime's own code — a
+   * raw child stderr forwarded here could carry a credential into a permanent
+   * log.
+   */
+  note?: FailureReason;
 }
 
 export type FinishResult =
@@ -1008,7 +1027,12 @@ export function finishExecution(
   const reason =
     event === "execution.failed" && options.reason !== undefined
       ? { code: options.reason.code, message: options.reason.message }
-      : {};
+      : // APRV-234. The mirror of it: a completion the executor wants on the
+        // record (the advance rebuilt the day's branch on a moved trunk).
+        // Same closed shape, same one-way street — a report, never read back.
+        event === "execution.completed" && options.note !== undefined
+        ? { code: options.note.code, message: options.note.message }
+        : {};
   const appended = append(
     logPath,
     {

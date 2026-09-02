@@ -216,6 +216,19 @@ export interface CommitOnBase {
   /** Repo-relative paths taken from the WORKING TREE, laid over the base tree. */
   paths: readonly string[];
   message: string;
+  /**
+   * Blobs forced into the index after the working-tree paths are laid over it,
+   * as `{path, sha}` (APRV-233).
+   *
+   * For a caller whose file is being written to concurrently and that has
+   * already pinned the bytes it means. `approval log advance` hashes the log
+   * under the append lock and then releases it for the slow half of the verb,
+   * so the commit must carry the object it VERIFIED rather than whatever the
+   * file grew into while `git fetch` was talking to the network. The blob has
+   * to be in the object store already; `git hash-object -w` is how the caller
+   * puts it there.
+   */
+  blobs?: readonly { path: string; sha: string }[];
 }
 
 /**
@@ -259,6 +272,15 @@ export function commitOnBase(
 
     const added = git(["add", "-A", "--", ...request.paths], root, env);
     if (!added.ok) return failed("git add", added);
+
+    for (const blob of request.blobs ?? []) {
+      const pinned = git(
+        ["update-index", "--add", "--cacheinfo", `100644,${blob.sha},${blob.path}`],
+        root,
+        env,
+      );
+      if (!pinned.ok) return failed(`git update-index ${blob.path}`, pinned);
+    }
 
     const tree = git(["write-tree"], root, env);
     if (!tree.ok) return failed("git write-tree", tree);
