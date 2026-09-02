@@ -1,0 +1,1 @@
+{"command":"git checkout --theirs -- backlog/tasks/aprv-201*.md && git add -u backlog/tasks && GIT_EDITOR=true git rebase --continue 2>&1 | tail -2; git log --oneline origin/main..rb-201; grep -m2 -E '^status:|^## Implementation Notes' backlog/tasks/aprv-201*.md","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/project-luma-event-relevance-3d2cb0"}

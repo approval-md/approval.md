@@ -1,0 +1,1 @@
+{"command":"git rebase origin/main 2>&1 | tail -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a5862b85acfb2b46b"}
