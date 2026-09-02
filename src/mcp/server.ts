@@ -74,6 +74,7 @@ import {
 
 import { commandAdapter } from "../cli/adapter.js";
 import { commandChannel } from "../cli/channel.js";
+import { commandPayload } from "../cli/payload.js";
 import { commandDoctor } from "../cli/doctor.js";
 import { commandRun } from "../cli/execute.js";
 import { main, type Streams } from "../cli/main.js";
@@ -117,7 +118,7 @@ export const EXCLUDED_VERBS: ReadonlyMap<string, string> = new Map([
  * A POSITIVE allowlist, and the direction is the whole point. Guest mode exists
  * so strangers can drive a gate over the network without executing anything on
  * the host, and the two verbs that make that dangerous are not the only ones:
- * `run` spawns argv on the server machine, `adapter email` spends vault
+ * `run` spawns argv on the server machine, an `adapter <name>` spends vault
  * credentials, `token` hands out spend material, `journal write` writes a local
  * file the operator reads. A deny list would have to name each of those and
  * every one that lands next; this list names what a guest MAY do, so a verb
@@ -489,7 +490,7 @@ function collector(): { streams: Streams; out: string[]; err: string[] } {
  * - `run` spawns a child, and `stdio: "inherit"` would hand that child the
  *   JSON-RPC pipe. It is called through the `childIo` seam `execute.ts` exposes
  *   for exactly this, which pipes the child's output back as tool content.
- * - `doctor` and `adapter email` are asynchronous, and `main()` drops their
+ * - `doctor` and every `adapter <name>` are asynchronous, and `main()` drops their
  *   promise into `process.exitCode` rather than returning it. Awaiting the
  *   command function is the only way to get the code.
  *
@@ -520,11 +521,21 @@ async function invoke(
     child = captured;
   } else if (label === "doctor") {
     code = await commandDoctor(argv, streams, cwd);
-  } else if (label === "adapter email") {
-    code = await commandAdapter(["email", ...argv], streams, cwd);
+  } else if (spec.name === "adapter") {
+    // Every `adapter <name>`, not the one that shipped first (APRV-221): the
+    // reason this arm exists is the promise `main()` drops, and that is true of
+    // the verb rather than of any adapter behind it.
+    const words = spec.subcommand === undefined ? [] : spec.subcommand.split(" ");
+    code = await commandAdapter([...words, ...argv], streams, cwd);
   } else if (spec.name === "channel") {
     const words = spec.subcommand === undefined ? [] : spec.subcommand.split(" ");
     code = await commandChannel([...words, ...argv], streams, cwd);
+  } else if (spec.name === "payload") {
+    // `payload agentmail-draft` reads a draft over HTTPS (APRV-223), so this
+    // verb family joined the promise-unwrapping arm of `main()`. `payload hash`
+    // still answers synchronously, and `await` on a number is a number.
+    const words = spec.subcommand === undefined ? [] : spec.subcommand.split(" ");
+    code = await commandPayload([...words, ...argv], streams, cwd);
   } else {
     const words = spec.subcommand === undefined ? [] : spec.subcommand.split(" ");
     code = main([spec.name, ...words, ...argv], { streams, cwd });

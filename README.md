@@ -439,6 +439,39 @@ payload your phone displayed. And the `Message-ID` is derived from the action
 key, the payload hash and the sender, so the header in a mailbox and the binding
 in the chain identify each other months later.
 
+### The same grant over AgentMail
+
+`communicate.email.external` has a second adapter. Where the email adapter opens
+an SMTP session, `approval adapter agentmail` calls the AgentMail API, and the
+mail an agent has already composed as a Draft leaves only when a grant says so.
+The walkthrough is [examples/agentmail-demo.md](examples/agentmail-demo.md).
+
+```sh
+approval setup adapter agentmail                  # inbox id + sending key, into the vault
+approval payload agentmail-draft "$INBOX" "$DRAFT" > payload.json
+approval adapter agentmail task-042:chaser --token "$TOKEN" \
+  --payload payload.json --as agent:claude-admin
+```
+
+**Two keys, and the split is the enforcement.** AgentMail API keys carry
+per-permission booleans, and `draft_create`, `draft_update` and `draft_read` are
+separate from `draft_send` and `message_send`. Give the agent a key holding the
+first three and none of the last two, and put a key holding the send permissions
+in the vault, where the adapter reads it inside the verified token window. The
+agent then composes all day and cannot send at all: an ungated send attempt is
+refused by AgentMail itself, `agentmail-unauthorized`, before this runtime is
+involved. Without that split, an AgentMail key sitting in the agent's
+environment is a full bypass of the gate, which is why `AGENTMAIL_` is withheld
+from every child `approval run` spawns.
+
+**A draft is mutable, so the grant binds its bytes.** `approval payload
+agentmail-draft` snapshots the draft's recipients, subject and text at request
+time, and that snapshot is what the payload hash binds and what your phone
+displays. Before it sends, the adapter re-fetches the draft and compares; a
+draft edited after the grant refuses `agentmail-draft-drifted`, sends nothing,
+and names which fields differ without quoting text nobody approved. Approving a
+draft id alone would be approving whatever the agent wrote into it last.
+
 ## The APPROVAL.md dictionary
 
 Every key that can appear in the policy block. The schema is closed at every

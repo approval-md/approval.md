@@ -60,6 +60,8 @@ Usage:
                       [--as <id>] [--json] -- <cmd…>
   approval adapter email <action-key> --token <t> --payload <file|->
                       [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
+  approval adapter agentmail <action-key> --token <t> --payload <file|->
+                      [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
   approval execution resolve <action-key> --outcome completed|failed
                       --note "<text>" [--as human:<id>] [--json]
   approval execution reconcile <action-key>
@@ -90,6 +92,8 @@ Usage:
   approval doctor     [--log <path>] [--policy <path>] [--dir <path>]
                       [--api-base <url>] [--json]
   approval payload hash <file|-> [--json]
+  approval payload agentmail-draft <inbox-id> <draft-id> [--api-base <url>]
+                      [--json]
   approval journal write --message "<text>" | - [--task <id>] [--session <id>]
                       [--as <id>] [--journal <dir>] [--json]
   approval journal read [--limit <n>] [--since <YYYY-MM-DD>] [--journal <dir>]
@@ -183,7 +187,10 @@ Ask — an agent declares an action and acts on the answer:
             credentials come from the vault inside the verified-token window,
             the payload is the bytes the grant bound to, and the runtime — not
             the adapter — recomputes the hash, spends the token, and writes both
-            execution events around the send
+            execution events around the send. "adapter agentmail" serves the
+            same class over the AgentMail API: a direct send, or the send of a
+            draft the agent composed, refused if the draft changed after the
+            snapshot a human approved
   wait      block until a task's requests are decided; the exit code IS the
             decision (0 granted, 1 rejected/revoked/withdrawn, 3 expired, 6 timeout)
   withdraw  take back your OWN pending request (timeout, cancelled, superseded);
@@ -262,7 +269,9 @@ Inspect — what the log says, and whether anything needs repair:
   payload   "payload hash" prints the payload_hash of a JSON document (SHA-256
             over its RFC 8785 canonical serialization), the value a declaration
             carries and a grant binds to. Most flows never need it: "request
-            --payload" hashes, verifies and stores the bytes in one step
+            --payload" hashes, verifies and stores the bytes in one step.
+            "payload agentmail-draft" snapshots one AgentMail draft with the
+            AGENT's key, so a human approves the words and not a draft id
   daemon    "daemon run" is the watch loop of SPEC.md §10.2, in the FOREGROUND:
             it records envelope.drift when a task file's state: contradicts the
             log, appends approval.expired for lapsed requests, writes the log's
@@ -1359,10 +1368,15 @@ export const PAYLOAD_HELP = `approval payload — work with the bytes an approva
 
 Usage:
   approval payload hash <file|-> [--json]
+  approval payload agentmail-draft <inbox-id> <draft-id> [--api-base <url>]
+                                   [--json]
 
 Commands:
   hash      print the payload_hash of a JSON document: SHA-256 over its RFC 8785
             canonical serialization (SPEC.md §6.2)
+  agentmail-draft
+            snapshot one AgentMail draft as the payload a grant can bind to,
+            read with the AGENT's key from AGENTMAIL_API_KEY
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
@@ -1392,6 +1406,30 @@ JSON shape (stdout, one object): {"ok":true,"hash":"<64hex>"}
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("payload-hash")}`;
+
+export const PAYLOAD_AGENTMAIL_DRAFT_HELP = `approval payload agentmail-draft — snapshot a draft as an approvable payload
+
+Usage:
+  approval payload agentmail-draft <inbox-id> <draft-id> [--api-base <url>]
+      [--timeout <ms>] [--json]
+
+Flags:
+  --api-base <url>  the API root (else AGENTMAIL_API_BASE, else the public one)
+  --timeout <ms> / --json / -h, --help   15000 / machine-readable / this text
+
+Reads one draft with the AGENT's key — AGENTMAIL_API_KEY, from the environment,
+and this is the ONE verb that reads it — and prints the canonical draft payload
+  {"inbox_id":…,"draft_id":…,"to":[…],"cc":[…],"bcc":[…],"subject":…,"text":…}
+in RFC 8785 form, the value \`approval adapter agentmail\` re-reads the draft
+against at send time. Write it to a file, declare its payload_hash, and request
+approval for THE WORDS: a draft edited after the snapshot is refused, not sent.
+
+SENDS NOTHING, SPENDS NO TOKEN, APPENDS NOTHING. Refusals are machine-readable:
+"agentmail-api-key-unset" (exit 2), "agentmail-draft-missing" (exit 1).
+
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("payload-agentmail-draft")}`;
 
 export const JOURNAL_HELP = `approval journal — the ungated channel an agent can always reach
 
@@ -1744,7 +1782,7 @@ ${why("vault-remove")}`;
 export const ADAPTER_HELP = `approval adapter — execute an approved action through a side-effect adapter
 
 Usage:
-  approval adapter email <action-key> --token <t> --payload <file|->
+  approval adapter email|agentmail <action-key> --token <t> --payload <file|->
                       [--as human:<id>|agent:<id>] [--vault <path>]
                       [--policy <path>] [--dir <path>] [--log <path>]
                       [--timeout <ms>] [--json]
@@ -1752,6 +1790,8 @@ Usage:
 Adapters:
   email   send one RFC 5322 message over SMTP, for actions declared under
           communicate.email.external (SPEC.md §6.1's canonical example)
+  agentmail  send the same class over the AgentMail API: a direct message, or
+          a draft the agent composed, re-read and refused if it drifted
 
 An adapter is the HARD BOUNDARY of SPEC.md §10.4: it holds the credentials and
 refuses to act without a valid, unexpired, single-use execution token bound to
@@ -1789,7 +1829,32 @@ ${EXIT_CODES_POINTER} (5 when no valid token was presented; 1 for every refusal)
 ${JSON_ERRORS}
 ${why("adapter-email")}`;
 
-export const ENV_HELP = `approval env — resolve .approval/env into an export block for your shell
+export const ADAPTER_AGENTMAIL_HELP = `approval adapter agentmail — send one approved message through AgentMail
+
+Usage:
+  approval adapter agentmail <action-key> --token <t> --payload <file|->
+      [--as <id>] [--vault <p>] [--policy <p>] [--dir <p>] [--log <p>]
+      [--timeout <ms>] [--json]
+
+Flags:
+  --token <t> / --payload <file|->   the token and the bytes. BOTH REQUIRED
+  --as <id> / --vault <p> / --policy <p> / --dir <p> / --log <p>   as email
+  --timeout <ms> / --json / -h, --help   15000 / machine-readable / this text
+
+TWO PAYLOAD MODES, told apart by shape and never inferred between:
+  direct  {from, to[], cc?, bcc?, subject, body, content_type?}: "from" is
+          checked against the inbox's address, since AgentMail has no From
+  draft   {inbox_id, draft_id, to[], cc?, bcc?, subject, text}: RE-READ, and
+          refused "agentmail-draft-drifted" if an approved field changed
+
+The VAULT holds agentmail.inbox_id and agentmail.api_key, and that key is the one
+WITH draft_send and message_send; the agent's own key must not have them.
+
+${EXIT_CODES_POINTER} (5 when no valid token was presented; 1 for every refusal)
+${JSON_ERRORS}
+${why("adapter-agentmail")}`;
+
+export const ENV_HELP =`approval env — resolve .approval/env into an export block for your shell
 
 Usage:
   approval env [--check] [--policy <path>] [--dir <path>] [--log <path>] [--json]
@@ -1910,6 +1975,8 @@ Usage:
 Known adapters:
   email     the SMTP settings \`approval adapter email\` reads: smtp.host,
             smtp.port, smtp.security, smtp.user, smtp.password
+  agentmail the two values \`approval adapter agentmail\` reads:
+            agentmail.inbox_id and agentmail.api_key
 
 Asks for each credential the named adapter DECLARES, validates every answer with
 the adapter's own rules, stores them in .approval/vault.enc, and offers to prove
@@ -1946,6 +2013,31 @@ send runs, then QUIT. A FAILED PROBE KEEPS THE VALUES and prints the undo:
 ${EXIT_CODES_POINTER} (1 means the server refused, or the vault would not open)
 ${JSON_ERRORS}
 ${why("setup-adapter-email")}`;
+
+export const SETUP_ADAPTER_AGENTMAIL_HELP = `approval setup adapter agentmail — the AgentMail credentials (HUMAN-ONLY)
+
+Usage:
+  approval setup adapter agentmail [--as human:<id>] [--log <path>]
+      [--dir <path>] [--policy <path>]
+
+The two names the AgentMail adapter reads inside the verified-token window:
+  agentmail.inbox_id  the inbox this runtime sends from; the inbox IS the sender
+  agentmail.api_key   the key carrying draft_send and message_send, no echo
+
+STORE THE SENDING KEY HERE AND GIVE THE AGENT A DIFFERENT ONE. An agent key
+without those permissions composes all day and cannot send; this one answers
+only to a grant.
+
+THE PROBE SENDS NOTHING: it is GET /v0/inboxes/{inbox_id}, the same read a send
+makes first, and it reports the address the inbox sends as. Where that read
+discloses the key's permissions a missing one is named; where it does not, it
+says so rather than claiming the key can send. A FAILED PROBE KEEPS THE VALUES:
+
+  approval vault remove agentmail.api_key --as human:<id>
+
+${EXIT_CODES_POINTER} (1 means AgentMail refused, or the vault would not open)
+${JSON_ERRORS}
+${why("setup-adapter-agentmail")}`;
 
 export const SETUP_CHANNEL_HELP = `approval setup channel — configure one channel's transport credential (HUMAN-ONLY)
 

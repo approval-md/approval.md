@@ -20,6 +20,16 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import {
+  agentmailAdapter,
+  DEFAULT_AGENTMAIL_CREDENTIAL_NAMES,
+} from "../src/adapters/agentmail.js";
+import { inMemoryCredentials, type JsonValue } from "../src/adapters/contract.js";
+import { commandPayload } from "../src/cli/payload.js";
+import { canonicalize } from "../src/core/jcs.js";
+import { payloadHash } from "../src/core/payload.js";
+import { assertLocal, startMockAgentmail } from "./agentmail-mock.js";
+
 /** dist/tests/cli-payload.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
@@ -306,4 +316,236 @@ test("approval run --help says --payload-hash is checked, never obeyed", () => {
   assert.match(run.stdout, /CHECKED and never trusted/u);
   assert.match(run.stdout, /payload-mismatch/u);
   assert.match(run.stdout, /argv array and cwd/u);
+});
+
+// ===========================================================================
+// payload agentmail-draft (APRV-223)
+// ===========================================================================
+
+/**
+ * The draft snapshot is exercised IN-PROCESS against the loopback AgentMail
+ * mock, and not through `spawnSync` like everything above it.
+ *
+ * Two reasons, and the first is fatal: the mock runs on this process's event
+ * loop, so a `spawnSync` child would wait for a greeting this process is
+ * blocked from sending. The second is what the case is actually for — the
+ * printed bytes have to hash to what the ADAPTER records for the same draft,
+ * and the honest way to show that is to hand the printed payload to the real
+ * `agentmailAdapter` and read its receipt.
+ */
+
+const AGENTMAIL_KEY = "am-key-cli-payload-aprv223-6f31c8-DO-NOT-USE";
+const AGENTMAIL_INBOX = "chaser@approval.invalid";
+
+const agentmailMock = await startMockAgentmail({
+  apiKey: AGENTMAIL_KEY,
+  inboxId: AGENTMAIL_INBOX,
+});
+
+after(async () => {
+  await agentmailMock.close();
+});
+
+interface Printed {
+  code: number;
+  out: string;
+  err: string;
+}
+
+/** The verb, in this process, with the environment it is handed and no other. */
+async function payloadVerb(argv: string[], env: NodeJS.ProcessEnv): Promise<Printed> {
+  let out = "";
+  let err = "";
+  const code = await commandPayload(
+    argv,
+    {
+      out: (text) => {
+        out += text;
+      },
+      err: (text) => {
+        err += text;
+      },
+    },
+    caseDir(),
+    { env },
+  );
+  agentmailTranscript.push(out, err);
+  return { code, out, err };
+}
+
+/** Everything the verb printed in this section. Swept for the key at the end. */
+const agentmailTranscript: string[] = [];
+
+after(() => {
+  assert.equal(
+    agentmailTranscript.join("\n").includes(AGENTMAIL_KEY),
+    false,
+    "the agent's AgentMail key appeared in this verb's output (SPEC.md §11.1 invariant 3)",
+  );
+});
+
+const DRAFT_ENV: NodeJS.ProcessEnv = {
+  AGENTMAIL_API_KEY: AGENTMAIL_KEY,
+  AGENTMAIL_API_BASE: assertLocal(agentmailMock.url),
+};
+
+test("the printed snapshot hashes to what the adapter records for the same draft", async () => {
+  agentmailMock.setDraft("draft_1", {
+    to: ["agency@example.co.uk"],
+    cc: ["me@example.co.uk"],
+    subject: "Deposit refund chaser <second> & final",
+    text: "Following up on the deposit refund, now 21 days past the deadline.",
+  });
+
+  const printed = await payloadVerb(
+    ["agentmail-draft", AGENTMAIL_INBOX, "draft_1"],
+    DRAFT_ENV,
+  );
+  assert.equal(printed.code, 0, printed.err);
+
+  // The bytes are the canonical serialization, so they are byte-identical to
+  // what the runtime hashes: no re-serialization stands between them.
+  const payload = JSON.parse(printed.out) as Record<string, unknown>;
+  assert.equal(printed.out, `${canonicalize(payload)}\n`);
+  assert.deepEqual(Object.keys(payload).sort(), [
+    "cc",
+    "draft_id",
+    "inbox_id",
+    "subject",
+    "text",
+    "to",
+  ]);
+
+  // THE case: the adapter, given these bytes, finds no drift against the same
+  // draft and records the hash of exactly these bytes.
+  const outcome = await agentmailAdapter({
+    apiBase: assertLocal(agentmailMock.url),
+    timeoutMs: 5_000,
+  }).act({
+    actionKey: "task-042:chaser",
+    payload: payload as JsonValue,
+    credentials: inMemoryCredentials({
+      [DEFAULT_AGENTMAIL_CREDENTIAL_NAMES.apiKey]: AGENTMAIL_KEY,
+      [DEFAULT_AGENTMAIL_CREDENTIAL_NAMES.inboxId]: AGENTMAIL_INBOX,
+    }),
+  });
+  assert.equal(outcome.ok, true, outcome.ok ? "" : `${outcome.code}: ${outcome.message}`);
+  const detail = (outcome.ok ? outcome.detail : {}) as Record<string, unknown>;
+  assert.equal(detail["mode"], "draft");
+  assert.equal(detail["payload_hash"], payloadHash(payload));
+});
+
+test("an empty cc is omitted, so a snapshot of it is not drift", async () => {
+  agentmailMock.setDraft("draft_2", {
+    to: ["agency@example.co.uk"],
+    cc: [],
+    bcc: null,
+    subject: "No copies",
+    text: "One recipient.",
+  });
+
+  const printed = await payloadVerb(
+    ["agentmail-draft", AGENTMAIL_INBOX, "draft_2"],
+    DRAFT_ENV,
+  );
+  assert.equal(printed.code, 0, printed.err);
+  const payload = JSON.parse(printed.out) as Record<string, unknown>;
+  assert.equal("cc" in payload, false, "an empty cc was carried into the payload");
+  assert.equal("bcc" in payload, false, "a null bcc was carried into the payload");
+});
+
+test("the API base can be a flag, and the request carries the agent's key", async () => {
+  agentmailMock.setDraft("draft_3", {
+    to: ["agency@example.co.uk"],
+    subject: "Flagged",
+    text: "Read over --api-base.",
+  });
+
+  const postsBefore = agentmailMock.posts().length;
+  const printed = await payloadVerb(
+    [
+      "agentmail-draft",
+      AGENTMAIL_INBOX,
+      "draft_3",
+      "--api-base",
+      assertLocal(agentmailMock.url),
+    ],
+    { AGENTMAIL_API_KEY: AGENTMAIL_KEY },
+  );
+  assert.equal(printed.code, 0, printed.err);
+
+  const read = agentmailMock.requestsFor("draft").at(-1);
+  assert.equal(read?.method, "GET");
+  assert.equal(read?.authorization, `Bearer ${AGENTMAIL_KEY}`);
+  // A snapshot spends nothing and sends nothing: the only POST this suite has
+  // seen is the adapter's own, from the case above.
+  assert.equal(agentmailMock.posts().length, postsBefore);
+});
+
+test("an unset AGENTMAIL_API_KEY refuses with a code, and reads no draft", async () => {
+  const before = agentmailMock.requests.length;
+
+  const plain = await payloadVerb(["agentmail-draft", AGENTMAIL_INBOX, "draft_1"], {});
+  assert.equal(plain.code, 2);
+  assert.equal(plain.out, "");
+  assert.match(plain.err, /AGENTMAIL_API_KEY is unset or empty/u);
+
+  const json = await payloadVerb(
+    ["agentmail-draft", AGENTMAIL_INBOX, "draft_1", "--json"],
+    { AGENTMAIL_API_KEY: "   " },
+  );
+  assert.equal(json.code, 2);
+  const error = (JSON.parse(json.err) as { error: { code: string; message: string } }).error;
+  assert.equal(error.code, "agentmail-api-key-unset");
+
+  assert.equal(
+    agentmailMock.requests.length,
+    before,
+    "a verb with no key still contacted AgentMail",
+  );
+});
+
+test("a draft that is gone is agentmail-draft-missing at exit 1", async () => {
+  const json = await payloadVerb(
+    ["agentmail-draft", AGENTMAIL_INBOX, "no_such_draft", "--json"],
+    DRAFT_ENV,
+  );
+  assert.equal(json.code, 1);
+  assert.equal(json.out, "");
+  const error = (JSON.parse(json.err) as { error: { code: string; message: string } }).error;
+  assert.equal(error.code, "agentmail-draft-missing");
+});
+
+test("a draft that cannot be sent as it stands is refused, not printed", async () => {
+  agentmailMock.setDraft("draft_empty", { to: [], subject: "Nobody", text: "" });
+
+  const json = await payloadVerb(
+    ["agentmail-draft", AGENTMAIL_INBOX, "draft_empty", "--json"],
+    DRAFT_ENV,
+  );
+  assert.equal(json.code, 1);
+  assert.equal(json.out, "");
+  const error = (JSON.parse(json.err) as { error: { code: string } }).error;
+  assert.equal(error.code, "agentmail-draft-unusable");
+});
+
+test("the arguments and the help are what the verb says they are", async () => {
+  const missing = await payloadVerb(["agentmail-draft", AGENTMAIL_INBOX], DRAFT_ENV);
+  assert.equal(missing.code, 2);
+  assert.match(missing.err, /missing <inbox-id> <draft-id>/u);
+
+  const extra = await payloadVerb(
+    ["agentmail-draft", AGENTMAIL_INBOX, "draft_1", "spare"],
+    DRAFT_ENV,
+  );
+  assert.equal(extra.code, 2);
+  assert.match(extra.err, /unexpected argument/u);
+
+  const help = await payloadVerb(["agentmail-draft", "--help"], {});
+  assert.equal(help.code, 0);
+  assert.match(help.out, /approval payload agentmail-draft —/u);
+  // The two claims a reader must not have to infer: whose key this is, and
+  // that the verb sends nothing.
+  assert.match(help.out, /AGENTMAIL_API_KEY/u);
+  assert.match(help.out, /SENDS NOTHING/u);
 });

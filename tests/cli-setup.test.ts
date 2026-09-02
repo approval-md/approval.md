@@ -91,6 +91,10 @@ import type { Streams } from "../src/cli/main.js";
 import type { TelegramFetch } from "../src/channels/telegram.js";
 import { assertLocal, callbackUpdate, messageUpdate, startMockBotApi } from "./telegram-mock.js";
 import { assertLoopback, startMockSmtp } from "./smtp-mock.js";
+import {
+  assertLocal as assertAgentmailLocal,
+  startMockAgentmail,
+} from "./agentmail-mock.js";
 
 /** dist/tests/cli-setup.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -1643,12 +1647,12 @@ test("setup adapter email refuses --json, answers --help, and names the adapters
   const missing = spawnCli(["setup", "adapter"], home.dir);
   assert.equal(missing.code, EXIT_USAGE);
   assert.match(missing.stderr, /missing <name>/u);
-  assert.match(missing.stderr, /known adapters: email/u);
+  assert.match(missing.stderr, /known adapters: agentmail, email/u);
 
   const unknown = spawnCli(["setup", "adapter", "gcal"], home.dir);
   assert.equal(unknown.code, EXIT_USAGE);
   assert.match(unknown.stderr, /unknown adapter "gcal"/u);
-  assert.match(unknown.stderr, /known adapters: email/u);
+  assert.match(unknown.stderr, /known adapters: agentmail, email/u);
   // A typo is answered with the list, not with a lecture about terminals.
   assert.doesNotMatch(unknown.stderr, /stdin is not a terminal/u);
 });
@@ -2556,4 +2560,182 @@ test("setup service refuses an identity that is not a human", async () => {
     { prompter: scriptedPrompter([]) },
   );
   assert.equal(result.code, EXIT_USAGE, result.err);
+});
+
+// ===========================================================================
+// setup adapter agentmail (APRV-223)
+// ===========================================================================
+
+/**
+ * The second adapter's setup, over the loopback AgentMail mock.
+ *
+ * The conversation is the SAME conversation — the manifest differs and nothing
+ * else does — so what these cases are about is the pairing this verb owns: the
+ * probe that sends nothing, and what it says about the permissions the stored
+ * key carries. `apiBase` points every one of them at 127.0.0.1, so no case can
+ * reach the real API.
+ */
+
+const AGENTMAIL_KEY = "am-key-setup-aprv223-9c04ea-DO-NOT-USE";
+const AGENTMAIL_INBOX = "chaser@approval.invalid";
+
+const agentmailMock = await startMockAgentmail({
+  apiKey: AGENTMAIL_KEY,
+  inboxId: AGENTMAIL_INBOX,
+  address: "carter@approval.invalid",
+});
+
+after(async () => {
+  await agentmailMock.close();
+});
+
+// The suite-wide sweep, extended to this section's secret. It cannot join
+// SECRETS itself — that list is built before this key exists — so the same
+// assertion is made here over the same transcript.
+after(() => {
+  assert.equal(
+    transcript.join("\n").includes(AGENTMAIL_KEY),
+    false,
+    "the AgentMail API key was printed by `approval setup adapter agentmail`",
+  );
+});
+
+/** The deps every agentmail case runs with: the mock, and the passphrase. */
+function agentmailDeps(prompter: ScriptedPrompter): ChannelSetupDeps {
+  return {
+    prompter,
+    keystore: fakeKeystore("keychain"),
+    env: WITH_PASSPHRASE,
+    apiBase: assertAgentmailLocal(agentmailMock.url),
+  };
+}
+
+/** The answers a full run gives: the inbox, the key, then yes to the probe. */
+function agentmailScript(): ScriptedPrompter {
+  return scriptedPrompter([AGENTMAIL_INBOX, AGENTMAIL_KEY, "y"]);
+}
+
+test("setup adapter agentmail stores both names and probes without sending", async () => {
+  agentmailMock.setInbox({
+    inbox_id: AGENTMAIL_INBOX,
+    address: "carter@approval.invalid",
+    permissions: ["draft_create", "draft_read", "draft_send", "message_send"],
+  });
+  const postsBefore = agentmailMock.posts().length;
+
+  const home = makeHome();
+  const prompter = agentmailScript();
+  const result = await run(["adapter", "agentmail", "--as", HUMAN], home, agentmailDeps(prompter));
+
+  assert.equal(result.code, EXIT_OK, result.err);
+  assert.deepEqual(prompter.remaining, []);
+  assert.deepEqual(vaultNames(home), ["agentmail.api_key", "agentmail.inbox_id"]);
+  assert.equal(vaultValue(home, "agentmail.inbox_id"), AGENTMAIL_INBOX);
+  assert.equal(vaultValue(home, "agentmail.api_key"), AGENTMAIL_KEY);
+
+  // The probe read the inbox, reported the address it sends as, and confirmed
+  // the two permissions a granted send spends.
+  assert.match(result.out, /verified: the key opened the inbox/u);
+  assert.match(result.out, /sends as carter@approval\.invalid/u);
+  assert.match(result.out, /carries draft_send and message_send/u);
+  assert.equal(agentmailMock.posts().length, postsBefore, "the probe sent something");
+  assert.equal(agentmailMock.requestsFor("inbox").at(-1)?.method, "GET");
+
+  // Adapter credentials go to the vault and nowhere else.
+  assert.equal(existsSync(home.envPath), false, "setup adapter wrote .approval/env");
+  assert.equal(result.out.includes(AGENTMAIL_KEY), false, "the key was printed");
+});
+
+test("a key without the send permissions is stored, and the missing one is named", async () => {
+  agentmailMock.setInbox({
+    inbox_id: AGENTMAIL_INBOX,
+    address: "carter@approval.invalid",
+    permissions: ["draft_create", "draft_read", "message_send"],
+  });
+
+  const home = makeHome();
+  const result = await run(
+    ["adapter", "agentmail", "--as", HUMAN],
+    home,
+    agentmailDeps(agentmailScript()),
+  );
+
+  assert.equal(result.code, EXIT_OK, result.err);
+  assert.match(result.out, /WARNING: this key does not carry draft_send/u);
+  assert.doesNotMatch(result.out, /WARNING: this key does not carry draft_send and message_send/u);
+  assert.match(result.out, /AFTER a human has granted it/u);
+  // A warning is not a refusal: the values stay, and a rotation is one re-run.
+  assert.deepEqual(vaultNames(home), ["agentmail.api_key", "agentmail.inbox_id"]);
+});
+
+test("an inbox that discloses no permissions prints the reminder instead of a verdict", async () => {
+  agentmailMock.setInbox({ inbox_id: AGENTMAIL_INBOX, address: "carter@approval.invalid" });
+
+  const home = makeHome();
+  const result = await run(
+    ["adapter", "agentmail", "--as", HUMAN],
+    home,
+    agentmailDeps(agentmailScript()),
+  );
+
+  assert.equal(result.code, EXIT_OK, result.err);
+  assert.match(result.out, /disclosed no permissions for this key here/u);
+  assert.match(result.out, /must carry draft_send and message_send/u);
+  assert.doesNotMatch(result.out, /WARNING/u);
+});
+
+test("a key AgentMail refuses keeps the values and prints the undo", async () => {
+  agentmailMock.setInbox({ inbox_id: AGENTMAIL_INBOX, address: "carter@approval.invalid" });
+
+  const home = makeHome();
+  const prompter = scriptedPrompter([AGENTMAIL_INBOX, "not-the-key", "y"]);
+  const result = await run(["adapter", "agentmail", "--as", HUMAN], home, agentmailDeps(prompter));
+
+  assert.equal(result.code, EXIT_INTEGRITY, result.out);
+  assert.match(result.out + result.err, /agentmail-unauthorized/u);
+  assert.match(result.out + result.err, /approval vault remove agentmail\.api_key/u);
+  assert.deepEqual(vaultNames(home), ["agentmail.api_key", "agentmail.inbox_id"]);
+});
+
+test("the probe can be declined, and then nothing is contacted at all", async () => {
+  const before = agentmailMock.requests.length;
+
+  const home = makeHome();
+  const prompter = scriptedPrompter([AGENTMAIL_INBOX, AGENTMAIL_KEY, "n"]);
+  const result = await run(["adapter", "agentmail", "--as", HUMAN], home, agentmailDeps(prompter));
+
+  assert.equal(result.code, EXIT_OK, result.err);
+  assert.match(result.out, /stored and unverified/u);
+  assert.equal(agentmailMock.requests.length, before, "a declined probe contacted AgentMail");
+});
+
+test("setup adapter agentmail answers --help and is human-only", async () => {
+  const home = makeHome();
+
+  const help = spawnCli(["setup", "adapter", "agentmail", "--help"], home.dir);
+  assert.equal(help.code, EXIT_OK, help.stderr);
+  assert.match(help.stdout, /approval setup adapter agentmail —/u);
+  assert.match(help.stdout, /THE PROBE SENDS NOTHING/u);
+  assert.match(help.stdout, /approval vault remove agentmail\.api_key/u);
+  assert.match(help.stdout, /GIVE THE AGENT A DIFFERENT ONE/u);
+
+  const agent = await run(
+    ["adapter", "agentmail", "--as", "agent:claude"],
+    home,
+    agentmailDeps(scriptedPrompter([])),
+  );
+  assert.equal(agent.code, EXIT_USAGE, agent.err);
+});
+
+test("the non-interactive hint is generated from the AgentMail manifest", () => {
+  const home = makeHome();
+  const result = spawnCli(["setup", "adapter", "agentmail"], home.dir);
+
+  assert.equal(result.code, EXIT_USAGE, result.stderr);
+  assert.match(result.stderr, /stdin is not a terminal/u);
+  for (const name of ["agentmail\\.inbox_id", "agentmail\\.api_key"]) {
+    assert.match(result.stderr, new RegExp(`approval vault set ${name} `, "u"));
+  }
+  // The secret's line still reads its value from the keystore, never an argv.
+  assert.match(result.stderr, /find-generic-password|secret-tool lookup/u);
 });

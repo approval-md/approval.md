@@ -860,8 +860,25 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // JSON document through the same core function the gate uses, so nobody has
     // to import an internal module (or reinvent JCS) to fill in a declaration.
     // It reads no log and writes nothing.
-    case "payload":
-      return commandPayload(rest, streams, cwd);
+    // `payload agentmail-draft` (APRV-223) reads one draft over HTTPS, so this
+    // verb joins the asynchronous family and is unwrapped the same way; the
+    // `hash` path is still synchronous and returns its code directly.
+    case "payload": {
+      const outcome = commandPayload(rest, streams, cwd);
+      if (typeof outcome === "number") return outcome;
+      void outcome.then(
+        (code) => {
+          process.exitCode = code;
+        },
+        (cause: unknown) => {
+          streams.err(
+            `approval: payload failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+          );
+          process.exitCode = EXIT_IO;
+        },
+      );
+      return EXIT_OK;
+    }
     // The ungated channel (APRV-195). `journal write` is the one verb in this
     // switch that reaches no policy, no log and no token: it appends free text
     // to a local file so that an agent complying perfectly can still say it

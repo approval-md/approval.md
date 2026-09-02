@@ -114,8 +114,11 @@ THE SEQUENCE.
      Executes behind the gate: it records the start before spawning, records
      the outcome after, and exits with the child's own exit code. A manual
      action must present the token the grant printed once. Side effects with
-     credentials go through an adapter instead (approval adapter email …),
-     which spends the same token and holds the same boundary.
+     credentials go through an adapter instead (approval adapter email …,
+     approval adapter agentmail …), which spends the same token and holds the
+     same boundary. For an AgentMail draft, take the snapshot a human will
+     read first: approval payload agentmail-draft <inbox> <draft> prints the
+     payload to declare, and a draft edited after it is refused, not sent.
 
 WHAT A REFUSAL MEANS. Exit 1 with a machine-readable error.code is the runtime
 saying no to a well-formed command. It is NOT a usage error and it is not a
