@@ -1846,6 +1846,11 @@ with `--no-gloss` to drop it. The phone is where an approver meets a request
 they did not watch being made, and the seconds are spent inside a dispatch cycle
 that is already waiting on the network, blocking nobody.
 
+The subprocess is spawned starved (APRV-207): it gets the same scrubbed
+environment a granted child gets, so no `APPROVAL_*`, `TELEGRAM_*` or `VAULT_*`
+variable and no vault passphrase reaches it, while its own auth (`ANTHROPIC_*`,
+`CLAUDE_CODE_OAUTH_TOKEN`), `PATH`, `HOME` and the locale pass through.
+
 The gloss is never load-bearing: it is attached at render time to a request the
 tagger has finished building, the payload hash does not cover it, the log never
 records it, and no code path branches on what it says. Every failure of the

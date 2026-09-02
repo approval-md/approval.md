@@ -74,6 +74,7 @@ import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
 import { instanceFindings } from "../core/instance.js";
 import { loadPolicy } from "../core/policy-load.js";
+import { passphraseEnvFor } from "../core/vault.js";
 import {
   DEFAULT_DEBOUNCE_MS,
   DEFAULT_INTERVAL_MS,
@@ -111,7 +112,7 @@ import {
   DEFAULT_DARK_WINDOW_MS,
 } from "../daemon/dark-session.js";
 import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
-import { spawnGloss } from "./gloss.js";
+import { glossRunnerFor } from "./gloss.js";
 import { UP_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
@@ -422,7 +423,12 @@ export function commandUp(
       // `channel telegram listen` — this IS that listener, and a flag that
       // meant different things on the two verbs that start it would be a trap.
       // The reasoning is at `glossWiring` there.
-      ...(boolFlag(flags, "--no-gloss") ? {} : { gloss: spawnGloss }),
+      //
+      // APRV-207: the subprocess is spawned starved, and the policy already
+      // loaded above names the passphrase variable the scrub must remove.
+      ...(boolFlag(flags, "--no-gloss")
+        ? {}
+        : { gloss: glossRunnerFor(passphraseEnvFor(load)) }),
     });
     if (prepared.ok) {
       telegram = prepared.setup;
