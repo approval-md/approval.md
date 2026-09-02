@@ -1648,10 +1648,21 @@ function checkAdvanceCadence(logPath: string, records: readonly EventRecord[]): 
   const today = new Date().toISOString();
   const state = publishedState(root, logPath, records, { remote: "origin", base: null }, today);
   const last = lastAdvance(records);
+  // The reason, when the log carries one (APRV-211). A failed advance used to
+  // reach this row as the bare word `failed`, which told an operator that
+  // something had gone wrong and nothing about what: the daemon knew, said it
+  // once on an event stream nobody was tailing, and recorded `exit_code: 1`.
+  // The verb's own code and message now travel onto `execution.failed`, so this
+  // row says them. A cycle recorded before the field existed still reads `null`
+  // and still prints the bare outcome; the shape is not assumed away.
+  const why =
+    last === null || last.code === null
+      ? ""
+      : ` (${last.code}${last.message === null ? "" : `: ${last.message}`})`;
   const attempt =
     last === null
       ? "no daemon advance cycle is in this log yet (the cadence is opt-in: `approval daemon run --advance`)"
-      : `the last daemon advance (through seq ${String(last.toSeq)}, ${last.ts}) ended ${last.outcome}`;
+      : `the last daemon advance (through seq ${String(last.toSeq)}, ${last.ts}) ended ${last.outcome}${why}`;
 
   if (state.pending === 0) {
     return {
