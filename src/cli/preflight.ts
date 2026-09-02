@@ -483,7 +483,7 @@ export function inspectPreflight(input: PreflightInput): PreflightReport {
           },
         ],
         footer: [
-          "no reset --hard is ever printed here: --keep refuses rather than discarding uncommitted work",
+          "--keep is the softest of the three: it refuses outright rather than overwriting an uncommitted change",
           "why the runtime will not choose for you: docs/cli-reference.md#up",
         ],
         next: `git log --oneline ${remote}/${branch}..HEAD`,
@@ -633,8 +633,12 @@ export function runPreflight(
     }
   }
 
-  if (facts.dist_stale && report.root !== null) {
-    const built = spawnBuild(report.root);
+  // Built in the INSTALLATION root, which is the tree whose `dist/` was dated —
+  // not in the repository root, which is where the fast-forward happened. In the
+  // primary checkout they are the same directory; anywhere they are not, dating
+  // one tree and compiling another would be the preflight lying about its work.
+  if (facts.dist_stale) {
+    const built = spawnBuild(input.root);
     if (!built.ok) {
       return {
         ok: false,
