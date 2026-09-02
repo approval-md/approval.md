@@ -3,9 +3,11 @@ id: APRV-236
 title: >-
   Bounded head-moved retry for every gate writer, not only the hook: approval
   grant lost the append race on a busy log and told the human to retype
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - 'agent:opus-lane-s'
 created_date: '2026-09-02 20:28'
+updated_date: '2026-09-02 20:43'
 labels:
   - core
   - gate
@@ -29,3 +31,15 @@ Seen 2026-09-02: approval grant daemon-log-advance-1-14008 in the primary refuse
 - [ ] #4 SPEC sentence drafted in the notes for sign-off
 - [ ] #5 npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. New shared module src/core/head-retry.ts: HEAD_MOVED_ATTEMPTS = 3 (APRV-150's count), isHeadMoved(result) (code append-failed AND append.code head-moved), attemptsOf(asked, ceiling) (clamp downward only), and withHeadRetry(attempts, cycle) which re-runs the WHOLE read-check-append cycle and, once the bound is spent on a still-head-moved refusal, returns it with the attempt count appended to its message. One implementation; no module keeps its own loop.
+2. src/core/gate.ts: delete its local HEAD_MOVED_ATTEMPTS / isHeadMoved / attemptsOf / withHeadMovedRetry and re-export a three-line options adapter over the shared helper. Wrap register, request, decide, withdraw and finishHarnessExecution the way startHarnessExecution and consumeHarnessGrant already are: the exported name keeps its signature, the body moves verbatim into an attemptX function, and the wrapper runs it under the helper. Every attempt is a fresh readGateRecords, a fresh policy read and attestation, a fresh derivation and a fresh compare-and-append against the head it just read.
+3. src/core/execute.ts: add retryOnHeadMoved to ExecuteOptions and wrap startExecution the same way (this is approval run's execution.started, on both the manual path through consumeToken and the supervised/autonomous path). core/token.ts's consumeToken keeps no loop of its own: it is re-entered whole by the retried cycle, so its single-use scan is re-run rather than skipped.
+4. src/core/gate-window.ts: drop its duplicate trio and call the shared helper, keeping its own 4-attempt ceiling as a parameter.
+5. src/core/log.ts is untouched. Update withdraw's doc rule 4 and the module header where they state the writer never retries.
+6. Tests: extend tests/concurrency.test.ts with real two-process races (parent holds the append lock across both children's reads) for grant/reject, withdraw, register, request and run; assert the write lands, that a request decided in the window refuses with the decided code rather than append-failed, and that the exhausted bound names its attempt count. Update the APRV-106 grant-vs-withdraw race, whose loser now re-derives instead of reporting head-moved.
+7. npm run build, per-file node --test, npx oxlint, full npm test; draft the spec sentence in the notes.
+<!-- SECTION:PLAN:END -->
