@@ -61,6 +61,7 @@ import {
   withdraw,
   type Decision,
 } from "../src/core/gate.js";
+import { ANCHOR_REFUSAL_CODES } from "../src/cli/log-anchor.js";
 import { readVerifiedRecords } from "../src/core/state.js";
 import { canonicalize, JcsError } from "../src/core/jcs.js";
 import { loadPolicyText } from "../src/core/policy-load.js";
@@ -313,6 +314,7 @@ const UNIONS: Readonly<Record<string, readonly string[]>> = {
   token_refusal_codes: TOKEN_REFUSAL_CODES,
   execute_refusal_codes: EXECUTE_REFUSAL_CODES,
   append_error_codes: APPEND_ERROR_CODES,
+  anchor_refusal_codes: ANCHOR_REFUSAL_CODES,
 };
 
 function runUnion(input: Record<string, unknown>): Expectation {
