@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-t'
 created_date: '2026-09-02 16:52'
-updated_date: '2026-09-02 19:43'
+updated_date: '2026-09-02 20:06'
 labels:
   - daemon
   - dogfood
@@ -24,11 +24,11 @@ Seen 2026-09-02 after PR #226 (log advance to seq 11361) merged: `approval log s
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Before the fast-forward, sync lists untracked files under `.approval/payloads/` that the incoming tree also carries; for each, it hashes the local bytes and refuses to proceed unless the hash equals the filename and equals the incoming blob
-- [ ] #2 When every such file is identical, sync completes the fast-forward without a hand step and reports how many payload files it reconciled; the local bytes are never deleted before the incoming blob has been confirmed identical
-- [ ] #3 A mismatching payload (name, local bytes, incoming blob disagree) refuses with a distinct machine-readable code that names the file, appends nothing, and leaves the working tree and the working log as they were
-- [ ] #4 Tests cover the identical case, the mismatch case, and a payload present locally but absent from the incoming tree (left alone)
-- [ ] #5 docs/dogfood-cutover.md or the log sync reference names the behaviour
+- [x] #1 Before the fast-forward, sync lists untracked files under `.approval/payloads/` that the incoming tree also carries; for each, it hashes the local bytes and refuses to proceed unless the hash equals the filename and equals the incoming blob
+- [x] #2 When every such file is identical, sync completes the fast-forward without a hand step and reports how many payload files it reconciled; the local bytes are never deleted before the incoming blob has been confirmed identical
+- [x] #3 A mismatching payload (name, local bytes, incoming blob disagree) refuses with a distinct machine-readable code that names the file, appends nothing, and leaves the working tree and the working log as they were
+- [x] #4 Tests cover the identical case, the mismatch case, and a payload present locally but absent from the incoming tree (left alone)
+- [x] #5 docs/dogfood-cutover.md or the log sync reference names the behaviour
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -63,4 +63,13 @@ Report/CLI: LogSyncReport.payloadsReconciled; --json gains payloads:{reconciled:
 Invariant paths touched: none of SPEC §11's global invariants change. Worth naming anyway, since the step deletes files: it appends nothing (no appendEvent on any path here, and the existing 'neither verb appends an event' test still passes), it never touches events.jsonl, and the delete-only-after-proof ordering is the fail-closed reading — an unprovable payload refuses rather than being cleared. No SPEC amendment needed: §9's payload store contract is unchanged, and §10.1's 'sync appends no event' still holds.
 
 No new dependencies.
+
+Verification evidence (node --test against the built CLI, real git topologies with a bare remote and a peer clone; no gate verb ever run against this worktree's own .approval):
+
+- tests/cli-log-verbs.test.ts, 38/38 pass. New cases: 'an untracked payload the incoming commit also carries is reconciled, not refused' (AC1/AC2 — payloadsReconciled 1, pulled 1, bytes identical after, file now tracked, log bytes and head seq unchanged); 'a payload whose bytes disagree with the incoming commit refuses and touches nothing' (AC3 — code log-sync-payload-mismatch, step 'payloads', message names the file, HEAD unmoved, local bytes untouched, log unchanged, no snapshot left); 'an untracked payload the incoming commit does not carry is left alone' (AC4 — payloadsReconciled 0, bytes unchanged, still ?? in git status); 'a file in the payload store that is not named by a hash is refused, not cleared'; '--json reports the payload count'. Payloads are written through storePayload (the real store write), so the filenames are real content addresses over real canonical bytes.
+- The injected-failure table now covers the new step: 'a failure before payloads restores the working log exactly' passes alongside the other seven, and the guard-on-the-guard assertion lists 'payloads' in order.
+- cli-long-help + cli-help: 70/70 with cli-log-verbs. The first pass of the help text broke cli-long-help's 25-line cap (LOG_SYNC_HELP hit 27); trimmed to one sentence plus the new refusal code, reasoning left in docs/cli-reference.md as that test directs.
+- npm run lint (oxlint src tests): clean.
+
+Pre-existing, unrelated failure: tests/ci-guard.test.ts 'every production dependency's engines.node admits the Node floor' fails with ENOENT on node_modules/@modelcontextprotocol/sdk/package.json. This worktree has no node_modules of its own (imports resolve by walking up to the primary checkout's), and the test reads a path under its own REPO_ROOT. Confirmed pre-existing by checking out the base commit's source and re-running: 27/28 there too. Nothing to do with this change.
 <!-- SECTION:NOTES:END -->
