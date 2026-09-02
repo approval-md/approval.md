@@ -3,11 +3,11 @@ id: APRV-216
 title: >-
   Telegram queue: summary first, one request at a time, /queue and /skip instead
   of the restart burst
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-z'
 created_date: '2026-09-02 15:57'
-updated_date: '2026-09-02 19:12'
+updated_date: '2026-09-02 19:45'
 labels:
   - telegram
   - channels
@@ -93,3 +93,9 @@ For the README/CLAUDE policy summary, one row: `channels.telegram.delivery: pace
 - Thirteen new cases in tests/channels-telegram.test.ts, all through the real gate, the real `recordChannelDecision` and the mock Bot API, each ending in `assertClean` (chain verify). Every command case counts the log's records before and after to prove nothing was appended.
 - `setupFor` in the suite defaults to `burst`, so the pre-existing dispatch cases keep proving the burst behaviour they were written for (AC 5); the paced cases name their mode. Called out because the PRODUCT default is paced and the helper's is not.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Telegram delivery is paced by default: one summary line plus the oldest pending request, next after a decision, /skip or /next, /queue lists the pending set from the log; order and current item are in-memory per process, pre-restart taps still decide by action key, channels.telegram.delivery: burst restores the old behaviour (schema-validated enum). Verified by 13 new mock-bot cases (Telegram suite 104 to 117), full suite 2999/0/1 skip, lint clean; merged in PR #234.
+<!-- SECTION:FINAL_SUMMARY:END -->

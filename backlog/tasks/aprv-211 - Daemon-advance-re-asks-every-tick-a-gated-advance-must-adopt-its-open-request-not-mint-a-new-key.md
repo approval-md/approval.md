@@ -3,11 +3,11 @@ id: APRV-211
 title: >-
   Daemon advance re-asks every tick: a gated advance must adopt its open
   request, not mint a new key
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-w'
 created_date: '2026-09-02 09:05'
-updated_date: '2026-09-02 19:15'
+updated_date: '2026-09-02 19:43'
 labels:
   - daemon
   - bug
@@ -112,3 +112,9 @@ UNRESOLVED / FOR THE ORCHESTRATOR
 - The second SPEC sentence admits something worth Carter eye: the payload declares the owed span at ask time and the advance publishes whatever the log holds when it runs (this was true before APRV-211 too — the old key just moved with the head). If that binding must be exact, log.advance needs a --through-seq the payload can bind to.
 - A daemon stopped while a child advance is in flight warns and leaves the execution open until the child settles; if the process does not outlive it, `approval status` shows a dangling execution. No auto-repair, deliberately.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Daemon advance keys on the owed span and adopts its open request (one question per span; grant authorises one advance, rejection honoured), the request self-delivers so no raw token is printed for a daemon-minted action (new fail-closed refusal token-delivery-unavailable, in the frozen union), and the git side effect runs in a scrubbed child off the channel loop so callbacks answer within 1 s. Failure reasons land on execution.failed and the doctor row. Verified by tests/daemon-advance-adopt.test.ts (7) and the full suite 2993/0/1 skip, lint clean; merged in PR #235.
+<!-- SECTION:FINAL_SUMMARY:END -->
