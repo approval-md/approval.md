@@ -83,6 +83,7 @@ import {
   repoPath,
   showBlob,
 } from "./git-scope.js";
+import { anchorRevs, defaultRecordsBranch } from "./log-anchor.js";
 import { compareChains, type LogDrift } from "../core/log-reconcile.js";
 import { silentProgress, type ProgressReporter } from "./progress.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
@@ -191,10 +192,10 @@ function detail(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-/** `YYYY-MM-DD`, the shape the default records branch name carries. */
-export function defaultRecordsBranch(today: string): string {
-  return `records-log-${today.slice(0, 10)}`;
-}
+// Re-exported rather than defined here (APRV-219). The anchor check and this
+// verb must name the day's records branch identically, and `cli/log-anchor.ts`
+// is the module that owns which revs a committed copy of the log may live at.
+export { defaultRecordsBranch };
 
 /**
  * Everything currently staged, as repo-relative paths.
@@ -522,6 +523,19 @@ export interface PublishedState {
   pending: number;
   /** The same count with the daemon's own advance cycles removed. */
   substantive: number;
+  /**
+   * The rev the published head was read from, or `null` when no rev carried a
+   * copy of this chain (APRV-210).
+   *
+   * A row that says "N records are not yet on a records branch" is unreadable
+   * without it: a rev that resolved to nothing and a rev that carried nothing
+   * are the same number and completely different facts, and the doctor's
+   * cadence row reported the first as the second on a log whose first 8,379
+   * records had been merged to the trunk an hour earlier.
+   */
+  publishedRev: string | null;
+  /** Every rev that was consulted, in the order they were tried. */
+  revs: readonly string[];
 }
 
 /**
@@ -548,16 +562,6 @@ function publishedHeadAt(
   if (!compared.ok) return null;
   if (compared.drift.relation === "diverged" || compared.drift.relation === "behind") return null;
   return compared.drift.committedHead?.seq ?? 0;
-}
-
-/** Every local anchor a previous advance left behind. Order is irrelevant. */
-function advanceAnchors(root: string): string[] {
-  const listed = git(["for-each-ref", "--format=%(refname)", "refs/approval/advance/"], root);
-  if (!listed.ok) return [];
-  return listed.stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
 }
 
 /**
@@ -590,17 +594,15 @@ export function publishedState(
     workingText = "";
   }
 
-  const base = where.base ?? "main";
-  const revs = [
-    ...advanceAnchors(root),
-    `refs/remotes/${where.remote}/${base}`,
-    `refs/remotes/${where.remote}/${defaultRecordsBranch(today)}`,
-    "HEAD",
-  ];
+  const revs = anchorRevs(root, { remote: where.remote, base: where.base, today });
   let publishedSeq = 0;
+  let publishedRev: string | null = null;
   for (const rev of revs) {
     const head = publishedHeadAt(root, logPath, workingText, rev);
-    if (head !== null && head > publishedSeq) publishedSeq = head;
+    if (head !== null && head > publishedSeq) {
+      publishedSeq = head;
+      publishedRev = rev;
+    }
   }
 
   const unpublished = records.filter((record) => record.seq > publishedSeq);
@@ -609,6 +611,8 @@ export function publishedState(
     workingSeq,
     pending: unpublished.length,
     substantive: unpublished.filter((record) => !isAdvanceBookkeeping(record)).length,
+    publishedRev,
+    revs,
   };
 }
 

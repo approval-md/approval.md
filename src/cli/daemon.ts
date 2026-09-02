@@ -244,9 +244,15 @@ export function describeDaemonEvent(event: DaemonEvent): { text: string; stderr:
         // project exists to prevent.
         text: `daemon: watching ${event.tasks} and ${event.log}; queue ${event.queue}; tick every ${String(
           event.interval_ms,
-        )}ms; read proof ${event.read_proof}${
-          event.watching ? "" : " (fs watch unavailable — polling only)"
-        }`,
+        )}ms; read proof ${event.read_proof}; anchor ${
+          // APRV-219: named for the reason the prefix proof is. Which external
+          // witness this run holds its log to is not something an operator
+          // should have to ask a running process about, and "none" is a fact
+          // worth printing rather than a blank.
+          event.anchor.rev === null
+            ? `none (${event.anchor.reason ?? "no committed copy of the log"})`
+            : `${event.anchor.rev} seq ${String(event.anchor.seq ?? 0)}`
+        }${event.watching ? "" : " (fs watch unavailable — polling only)"}`,
         stderr: false,
       };
     case "drift":
@@ -409,6 +415,11 @@ export function exitForDaemonOutcome(outcome: DaemonOutcome): number {
     case "log-torn-tail":
       return EXIT_TORN_TAIL;
     case "log-corrupt":
+      return EXIT_INTEGRITY;
+    // APRV-219. Drawn where `log-corrupt` is drawn, and for the same reason: a
+    // log that contradicts its own committed copy is an integrity failure, and
+    // a supervisor that restarts on 4 and stops on 1 must stop on this.
+    case "anchor-diverged":
       return EXIT_INTEGRITY;
   }
 }

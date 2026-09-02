@@ -30,7 +30,9 @@
 import { pathToFileURL } from "node:url";
 
 import { reindex } from "../core/reindex.js";
-import { verify, type ChainAnomaly } from "../core/verify.js";
+import { verify, verifyWithRecords, type ChainAnomaly } from "../core/verify.js";
+import type { EventRecord } from "../core/log.js";
+import { checkLogAnchor, type AnchorCheck } from "./log-anchor.js";
 import { boolFlag, countFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
   EXIT_INTEGRITY,
@@ -301,16 +303,66 @@ function reportAnomalies(streams: Streams, anomalies: ChainAnomaly[]): void {
   }
 }
 
+/**
+ * The anchor half of `approval log verify` (APRV-219).
+ *
+ * Runs only behind `--anchor`, and only on a chain that already verified: the
+ * committed copy answers a different question from the one the chain walk
+ * answers ("does anybody else hold these records?" rather than "is this file
+ * self-consistent?"), and asking it about a log that does not verify would be
+ * deciding something from an unverified log.
+ *
+ * A divergence is an integrity refusal and exits where `corrupt` exits. A skip
+ * is a skip: a repository with no committed copy has said nothing about this
+ * log, and this verb never reports silence as a pass.
+ */
+function anchorField(outcome: AnchorCheck): Record<string, unknown> {
+  if (outcome.status === "skip") return { anchor: { status: "skip", reason: outcome.reason } };
+  return {
+    anchor: {
+      status: outcome.status,
+      rev: outcome.anchor.rev,
+      seq: outcome.anchor.head.seq,
+      hash: outcome.anchor.head.hash,
+      bytes: outcome.anchor.byteLength,
+      ...(outcome.status === "diverged" ? { message: outcome.message } : {}),
+    },
+  };
+}
+
+/** The anchor line a human reads, after the chain verdict it qualifies. */
+function reportAnchor(outcome: AnchorCheck, streams: Streams): void {
+  if (outcome.status === "skip") {
+    streams.err(`approval: anchor skipped — ${outcome.reason}\n`);
+    return;
+  }
+  if (outcome.status === "diverged") return;
+  streams.out(`anchor ${outcome.anchor.rev}: ${outcome.detail}\n`);
+}
+
 function commandVerify(argv: string[], streams: Streams, cwd: string): number {
   const front = prelude(
     argv,
-    { "--log": "string", "--json": "boolean" },
+    {
+      "--log": "string",
+      "--json": "boolean",
+      // APRV-219. `--anchor` is the default resolution (the newest committed
+      // copy this checkout can see); `--anchor-rev` names one and implies it.
+      // Two flags rather than one optional-value flag, because this CLI's
+      // parser has no optional-value form and inventing one to save a word
+      // would make every other flag's shape a special case.
+      "--anchor": "boolean",
+      "--anchor-rev": "string",
+    },
     VERIFY_HELP,
     streams,
     cwd,
   );
   if (front.kind === "handled") return front.code;
-  const { logPath, json } = front;
+  const { flags, logPath, json } = front;
+
+  const anchorRev = stringFlag(flags, "--anchor-rev");
+  const wantsAnchor = boolFlag(flags, "--anchor") || anchorRev !== null;
 
   const check = preflightLog(logPath);
   if (!check.ok) return ioError(streams, json, check.message);
@@ -319,21 +371,53 @@ function commandVerify(argv: string[], streams: Streams, cwd: string): number {
   // and it reaches only which anomalies are reported. The verdict below is a
   // function of the log bytes and the schemas, so a missing or unloadable
   // policy leaves this command's answer exactly as it was.
-  const result = verify(logPath, { policy: { dir: cwd } });
+  const walked = wantsAnchor
+    ? verifyWithRecords(logPath, { policy: { dir: cwd } })
+    : { result: verify(logPath, { policy: { dir: cwd } }), records: [] as EventRecord[] };
+  const result = walked.result;
 
   if (result.status === "clean") {
+    const anchor = wantsAnchor
+      ? checkLogAnchor({
+          logPath,
+          records: walked.records,
+          ...(anchorRev === null ? {} : { rev: anchorRev }),
+        })
+      : null;
+
+    // A divergence replaces the clean verdict rather than qualifying it. The
+    // chain walk's answer is still true and it is no longer the answer to the
+    // question `--anchor` asked, so printing `clean` beside it would be this
+    // verb reporting a pass it does not mean.
+    if (anchor !== null && anchor.status === "diverged") {
+      if (json) {
+        emitJson(streams, {
+          status: "anchor-diverged",
+          records: result.records,
+          head: result.head,
+          ...anchorField(anchor),
+          message: anchor.message,
+        });
+      } else {
+        streams.err(`${renderRefusal(style({ json }), anchor.code, anchor.message)}\n`);
+      }
+      return EXIT_INTEGRITY;
+    }
+
     if (json) {
       emitJson(streams, {
         status: result.status,
         records: result.records,
         head: result.head,
         ...anomalyField(result.anomalies),
+        ...(anchor === null ? {} : anchorField(anchor)),
       });
     } else {
       const head =
         result.head === null ? "head none" : `head seq ${result.head.seq} ${result.head.hash}`;
       streams.out(`clean: ${result.records} record(s), ${head}\n`);
       reportAnomalies(streams, result.anomalies);
+      if (anchor !== null) reportAnchor(anchor, streams);
     }
     return EXIT_OK;
   }

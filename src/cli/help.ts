@@ -449,21 +449,34 @@ ${why("log-advance")}`;
 export const VERIFY_HELP = `approval log verify — verify the log's hash chain
 
 Usage:
-  approval log verify [--log <path>] [--json]
+  approval log verify [--log <path>] [--anchor] [--anchor-rev <rev>] [--json]
 
 Flags:
-  --log <path>   log file to verify (default .approval/log/events.jsonl)
-  --json         machine-readable output
-  -h, --help     this text
+  --log <path>        log file to verify (default .approval/log/events.jsonl)
+  --anchor            also compare the prefix against the committed copy
+  --anchor-rev <rev>  compare against THIS rev's copy (implies --anchor)
+  --json              machine-readable output
+  -h, --help          this text
 
 Walks every complete line: re-derives each record's digest, follows the prev
 chain and the seq succession, and reports the first place the log stops being
 self-consistent. An absent file is an empty log and verifies clean. Nothing is
 written, and a torn tail is never truncated.
 
+--anchor adds the one check the file cannot make about itself. The chain is
+unkeyed, so a process with write access can truncate the log and recompute a
+chain that walks clean from genesis; the copy already committed to a records
+branch or the trunk is the witness that party cannot rewrite. The working log's
+first N bytes must hash to the anchored copy's digest and its record at the
+anchored head seq must carry that hash, or the verb refuses anchor-diverged.
+Git is READ (git show), never fetched. No committed copy is a skip with a
+reason on stderr, never a pass.
+
 JSON shape (stdout, one object):
-  {"status":"clean"|"torn-tail"|"corrupt","records","head",
-   "intactThroughSeq"?,"firstBadSeq"?,"reason"?,"message"?,"anomalies"?}
+  {"status":"clean"|"torn-tail"|"corrupt"|"anchor-diverged","records","head",
+   "intactThroughSeq"?,"firstBadSeq"?,"reason"?,"message"?,"anomalies"?,
+   "anchor"?:{"status":"pass"|"behind"|"skip"|"diverged","rev"?,"seq"?,
+              "hash"?,"bytes"?,"reason"?}}
   A CLEAN LOG WITH ANOMALIES IS CLEAN and still exits 0.
 
 ${EXIT_CODES_POINTER} (clean 0, corrupt 1, torn-tail 3; an unreadable log is 4)

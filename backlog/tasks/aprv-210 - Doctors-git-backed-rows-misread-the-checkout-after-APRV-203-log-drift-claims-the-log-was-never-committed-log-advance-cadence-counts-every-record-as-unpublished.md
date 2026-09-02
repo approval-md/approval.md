@@ -4,9 +4,11 @@ title: >-
   Doctor's git-backed rows misread the checkout after APRV-203: log-drift claims
   the log was never committed, log-advance-cadence counts every record as
   unpublished
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - 'agent:opus-lane-v'
 created_date: '2026-09-02 08:44'
+updated_date: '2026-09-02 18:32'
 labels:
   - doctor
   - bug
@@ -28,3 +30,12 @@ Observed 2026-09-02 on the primary checkout right after syncing to main and rebu
 - [ ] #3 Both rows resolve paths repo-relative from the checkout root via git-scope helpers; no row builds a HEAD:<absolute path> spec
 - [ ] #4 npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. log-drift: fixed by construction in APRV-219 — the row becomes the anchor check, whose path resolution is repo-relative from the checkout root through git-scope helpers with realpath on both sides, so a checkout reached through a symlinked spelling (/tmp vs /private/tmp) can no longer produce a bogus relative path and a false 'never been committed'.
+2. log-advance-cadence: publishedState already reads refs/remotes/<remote>/<base> and refs/approval/advance/*, but the row never says which ref it read and a rev that resolves to nothing is indistinguishable from a rev that carried nothing. Return the winning rev from publishedState (publishedRev) and print it in the row; keep counting the max clean head across every candidate rev.
+3. Tests: a scratch repo whose HEAD carries the log (log-drift passes, reports the committed seq), and a scratch repo with a bare remote whose trunk carries seq 1..N with a working log at N+k (cadence reports k owed and names the ref).
+4. tests/cli-doctor.test.ts row counts unchanged: both rows keep their name and position.
+<!-- SECTION:PLAN:END -->

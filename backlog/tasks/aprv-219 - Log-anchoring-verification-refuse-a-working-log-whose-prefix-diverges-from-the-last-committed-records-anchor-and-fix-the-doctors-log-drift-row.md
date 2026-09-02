@@ -3,9 +3,11 @@ id: APRV-219
 title: >-
   Log anchoring verification: refuse a working log whose prefix diverges from
   the last committed records anchor, and fix the doctor's log-drift row
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - 'agent:opus-lane-v'
 created_date: '2026-09-02 16:26'
+updated_date: '2026-09-02 18:32'
 labels:
   - core
   - log
@@ -37,3 +39,16 @@ An unkeyed hash chain means a process with write access to .approval/log/events.
 - [ ] #5 The refusal code joins the pinned code union (SPEC §11.1 inv. 6); SPEC.md §9 or §11 gains the anchoring sentence via a gated edit
 - [ ] #6 docs/cli-reference.md and docs/git-evidence.md updated; npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. New module src/cli/log-anchor.ts: ANCHOR_REFUSAL_CODES (closed union, anchor-diverged), anchorRevs() reused from log-advance's publishedState rev resolution, resolveAnchor() (git show of the blob at each rev, newest = highest clean head seq), checkLogAnchor({logPath, records, rev?}) returning pass | skip(reason) | refused(anchor-diverged). Byte-prefix digest + the working record at the anchor head seq carrying the anchor hash. Read-only git, never a fetch, never a write.
+2. Export the rev list from src/cli/log-advance.ts (anchorRevs) and have publishedState use it, so one resolution serves both.
+3. approval log verify --anchor / --anchor-rev <rev> in src/cli/main.ts: runs after the chain verdict on a clean log, prints the anchor in use, refuses anchor-diverged at EXIT_INTEGRITY, --json carries the anchor block.
+4. Daemon: anchor check at startup and on every tick whose reads took a full re-proof; DaemonOutcome gains kind anchor-diverged (EXIT_INTEGRITY, like log-corrupt); started/tick lines name the anchor rev and seq.
+5. Doctor: checkLogDrift becomes the anchor check's result, takes verified.records, resolves the repo-relative path realpath-safe via git-scope; no HEAD:<absolute> spec ever built.
+6. Conformance: anchor_refusal_codes joins tests/conformance-harness.ts UNIONS and scripts/regen-conformance-vectors.mjs; regenerate vectors (refusal-unions 7.0.0) and the manifest the documented way.
+7. Tests: tests/log-anchor.test.ts (real git fixtures with a bare remote, records through appendAttestation), daemon and doctor coverage; docs/cli-reference.md + docs/git-evidence.md.
+8. Draft the SPEC sentence and the union row for the orchestrator in the notes; do not edit SPEC.md.
+<!-- SECTION:PLAN:END -->

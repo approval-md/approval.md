@@ -103,6 +103,8 @@ import {
 } from "../core/state.js";
 import { validate } from "../core/validate.js";
 import { publishedState } from "../cli/log-advance.js";
+import { repoRoot } from "../cli/git-scope.js";
+import { checkLogAnchor, resolveAnchor, type AnchorCheck } from "../cli/log-anchor.js";
 import {
   attemptAdvance,
   type AdvanceAttempt,
@@ -169,6 +171,14 @@ export type DaemonEvent =
        * to see without asking the process anything.
        */
       read_proof: "full" | "incremental";
+      /**
+       * The committed copy of the log this run is anchored against (APRV-219).
+       * Additive, like every other growth of this union, and on the first line
+       * for the reason `read_proof` is: which external witness a run holds
+       * itself to is not something an operator should have to ask the process
+       * about. `rev: null` is an honest "none was found", never a silent pass.
+       */
+      anchor: { rev: string | null; seq: number | null; reason: string | null };
     }
   | {
       event: "drift";
@@ -331,6 +341,14 @@ export type DaemonEvent =
        * report: that is the path those reads took.
        */
       reproof: "full" | "incremental";
+      /**
+       * The anchor comparison this tick made, or `null` when it made none
+       * (APRV-219). Additive. The check rides the full re-proof cadence: a tick
+       * whose reads were all served from a carried hash state has re-proved
+       * nothing about the file's prefix and has nothing new to compare against
+       * a committed copy that cannot have changed since the last look.
+       */
+      anchor?: { status: "pass" | "behind" | "skip"; rev: string | null; seq: number | null };
       /** Per-phase duration in milliseconds, in the order the tick runs them. */
       phases: {
         drift: number;
@@ -403,6 +421,14 @@ export const DAEMON_WARNING_CODES = [
    * detector reports and the gate decides.
    */
   "dark-session-undetermined",
+  /**
+   * The working log is a strict PREFIX of its committed copy (APRV-219): the
+   * anchor carries records this file does not. Not a divergence — the two are
+   * one chain and this checkout is behind it — and not silence either, because
+   * an append onto the shorter chain forks it. `approval log sync` is the
+   * repair, and the next tick asks again.
+   */
+  "anchor-behind",
 ] as const;
 
 export type DaemonWarningCode = (typeof DAEMON_WARNING_CODES)[number];
@@ -491,22 +517,41 @@ export interface DaemonOptions {
    * cannot drift from the mode its `started` line printed.
    */
   readProof?: { mode: "full" | "incremental"; everyReads: number; afterMs: number };
+  /**
+   * The log-anchoring check (APRV-219). On unless explicitly disabled.
+   *
+   * On by default, unlike `gitEvidence` and `advance`, for the reason
+   * `snapshot` is: it READS git's object store and changes nothing anywhere,
+   * on this machine or any other. `rev` pins the anchor to one rev instead of
+   * the default resolution, which is what a test and an operator debugging a
+   * divergence both want.
+   */
+  anchor?: { enabled?: boolean; rev?: string; remote?: string; base?: string | null };
   sink: DaemonSink;
 }
 
 /**
  * How the loop ended.
  *
- * `stopped` is a clean shutdown (a signal, or `once` completing). The three
+ * `stopped` is a clean shutdown (a signal, or `once` completing). The four
  * failures mirror the CLI's frozen exit table exactly, so the verb maps them
  * without inventing a code: an unreadable log is I/O, a torn tail is a crashed
  * write, and a chain that does not verify is an integrity failure.
+ *
+ * `anchor-diverged` (APRV-219) is the fourth, and it is an integrity failure
+ * for the same reason `log-corrupt` is: the log this loop would append to is
+ * not the log somebody else already holds a committed copy of, and appending
+ * onto it would extend the wrong chain. It is a DISTINCT kind rather than a
+ * flavour of `log-corrupt` because the two say different things to whoever
+ * reads the stopped line — one means the file contradicts itself, the other
+ * means the file contradicts the record of it.
  */
 export type DaemonOutcome =
   | { kind: "stopped"; reason: string }
   | { kind: "log-unreadable"; message: string }
   | { kind: "log-torn-tail"; message: string }
-  | { kind: "log-corrupt"; message: string };
+  | { kind: "log-corrupt"; message: string }
+  | { kind: "anchor-diverged"; message: string };
 
 // ---------------------------------------------------------------------------
 // The loop
@@ -575,6 +620,12 @@ export class Daemon {
   private reads = 0;
   /** Did any of this tick's own reads hash the whole prefix (APRV-217)? */
   private fullReproofThisTick = false;
+  /** This tick's anchor comparison (APRV-219), or `null` when it made none. */
+  private anchorThisTick: {
+    status: "pass" | "behind" | "skip";
+    rev: string | null;
+    seq: number | null;
+  } | null = null;
   /** Basenames {@link writeBack} placed this tick, so the watcher can ignore them. */
   private selfWrites = new Set<string>();
   /** The previous tick's, kept one generation: watch events arrive after the write. */
@@ -608,6 +659,11 @@ export class Daemon {
         debounce_ms: this.options.debounceMs,
         watching: this.watching,
         read_proof: this.options.readProof?.mode ?? "full",
+        // APRV-219. RESOLVED here and COMPARED by the first tick, which runs a
+        // line below and always re-proves in full: the started line's job is to
+        // name the witness this run holds itself to, and resolving it costs two
+        // git reads and no log read at all.
+        anchor: this.resolveAnchorForReport(),
       });
 
       const outcome = this.tick();
@@ -820,6 +876,7 @@ export class Daemon {
       this.ticks += 1;
       this.reads = 0;
       this.fullReproofThisTick = false;
+      this.anchorThisTick = null;
       // One generation of the daemon's own task-file writes is kept, because a
       // watch event arrives after the write that caused it and often after the
       // tick that made it has ended.
@@ -834,6 +891,30 @@ export class Daemon {
 
       const opening = this.read();
       if (!opening.ok) return this.fatal(opening);
+
+      // The anchor check (APRV-219), on the full re-proof cadence and on the
+      // first tick, which is always a cold walk. Placed immediately after the
+      // opening read and before any append this tick could make: a log that
+      // contradicts its own committed copy is not fit to be appended to, and
+      // the sweeps below all append.
+      if (this.fullReproofThisTick) {
+        const anchor = this.compareToAnchor(opening.records);
+        if (anchor !== null) {
+          if (anchor.status === "diverged") {
+            return { kind: "anchor-diverged", message: anchor.message };
+          }
+          if (anchor.status === "behind") {
+            this.warn(
+              "anchor-behind",
+              `${anchor.detail}. Nothing was appended onto the shorter chain by this check; run \`approval log sync\` before this daemon writes anything`,
+            );
+          }
+          this.anchorThisTick =
+            anchor.status === "skip"
+              ? { status: "skip", rev: null, seq: null }
+              : { status: anchor.status, rev: anchor.anchor.rev, seq: anchor.anchor.head.seq };
+        }
+      }
 
       const drift = timed("drift", () => this.scanForDrift());
       if (drift.stop !== null) return drift.stop;
@@ -920,6 +1001,7 @@ export class Daemon {
         ms: Math.round((performance.now() - startedAt) * 10) / 10,
         reads: this.reads,
         reproof: this.fullReproofThisTick ? "full" : "incremental",
+        ...(this.anchorThisTick === null ? {} : { anchor: this.anchorThisTick }),
         phases: {
           drift: Math.round(phases.drift * 10) / 10,
           ttl: Math.round(phases.ttl * 10) / 10,
@@ -1129,6 +1211,73 @@ export class Daemon {
   /** The last attempt this process made, for a caller that wants to assert on it. */
   lastAdvanceAttempt(): AdvanceAttempt | null {
     return this.lastAdvance;
+  }
+
+  // -------------------------------------------------------------------------
+  // Log anchoring (APRV-219)
+  // -------------------------------------------------------------------------
+
+  /** Is the anchor check on for this run? On unless the operator turned it off. */
+  private anchorEnabled(): boolean {
+    return this.options.anchor?.enabled !== false;
+  }
+
+  /** The anchor options this loop passes down, assembled once and identically. */
+  private anchorWhere(): { rev?: string; remote?: string; base?: string | null; today?: string } {
+    const anchor = this.options.anchor;
+    return {
+      ...(anchor?.rev === undefined ? {} : { rev: anchor.rev }),
+      ...(anchor?.remote === undefined ? {} : { remote: anchor.remote }),
+      ...(anchor?.base === undefined ? {} : { base: anchor.base }),
+      ...(this.options.today === undefined ? {} : { today: this.options.today }),
+    };
+  }
+
+  /**
+   * Which committed copy this run is anchored against, for the `started` line.
+   *
+   * Resolution only: it asks git which revs carry a copy of the log and which
+   * of them reaches furthest, and compares nothing. The first tick, a line
+   * below the `started` emit, makes the comparison — and always in full, since
+   * a cold walk is a full re-proof by construction.
+   */
+  private resolveAnchorForReport(): { rev: string | null; seq: number | null; reason: string | null } {
+    if (!this.anchorEnabled()) {
+      return { rev: null, seq: null, reason: "the anchor check is disabled for this run" };
+    }
+    const root = repoRoot(dirname(this.options.logPath));
+    if (root === null) {
+      return {
+        rev: null,
+        seq: null,
+        reason: `${this.display(this.options.logPath)} is not inside a git repository`,
+      };
+    }
+    const resolved = resolveAnchor(root, this.options.logPath, {
+      ...this.anchorWhere(),
+      ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
+    });
+    return resolved.ok
+      ? { rev: resolved.anchor.rev, seq: resolved.anchor.head.seq, reason: null }
+      : { rev: null, seq: null, reason: resolved.reason };
+  }
+
+  /**
+   * Compare the verified working records against the committed copy.
+   *
+   * `null` when the check is off. Everything else — including "there is no
+   * committed copy" — comes back as an {@link AnchorCheck} the caller reports,
+   * because a check that could not look must never be read as a check that
+   * looked and was satisfied.
+   */
+  private compareToAnchor(records: readonly EventRecord[]): AnchorCheck | null {
+    if (!this.anchorEnabled()) return null;
+    return checkLogAnchor({
+      logPath: this.options.logPath,
+      records,
+      ...this.anchorWhere(),
+      ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
+    });
   }
 
   private fatal(read: LogReadRefusal): DaemonOutcome {
