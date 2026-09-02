@@ -2522,6 +2522,32 @@ and the daemon runs log-only. `--interval` defaults to 30s and `--debounce` to
 250ms. Git-evidence refusals at startup: `git-unavailable` and `log-dir-missing`
 exit 4; `log-dir-not-repo` and `log-dir-nested` exit 2.
 
+**Sustained append rate, and what to tune.** The daemon watches the log's
+directory and the task folder. Every append from any writer (a hook in another
+Claude Code session, a CLI verb, a channel tap) schedules one tick `--debounce`
+after the burst settles, and `--interval` is only the floor for a quiet log. With
+several sessions appending (the 2026-09-02 incident saw ~20 hook appends per
+minute, one every three seconds), the watcher-driven tick is effectively
+continuous, so the daemon's CPU is the cost of one tick times the append rate.
+One tick against a 10k-record, 6.5 MB log costs about 200 ms after APRV-212
+(it was 2.9 s before: one verified read per task file and a quadratic audit
+candidate scan; see `docs/postmortem-2026-09-02-daemon-tick-cpu.md`). Most of
+what remains is five verified reads, each re-proving the whole file's digest,
+so the cost still grows with log size. The `tick` line reports `ms`,
+`reads` and per-phase `phases` so an operator can see what a tick costs on their
+log before it becomes a load problem.
+
+The daemon never wakes itself: the verified-head snapshot it publishes beside
+the log, `QUEUE.md`, and its own task-file write-backs are filtered out of the
+watcher. Any tick you see with no external append is the `--interval` tick.
+
+If `tick.ms` times the append rate approaches one core, raise `--debounce`
+(`1s` to `5s` coalesces a burst of appends into one tick at the cost of that much
+latency on drift, expiry and queue updates; hooks do not wait on the tick, they
+read the log directly). `--interval` does not help under load, it only bounds
+how stale the queue can get when nothing is appending. A tick that stays slow
+with the log idle is a bug: file it with the `tick` line's `phases`.
+
 **`--json`** is one object per line on stdout:
 
 ```
@@ -2543,7 +2569,9 @@ exit 4; `log-dir-not-repo` and `log-dir-nested` exit 2.
  "records_branch":"records-log-2026-09-01","range":{"from":4,"to":10},
  "commit":"<40hex>","pr_url":"https://github.com/…","pr_created":true,
  "code":null,"message":"seq 4..10 is on records-log-2026-09-01","flush":false}
-{"event":"tick","n":1,"head":10,"drift":1,"expired":1,"escalated":0}
+{"event":"tick","n":1,"head":10,"drift":1,"expired":1,"escalated":0,
+ "ms":41,"reads":8,"phases":{"drift":9,"ttl":3,"audit":6,"dark":0,"prune":1,
+ "write_back":4,"advance":0,"escalations":1,"render":12}}
 {"event":"stopped","reason":"SIGINT","ticks":3,"drift":1,"expired":1,
  "renders":3}
 {"event":"git_evidence","commit":"a1b2c3d","seq":10,

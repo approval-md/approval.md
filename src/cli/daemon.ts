@@ -292,11 +292,14 @@ export function describeDaemonEvent(event: DaemonEvent): { text: string; stderr:
       };
     case "tick":
       return {
+        // The cost of the tick is on the line an operator already reads
+        // (APRV-211): a tick that takes seconds, or that reads the log dozens of
+        // times, is the shape of the incident this field exists to make obvious.
         text: `tick ${String(event.n)}: head ${
           event.head === null ? "none" : `seq ${String(event.head)}`
         }, ${String(event.drift)} drift, ${String(event.expired)} expired, ${String(
           event.escalated,
-        )} escalated`,
+        )} escalated (${String(event.ms)} ms, ${String(event.reads)} reads)`,
         stderr: false,
       };
     case "warning":

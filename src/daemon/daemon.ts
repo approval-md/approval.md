@@ -303,6 +303,29 @@ export type DaemonEvent =
       drift: number;
       expired: number;
       escalated: number;
+      /**
+       * What the tick cost (APRV-211). Additive, like every other growth of this
+       * union: the fields below were appended and nothing above them changed
+       * meaning. A tick is the daemon's unit of work and it was possible for one
+       * to pin a core for three seconds while every line it printed looked
+       * healthy; these three fields are how that is visible without a profiler.
+       */
+      /** Wall-clock duration of the whole tick, in milliseconds. */
+      ms: number;
+      /** Verified log reads this tick made. Bounded by structure, not by size. */
+      reads: number;
+      /** Per-phase duration in milliseconds, in the order the tick runs them. */
+      phases: {
+        drift: number;
+        ttl: number;
+        audit: number;
+        dark: number;
+        prune: number;
+        write_back: number;
+        advance: number;
+        escalations: number;
+        render: number;
+      };
     }
   | { event: "warning"; code: DaemonWarningCode; message: string }
   | {
@@ -462,6 +485,13 @@ export type DaemonOutcome =
 // The loop
 // ---------------------------------------------------------------------------
 
+/**
+ * A verified read that came back clean: the records and the head the drift scan
+ * decides from (APRV-211). Never the evidence an append is compared against —
+ * see {@link Daemon.scanForDrift} on why that is always a fresh read.
+ */
+type VerifiedRead = Extract<ReadRecordsResult, { ok: true }>;
+
 interface RenderSummary {
   pending: number;
   skipped: number;
@@ -514,6 +544,12 @@ export class Daemon {
   /** Epoch ms of the last dark-session sweep (APRV-192); `null` before the first. */
   private lastDarkSweepAt: number | null = null;
   private reportedEscalations = new Set<string>();
+  /** Verified reads made during the current tick (APRV-211). Reset at tick start. */
+  private reads = 0;
+  /** Basenames {@link writeBack} placed this tick, so the watcher can ignore them. */
+  private selfWrites = new Set<string>();
+  /** The previous tick's, kept one generation: watch events arrive after the write. */
+  private previousSelfWrites = new Set<string>();
   private settle: ((outcome: DaemonOutcome) => void) | null = null;
   private finished = false;
 
@@ -631,17 +667,57 @@ export class Daemon {
    *
    * Failure is a warning, never fatal — see the module header on why the periodic
    * tick makes watching optional.
+   *
+   * ## Ignoring the daemon's own hand (APRV-211)
+   *
+   * Two of the files in these directories are written by this loop itself: the
+   * verified-head snapshot beside the log (`verified-head.json` and its temp
+   * file, published on every clean read) and the task files {@link writeBack}
+   * repairs. A watcher that fires on those schedules a tick whose only cause was
+   * the previous tick, and the daemon wakes itself forever: measured at 18 ticks
+   * in 45 seconds against a ten-minute interval, with no other writer.
+   *
+   * So the log-directory watcher schedules only for the log file itself (or for
+   * an event that names no file, which is the platform saying "something here
+   * changed" and must still be believed), and the tasks watcher ignores the
+   * basenames this daemon just placed.
+   *
+   * This is safe for exactly the reason stated in the module header: correctness
+   * never depended on the watcher. Every tick re-scans the folder and re-derives
+   * everything from the verified log, and the periodic tick runs regardless
+   * (SPEC.md §10.2). The worst an over-eager filter can cost is latency on a
+   * change that arrives inside the same window as one of the daemon's own
+   * writes, and the next periodic tick collects it.
    */
   private attachWatchers(): void {
     if (this.watchAttempted) return;
     this.watchAttempted = true;
-    const trigger = (): void => this.schedule();
+    const logName = basename(this.options.logPath);
+    const ownTempFile = new RegExp(`^\\..*\\.tmp-${String(process.pid)}-\\d+$`, "u");
+    const triggers = {
+      // A rename or a save the daemon did not make. `null` (or an undefined
+      // name) is a platform that will not say which file moved: believe it.
+      tasks: (_event: string, name: string | null): void => {
+        if (name !== null && name !== undefined) {
+          if (this.selfWrites.has(name) || this.previousSelfWrites.has(name)) return;
+          // `core/task-file.ts` places a file through `.<name>.tmp-<pid>-<n>`
+          // in the same directory, and that temp file's create and rename are
+          // two more events about a write this process made.
+          if (ownTempFile.test(name)) return;
+        }
+        this.schedule();
+      },
+      log: (_event: string, name: string | null): void => {
+        if (name !== null && name !== undefined && name !== logName) return;
+        this.schedule();
+      },
+    };
     for (const [label, dir] of [
       ["tasks", this.options.tasksDir],
       ["log", dirname(this.options.logPath)],
     ] as const) {
       try {
-        const watcher = watch(dir, { persistent: true }, trigger);
+        const watcher = watch(dir, { persistent: true }, triggers[label]);
         watcher.on("error", () => {
           // A watcher that errors (its directory was removed, the platform ran
           // out of handles) is simply dropped. The periodic tick continues to
@@ -689,8 +765,35 @@ export class Daemon {
   private tick(): DaemonOutcome | null {
     if (this.ticking) return null;
     this.ticking = true;
+    const startedAt = performance.now();
+    const phases = {
+      drift: 0,
+      ttl: 0,
+      audit: 0,
+      dark: 0,
+      prune: 0,
+      write_back: 0,
+      advance: 0,
+      escalations: 0,
+      render: 0,
+    };
+    /** Time `step`, add it to `phase`, and hand back what it returned. */
+    const timed = <T>(phase: keyof typeof phases, step: () => T): T => {
+      const from = performance.now();
+      try {
+        return step();
+      } finally {
+        phases[phase] += performance.now() - from;
+      }
+    };
     try {
       this.ticks += 1;
+      this.reads = 0;
+      // One generation of the daemon's own task-file writes is kept, because a
+      // watch event arrives after the write that caused it and often after the
+      // tick that made it has ended.
+      this.previousSelfWrites = this.selfWrites;
+      this.selfWrites = new Set<string>();
       // Late-attaching watchers: a log directory (or a task folder) created after
       // startup becomes watchable, and the operator gets the latency back.
       if (!this.options.once && !this.watching) {
@@ -701,10 +804,10 @@ export class Daemon {
       const opening = this.read();
       if (!opening.ok) return this.fatal(opening);
 
-      const drift = this.scanForDrift();
+      const drift = timed("drift", () => this.scanForDrift());
       if (drift.stop !== null) return drift.stop;
 
-      const expired = this.sweepTtl();
+      const expired = timed("ttl", () => this.sweepTtl());
       if (expired.stop !== null) return expired.stop;
 
       // Audit sampling (APRV-40, SPEC.md §5.2/§10.2). Placed before the closing
@@ -712,44 +815,50 @@ export class Daemon {
       // head and shows up in this tick's `audit_backlog`. It decides nothing:
       // `daemon/audit.ts` re-derives eligibility from the verified log and every
       // append is a compare-and-append.
-      sweepAuditSampling({
-        logPath: this.options.logPath,
-        policy: this.options.policy,
-        cwd: this.options.cwd,
-        ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
-        ...(this.options.clock === undefined ? {} : { clock: this.options.clock }),
-        warn: (message) => this.warn("append-refused", message),
-        // One line per sample appended (APRV-57). The sweep names no event; it
-        // hands back what it wrote and the loop says it in the loop's own words.
-        sampled: (sample) =>
-          this.emit({
-            event: "sampled",
-            action_key: sample.candidate.actionKey,
-            task: sample.candidate.task,
-            seq: sample.record.seq,
-            subject_seq: sample.candidate.seq,
-          }),
-      });
+      timed("audit", () =>
+        sweepAuditSampling({
+          logPath: this.options.logPath,
+          policy: this.options.policy,
+          cwd: this.options.cwd,
+          ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
+          ...(this.options.clock === undefined ? {} : { clock: this.options.clock }),
+          warn: (message) => this.warn("append-refused", message),
+          // One line per sample appended (APRV-57). The sweep names no event; it
+          // hands back what it wrote and the loop says it in the loop's own words.
+          sampled: (sample) =>
+            this.emit({
+              event: "sampled",
+              action_key: sample.candidate.actionKey,
+              task: sample.candidate.task,
+              seq: sample.record.seq,
+              subject_seq: sample.candidate.seq,
+            }),
+        }),
+      );
 
       // The dark-session sweep (APRV-192), on its own cadence. Placed with the
       // audit sweep because it is the same kind of thing — a detective control
       // that re-derives its whole question from the verified log and the world,
       // appends what is new, and changes no verdict. It runs BEFORE the prune so
       // that an observation it appends is counted by this tick's closing head.
-      this.sweepDark();
+      timed("dark", () => {
+        this.sweepDark();
+      });
 
       // Payload retention (APRV-41), after the TTL sweep so a request expired on
       // this tick is judged against the record the sweep just wrote. The pruner
       // owns the rule, the append and the unlink; the daemon owns only the
       // scheduling, which is the one thing `daemon/prune.ts` deliberately lacks.
-      this.prune();
+      timed("prune", () => {
+        this.prune();
+      });
 
       // Projection write-back (SPEC.md §6.3, APRV-62). Last, because it copies
       // the log into the files and every append this tick can make has now been
       // made: a request expired by the sweep above is reflected on disk by this
       // same tick rather than surfacing as drift on the next one. It appends
       // nothing itself, so its position cannot affect any record.
-      const wrote = this.writeBack();
+      const wrote = timed("write_back", () => this.writeBack());
       if (wrote !== null) return wrote;
 
       // The cadence advance (APRV-204), after every append this tick can make
@@ -757,13 +866,17 @@ export class Daemon {
       // the advance published against. It appends through the gate rather than
       // through this loop, and everything it appends is picked up by the read
       // below like any other writer's.
-      this.advanceIfDue(false);
+      timed("advance", () => {
+        this.advanceIfDue(false);
+      });
 
       const closing = this.read();
       if (!closing.ok) return this.fatal(closing);
-      const escalated = this.surfaceEscalations(closing.records);
+      const escalated = timed("escalations", () => this.surfaceEscalations(closing.records));
 
-      this.render();
+      timed("render", () => {
+        this.render();
+      });
       this.options.gitEvidence?.commit(closing.head);
 
       this.emit({
@@ -773,6 +886,19 @@ export class Daemon {
         drift: drift.appended,
         expired: expired.appended,
         escalated,
+        ms: Math.round((performance.now() - startedAt) * 10) / 10,
+        reads: this.reads,
+        phases: {
+          drift: Math.round(phases.drift * 10) / 10,
+          ttl: Math.round(phases.ttl * 10) / 10,
+          audit: Math.round(phases.audit * 10) / 10,
+          dark: Math.round(phases.dark * 10) / 10,
+          prune: Math.round(phases.prune * 10) / 10,
+          write_back: Math.round(phases.write_back * 10) / 10,
+          advance: Math.round(phases.advance * 10) / 10,
+          escalations: Math.round(phases.escalations * 10) / 10,
+          render: Math.round(phases.render * 10) / 10,
+        },
       });
       return null;
     } finally {
@@ -1002,6 +1128,7 @@ export class Daemon {
    * it could endorse a digest of bytes nobody walked.
    */
   private read(): ReadRecordsResult {
+    this.reads += 1;
     return readVerifiedRecords(this.options.logPath, {
       ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
       publishSnapshot: this.options.snapshot !== false,
@@ -1051,9 +1178,24 @@ export class Daemon {
    * would put a fact in the log that nobody wrote.
    */
   private scanForDrift(): { appended: number; stop: DaemonOutcome | null } {
+    // ONE verified read for the whole scan (APRV-211). The scan asks the same
+    // question of every file — "what does the log say about this task?" — and
+    // asking it per file re-verified and re-walked the log once per task file:
+    // 210 reads a tick in this repository, 45% of a three-second tick.
+    //
+    // The read below is the DECISION's evidence. It never becomes an append's:
+    // a file the decision finds in drift is re-derived against a fresh read
+    // immediately before the append, and that fresh head is the `expectedHead`
+    // the append is compared against (SPEC.md §11.1 invariant 5, unchanged).
+    // Deciding from a slightly older log can therefore only cost a decision that
+    // the fresh derivation then declines to act on; it can never place a record
+    // against a head it did not see.
+    const scan = this.read();
+    if (!scan.ok) return { appended: 0, stop: this.fatal(scan) };
+
     let appended = 0;
     for (const file of this.taskFiles()) {
-      const outcome = this.checkOneFile(file);
+      const outcome = this.checkOneFile(file, scan);
       if (outcome.stop !== null) return { appended, stop: outcome.stop };
       if (outcome.appended) appended += 1;
     }
@@ -1083,7 +1225,10 @@ export class Daemon {
       .sort();
   }
 
-  private checkOneFile(file: string): { appended: boolean; stop: DaemonOutcome | null } {
+  private checkOneFile(
+    file: string,
+    scan: VerifiedRead,
+  ): { appended: boolean; stop: DaemonOutcome | null } {
     const read = readTaskFile(file);
     if (!read.ok) {
       if (read.code === "no-frontmatter") {
@@ -1094,7 +1239,7 @@ export class Daemon {
         // anything.
         const hint = taskIdFromFileName(file);
         if (hint === null) return { appended: false, stop: null };
-        return this.reportEnvelopeLoss(file, hint, true, "no-frontmatter");
+        return this.reportEnvelopeLoss(file, hint, true, "no-frontmatter", scan);
       }
       this.warn(
         read.code === "io" ? "task-unreadable" : "frontmatter-invalid",
@@ -1118,6 +1263,7 @@ export class Daemon {
         id,
         typeof declaredId !== "string" || declaredId.length === 0,
         "no-approval-key",
+        scan,
       );
     }
 
@@ -1153,21 +1299,41 @@ export class Daemon {
       return { appended: false, stop: null };
     }
 
-    // Re-read immediately before deciding, so the head this append is compared
-    // against is the head the decision was made from.
+    const ts = readClock(this.options.clock === undefined ? {} : { clock: this.options.clock });
+    const ttlMs = this.ttlMs();
+    const declaredRaw = (envelope as { state?: unknown }).state;
+    const declaredState = typeof declaredRaw === "string" ? declaredRaw : null;
+    const envelopeDigest = digestOf(envelope);
+
+    // The decision, from the scan's read.
+    const decided = taskEnvelopeState(scan.records, id, ts, ttlMs);
+    if (declaredState === decided.state) return { appended: false, stop: null };
+    if (
+      driftAlreadyLogged(scan.records, id, {
+        declaredState,
+        derivedState: decided.state,
+        envelopeDigest,
+      })
+    ) {
+      return { appended: false, stop: null };
+    }
+
+    // Re-read immediately before appending, so the head this append is compared
+    // against is the head the RECORDED fact was derived from. The whole decision
+    // is remade against those fresh records: a log that moved between the scan
+    // and here may have removed the drift (someone decided the request, another
+    // writer recorded the same drift), and a record about a disagreement that no
+    // longer exists is a record nobody wrote.
     const records = this.read();
     if (!records.ok) return { appended: false, stop: this.fatal(records) };
 
-    const ts = readClock(this.options.clock === undefined ? {} : { clock: this.options.clock });
-    const projection = taskEnvelopeState(records.records, id, ts, this.ttlMs());
-    const declaredRaw = (envelope as { state?: unknown }).state;
-    const declaredState = typeof declaredRaw === "string" ? declaredRaw : null;
+    const projection = taskEnvelopeState(records.records, id, ts, ttlMs);
     if (declaredState === projection.state) return { appended: false, stop: null };
 
     const facts: DriftFacts = {
       declaredState,
       derivedState: projection.state,
-      envelopeDigest: digestOf(envelope),
+      envelopeDigest,
     };
     if (driftAlreadyLogged(records.records, id, facts)) return { appended: false, stop: null };
 
@@ -1239,23 +1405,33 @@ export class Daemon {
     id: string,
     loose: boolean,
     kind: "no-frontmatter" | "no-approval-key",
+    scan: VerifiedRead,
   ): { appended: boolean; stop: DaemonOutcome | null } {
-    // Re-read immediately before deciding, exactly as the mismatch path does:
-    // the head this append is compared against is the head it decided from.
-    const records = this.read();
-    if (!records.ok) return { appended: false, stop: this.fatal(records) };
-
-    const registration = latestRegistration(records.records, id, loose);
-    if (registration === null) {
+    // The decision, from the scan's read (APRV-211). This is the path the vast
+    // majority of task files take — a plain Backlog.md task the log never
+    // registered — and it used to cost one full verified read per file.
+    const scanned = latestRegistration(scan.records, id, loose);
+    if (scanned === null) {
       // The log has never heard of this task. SPEC.md §6: a task with no
       // envelope is valid markdown, and this one is exactly that.
       return { appended: false, stop: null };
     }
+
+    const ts = readClock(this.options.clock === undefined ? {} : { clock: this.options.clock });
+    const ttlMs = this.ttlMs();
+
+    // Re-read immediately before appending, exactly as the mismatch path does:
+    // the head this append is compared against is the head the recorded fact was
+    // derived from, and the whole decision is remade against it.
+    const records = this.read();
+    if (!records.ok) return { appended: false, stop: this.fatal(records) };
+
+    const registration = latestRegistration(records.records, id, loose);
+    if (registration === null) return { appended: false, stop: null };
     const task = registration.task;
     if (typeof task !== "string" || task.length === 0) return { appended: false, stop: null };
 
-    const ts = readClock(this.options.clock === undefined ? {} : { clock: this.options.clock });
-    const projection = taskEnvelopeState(records.records, task, ts, this.ttlMs());
+    const projection = taskEnvelopeState(records.records, task, ts, ttlMs);
     const facts: DriftFacts = {
       declaredState: null,
       derivedState: projection.state,
@@ -1522,6 +1698,10 @@ export class Daemon {
         );
         continue;
       }
+
+      // The watcher is about to see this file change; the change was ours
+      // (APRV-211). Recorded by basename because that is what `fs.watch` reports.
+      this.selfWrites.add(basename(file));
 
       this.emit({
         event: "write_back",
