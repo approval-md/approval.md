@@ -1655,6 +1655,7 @@ Usage:
   approval up [every "daemon run" flag] [--as human:<id>] [--port <n>]
               [--payloads <f>] [--payload-dir <d>] [--api-base <url>] [--no-gloss]
               [--poll-timeout <s>] [--no-telegram] [--no-web] [--restart-backoff <d>]
+              [--no-preflight] [--preflight-remote <r>] [--preflight-base <b>]
 
 Flags (every "daemon run" flag, unchanged, plus):
   --as human:<id>  the approver every decision is recorded against
@@ -1663,7 +1664,18 @@ Flags (every "daemon run" flag, unchanged, plus):
   --port <n>       queue-page port. Precedence: --port, channels.web.port
   --no-telegram / --no-web   leave that channel out of this process
   --no-gloss / --restart-backoff <d>   drop the model gloss / first retry wait
+  --no-preflight   start on this checkout and this build, whatever git says
+  --preflight-remote <r> / --preflight-base <b>   default origin / this branch
   -h, --help       this text
+
+BEFORE ANYTHING STARTS, the preflight fetches and judges (APRV-215). Safe means
+this checkout is not AHEAD of the remote and the upstream range does not rewrite
+a file you have uncommitted changes to; then it fast-forwards, rebuilds if dist
+is older than src, and names the commit it is now running. Otherwise it refuses
+with up-preflight-behind-ahead, up-preflight-log-diverged (run "approval log
+sync") or up-preflight-dirty-protected, and TOUCHES NOTHING. It never resets
+--hard, never stashes, and never moves the working log. A fetch that cannot
+reach the remote is a warning; it starts on the build it has.
 
 Credentials and identity come from THE LAUNCH ENVIRONMENT and nowhere else. A
 channel whose credential is unset is NOT started, is reported in doctor's words,
