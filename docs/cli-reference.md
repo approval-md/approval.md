@@ -78,6 +78,72 @@ appears only when there is something to report:
 Human output: the status and head on stdout; reason, first bad seq, anomalies,
 and the full message on stderr.
 
+### `--anchor`: the check the file cannot make about itself (APRV-219)
+
+Everything above is a claim about one file's internal consistency, and the
+chain is unkeyed. A process with write access to `.approval/log/events.jsonl`
+can truncate it and recompute a chain that walks clean from genesis; nothing
+inside the file contradicts that, which is why the conformance suite's
+`chain-verification/truncation-unanchored` vector says an implementation
+reporting corruption there is wrong. The word doing the work in that vector's
+name is *unanchored*.
+
+The anchor is the copy of the log somebody else already holds: a records branch
+pushed by the advance cadence, a log sync's fast-forward, the trunk behind a
+protected branch. `--anchor` reads the newest committed copy this checkout can
+see and checks two things about the working file:
+
+1. its first N bytes hash to the anchored copy's digest, where N is the
+   anchored copy's byte length; and
+2. its record at the anchored head's `seq` carries the anchored head's hash.
+
+The byte check is the stricter of the two: a rewrite that preserves every
+record's own hash while changing the bytes around them still fails it.
+
+Which revs are consulted, in order: `refs/approval/advance/*` (what a previous
+`approval log advance` left behind), `refs/remotes/<remote>/<base>`,
+`refs/remotes/<remote>/records-log-<today>`, then `HEAD`. The one that reaches
+the highest `seq` wins. `--anchor-rev <rev>` names one instead, and implies
+`--anchor`.
+
+Git is READ — `git rev-parse <rev>:<path>` and `git show` — and never fetched:
+a verification path that went to the network would be a verification path that
+fails when the network does. Nothing is written: not the log, not a ref, not a
+cache file.
+
+Four outcomes:
+
+| outcome | exit | meaning |
+|---|---|---|
+| `pass` | 0 | the working log carries the anchored prefix byte for byte |
+| `behind` | 0 | the working log is a strict prefix of the anchored copy; `approval log sync` fast-forwards it |
+| `skip` | 0 | no committed copy was found; the reason is printed on stderr |
+| `anchor-diverged` | 1 | the two contradict each other |
+
+A skip is never a pass. A repository with no committed copy of the log has not
+established that the working log is honest; it has failed to say anything about
+it, and the reason names every rev that was tried.
+
+`--json` adds an `anchor` object, and a divergence replaces the verdict rather
+than qualifying it:
+
+```
+pass       {"status":"clean","records":9,"head":{...},
+            "anchor":{"status":"pass","rev":"refs/remotes/origin/main",
+                      "seq":7,"hash":"<64 hex>","bytes":2412}}
+skip       {"status":"clean",...,"anchor":{"status":"skip","reason":"..."}}
+diverged   {"status":"anchor-diverged","records":9,"head":{...},
+            "anchor":{"status":"diverged","rev":"...","seq":7,
+                      "hash":"<64 hex>","bytes":2412,"message":"..."},
+            "message":"..."}
+```
+
+`anchor-diverged` is its own frozen refusal union
+(`conformance/vectors/refusal-unions.v1.json`, `anchor_refusal_codes`).
+`approval doctor`'s `log-drift` row is this same check, and `approval daemon
+run` makes it at startup and on every full prefix re-proof — see
+[git evidence](git-evidence.md).
+
 ## log tail
 
 The chain is verified first. On a torn tail the intact records are printed and the
