@@ -1,0 +1,1 @@
+{"command":"git add \"backlog/tasks/aprv-184 - Policy-amendment-policy.edit-moves-to-supervised-live-0.1.md\" && GIT_EDITOR=true git rebase --continue 2>&1 | tail -8","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a553d0bab68d38f2b"}

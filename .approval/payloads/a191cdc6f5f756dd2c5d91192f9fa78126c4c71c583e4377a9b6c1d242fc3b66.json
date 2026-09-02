@@ -1,0 +1,1 @@
+{"command":"git push --force-with-lease origin HEAD:aprv-178-167-operator 2>&1 | tail -8","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-a5862b85acfb2b46b"}

@@ -1,0 +1,1 @@
+{"command":"git checkout -q -B rb-197 origin/aprv-197-gloss && git rebase origin/main 2>&1 | tail -15; git status --short | grep -v '^??' | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/project-luma-event-relevance-3d2cb0"}

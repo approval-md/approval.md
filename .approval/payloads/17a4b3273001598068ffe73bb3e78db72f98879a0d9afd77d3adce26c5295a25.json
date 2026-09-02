@@ -1,0 +1,1 @@
+{"command":"gh api graphql -f query='{ repository(owner:\"approval-md\", name:\"approval.md\"){ pr185: pullRequest(number:185){ isInMergeQueue mergeQueueEntry{ state } } pr186: pullRequest(number:186){ isInMergeQueue mergeQueueEntry{ state } } } }'","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/project-luma-event-relevance-3d2cb0"}

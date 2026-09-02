@@ -1,0 +1,1 @@
+{"command":"git add -A && GIT_EDITOR=true git rebase --continue 2>&1 | tail -5 && git log --oneline -4","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-afc048dfd719bbbf3"}

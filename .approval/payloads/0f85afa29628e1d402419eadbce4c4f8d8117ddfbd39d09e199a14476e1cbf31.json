@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md && gh pr update-branch 176 && echo branch-updated","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/project-luma-event-relevance-3d2cb0"}

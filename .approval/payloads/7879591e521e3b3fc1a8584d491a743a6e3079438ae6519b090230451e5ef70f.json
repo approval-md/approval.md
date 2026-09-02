@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md && RUN=$(gh run list --branch aprv-151-guard --limit 1 --json databaseId --jq '.[0].databaseId') && gh run rerun \"$RUN\" --failed && echo \"rerun armed for $RUN\"","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/project-luma-event-relevance-3d2cb0"}

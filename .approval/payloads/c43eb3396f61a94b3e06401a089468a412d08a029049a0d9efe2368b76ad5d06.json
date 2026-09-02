@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md && gh run rerun 33473205091 --failed && echo rerun-armed","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/project-luma-event-relevance-3d2cb0"}
