@@ -16,6 +16,29 @@ labels:
 dependencies: []
 priority: high
 ordinal: 136000
+approval:
+  origin:
+    app: manual
+    created_by: 'agent:fable'
+  route:
+    assignee: 'agent:fable'
+    rationale: >-
+      Wave 1 protected-path batch, one grant: SPEC.md section 7 amendments drafted by
+      APRV-198 and APRV-194 (policy.* row split, log.* row, two paragraphs, protected_paths
+      sentence, all flagged pending sign-off) plus APRV-151 CI job (protected-paths grant
+      cross-check, aggregator needs + enforcement) with its tests/ci-guard.test.ts pin. Applied
+      by a script whose argv names every protected path it writes; dry-run clean on copies.
+  state: executed
+  actions:
+    - class: policy.edit
+      summary: >-
+        node apply-wave1-all.mjs <worktree> SPEC.md .github/workflows/ci.yml tests/ci-guard.test.ts
+        in worktree project-luma-event-relevance-3d2cb0 on branch wave1-protected-batch (base 9f3febc):
+        SPEC section 7 amendments (APRV-198, APRV-194) and the APRV-151 CI job.
+      reversible: true
+      est_cost_usd: '0'
+      idempotency_key: 'aprv-151:wave1-protected-batch:2026-09-01'
+      payload_hash: '79fdae581290a559b3b071b664f0d2e2b8f559846b09f1a2e1eb4393ad52d1e0'
 ---
 
 ## Description
