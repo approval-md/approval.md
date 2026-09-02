@@ -10,12 +10,16 @@
  * caller (a thrown error would be an unhandled write-boundary bypass).
  *
  * Determinism: the result is a pure function of (schema files on disk,
- * document). No network, no clock, no randomness, and no cross-call caching —
- * schemas are re-read and re-compiled per call so a run never depends on the
- * order or history of previous calls. The one deliberate reuse is
- * {@link prepareValidator}: a caller validating many documents against one
- * schema in one pass compiles once and holds the snapshot itself; preparing is
- * still uncached call to call.
+ * document). No network, no clock, no randomness. Every call re-reads every
+ * schema file, so a run never depends on the order or history of previous
+ * calls: edit a schema mid-run and the next call validates against the edit.
+ * Two reuses sit under that rule and neither bends it. {@link prepareValidator}
+ * lets a caller validating many documents against one schema in one pass
+ * compile once and hold the snapshot itself. And since APRV-206 the Ajv
+ * *compile* is reused across calls when the schema bytes just read hash to the
+ * digest the compiled validator was built from — the schema files are still
+ * read every time, so nothing is answered for bytes that were not re-proved;
+ * see {@link compiledValidators} for the argument in full.
  *
  * Dialect / import notes (AC #6 — documented, never silently downgraded):
  *
@@ -35,6 +39,7 @@
  *   registered, so an invalid `date-time` string is a validation error.
  */
 
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -178,12 +183,27 @@ type LoadOutcome =
   | { ok: true; schemas: LoadedSchema[] }
   | { ok: false; errors: ValidationError[] };
 
+interface SchemaBytes {
+  /** The file's name within the directory, `foo.schema.json`. */
+  entry: string;
+  /** Its contents, verbatim. */
+  raw: string;
+}
+
+type BytesOutcome =
+  | { ok: true; files: SchemaBytes[]; digest: string }
+  | { ok: false; errors: ValidationError[] };
+
 /**
- * Read and JSON-parse every schema in `schemaDir`. Any unreadable or
- * unparseable file fails the whole load: a partially-loaded schema set could
- * silently drop a `$ref` target and let a bad document through.
+ * Read every schema file in `schemaDir` and digest exactly the bytes read.
+ *
+ * The digest covers each file's name and its full contents, length-prefixed so
+ * that no rename or content shuffle can produce the same digest as a different
+ * set. It is the cache key {@link compileSchema} keys its compiled validators
+ * on, which is why it is computed from the bytes this call read rather than
+ * from a `stat`.
  */
-function loadSchemas(schemaDir: string): LoadOutcome {
+function readSchemaBytes(schemaDir: string): BytesOutcome {
   let entries: string[];
   try {
     entries = readdirSync(schemaDir);
@@ -198,7 +218,8 @@ function loadSchemas(schemaDir: string): LoadOutcome {
     .filter((entry) => entry.endsWith(SCHEMA_FILE_SUFFIX))
     .sort();
 
-  const schemas: LoadedSchema[] = [];
+  const files: SchemaBytes[] = [];
+  const digest = createHash("sha256");
   for (const entry of names) {
     const file = join(schemaDir, entry);
     let raw: string;
@@ -210,6 +231,22 @@ function loadSchemas(schemaDir: string): LoadOutcome {
         `schema file ${entry} could not be read: ${errorMessage(cause)}`,
       );
     }
+    digest.update(`${entry} ${String(raw.length)} `, "utf8");
+    digest.update(raw, "utf8");
+    files.push({ entry, raw });
+  }
+
+  return { ok: true, files, digest: digest.digest("hex") };
+}
+
+/**
+ * JSON-parse schema bytes already read. Any unparseable file fails the whole
+ * load: a partially-loaded schema set could silently drop a `$ref` target and
+ * let a bad document through.
+ */
+function parseSchemas(files: SchemaBytes[]): LoadOutcome {
+  const schemas: LoadedSchema[] = [];
+  for (const { entry, raw } of files) {
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -239,15 +276,53 @@ type CompileOutcome =
   | { ok: false; errors: ValidationError[] };
 
 /**
+ * Compiled validators, keyed on the bytes they were compiled from (APRV-206).
+ *
+ * ## Why this is not the cross-call caching the module header forbids
+ *
+ * The header's rule is that a result must be a pure function of (schema files
+ * on disk, document), so that a run never depends on the order or history of
+ * previous calls. This cache preserves that rule exactly, by the same argument
+ * `core/state.ts` makes for the verified-read cache: **every call still reads
+ * every schema file**, and the compiled validator is reused only when the bytes
+ * just read hash to the digest it was compiled from. Editing a schema mid-run
+ * changes the digest and compiles again; deleting one changes the digest;
+ * renaming one changes the digest. Nothing here can answer for bytes it has not
+ * re-read, and no entry can outlive its inputs.
+ *
+ * What it saves is the Ajv compile, which measured 13-16 ms per call against
+ * this repository's 48 KB `event.schema.json` — paid on **every append**, at the
+ * write boundary, in front of a human waiting on a phone. A prepared validator
+ * checks the same record in 0.0017 ms.
+ *
+ * Memory-only, process-lifetime, and bounded: a handful of (directory, schema,
+ * mode) triples is all any process uses, and eviction costs only a recompile.
+ */
+const compiledValidators = new Map<string, ValidateFunction>();
+
+/** How many compiled validators one process keeps. Eviction costs a recompile. */
+const MAX_COMPILED_VALIDATORS = 16;
+
+/**
  * Build a fresh Ajv 2020-12 instance holding every schema in the directory
  * (so cross-schema `$ref` by `$id` resolves) and compile the requested one.
+ *
+ * The schema files are read on every call; the compile is reused when their
+ * bytes are unchanged (see {@link compiledValidators}).
  */
 function compileSchema(
   schemaDir: string,
   schemaId: string,
   mode: ValidationMode,
 ): CompileOutcome {
-  const raw = loadSchemas(schemaDir);
+  const bytes = readSchemaBytes(schemaDir);
+  if (!bytes.ok) return bytes;
+
+  const cacheKey = `${schemaDir} ${schemaId} ${mode} ${bytes.digest}`;
+  const cached = compiledValidators.get(cacheKey);
+  if (cached !== undefined) return { ok: true, validateFn: cached };
+
+  const raw = parseSchemas(bytes.files);
   if (!raw.ok) return raw;
   const loaded: LoadOutcome =
     mode === "historical"
@@ -292,7 +367,13 @@ function compileSchema(
       if (entry.name === target.name) continue;
       ajv.addSchema(entry.schema);
     }
-    return { ok: true, validateFn: ajv.compile(target.schema) };
+    const validateFn = ajv.compile(target.schema);
+    if (compiledValidators.size >= MAX_COMPILED_VALIDATORS) {
+      const oldest = compiledValidators.keys().next();
+      if (!oldest.done) compiledValidators.delete(oldest.value);
+    }
+    compiledValidators.set(cacheKey, validateFn);
+    return { ok: true, validateFn };
   } catch (cause) {
     return failure(
       "schemaCompile",

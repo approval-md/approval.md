@@ -57,8 +57,11 @@ import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
 import { openObligations } from "../core/audit.js";
 import { evaluateBudgets, type BudgetVerdict } from "../core/budgets.js";
+import { declaredCredentialsForClass } from "../adapters/registry.js";
+import { childEnvironment, type ChildEnvironment } from "../core/child-env.js";
 import {
   danglingExecutions,
+  findDeclaration,
   finishExecution,
   indeterminateExecutions,
   isReconcileResolution,
@@ -75,9 +78,11 @@ import { isPayloadHash, runPayloadHash } from "../core/payload.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
 import { withdraw } from "../core/gate.js";
+import { openGateWindow } from "../core/gate-window.js";
 import { keyStoreDirFor } from "../core/seal.js";
 import { readVerifiedRecords, requestState } from "../core/state.js";
 import { deliveredToken } from "../core/token.js";
+import { passphraseEnvFor } from "../core/vault.js";
 import type { EventRecord } from "../core/log.js";
 import { loadPolicy, parseDuration, POLICY_FILENAMES } from "../core/policy-load.js";
 import { verify } from "../core/verify.js";
@@ -235,6 +240,42 @@ function executeOptions(
     policy: policyLocation(flags, cwd),
     ...(token === null ? {} : { token }),
   };
+}
+
+/**
+ * The environment the granted child gets, and the count of what was withheld
+ * (APRV-205).
+ *
+ * Three inputs, none of them a flag. The policy names the passphrase variable
+ * (`vault.passphrase_env`); the credential-bearing prefixes and their allowlist
+ * come from the classifier's own list (APRV-194, exported for this); and the
+ * pass-through set is whatever adapter serves the DECLARED class of this action
+ * named in its `requiredCredentials` (APRV-169). The declaration is read from
+ * verified records — SPEC.md §11.1's first invariant, and the reason this is a
+ * second read of the log rather than a peek at the task file.
+ *
+ * A log this cannot read yields the empty pass-through set and a scrub that
+ * removes more, which is the fail-closed direction: `startExecution` is about to
+ * refuse the same read anyway, and if it somehow does not, the child is starved
+ * rather than fed.
+ */
+function childEnvFor(
+  logPath: string,
+  actionKey: string,
+  flags: Record<string, string | boolean>,
+  cwd: string,
+): ChildEnvironment {
+  const location = policyLocation(flags, cwd);
+  const load = loadPolicy(
+    location.file === undefined ? { dir: location.dir ?? cwd } : { file: location.file },
+  );
+  const read = readVerifiedRecords(logPath);
+  const declared = read.ok ? findDeclaration(read.records, actionKey) : null;
+  return childEnvironment({
+    passphraseEnv: passphraseEnvFor(load),
+    declaredCredentials:
+      declared === null ? [] : declaredCredentialsForClass(declared.class),
+  });
 }
 
 /** `defaults.approval_ttl` in force, or `null` when the policy declares none. */
@@ -435,6 +476,14 @@ export function commandRun(
     });
   }
 
+  // APRV-205. The child's environment is built BEFORE `execution.started`,
+  // because the count of what was withheld is recorded on that event and a
+  // number written after the fact would be a number nobody measured. The child
+  // gets everything the session holds except the credential-bearing names: see
+  // `core/child-env.ts` for the three rules and for what this deliberately does
+  // NOT do (it is a scrub, not the sandbox APRV-193 designs).
+  const childEnv = childEnvFor(logPath, actionKey, flags, cwd);
+
   // execution.started is appended HERE, before the child exists. A crash from
   // this line until the finish below leaves a dangling execution, which
   // `approval status` reports and nothing repairs on its own.
@@ -444,6 +493,7 @@ export function commandRun(
     {
       ...executeOptions(flags, cwd, stringFlag(flags, "--token")),
       presentedPayloadHash: payloadHash,
+      envStripped: childEnv.stripped,
     },
     actor,
   );
@@ -453,6 +503,7 @@ export function commandRun(
     cwd,
     stdio: childIo.stdio,
     encoding: "utf8",
+    env: childEnv.env,
   });
   if (childIo.onOutput !== undefined) {
     childIo.onOutput({ stdout: child.stdout ?? "", stderr: child.stderr ?? "" });
@@ -1107,6 +1158,13 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
     obligation: item.obligation,
     review_seq: item.reviewSeq,
   }));
+  // APRV-214, amended SPEC.md §5.2. An open window is a suspension of the
+  // policy for every gated tool call under this root, so it belongs in the one
+  // report an operator reads to answer "is this repository in a normal state".
+  // It counts toward `healthy` DELIBERATELY: a CI check or a `doctor` run keyed
+  // on `healthy` should go red while a bypass stands, and a window nobody
+  // noticed was left open is the failure mode of the whole feature.
+  const gateWindow = openGateWindow(records);
   const budgets = budgetHeadroom(records, flags, cwd, now());
   // Informational: the store's state never moves `healthy` or the exit code.
   // A repo that has never made a `--payload` request has no store, and an
@@ -1145,7 +1203,8 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
     // reconciliation obligation is a denial nobody has answered for yet.
     indeterminate.length === 0 &&
     escalations.length === 0 &&
-    obligations.length === 0;
+    obligations.length === 0 &&
+    gateWindow === null;
 
   if (json) {
     emitJson(streams, {
@@ -1170,6 +1229,21 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       reconciliation: obligations,
       payload_store: payloadStore,
       ...(anomalies.length === 0 ? {} : { anomalies }),
+      // Present only while a window stands, exactly as `anomalies` and
+      // `indeterminate` are: a repository with no window emits the object it
+      // has always emitted, byte for byte.
+      ...(gateWindow === null
+        ? {}
+        : {
+            gate_window: {
+              seq: gateWindow.seq,
+              opened_at: gateWindow.openedAt,
+              opened_by: gateWindow.openedBy,
+              reason: gateWindow.reason,
+              expires_at: gateWindow.expiresAt,
+              bypassed: gateWindow.bypassCount,
+            },
+          }),
     });
   } else {
     const st = style({ json });
@@ -1283,6 +1357,26 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
         right: st.muted(
           `${harnessOutcomes.started} started, ${harnessOutcomes.reported} reported, ${harnessOutcomes.unreported} unreported`,
         ),
+      },
+      {
+        // APRV-214. Its own row and not a footnote: while this says OPEN, the
+        // policy is deciding nothing for the harness, and the person reading
+        // this report is the person who can end that.
+        left: "gate window",
+        right:
+          gateWindow === null
+            ? st.muted("closed")
+            : st.warn(
+                `OPEN until ${gateWindow.expiresAt}, opened by ${gateWindow.openedBy}, ${String(gateWindow.bypassCount)} call(s) bypassed`,
+              ),
+        ...(gateWindow === null
+          ? {}
+          : {
+              under: [
+                `seq ${String(gateWindow.seq)}  reason: ${gateWindow.reason}`,
+                "every gated tool call under this root is allowed without approval — `approval gate close`",
+              ],
+            }),
       },
       {
         left: "reconciliation",

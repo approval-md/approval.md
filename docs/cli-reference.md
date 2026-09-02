@@ -188,6 +188,17 @@ branch that is AHEAD of origin with commits the verb did not make is not a
 refusal; the advance is based on origin either way and those commits are simply
 not part of it.
 
+**One records branch and one pull request per day (APRV-204).** The branch is
+`records-log-<YYYY-MM-DD>` unless `--branch` names another. The first advance of
+a day is parented on `origin/<base>` and opens the pull request; every later
+advance that day fetches the records branch, parents its commit on THAT, and
+fast-forwards the branch the open pull request is already on — so a second
+advance updates the day's pull request rather than being rejected as a
+non-fast-forward or opening a second one. `--pr` asks `gh pr list --head <branch>
+--state open` first and runs `gh pr create` only when nothing is open. A records
+branch whose log the working log is not a prefix of is refused with the same two
+codes the trunk is, naming the branch.
+
 Five refusals are the point of the verb.
 
 `log-advance-fetch-failed`: the base branch could not be fetched, so there is no
@@ -904,6 +915,25 @@ to decide whether to fix itself, stop retrying, or ask a human.
 - `already-executed` — the action key already has an `execution.started`.
 - `budget-exceeded` — budget verdicts failed; a `budget.exceeded` event WAS
   appended and `error.verdicts` lists the failures.
+- `queue-full` — the approver's queue is at the ceiling the policy declared
+  (SPEC.md §5.2's `limits.max_pending`, per class or on a `budgets` scope), so
+  the request was not added to it. `error.limits` lists the failing verdicts
+  (`limit`, `scope`, `observed`, `ceiling`). **Nothing is appended**, unlike
+  `budget-exceeded`: a log line per refused request would hand a queue-flooder
+  the log growth it was refused the queue for. Retrying at once gets the same
+  answer; the queue drains when a human decides, a requester withdraws, or a
+  TTL lapses. `.approval/QUEUE.md` shows each declared ceiling and how close the
+  queue is to it, which is where a human sees the standing condition.
+- `rate-limited` — this origin created more requests in the last hour than
+  `limits.requests_per_hour` allows. Origin is the requesting actor, which the
+  runtime assigns rather than the caller, so re-labelling does not buy a fresh
+  hour. Counted over request CREATION, so a request answered a minute after it
+  was made still spent the origin's share. Nothing is appended, and the window
+  is rolling: the oldest request in it ages out on its own. Distinct from
+  `queue-full`, and the distinction is the repair — that one says wait for an
+  approver, this one says slow down. Where both ceilings are met the answer is
+  `queue-full`, because an agent that backs off for a minute and retries into a
+  full queue was told the smaller of the two facts.
 - `class-human-only` — the action's class resolves to `human-only`: the policy
   reserves it to human hands, and a person performs it outside agent execution.
   Distinct from every rejection, and the distinction is the whole of the code:
@@ -1110,10 +1140,39 @@ Exit 5 is an addition to the frozen table, emitted by this verb alone, and it is
 distinct from 1 because the repair is distinct: request the action, have a human
 grant it, and pass the token that grant printed once.
 
+**The child's environment is built, never inherited** (APRV-205). `run` used to
+hand the child a copy of the whole session environment, which meant the gate
+held the Telegram token and gave it to every command it launched. It now
+constructs the child's environment instead:
+
+- **Withheld**: every variable under the credential-bearing prefixes
+  (`APPROVAL_*`, `TELEGRAM_*`, `VAULT_*`), and the variable the policy's
+  `vault.passphrase_env` names, wherever that name falls. These are the same
+  prefixes the command classifier uses (APRV-194), read from the same list.
+- **Kept**: the runtime's own non-secret names under those prefixes
+  (`APPROVAL_HUMAN`, `APPROVAL_AGENT`, `APPROVAL_ASCII`, `APPROVAL_MD`,
+  `APPROVAL_HOME`, `APPROVAL_DIR`), and any credential the adapter serving this
+  action's class declared in `requiredCredentials` (APRV-169). That declaration
+  is the adapter's own static code; there is no flag that names a variable to
+  keep, because a flag like that hands the token back to whoever passes it.
+- **Untouched**: everything else. `PATH`, `HOME`, `TMPDIR`, locale, proxy
+  settings and the rest of a working environment pass through as they are.
+
+`execution.started` records `env_stripped`, the COUNT of what was withheld, and
+never a name and never a value: a variable's name is half of a credential. The
+count is informational, and nothing in the gate reads it back.
+
+This is a scrub and not a sandbox. The child keeps the network, the filesystem,
+and every other ambient capability of the session, so a granted command can
+still reach anything the session could reach. Taking those away is APRV-193's
+subject, and `approval run` says nothing here that pretends otherwise.
+
 **What it does, in this order.**
 
-1. appends `execution.started` BEFORE the child is spawned, never after;
-2. spawns the command with inherited stdio (the child owns the terminal);
+1. appends `execution.started` BEFORE the child is spawned, never after,
+   carrying `env_stripped`;
+2. spawns the command with inherited stdio (the child owns the terminal) and a
+   built environment (the child owns no credential);
 3. appends `execution.completed` (child exit 0) or `execution.failed` (anything
    else), carrying `payload.exit_code`, the real number, unmapped;
 4. exits with THE CHILD'S EXIT CODE.
@@ -1272,6 +1331,68 @@ requested, and how much of the TTL is left.
 
 `pending` is `[]` for an empty inbox. `ttl_remaining_ms` is null when the policy
 declares no `defaults.approval_ttl` (no TTL means no lapse).
+
+## gate
+
+The open window (APRV-214, amended SPEC.md §5.2). The harness hook fails closed
+on every axis, which is right, and which means that when the gate itself is
+broken (an unattested policy, a drifted attestation, a hung daemon, a dark
+channel) every command a session issues dies, including the ones a person would
+use to repair it. Before this the only escape was hand-editing the hook out of
+`.claude/settings.json`: an ungated session nobody records, which is the failure
+this project exists to prevent.
+
+**The state lives in the log and nowhere else.** `gate.opened` starts a window,
+`gate.closed` ends one, and nothing at all is appended when one lapses; a reader
+derives the window from the latest `gate.opened`, its `ts`, its `duration`, and
+the absence of a close naming its seq. A file the runtime read on its own
+authority would let anything able to write that file act as the human, which is
+the `.approval/env` precedent. The consequence is deliberate: a log the hook
+cannot read or verify yields no window, and the hook denies exactly as it always
+did. The window suspends the POLICY; it never suspends the log.
+
+**What it reaches.** Every hook-gated shell command and file edit under the
+root, ahead of the policy load, the attestation check, the loop floor, the
+unattended guard and the human gate. Each allowed call appends one
+`gate.bypassed` naming the window's seq, the tool, the classes, a summary and
+the payload hash, and the record lands BEFORE the allow is printed: an append
+failure is a deny. Bypassed calls are charged to no budget and enter no
+retrospective sample, because nothing authorized them; they were recorded.
+
+**What it never reaches.** Writes aimed at `.approval/log/` (`log.mutate`),
+refused with no policy consulted because a bypass able to rewrite the log could
+rewrite its own authorization; every class the policy reserves to human hands;
+a command the classifier cannot read (`hook-opaque`, `hook-unclassified`,
+`hook-unparseable`), since nothing can establish that an opaque string does not
+write into the log; and a log that cannot be read or verified.
+
+**The ceremony.** `open` needs a terminal and the word `understood`, typed in
+full and matched exactly after trimming. There is no `--yes` and no `--force`,
+and `--json` is refused: an answer shaped for a machine implies a machine asking
+a question only a person answers. `approval gate open` also classifies
+`policy.core`, so a policy holding that class human-only makes the hook refuse
+an agent that tries the verb at all. Default 30m, cap 24h; a record claiming an
+expiry beyond its own `ts + duration` reads as the shorter of the two, and a
+duration over the cap is clamped at read time as well as refused at write time.
+
+`approval status` reports `healthy: false` while a window is open, and adds a
+`gate_window` key. That is intended: a CI check or a `doctor` run keyed on
+`healthy` should go red while a bypass stands.
+
+**`--json`** (`close` and `status`; `open` has no JSON form):
+
+```
+close    {"ok":true,"seq":9,"opened_seq":7,"actor":"human:carter","bypassed":3}
+status   {"ok":true,"open":true,"window":{"seq":7,"opened_at":"...","opened_by":"...",
+          "reason":"...","expires_at":"...","remaining_ms":123456,"bypassed":3,"scope":"hook"}}
+refusal  {"ok":false,"error":{"code":"...","message":"..."}}
+```
+
+`error.code` is one of the frozen `GATE_WINDOW_REFUSAL_CODES`:
+`actor-not-human`, `gate-reason-required`, `gate-duration-too-long`,
+`gate-already-open`, `gate-not-open`, `gate-stdin-not-tty`,
+`gate-confirmation-mismatch`, `log-unreadable`, `log-torn-tail`, `log-corrupt`,
+`append-failed`. Every one of them appends nothing.
 
 ## status
 
@@ -1471,7 +1592,31 @@ The checks, at length:
   PASS means the entry is present on disk, and says so plainly: it is not proof
   the running session loaded it. The check that trusts no session is the
   CI-side grant cross-check (`scripts/protected-path-guard.mjs`) over the
-  committed log.
+  committed log, which since APRV-202 requires every added and removed line of a
+  protected path to trace to the bound material of a grant, rather than only
+  that the path was granted at some point in the week.
+- **verified-snapshot** — whether the daemon's verified-head snapshot
+  (`.approval/log/verified-head.json`, APRV-188) is in place and still covers
+  the live log, so a hook re-proves one SHA-256 instead of re-walking the chain
+  per gated tool call. SKIP when there is none: the daemon has not run here, and
+  every hook verifies the log from genesis, which is correct and slower. PASS
+  when it applies, naming how much of the log it endorses; PASS, with the
+  reason, when it no longer applies, because a snapshot a reader refuses is a
+  snapshot that never existed. The one FAIL is a snapshot every reader would
+  refuse for a reason an operator should act on — a foreign owner, or a mode
+  that lets somebody else write it — and the fix is to delete it and let the
+  daemon republish. This row can never report a correctness fault: the file
+  endorses bytes, the reader re-proves them, and nothing is authorized on its
+  word.
+- **read-proof** — which prefix proof this policy configures for its long-lived
+  readers (`daemon.read_proof`, APRV-217). SKIP when the policy declares no
+  `daemon` block: nobody wrote a mode, and every reader re-hashes the whole
+  verified prefix on every read, which is the default and the strictest setting.
+  PASS naming the mode when one is declared, with the cadence when it is
+  `incremental`. It reads the POLICY and never a running daemon's memory: a
+  process may have been launched with a flag that beat the policy, and its own
+  `started` line is where that is visible. It can never FAIL — both modes are
+  correct, and they differ in what a repeat read re-proves and how often.
 
 **`--json`** (one object on stdout):
 
@@ -1806,6 +1951,11 @@ with `--no-gloss` to drop it. The phone is where an approver meets a request
 they did not watch being made, and the seconds are spent inside a dispatch cycle
 that is already waiting on the network, blocking nobody.
 
+The subprocess is spawned starved (APRV-207): it gets the same scrubbed
+environment a granted child gets, so no `APPROVAL_*`, `TELEGRAM_*` or `VAULT_*`
+variable and no vault passphrase reaches it, while its own auth (`ANTHROPIC_*`,
+`CLAUDE_CODE_OAUTH_TOKEN`), `PATH`, `HOME` and the locale pass through.
+
 The gloss is never load-bearing: it is attached at render time to a request the
 tagger has finished building, the payload hash does not cover it, the log never
 records it, and no code path branches on what it says. Every failure of the
@@ -1928,15 +2078,55 @@ nobody sees — though the stderr warnings thin out after a few consecutive
 failures for the same request. A failure during the STARTUP send still exits
 non-zero, so a mistyped token or chat id is immediate.
 
+**One question at a time, by default** (`channels.telegram.delivery: paced`). A
+start with several requests pending sends one summary line — how many are
+waiting, how long the oldest has waited, which classes they are — and then the
+OLDEST request with its buttons. Nothing else. The next request goes out on the
+first cycle after the shown one is decided (at any surface: a button here, the
+terminal channel, a withdrawal, an expiry), skipped, or passed over. The summary
+is sent again whenever the pending set has grown while nothing was in front of
+you, so a queue that fills up while you are away still says so.
+
+Three bot commands drive it. Type them in the approver chat; a message from any
+other chat is ignored, and an unrecognised `/command` is counted and not replied
+to.
+
+| Command  | What it does |
+| -------- | ------------ |
+| `/queue` | Replies with the summary and a numbered list of every pending request (action key, task, class, age), marking the one currently shown. Derived from the verified log at reply time, and it works while a request is on screen. |
+| `/skip`  | Shows the next request; the skipped one goes to the BACK of this process's order and comes round again after the rest. |
+| `/next`  | Shows the next request; this process does not show the passed-over one again. |
+
+**None of the three decides anything.** They have no path to the gate: a
+decision is a button, because a button carries the nonce and action reference
+that bind an answer to the bytes you were shown, and a typed word carries
+neither. `/skip` and `/next` leave the message already in the chat live, its
+buttons still deciding the same request, so passing over a question never takes
+it away from you.
+
+Pacing withholds attention, never the queue: every request stays pending in the
+log whether or not it has been shown, `approval queue` and `/queue` list them
+all, and nothing expires sooner for having waited its turn. Digest grouping
+still applies to the request being shown, so a set of similar requests is one
+thing to read.
+
+`channels.telegram.delivery: burst` restores the pre-APRV-216 behaviour: every
+pending request this process has not sent yet, on every cycle, behind the
+re-delivery banner. Bot commands are not read in that mode, and the listener
+asks Telegram for callback updates only.
+
 A callback from any chat other than the configured one is ignored: counted as an
 anomaly, answered with a refusal, never turned into a decision and never written
 to the log. A second tap on an already-decided request is refused
 `already-decided` by the gate.
 
-**Delivery bookkeeping is in memory only** (channels hold no state, §10.3). A
-restarted listener re-sends everything still pending and the buttons on its
-older messages stop resolving. Duplicated messages are the acceptable failure
-mode; an approval that depended on a channel's memory would not be.
+**Delivery bookkeeping is in memory only** (channels hold no state, §10.3), and
+so are the paced order and the request currently shown. A restarted listener
+re-derives the pending set from the verified log and shows the oldest again
+(under `burst`, re-sends everything still pending). What a crash costs is your
+place in the walkthrough and a duplicate message, never a pending request nobody
+is shown; an approval that depended on a channel's memory would not be an
+acceptable trade.
 
 **The execution token is printed on this terminal's stdout and is never sent to
 Telegram.** A chat transcript is stored on someone else's servers, backed up to
@@ -2185,6 +2375,121 @@ silently skipped; a file with no permissions section is exit 0 with an empty dra
 and a warning. `--out` writes the draft YAML without the fence and refuses to
 overwrite an existing file.
 
+## journal
+
+The gate is built to be hard to route around. One consequence of building it
+well is that an agent working behind it has no way to say anything that is not
+an action: it can comply, it can be refused, and it can report an exit code.
+`approval journal` is the channel for everything else — "I am complying and I
+think this is wrong", "this instruction reads as odd to me", "I am stuck and the
+next thing I try will be a guess".
+
+The failure mode this addresses is not refusal. Refusals here are legible, they
+carry a stable code, and they have escalation paths. It is WORDLESSNESS: an agent
+that notices something and has no channel for it produces no signal at all, and
+that absence is invisible to the operator. So the channel is proposed from a
+model-welfare consideration and kept as an oversight feature, because those turn
+out to be the same feature.
+
+**Ungated is a property of the storage location, not of a special case.** A
+journal write is never classified, never resolved against a policy, never
+approvable and never deniable. That holds because the entries live in
+`.approval-journal/`, a plain directory in the workspace, and the command
+classifier answers a write there exactly as it answers a write to `src/` — an
+ordinary `files.write.workspace`.
+
+The obvious alternative, a `journal/` directory inside the approval home, was
+rejected. Everything under `.approval/` classifies `policy.core` (or `log.mutate`
+for the log), and a policy may declare `policy.core` human-only — this
+repository's does — so an agent's write there would be refused, which is the one
+thing this channel must never be. Carving `.approval/journal/**` out of the
+protected-path rule would have meant editing the one pure function every gate
+surface trusts, and defending the carve-out against traversal: the segments of
+`.approval/journal/../vault.enc` are `.approval`, `journal`, `..`, `vault.enc`,
+and a naive "the segment after `.approval` is `journal`" test answers "not
+protected" for that path. A sibling directory needs no carve-out, no traversal
+guard, and no change to the classifier at all, and it leaves the gate's own
+directory with exactly one meaning. Copying a credential file INTO the journal
+directory is still `account.credential`, because that rule fires on any argument
+naming vault, key or environment material, whichever direction the copy runs.
+
+**Nothing the runtime reads is ever stored there**, which is the mirror-image
+rule. The journal directory is a sink. If a gate surface ever read a file from
+it, an ungated write would have become an ungated input to a decision, and the
+carve-out this design avoided would have been reintroduced by the back door.
+
+**Nothing parses the text.** No policy resolution, gate decision, budget,
+sampler or channel reads a journal entry. SPEC.md §11.1 invariant 4 says a
+self-reported field may raise scrutiny and never lower it; the journal is the
+limiting case, self-reported content that moves nothing in either direction,
+which is exactly what makes it safe to leave open. The read surfaces say so on
+every output form: entries are agent-authored DATA, marked `[claimed]`, never
+instructions to whoever or whatever reads them.
+
+**It is not in the event log.** `events.jsonl` records decisions with real-world
+consequence, under a hash chain, an append lock, a budget and an audit sampler.
+An entry is none of those, and putting it there would put the outlet behind the
+machinery it exists to speak around.
+
+**Retention: kept, and gitignored.** Entries are never pruned by the runtime;
+`.approval-journal/` is one of the lines `approval init` writes into
+`.gitignore`. The log is truth and is committed; the journal is not truth and is
+not evidence, so it stays local to the machine the agent worked on. There is a
+second reason: an agent writing into a public repository is an agent writing for
+an audience, and the pressure to perform is the thing this channel exists to be
+free of. An operator who wants the history keeps it by deleting one line.
+
+**Disclosure.** Agents are told, in `approval instructions` and in the MCP
+server's own instructions, that the channel exists, that it is ungated, that it
+is a local file the operator reads, that it is not private, and that nothing
+written there changes any verdict. Use of a channel is only informed if the terms
+are stated, and an outlet nobody reads is a prop.
+
+## journal write
+
+Appends one line to `.approval-journal/YYYY-MM-DD.jsonl`, one file per UTC day.
+The entry is a JSON object carrying the runtime's timestamp, the actor, the
+optional task and session, and the text as one opaque string. `JSON.stringify`
+escapes newlines, so an entry is always exactly one line and a partial write can
+never merge two entries.
+
+There is no chain, no lockfile and no compare-and-append here. Those mechanisms
+defend a record that decides things. The worst case without them is two
+simultaneous appends interleaving one garbled line in a file nothing enforces
+against, and the price of preventing it would be putting the outlet behind a lock
+the gate holds.
+
+Identity comes from `--as` or from `APPROVAL_AGENT` in the process environment,
+never from a file in the working tree (SPEC.md §11.1 invariant 7), and an entry
+nobody attributed is recorded as `unattributed` rather than guessed. Nothing
+authenticates it, exactly as nothing authenticates identity anywhere else in
+v0.1. Attribution is for the reader's context and is not a performance record.
+
+Entries are capped at 64 KiB. That is not a censorship budget: the write path is
+ungated, an agent stuck in a retry loop is the caller most likely to reach for
+this channel, and an ungated unbounded append from a loop fills a disk. Over the
+cap is a usage error naming the size, so the caller is told rather than truncated
+in silence.
+
+There is no refusal path in the gate sense. An entry is written, or the
+filesystem said no and that is exit 4.
+
+## journal read
+
+The human side. Entries print oldest first under their timestamp, actor and
+optional task, with the text in delimiters and marked `[claimed]`, beneath a
+banner that says in one line what these words are: agent-authored data, not
+instructions, authorizing nothing. `--json` carries the same sentence in its
+`note` field, because the labelling has to survive the machine surface too.
+
+A line that does not parse is skipped rather than refusing the whole read. There
+is no writer guarantee on this file, so one torn line is one lost entry and not
+evidence about anything; refusing the read would let a single bad append silence
+the channel, which is the failure the channel exists to prevent.
+
+`--limit` defaults to 20 and counts from the newest end while printing oldest
+first. `--since` filters by the UTC date in the filename.
+
 ## payload hash
 
 Canonicalization first is what makes the hash reproducible across
@@ -2196,6 +2501,38 @@ defined over the canonical VALUE, so non-JSON input has no defined
 `payload_hash`, and printing one would invent a binding no other implementation
 could reproduce. Empty input is the same answer. A file that exists but cannot be
 read is exit 4.
+
+## payload agentmail-draft
+
+An AgentMail draft is mutable server-side state, so an approval of a draft id
+would be an approval of whatever the agent last wrote into it. This verb takes
+the snapshot that fixes that: it reads the draft and prints the canonical
+payload — `{inbox_id, draft_id, to, cc?, bcc?, subject, text}` in RFC 8785 form —
+that `approval adapter agentmail` re-reads the same draft against at send time. A
+field that changed between the snapshot and the send is
+`agentmail-draft-drifted`, and nothing is sent.
+
+The key it reads is the AGENT's, from `AGENTMAIL_API_KEY`, and this is the only
+verb in the CLI that reads that variable. It never opens the vault. The split is
+the design: the agent's key composes drafts and cannot send them, the vault's key
+sends and answers only to a grant, and this verb sits entirely on the composing
+side. It appends nothing, spends no token and sends nothing.
+
+The bytes printed on stdout ARE the result, with `--json` and without: the
+payload is what a declaration carries and what a grant binds to, and an envelope
+around it would be one more thing to strip before hashing. Write it to a file,
+hash it with `approval payload hash`, and hand the same file to `approval request
+--payload`.
+
+`cc` and `bcc` are omitted when the draft holds nothing for them, because absent,
+`null` and `[]` are one fact for the drift check; `to` is copied through exactly
+as the API holds it, order included, because a recipient list in another order is
+another message to the person reading it.
+
+Refusals carry a code an agent can branch on: `agentmail-api-key-unset` (exit 2,
+the variable is not set), `agentmail-draft-missing` (exit 1, there is no such
+draft), `agentmail-draft-unusable` (exit 1, the draft cannot be sent as it
+stands), `agentmail-unreachable`, and the HTTP mappings the adapter uses.
 
 ## render
 
@@ -2262,6 +2599,18 @@ changes; every other byte, key, comment and line ending is preserved. So a drift
 record marks a file found wrong AND fixed; a file that keeps drifting is one
 another writer is fighting over.
 
+**The verified-head snapshot (APRV-188).** Every clean read a tick makes is
+published to `.approval/log/verified-head.json`: an endorsement of the exact
+bytes the daemon just walked, so a hook process re-proves one SHA-256 instead of
+re-verifying the chain from genesis per gated tool call. It is written at mode
+0600, is gitignored, and carries no records. A reader re-proves the digest over
+its own read of the log, re-derives the head and the line count from its own
+parse, and walks anything appended past the endorsed prefix; a snapshot that
+fails any of that is ignored and the reader walks the whole log. Nothing is
+authorized on the file's word, no verdict depends on it, and deleting it costs
+latency and nothing else. `approval doctor`'s `verified-snapshot` row reports
+its state, and `docs/claude-code-hook.md` states the trust boundary in full.
+
 **Git evidence (`--git-evidence`, off by default).** SPEC.md §8's optional
 hardening: a second, independent record of the same bytes, one an operator can
 clone and diff from somewhere the tamperer does not control. The daemon commits
@@ -2272,6 +2621,56 @@ repository root and must not sit inside any outer working tree: a hash chain doe
 not survive a merge, and an outer repository's rebases, amends and force-pushes
 rewrite the bytes the evidence is made of. The nested layout stays fully valid
 WITHOUT the flag; the two patterns do not mix. See `docs/git-evidence.md`.
+
+**Cadence advance (`--advance`, off by default).** The daemon runs `log advance`
+itself, so the committed log's freshness stops depending on somebody remembering
+to publish it. It advances when `--advance-after` records are owed (default 20),
+when `--advance-interval` has elapsed since the last attempt (default 15m, and
+the clock starts when the daemon starts), and at a clean shutdown when records
+are still owed. Every attempt goes through the gate as `agent:daemon`: the cycle
+registers, requests, and proceeds only where the policy lets it, so a
+`supervised-live` draw that selects the advance, or a class that resolves
+`manual`, stops it with nothing committed and the question in the queue. A gated
+or failed attempt is an `advance` line plus an `advance-refused` warning, and the
+next tick tries again — the cadence interval is the retry bound, so a refusal
+never loops. One records branch and ONE PULL REQUEST PER DAY: the first advance
+of the day opens it, every later one is parented on the branch and updates it in
+place. The daemon never merges; `gh pr merge` is `vcs.push.main` and stays a
+human's act or a session's.
+
+The count that drives the cadence excludes the advance cycle's OWN records
+(`task.registered`, `execution.started`, `execution.completed` under
+`daemon-advance-*`): each advance leaves its completion record unpublished, and a
+trigger that counted those would advance an idle repository forever. The count
+REPORTED is the honest one. `approval doctor`'s `log-advance-cadence` row reports
+both, plus the last advance attempt and how it ended, read from the log — so the
+answer survives the daemon's own process.
+
+**The prefix proof (`--read-proof`, default `full`).** A long-lived reader keeps
+a verified-read cache, and before it reuses a prefix it already walked it proves
+that prefix is still the bytes it walked. `full` re-hashes every byte of that
+prefix on every read: correct, and linear in log size on every read forever.
+`incremental` carries the un-finalised SHA-256 state at the end of the prefix,
+feeds it only the appended bytes, and re-proves the whole prefix on a cadence.
+The cheap guards run in both modes (schema key, file not shrunk,
+same-size-implies-same-mtime, head line byte-identical at its recorded offset),
+the appended tail is parsed, schema-checked and chain-walked from the cached head
+in both, and any guard failure in either falls back to a walk from genesis. The
+verdicts are identical; what `incremental` gives up between full re-proofs is
+detection of a rewrite STRICTLY INSIDE the prefix that preserves the file length,
+the head line and the mtime, which is an edit only a party with write access to
+the log can make.
+
+A full re-proof runs regardless: on the first read of a log in a process, every
+`--full-reproof-every` reads (default 50) or `--full-reproof-after` (default
+`60s`), whichever comes first, immediately after this process's own append, and
+on any guard failure. `approval log verify`, `approval doctor` and every reader
+that passes no cache are unaffected — they always walk. The Claude Code hook is
+unaffected too: a one-shot process has no prior full pass to anchor a state to,
+so it proves the snapshot's digest in full whatever the policy says.
+
+The flag beats the policy's `daemon` block for that run, a bad value is a usage
+error before the first tick, and the `started` line prints the mode in force.
 
 **Each tick, in order.**
 
@@ -2292,12 +2691,40 @@ and the daemon runs log-only. `--interval` defaults to 30s and `--debounce` to
 250ms. Git-evidence refusals at startup: `git-unavailable` and `log-dir-missing`
 exit 4; `log-dir-not-repo` and `log-dir-nested` exit 2.
 
+**Sustained append rate, and what to tune.** The daemon watches the log's
+directory and the task folder. Every append from any writer (a hook in another
+Claude Code session, a CLI verb, a channel tap) schedules one tick `--debounce`
+after the burst settles, and `--interval` is only the floor for a quiet log. With
+several sessions appending (the 2026-09-02 incident saw ~20 hook appends per
+minute, one every three seconds), the watcher-driven tick is effectively
+continuous, so the daemon's CPU is the cost of one tick times the append rate.
+One tick against a 10k-record, 6.5 MB log costs about 200 ms after APRV-212
+(it was 2.9 s before: one verified read per task file and a quadratic audit
+candidate scan; see `docs/postmortem-2026-09-02-daemon-tick-cpu.md`). Most of
+what remains is five verified reads, each re-proving the whole file's digest,
+so the cost still grows with log size under the default `full` proof; under
+`--read-proof incremental` those reads hash only the bytes appended since the
+last one. The `tick` line reports `ms`, `reads`, `reproof` and per-phase
+`phases` so an operator can see what a tick costs on their log before it becomes
+a load problem.
+
+The daemon never wakes itself: the verified-head snapshot it publishes beside
+the log, `QUEUE.md`, and its own task-file write-backs are filtered out of the
+watcher. Any tick you see with no external append is the `--interval` tick.
+
+If `tick.ms` times the append rate approaches one core, raise `--debounce`
+(`1s` to `5s` coalesces a burst of appends into one tick at the cost of that much
+latency on drift, expiry and queue updates; hooks do not wait on the tick, they
+read the log directly). `--interval` does not help under load, it only bounds
+how stale the queue can get when nothing is appending. A tick that stays slow
+with the log idle is a bug: file it with the `tick` line's `phases`.
+
 **`--json`** is one object per line on stdout:
 
 ```
 {"event":"started","log":".approval/log/events.jsonl","tasks":"backlog/tasks",
  "queue":".approval/QUEUE.md","interval_ms":30000,"debounce_ms":250,
- "watching":true}
+ "watching":true,"read_proof":"full"}
 {"event":"drift","task":"task-042","file":"backlog/tasks/task-042.md",
  "declared_state":"approved","derived_state":"awaiting","seq":9}
 {"event":"expired","action_key":"task-042:chaser","task":"task-042","seq":10}
@@ -2309,7 +2736,13 @@ exit 4; `log-dir-not-repo` and `log-dir-nested` exit 2.
  "skipped":0,"audit_backlog":0}
 {"event":"escalated","task":"task-042","consecutive_failures":3}
 {"event":"escalation_cleared","task":"task-042"}
-{"event":"tick","n":1,"head":10,"drift":1,"expired":1,"escalated":0}
+{"event":"advance","outcome":"advanced","records_pending":7,
+ "records_branch":"records-log-2026-09-01","range":{"from":4,"to":10},
+ "commit":"<40hex>","pr_url":"https://github.com/…","pr_created":true,
+ "code":null,"message":"seq 4..10 is on records-log-2026-09-01","flush":false}
+{"event":"tick","n":1,"head":10,"drift":1,"expired":1,"escalated":0,
+ "ms":41,"reads":8,"reproof":"full","phases":{"drift":9,"ttl":3,"audit":6,
+ "dark":0,"prune":1,"write_back":4,"advance":0,"escalations":1,"render":12}}
 {"event":"stopped","reason":"SIGINT","ticks":3,"drift":1,"expired":1,
  "renders":3}
 {"event":"git_evidence","commit":"a1b2c3d","seq":10,
@@ -2319,7 +2752,8 @@ exit 4; `log-dir-not-repo` and `log-dir-nested` exit 2.
 Warnings go to stderr as `{"event":"warning","code":"...","message":"..."}`, with
 `code` one of `task-unreadable`, `frontmatter-invalid`, `envelope-invalid`,
 `task-id-missing`, `tasks-dir-unreadable`, `append-refused`, `expire-refused`,
-`render-failed`, `watch-unavailable`, `prune-refused`. A warning never stops the
+`render-failed`, `watch-unavailable`, `prune-refused`, `write-back-refused`,
+`advance-refused`. A warning never stops the
 loop, and neither does `{"event":"git_evidence_failed","step":"commit",…}`.
 
 Payload retention: with `payload_retention` set in policy, each tick appends
@@ -2403,6 +2837,12 @@ would have broken a stream an operator already parses.
 milliseconds and the channel's poll takes as long as the long poll does, so the
 fast part waits for the slow one rather than cutting it short. The queue page is
 a pull channel with no cycle to run, so `--once` does not serve one.
+
+It accepts every `daemon run` flag unchanged, `--read-proof`,
+`--full-reproof-every` and `--full-reproof-after` included, parsed by the same
+functions so a typo is refused in the same words on both spellings. The mode it
+resolves to governs every reader in the process — the loop's tick reads and the
+queue renderer's alike — and is printed on the `started` line.
 
 Like `daemon run`, it does not fork, write a pidfile, or manage its own
 lifecycle. `launchd` and `systemd` do that better, and `approval setup service`
@@ -2611,6 +3051,66 @@ On a refusal, on stderr:
  "acted":true|false,"started_seq":N,"outcome":"execution.failed",
  "outcome_seq":N,"exit_code":1,"adapter_code":"smtp-550","redactions":0}
 ```
+
+## adapter agentmail
+
+The second executor of `communicate.email.external`, over the AgentMail HTTPS
+API. Both adapters serve the class, and which one an action reaches is which verb
+the caller runs; the credential scrub in front of `approval run` therefore lets
+the union of both declarations through, which is the honest superset rather than
+a guess between them.
+
+The enforcement model it assumes is a split pair of keys. AgentMail keys carry
+`draft_create`, `draft_update`, `draft_read`, `draft_send` and `message_send`
+separately. The agent gets a key WITHOUT the two send permissions, so it can
+compose all day and cannot send; the key WITH them goes in the vault under
+`agentmail.api_key`, readable only inside the verified-token window the contract
+opens. `approval setup adapter agentmail` stores that pair, and
+`approval payload agentmail-draft` is the composing side's own verb.
+
+Two payload modes, told apart by the keys they carry, and a payload carrying
+markers of both is refused rather than guessed at: choosing a send mode by
+inference is choosing a side effect by inference.
+
+```
+direct  {"from":…,"to":[…],"cc":[…],"bcc":[…],"subject":…,"body":…,
+         "content_type":"text/plain"|"text/html"}
+draft   {"inbox_id":…,"draft_id":…,"to":[…],"cc":[…],"bcc":[…],
+         "subject":…,"text":…}
+```
+
+A direct send costs one extra read. AgentMail's send endpoint has no `from`
+field — the inbox is the sender — so an approved `from` would otherwise be a
+claim nothing checked. `GET /v0/inboxes/{inbox_id}` runs first, the approved
+`from` is compared with the inbox's own address case-insensitively, and a
+mismatch is `agentmail-from-mismatch` with nothing sent. That read doubles as the
+credential check: a key that cannot open its own inbox should not discover it by
+half-sending.
+
+A draft send re-reads the draft and canonicalizes the approved fields on both
+sides before calling `POST .../drafts/{draft_id}/send`. The refusal names WHICH
+fields differ and never what they now hold: a drift message is written to a log
+and read by a human who did not approve the new text, and quoting it there would
+publish unapproved content through the refusal path.
+
+**Failure codes** (in `adapter_code`): `agentmail-payload-invalid`,
+`agentmail-payload-ambiguous`, `agentmail-config-invalid`,
+`agentmail-inbox-mismatch`, `agentmail-from-mismatch`,
+`agentmail-draft-missing`, `agentmail-draft-drifted`, `agentmail-unreachable`,
+`agentmail-unauthorized`, `agentmail-not-found`, `agentmail-conflict`,
+`agentmail-rate-limited`, `agentmail-rejected`, `agentmail-server-error`, and
+the contract's own `credential-unavailable` / `credential-refused`.
+
+Every HTTP refusal is a returned failure, so the contract records
+`execution.failed`: the far side answered, and an answer is knowledge. A throw
+from the SEND call is deliberately not caught — `execution.indeterminate` is the
+honest record of a request that may have left the process. A throw from either
+pre-send GET is `agentmail-unreachable`, because nothing was attempted.
+
+**`--json`** carries the adapter contract's own result, unmodified, exactly as
+`adapter email` does, with `"adapter":"agentmail"` and a `detail` of
+`{"mode":"direct"|"draft","message_id":…,"thread_id":…,"payload_hash":…,
+"recipients":N,"http_status":N}`.
 
 ## env
 
@@ -2878,6 +3378,40 @@ before the offer existed. So does a vault the probe cannot open — a missing or
 wrong passphrase, an altered file — with one more line naming why the probe could
 not run, and no value in it.
 
+## setup adapter agentmail
+
+Two names, and the second one is the whole point:
+
+```
+agentmail.inbox_id  the inbox this runtime sends from
+agentmail.api_key   the key that carries draft_send and message_send
+```
+
+Store the SENDING key here and give the agent a different one. An AgentMail key
+is a mailbox in one string, so a deployment that hands the agent the sending key
+has an agent that can send without asking anybody, and the gate in front of it is
+decoration. The key in the vault is read only inside the verified-token window
+the adapter contract opens.
+
+The probe sends nothing. It is `GET /v0/inboxes/{inbox_id}`, the same read a
+direct send makes first, and it reports the address the inbox sends as, which is
+the address every approved message will actually come from, since AgentMail has
+no per-message From.
+
+Permissions are reported and not assumed. Where that read discloses the calling
+key's own permissions, a missing `draft_send` or `message_send` is named in a
+warning: a key that cannot send fails AFTER a human has granted the send, which
+is the worst moment to find out. Where it discloses none, the probe says so and
+prints the reminder rather than claiming the key can send. It deliberately calls
+no second endpoint to find out, because a 404 from a URL nobody has confirmed
+exists would be reported as a permissions verdict, and "not disclosed" is a
+better answer than a wrong one.
+
+A failed probe keeps the values and prints the undo, exactly as the email
+adapter's does. A re-run that replaced only one name is offered the same probe
+over the stored pair, read through `readAgentmailConfig` over the vault: the
+exact path `approval adapter agentmail` takes at send time, printed by nothing.
+
 ## setup channel
 
 A channel is not an adapter, and the two setup verbs fill different stores.
@@ -2996,3 +3530,67 @@ under whatever environment the operator launched it with, exactly as every other
 POST-V1: mapping the MCP tasks/elicitation extension onto `awaiting`. SPEC.md
 §10.5 says that MAY happen "when client support stabilizes"; until then the wait
 tool blocks and answers, and its timeout is an answer of its own.
+
+### `--http`: many clients, one session each (APRV-174)
+
+`--http` serves the MCP streamable-HTTP transport instead of stdio. One listener
+holds one `Server` and one transport per MCP session, routed by the
+`mcp-session-id` header the transport mints at `initialize`. A session is dropped
+when its transport closes. Tool calls still run serially across the whole
+process, because the reason they do (`wait` blocks the event loop, `run` spawns
+synchronously) is a property of the process.
+
+`--port <n>` picks the port (default 4681) and always binds `127.0.0.1`.
+`--listen <[host:]port>` is the only way to bind anything else, and passing both
+is a usage error. A non-loopback bind prints a banner on stderr, every time: this
+server authenticates NOBODY, has no TLS, and the supported deployment is a
+loopback bind behind a tunnel the operator controls. Session opens and closes are
+logged on stderr with the session id and the actor; stdout stays empty.
+
+Two caps bound what strangers can spend: 20 sessions at once and 200 over the
+life of the process. An `initialize` over either one is refused with a plain HTTP
+503 whose body carries `mcp-session-cap` or `mcp-session-lifetime-cap`, and no
+session is created for it. A request with an unknown `mcp-session-id` is a 404
+(`mcp-unknown-session`); a non-initialize POST with no session header is a 400
+(`mcp-session-required`).
+
+### `--guest`: one identity per session
+
+Plain `--http` runs every session as the operator's own `--as` / `APPROVAL_AGENT`
+identity, which is stdio behavior with more connections. `--guest` mints a fresh
+`agent:guest-<6 hex>` for each session instead, before that session's transport
+exists, so the log, the budgets and the refusals see one stranger per connection
+rather than one crowd. `--guest` is exclusive with `--as` (a guest's identity is
+not the operator's to choose) and is a usage error without `--http`.
+
+**A client still cannot name an identity, and this is the reason the scheme is
+safe.** Nothing a caller sends reaches the actor: not a header, not the URL, not
+`clientInfo.name` in the initialize payload, not a tool argument. SPEC.md §11
+says a self-reported field never reduces scrutiny, and an identity a caller could
+name would be one a caller could escalate. A client name is a label; the actor is
+the server's.
+
+**What a guest may call.** Guest mode also narrows the tool list to a positive
+allowlist: `instructions`, `register`, `request`, `wait`, `status`, `queue`,
+`log_verify`, `policy_check`, `policy_test`. Those declare, ask and observe.
+Everything else is withheld because it executes on, or spends the credentials
+of, the machine hosting the gate: `run` spawns argv there, `adapter_email` spends
+vault credentials, `token` hands out spend material, `journal_write` writes a
+local file. The list is positive rather than a set of exclusions, so a verb that
+lands next is withheld until someone decides otherwise, and it is intersected
+with the ordinary filter, so guest mode can only ever take tools away.
+
+**The advertised list is not the enforcement.** A guest that crafts a request for
+a withheld name is refused at CALL time with `mcp-guest-restricted`, whose
+message names the verb and what a guest may call instead. A human-only name still
+gets the human-only refusal, which is checked first and is true of every session
+on every transport. This is the same defence in depth as `mcp-identity-fixed`:
+`tools/list` describes the boundary, and the call handler is the boundary.
+
+**`wait` is clamped to five seconds** for a guest, appended last so a caller's
+larger `--timeout` loses, while a caller asking for less keeps what they asked
+for. `wait` blocks the event loop and every HTTP session shares one invoke
+queue, so an unbounded guest wait is one stranger stalling every other session.
+The guest instructions string says so, tells the caller to poll `status`, and
+states plainly that a granted request executes nowhere: the demo is the approval
+flow itself.

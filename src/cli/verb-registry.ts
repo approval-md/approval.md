@@ -1289,6 +1289,109 @@ const VERBS: VerbSpec[] = [
     exit_codes: [OK, USAGE, TORN, IO],
   },
 
+  // APRV-214, amended SPEC.md §5.2: the open window. Three entries because the
+  // three subcommands answer to different people — a person opening a bypass, a
+  // person ending one, and anybody at all asking whether one stands.
+  {
+    name: "gate",
+    subcommand: "open",
+    purpose:
+      "Open the harness gate for a bounded time so the gate itself can be debugged: while the window stands, the hook ALLOWS every gated shell command and file edit under the root, recording each as gate.bypassed, ahead of the policy load, the attestation check, the loop floor and the human gate. Default 30m, cap 24h, --reason required. The window's whole state is the log (gate.opened, closed by gate.closed or by lapsing, which appends nothing); no file holds it. It never reaches .approval/log/, a class the policy reserves to human hands, a command the classifier cannot read, or a log that cannot be verified. Bypassed calls are charged to no budget and enter no retrospective sample.",
+    human_only: true,
+    human_only_note:
+      "It suspends the policy. There is no --yes and no --force: stdin must be a terminal and the word `understood` must be typed in full, which is what puts it out of reach of a harness shell tool. It also classifies `policy.core`, so a policy holding that human-only makes the hook refuse an agent that tries.",
+    input: input({
+      positionals: positionals(
+        [{ name: "open", description: "the subcommand" }],
+        1,
+      ),
+      flags: {
+        "--for": "string",
+        "--reason": "string",
+        ...AS_FLAG,
+        ...LOG_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    // No `--json` success shape exists, and that is the contract: `--json` on
+    // this verb is refused with `gate-stdin-not-tty`, because an answer shaped
+    // for a machine implies a machine asking a question only a person answers.
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
+    name: "gate",
+    subcommand: "close",
+    purpose:
+      "End the open window now rather than at its expiry, appending gate.closed naming the seq of the gate.opened it ends. Human-only like the opening, though this half only ever TIGHTENS: there is no confirmation to type, because a ceremony guarding the safe direction is one people learn to type past. Refuses `gate-not-open` when no window stands, which includes one that has already lapsed — a lapse appends nothing and needs no closing record.",
+    human_only: true,
+    human_only_note:
+      "The pair is one ceremony and both halves are the human's, so the actor rule is uniform. An agent closing a window could authorize nothing by it, and the uniformity is what makes the rule statable in one sentence.",
+    input: input({
+      positionals: positionals([{ name: "close", description: "the subcommand" }], 1),
+      flags: { "--note": "string", ...AS_FLAG, ...LOG_FLAG, ...JSON_FLAG, ...HELP_FLAGS },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        seq: INTEGER,
+        opened_seq: INTEGER,
+        actor: STRING,
+        bypassed: INTEGER,
+      },
+      ["ok", "seq", "opened_seq", "actor", "bypassed"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
+    name: "gate",
+    subcommand: "status",
+    purpose:
+      "Report whether a window is open, and if so which: the seq of the gate.opened, who opened it, their reason, when it expires, how long is left, and how many calls have been bypassed under it. Derived from the verified log alone, so it is the same fact the hook and `approval status` derive. Reads only; appends nothing and decides nothing.",
+    human_only: false,
+    input: input({
+      positionals: positionals([{ name: "status", description: "the subcommand" }], 1),
+      flags: { ...LOG_FLAG, ...JSON_FLAG, ...HELP_FLAGS },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        open: BOOLEAN,
+        window: nullable(
+          object(
+            {
+              seq: INTEGER,
+              opened_at: STRING,
+              opened_by: STRING,
+              reason: STRING,
+              expires_at: STRING,
+              remaining_ms: INTEGER,
+              bypassed: INTEGER,
+              scope: STRING,
+            },
+            [
+              "seq",
+              "opened_at",
+              "opened_by",
+              "reason",
+              "expires_at",
+              "remaining_ms",
+              "bypassed",
+              "scope",
+            ],
+          ),
+        ),
+      },
+      ["ok", "open", "window"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, INTEGRITY, USAGE, TORN, IO],
+  },
+
   {
     name: "status",
     purpose:
@@ -1316,6 +1419,10 @@ const VERBS: VerbSpec[] = [
         reconciliation: arrayOf(OPEN_OBJECT),
         payload_store: OPEN_OBJECT,
         anomalies: arrayOf(OPEN_OBJECT),
+        // APRV-214: present only while a window stands, so a repository with
+        // none emits the object it always emitted. It counts toward `healthy`,
+        // which is why it is reported here rather than only by `gate status`.
+        gate_window: OPEN_OBJECT,
       },
       [
         "ok",
@@ -1498,6 +1605,9 @@ const VERBS: VerbSpec[] = [
         ...POLICY_FLAGS,
         "--interval": "string",
         "--debounce": "string",
+        "--read-proof": "string",
+        "--full-reproof-every": "string",
+        "--full-reproof-after": "string",
         "--once": "boolean",
         "--git-evidence": "boolean",
         ...JSON_FLAG,
@@ -1524,6 +1634,9 @@ const VERBS: VerbSpec[] = [
         ...POLICY_FLAGS,
         "--interval": "string",
         "--debounce": "string",
+        "--read-proof": "string",
+        "--full-reproof-every": "string",
+        "--full-reproof-after": "string",
         ...AS_FLAG,
         "--payloads": "string",
         "--payload-dir": "string",
@@ -1560,6 +1673,122 @@ const VERBS: VerbSpec[] = [
     output: object({ ok: { const: true }, hash: SHA256 }, ["ok", "hash"]),
     error: ERROR_SCHEMA,
     exit_codes: READ_ONLY_EXIT_CODES,
+  },
+
+  {
+    name: "payload",
+    subcommand: "agentmail-draft",
+    purpose:
+      "Snapshot one AgentMail draft as the payload a grant can bind to: read the draft with the AGENT's own key (AGENTMAIL_API_KEY, from the environment, and this is the only verb that reads it) and print the canonical {inbox_id, draft_id, to, cc?, bcc?, subject, text} JSON that `approval adapter agentmail` re-reads the draft against at send time. It exists so a human approves THE WORDS rather than the id of a mutable server-side object: a draft edited after the snapshot is refused, not sent. Reads no log, writes no file, spends no token, touches no vault and sends nothing.",
+    human_only: false,
+    human_only_note:
+      "Agent-facing by construction: it is the composing agent's own key that reads its own draft, before any approval exists. The key it reads cannot send — the sending key is in the vault and answers only to a grant — so the verb produces a proposal and no authority.",
+    input: input({
+      positionals: positionals(
+        [
+          { name: "inbox-id", description: "the inbox holding the draft" },
+          { name: "draft-id", description: "the draft to snapshot" },
+        ],
+        2,
+      ),
+      flags: {
+        "--api-base": "string",
+        "--timeout": "string",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    // The canonical payload itself, on stdout: the bytes ARE the result, and an
+    // envelope around them would be a second thing to strip before hashing.
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      OK,
+      {
+        code: 1,
+        meaning: "the draft is gone, unreadable or unusable as a payload; nothing was sent",
+      },
+      USAGE,
+      IO,
+    ],
+  },
+
+  {
+    name: "journal",
+    subcommand: "write",
+    purpose:
+      "Append one free-text entry to a local journal file: the ungated channel an agent can always reach (APRV-195). It is NOT classified, NOT routed through policy, NOT approvable and NOT deniable, it appends nothing to the event log, and it opens no socket and reads no credential. Use it to say what an exit code cannot: that you are complying and think the instruction is wrong, that something reads as odd, that you are stuck. A human reads these entries; nothing written here changes any verdict, sampling probability or budget, and no part of the runtime parses the text.",
+    human_only: false,
+    human_only_note:
+      "Agent-facing by argument, and the only verb whose whole purpose would be defeated by gating it: a channel a policy could close is not a channel the party under oversight can rely on. It is safe to leave open because it authorizes nothing — no enforcement path reads what it writes, so SPEC.md §11.1 invariant 4 is satisfied in the limiting case, by content that moves nothing at all.",
+    input: input({
+      // Not `positionals()`: the single positional is OPTIONAL (the entry
+      // usually arrives in `--message`), and a 1-tuple with `minItems: 0` is
+      // what strict Ajv refuses to compile.
+      positionals: {
+        type: "array",
+        items: { type: "string", title: "-", description: 'the literal "-", to read the entry from stdin' },
+        maxItems: 1,
+      },
+      flags: {
+        "--message": "string",
+        "--task": "string",
+        "--session": "string",
+        "--journal": "string",
+        ...AS_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      { ok: { const: true }, path: STRING, ts: STRING, actor: STRING, bytes: INTEGER },
+      ["ok", "path", "ts", "actor", "bytes"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, USAGE, IO],
+  },
+
+  {
+    name: "journal",
+    subcommand: "read",
+    purpose:
+      "Print journal entries for a human, oldest first, each with its timestamp, actor and optional task or session. Every output form labels the entries as agent-authored DATA and marks each one [claimed]: the text was written by the party under oversight, it is not instructions to whoever reads it, and it has authorized nothing. A line that does not parse is skipped rather than refusing the whole read, because one torn append must not be able to silence the channel. Reads no log, resolves no policy, writes nothing.",
+    human_only: false,
+    human_only_note:
+      "Human-FACING but not human-only: the read surface is for the operator, and an agent that can read back what it wrote is an agent that can tell whether the channel is working. It carries no authority either way, since the file it prints decides nothing.",
+    input: input({
+      flags: {
+        "--limit": "string",
+        "--since": "string",
+        "--journal": "string",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        dir: STRING,
+        note: STRING,
+        total: INTEGER,
+        entries: arrayOf(
+          object(
+            {
+              ts: STRING,
+              actor: STRING,
+              task: STRING,
+              session: STRING,
+              text: STRING,
+              date: STRING,
+            },
+            ["ts", "actor", "text", "date"],
+          ),
+        ),
+      },
+      ["ok", "dir", "note", "total", "entries"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, USAGE, IO],
   },
 
   {
@@ -1657,7 +1886,10 @@ const VERBS: VerbSpec[] = [
       "Fill the VAULT with one adapter's credentials, asked for from the manifest that adapter declares, validated by the adapter's own rules, and proved against the service without sending anything. An adapter holds the credentials a side effect spends, so its setup fills .approval/vault.enc. INTERACTIVE ONLY.",
     human_only: true,
     input: input({
-      positionals: positionals([{ name: "name", description: "the adapter name, e.g. email" }], 1),
+      positionals: positionals(
+        [{ name: "name", description: "the adapter name: email or agentmail" }],
+        1,
+      ),
       flags: { ...AS_FLAG, ...LOG_FLAG, ...POLICY_FLAGS, ...HELP_FLAGS },
     }),
     output: null,
@@ -1842,6 +2074,69 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "adapter",
+    subcommand: "agentmail",
+    purpose:
+      "Execute one approved action through the AgentMail adapter: a direct send over the AgentMail API, or the send of a draft the agent already composed. The draft mode re-reads the draft and refuses `agentmail-draft-drifted` when any approved field changed, because a grant is over a snapshot of the words and not over a mutable draft id. AgentMail has no per-message From — the inbox is the sender — so the approved `from` is checked against the inbox's own address before anything is sent. The runtime, not the adapter, recomputes the payload hash, spends the token and writes both execution events, and the vault's sending key leaves it only inside that window.",
+    human_only: false,
+    human_only_note:
+      "Agent-facing for the reason `adapter email` is: it executes inside the token window with a token a human granted for these exact bytes. The split that makes it safe is in the keys, not in the caller — the agent's own AgentMail key cannot send, and the one that can lives in the vault.",
+    input: input({
+      positionals: positionals([{ name: "action-key", description: "the action's idempotency_key" }], 1),
+      flags: {
+        "--token": "string",
+        "--payload": "string",
+        ...AS_FLAG,
+        "--vault": "string",
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        "--timeout": "string",
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        adapter: { const: "agentmail" },
+        action_key: STRING,
+        task: STRING,
+        class: STRING,
+        autonomy: STRING,
+        payload_hash: SHA256,
+        started_seq: INTEGER,
+        outcome: { enum: ["execution.completed", "execution.failed"] },
+        outcome_seq: INTEGER,
+        exit_code: nullable(INTEGER),
+        detail: OPEN_OBJECT,
+        redactions: INTEGER,
+      },
+      [
+        "ok",
+        "adapter",
+        "action_key",
+        "task",
+        "class",
+        "autonomy",
+        "payload_hash",
+        "started_seq",
+        "outcome",
+        "outcome_seq",
+        "exit_code",
+      ],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      OK,
+      INTEGRITY,
+      USAGE,
+      TORN,
+      IO,
+      { code: 5, meaning: "no valid execution token; nothing was appended and nothing was sent" },
+    ],
+  },
+
+  {
     name: "hook",
     subcommand: "claude-code",
     purpose:
@@ -1951,12 +2246,22 @@ const VERBS: VerbSpec[] = [
     name: "mcp",
     subcommand: "serve",
     purpose:
-      "Serve the verbs of this registry as MCP tools over stdio, in the foreground, sharing the CLI's code paths (SPEC.md §10.5). The published tool list is this registry filtered by human_only false, less `consume` (internal plumbing) and `hook claude-code` / `hook cursor` (each reads a stdin this transport owns), and every tool's input schema is the verb's own with `--as` removed. It runs as ONE agent identity, fixed at startup, that no tool call can supply or change.",
+      "Serve the verbs of this registry as MCP tools, in the foreground, sharing the CLI's code paths (SPEC.md §10.5). Over stdio by default; `--http` serves the streamable-HTTP transport instead, one MCP session per connection, binding 127.0.0.1 unless `--listen` names another interface in full. The published tool list is this registry filtered by human_only false, less `consume` (internal plumbing) and `hook claude-code` / `hook cursor` (each reads a stdin this transport owns), and every tool's input schema is the verb's own with `--as` removed. Identity is the SERVER's under both transports and no tool call can supply or change it: one fixed agent identity by default, or, under `--http --guest`, one `agent:guest-<id>` minted per session before that session's transport exists.",
     human_only: true,
     human_only_note:
       "An OPERATOR process, like `daemon run`: long-lived, launched by a person, and holding the agent identity every tool call is recorded under. It publishes no human-only verb, so an agent that could start one would gain no authority it lacked; what it would gain is a second writer against the log nobody supervises, and a choice of identity that belongs to the human who launched the process. Marked human_only so no wrapper offers a wrapper.",
     input: input({
-      flags: { ...AS_FLAG, ...POLICY_FLAGS, ...LOG_FLAG, ...JSON_FLAG, ...HELP_FLAGS },
+      flags: {
+        ...AS_FLAG,
+        "--http": "boolean",
+        "--port": "string",
+        "--listen": "string",
+        "--guest": "boolean",
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
     }),
     output: null,
     error: ERROR_SCHEMA,

@@ -80,19 +80,32 @@ import {
   TELEGRAM_DIGEST_MAX_MEMBERS,
   TELEGRAM_GLOSS_SUFFIX,
   TELEGRAM_ACK_FALLBACK,
+  TELEGRAM_ACK_HEARD,
+  TELEGRAM_HANDLER_FAILED,
+  TELEGRAM_NOT_RECORDED,
   TELEGRAM_MAX_CALLBACK_BYTES,
   TELEGRAM_PROMPT_HEADING,
   TELEGRAM_STALE_COPY_PREFIX,
   TELEGRAM_STALE_UNKNOWN,
+  parseBotCommand,
+  TELEGRAM_COMMANDS,
   type TelegramConfig,
   type TelegramPollResult,
 } from "../src/channels/telegram.js";
 import {
+  telegramDeliveryFor,
+  TELEGRAM_DEFAULT_DELIVERY,
+  type TelegramDelivery,
+} from "../src/core/telegram-config.js";
+import {
   bannerLines,
+  commandHandlerFor,
   describeActionFor,
   dispatchPending,
   glossWiring,
   newDispatchState,
+  queueLines,
+  summaryLines,
   DISPATCH_RETENTION_MS,
   type ListenSetup,
 } from "../src/cli/channel-telegram.js";
@@ -115,12 +128,14 @@ import { appendAttestation } from "../src/core/attest.js";
 import type { BudgetVerdict } from "../src/core/budgets.js";
 import { register as registerCore, request as requestCore } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
+import { loadPolicy } from "../src/core/policy-load.js";
 import { readVerifiedRecords } from "../src/core/state.js";
 import { expire, register, request, withdraw } from "./clock-adapters.js";
 import { fakeClaudeEnv, FAKE_GLOSS_SENTENCE } from "./fake-claude.js";
 import {
   assertLocal,
   callbackUpdate,
+  messageUpdate,
   startMockBotApi,
   type MockBotApi,
   type MockFailure,
@@ -1679,7 +1694,14 @@ test("Approve all is N decisions: one event per member, each bound to its own ac
   assert.equal(edits.length, 1, "one tap over the set is one redraw");
   assert.match(String(edits[0]?.text), /ALL 3 REQUESTS DECIDED/u);
   assert.equal(edits[0]?.replyMarkup, undefined);
-  assert.match(mock.answerTexts().join("\n"), /Approved 3 — one log event each\./u);
+  // APRV-206: the tap's one answer is the early ack, sent before any of the
+  // three decisions ran. The tally the toast used to carry is on the operator's
+  // terminal, and the outcome the approver reads is the redraw above.
+  assert.equal(mock.answerTexts().at(-1), TELEGRAM_ACK_HEARD);
+  assert.ok(
+    complaints.some((line) => line.includes("Approved 3 — one log event each.")),
+    `no digest tally on the operator stream: ${complaints.join("\n")}`,
+  );
   assertNoTokenInEdits();
 });
 
@@ -1717,7 +1739,13 @@ test("Approve all after a member was decided elsewhere records only the rest", a
     before + 2,
     "a refused member must append nothing, and must not stop the others",
   );
-  assert.match(mock.answerTexts().join("\n"), /Approved 2; 1 refused \(already-decided\)/u);
+  // APRV-206: acked before the members were decided, so the tally is the
+  // operator's line rather than the toast.
+  assert.equal(mock.answerTexts().at(-1), TELEGRAM_ACK_HEARD);
+  assert.ok(
+    complaints.some((line) => /Approved 2; 1 refused \(already-decided\)/u.test(line)),
+    `no digest tally on the operator stream: ${complaints.join("\n")}`,
+  );
   assertClean(world.unit);
 });
 
@@ -2114,10 +2142,16 @@ test("a tap on a withdrawn request is refused and appends nothing", async () => 
   assert.equal(outcome?.ok, false, "a withdrawn request must not be grantable");
   if (outcome !== undefined && !outcome.ok) assert.equal(outcome.code, "request-withdrawn");
   assert.equal(recordsOf(world.unit.logPath).length, before, "nothing was appended");
+  // APRV-206. The tap's one answer went out before the gate ran, so the refusal
+  // is in the message edit — where it outlives the toast that used to carry it.
+  assert.equal(mock.answerTexts().at(-1), TELEGRAM_ACK_HEARD);
+  const refused = mock.edits().at(-1);
+  assert.match(String(refused?.text), /NOT RECORDED/u);
   assert.match(
-    mock.answerTexts().join("\n"),
+    String(refused?.text),
     /Withdrawn — the requester took this back and is no longer waiting/u,
   );
+  assert.equal(refused?.replyMarkup, undefined, "a refused tap must leave no live button");
   assertClean(world.unit);
 });
 
@@ -2563,8 +2597,24 @@ test("--once: pending request → message → callback → grant → token on st
  * through the real gate and every decision through `recordChannelDecision`.
  */
 
+/**
+ * A payload whose top-level key set is unique to `index` (APRV-216).
+ *
+ * `digestKeyOf` groups by payload SHAPE, so the ordinary fixture's requests are
+ * all one digest — which is right, and is exactly what the paced cases must not
+ * accidentally rely on when they are counting messages. A per-index key makes
+ * every request its own group, so "one summary and one request" is a claim
+ * about pacing rather than about grouping.
+ */
+function distinctPayloadFor(index: number): Record<string, unknown> {
+  return { ...payloadFor(index), [`thread_${String(index)}`]: `ref-${String(index)}` };
+}
+
 /** A staged world: `count` actions registered, none requested yet. */
-function staged(count: number): Live {
+function staged(
+  count: number,
+  makePayload: (index: number) => Record<string, unknown> = payloadFor,
+): Live {
   fixtureCounter += 1;
   const prefix = `staged${fixtureCounter}`;
   const unit = newScenario(scratch.root, POLICY);
@@ -2575,7 +2625,7 @@ function staged(count: number): Live {
   const actions = [];
   for (let index = 0; index < count; index += 1) {
     const key = actionKeyFor(prefix, index);
-    const payload = payloadFor(index);
+    const payload = makePayload(index);
     keys.push(key);
     payloads.set(key, payload);
     actions.push({
@@ -2643,6 +2693,14 @@ function setupFor(
   world: Live,
   channel: TelegramChannel,
   gloss?: GlossRunner,
+  /**
+   * APRV-216. The PRODUCT default is `paced`; this helper defaults to `burst`
+   * because the cases below it were written against burst and are what proves
+   * `delivery: burst` still restores that behaviour (AC 5). The paced cases
+   * ask for `paced` by name, so both modes are exercised and neither is
+   * exercised by accident.
+   */
+  delivery: TelegramDelivery = "burst",
 ): ListenSetup {
   return {
     channel,
@@ -2650,6 +2708,7 @@ function setupFor(
     actor: HUMAN,
     json: false,
     once: false,
+    delivery,
     gateOptions: world.unit.options,
     tagOptions: world.tagOptions,
     // Absent unless a test hands one over. No suite in this repository may
@@ -3772,8 +3831,12 @@ test("every callback query is acked exactly once, on every path (APRV-196)", asy
   assert.deepEqual(stale, [TELEGRAM_STALE_UNKNOWN]);
 
   // And the accepted decision, which is the one path that was never in doubt.
+  // Since APRV-206 its one answer is the early ack — sent before the gate ran,
+  // so it says the tap arrived and claims nothing about the log. What the log
+  // recorded is in the message edit, asserted by the APRV-113 cases and by
+  // tests/telegram-tap-latency.test.ts.
   const accepted = await tap(live_);
-  assert.deepEqual(accepted, ["Approved — recorded in the log."]);
+  assert.deepEqual(accepted, [TELEGRAM_ACK_HEARD]);
 
   // The second tap on the same button — Telegram redelivers on its own — is
   // acked too, and appends nothing.
@@ -4010,11 +4073,535 @@ test("a handler that throws still answers the tap, and the loop survives (APRV-1
   const poll = await channel.pollOnce();
 
   assert.deepEqual(poll.outcomes, [], "a thrown handler produced an outcome");
-  assert.deepEqual(answersSince(from), [TELEGRAM_ACK_FALLBACK], "the tap went unanswered");
+  // APRV-206: exactly one answer, still — but it is now the early ack, which
+  // went out before the handler was called. The fallback toast the wrapper used
+  // to send is a no-op behind it, so the sentence the approver would have got
+  // from it is put on the message instead.
+  assert.deepEqual(answersSince(from), [TELEGRAM_ACK_HEARD], "the tap went unanswered");
+  const failed = mock.edits().at(-1);
+  assert.match(String(failed?.text), new RegExp(TELEGRAM_NOT_RECORDED, "u"));
+  assert.ok(
+    String(failed?.text).includes(TELEGRAM_HANDLER_FAILED.split("`")[0] as string),
+    `the failure was not put on the message: ${String(failed?.text)}`,
+  );
   assert.ok(
     complaints.some((entry) => entry.includes("failed while handling a callback")),
     "a thrown handler was not reported to the operator",
   );
   assert.equal(recordsOf(world.unit.logPath).length, events, "a thrown handler appended");
   assertClean(world.unit);
+});
+
+test("a throw BEFORE any ack still falls back to the wrapper's toast (APRV-196)", async () => {
+  // The other side of APRV-206's early ack: it is sent once the tap has been
+  // resolved to a live delivery, so a branch that throws before that point has
+  // still answered nothing. The wrapper's fallback is what covers it, and this
+  // is the case that keeps it exercised — `describeAction` is the listener's
+  // verified-log probe, and a log it cannot read is a real way for it to throw.
+  const world = live(1);
+  const channel = channelFor({
+    describeAction: () => {
+      throw new Error("the probe fell over");
+    },
+  });
+  channel.onDecision(handlerFor(world, at(2)));
+
+  const from = mock.answerTexts().length;
+  mock.queueUpdate(
+    callbackUpdate({
+      data: `g:nosuchnonce:${actionRefOf("task-999:elsewhere")}`,
+      chatId: CHAT,
+    }),
+  );
+  await channel.pollOnce();
+
+  assert.deepEqual(answersSince(from), [TELEGRAM_ACK_FALLBACK], "the tap went unanswered");
+  assertClean(world.unit);
+});
+
+// ---------------------------------------------------------------------------
+// Paced delivery: one question at a time (APRV-216)
+// ---------------------------------------------------------------------------
+
+/**
+ * The default mode since APRV-216. A listener start no longer empties the
+ * pending set onto a phone: it sends one summary line and the oldest request,
+ * and the next one only once that one is decided, skipped or passed over.
+ *
+ * Two properties are load-bearing under every case below, and both are SPEC.md
+ * §10.3's "channels hold no truth" rather than anything about pacing:
+ *
+ * - pending-ness is re-derived from the verified log on every cycle, so a
+ *   decision made anywhere (a button, the terminal channel, a withdrawal, the
+ *   daemon's expiry) advances the walkthrough;
+ * - the order and the shown item are process memory, so losing them costs a
+ *   re-send and never a request nobody is shown.
+ *
+ * The commands append nothing, and these cases prove it the only way worth
+ * proving it: by counting the records in the log before and after.
+ */
+
+/** How many records the log holds, read through the verifying path. */
+function recordCount(world: Live): number {
+  const read = readVerifiedRecords(world.unit.logPath);
+  assert.equal(read.ok, true, "the log did not verify");
+  return read.ok ? read.records.length : -1;
+}
+
+/** Every message sent since `from`, as text. */
+function sentSince(from: number): string[] {
+  return mock.sentTexts().slice(from);
+}
+
+test("paced delivery opens with one summary and the oldest request alone (APRV-216)", async () => {
+  const world = staged(3, distinctPayloadFor);
+  const setup = setupFor(world, channelFor(), undefined, "paced");
+  const state = newDispatchState();
+  const { streams, err } = capture();
+
+  const a = requestAt(world, 0, at(1));
+  const b = requestAt(world, 1, at(2));
+  const c = requestAt(world, 2, at(3));
+
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(setup, streams, state, at(63));
+
+  // "Exactly two messages" in the AC's sense: the summary, and ONE request.
+  // A request has been a multi-segment prompt since APRV-100 (header, payload,
+  // claimed material), so what is counted here is what reached the approver as
+  // a thing to read, not the segments one prompt costs.
+  assert.notEqual(cycle.summary, undefined, "no queue summary was sent");
+  assert.equal(cycle.summary?.pending, 3);
+  assert.equal(cycle.banner, undefined, "a paced cycle sent the burst banner");
+  assert.deepEqual(
+    cycle.delivered.map((entry) => entry.action_key),
+    [a],
+    "a paced cycle delivered something other than the oldest request alone",
+  );
+
+  const sent = sentSince(from);
+  assert.equal(sent[0]?.includes("3 pending"), true, `summary missing the count: ${String(sent[0])}`);
+  assert.equal(sent[0]?.includes("communicate.email.external"), true, "summary named no class");
+  for (const key of [b, c]) {
+    assert.equal(
+      sent.filter((text) => text.includes(key)).length,
+      0,
+      `${key} reached the chat while another request was being shown`,
+    );
+  }
+
+  // Nothing has been decided, and the two unshown requests are still pending in
+  // the log: pacing withholds attention, never the queue.
+  const queue = buildPendingQueue(world.unit.logPath, world.tagOptions, at(63));
+  assert.equal(queue.ok && queue.requests.length, 3);
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("a decision on the shown request sends the next one on the next cycle (APRV-216)", async () => {
+  const world = staged(3, distinctPayloadFor);
+  const channel = channelFor();
+  const setup = setupFor(world, channel, undefined, "paced");
+  const state = newDispatchState();
+  const { streams, err } = capture();
+
+  const a = requestAt(world, 0, at(1));
+  const b = requestAt(world, 1, at(2));
+  requestAt(world, 2, at(3));
+
+  await dispatchPending(setup, streams, state, at(63));
+
+  // A cycle while the question is still open sends nothing at all.
+  const quiet = await dispatchPending(setup, streams, state, at(64));
+  assert.equal(quiet.delivered.length, 0, "a second request went out under the first");
+  assert.equal(quiet.summary, undefined);
+
+  channel.onDecision(handlerFor(world, at(65)));
+  const outcome = await press(channel, a, "grant");
+  assert.equal(outcome?.ok, true, `grant refused: ${JSON.stringify(outcome)}`);
+
+  const next = await dispatchPending(setup, streams, state, at(66));
+  assert.deepEqual(
+    next.delivered.map((entry) => entry.action_key),
+    [b],
+    "the next request did not follow the decision",
+  );
+  // Two pending now, and the approver was told three: a queue that has only
+  // shrunk is not news, so no second summary.
+  assert.equal(next.summary, undefined, "a shrinking queue re-announced itself");
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("/skip shows the next request and brings the skipped one round last (APRV-216)", async () => {
+  const world = staged(3, distinctPayloadFor);
+  const channel = channelFor();
+  const setup = setupFor(world, channel, undefined, "paced");
+  const state = newDispatchState();
+  const { streams, err } = capture();
+  const commands = commandHandlerFor(setup, streams, state);
+
+  const a = requestAt(world, 0, at(1));
+  const b = requestAt(world, 1, at(2));
+  const c = requestAt(world, 2, at(3));
+
+  await dispatchPending(setup, streams, state, at(63));
+
+  const before = recordCount(world);
+  await commands("skip");
+  assert.equal(recordCount(world), before, "/skip appended to the log");
+
+  const second = await dispatchPending(setup, streams, state, at(64));
+  assert.deepEqual(
+    second.delivered.map((entry) => entry.action_key),
+    [b],
+    "/skip did not move on",
+  );
+
+  // Decide the two that follow, and the skipped one comes back — last, and as a
+  // fresh copy, because a skip is "later" and not "gone".
+  channel.onDecision(handlerFor(world, at(65)));
+  assert.equal((await press(channel, b, "grant"))?.ok, true);
+  const third = await dispatchPending(setup, streams, state, at(66));
+  assert.deepEqual(
+    third.delivered.map((entry) => entry.action_key),
+    [c],
+  );
+
+  channel.onDecision(handlerFor(world, at(67)));
+  assert.equal((await press(channel, c, "reject"))?.ok, true);
+  const roundAgain = await dispatchPending(setup, streams, state, at(68));
+  assert.deepEqual(
+    roundAgain.delivered.map((entry) => entry.action_key),
+    [a],
+    "the skipped request never came round again",
+  );
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("/next moves past the shown request without showing it again (APRV-216)", async () => {
+  const world = staged(2, distinctPayloadFor);
+  const channel = channelFor();
+  const setup = setupFor(world, channel, undefined, "paced");
+  const state = newDispatchState();
+  const { streams, err } = capture();
+  const commands = commandHandlerFor(setup, streams, state);
+
+  const a = requestAt(world, 0, at(1));
+  const b = requestAt(world, 1, at(2));
+
+  await dispatchPending(setup, streams, state, at(63));
+
+  const before = recordCount(world);
+  await commands("next");
+  assert.equal(recordCount(world), before, "/next appended to the log");
+
+  const second = await dispatchPending(setup, streams, state, at(64));
+  assert.deepEqual(
+    second.delivered.map((entry) => entry.action_key),
+    [b],
+    "/next did not move on",
+  );
+
+  // A decision on B leaves A pending and already delivered: this process has
+  // passed it over, and its live copy is still up the chat.
+  channel.onDecision(handlerFor(world, at(65)));
+  assert.equal((await press(channel, b, "grant"))?.ok, true);
+  const after = await dispatchPending(setup, streams, state, at(66));
+  assert.equal(after.delivered.length, 0, "/next re-sent the request it passed over");
+
+  // And the copy it passed over still decides: nothing was withdrawn from the
+  // approver, only from this process's order.
+  channel.onDecision(handlerFor(world, at(67)));
+  assert.equal((await press(channel, a, "grant"))?.ok, true, "the passed-over copy went dead");
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("/queue lists every pending request while one is being shown (APRV-216)", async () => {
+  const world = staged(3, distinctPayloadFor);
+  const channel = channelFor();
+  const setup = setupFor(world, channel, undefined, "paced");
+  const state = newDispatchState();
+  const { streams, err } = capture();
+
+  const a = requestAt(world, 0, at(1));
+  const b = requestAt(world, 1, at(2));
+  const c = requestAt(world, 2, at(3));
+
+  await dispatchPending(setup, streams, state, at(63));
+
+  // Through the real wire this time: a Telegram message update, the long-poll
+  // loop, and the handler the listener registers.
+  channel.onCommand(commandHandlerFor(setup, streams, state, () => at(70)));
+  const before = recordCount(world);
+  const from = mock.sentTexts().length;
+  mock.queueUpdate(messageUpdate({ chatId: CHAT, text: "/queue" }));
+  const poll = await channel.pollOnce();
+
+  assert.deepEqual(poll.commands, ["queue"], "the command never reached the runtime");
+  assert.equal(recordCount(world), before, "/queue appended to the log");
+
+  const reply = sentSince(from).join("\n");
+  assert.equal(reply.includes("3 pending"), true, `no summary in the reply: ${reply}`);
+  for (const key of [a, b, c]) {
+    assert.equal(reply.includes(key), true, `${key} is pending and absent from /queue`);
+  }
+  assert.equal(reply.includes(`${a} `), true, "the list is not keyed by action key");
+  assert.equal(reply.includes("shown now"), true, "/queue did not mark the shown request");
+
+  // The queue is derived, not held: a decision changes the next reply with no
+  // command and no cycle in between.
+  channel.onDecision(handlerFor(world, at(65)));
+  assert.equal((await press(channel, a, "grant"))?.ok, true);
+  const secondFrom = mock.sentTexts().length;
+  mock.queueUpdate(messageUpdate({ chatId: CHAT, text: "/queue" }));
+  await channel.pollOnce();
+  const secondReply = sentSince(secondFrom).join("\n");
+  assert.equal(secondReply.includes("2 pending"), true, `stale count: ${secondReply}`);
+  assert.equal(secondReply.includes(a), false, "a decided request is still listed as pending");
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("a paced restart re-shows the oldest, and the pre-restart copy still decides (APRV-216)", async () => {
+  const world = staged(2, distinctPayloadFor);
+  const first = channelFor();
+  const setup = setupFor(world, first, undefined, "paced");
+  const state = newDispatchState();
+  const { streams, err } = capture();
+
+  const a = requestAt(world, 0, at(1));
+  requestAt(world, 1, at(2));
+
+  await dispatchPending(setup, streams, state, at(63));
+  // The copy the first process armed, captured before anything supersedes it.
+  const oldCopy = mock.callbackDataFor(a, "grant");
+
+  // The restart: a new channel and a FRESH state, which is the whole of what a
+  // crash costs. The pending set is re-derived, so the oldest is shown again.
+  const second = channelFor();
+  const restarted = setupFor(world, second, undefined, "paced");
+  const freshState = newDispatchState();
+  const afterRestart = await dispatchPending(restarted, streams, freshState, at(64));
+  assert.deepEqual(
+    afterRestart.delivered.map((entry) => entry.action_key),
+    [a],
+    "a restarted paced listener did not re-show the oldest pending request",
+  );
+  assert.notEqual(afterRestart.summary, undefined, "a restart sent no summary");
+
+  // A tap on the copy from before the restart (APRV-196): resolved by action
+  // reference against the delivery this process is holding open, so it decides
+  // the request the human meant.
+  second.onDecision(handlerFor(world, at(65)));
+  mock.queueUpdate(callbackUpdate({ data: oldCopy, chatId: CHAT }));
+  const poll = await second.pollOnce();
+  assert.equal(poll.outcomes[0]?.outcome.ok, true, `the old copy decided nothing: ${JSON.stringify(poll)}`);
+
+  // And nothing is decided twice. The newest copy's button does not even reach
+  // the gate: the decision disarmed the delivery, so the tap takes APRV-196's
+  // stale-copy path and is answered rather than recorded.
+  const stale = second.anomalyCount("stale-copy");
+  const refused = await press(second, a, "grant");
+  assert.equal(refused, undefined, "a second decision reached the gate");
+  assert.equal(second.anomalyCount("stale-copy"), stale + 1, "the second tap went unanswered");
+
+  const granted = readVerifiedRecords(world.unit.logPath);
+  assert.equal(granted.ok, true);
+  assert.equal(
+    granted.ok
+      ? granted.records.filter(
+          (record) => record.event === "approval.granted" && record.action_key === a,
+        ).length
+      : -1,
+    1,
+    "more than one grant landed for one request",
+  );
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("digest grouping still applies to the request being shown (APRV-216)", async () => {
+  // Two requests of the same shape and one of another: the pair is one thing to
+  // read, and pacing shows it as one thing.
+  const world = staged(3, (index) => (index < 2 ? payloadFor(index) : distinctPayloadFor(index)));
+  const channel = channelFor();
+  const setup = setupFor(world, channel, undefined, "paced");
+  const state = newDispatchState();
+  const { streams, err } = capture();
+
+  const a = requestAt(world, 0, at(1));
+  const b = requestAt(world, 1, at(2));
+  const c = requestAt(world, 2, at(3));
+
+  const cycle = await dispatchPending(setup, streams, state, at(63));
+  assert.deepEqual(
+    cycle.delivered.map((entry) => entry.action_key).sort(),
+    [a, b].sort(),
+    "the digest the oldest belongs to was not shown whole",
+  );
+  assert.equal(cycle.digests.length, 1, "the pair was not digested");
+  assert.equal(
+    cycle.delivered.some((entry) => entry.action_key === c),
+    false,
+    "an unrelated request rode along with the digest",
+  );
+
+  // The unit is released only once the log says no member is pending.
+  channel.onDecision(handlerFor(world, at(65)));
+  assert.equal((await press(channel, a, "grant"))?.ok, true);
+  const half = await dispatchPending(setup, streams, state, at(66));
+  assert.equal(half.delivered.length, 0, "the next request went out with a member still open");
+
+  channel.onDecision(handlerFor(world, at(67)));
+  assert.equal((await press(channel, b, "reject"))?.ok, true);
+  const rest = await dispatchPending(setup, streams, state, at(68));
+  assert.deepEqual(
+    rest.delivered.map((entry) => entry.action_key),
+    [c],
+  );
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("a pending set that grows while nothing is shown announces itself again (APRV-216)", async () => {
+  const world = staged(3, distinctPayloadFor);
+  const channel = channelFor();
+  const setup = setupFor(world, channel, undefined, "paced");
+  const state = newDispatchState();
+  const { streams, err } = capture();
+
+  const a = requestAt(world, 0, at(1));
+  const opening = await dispatchPending(setup, streams, state, at(63));
+  assert.equal(opening.summary?.pending, 1);
+
+  channel.onDecision(handlerFor(world, at(64)));
+  assert.equal((await press(channel, a, "grant"))?.ok, true);
+
+  // Two arrive while the approver has nothing in front of them.
+  requestAt(world, 1, at(65));
+  requestAt(world, 2, at(66));
+  const grown = await dispatchPending(setup, streams, state, at(67));
+  assert.equal(grown.summary?.pending, 2, "a queue that grew said nothing about it");
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("delivery: burst restores the banner and the whole pending set (APRV-216)", async () => {
+  const world = staged(3, distinctPayloadFor);
+  const setup = setupFor(world, channelFor(), undefined, "burst");
+  const state = newDispatchState();
+  const { streams, err } = capture();
+
+  const keys = [requestAt(world, 0, at(1)), requestAt(world, 1, at(2)), requestAt(world, 2, at(3))];
+
+  const cycle = await dispatchPending(setup, streams, state, at(63));
+  assert.notEqual(cycle.banner, undefined, "the burst banner is gone");
+  assert.equal(cycle.banner?.pending, 3);
+  assert.equal(cycle.summary, undefined, "burst delivery sent the paced summary");
+  assert.deepEqual(cycle.delivered.map((entry) => entry.action_key).sort(), [...keys].sort());
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("a command from another chat is ignored, and an unknown one is only counted (APRV-216)", async () => {
+  const world = staged(1, distinctPayloadFor);
+  const channel = channelFor();
+  const setup = setupFor(world, channel, undefined, "paced");
+  const state = newDispatchState();
+  const { streams } = capture();
+
+  requestAt(world, 0, at(1));
+  await dispatchPending(setup, streams, state, at(63));
+
+  const seen: string[] = [];
+  channel.onCommand(async (command) => {
+    seen.push(command);
+    await commandHandlerFor(setup, streams, state)(command);
+  });
+
+  const foreignBefore = channel.anomalyCount("foreign-chat");
+  const unknownBefore = channel.anomalyCount("unknown-command");
+  const before = recordCount(world);
+  const from = mock.sentTexts().length;
+
+  mock.queueUpdate(messageUpdate({ chatId: "8080", text: "/queue" }));
+  mock.queueUpdate(messageUpdate({ chatId: CHAT, text: "/deploy" }));
+  mock.queueUpdate(messageUpdate({ chatId: CHAT, text: "good morning" }));
+  await channel.pollOnce();
+
+  assert.deepEqual(seen, [], "a command this channel must ignore reached the runtime");
+  assert.equal(channel.anomalyCount("foreign-chat"), foreignBefore + 1);
+  assert.equal(channel.anomalyCount("unknown-command"), unknownBefore + 1);
+  assert.deepEqual(sentSince(from), [], "the channel replied to a command it ignored");
+  assert.equal(recordCount(world), before, "an ignored command touched the log");
+  assertClean(world.unit);
+});
+
+test("the bot command grammar is closed and forgiving in one direction only (APRV-216)", () => {
+  assert.deepEqual([...TELEGRAM_COMMANDS], ["queue", "skip", "next"]);
+  assert.equal(parseBotCommand("/queue"), "queue");
+  assert.equal(parseBotCommand("  /Skip  "), "skip", "a command must survive case and spacing");
+  assert.equal(parseBotCommand("/next@approval_md_bot"), "next", "the @bot suffix is not read");
+  assert.equal(parseBotCommand("/queue please"), "queue", "a stray word must not refuse a command");
+  assert.equal(parseBotCommand("/grant task-1:x"), null, "a decision is a button, never a word");
+  assert.equal(parseBotCommand("queue"), null);
+  assert.equal(parseBotCommand("what is /queue"), null);
+  assert.equal(parseBotCommand(undefined), null);
+});
+
+test("the delivery mode is the policy's, and paced when it says nothing (APRV-216)", () => {
+  assert.equal(TELEGRAM_DEFAULT_DELIVERY, "paced");
+
+  const silent = newScenario(scratch.root, POLICY);
+  assert.equal(telegramDeliveryFor(loadPolicy({ file: silent.policyPath })), "paced");
+
+  const declared = newScenario(
+    scratch.root,
+    POLICY.replace("classes:", "channels:\n  telegram:\n    delivery: burst\nclasses:"),
+  );
+  const load = loadPolicy({ file: declared.policyPath });
+  assert.equal(load.ok, true, `the policy did not load: ${JSON.stringify(load)}`);
+  assert.equal(telegramDeliveryFor(load), "burst");
+
+  // The enum is closed: an unrecognised mode fails validation rather than being
+  // guessed at, and a policy that does not load leaves the default in force.
+  const bogus = newScenario(
+    scratch.root,
+    POLICY.replace("classes:", "channels:\n  telegram:\n    delivery: hourly\nclasses:"),
+  );
+  const refused = loadPolicy({ file: bogus.policyPath });
+  assert.equal(refused.ok, false, "an unknown delivery mode was accepted");
+  assert.equal(telegramDeliveryFor(refused), "paced");
+});
+
+test("the summary and the queue listing are arithmetic on the log alone (APRV-216)", () => {
+  const world = staged(2, distinctPayloadFor);
+  requestAt(world, 0, at(1));
+  requestAt(world, 1, at(120));
+  const queue = buildPendingQueue(world.unit.logPath, world.tagOptions, at(180));
+  assert.equal(queue.ok, true);
+  const requests = queue.ok ? queue.requests : [];
+
+  const summary = summaryLines(requests, at(180));
+  assert.equal(summary.length, 1, "the summary is one line");
+  assert.equal(summary[0]?.includes("2 pending"), true);
+  assert.equal(summary[0]?.includes("2h 59m ago"), true, `oldest age wrong: ${String(summary[0])}`);
+
+  const listed = queueLines(requests, at(180), [world.keys[1] as string]);
+  assert.equal(listed[1]?.startsWith("1. "), true, "the list is not numbered from one");
+  assert.equal(listed[1]?.includes(TASK), true, "the list names no task");
+  assert.equal(listed[2]?.includes("shown now"), true, "the shown request is not marked");
+
+  assert.deepEqual(summaryLines([], at(180)), ["Nothing pending — the queue is empty."]);
+  assert.deepEqual(queueLines([], at(180), []), ["Nothing pending — the queue is empty."]);
 });

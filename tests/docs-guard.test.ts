@@ -29,6 +29,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
+import { isAgentmailFailureCode } from "../src/adapters/agentmail.js";
+import { ADAPTER_REFUSAL_CODES } from "../src/adapters/contract.js";
 import { EXECUTE_REFUSAL_CODES } from "../src/core/execute.js";
 import { GATE_REFUSAL_CODES } from "../src/core/gate.js";
 import { TOKEN_VERIFY_REFUSAL_CODES } from "../src/core/token.js";
@@ -109,8 +111,96 @@ test("every refusal name the demo transcript prints is still in the CLI vocabula
 });
 
 // ---------------------------------------------------------------------------
+// examples/agentmail-demo.md (APRV-224)
+// ---------------------------------------------------------------------------
+
+/**
+ * The AgentMail walkthrough's refusals, from two vocabularies.
+ *
+ * The demo shows the runtime's own refusal beside the adapter's, and the two
+ * are frozen in different files: `adapter-failed` and `token-consumed` are the
+ * contract's and core's, `agentmail-draft-drifted` and its kin are the
+ * adapter's. A reader copying the transcript is told what a refusal will say,
+ * so a rename in either vocabulary has to reach the prose.
+ */
+const AGENTMAIL_DEMO_RUNTIME_REFUSALS = [
+  "adapter-failed",
+  "token-consumed",
+  "payload-mismatch",
+  "credential-unavailable",
+] as const;
+
+const AGENTMAIL_DEMO_ADAPTER_REFUSALS = [
+  "agentmail-draft-drifted",
+  "agentmail-unauthorized",
+  "agentmail-inbox-mismatch",
+  "agentmail-draft-missing",
+  "agentmail-from-mismatch",
+  "agentmail-unreachable",
+  "agentmail-payload-ambiguous",
+  "agentmail-payload-invalid",
+] as const;
+
+test("every refusal the AgentMail demo shows is still a real refusal", () => {
+  const demo = readDoc("examples/agentmail-demo.md");
+  const runtimeVocabulary: ReadonlySet<string> = new Set<string>([
+    ...REFUSAL_VOCABULARY,
+    ...ADAPTER_REFUSAL_CODES,
+  ]);
+  for (const code of AGENTMAIL_DEMO_RUNTIME_REFUSALS) {
+    assert.ok(
+      demo.includes(code),
+      `examples/agentmail-demo.md no longer shows the refusal ${code}; either restore it or drop it from the list with a reason`,
+    );
+    assert.ok(
+      runtimeVocabulary.has(code),
+      `examples/agentmail-demo.md shows the refusal ${code}, which no frozen union declares any more`,
+    );
+  }
+  for (const code of AGENTMAIL_DEMO_ADAPTER_REFUSALS) {
+    assert.ok(
+      demo.includes(code),
+      `examples/agentmail-demo.md no longer shows the AgentMail refusal ${code}`,
+    );
+    assert.ok(
+      isAgentmailFailureCode(code),
+      `examples/agentmail-demo.md shows ${code}, which AGENTMAIL_FAILURE_CODES no longer declares. The vocabulary is frozen and additive; a rename makes the walkthrough state a refusal the adapter cannot produce.`,
+    );
+  }
+});
+
+test("the AgentMail demo states the two-key split it depends on", () => {
+  const demo = readDoc("examples/agentmail-demo.md");
+  for (const permission of ["draft_create", "draft_read", "draft_send", "message_send"]) {
+    assert.match(
+      demo,
+      new RegExp(permission, "u"),
+      `examples/agentmail-demo.md no longer names the ${permission} permission. The two-key split IS the enforcement (SPEC.md section 10.4); a walkthrough that stops naming the permissions leaves the reader to guess which key goes where.`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
 // README.md
 // ---------------------------------------------------------------------------
+
+test("the README's AgentMail paragraph keeps the two-key split and the drift refusal", () => {
+  const readme = readDoc("README.md");
+  assert.match(
+    readme,
+    /agentmail-draft-drifted/u,
+    "README.md no longer names the drift refusal. A grant over a remote mutable object is only bound because the adapter re-fetches and refuses; prose that drops the refusal claims a binding it does not describe.",
+  );
+  assert.ok(
+    isAgentmailFailureCode("agentmail-draft-drifted"),
+    "README.md names a refusal AGENTMAIL_FAILURE_CODES no longer declares",
+  );
+  assert.match(
+    readme,
+    /message_send/u,
+    "README.md no longer names the send permission the vault key holds, which is the half of the two-key split that makes the other half enforcement",
+  );
+});
 
 test("the README's exit-code table is EXIT_CODE_TABLE verbatim", () => {
   assert.deepEqual(

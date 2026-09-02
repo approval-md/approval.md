@@ -1,0 +1,14 @@
+{
+  "seq": 44,
+  "ts": "2026-09-02T14:12:00Z",
+  "event": "gate.closed",
+  "actor": "human:carter",
+  "channel": "cli",
+  "payload": {
+    "opened_seq": 41,
+    "note": "attestation repaired; closing early"
+  },
+  "alg": "sha256/jcs",
+  "prev": "1b4f8e2c9a7d05613fbc84a2e0d97c31556a08bf4e2913d7ca60b85f9d3e7042",
+  "hash": "83c1de5a6047b29f0e5a1d7c4b8e39026fa7d15c9b3e04872dc6ab1f5e90d374"
+}

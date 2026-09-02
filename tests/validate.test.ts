@@ -192,3 +192,75 @@ test("validation does not mutate the document under validation", () => {
   validate("sample-record", document);
   assert.equal(JSON.stringify(document), snapshot);
 });
+
+// ---------------------------------------------------------------------------
+// The compiled-validator reuse (APRV-206)
+// ---------------------------------------------------------------------------
+
+/**
+ * The rule the reuse must not break: a result is a pure function of (schema
+ * files on disk, document). The Ajv compile is skipped only when the bytes just
+ * read hash to the digest it was compiled from, so a schema edited between two
+ * calls is honoured by the second — which is what these cases assert, in both
+ * directions and for a sibling `$ref` target as well as the target itself.
+ */
+const STRICT_SCHEMA = JSON.stringify({
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: "https://approval.md/schema/test/mutable.schema.json",
+  type: "object",
+  additionalProperties: false,
+  required: ["id"],
+  properties: { id: { type: "string" } },
+});
+
+const LOOSE_SCHEMA = JSON.stringify({
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: "https://approval.md/schema/test/mutable.schema.json",
+  type: "object",
+  additionalProperties: true,
+  required: ["id"],
+  properties: { id: { type: "string" } },
+});
+
+test("a schema edited between two calls is honoured by the second (APRV-206)", () => {
+  const dir = schemaDirWith("mutable", { "mutable.schema.json": STRICT_SCHEMA });
+  const document = { id: "one", extra: true };
+
+  const strict = validate("mutable", document, { schemaDir: dir });
+  assert.equal(strict.ok, false, "the strict schema admitted an extra property");
+
+  // Same path, same schema id, different bytes. A cache keyed on anything but
+  // the bytes — a path, an mtime, a call count — would answer with the compile
+  // above and call this document invalid.
+  writeFileSync(join(dir, "mutable.schema.json"), LOOSE_SCHEMA, "utf8");
+  assert.deepEqual(validate("mutable", document, { schemaDir: dir }), { ok: true });
+
+  // And back again: the reuse is not a one-way ratchet either.
+  writeFileSync(join(dir, "mutable.schema.json"), STRICT_SCHEMA, "utf8");
+  assert.equal(validate("mutable", document, { schemaDir: dir }).ok, false);
+});
+
+test("a sibling schema appearing or vanishing re-compiles too (APRV-206)", () => {
+  // The digest covers the whole directory's bytes, not just the target's: a
+  // `$ref` target arriving or leaving changes what the same schema means.
+  const dir = schemaDirWith("siblings", {
+    "host.schema.json": JSON.stringify({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $id: "https://approval.md/schema/test/host.schema.json",
+      type: "object",
+      required: ["inner"],
+      properties: { inner: { $ref: "https://approval.md/schema/test/inner.schema.json" } },
+    }),
+    "inner.schema.json": JSON.stringify({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $id: "https://approval.md/schema/test/inner.schema.json",
+      type: "string",
+    }),
+  });
+
+  assert.deepEqual(validate("host", { inner: "yes" }, { schemaDir: dir }), { ok: true });
+
+  rmSync(join(dir, "inner.schema.json"));
+  const orphaned = validate("host", { inner: "yes" }, { schemaDir: dir });
+  assert.equal(orphaned.ok, false, "a missing $ref target must fail closed, not reuse a compile");
+});

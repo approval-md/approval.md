@@ -162,6 +162,12 @@ Five overrides sit on top of the table:
   `sudo cat .approval/env` stays opaque: the credential check sits below the
   opaque one, so a refusal is never softened into a request. No rule can print
   a value — the classifier reads command text and never an environment.
+- **`.approval-journal/` is not protected** (APRV-195). The journal of
+  `approval journal write` is a SIBLING of the approval home, not a directory
+  inside it, so nothing above was loosened to let an agent write there: a write
+  to it is `files.write.workspace` like any other workspace write, which is what
+  makes the channel ungated. Traversal back out of it is protected again, and a
+  copy from credential material into it is still `account.credential`.
 - **`redirect-write` → `files.write.workspace`.** A read command with a `>` or
   `>>` writes a file, and the class says so.
 - **`gate.self`.** The `approval` CLI (and `node …/dist/src/cli/main.js`) is the
@@ -309,6 +315,7 @@ Never `ask`. The `agent_message` is `<code>: <detail>`, and the codes are frozen
 | `hook-timeout` | no decision inside `--timeout`; the request stays OPEN, and a decision inside the TTL authorizes an identical retry, once |
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
+| `hook-grant-unverified` | the grant was spent, and the verified log cannot be seen to carry the `execution.started` recording it. The record IS the authorization on a harness surface, because the harness executes and never sees the gate's return value, so no verdict is printed until the chain carries it (APRV-200) |
 | `hook-policy-unavailable` | `APPROVAL.md` could not be loaded |
 | `hook-log-unreachable` | no log where the hook was pointed; it writes to an existing log and creates none |
 | `hook-io` | malformed hook input, or an unreadable log |
@@ -317,6 +324,18 @@ Never `ask`. The `agent_message` is `<code>: <detail>`, and the codes are frozen
 `sudo`, `env`, `xargs`, `node -e`, `python3 -c`, backticks, arithmetic expansion,
 and any `$(…)` that is not purely a read: all deny. The fix is to write the
 command out, or to run the effect through `approval run` with a granted token.
+
+### When the grant can follow the write (APRV-200)
+
+Cursor's `failClosed` on the `hooks.json` entry is what closes, on this harness,
+the window `docs/claude-code-hook.md` documents at length for Claude Code: a hook
+that crashes or is killed still blocks, so a tool call that proceeds without a
+verdict is not a shape this adapter has. The rest of that section applies
+unchanged, including the `grant_origin` marker every harness `execution.started`
+carries: `direct` when the tool call that spent the grant is the tool call that
+asked for it, `carried` when a later one spent it under the carryover below. A
+grant that arrives after the effect it names ratifies rather than authorizes, and
+`carried` is how an auditor sees which window a spend sits in.
 
 ### When the wait runs out (APRV-106, revised by APRV-117)
 

@@ -439,6 +439,39 @@ payload your phone displayed. And the `Message-ID` is derived from the action
 key, the payload hash and the sender, so the header in a mailbox and the binding
 in the chain identify each other months later.
 
+### The same grant over AgentMail
+
+`communicate.email.external` has a second adapter. Where the email adapter opens
+an SMTP session, `approval adapter agentmail` calls the AgentMail API, and the
+mail an agent has already composed as a Draft leaves only when a grant says so.
+The walkthrough is [examples/agentmail-demo.md](examples/agentmail-demo.md).
+
+```sh
+approval setup adapter agentmail                  # inbox id + sending key, into the vault
+approval payload agentmail-draft "$INBOX" "$DRAFT" > payload.json
+approval adapter agentmail task-042:chaser --token "$TOKEN" \
+  --payload payload.json --as agent:claude-admin
+```
+
+**Two keys, and the split is the enforcement.** AgentMail API keys carry
+per-permission booleans, and `draft_create`, `draft_update` and `draft_read` are
+separate from `draft_send` and `message_send`. Give the agent a key holding the
+first three and none of the last two, and put a key holding the send permissions
+in the vault, where the adapter reads it inside the verified token window. The
+agent then composes all day and cannot send at all: an ungated send attempt is
+refused by AgentMail itself, `agentmail-unauthorized`, before this runtime is
+involved. Without that split, an AgentMail key sitting in the agent's
+environment is a full bypass of the gate, which is why `AGENTMAIL_` is withheld
+from every child `approval run` spawns.
+
+**A draft is mutable, so the grant binds its bytes.** `approval payload
+agentmail-draft` snapshots the draft's recipients, subject and text at request
+time, and that snapshot is what the payload hash binds and what your phone
+displays. Before it sends, the adapter re-fetches the draft and compares; a
+draft edited after the grant refuses `agentmail-draft-drifted`, sends nothing,
+and names which fields differ without quoting text nobody approved. Approving a
+draft id alone would be approving whatever the agent wrote into it last.
+
 ## The APPROVAL.md dictionary
 
 Every key that can appear in the policy block. The schema is closed at every
@@ -466,9 +499,13 @@ believed was in force. Full semantics: SPEC.md section 5.
 | `audit.supervised_sample_rate` | Fraction of `supervised` actions escalated for retrospective review, in [0, 1] (§5.2). |
 | `audit.sampling_secret_env` | Name of the variable holding the operator's HMAC sampling secret. Unnamed means sampling is off and says so (§5.2, §11). |
 | `audit.skew_tolerance` | How far a gate-typed event's timestamp may step back before verification reports an anomaly. Report-only; default 2 seconds (§8). |
+| `daemon.read_proof` | Which prefix proof a long-lived reader runs before reusing a cached prefix: `full` (the default, re-hash the whole prefix on every read) or `incremental` (hash only the appended bytes, re-proving in full on a cadence). One-shot processes, the Claude Code hook and `approval log verify` prove in full regardless (§5.2, APRV-217). |
+| `daemon.full_reproof_every` | Reads one full re-proof may cover under `incremental`, the anchoring read included. Default 50 (§5.2). |
+| `daemon.full_reproof_after` | Wall clock one full re-proof may cover under `incremental`. Duration string, default `60s` (§5.2). |
 | `vault.passphrase_env` | Name of the variable holding the vault passphrase. Absent means `APPROVAL_VAULT_PASSPHRASE` (§5.2, §10.4). |
 | `channels.telegram.token_env` | Name of the variable holding the bot token. Default `APPROVAL_TG_TOKEN` (§5.1). |
 | `channels.telegram.chat_id_env` | Name of the variable holding the approver chat id. Default `APPROVAL_TG_CHAT` (§5.1). |
+| `channels.telegram.delivery` | `paced` (the default) shows one summary line and the oldest pending request, then the next one after a decision, `/skip` or `/next`; `burst` sends every pending request the listener has not sent yet (§10.3). |
 | `channels.web.port` | TCP port for the local approval UI, bound on loopback only (§5.1). |
 | `channels.<other>` | An unknown channel name is accepted as an object, so a third-party transport does not fail the whole policy closed (§10.3). |
 
@@ -675,6 +712,12 @@ inventory. `approval --help` lists them grouped by what they are for. `approval
 `--help --long` appends that verb's reasoning from
 [docs/cli-reference.md](docs/cli-reference.md). `approval instructions` is the
 agent-facing guide, and `--schemas` prints the verb registry as JSON.
+
+Every external adapter, harness, updater or gateway this project has weighed
+for integration has an entry in
+[docs/integrations-considered.md](docs/integrations-considered.md): what it
+exposes, how it fits, the verdict, and the next step, so the question is
+answered once.
 
 ## License
 

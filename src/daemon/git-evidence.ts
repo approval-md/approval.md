@@ -66,6 +66,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
+import { childEnvironment } from "../core/child-env.js";
 import type { LogHead } from "../core/log.js";
 import { PAYLOAD_STORE_DIRNAME } from "../core/payload-store.js";
 
@@ -197,9 +198,15 @@ function detail(cause: unknown): string {
  * inherited environment from redirecting the command at some other repository,
  * and nothing here ever prompts: a daemon blocked on a credential prompt is a
  * daemon that has silently stopped.
+ *
+ * The environment is built by the APRV-205 scrub rather than copied. The daemon
+ * spawns no granted command (it advances the log and never executes an action),
+ * so this is not the task's load-bearing case; it is the daemon being the
+ * process that holds the passphrase and the token, and `git log` having no use
+ * for either.
  */
 function git(args: string[], cwd: string): GitResult {
-  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  const env: NodeJS.ProcessEnv = { ...childEnvironment().env, GIT_TERMINAL_PROMPT: "0" };
   delete env["GIT_DIR"];
   delete env["GIT_WORK_TREE"];
   const result = spawnSync("git", args, { cwd, encoding: "utf8", env });

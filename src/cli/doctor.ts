@@ -98,11 +98,24 @@ import {
   vaultExists,
   vaultPathFor,
 } from "../core/vault.js";
+import {
+  admitSnapshot,
+  logBytes,
+  snapshotPathFor,
+  snapshotSummary,
+} from "../core/verified-snapshot.js";
 import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { policyWebPort } from "./channel-web.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
+import { lastAdvance } from "../core/advance-cycle.js";
+import {
+  DEFAULT_DARK_WINDOW_MS,
+  reportDarkSessions,
+  type DarkSessionFinding,
+} from "../core/dark-session.js";
 import { repoPath, repoRoot, showBlob } from "./git-scope.js";
+import { publishedState } from "./log-advance.js";
 import { DOCTOR_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
@@ -735,6 +748,133 @@ function checkPayloadStore(logPath: string, records: EventRecord[]): DoctorCheck
     check: "payload-store",
     status: "pass",
     detail: `${storeDir} is writable and holds ${files} payload file(s), ${census.pruned} pruned by the log, ${census.orphans} bound to no record${residue}; ${PAYLOAD_STORE_WARNING}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 7b. the verified-head snapshot (APRV-188)
+// ---------------------------------------------------------------------------
+
+/**
+ * Is the daemon's verified-head snapshot present, and does it still cover the
+ * log a hook would read?
+ *
+ * The snapshot is what lets a hook process re-prove a digest instead of
+ * re-walking the chain, so its absence is a latency fact and never a
+ * correctness one. That is why nothing here is a `fail` on the snapshot's own
+ * account: every reader re-proves it, an unusable one is ignored, and a hook
+ * behind an unusable snapshot behaves exactly as it did before APRV-188. The
+ * row exists so an operator can see whether the acceleration is actually in
+ * force, and so a snapshot that is somehow unreadable (a bad mode, a foreign
+ * owner) is visible rather than silent.
+ *
+ * The one `fail` is a snapshot a reader would REFUSE for a reason the operator
+ * should act on: permissions or ownership. A stale one is a `pass` that says so
+ * — it endorses a shorter prefix, and the hook walks the tail.
+ */
+function checkVerifiedSnapshot(logPath: string): DoctorCheck {
+  const path = snapshotPathFor(logPath);
+  const read = snapshotSummary(logPath);
+  if (!read.ok) {
+    if (read.reason === "absent") {
+      return {
+        check: "verified-snapshot",
+        status: "skip",
+        detail: `no snapshot at ${path}; every hook invocation verifies the log from genesis. It is published by \`approval daemon run\`, so this is expected when the daemon has never run here.`,
+      };
+    }
+    if (read.reason === "foreign-owner" || read.reason === "loose-permissions") {
+      return {
+        check: "verified-snapshot",
+        status: "fail",
+        detail: `${path} would be refused by every reader: ${read.detail}. Hooks fall back to a full chain walk, which is correct but slower.`,
+        fix: `rm ${path} — remove it and let \`approval daemon run\` republish it as this user at mode 0600`,
+      };
+    }
+    return {
+      check: "verified-snapshot",
+      status: "pass",
+      detail: `${path} is present but not usable (${read.reason}: ${read.detail}); hooks verify the log from genesis, which is the behaviour without a snapshot at all.`,
+    };
+  }
+
+  const raw = logBytes(logPath);
+  if (raw === null) {
+    return {
+      check: "verified-snapshot",
+      status: "pass",
+      detail: `${path} endorses ${String(read.snapshot.lines)} record(s), and the log could not be read here to check it against.`,
+    };
+  }
+
+  const admitted = admitSnapshot(logPath, raw, read.snapshot, undefined);
+  if (!admitted.ok) {
+    return {
+      check: "verified-snapshot",
+      status: "pass",
+      detail: `${path} no longer applies to the log (${admitted.reason}: ${admitted.detail}); hooks verify from genesis until the daemon republishes it.`,
+    };
+  }
+
+  const behind = raw.length - read.snapshot.byte_length;
+  const currency =
+    behind === 0
+      ? "the whole log"
+      : `all but the last ${String(behind)} byte(s), which a hook walks itself`;
+  return {
+    check: "verified-snapshot",
+    status: "pass",
+    detail: `${path} endorses ${currency}: ${String(read.snapshot.lines)} record(s) through seq ${String(read.snapshot.head.seq)}, published ${read.snapshot.verified_at}. A hook re-proves the digest rather than re-walking the chain.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 7c. the prefix proof long-lived readers run (APRV-217)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which prefix proof this policy configures for its long-lived readers.
+ *
+ * A configuration row, and only that. It reads the POLICY and never a running
+ * daemon: the mode a process is actually using is on that process's own
+ * `started` line, a daemon may have been launched with a flag that beat the
+ * policy, and a doctor that reported a live process's memory would be reporting
+ * something it cannot verify. Nothing here is ever a `fail` — both modes are
+ * correct, they differ in what a repeat read re-proves and how often — and a
+ * policy that declares no `daemon` block skips the row rather than announcing a
+ * default nobody wrote.
+ */
+function checkReadProof(policyLoad: PolicyLoadResult): DoctorCheck {
+  if (!policyLoad.ok) {
+    return {
+      check: "read-proof",
+      status: "skip",
+      detail: `the policy did not load (${policyLoad.code}), so no daemon read proof is configured; every reader proves the whole prefix on every read, which is the strict default. The policy failure itself is reported by \`approval policy check\`.`,
+    };
+  }
+  const configured = policyLoad.daemon;
+  if (!configured.declared) {
+    return {
+      check: "read-proof",
+      status: "skip",
+      detail: `${policyLoad.source.filename} declares no \`daemon\` block, so long-lived readers re-hash the whole verified prefix on every read (read_proof: full). That is the default and the strictest setting; \`daemon.read_proof: incremental\` trades it for a cadence-bounded proof of the appended bytes.`,
+    };
+  }
+  if (configured.readProof === "full") {
+    return {
+      check: "read-proof",
+      status: "pass",
+      detail: `${policyLoad.source.filename} sets daemon.read_proof: full — every cached read re-hashes the whole verified prefix and compares the digest. One-shot processes and \`approval log verify\` do that regardless.`,
+    };
+  }
+  return {
+    check: "read-proof",
+    status: "pass",
+    detail: `${policyLoad.source.filename} sets daemon.read_proof: incremental — a long-lived reader hashes only the appended bytes, re-proving the whole prefix at least every ${String(
+      configured.fullReproofEvery,
+    )} read(s) or ${String(
+      configured.fullReproofAfterMs,
+    )} ms, whichever comes first, and after every append it makes. The Claude Code hook, \`approval log verify\` and \`approval doctor\` prove in full whatever this says.`,
   };
 }
 
@@ -1472,6 +1612,78 @@ function checkLogDrift(logPath: string): DoctorCheck {
 }
 
 // ---------------------------------------------------------------------------
+// 13. log-advance-cadence (APRV-204)
+// ---------------------------------------------------------------------------
+
+/**
+ * How far the log has run ahead of any records branch, and how the daemon's
+ * last advance ended.
+ *
+ * This is the status surface the cadence needed and `approval daemon` did not
+ * have. There is no `approval daemon status` subcommand and no status file: the
+ * daemon reports live on its own event stream, which is gone the moment nobody
+ * is tailing it, and a status file would be a second copy of facts the log
+ * already carries. So the answer is read from the log itself (the advance
+ * cycles the daemon registers under `daemon-advance-*`) plus git's local refs,
+ * which is why it can be answered by a DIFFERENT process from the one that made
+ * the attempt, and why an operator gets the same answer whether or not a daemon
+ * is running at all.
+ *
+ * Reads only, and never fetches: the same rule `log-drift` holds itself to.
+ * Advisory rather than failing — records waiting to be published is the normal
+ * state of a checkout that has been recording decisions, and only the reader
+ * knows how long is too long.
+ */
+function checkAdvanceCadence(logPath: string, records: readonly EventRecord[]): DoctorCheck {
+  const check = "log-advance-cadence";
+  const root = repoRoot(dirname(logPath));
+  if (root === null) {
+    return {
+      check,
+      status: "skip",
+      detail: `${logPath} is not inside a git repository, so there is no records branch for anything to be waiting for`,
+    };
+  }
+
+  const today = new Date().toISOString();
+  const state = publishedState(root, logPath, records, { remote: "origin", base: null }, today);
+  const last = lastAdvance(records);
+  // The reason, when the log carries one (APRV-211). A failed advance used to
+  // reach this row as the bare word `failed`, which told an operator that
+  // something had gone wrong and nothing about what: the daemon knew, said it
+  // once on an event stream nobody was tailing, and recorded `exit_code: 1`.
+  // The verb's own code and message now travel onto `execution.failed`, so this
+  // row says them. A cycle recorded before the field existed still reads `null`
+  // and still prints the bare outcome; the shape is not assumed away.
+  const why =
+    last === null || last.code === null
+      ? ""
+      : ` (${last.code}${last.message === null ? "" : `: ${last.message}`})`;
+  const attempt =
+    last === null
+      ? "no daemon advance cycle is in this log yet (the cadence is opt-in: `approval daemon run --advance`)"
+      : `the last daemon advance (through seq ${String(last.toSeq)}, ${last.ts}) ended ${last.outcome}${why}`;
+
+  if (state.pending === 0) {
+    return {
+      check,
+      status: "pass",
+      detail: `every record through seq ${String(state.publishedSeq)} is on a records branch or the trunk; ${attempt}`,
+    };
+  }
+  return {
+    check,
+    status: "pass",
+    detail: `${String(state.pending)} record(s) are not yet on a records branch (${String(
+      state.substantive,
+    )} of them are not the daemon's own advance bookkeeping); published through seq ${String(
+      state.publishedSeq,
+    )}, working head seq ${String(state.workingSeq)}. ${attempt}`,
+    fix: "approval log advance --pr — publish them now, or run the daemon with --advance",
+  };
+}
+
+// ---------------------------------------------------------------------------
 // harness hook outcome reporting (APRV-145)
 // ---------------------------------------------------------------------------
 
@@ -1679,7 +1891,102 @@ function checkHarnessWiring(dir: string): DoctorCheck {
   return {
     check,
     status: "pass",
-    detail: `WIRED on disk: ${path} registers \`approval hook\` for PreToolUse over ${GATED_TOOLS.join(", ")}. This is the file being present, NOT proof this session loaded it — the APRV-151 bypasses happened in worktrees carrying exactly this entry. The check that does not trust session wiring is the CI-side grant cross-check over the committed log.`,
+    detail: `WIRED on disk: ${path} registers \`approval hook\` for PreToolUse over ${GATED_TOOLS.join(", ")}. This is the file being present, NOT proof this session loaded it — the APRV-151 bypasses happened in worktrees carrying exactly this entry. The check that does not trust session wiring is the CI-side grant cross-check over the committed log, which asks whether the CHANGE was granted rather than whether the path ever was (APRV-202).`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// dark sessions (APRV-192)
+// ---------------------------------------------------------------------------
+
+/**
+ * Does the git activity in this checkout have log records beside it?
+ *
+ * The detective complement to `harness-hook-wiring` above. That row reports
+ * whether the settings file is on disk and says plainly that this is not proof
+ * a session loaded it; this row asks the question that does not depend on
+ * session wiring at all — git shows commits and worktrees, and the log either
+ * carries records beside them or it does not.
+ *
+ * Reads only. Doctor never appends, so a dark subject found HERE is reported
+ * and not recorded: the record is the daemon's, written by the sweep it runs on
+ * its own cadence (`approval daemon run --dark-sessions`). Two processes
+ * appending the same observation would be two writers to one fact, and doctor
+ * is a reader.
+ *
+ * This row DOES fail the run, which is where it parts company with
+ * `harness-hook-wiring` above. That row reports a configuration, and a
+ * configuration this runtime cannot verify from disk is not a health verdict.
+ * This one reports an EVENT: work was done in this repository and the log was
+ * not told. "Never silently tolerate it" is the whole of APRV-192, and a row
+ * that reported a dark session in the pass column would be tolerating it
+ * quietly in the one place an operator goes to ask whether anything is wrong.
+ *
+ * An `undetermined` subject is a skip, not a fail, for the reason the daemon
+ * appends nothing for one: what the detector could not see is a gap in the
+ * instrument, and a red row for it would train an operator to ignore red rows.
+ * The gap is named in the detail, never folded into a pass.
+ */
+function checkDarkSessions(
+  logPath: string,
+  dir: string,
+  policyPath: string,
+  records: readonly EventRecord[],
+  verified: boolean,
+): DoctorCheck {
+  const check = "dark-sessions";
+  const root = repoRoot(dir);
+  if (root === null) {
+    return {
+      check,
+      status: "skip",
+      detail: `${dir} is not inside a git repository, so there is no git activity for the log to owe records against`,
+    };
+  }
+
+  // `reportDarkSessions`, never `sweepDarkSessions`: the read-only half of the
+  // same code, so doctor and the daemon reach identical verdicts and only the
+  // daemon writes them down.
+  const { report } = reportDarkSessions({
+    logPath,
+    root,
+    policy: { file: policyPath },
+    windowMs: DEFAULT_DARK_WINDOW_MS,
+    records: verified ? records : null,
+    ...(verified ? {} : { logDetail: "the chain did not verify; see the log check above" }),
+  });
+
+  const dark = report.findings.filter((finding) => finding.verdict === "dark");
+  const undetermined = report.findings.filter((finding) => finding.verdict === "undetermined");
+  const watched = report.findings.length;
+
+  if (dark.length > 0) {
+    return {
+      check,
+      status: "fail",
+      detail: `${String(dark.length)} of ${String(watched)} checkout(s) show git activity the log carries no record of: ${dark
+        .map((finding) => `${finding.subject} [${finding.code ?? "?"}]`)
+        .join(", ")}. ${(dark[0] as DarkSessionFinding).detail}`,
+      fix: "approval doctor --dir <that checkout> — its harness-hook-wiring row, then `approval instructions hook`",
+    };
+  }
+  if (undetermined.length > 0) {
+    return {
+      check,
+      status: "skip",
+      detail: `UNDETERMINED for ${String(undetermined.length)} of ${String(
+        watched,
+      )} checkout(s): ${undetermined
+        .map((finding) => `${finding.subject} [${finding.code ?? "?"}]`)
+        .join(", ")}. ${(undetermined[0] as DarkSessionFinding).detail}`,
+    };
+  }
+  return {
+    check,
+    status: "pass",
+    detail: `${String(watched)} checkout(s) swept over the last ${String(
+      Math.round(DEFAULT_DARK_WINDOW_MS / 3_600_000),
+    )}h and every one of them either produced no git activity or has records beside it. ${report.coverage}`,
   };
 }
 
@@ -1845,6 +2152,24 @@ export function commandDoctor(
       // APRV-178: appended, eighth time, same reason. The sharing this reports
       // is what put a demo gate on the production bot.
       checkKeychainScope(logPath, policyLoad),
+      // APRV-204: appended, ninth time, same reason. The cadence advance needed
+      // a status surface that outlives the daemon's own event stream.
+      checkAdvanceCadence(logPath, verified.records),
+      // APRV-192: appended, tenth time, same reason. The detective complement
+      // to harness-hook-wiring above — that row asks this checkout's settings
+      // file, this one asks git and the log and never asks a session anything.
+      checkDarkSessions(
+        logPath,
+        dir,
+        policyPath,
+        verified.records,
+        verified.result.status === "clean",
+      ),
+      // APRV-188: appended, eleventh time, same reason.
+      checkVerifiedSnapshot(logPath),
+      // APRV-217: appended, twelfth time, same reason. A configuration row: it
+      // reads the policy, never a running daemon's memory.
+      checkReadProof(policyLoad),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

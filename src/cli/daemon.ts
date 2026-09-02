@@ -40,8 +40,18 @@ import {
   type DaemonOptions,
   type DaemonOutcome,
 } from "../daemon/daemon.js";
+import { defaultCadence, type AdvanceCadence } from "../daemon/advance.js";
 import { enableGitEvidence, type GitEvidenceEvent } from "../daemon/git-evidence.js";
-import { parseDuration } from "../core/policy-load.js";
+import {
+  DEFAULT_DARK_INTERVAL_MS,
+  DEFAULT_DARK_WINDOW_MS,
+} from "../daemon/dark-session.js";
+import {
+  DEFAULT_POLICY_DAEMON_READ,
+  loadPolicy,
+  parseDuration,
+  type LoadPolicyOptions,
+} from "../core/policy-load.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
   EXIT_INTEGRITY,
@@ -52,6 +62,7 @@ import {
 } from "./exit-codes.js";
 import { DAEMON_HELP, DAEMON_RUN_HELP } from "./help.js";
 import type { Streams } from "./main.js";
+import { useReadProof } from "../core/state.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
 import { DEFAULT_QUEUE_PATH } from "./render.js";
 import { refusal as renderRefusal, style } from "./style.js";
@@ -67,6 +78,26 @@ const RUN_FLAGS: Record<string, FlagKind> = {
   "--debounce": "string",
   "--once": "boolean",
   "--git-evidence": "boolean",
+  // The cadence advance (APRV-204). Opt-in, like `--git-evidence`: it pushes to
+  // a remote and opens pull requests, which a daemon must never start doing
+  // because a default moved under an operator who did not ask.
+  "--advance": "boolean",
+  "--advance-interval": "string",
+  "--advance-after": "string",
+  "--advance-remote": "string",
+  "--advance-base": "string",
+  "--no-advance-pr": "boolean",
+  // The dark-session sweep (APRV-192). Opt-in for the reason above, in a milder
+  // form: it runs `git log` over every worktree of the checkout on a cadence.
+  "--dark-sessions": "boolean",
+  "--dark-window": "string",
+  "--dark-interval": "string",
+  // The prefix proof (APRV-217). A flag here beats the `daemon` policy block
+  // for this run and nothing else; the policy is what an unattended service
+  // reads.
+  "--read-proof": "string",
+  "--full-reproof-every": "string",
+  "--full-reproof-after": "string",
   "--json": "boolean",
   "--help": "boolean",
   "-h": "boolean",
@@ -112,6 +143,92 @@ export function durationFlag(
 }
 
 /**
+ * The cadence-advance flags, as one cadence or none (APRV-204).
+ *
+ * Exported for `approval up`, which accepts every `daemon run` flag and must
+ * refuse a typo in exactly the same words — the reason {@link durationFlag} is
+ * exported, and the reason this parsing is not written twice.
+ *
+ * Every duration and count is judged HERE, before the first tick: a daemon that
+ * accepted `--advance-after twenty` and quietly advanced on the default would be
+ * lying about its own configuration for as long as it ran.
+ */
+export function advanceFlags(
+  flags: Record<string, string | boolean>,
+): { ok: true; cadence: AdvanceCadence | null } | { ok: false; message: string } {
+  if (!boolFlag(flags, "--advance")) return { ok: true, cadence: null };
+  const fallback = defaultCadence();
+
+  const interval = durationFlag(flags, "--advance-interval", fallback.intervalMs);
+  if (!interval.ok) return { ok: false, message: interval.message };
+
+  const afterRaw = stringFlag(flags, "--advance-after");
+  const after = afterRaw === null ? fallback.afterRecords : Number.parseInt(afterRaw, 10);
+  if (!Number.isInteger(after) || after < 1) {
+    return {
+      ok: false,
+      message: `--advance-after expects a positive whole number of records, got ${JSON.stringify(afterRaw)}`,
+    };
+  }
+
+  return {
+    ok: true,
+    cadence: {
+      intervalMs: interval.ms,
+      afterRecords: after,
+      remote: stringFlag(flags, "--advance-remote") ?? fallback.remote,
+      base: stringFlag(flags, "--advance-base"),
+      pr: !boolFlag(flags, "--no-advance-pr"),
+    },
+  };
+}
+
+/**
+ * The prefix-proof flags, resolved against the policy (APRV-217).
+ *
+ * Precedence is the one every override in this CLI uses: the flag wins for this
+ * run, the policy governs when no flag was typed, and an unloadable policy
+ * yields the default — which here is `full`, the strictest and most expensive
+ * proof, so a policy nobody could read cannot buy a cheaper one.
+ *
+ * Exported for `approval up`, which accepts every `daemon run` flag and must
+ * refuse a typo in exactly the same words — the reason {@link durationFlag} and
+ * {@link advanceFlags} are exported.
+ */
+export function readProofFlags(
+  flags: Record<string, string | boolean>,
+  policy: LoadPolicyOptions,
+):
+  | { ok: true; readProof: { mode: "full" | "incremental"; everyReads: number; afterMs: number } }
+  | { ok: false; message: string } {
+  const loaded = loadPolicy(policy);
+  const configured = loaded.ok ? loaded.daemon : DEFAULT_POLICY_DAEMON_READ;
+
+  const modeRaw = stringFlag(flags, "--read-proof");
+  if (modeRaw !== null && modeRaw !== "full" && modeRaw !== "incremental") {
+    return {
+      ok: false,
+      message: `--read-proof expects full or incremental, got ${JSON.stringify(modeRaw)}`,
+    };
+  }
+  const mode = modeRaw === null ? configured.readProof : modeRaw;
+
+  const everyRaw = stringFlag(flags, "--full-reproof-every");
+  const everyReads = everyRaw === null ? configured.fullReproofEvery : Number.parseInt(everyRaw, 10);
+  if (!Number.isInteger(everyReads) || everyReads < 1) {
+    return {
+      ok: false,
+      message: `--full-reproof-every expects a positive whole number of reads, got ${JSON.stringify(everyRaw)}`,
+    };
+  }
+
+  const after = durationFlag(flags, "--full-reproof-after", configured.fullReproofAfterMs);
+  if (!after.ok) return { ok: false, message: after.message };
+
+  return { ok: true, readProof: { mode, everyReads, afterMs: after.ms } };
+}
+
+/**
  * One daemon event as a human sentence.
  *
  * Warnings go to stderr and everything else to stdout, so `approval daemon run >
@@ -121,9 +238,15 @@ export function describeDaemonEvent(event: DaemonEvent): { text: string; stderr:
   switch (event.event) {
     case "started":
       return {
+        // The prefix proof is named on the line an operator already reads
+        // (APRV-217): which proof the reads of this run pay is configuration,
+        // and configuration nobody is told about is the failure mode this
+        // project exists to prevent.
         text: `daemon: watching ${event.tasks} and ${event.log}; queue ${event.queue}; tick every ${String(
           event.interval_ms,
-        )}ms${event.watching ? "" : " (fs watch unavailable — polling only)"}`,
+        )}ms; read proof ${event.read_proof}${
+          event.watching ? "" : " (fs watch unavailable — polling only)"
+        }`,
         stderr: false,
       };
     case "drift":
@@ -180,6 +303,44 @@ export function describeDaemonEvent(event: DaemonEvent): { text: string; stderr:
         )} awaiting audit review)`,
         stderr: false,
       };
+    case "advance":
+      // The refused and gated outcomes go to stderr beside their warning, for
+      // the reason every warning does: a records branch that did not move is a
+      // complaint, and a complaint belongs where an operator's eye is.
+      return {
+        text:
+          event.outcome === "advanced"
+            ? `log advance: ${event.message}${event.flush ? " (shutdown flush)" : ""}${
+                event.pr_created ? " — pull request opened" : ""
+              }`
+            : `log advance ${event.outcome}${event.code === null ? "" : ` (${event.code})`}: ${
+                event.message
+              } — ${String(event.records_pending)} record(s) still off ${
+                event.records_branch ?? "any records branch"
+              }`,
+        stderr: event.outcome !== "advanced",
+      };
+    case "dark_session":
+      // Both verdicts go to stderr. A dark session is the loudest thing this
+      // loop can say — git activity nobody was told about — and an undetermined
+      // one is a gap in the detector's own sight; neither belongs in the stream
+      // an operator scrolls past.
+      return {
+        text: renderRefusal(
+          style(),
+          event.verdict === "dark" ? `dark-session:${event.code}` : `dark-session-undetermined:${event.code}`,
+          `${event.subject}${event.branch === null ? "" : ` (branch ${event.branch})`}: ${
+            event.message
+          }${
+            event.seq === null
+              ? event.already_recorded
+                ? " — already recorded in this log; nothing appended"
+                : ""
+              : ` — recorded at seq ${String(event.seq)}`
+          }`,
+        ),
+        stderr: true,
+      };
     case "escalated":
       return {
         text: `loop escalation: ${event.task} has ${String(
@@ -194,11 +355,14 @@ export function describeDaemonEvent(event: DaemonEvent): { text: string; stderr:
       };
     case "tick":
       return {
+        // The cost of the tick is on the line an operator already reads
+        // (APRV-211): a tick that takes seconds, or that reads the log dozens of
+        // times, is the shape of the incident this field exists to make obvious.
         text: `tick ${String(event.n)}: head ${
           event.head === null ? "none" : `seq ${String(event.head)}`
         }, ${String(event.drift)} drift, ${String(event.expired)} expired, ${String(
           event.escalated,
-        )} escalated`,
+        )} escalated (${String(event.ms)} ms, ${String(event.reads)} reads)`,
         stderr: false,
       };
     case "warning":
@@ -349,6 +513,35 @@ export function commandDaemonRun(
       },
     },
   };
+
+  const cadence = advanceFlags(flags);
+  if (!cadence.ok) return usageError(streams, json, cadence.message, DAEMON_RUN_HELP);
+  if (cadence.cadence !== null) options.advance = cadence.cadence;
+
+  // APRV-217. Resolved here, before the first tick, for the reason every other
+  // configuration is: a daemon that accepted `--read-proof incrementel` and
+  // quietly ran the default would be lying about its own proof for as long as
+  // it ran, and the mode it resolves to is printed on its first line.
+  const proof = readProofFlags(flags, policy);
+  if (!proof.ok) return usageError(streams, json, proof.message, DAEMON_RUN_HELP);
+  options.readProof = proof.readProof;
+  // Process-wide as well as per-read: the loop's own reads carry the option,
+  // and the queue renderer's reads — same process, same log, no options of
+  // their own — pick it up from here. Set only in this long-lived operator
+  // process, and never by a CLI verb an agent runs.
+  useReadProof(proof.readProof);
+
+  // The dark-session sweep (APRV-192). Its two durations are refused for a typo
+  // in exactly the words every other duration flag is, for the reason
+  // `advanceFlags` states: a daemon that accepted `--dark-window twelve` and
+  // quietly swept the default would be lying about what it looked at.
+  const darkWindow = durationFlag(flags, "--dark-window", DEFAULT_DARK_WINDOW_MS);
+  if (!darkWindow.ok) return usageError(streams, json, darkWindow.message, DAEMON_RUN_HELP);
+  const darkInterval = durationFlag(flags, "--dark-interval", DEFAULT_DARK_INTERVAL_MS);
+  if (!darkInterval.ok) return usageError(streams, json, darkInterval.message, DAEMON_RUN_HELP);
+  if (boolFlag(flags, "--dark-sessions")) {
+    options.darkSessions = { windowMs: darkWindow.ms, intervalMs: darkInterval.ms };
+  }
 
   // SPEC.md §8's optional git hardening (APRV-42). Opt-in, checked here and
   // never later: an operator who asked for a second evidence layer and silently

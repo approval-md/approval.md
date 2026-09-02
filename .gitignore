@@ -4,6 +4,13 @@ dist/
 .DS_Store
 .approval/*.sqlite
 
+# The verified-head snapshot (APRV-188): the daemon's endorsement of the log
+# bytes it just walked, so the next hook process re-proves a digest instead of
+# re-walking the chain. Local, derived, and re-proved by every reader — never
+# evidence, and never something a clone should inherit.
+.approval/log/verified-head.json
+.approval/log/verified-head.json.*.tmp
+
 # The encrypted credential vault (SPEC.md §10.4). Never committed, in any
 # repository: the contents stay encrypted, but a published vault is a permanent
 # offline-attack target against one human-chosen passphrase, and a commit is not
@@ -15,3 +22,7 @@ dist/
 # Private strategy notes: never committed, never published (Pages serves repo root)
 private/*
 !private/README.md
+
+# The ungated agent journal (APRV-195): local signal for the operator, not
+# truth and not evidence. The log is the record that gets committed.
+.approval-journal/

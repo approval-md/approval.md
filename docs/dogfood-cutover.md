@@ -85,6 +85,11 @@ approval daemon run &              # watch, drift, TTL, QUEUE.md — the sole wr
 approval channel telegram listen   # pushes requests to the phone, records taps
 ```
 
+With several sessions appending at once the daemon ticks after every append;
+the `tick` line's `ms` says what each costs, and `--debounce` is the knob when
+that times the append rate approaches a core. See "Sustained append rate" under
+`daemon run` in `docs/cli-reference.md` and the 2026-09-02 postmortem.
+
 To have the runtime there without starting it by hand, `approval setup service`
 writes the launchd agent (macOS) or systemd user unit (Linux) that runs
 `approval up` at login. It prints the whole unit for you to read before it writes
@@ -112,12 +117,14 @@ day gets its message on the phone within one poll cycle, with no restart. The
 M5 proof ran the other way round (request first, listener second) and so never
 exercised this; the order no longer matters.
 
-Two consequences worth knowing at the terminal. A restarted listener re-sends
-everything still pending, because the "already sent" set lives only in the
-process (SPEC.md §10.3: channels hold no state that is truth): a duplicate on
-the phone, never a request nobody sees. Since APRV-196 that re-delivery
-announces itself and the older copies keep working; the section below is the
-operator's view of it. And a send that fails is retried on every later cycle
+Two consequences worth knowing at the terminal. A restarted listener starts its
+walkthrough over — it re-derives the pending set from the verified log and shows
+the oldest again, or under `channels.telegram.delivery: burst` re-sends
+everything still pending — because the "already sent" set and the order live
+only in the process (SPEC.md §10.3: channels hold no state that is truth): a
+duplicate on the phone, never a request nobody sees. Since APRV-196 the older
+copies keep working, and since APRV-216 there is one request on screen at a
+time; the section below is the operator's view of both. And a send that fails is retried on every later cycle
 without an attempt limit, so a phone out of signal or a Bot API outage delays
 delivery rather than dropping it; the stderr warnings thin out after a few
 consecutive failures for the same request. Only a failure during the startup
@@ -134,7 +141,26 @@ above are the same behaviour, reached on a timer instead of by your hand.
 every page load, so a refresh shows what is pending now. `approval channel cli`
 is one-shot by design; running the verb again is its refresh.
 
-### What a restart looks like on the phone (APRV-196)
+### What a restart looks like on the phone (APRV-216, and APRV-196 before it)
+
+**There is no wall any more.** The default since APRV-216 is
+`channels.telegram.delivery: paced`, and a restart with five pending requests
+sends two things: one summary line (`5 pending — oldest 2h 10m ago —
+policy.edit ×3, network.call ×2`) and the OLDEST request, with its buttons. The
+next one arrives on the first cycle after you decide that one, `/skip` it (it
+comes round again, last) or `/next` past it (this process does not show it
+again). `/queue` lists everything pending at any time, including while a request
+is on screen, and that list is read from the log rather than from the chat, so it
+is right even when the chat is not.
+
+Nothing is withheld by this. Every request is still pending in the log, still
+listed by `approval queue`, and still decidable from any copy of its message
+already in the chat. What is paced is your attention.
+
+The rest of this section is what a restart looked like before, and what it still
+looks like under `channels.telegram.delivery: burst`. Read it that way: the
+duplicate-copy rules and every toast below hold in both modes, because they are
+properties of the buttons rather than of the pacing.
 
 The re-delivery above used to arrive as a wall: five pending requests, five new
 messages with no warning, sitting under five older copies whose buttons had
@@ -142,7 +168,7 @@ quietly stopped working. Taps on the older copies did nothing at all, so the
 natural response (tap it again, harder) was the one response that could not
 help. Three things changed.
 
-**A restart announces itself.** The first batch a listener process sends is
+**A restart announces itself.** Under `burst`, the first batch a listener sends is
 preceded by one line: `LISTENER STARTED — re-sending N pending requests`,
 followed by the requests. A flood that says what it is is a re-delivery; the
 same flood in silence is an incident. Later cycles send no banner, because a
@@ -165,19 +191,49 @@ useful part:
 
 | Toast | What happened |
 |---|---|
-| `Approved — recorded in the log.` / `Rejected — …` | The decision landed; the log has the event. |
-| `Earlier copy of this request — Approved — recorded in the log.` | You tapped an older copy. It decided the same request, once. |
+| `Heard — deciding. The message will say what the log recorded.` | Your tap arrived. **Nothing has been decided yet**; read the message. |
+| `Earlier copy of this request — Heard — deciding…` | Same, and you tapped an older copy. It decides the request this listener holds, once. |
 | `Already granted/rejected/revoked — the recorded answer stands…` | Someone (possibly you) already answered this, here or at another surface. Nothing was recorded for this tap. |
-| `Expired — the approval window closed…` | The TTL lapsed before an answer. Nothing was recorded; the requester must ask again. |
-| `Withdrawn — the requester took this back…` | The asker is gone. Nothing to do. |
 | `Still pending — this copy's buttons are not live here…` | The listener is holding the request but has not yet re-sent it. The new copy is seconds away. |
 | `This request is not open here…` | The listener could not place the request at all: another listener holds it, or the log it reads does not carry it. Check which checkout `approval up` is running in. |
-| `Received — this listener could not finish reading your tap.` | A bug or a transport failure mid-handling. Nothing was recorded by the tap; read the message above for the outcome and check the listener's stderr. |
+| `This button is no longer live…` / `Unrecognized button.` | A button this listener never issued, or one it has already annotated. Read the message. |
+| `Received — this listener could not finish reading your tap.` | A tap that reached no branch at all. Nothing was recorded by it; check the listener's stderr. |
 
-The toast is a courtesy and the log is the record: a toast that fails to send
-(Telegram drops a callback query after its own window, so a tap from a phone
-that was offline can arrive too late to answer) is reported on the listener's
-stderr and changes nothing about the decision.
+### The toast means "heard". The message means "recorded".
+
+Since APRV-206 these are two different statements and it is worth being precise
+about which is which, because only one of them is evidence.
+
+- **The toast** is sent the moment the tap is recognized, *before* the gate runs.
+  It says the listener has your tap and is deciding. It is never a decision, and
+  it deliberately does not contain the words approved, granted, rejected or
+  recorded. Telegram allows exactly one answer per button press, and this is it.
+- **The message edit** is written afterwards, from the record the gate actually
+  appended: `✓ APPROVED` or `✗ REJECTED`, with the actor, the timestamp and the
+  sequence number of the event. That line is the receipt, and it is the one that
+  agrees with `approval queue`, `approval log verify` and the log itself.
+- **`✗ NOT RECORDED`** on the message means the gate refused the tap (already
+  decided, withdrawn, expired, over budget) or the listener fell over while
+  recording it. The reason is on the line under the headline. Nothing was
+  appended by the tap, and the buttons are removed: if the request is still
+  pending, the next dispatch cycle sends a fresh prompt for it.
+
+Why the split: the decision path reads and verifies the log, re-checks the
+budgets and appends under a lock, and the parts of that which grow with the log
+used to sit in front of your spinner. On this repository's own log the tap's
+toast went from ~23 ms to well under a millisecond of local work when the ack
+moved in front of the gate. What did not move is the order of events in the log:
+the toast is not evidence of anything, and the message is written from the
+record.
+
+A toast that fails to send (Telegram drops a callback query after its own
+window, so a tap from a phone that was offline can arrive too late to answer) is
+reported on the listener's stderr and changes nothing about the decision.
+
+**A tap on an "all" button** is acked the same way, before any of its member
+decisions run. The digest is then redrawn once, member by member, and that
+redraw is where you read what landed; the tally (`Approved 3 — one log event
+each.`) goes to the listener's stderr for the operator.
 
 ### When the phone channel misbehaves, decide at the CLI
 

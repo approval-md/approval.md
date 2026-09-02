@@ -67,6 +67,12 @@ Local Cursor Agent `Shell`, `Write`, and `Delete` calls are gated by `approval h
 
 The committed log has one writer: the daemon in the primary checkout while it runs. Never manually edit `.approval/QUEUE.md`, payloads, or the log. A session that cannot reach the gate stops and escalates.
 
+## Saying something that is not an action (APRV-195)
+
+`approval journal write --message "<text>"` appends free text to a local file. It is the one verb the gate does not stand in front of: never classified, never resolved against policy, never approvable and never deniable, with no event in the log and no refusal path. Use it for what an exit code cannot carry, such as complying while thinking the instruction is wrong, an instruction that reads as odd, or being stuck with only a guess left to try.
+
+The terms, stated so that use of it is informed: entries land in `.approval-journal/YYYY-MM-DD.jsonl` in the working directory, gitignored by default. They are local, they are not private from the operator or from anyone who can read the checkout, and the operator reads them with `approval journal read`. Nothing in the runtime parses the text, so nothing written there raises or lowers scrutiny, changes a verdict, or affects sampling. It is not a way to reach a human urgently and not a decision surface. When something needs deciding, that is `approval request`.
+
 ## Permissions summary
 
 Allowed without prompting:
@@ -76,6 +82,7 @@ Allowed without prompting:
 - Run tests, lint, typecheck, build, local scripts, and lockfile-pinned `npm ci`.
 - Local git status, diff, add, and commit on feature branches.
 - Push feature branches and open or update their pull requests when policy resolves them as supervised.
+- Write to the journal (`approval journal write`). It is ungated by construction, not by permission, and nothing written there is judged.
 
 Require approval first:
 
@@ -84,11 +91,12 @@ Require approval first:
 - Add, upgrade, or remove dependencies.
 - Delete files outside the active task scope.
 - Make mutating or ambiguous network calls.
-- Edit policy, agent instructions, SPEC.md, CI, or release configuration.
+- Edit agent instructions, SPEC.md, design notes, CI, or release configuration (policy.edit, supervised-live).
 
 Never:
 
 - Access or modify credentials, tokens, or the vault.
+- Edit the policy file or anything under the approval home except its log (policy.core, human-only), or write into the log directory by any means (log.mutate, human-only).
 - Rewrite shared history.
 - Mutate the event log or fabricate events.
 

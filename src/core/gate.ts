@@ -120,6 +120,12 @@ import {
   type AttestationRefusalDetail,
 } from "./attest.js";
 import { evaluateBudgetsWithTask, type BudgetScope, type BudgetVerdict } from "./budgets.js";
+import {
+  evaluateIntakeLimits,
+  intakeRefusalOf,
+  type IntakeScope,
+  type IntakeVerdict,
+} from "./intake-limits.js";
 import { tick, type ClockOptions } from "./clock.js";
 import { readTaskFile } from "./frontmatter.js";
 import {
@@ -156,6 +162,7 @@ import {
   RECIPIENT_KEY_FIELD,
   sealToken,
   SEALED_TOKEN_FIELD,
+  SELF_DELIVERY_FIELD,
   writePrivateKey,
 } from "./seal.js";
 import {
@@ -280,6 +287,50 @@ export const GATE_REFUSAL_CODES = [
    * `verdicts` and in the appended event's payload.
    */
   "budget-exceeded",
+  /**
+   * The approver's queue is at the ceiling the policy declared (SPEC.md §5.2's
+   * `limits.max_pending`, per class or on a `budgets` scope; APRV-173).
+   *
+   * A limit on ATTENTION rather than on money, which is why it is its own code
+   * and why it fires where it does: after the legality checks that say whether
+   * this request may exist at all, and before budgets, which are about the
+   * world's exposure rather than the human's. An agent that floods the queue
+   * with cheap in-budget requests spends nothing and still defeats the gate,
+   * because an approver facing two hundred prompts stops reading them and
+   * starts clearing them.
+   *
+   * Nothing is appended, deliberately, and this is the one refusal shaped
+   * differently from `budget-exceeded` on purpose (Carter's approved reading,
+   * 2026-08-31). A `budget.exceeded` record exists because a budget refusal is
+   * a fact about a commitment audit must be able to reconstruct; a record per
+   * refused flood request would hand the flooder the log growth it was refused
+   * the queue for. `error.limits` carries the failing verdicts, and the
+   * requests that WERE admitted are all in the log to count from.
+   *
+   * Transient in the sense that matters to a caller: the queue drains when a
+   * human decides, a requester withdraws, or a TTL lapses. Retrying at once
+   * gets the same answer.
+   */
+  "queue-full",
+  /**
+   * This origin created more requests in the last hour than the policy's
+   * `limits.requests_per_hour` allows (SPEC.md §5.2, APRV-173).
+   *
+   * Distinct from `queue-full`, and the distinction is the repair. That code
+   * says the queue is full whoever is asking, so the caller waits for an
+   * approver; this one says the caller's own recent volume is the problem, so
+   * it slows down. Origin is the requesting actor at v0.1, which the runtime
+   * assigns rather than the caller (see `core/intake-limits.ts`), so a
+   * requester cannot re-label itself into a fresh hour.
+   *
+   * Counted over request CREATION, not over live requests: a request that was
+   * answered a minute after it was made still spent the origin's share of the
+   * hour. A ceiling that forgot each request as it was answered could be
+   * cleared by withdrawing every request as fast as it was made.
+   *
+   * Nothing is appended, for the same reason `queue-full` appends nothing.
+   */
+  "rate-limited",
   /**
    * The action resolves to `manual` and its registered declaration carries no
    * `payload_hash` (amended SPEC.md §6.2: MUST for `manual` actions).
@@ -495,6 +546,17 @@ export const GATE_REFUSAL_CODES = [
    * so nothing was written and nothing is retried here.
    */
   "append-failed",
+  /**
+   * A `delivery: "self"` request could not publish a delivery address (APRV-211):
+   * the ephemeral private key could not be written beside the log.
+   *
+   * Fail closed, and unlike APRV-105's ordinary sealed path, which drops the
+   * convenience and leaves the paste path standing. There is no paste path
+   * here — the requester is a process, not a terminal — so a request admitted
+   * without an address would spend a human's decision on an authorization
+   * nothing can ever open. Nothing is appended; the next attempt asks again.
+   */
+  "token-delivery-unavailable",
 ] as const;
 
 export type GateRefusalCode = (typeof GATE_REFUSAL_CODES)[number];
@@ -510,6 +572,14 @@ export interface GateRefusal {
   state?: RequestState;
   /** The failing verdicts, when `code` is `budget-exceeded`. */
   verdicts?: BudgetVerdict[];
+  /**
+   * The failing request-volume verdicts, when `code` is `queue-full` or
+   * `rate-limited` (APRV-173). Separate from `verdicts` because they are a
+   * different measurement with a different shape, and because a caller that
+   * branched on `verdicts` to read money out of a budget refusal must not find
+   * queue counts there.
+   */
+  limits?: IntakeVerdict[];
   /** Schema errors, when `code` is `envelope-invalid`. */
   errors?: ValidationError[];
   /** The underlying append error, when `code` is `append-failed`. */
@@ -736,6 +806,26 @@ function ttlOf(load: PolicyLoadResult): number | null {
 }
 
 function budgetScopeOf(load: PolicyLoadResult, resolution: Resolution): BudgetScope {
+  return {
+    classLimits: resolution.limits,
+    classPattern: resolution.matched === null ? null : resolution.matched.pattern,
+    globalBudgets: load.ok ? load.policy.budgets ?? null : null,
+  };
+}
+
+/**
+ * The request-volume scope (APRV-173): the same three fields the budget scope
+ * carries, read from the same resolution and the same load.
+ *
+ * Identical by construction rather than by coincidence. A queue ceiling written
+ * on a rule must be attributed by that rule's pattern for the reason SPEC.md
+ * §5.2 gives budgets: one `financial.*` rule is one ceiling shared by every
+ * class it governs, and a limit taken from a rule that did not win would be
+ * compared against a window it does not scope. A policy that fails to load
+ * offers no limits at all here, exactly as it offers no budgets: everything is
+ * `manual` in that case, and the human gate is the ceiling.
+ */
+function intakeScopeOf(load: PolicyLoadResult, resolution: Resolution): IntakeScope {
   return {
     classLimits: resolution.limits,
     classPattern: resolution.matched === null ? null : resolution.matched.pattern,
@@ -1285,6 +1375,36 @@ export interface RequestInput {
    * {@link startHarnessExecution}, which re-checks the same streaks.
    */
   loopFloor?: boolean;
+  /**
+   * `"self"` when the requesting process will consume its own grant, in its own
+   * process, and no other principal needs the raw token (APRV-211).
+   *
+   * The daemon's cadence advance is the case it exists for. The daemon is the
+   * requester AND the executor: it asks the gate, a human answers on the phone,
+   * and the same process spends the answer through {@link startExecution}'s
+   * APRV-105 sealed path. Before this field, the grant handed its raw token back
+   * to the GRANTING surface — the Telegram listener's terminal — which printed
+   * it under "single-use · stored nowhere · copy it now", the APRV-166 relay
+   * path meant for a requester in another process. Nobody was ever going to
+   * carry that value anywhere; it was a live credential rendered for a principal
+   * that was not the requester, which SPEC.md §11.1's raw-secrets invariant
+   * exists to prevent.
+   *
+   * So it does two things and nothing else. {@link request} mints the sealed
+   * delivery address for this action REGARDLESS of `defaults.token_delivery`,
+   * because there is no terminal on the other end of the paste path and a
+   * request with no address would be an authorization nobody could open; and
+   * {@link decide} withholds the raw token from its own return value, so no
+   * granting surface has one to print. The token still exists, still binds to
+   * the payload bytes, is still single-use, and is still minted only by a
+   * human's grant. Nothing here reduces scrutiny: it removes a reader, not a
+   * check.
+   *
+   * Refused when the key cannot be written (`token-delivery-unavailable`), which
+   * is the fail-closed direction: a self-delivered grant nobody can open would
+   * spend a human's decision on an authorization that can never execute.
+   */
+  delivery?: "self";
 }
 
 /**
@@ -1766,6 +1886,60 @@ export function request(
     );
   }
 
+  // APRV-173, SPEC.md §5.2's request-volume limits, enforced here and nowhere
+  // else. Placed AFTER the legality checks above and BEFORE budgets, and both
+  // halves of that placement are deliberate.
+  //
+  // After `duplicate-request` and `already-executed`, because those say the
+  // request may not exist at all: a second request for a live action key is
+  // refused for being a duplicate rather than for the queue it would have
+  // joined, and a caller told `queue-full` about an action that already
+  // executed would be sent to wait for a queue to drain instead of to stop.
+  //
+  // Before budgets, because these limits protect the approver's attention and
+  // budgets protect the world's exposure. The cheaper measurement guards the
+  // scarcer resource: a flood of in-budget requests passes every budget verdict
+  // and still empties the one thing this system cannot refill, which is a
+  // human's willingness to read a prompt.
+  //
+  // Off the manual path this code is unreachable, and correctly so: the
+  // `proceed: true` return above happens first. An autonomous or unsampled
+  // supervised action appends no `approval.requested` (§6.3), joins no queue,
+  // and puts nothing in front of anyone, so a queue ceiling has nothing to
+  // measure it against.
+  //
+  // A refusal here appends NOTHING: no event, no payload file, no recipient
+  // key. So a refused request consumes no budget (nothing was authorized), no
+  // window (the window counts `approval.requested` records and none was
+  // written), and no attention.
+  const intake = evaluateIntakeLimits(
+    read.records,
+    intakeScopeOf(load, resolution),
+    { class: input.cls, origin: actor },
+    ts,
+    ttlOf(load),
+  );
+  if (!intake.pass) {
+    const failedLimits = intake.verdicts.filter((entry) => !entry.pass);
+    // Never null on this branch: `pass` is false only when a verdict failed.
+    const code = intakeRefusalOf(intake) ?? "queue-full";
+    const detail = failedLimits
+      .map(
+        (entry) =>
+          `${entry.limit} (${entry.scope}, ${String(entry.observed)} of ${
+            entry.ceiling === null ? "an unreadable ceiling" : String(entry.ceiling)
+          }${entry.note === undefined ? "" : `: ${entry.note}`})`,
+      )
+      .join(", ");
+    return refuse(
+      code,
+      code === "queue-full"
+        ? `the approver's queue is at its declared ceiling, so action ${input.actionKey} was not added to it: ${detail}. SPEC.md §5.2 caps simultaneously pending requests because approver attention is the resource this gate spends. Nothing was appended and no budget was consumed; the request can be made again once a pending request is decided, withdrawn, or lapses.`
+        : `request intake is rate-limited for ${actor}: ${detail}. SPEC.md §5.2 caps request creation per origin over a rolling hour. Nothing was appended and no budget was consumed; the window is rolling, so the oldest request in it ages out on its own.`,
+      { limits: failedLimits },
+    );
+  }
+
   const budget = evaluateBudgetsWithTask(
     read.records,
     budgetScopeOf(load, resolution),
@@ -1867,8 +2041,16 @@ export function request(
   // the delivery is a convenience, the human's decision is not, and a request
   // that recorded a key it cannot open would be worse than one that recorded
   // none. So a failed write drops the field and the paste path stands.
+  //
+  // APRV-211. `delivery: "self"` mints the address whatever the policy says,
+  // and refuses when it cannot. The operator's `token_delivery` setting chooses
+  // between two ways of getting a token to a HUMAN AT A TERMINAL; a requester
+  // that is a process in the same machine has no terminal on the other end, so
+  // the setting has nothing to choose between and the address is the only route
+  // that exists. See {@link RequestInput.delivery}.
+  const selfDelivered = input.delivery === "self" && input.execution !== "harness";
   if (
-    tokenDeliveryOf(load) === "sealed" &&
+    (tokenDeliveryOf(load) === "sealed" || selfDelivered) &&
     input.execution !== "harness" // a harness grant mints no token to deliver
   ) {
     const keypair = mintRecipientKeypair();
@@ -1878,6 +2060,14 @@ export function request(
       keypair.privateKey,
     );
     if (written.ok) payload[RECIPIENT_KEY_FIELD] = keypair.publicKey;
+    else if (selfDelivered) {
+      return {
+        ok: false,
+        code: "token-delivery-unavailable",
+        message: `action ${input.actionKey} is requested with self-delivery, so the grant's token can only reach this process through the sealed address this request publishes — and the private half could not be written (${written.message}). Nothing was appended: a decision spent on an authorization nobody can open would be worse than a question asked again.`,
+      };
+    }
+    if (written.ok && selfDelivered) payload[SELF_DELIVERY_FIELD] = "self";
   }
   if (input.summary !== undefined) payload["summary"] = input.summary;
   if (input.reversible !== undefined) payload["reversible"] = input.reversible;
@@ -1956,6 +2146,12 @@ export type DecideResult =
        * The raw single-use execution token, on `grant` only (APRV-17). Returned
        * here and nowhere else: the log carries only its SHA-256, so this value
        * is unrecoverable once the caller drops it.
+       *
+       * Absent — on a grant that DID mint one — when the request declared
+       * self-delivery and the token was sealed to its address (APRV-211). The
+       * authorization is complete; the granting surface simply has no copy to
+       * print, because the requester is a process that opens the seal itself.
+       * See {@link RequestInput.delivery}.
        */
       token?: string;
     }
@@ -2318,12 +2514,27 @@ export function decide(
       //
       // The raw token is STILL returned to this caller and still printed once on
       // the granting surface. Sealing adds a second reader; it removes none.
-      const recipient = payloadOf(requestRecord(read.records, actionKey))[RECIPIENT_KEY_FIELD];
+      //
+      // APRV-211 adds the one request for which it DOES remove one. A request
+      // that declared self-delivery was minted by a process that will open the
+      // seal itself (the daemon's own advance), so every copy of the token that
+      // leaves this function is a copy nobody needs: the observed defect was the
+      // Telegram listener printing "copy it now" on Carter's terminal for an
+      // action they were not going to run. Withheld HERE, at the single choke
+      // point, rather than at each granting surface — a value never handed out
+      // cannot be printed by a surface written later. Only when the seal was
+      // actually written: an unopenable grant with no returned token would be a
+      // decision spent on nothing.
+      const declared = payloadOf(requestRecord(read.records, actionKey));
+      const recipient = declared[RECIPIENT_KEY_FIELD];
       if (isRecipientKey(recipient)) {
         const sealed = sealToken(token, recipient, actionKey);
         // An unusable recipient key drops the convenience and never the grant:
         // a human's yes must not be voidable by a malformed delivery address.
-        if (sealed !== null) payload[SEALED_TOKEN_FIELD] = { ...sealed };
+        if (sealed !== null) {
+          payload[SEALED_TOKEN_FIELD] = { ...sealed };
+          if (declared[SELF_DELIVERY_FIELD] === "self") token = undefined;
+        }
       }
     }
   }
@@ -2697,7 +2908,47 @@ export interface ConsumeHarnessOptions extends GateOptions {
    * than a compile error a caller could silence with a placeholder.
    */
   presentedPayloadHash?: string;
+  /**
+   * The task id of the invocation doing the spending (APRV-200).
+   *
+   * Used for one thing and nothing else: to decide whether the recorded
+   * {@link HARNESS_GRANT_ORIGIN} is `direct` or `carried`. It never gates the
+   * spend, never changes a refusal, and never appears on the record itself.
+   *
+   * It is a CLAIM, in §9's computed-versus-claimed vocabulary, and it is bounded
+   * the way §11.1 invariant 4 bounds every claim: the only value it can produce
+   * unaided is the one that ADDS scrutiny. `direct` is reachable solely by
+   * presenting the task the request record already carries, which is a fact the
+   * gate reads out of the verified log rather than out of the caller; anything
+   * else, absence included, records `carried`.
+   */
+  spendingTask?: string;
 }
+
+/**
+ * How the authorization reached the process that spent it (APRV-200).
+ *
+ * `direct` — the tool call that spent this grant is the tool call that asked for
+ * it. One process opened the request, waited, saw the decision and proceeded, so
+ * the gate observed the whole ordering: nothing this runtime authorized could
+ * have run before the human answered.
+ *
+ * `carried` — a LATER tool call spent it, under APRV-117's carryover or its
+ * adoption sibling. The asking invocation had already returned a verdict (a
+ * `hook-timeout` deny, which leaves the request open), and whether the harness
+ * honoured that verdict is a fact this runtime never observes: it decides, and
+ * the harness executes. So the ordering the record implies — grant, then
+ * execution — is only guaranteed for `direct`, and this marker is what lets an
+ * auditor tell the two apart from the committed log alone. See
+ * `docs/claude-code-hook.md`, "When the grant can follow the write".
+ *
+ * Absent on an `execution.started` that names no `grant_seq`: an unattended
+ * execution has no grant, so it has no origin to report (SPEC.md §6.3).
+ */
+export type HarnessGrantOrigin = "direct" | "carried";
+
+/** The payload field {@link HarnessGrantOrigin} is recorded under. */
+export const HARNESS_GRANT_ORIGIN = "grant_origin";
 
 export type ConsumeHarnessResult = { ok: true; record: EventRecord } | GateRefusal;
 
@@ -2749,6 +3000,18 @@ export type ConsumeHarnessResult = { ok: true; record: EventRecord } | GateRefus
  * authorization was charged at `approval.granted`, and `core/budgets.ts`'s
  * consumption contract already dedupes a start event against a grant carrying
  * the same `action_key`.
+ *
+ * ## What the record says about ORDER (APRV-200)
+ *
+ * The start carries `grant_origin`, which answers a question the log could not
+ * previously be asked: was the tool call that spent this grant the tool call
+ * that asked for it? `direct` says yes, and the gate observed the whole ordering
+ * in one process. `carried` says a LATER invocation spent it — APRV-117's
+ * carryover, or its adoption sibling — which means the asking invocation had
+ * already returned a verdict, and this runtime never sees whether the harness
+ * honoured it. A grant that arrives after the effect it names is a ratification
+ * and not an approval, and `carried` is the window in which that is possible.
+ * See {@link HarnessGrantOrigin} and `docs/claude-code-hook.md`.
  */
 export function consumeHarnessGrant(
   logPath: string,
@@ -2943,6 +3206,15 @@ function attemptHarnessConsume(
     // that states none were both refused above. Every execution.started this
     // module writes names the bytes that ran.
     payload_hash: declaredHash,
+    // APRV-200: whether the tool call that spent this grant is the tool call
+    // that asked for it. Derived here, from the request's own task as the
+    // verified log records it, so the laxer of the two values is unreachable by
+    // assertion alone.
+    [HARNESS_GRANT_ORIGIN]: (options.spendingTask !== undefined &&
+    derivation.task !== null &&
+    options.spendingTask === derivation.task
+      ? "direct"
+      : "carried") satisfies HarnessGrantOrigin,
   };
   if (derivation.decisionSeq !== null) payload["grant_seq"] = derivation.decisionSeq;
 

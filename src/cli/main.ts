@@ -54,6 +54,7 @@ import {
   commandRequest,
   commandWithdraw,
 } from "./gate.js";
+import { commandGate } from "./gate-window.js";
 import {
   commandExecution,
   commandQueue,
@@ -70,6 +71,7 @@ import { commandDoctor } from "./doctor.js";
 import { commandEnv } from "./env.js";
 import { commandHook } from "./hook.js";
 import { commandImport } from "./import.js";
+import { commandJournal } from "./journal.js";
 import { commandInstructions } from "./instructions.js";
 import { commandInit } from "./init.js";
 import { commandLogAdvance, commandLogSync } from "./log-verbs.js";
@@ -755,6 +757,15 @@ export function main(argv: string[], options: MainOptions = {}): number {
       return commandWait(rest, streams, cwd);
     case "queue":
       return commandQueue(rest, streams, cwd);
+    // The open window (APRV-214, amended SPEC.md §5.2). `gate open` is the one
+    // verb that SUSPENDS the policy for the harness hook, so it is human-only
+    // three times over: it classifies `policy.core` (which APPROVAL.md holds
+    // human-only, so the hook denies an agent running it), it refuses a stdin
+    // that is not a terminal, and it reads the word `understood` with no --yes
+    // and no --force. `gate close` only tightens and `gate status` decides
+    // nothing. The window's whole state is in the log; no file holds it.
+    case "gate":
+      return commandGate(rest, streams, cwd);
     case "status":
       return commandStatus(rest, streams, cwd);
     // The diagnostic verb (APRV-31). `doctor` answers for the MACHINE what
@@ -849,8 +860,32 @@ export function main(argv: string[], options: MainOptions = {}): number {
     // JSON document through the same core function the gate uses, so nobody has
     // to import an internal module (or reinvent JCS) to fill in a declaration.
     // It reads no log and writes nothing.
-    case "payload":
-      return commandPayload(rest, streams, cwd);
+    // `payload agentmail-draft` (APRV-223) reads one draft over HTTPS, so this
+    // verb joins the asynchronous family and is unwrapped the same way; the
+    // `hash` path is still synchronous and returns its code directly.
+    case "payload": {
+      const outcome = commandPayload(rest, streams, cwd);
+      if (typeof outcome === "number") return outcome;
+      void outcome.then(
+        (code) => {
+          process.exitCode = code;
+        },
+        (cause: unknown) => {
+          streams.err(
+            `approval: payload failed: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+          );
+          process.exitCode = EXIT_IO;
+        },
+      );
+      return EXIT_OK;
+    }
+    // The ungated channel (APRV-195). `journal write` is the one verb in this
+    // switch that reaches no policy, no log and no token: it appends free text
+    // to a local file so that an agent complying perfectly can still say it
+    // thinks something is wrong. Nothing in the runtime reads what it writes,
+    // which is what makes leaving it ungated safe (SPEC.md §11.1 invariant 4).
+    case "journal":
+      return commandJournal(rest, streams, cwd);
     // The environment verb (APRV-73). `env` resolves `.approval/env` — the
     // source map naming where each *_env variable's value lives — and prints an
     // export block for a shell to evaluate. IT IS THE ONLY COMMAND IN THIS

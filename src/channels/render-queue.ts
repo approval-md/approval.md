@@ -73,7 +73,13 @@ import { closeSync, mkdirSync, openSync, renameSync, unlinkSync, writeSync } fro
 import { dirname, join } from "node:path";
 
 import type { BudgetVerdict } from "../core/budgets.js";
+import { MAX_PENDING, pendingCount } from "../core/intake-limits.js";
 import type { EventRecord, LogHead } from "../core/log.js";
+import {
+  loadPolicy,
+  type LoadPolicyOptions,
+  type PolicyLoadResult,
+} from "../core/policy-load.js";
 import { payloadOf, readVerifiedRecords } from "../core/state.js";
 import type { ChannelRequest, TaggedField } from "./contract.js";
 import {
@@ -93,6 +99,20 @@ import {
  * derives nothing the tagger does not already derive.
  */
 export type RenderQueueOptions = TagOptions;
+
+/**
+ * The policy load options, resolved exactly as `channels/tagging.ts` resolves
+ * them, so the ceilings this file renders come from the same file the entries
+ * above them were tagged against.
+ */
+function loadOptionsOf(options: RenderQueueOptions): LoadPolicyOptions {
+  const policy = options.policy ?? {};
+  const load: LoadPolicyOptions = {};
+  if (policy.file !== undefined) load.file = policy.file;
+  else load.dir = policy.dir ?? process.cwd();
+  if (options.schemaDir !== undefined) load.schemaDir = options.schemaDir;
+  return load;
+}
 
 /**
  * Why the renderer refused.
@@ -499,6 +519,7 @@ export function renderQueue(
     }
   }
 
+  lines.push(...renderIntakeLimits(read.records, loadPolicy(loadOptionsOf(options)), now));
   lines.push(...renderSkipped(queue.skipped));
   lines.push(...renderAudit(backlog));
   lines.push(...footer(read.head, logPath));
@@ -540,6 +561,78 @@ function renderSkipped(skipped: SkippedRequest[]): string[] {
   }
   lines.push("");
   return lines;
+}
+
+/**
+ * The request-volume ceilings in force, and how close the queue is to them
+ * (SPEC.md §5.2, APRV-173).
+ *
+ * Rendered only when the policy declares at least one `max_pending`, so a
+ * policy that declares none produces exactly the file it produced before this
+ * section existed. That is not cosmetic: a heading reading "no ceiling is
+ * declared" on every queue in the world would train a reader to skip the one
+ * place this file says a request was turned away.
+ *
+ * Why it belongs here at all. A refused intake appends nothing (see
+ * `core/gate.ts`), so a `queue-full` refusal is invisible in the log by design.
+ * What IS visible is the standing condition that produced it, and this is where
+ * a human reads it: the queue is at its ceiling, so requests are being refused
+ * until it drains. Every figure is computed by `core/intake-limits.ts` — the
+ * same function the gate refuses from, never a second count.
+ *
+ * The rate limit has no row. It is per origin over a rolling hour, so its
+ * pressure is a fact about a requester rather than about this queue, and a
+ * number here would be a number for whichever origin the renderer happened to
+ * pick.
+ */
+function renderIntakeLimits(
+  records: EventRecord[],
+  load: PolicyLoadResult,
+  now: string,
+): string[] {
+  if (!load.ok) return [];
+  const rows: string[] = [];
+  const classes = load.policy.classes ?? {};
+  const ttlMs = load.durations.approvalTtlMs;
+  for (const pattern of Object.keys(classes).sort()) {
+    const declared = classes[pattern]?.limits?.[MAX_PENDING];
+    if (declared === undefined) continue;
+    rows.push(row(MAX_PENDING, pattern, pendingCount(records, pattern, now, ttlMs), declared));
+  }
+  const budgets = load.policy.budgets ?? {};
+  for (const scopeName of Object.keys(budgets).sort()) {
+    const declared = budgets[scopeName]?.[MAX_PENDING];
+    if (declared === undefined) continue;
+    rows.push(
+      row(
+        `${scopeName}.${MAX_PENDING}`,
+        "every class",
+        pendingCount(records, null, now, ttlMs),
+        declared,
+      ),
+    );
+  }
+  if (rows.length === 0) return [];
+  return [
+    "## Request-volume ceilings",
+    "",
+    "SPEC.md §5.2 caps how many requests may await a decision at once. A request that would cross a ceiling is refused `queue-full` at intake, and a refused request appears nowhere: nothing is appended for it, here or in the log. These figures are computed by the same code the gate refuses from.",
+    "",
+    "| ceiling | scope | pending | limit | headroom |",
+    "|---|---|---|---|---|",
+    ...rows,
+    "",
+  ];
+}
+
+/** One ceiling's row: computed counts, never a claimed one. */
+function row(limit: string, scope: string, pending: number, declared: number): string {
+  const headroom = declared - pending;
+  const state =
+    headroom > 0
+      ? `${num(headroom)} more`
+      : "**full** — intake is refusing `queue-full` until it drains";
+  return `| ${span(limit)} | ${span(scope)} | ${num(pending)} | ${num(declared)} | ${state} |`;
 }
 
 function renderAudit(backlog: AuditItem[]): string[] {

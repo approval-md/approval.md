@@ -198,6 +198,7 @@ import type {
   TaggedField,
   TestableChannel,
 } from "./contract.js";
+import type { GateRefusal } from "../core/gate.js";
 import { commandPayloadView, payloadRegionText } from "./payload-view.js";
 
 // ---------------------------------------------------------------------------
@@ -238,6 +239,48 @@ export const TELEGRAM_REJECT_NOTE = "rejected via telegram";
  */
 export const TELEGRAM_ACK_FALLBACK =
   "Received — this listener could not finish reading your tap. Nothing was recorded by it; check the message above for the outcome.";
+
+/**
+ * The toast a tap gets the instant it is recognized, BEFORE the gate runs
+ * (APRV-206).
+ *
+ * Telegram gives a callback query exactly one answer, and until it arrives the
+ * button spins on the approver's phone. Sending it after the decision made the
+ * spinner as long as the decision — which grew with the log — and the human,
+ * with no way to tell a slow tap from a swallowed one, tapped again.
+ *
+ * So this is what the single answer says, and its wording is load-bearing: it
+ * claims only that the tap ARRIVED. It must never say granted, rejected,
+ * approved, recorded, or anything else a reader could take as "the log now says
+ * so", because at the moment it is sent nothing has been appended and the gate
+ * may still refuse. What became of the request is said by the message edit that
+ * follows, which is written from the record the gate actually appended (or from
+ * its refusal). The toast vanishes; the message stays.
+ */
+export const TELEGRAM_ACK_HEARD = "Heard — deciding. The message will say what the log recorded.";
+
+/**
+ * The headline on a message whose tap the gate refused (APRV-206).
+ *
+ * Before the early ack, a refusal was a toast and the message was left alone.
+ * Now that the single answer is spent on "heard", the refusal has to reach the
+ * approver here or nowhere. The buttons go with it ({@link annotate} disarms),
+ * which is the right outcome in both directions: a request the gate calls
+ * terminal has no live decision left to collect, and a request that is still
+ * pending is re-delivered by the next dispatch cycle as a fresh prompt.
+ */
+export const TELEGRAM_NOT_RECORDED = "✗ NOT RECORDED";
+
+/**
+ * The detail line under {@link TELEGRAM_NOT_RECORDED} when the runtime's
+ * decision handler threw (APRV-206).
+ *
+ * The wording is careful about what it does not know: a handler that threw may
+ * have thrown before or after its append, so this says where to look rather
+ * than what happened. The log is the thing that knows.
+ */
+export const TELEGRAM_HANDLER_FAILED =
+  "This listener failed while recording your tap. Check `approval queue` — the log is what says whether anything was recorded.";
 
 /** Prefixed to the toast when the tap arrived on a pre-restart copy (APRV-196). */
 export const TELEGRAM_STALE_COPY_PREFIX = "Earlier copy of this request — ";
@@ -495,6 +538,14 @@ export const TELEGRAM_ANOMALY_KINDS = [
    * over. Always answered with a toast that names the state.
    */
   "stale-copy",
+  /**
+   * A message in the approver chat that began with `/` and named no command
+   * this channel answers (APRV-216). Counted rather than replied to: the chat
+   * belongs to a human, other bots and other slash commands live in it, and a
+   * channel that answered every unrecognised one would be noise in the one
+   * place an approver's attention is supposed to be scarce.
+   */
+  "unknown-command",
 ] as const;
 
 export type TelegramAnomalyKind = (typeof TELEGRAM_ANOMALY_KINDS)[number];
@@ -518,6 +569,45 @@ export interface TelegramStats {
    * restart is costing the approver a wrong tap.
    */
   staleCopyDecisions: number;
+  /**
+   * Bot commands handed to the runtime's command handler (APRV-216). Never a
+   * decision and never a log event: a command reorders what this process shows
+   * and nothing else.
+   */
+  commands: number;
+}
+
+/**
+ * The bot commands the paced listener answers (APRV-216).
+ *
+ * A closed set, and deliberately a small one. Each is a verb about ATTENTION —
+ * what to put in front of the approver next — and none of them is a verb about
+ * the log: there is no `/grant`, and there will not be one, because a decision
+ * must name the request it decides and a typed command names nothing the
+ * runtime could bind a payload hash to. Buttons decide; commands navigate.
+ */
+export const TELEGRAM_COMMANDS = ["queue", "skip", "next"] as const;
+
+export type TelegramCommand = (typeof TELEGRAM_COMMANDS)[number];
+
+/**
+ * The command a message's text names, or `null` (APRV-216).
+ *
+ * Pure, and exported so the listener's tests can exercise the grammar without
+ * a transport. Telegram delivers a command in a group chat as `/skip@thebot`,
+ * so the `@suffix` is stripped; the bot's own username is not checked, because
+ * this channel only ever reads ONE chat and a message in it that says `/skip`
+ * to some other bot is a message the approver still meant as a skip more often
+ * than not. Anything after the command word is ignored: none of these three
+ * takes an argument, and silently discarding one is better than refusing a
+ * command a human typed with a stray word on the end.
+ */
+export function parseBotCommand(text: unknown): TelegramCommand | null {
+  if (typeof text !== "string") return null;
+  const first = text.trim().split(/\s+/u)[0];
+  if (first === undefined || !first.startsWith("/")) return null;
+  const word = first.slice(1).split("@")[0]?.toLowerCase();
+  return TELEGRAM_COMMANDS.find((command) => command === word) ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1274,6 +1364,8 @@ export interface TelegramPollResult {
   outcomes: { action_key: string; outcome: DecisionOutcome }[];
   /** Callbacks ignored in this batch, with the reason. */
   ignored: { kind: TelegramAnomalyKind; detail: string }[];
+  /** Bot commands handed to the runtime in this batch, in order (APRV-216). */
+  commands: TelegramCommand[];
 }
 
 export interface TelegramListenOptions {
@@ -1352,6 +1444,12 @@ export class TelegramChannel implements TestableChannel {
   private ack: { id: string; answered: boolean } | null = null;
 
   private handler: ((decision: ChannelDecision) => DecisionOutcome) | null = null;
+  /**
+   * What to do with a bot command (APRV-216). Absent unless the runtime asked
+   * for commands, and its absence is what keeps `message` out of
+   * `allowed_updates` — see {@link onCommand}.
+   */
+  private commandHandler: ((command: TelegramCommand) => Promise<void> | void) | null = null;
   private readonly deliveries = new Map<string, Delivery>();
   /** Digest message id -> what is on it. Delivery bookkeeping, never truth. */
   private readonly digests = new Map<DeliveryId, DigestState>();
@@ -1374,8 +1472,10 @@ export class TelegramChannel implements TestableChannel {
       "unknown-callback": 0,
       "key-mismatch": 0,
       "stale-copy": 0,
+      "unknown-command": 0,
     },
     staleCopyDecisions: 0,
+    commands: 0,
   };
 
   constructor(config: TelegramConfig) {
@@ -1409,6 +1509,25 @@ export class TelegramChannel implements TestableChannel {
 
   onDecision(handler: (decision: ChannelDecision) => DecisionOutcome): void {
     this.handler = handler;
+  }
+
+  /**
+   * Register what to do with `/queue`, `/skip` and `/next` (APRV-216).
+   *
+   * **Registering is what makes this channel read messages at all.** Until a
+   * handler is here, `getUpdates` asks for `callback_query` only, exactly as it
+   * did before this task, so a listener in `burst` delivery consumes no message
+   * updates — which matters because `approval setup channel telegram`
+   * discovers the approver chat by reading one (APRV-74), and a listener that
+   * swallowed it would break the bootstrap of the very channel it runs on.
+   *
+   * The handler owns whatever answer the human gets. This class sends nothing
+   * of its own for a command: it holds no queue to summarise (SPEC.md §10.3),
+   * so the sentence a command produces is written where the pending set is
+   * re-derived, in `cli/channel-telegram.ts`.
+   */
+  onCommand(handler: (command: TelegramCommand) => Promise<void> | void): void {
+    this.commandHandler = handler;
   }
 
   health(): ChannelHealth {
@@ -1982,12 +2101,17 @@ export class TelegramChannel implements TestableChannel {
       {
         offset: this.offset,
         timeout: this.pollTimeoutSeconds,
-        allowed_updates: ["callback_query"],
+        // APRV-216. `message` is asked for only while a command handler is
+        // registered: see {@link onCommand} for why a listener that reads
+        // messages nobody asked for would break `approval setup channel
+        // telegram`'s chat discovery.
+        allowed_updates:
+          this.commandHandler === null ? ["callback_query"] : ["callback_query", "message"],
       },
       this.requestTimeoutMs ?? (this.pollTimeoutSeconds + 10) * 1000,
     );
 
-    const result: TelegramPollResult = { updates: 0, outcomes: [], ignored: [] };
+    const result: TelegramPollResult = { updates: 0, outcomes: [], ignored: [], commands: [] };
     for (const raw of updates) {
       const update = (raw ?? {}) as Record<string, unknown>;
       const id = update["update_id"];
@@ -2016,13 +2140,32 @@ export class TelegramChannel implements TestableChannel {
    * malformed update would cost the whole batch and the poll after it. Nothing
    * is lost by continuing — the gate has already appended whatever it appended,
    * and the log is what says so.
+   *
+   * APRV-206 moved WHEN that one answer is sent on the decision path: it now
+   * goes out before the gate runs, so the spinner on the phone is one Bot API
+   * call long instead of one decision long. The guarantee is unchanged and is
+   * now enforced in one place — {@link safeAnswer} answers a query at most once,
+   * so the fallback below cannot follow an early ack with a second call.
    */
   private async handleUpdate(
     update: Record<string, unknown>,
     result: TelegramPollResult,
   ): Promise<void> {
     const callback = update["callback_query"];
-    if (typeof callback !== "object" || callback === null) return;
+    if (typeof callback !== "object" || callback === null) {
+      // APRV-216. Swallowed for the same reason a thrown decision handler is:
+      // letting it out would reach `pollOnce`, and a listener that dropped into
+      // backoff because one command failed would be a listener that stopped
+      // listening over something that wrote nothing.
+      try {
+        await this.handleMessage(update, result);
+      } catch (cause) {
+        this.complain(
+          `approval: telegram failed while handling a command: ${this.describe(cause)} — nothing was appended and the listener is still up`,
+        );
+      }
+      return;
+    }
     const query = callback as Record<string, unknown>;
     const callbackId = typeof query["id"] === "string" ? query["id"] : "";
 
@@ -2041,6 +2184,71 @@ export class TelegramChannel implements TestableChannel {
         await this.safeAnswer(callbackId, TELEGRAM_ACK_FALLBACK);
       }
     }
+  }
+
+  /**
+   * A `message` update: the bot-command path (APRV-216).
+   *
+   * Three rules, in this order, and each of them is a refusal to act on
+   * something the network said:
+   *
+   * 1. **No handler, no reading.** A channel with no command handler wants no
+   *    message updates and did not ask for any; one that arrives anyway (a
+   *    webhook backlog, a poll issued before the handler was registered) is
+   *    dropped without a counter, because there is nothing wrong with it.
+   * 2. **The configured chat only.** A message from anywhere else is counted
+   *    `foreign-chat` and answered with nothing at all. Not even a refusal
+   *    reply: a stranger who can reach the bot learns from silence that the
+   *    bot is there, and learns from a reply what it is for.
+   * 3. **A closed vocabulary.** `/queue`, `/skip`, `/next`. Anything else
+   *    beginning with `/` is counted `unknown-command`; anything not beginning
+   *    with `/` is ordinary chat and is ignored silently.
+   *
+   * A command decides nothing and appends nothing — it cannot, because it
+   * never reaches {@link handler}. The handler it does reach reorders what the
+   * runtime shows next, which is process memory on the runtime's side of the
+   * boundary (SPEC.md §10.3).
+   */
+  private async handleMessage(
+    update: Record<string, unknown>,
+    result: TelegramPollResult,
+  ): Promise<void> {
+    const handler = this.commandHandler;
+    if (handler === null) return;
+
+    const raw = update["message"];
+    if (typeof raw !== "object" || raw === null) return;
+    const message = raw as Record<string, unknown>;
+    const text = message["text"];
+    if (typeof text !== "string" || !text.trim().startsWith("/")) return;
+
+    const chat = (message["chat"] ?? {}) as Record<string, unknown>;
+    const chatId = chat["id"] === undefined ? "" : String(chat["id"]);
+    if (chatId !== this.chatId) {
+      this.counters.anomalies["foreign-chat"] += 1;
+      result.ignored.push({
+        kind: "foreign-chat",
+        detail: `command from chat ${JSON.stringify(chatId)}, which is not the configured approver chat`,
+      });
+      this.complain(
+        `approval: telegram ignored a command (foreign-chat): from chat ${JSON.stringify(chatId)}, which is not the configured approver chat`,
+      );
+      return;
+    }
+
+    const command = parseBotCommand(text);
+    if (command === null) {
+      this.counters.anomalies["unknown-command"] += 1;
+      result.ignored.push({ kind: "unknown-command", detail: this.redact(text.trim()) });
+      return;
+    }
+
+    this.counters.commands += 1;
+    result.commands.push(command);
+    // A throw here is caught by `handleUpdate`, which complains and carries on:
+    // a command that failed must not cost the batch or the poll after it, and
+    // there is nothing to undo, because a command writes nothing.
+    await handler(command);
   }
 
   private async routeCallback(
@@ -2163,7 +2371,31 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
-    const outcome = this.handler(decision);
+    // APRV-206. The ack goes out BEFORE the gate runs, and it is the only
+    // answer this query will get. Everything below — reading the verified log,
+    // re-checking the budgets, appending under the lock — used to happen while
+    // the button spun, so the spinner's length was the log's length. It claims
+    // no decision (see {@link TELEGRAM_ACK_HEARD}): at this instant nothing has
+    // been appended, and the annotation below is what says what the log holds.
+    await this.safeAnswer(
+      callbackId,
+      `${viaStaleCopy ? TELEGRAM_STALE_COPY_PREFIX : ""}${TELEGRAM_ACK_HEARD}`,
+    );
+
+    // APRV-206. A handler that throws is the one case the early ack cannot be
+    // taken back: the human has been told their tap arrived, and the toast that
+    // used to say "this listener could not finish reading your tap" is spent. So
+    // the message says it instead, and the throw still reaches `handleUpdate`,
+    // which complains and keeps the poll loop alive exactly as before.
+    let outcome: DecisionOutcome;
+    try {
+      outcome = this.handler(decision);
+    } catch (cause) {
+      await this.annotateQuietly(delivery.deliveryId, delivery.actionKey, TELEGRAM_NOT_RECORDED, [
+        TELEGRAM_HANDLER_FAILED,
+      ]);
+      throw cause;
+    }
     this.counters.decisions += 1;
     if (viaStaleCopy) {
       this.counters.staleCopyDecisions += 1;
@@ -2172,26 +2404,25 @@ export class TelegramChannel implements TestableChannel {
       );
     }
     result.outcomes.push({ action_key: delivery.actionKey, outcome });
-    // Best effort, and before the edit: the toast is what the tapping human is
-    // waiting on, and a Bot API that refuses it (a callback older than
-    // Telegram's own window, most often) must not cost them the annotation the
-    // message is about to get.
-    await this.safeAnswer(
-      callbackId,
-      `${viaStaleCopy ? TELEGRAM_STALE_COPY_PREFIX : ""}${this.answerFor(decision, outcome)}`,
-    );
 
-    // APRV-113. The tap is now visible in the transcript, not only in a toast
-    // that vanishes. The outcome word comes from the record the gate actually
-    // appended, so a refused tap (already decided, withdrawn, expired) edits
-    // nothing and the message keeps whatever the poll cycle later gives it.
+    // APRV-113, and since APRV-206 the ONLY place the outcome is stated. The
+    // tap is visible in the transcript rather than in a toast that vanishes,
+    // and the words come from the record the gate actually appended.
     //
-    // AFTER the toast, and never before it: the toast is the thing the tapping
-    // human is waiting on, and a slow edit must not delay it. Best effort in
-    // the same sense `retract` is — a failed edit is complained about and
-    // dropped, because the decision is already in the log and nothing about it
-    // depends on a chat message being redrawn.
-    if (!outcome.ok) return;
+    // Best effort in the same sense `retract` is — a failed edit is complained
+    // about and dropped, because the decision is already in the log and nothing
+    // about it depends on a chat message being redrawn.
+    if (!outcome.ok) {
+      // APRV-206. A refusal used to be a toast; the single answer is now spent
+      // on the ack, so it is said here or nowhere. `annotate` disarms the
+      // message, which is right in both directions: a terminal request has no
+      // decision left to collect, and a still-pending one is re-delivered as a
+      // fresh prompt by the next dispatch cycle.
+      await this.annotateQuietly(delivery.deliveryId, delivery.actionKey, TELEGRAM_NOT_RECORDED, [
+        this.answerFor(outcome),
+      ]);
+      return;
+    }
     const record = outcome.record;
     const headline =
       outcome.decision === "grant"
@@ -2261,6 +2492,11 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
+    // APRV-206, and this path needs it most: an "all" tap runs one gate
+    // decision per open member, so its old post-hoc toast made the spinner N
+    // decisions long. The redraw below is what says how each member ended.
+    await this.safeAnswer(callbackId, TELEGRAM_ACK_HEARD);
+
     const open = digest.members.filter((member) => member.settled === null);
     let landed = 0;
     const refusals: string[] = [];
@@ -2304,7 +2540,10 @@ export class TelegramChannel implements TestableChannel {
       refusals.length === 0
         ? `${word} ${landed} — one log event each.`
         : `${word} ${landed}; ${refusals.length} refused (${[...new Set(refusals)].join(", ")}). Nothing was recorded for those.`;
-    await this.safeAnswer(callbackId, summary);
+    // APRV-206: the summary is no longer a toast (the tap's one answer was
+    // spent acknowledging it). The approver reads the outcome off the redrawn
+    // digest, member by member, and the operator gets the tally here.
+    this.complain(`approval: telegram digest ${digest.deliveryId}: ${summary}`);
 
     try {
       await this.redraw(digest);
@@ -2316,19 +2555,38 @@ export class TelegramChannel implements TestableChannel {
   }
 
   /**
-   * What the tapping human sees in the toast.
+   * {@link annotate}, with a failed edit complained about rather than thrown
+   * (APRV-206).
+   *
+   * Every caller on the decision path wants the same thing from a failed edit:
+   * say so on the operator's terminal and carry on, because whatever the gate
+   * did or did not append has already happened and no chat message changes it.
+   */
+  private async annotateQuietly(
+    deliveryId: DeliveryId,
+    actionKey: string,
+    headline: string,
+    detail: string[],
+  ): Promise<void> {
+    try {
+      await this.annotate(deliveryId, headline, detail, actionKey);
+    } catch (cause) {
+      this.complain(
+        `approval: telegram could not annotate ${actionKey} (message ${deliveryId}): ${this.describe(cause)} — the log is what it is; only the message is stale`,
+      );
+    }
+  }
+
+  /**
+   * What a refused tap is told, in the message edit (APRV-206; it was the toast
+   * until the single answer moved to the early ack).
    *
    * The duplicate case is the one worth naming: a second tap on a request the
    * gate has already decided produces `already-decided`, no second event, and
    * this text. Telegram redelivers callbacks on its own, so this path is
    * ordinary traffic, not an error.
    */
-  private answerFor(decision: ChannelDecision, outcome: DecisionOutcome): string {
-    if (outcome.ok) {
-      return decision.decision === "grant"
-        ? "Approved — recorded in the log."
-        : "Rejected — recorded in the log.";
-    }
+  private answerFor(outcome: GateRefusal): string {
     if (outcome.code === "already-decided") {
       return "Already decided — the first answer stands; nothing was recorded.";
     }
@@ -2377,9 +2635,20 @@ export class TelegramChannel implements TestableChannel {
    *
    * The attempt is recorded either way, so {@link handleUpdate}'s guarantee
    * does not turn one failed ack into a second doomed call.
+   *
+   * **Idempotent per callback query since APRV-206.** A query that has already
+   * been answered in this handling is not answered again: the early ack the
+   * decision path sends is THE answer, and every later sentence — a branch's
+   * own toast, the wrapper's fallback — becomes a no-op rather than a second
+   * `answerCallbackQuery`. APRV-196's "exactly one per callback" therefore
+   * holds structurally, in this one method, instead of by every branch
+   * remembering to return.
    */
   private async safeAnswer(callbackId: string, text: string): Promise<void> {
-    if (this.ack !== null && this.ack.id === callbackId) this.ack.answered = true;
+    if (this.ack !== null && this.ack.id === callbackId) {
+      if (this.ack.answered) return;
+      this.ack.answered = true;
+    }
     if (callbackId.length === 0) return;
     try {
       await this.answer(callbackId, text);

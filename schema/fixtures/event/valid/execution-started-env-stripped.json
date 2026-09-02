@@ -1,0 +1,17 @@
+{
+  "seq": 9,
+  "ts": "2026-09-02T09:19:02Z",
+  "event": "execution.started",
+  "task": "task-042",
+  "action_key": "task-042:chaser:2026-09-02",
+  "actor": "agent:chaser",
+  "payload": {
+    "class": "communicate.email.external",
+    "est_cost_usd": "0.02",
+    "payload_hash": "9f2b1c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+    "env_stripped": 3
+  },
+  "alg": "sha256/jcs",
+  "prev": "d973375d6aeec5e6cd2de3a0f7dc8f5bc1d9be77225f9af0f851e7fc519a07c3",
+  "hash": "707b79cfa14ec43224c8f71a4fee3ddbff52369f82525aab19bec18c369d5cad"
+}

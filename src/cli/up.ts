@@ -74,6 +74,7 @@ import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
 import { instanceFindings } from "../core/instance.js";
 import { loadPolicy } from "../core/policy-load.js";
+import { passphraseEnvFor } from "../core/vault.js";
 import {
   DEFAULT_DEBOUNCE_MS,
   DEFAULT_INTERVAL_MS,
@@ -100,13 +101,20 @@ import {
   type RunningWebChannel,
 } from "./channel-web.js";
 import {
+  advanceFlags,
   describeDaemonEvent,
   describeGitEvidence,
   durationFlag,
   exitForDaemonOutcome,
+  readProofFlags,
 } from "./daemon.js";
+import {
+  DEFAULT_DARK_INTERVAL_MS,
+  DEFAULT_DARK_WINDOW_MS,
+} from "../daemon/dark-session.js";
+import { useReadProof } from "../core/state.js";
 import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
-import { spawnGloss } from "./gloss.js";
+import { glossRunnerFor } from "./gloss.js";
 import { UP_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
@@ -227,6 +235,21 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--debounce": "string",
   "--once": "boolean",
   "--git-evidence": "boolean",
+  // The cadence advance (APRV-204), spelled identically to `daemon run`'s.
+  "--advance": "boolean",
+  "--advance-interval": "string",
+  "--advance-after": "string",
+  "--advance-remote": "string",
+  "--advance-base": "string",
+  "--no-advance-pr": "boolean",
+  // The dark-session sweep (APRV-192), spelled identically to `daemon run`'s.
+  "--dark-sessions": "boolean",
+  "--dark-window": "string",
+  "--dark-interval": "string",
+  // The prefix proof (APRV-217), spelled identically to `daemon run`'s.
+  "--read-proof": "string",
+  "--full-reproof-every": "string",
+  "--full-reproof-after": "string",
   // The channels'.
   "--as": "string",
   "--payloads": "string",
@@ -406,7 +429,12 @@ export function commandUp(
       // `channel telegram listen` — this IS that listener, and a flag that
       // meant different things on the two verbs that start it would be a trap.
       // The reasoning is at `glossWiring` there.
-      ...(boolFlag(flags, "--no-gloss") ? {} : { gloss: spawnGloss }),
+      //
+      // APRV-207: the subprocess is spawned starved, and the policy already
+      // loaded above names the passphrase variable the scrub must remove.
+      ...(boolFlag(flags, "--no-gloss")
+        ? {}
+        : { gloss: glossRunnerFor(passphraseEnvFor(load)) }),
     });
     if (prepared.ok) {
       telegram = prepared.setup;
@@ -517,6 +545,32 @@ export function commandUp(
       },
     },
   };
+
+  // The cadence advance (APRV-204), parsed by `daemon run`'s own function so a
+  // typo is refused in the same words on both spellings of this verb.
+  const cadence = advanceFlags(flags);
+  if (!cadence.ok) return usageError(streams, json, cadence.message);
+  if (cadence.cadence !== null) options.advance = cadence.cadence;
+
+  // The dark-session sweep (APRV-192), parsed by the same duration function for
+  // the same reason: one typo, one sentence, on both spellings of this verb.
+  const darkWindow = durationFlag(flags, "--dark-window", DEFAULT_DARK_WINDOW_MS);
+  if (!darkWindow.ok) return usageError(streams, json, darkWindow.message);
+  const darkInterval = durationFlag(flags, "--dark-interval", DEFAULT_DARK_INTERVAL_MS);
+  if (!darkInterval.ok) return usageError(streams, json, darkInterval.message);
+  if (boolFlag(flags, "--dark-sessions")) {
+    options.darkSessions = { windowMs: darkWindow.ms, intervalMs: darkInterval.ms };
+  }
+
+  // The prefix proof (APRV-217), parsed by `daemon run`'s own function so the
+  // flag beats the policy identically on both spellings of this verb.
+  const proof = readProofFlags(flags, policy);
+  if (!proof.ok) return usageError(streams, json, proof.message);
+  options.readProof = proof.readProof;
+  // Process-wide too, for the reason `daemon run` sets it: the channels and the
+  // queue renderer in this process read the same log through paths that thread
+  // no options of their own.
+  useReadProof(proof.readProof);
 
   // SPEC.md §8's optional git hardening, judged before the first tick exactly as
   // `daemon run` judges it: an operator who asked for a second evidence layer and

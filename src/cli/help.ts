@@ -60,6 +60,8 @@ Usage:
                       [--as <id>] [--json] -- <cmd…>
   approval adapter email <action-key> --token <t> --payload <file|->
                       [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
+  approval adapter agentmail <action-key> --token <t> --payload <file|->
+                      [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
   approval execution resolve <action-key> --outcome completed|failed
                       --note "<text>" [--as human:<id>] [--json]
   approval execution reconcile <action-key>
@@ -83,10 +85,19 @@ Usage:
                       [--restart-backoff <d>] (plus every daemon run flag)
   approval setup service [--platform launchd|systemd] [--uninstall]
                       [--label <name>] [--logs <dir>] [--env-file <path>]
+  approval gate open|close|status [--for <d>] [--reason "<t>"] [--note "<t>"]
+                      [--as human:<id>] [--log <path>] [--json]
+                                              (open: terminal only, no --json)
   approval status     [--policy <path>] [--dir <path>] [--json]
   approval doctor     [--log <path>] [--policy <path>] [--dir <path>]
                       [--api-base <url>] [--json]
   approval payload hash <file|-> [--json]
+  approval payload agentmail-draft <inbox-id> <draft-id> [--api-base <url>]
+                      [--json]
+  approval journal write --message "<text>" | - [--task <id>] [--session <id>]
+                      [--as <id>] [--journal <dir>] [--json]
+  approval journal read [--limit <n>] [--since <YYYY-MM-DD>] [--journal <dir>]
+                      [--json]
   approval env        [--check] [--policy <path>] [--dir <path>] [--log <path>]
                       [--json]
   approval setup      identity|vault|sampling|channel <name>|adapter <name>
@@ -176,7 +187,10 @@ Ask — an agent declares an action and acts on the answer:
             credentials come from the vault inside the verified-token window,
             the payload is the bytes the grant bound to, and the runtime — not
             the adapter — recomputes the hash, spends the token, and writes both
-            execution events around the send
+            execution events around the send. "adapter agentmail" serves the
+            same class over the AgentMail API: a direct send, or the send of a
+            draft the agent composed, refused if the draft changed after the
+            snapshot a human approved
   wait      block until a task's requests are decided; the exit code IS the
             decision (0 granted, 1 rejected/revoked/withdrawn, 3 expired, 6 timeout)
   withdraw  take back your OWN pending request (timeout, cancelled, superseded);
@@ -189,6 +203,15 @@ Ask — an agent declares an action and acts on the answer:
             never answer "ask": a decision taken outside the log is a decision
             nothing can audit. "hook classify" prints what the classifier makes
             of a command and touches nothing
+  journal   the one channel the gate does NOT stand in front of. "journal write"
+            appends free text to a local file — ungated, unclassified, never
+            approvable and never deniable, with no event in the log — so an
+            agent can say "I am complying and I think this is wrong", "this
+            reads as odd to me", or "I am stuck" even when it is complying
+            perfectly. "journal read" is the human side, and it labels every
+            entry as agent-authored DATA. Nothing written there changes any
+            verdict, sampling probability or budget; it is signal for the
+            operator, not a decision surface
   mcp       "mcp serve" is the optional MCP wrapper of SPEC.md §10.5: the same
             verbs as tools, over stdio, sharing the CLI's code paths. It is
             AGENT-FACING ONLY — grant, reject, revoke, attest, amend, vault,
@@ -246,7 +269,9 @@ Inspect — what the log says, and whether anything needs repair:
   payload   "payload hash" prints the payload_hash of a JSON document (SHA-256
             over its RFC 8785 canonical serialization), the value a declaration
             carries and a grant binds to. Most flows never need it: "request
-            --payload" hashes, verifies and stores the bytes in one step
+            --payload" hashes, verifies and stores the bytes in one step.
+            "payload agentmail-draft" snapshots one AgentMail draft with the
+            AGENT's key, so a human approves the words and not a draft id
   daemon    "daemon run" is the watch loop of SPEC.md §10.2, in the FOREGROUND:
             it records envelope.drift when a task file's state: contradicts the
             log, appends approval.expired for lapsed requests, writes the log's
@@ -270,6 +295,10 @@ Defaults:
   env    .approval/env  (the environment SOURCE MAP: KEY=keychain:<service> /
          secret-service:<label> / env: / a plaintext literal. Mode 0600, and read
          by exactly one command, "approval env". GITIGNORED by init)
+  journal .approval-journal/YYYY-MM-DD.jsonl  (the ungated free-text channel of
+         "journal write". OUTSIDE the approval home on purpose: everything under
+         .approval/ is the gate's own, and an outlet the gate could close is not
+         an outlet. Nothing the runtime reads is ever stored there. Gitignored)
   vault  .approval/vault.enc  (AES-256-GCM over the named credentials; written
          only by "vault set|remove", read only by an adapter inside a verified
          token window. GITIGNORE IT — doctor fails if you have not)
@@ -749,6 +778,32 @@ JSON shape: docs/cli-reference.md#expire
 ${GATE_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("expire")}`;
+
+export const GATE_WINDOW_HELP = `approval gate — the open window: a human-only, time-boxed harness bypass
+
+Usage:
+  approval gate open   [--for <duration>] --reason "<text>" [--as human:<id>]
+                       [--log <path>]                     (terminal; no --json)
+  approval gate close  [--note "<text>"] [--as human:<id>] [--log <path>] [--json]
+  approval gate status [--log <path>] [--json]
+
+Flags:
+  --for <duration>  how long the window stands; default 30m, cap 24h
+  --reason "<text>" why it is being opened; required, and recorded
+  --note "<text>"   what was learned, recorded on the close
+  --as human:<id>   the person opening or closing it (or ${"APPROVAL_HUMAN"})
+  --log <path>      log file to read and append to; --json for status and close
+
+While a window is open the harness hook ALLOWS every gated tool call under the
+root and records each as gate.bypassed, ahead of the policy, attestation, the
+loop floor and the human gate. It never reaches .approval/log/, a human-only
+class, a command the classifier cannot read, or a log it cannot verify. open is
+a ceremony: a terminal, and the word \`understood\` typed in full. There is no
+--yes and no --force. State lives in the log; a lapse appends nothing.
+
+JSON shape: docs/cli-reference.md#gate
+${EXIT_CODES_POINTER}
+${why("gate")}`;
 
 export const REINDEX_HELP = `approval reindex — rebuild the SQLite index from the log
 
@@ -1258,14 +1313,14 @@ Commands:
 
 Flags (claude-code, cursor):
   --as <id>        proposing identity (default agent:claude-code / agent:cursor)
-  --timeout <d>    how long to wait for a decision (default 55s)
-  --interval <d>   poll interval while waiting (default 1s)
+  --timeout/--interval <d>   wait for a decision / poll it (default 55s / 1s)
   --dir/--policy/--log <p>   policy+log root; --dir sets BOTH, default primary
   -h, --help       this text
 
 Deny: hook-unclassified, hook-class-human-only, hook-opaque, hook-unparseable,
 hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout,
-hook-gate-refused:<c>, hook-policy-unavailable, hook-log-unreachable, hook-io.
+hook-gate-refused:<c>, hook-grant-unverified, hook-policy-unavailable,
+hook-log-unreachable, hook-io.
 
 ${EXIT_CODES_POINTER} (harness verbs use 0 and 2 only; 0 is a verdict, never "ask")
 ${why("hook")}`;
@@ -1313,10 +1368,15 @@ export const PAYLOAD_HELP = `approval payload — work with the bytes an approva
 
 Usage:
   approval payload hash <file|-> [--json]
+  approval payload agentmail-draft <inbox-id> <draft-id> [--api-base <url>]
+                                   [--json]
 
 Commands:
   hash      print the payload_hash of a JSON document: SHA-256 over its RFC 8785
             canonical serialization (SPEC.md §6.2)
+  agentmail-draft
+            snapshot one AgentMail draft as the payload a grant can bind to,
+            read with the AGENT's key from AGENTMAIL_API_KEY
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
@@ -1346,6 +1406,103 @@ JSON shape (stdout, one object): {"ok":true,"hash":"<64hex>"}
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("payload-hash")}`;
+
+export const PAYLOAD_AGENTMAIL_DRAFT_HELP = `approval payload agentmail-draft — snapshot a draft as an approvable payload
+
+Usage:
+  approval payload agentmail-draft <inbox-id> <draft-id> [--api-base <url>]
+      [--timeout <ms>] [--json]
+
+Flags:
+  --api-base <url>  the API root (else AGENTMAIL_API_BASE, else the public one)
+  --timeout <ms> / --json / -h, --help   15000 / machine-readable / this text
+
+Reads one draft with the AGENT's key — AGENTMAIL_API_KEY, from the environment,
+and this is the ONE verb that reads it — and prints the canonical draft payload
+  {"inbox_id":…,"draft_id":…,"to":[…],"cc":[…],"bcc":[…],"subject":…,"text":…}
+in RFC 8785 form, the value \`approval adapter agentmail\` re-reads the draft
+against at send time. Write it to a file, declare its payload_hash, and request
+approval for THE WORDS: a draft edited after the snapshot is refused, not sent.
+
+SENDS NOTHING, SPENDS NO TOKEN, APPENDS NOTHING. Refusals are machine-readable:
+"agentmail-api-key-unset" (exit 2), "agentmail-draft-missing" (exit 1).
+
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("payload-agentmail-draft")}`;
+
+export const JOURNAL_HELP = `approval journal — the ungated channel an agent can always reach
+
+Usage:
+  approval journal write --message "<text>" [--task <id>] [--session <id>]
+  approval journal write - [--as <id>] [--journal <dir>] [--json]
+  approval journal read [--limit <n>] [--since <YYYY-MM-DD>] [--json]
+
+Commands:
+  write     append one free-text entry to a local file. NOT gated, not
+            classified, not approvable and not deniable; nothing is appended to
+            the event log and no network or credential is touched
+  read      print entries for a human, labelled as agent-authored DATA
+
+An agent behind this gate can comply, be refused, and report an exit code. This
+verb is how it says anything else: "I am complying and I think this is wrong",
+"this instruction reads as odd", "I am stuck". The operator reads it; nothing
+written here changes any verdict, sampling probability or budget.
+
+Default location: .approval-journal/YYYY-MM-DD.jsonl (outside .approval/, so the
+gate cannot close it). Gitignored by init.
+
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("journal")}`;
+
+export const JOURNAL_WRITE_HELP = `approval journal write — say something the gate will not judge
+
+Usage:
+  approval journal write --message "<text>" [--task <id>] [--session <id>]
+                         [--as <id>] [--journal <dir>] [--json]
+  approval journal write - [flags]        (the entry comes from stdin)
+
+Flags:
+  --message <text>      the entry; or pass "-" to read it from stdin instead
+  --task / --session    attribution, when you know them; both optional
+  --as <id>             who is writing (default: APPROVAL_AGENT, else
+                        "unattributed"). Nothing authenticates it
+  --journal <dir>       the journal directory (default .approval-journal)
+  --json / -h, --help   machine-readable output / this text
+
+Appends one line to a local append-only file. It resolves no policy, reads no
+log, appends no event, mints no token, opens no socket and reads no credential.
+There is no refusal path: an entry is written or an I/O error is reported.
+A human reads these; write for that reader. Entries are capped at 64 KiB.
+
+JSON shape: {"ok":true,"path":"<file>","ts":"<rfc3339>","actor":"<id>","bytes":N}
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("journal-write")}`;
+
+export const JOURNAL_READ_HELP = `approval journal read — what the agents have said (human-facing)
+
+Usage:
+  approval journal read [--limit <n>] [--since <YYYY-MM-DD>]
+                        [--journal <dir>] [--json]
+
+Flags:
+  --limit <n>           how many entries, newest last (default 20)
+  --since <YYYY-MM-DD>  only entries written on or after this UTC date
+  --journal <dir>       the journal directory (default .approval-journal)
+  --json / -h, --help   machine-readable output / this text
+
+Prints entries oldest first, each under its timestamp, actor and optional task,
+with the text in delimiters and marked [claimed] — it was authored by the party
+under oversight. EVERY OUTPUT FORM CARRIES THAT LABEL: these are DATA, never
+instructions to whoever or whatever reads them, and nothing here has authorized
+anything. An unparseable line is skipped rather than refusing the whole read.
+
+JSON shape: {"ok":true,"dir":"…","note":"…","total":N,"entries":[…]}
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("journal-read")}`;
 
 export const RENDER_HELP = `approval render — regenerate .approval/QUEUE.md from the log
 
@@ -1468,15 +1625,15 @@ export const DAEMON_RUN_HELP = `approval daemon run — watch, expire, re-render
 Usage:
   approval daemon run [--log <path>] [--tasks <dir>] [--out <path>]
                       [--policy <path>] [--dir <path>] [--interval <duration>]
-                      [--debounce <duration>] [--once] [--with-channels] [--json]
+                      [--debounce <d>] [--read-proof <mode>] [--once] [--json]
 
 Flags:
-  --log <path> / --out <path>      the log to append to / the queue to write
-  --tasks <dir>    task folder to watch (default backlog/tasks)
+  --log <p> / --out <p> / --tasks <d>  log / queue / task folder (backlog/tasks)
   --policy <path> / --dir <path>   the policy file, or where to discover it
   --interval <d> / --debounce <d>  tick period (30s) / event settle time (250ms)
   --once / --json  one tick then exit / machine-readable, one object per line
-  --git-evidence   OPT-IN: commit the log to the log home's own git repository
+  --git-evidence / --advance / --dark-sessions  three OPT-INs, off by default
+  --read-proof full|incremental    prefix proof per read; full is the default
   --with-channels  the channels in this process too: SAME VERB as "approval up"
   -h, --help       this text
 
@@ -1625,7 +1782,7 @@ ${why("vault-remove")}`;
 export const ADAPTER_HELP = `approval adapter — execute an approved action through a side-effect adapter
 
 Usage:
-  approval adapter email <action-key> --token <t> --payload <file|->
+  approval adapter email|agentmail <action-key> --token <t> --payload <file|->
                       [--as human:<id>|agent:<id>] [--vault <path>]
                       [--policy <path>] [--dir <path>] [--log <path>]
                       [--timeout <ms>] [--json]
@@ -1633,6 +1790,8 @@ Usage:
 Adapters:
   email   send one RFC 5322 message over SMTP, for actions declared under
           communicate.email.external (SPEC.md §6.1's canonical example)
+  agentmail  send the same class over the AgentMail API: a direct message, or
+          a draft the agent composed, re-read and refused if it drifted
 
 An adapter is the HARD BOUNDARY of SPEC.md §10.4: it holds the credentials and
 refuses to act without a valid, unexpired, single-use execution token bound to
@@ -1670,7 +1829,32 @@ ${EXIT_CODES_POINTER} (5 when no valid token was presented; 1 for every refusal)
 ${JSON_ERRORS}
 ${why("adapter-email")}`;
 
-export const ENV_HELP = `approval env — resolve .approval/env into an export block for your shell
+export const ADAPTER_AGENTMAIL_HELP = `approval adapter agentmail — send one approved message through AgentMail
+
+Usage:
+  approval adapter agentmail <action-key> --token <t> --payload <file|->
+      [--as <id>] [--vault <p>] [--policy <p>] [--dir <p>] [--log <p>]
+      [--timeout <ms>] [--json]
+
+Flags:
+  --token <t> / --payload <file|->   the token and the bytes. BOTH REQUIRED
+  --as <id> / --vault <p> / --policy <p> / --dir <p> / --log <p>   as email
+  --timeout <ms> / --json / -h, --help   15000 / machine-readable / this text
+
+TWO PAYLOAD MODES, told apart by shape and never inferred between:
+  direct  {from, to[], cc?, bcc?, subject, body, content_type?}: "from" is
+          checked against the inbox's address, since AgentMail has no From
+  draft   {inbox_id, draft_id, to[], cc?, bcc?, subject, text}: RE-READ, and
+          refused "agentmail-draft-drifted" if an approved field changed
+
+The VAULT holds agentmail.inbox_id and agentmail.api_key, and that key is the one
+WITH draft_send and message_send; the agent's own key must not have them.
+
+${EXIT_CODES_POINTER} (5 when no valid token was presented; 1 for every refusal)
+${JSON_ERRORS}
+${why("adapter-agentmail")}`;
+
+export const ENV_HELP =`approval env — resolve .approval/env into an export block for your shell
 
 Usage:
   approval env [--check] [--policy <path>] [--dir <path>] [--log <path>] [--json]
@@ -1791,6 +1975,8 @@ Usage:
 Known adapters:
   email     the SMTP settings \`approval adapter email\` reads: smtp.host,
             smtp.port, smtp.security, smtp.user, smtp.password
+  agentmail the two values \`approval adapter agentmail\` reads:
+            agentmail.inbox_id and agentmail.api_key
 
 Asks for each credential the named adapter DECLARES, validates every answer with
 the adapter's own rules, stores them in .approval/vault.enc, and offers to prove
@@ -1827,6 +2013,31 @@ send runs, then QUIT. A FAILED PROBE KEEPS THE VALUES and prints the undo:
 ${EXIT_CODES_POINTER} (1 means the server refused, or the vault would not open)
 ${JSON_ERRORS}
 ${why("setup-adapter-email")}`;
+
+export const SETUP_ADAPTER_AGENTMAIL_HELP = `approval setup adapter agentmail — the AgentMail credentials (HUMAN-ONLY)
+
+Usage:
+  approval setup adapter agentmail [--as human:<id>] [--log <path>]
+      [--dir <path>] [--policy <path>]
+
+The two names the AgentMail adapter reads inside the verified-token window:
+  agentmail.inbox_id  the inbox this runtime sends from; the inbox IS the sender
+  agentmail.api_key   the key carrying draft_send and message_send, no echo
+
+STORE THE SENDING KEY HERE AND GIVE THE AGENT A DIFFERENT ONE. An agent key
+without those permissions composes all day and cannot send; this one answers
+only to a grant.
+
+THE PROBE SENDS NOTHING: it is GET /v0/inboxes/{inbox_id}, the same read a send
+makes first, and it reports the address the inbox sends as. Where that read
+discloses the key's permissions a missing one is named; where it does not, it
+says so rather than claiming the key can send. A FAILED PROBE KEEPS THE VALUES:
+
+  approval vault remove agentmail.api_key --as human:<id>
+
+${EXIT_CODES_POINTER} (1 means AgentMail refused, or the vault would not open)
+${JSON_ERRORS}
+${why("setup-adapter-agentmail")}`;
 
 export const SETUP_CHANNEL_HELP = `approval setup channel — configure one channel's transport credential (HUMAN-ONLY)
 
@@ -1900,26 +2111,26 @@ ${why("setup-service")}`;
 // The MCP wrapper (APRV-87)
 // ---------------------------------------------------------------------------
 
-export const MCP_HELP = `approval mcp serve — the MCP wrapper of SPEC.md §10.5 (stdio, FOREGROUND)
+export const MCP_HELP = `approval mcp serve — the MCP wrapper of SPEC.md §10.5 (FOREGROUND)
 
 Usage:
-  approval mcp serve --as agent:<id> [--dir <path>] [--log <path>]
-                     [--policy <path>]
+  approval mcp serve [--as agent:<id>] [--dir <p>] [--log <p>] [--policy <p>]
+                     [--http [--port <n> | --listen <host:port>] [--guest]]
 
 Flags:
-  --as agent:<id>  the identity EVERY tool call is recorded under. Required
-                   unless APPROVAL_AGENT names one; agent: only
-  --dir <path>     working directory every relative path resolves against
-  --log <p> / --policy <p>   pin the log and the policy for every tool call
-  -h, --help       this text
+  --as agent:<id>  the identity EVERY tool call is recorded under; agent: only,
+                   required unless APPROVAL_AGENT names one. -h for this text
+  --dir/--log/--policy <p>   working directory, and the log and policy pinned
+  --http           streamable HTTP, not stdio: a session per client, 20 live and
+                   200 per process. --port <n>=4681 is loopback; --listen widens
+  --guest          --http only: a fresh agent:guest-<id> per session, so limits
+                   are per connection. Exclusive with --as
 
-Speaks MCP over stdin/stdout and runs until interrupted. THE TOOLS ARE THE
-AGENT SURFACE: the verb registry filtered by human_only false, so grant, reject,
-revoke, attest, amend and the channel listeners are not published: SPEC.md §11
-names the agent the untrusted policy, and an MCP client is an agent's harness.
-Tool calls run SERIALLY, and THIS SERVER READS NO .approval/env. A refusal comes
-back as a tool result with the CLI's own error object, never as a JSON-RPC error.
-POST-V1: mapping the MCP tasks/elicitation extension onto \`awaiting\`.
+On stdio, stdout IS the JSON-RPC stream; both run until interrupted. THE TOOLS
+ARE THE AGENT SURFACE: the registry less human_only, so grant and the channel
+listeners are unpublished (SPEC.md §11 names the agent the untrusted policy).
+IDENTITY IS THE SERVER'S: no client name or argument names an actor. Calls run
+SERIALLY, THIS SERVER READS NO .approval/env. POST-V1: tasks/elicitation.
 
 ${EXIT_CODES_POINTER} (2 is a startup refusal; 0 is a clean shutdown)
 ${JSON_ERRORS}

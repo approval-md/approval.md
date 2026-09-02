@@ -391,7 +391,13 @@ test("a supervised action runs with NO token and its budget is charged at the st
   // APRV-140: the start event carries the hash of what actually spawned, so an
   // operator holding the command can reproduce it and see that the log names
   // the bytes that ran.
-  assert.deepEqual(logRecords(dir)[2]?.["payload"], {
+  // APRV-205 adds one more field, whose value depends on the environment this
+  // suite happens to run in, so it is asserted by shape and lifted out of the
+  // exact comparison below. The cases in "the starved child" pin its meaning.
+  const startedPayload = { ...((logRecords(dir)[2]?.["payload"] ?? {}) as Record<string, unknown>) };
+  assert.equal(typeof startedPayload["env_stripped"], "number");
+  delete startedPayload["env_stripped"];
+  assert.deepEqual(startedPayload, {
     class: "files.write.local",
     est_cost_usd: "0.01",
     payload_hash: runPayloadHash(exiting(0), dir),
@@ -435,6 +441,174 @@ test("a supervised run refuses when the policy changed since attestation", () =>
   assert.equal(jsonErr(run)["code"], "policy-not-attested");
   assert.equal(jsonErr(run)["detail"], "hash-mismatch");
   assert.equal(events(dir).includes("execution.started"), false);
+});
+
+// ===========================================================================
+// the starved child (APRV-205)
+// ===========================================================================
+
+/**
+ * A child that writes its whole environment to a file and prints it.
+ *
+ * Both halves matter: the FILE is what the assertions read, and the PRINT is
+ * what proves the value would have been visible to anything downstream of the
+ * child's stdout had it been there.
+ */
+const ENV_DUMPING_CHILD = [
+  process.execPath,
+  "-e",
+  "const e=JSON.stringify(process.env);require('fs').writeFileSync(process.env.ENV_OUT,e);console.log(e)",
+];
+
+/**
+ * A credential-shaped value, invented here.
+ *
+ * Set from inside the test, never from a shell: the hook classifies a command
+ * whose text expands a secret-named variable as `account.credential` and refuses
+ * it, which is APRV-194 working. Nothing in this file reads a real credential.
+ */
+const FIXTURE_TOKEN = "fixture-tg-token-4f1a9c-not-a-real-token";
+
+/** The names this case exports, all of them credential-shaped. */
+const STARVED: Record<string, string> = {
+  APPROVAL_TG_TOKEN: FIXTURE_TOKEN,
+  APPROVAL_TG_CHAT: FIXTURE_TOKEN,
+  APPROVAL_VAULT_PASSPHRASE: FIXTURE_TOKEN,
+  TELEGRAM_BOT_TOKEN: FIXTURE_TOKEN,
+  VAULT_ADDR: FIXTURE_TOKEN,
+};
+
+test("the granted child cannot read the token, TELEGRAM_*, VAULT_* or the passphrase", () => {
+  const dir = ready(POLICY, ENV_DUMPING_CHILD);
+  const token = grantChaser(dir);
+  const dump = join(dir, "child-env.json");
+
+  const run = runCli(
+    [
+      "run",
+      "task-042:chaser",
+      "--token",
+      token,
+      "--as",
+      "agent:claude",
+      "--json",
+      "--",
+      ...ENV_DUMPING_CHILD,
+    ],
+    dir,
+    { ...STARVED, ENV_OUT: dump },
+  );
+  assert.equal(run.code, 0, run.stderr);
+
+  const childEnv = JSON.parse(readFileSync(dump, "utf8")) as Record<string, string>;
+  for (const name of Object.keys(STARVED)) {
+    assert.equal(childEnv[name], undefined, `${name} reached the granted child`);
+  }
+  // The value, under any name at all, and in either place it could surface.
+  assert.equal(
+    Object.values(childEnv).includes(FIXTURE_TOKEN),
+    false,
+    "the credential value reached the child under some other name",
+  );
+  assert.equal(run.stdout.includes(FIXTURE_TOKEN), false, "the child printed the credential");
+  assert.equal(rawLog(dir).includes(FIXTURE_TOKEN), false, "the credential value reached the log");
+  // The raw-secrets invariant covers the NAMES this path could have recorded
+  // too: the log says how many were withheld and never which.
+  assert.equal(rawLog(dir).includes("APPROVAL_TG_TOKEN"), false, "a credential NAME reached the log");
+  assertClean(dir);
+});
+
+test("PATH, HOME and the APRV-194 allowlist survive into the granted child", () => {
+  const dir = ready(POLICY, ENV_DUMPING_CHILD);
+  const token = grantChaser(dir);
+  const dump = join(dir, "child-env.json");
+
+  const run = runCli(
+    [
+      "run",
+      "task-042:chaser",
+      "--token",
+      token,
+      "--as",
+      "agent:claude",
+      "--",
+      ...ENV_DUMPING_CHILD,
+    ],
+    dir,
+    {
+      ...STARVED,
+      ENV_OUT: dump,
+      APPROVAL_HUMAN: "human:carter",
+      APPROVAL_ASCII: "1",
+      APPROVAL_DIR: dir,
+    },
+  );
+  assert.equal(run.code, 0, run.stderr);
+
+  const childEnv = JSON.parse(readFileSync(dump, "utf8")) as Record<string, string>;
+  assert.equal(typeof childEnv["PATH"], "string");
+  assert.ok((childEnv["PATH"] ?? "").length > 0, "PATH was emptied");
+  assert.equal(childEnv["HOME"], process.env["HOME"]);
+  assert.equal(childEnv["APPROVAL_HUMAN"], "human:carter");
+  assert.equal(childEnv["APPROVAL_ASCII"], "1");
+  assert.equal(childEnv["APPROVAL_DIR"], dir);
+  assert.equal(childEnv["ENV_OUT"], dump, "an ordinary variable was withheld");
+});
+
+test("execution.started records the COUNT of withheld variables and no name", () => {
+  const dir = ready(POLICY, ENV_DUMPING_CHILD);
+  const token = grantChaser(dir);
+  const dump = join(dir, "child-env.json");
+
+  assert.equal(
+    runCli(
+      [
+        "run",
+        "task-042:chaser",
+        "--token",
+        token,
+        "--as",
+        "agent:claude",
+        "--",
+        ...ENV_DUMPING_CHILD,
+      ],
+      dir,
+      { ...STARVED, ENV_OUT: dump },
+    ).code,
+    0,
+  );
+
+  const started = logRecords(dir).find((record) => record["event"] === "execution.started");
+  const payload = (started?.["payload"] ?? {}) as Record<string, unknown>;
+  const count = payload["env_stripped"];
+  assert.equal(typeof count, "number", "execution.started carries no env_stripped");
+  assert.equal(Number.isInteger(count), true);
+  assert.ok(
+    (count as number) >= Object.keys(STARVED).length,
+    `env_stripped ${String(count)} is fewer than the ${Object.keys(STARVED).length} this case exported`,
+  );
+  // A count, and nothing beside it: no list, no name, no value.
+  assert.equal(JSON.stringify(payload).includes("APPROVAL_"), false);
+  assertClean(dir);
+});
+
+test("a supervised run starves its child too: the scrub is not the manual path's", () => {
+  const dir = ready(POLICY, ENV_DUMPING_CHILD);
+  const dump = join(dir, "child-env.json");
+
+  const run = runCli(
+    ["run", "task-042:draft", "--as", "agent:claude", "--", ...ENV_DUMPING_CHILD],
+    dir,
+    { ...STARVED, ENV_OUT: dump },
+  );
+  assert.equal(run.code, 0, run.stderr);
+
+  const childEnv = JSON.parse(readFileSync(dump, "utf8")) as Record<string, string>;
+  assert.equal(Object.values(childEnv).includes(FIXTURE_TOKEN), false);
+  const started = logRecords(dir).find((record) => record["event"] === "execution.started");
+  const payload = (started?.["payload"] ?? {}) as Record<string, unknown>;
+  assert.equal(typeof payload["env_stripped"], "number");
+  assertClean(dir);
 });
 
 // ===========================================================================

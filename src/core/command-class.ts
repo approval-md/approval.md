@@ -341,15 +341,32 @@ const CREDENTIAL_WRITE_BINS: readonly string[] = [
  * environment: it cannot know which `APPROVAL_*` holds a token, so it treats
  * the family alike and lets the allowlist below carve out the runtime's own
  * non-secret names. Erring wide costs one approval prompt.
+ *
+ * Exported since APRV-205: `core/child-env.ts` starves a spawned child of the
+ * same family, and two copies of this list would be one list that drifts.
+ *
+ * `AGENTMAIL_` joins the family with the AgentMail adapter (APRV-224). An
+ * AgentMail API key is a mailbox in one string, and the deployment the adapter
+ * assumes hands the agent a key that cannot send while the sending key waits in
+ * the vault (SPEC.md §10.4). A key of either half in a granted child's
+ * environment would undo that split, so the prefix is withheld like the rest.
+ * The adapter's own declared credentials are vault names (`agentmail.api_key`,
+ * `agentmail.inbox_id`), so nothing under this prefix passes through by
+ * declaration either.
  */
-const SECRET_ENV_PREFIXES: readonly string[] = ["APPROVAL_", "TELEGRAM_", "VAULT_"];
+export const SECRET_ENV_PREFIXES: readonly string[] = [
+  "APPROVAL_",
+  "TELEGRAM_",
+  "VAULT_",
+  "AGENTMAIL_",
+];
 
 /**
  * The runtime's own variables under those prefixes that hold no secret: an
  * identity, a rendering switch, a path. Listed rather than pattern-matched so
  * that adding one is a deliberate act with a reviewer.
  */
-const NON_SECRET_ENV_NAMES: readonly string[] = [
+export const NON_SECRET_ENV_NAMES: readonly string[] = [
   "APPROVAL_HUMAN",
   "APPROVAL_AGENT",
   "APPROVAL_ASCII",
@@ -358,8 +375,14 @@ const NON_SECRET_ENV_NAMES: readonly string[] = [
   "APPROVAL_DIR",
 ];
 
-/** Does this bare variable name name credential material? */
-function isSecretEnvName(name: string): boolean {
+/**
+ * Does this bare variable name name credential material?
+ *
+ * Exported since APRV-205 for the same reason the two lists are: the scrub that
+ * builds a granted child's environment asks exactly this question, of a real
+ * environment rather than of command text, and it must ask it the same way.
+ */
+export function isSecretEnvName(name: string): boolean {
   if (NON_SECRET_ENV_NAMES.includes(name)) return false;
   return SECRET_ENV_PREFIXES.some((prefix) => name.startsWith(prefix) && name.length > prefix.length);
 }
@@ -1142,7 +1165,7 @@ function isGateEntrypoint(path: string): boolean {
 }
 
 /**
- * The two `approval` invocations that are NOT pass-through (APRV-125).
+ * The `approval` invocations that are NOT pass-through (APRV-125, APRV-214).
  *
  * Everything else this CLI does is the enforcement path itself, and gating the
  * gate with the gate deadlocks or recurses (see {@link GATE_SELF_CLASS}). `log
@@ -1150,6 +1173,15 @@ function isGateEntrypoint(path: string): boolean {
  * they drive git against a shared remote, which is a real-world effect, and the
  * policy has to be able to hold them at manual while trust builds and to relax
  * them independently later.
+ *
+ * `gate open` and `gate close` (APRV-214, amended SPEC.md §5.2) are different
+ * in the same way and more so: opening the window SUSPENDS the policy for every
+ * harness tool call under the root, which makes it the most consequential thing
+ * this CLI can do. Classified `policy.core` it lands where APPROVAL.md already
+ * puts the policy's own machinery, which today is `human-only`, so the hook
+ * denies an agent running the ceremony with `hook-class-human-only` — the
+ * classification lock, sitting behind the terminal lock and the typed word.
+ * `gate status` reports and writes nothing, so it stays pass-through.
  *
  * Naming them here is also what stops the prompt lying. Performed by hand, the
  * ritual reached the approver's phone as `policy.edit` over a protected path —
@@ -1159,10 +1191,18 @@ function isGateEntrypoint(path: string): boolean {
  * hide the verb: `approval --json log sync` is the same invocation.
  */
 function refineApprovalVerb(positionals: readonly string[]): Refinement | null {
-  if (positionals[0] !== "log") return null;
+  const verb = positionals[0];
   const sub = positionals[1];
-  if (sub === "sync") return { class: "log.sync", rule: "approval-log-sync" };
-  if (sub === "advance") return { class: "log.advance", rule: "approval-log-advance" };
+  if (verb === "log") {
+    if (sub === "sync") return { class: "log.sync", rule: "approval-log-sync" };
+    if (sub === "advance") return { class: "log.advance", rule: "approval-log-advance" };
+    return null;
+  }
+  if (verb === "gate") {
+    if (sub === "open") return { class: "policy.core", rule: "approval-gate-open" };
+    if (sub === "close") return { class: "policy.core", rule: "approval-gate-close" };
+    return null;
+  }
   return null;
 }
 
@@ -1320,14 +1360,14 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     id: "node",
     bins: ["node"],
     class: "files.write.workspace",
-    emits: [GATE_SELF_CLASS, "log.sync", "log.advance"],
+    emits: [GATE_SELF_CLASS, "log.sync", "log.advance", "policy.core"],
     refine: refineNode,
   },
   {
     id: "approval",
     bins: ["approval"],
     class: GATE_SELF_CLASS,
-    emits: ["log.sync", "log.advance"],
+    emits: ["log.sync", "log.advance", "policy.core"],
     refine: refineApproval,
   },
   {

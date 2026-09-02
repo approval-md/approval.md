@@ -285,6 +285,20 @@ export interface ExecuteOptions extends ClockOptions {
   /** Lock tuning for the append path. */
   append?: AppendOptions;
   /**
+   * How many credential-bearing variables the executor withheld from the child
+   * it is about to spawn (APRV-205), recorded on `execution.started` as
+   * `env_stripped`.
+   *
+   * A COUNT, never a name and never a value: a name is half of a credential,
+   * and SPEC.md §11.1's raw-secrets invariant is not satisfied by leaking the
+   * other half slowly. It is informational — nothing in the gate reads it back
+   * and no decision turns on it, which is what keeps it clear of §11.1's
+   * "self-reported fields never reduce scrutiny". No CLI flag sets it: it is
+   * computed by `core/child-env.ts` at the spawn site, in the same process that
+   * spawns.
+   */
+  envStripped?: number;
+  /**
    * Where per-request private keys live (APRV-105). Defaults to `.approval/keys/`
    * beside the log. Read when no `token` is passed and a grant carries a
    * `token_sealed`; unlinked once the token is spent.
@@ -423,6 +437,31 @@ export function findDeclaration(
   actionKey: string,
 ): Declaration | null {
   let found: Declaration | null = null;
+  for (const { task, key, item } of declaredActions(records)) {
+    if (key !== actionKey) continue;
+    const declaration = declarationOf(task, item);
+    if (declaration === null) continue;
+    found = declaration;
+  }
+  return found;
+}
+
+/**
+ * One declared action, as a `task.registered` record carries it.
+ *
+ * The shared walk behind {@link findDeclaration}, {@link declaringTasks} and
+ * {@link indexDeclarations}: the three ask different questions of exactly the
+ * same records, entries and skip rules, and a fourth copy of those rules is a
+ * fourth place for them to diverge.
+ */
+interface DeclaredAction {
+  task: string;
+  /** The entry's `idempotency_key`, unnormalized: it is compared, never trusted. */
+  key: unknown;
+  item: Record<string, unknown>;
+}
+
+function* declaredActions(records: readonly EventRecord[]): Generator<DeclaredAction> {
   for (const record of records) {
     if (record.event !== "task.registered") continue;
     const task = record.task;
@@ -432,24 +471,76 @@ export function findDeclaration(
     for (const entry of actions) {
       if (typeof entry !== "object" || entry === null) continue;
       const item = entry as Record<string, unknown>;
-      if (item["idempotency_key"] !== actionKey) continue;
-      const cls = item["class"];
-      if (typeof cls !== "string") continue;
-      const cost = item["est_cost_usd"];
-      const reversible = item["reversible"];
-      const summary = item["summary"];
-      const binding = item["payload_hash"];
-      found = {
-        task,
-        class: cls,
-        est_cost_usd: usdOrZero(cost),
-        reversible: typeof reversible === "boolean" ? reversible : null,
-        summary: typeof summary === "string" ? summary : null,
-        payload_hash: isPayloadHash(binding) ? binding : null,
-      };
+      yield { task, key: item["idempotency_key"], item };
     }
   }
-  return found;
+}
+
+/** The {@link Declaration} an entry states, or `null` when it declares no class. */
+function declarationOf(task: string, item: Record<string, unknown>): Declaration | null {
+  const cls = item["class"];
+  if (typeof cls !== "string") return null;
+  const cost = item["est_cost_usd"];
+  const reversible = item["reversible"];
+  const summary = item["summary"];
+  const binding = item["payload_hash"];
+  return {
+    task,
+    class: cls,
+    est_cost_usd: usdOrZero(cost),
+    reversible: typeof reversible === "boolean" ? reversible : null,
+    summary: typeof summary === "string" ? summary : null,
+    payload_hash: isPayloadHash(binding) ? binding : null,
+  };
+}
+
+/**
+ * Every declaration question the log answers, keyed once (APRV-211).
+ *
+ * The three per-key helpers above each scan the whole log, which is the right
+ * shape for the gate (one key, one decision, no bookkeeping to get wrong) and
+ * the wrong shape for a caller asking about thousands of keys: `core/audit.ts`'s
+ * candidate selection asked all three per `execution.started` and spent three
+ * full scans per candidate, which is quadratic in the log and measured at 3.3 s
+ * on a ten-thousand-record log.
+ *
+ * This is a **per-call derivation and nothing more**. It caches nothing across
+ * calls, holds no state, reads no file and no clock, and is built from the
+ * records the caller already verified. The per-key helpers remain the gate's
+ * API: an enforcement path deciding ONE action asks them, because a decision
+ * that depends on an index built somewhere else is a decision that depends on
+ * that index being fresh.
+ */
+export interface DeclarationIndex {
+  /** Per key, the distinct tasks declaring it, exactly as {@link declaringTasks}. */
+  declaringTasks: Map<string, string[]>;
+  /** Per key, the LAST declaration in log order, exactly as {@link findDeclaration}. */
+  declarations: Map<string, Declaration>;
+  /** Keys the log holds an `approval.requested` for, as {@link hasApprovalCycle}. */
+  requested: Set<string>;
+}
+
+export function indexDeclarations(records: readonly EventRecord[]): DeclarationIndex {
+  const tasksByKey = new Map<string, string[]>();
+  const declarations = new Map<string, Declaration>();
+  const requested = new Set<string>();
+
+  for (const { task, key, item } of declaredActions(records)) {
+    if (typeof key !== "string") continue;
+    const tasks = tasksByKey.get(key);
+    if (tasks === undefined) tasksByKey.set(key, [task]);
+    else if (!tasks.includes(task)) tasks.push(task);
+    const declaration = declarationOf(task, item);
+    if (declaration !== null) declarations.set(key, declaration);
+  }
+
+  for (const record of records) {
+    if (record.event !== "approval.requested") continue;
+    const key = record.action_key;
+    if (typeof key === "string") requested.add(key);
+  }
+
+  return { declaringTasks: tasksByKey, declarations, requested };
 }
 
 /**
@@ -461,18 +552,8 @@ export function findDeclaration(
  */
 export function declaringTasks(records: EventRecord[], actionKey: string): string[] {
   const tasks = new Set<string>();
-  for (const record of records) {
-    if (record.event !== "task.registered") continue;
-    const task = record.task;
-    if (typeof task !== "string" || task.length === 0) continue;
-    const actions = payloadOf(record)["actions"];
-    if (!Array.isArray(actions)) continue;
-    for (const entry of actions) {
-      if (typeof entry !== "object" || entry === null) continue;
-      if ((entry as Record<string, unknown>)["idempotency_key"] === actionKey) {
-        tasks.add(task);
-      }
-    }
+  for (const { task, key } of declaredActions(records)) {
+    if (key === actionKey) tasks.add(task);
   }
   return [...tasks];
 }
@@ -677,6 +758,9 @@ export function startExecution(
       ...(options.presentedPayloadHash === undefined
         ? {}
         : { presentedPayloadHash: options.presentedPayloadHash }),
+      // APRV-205: the manual path's `execution.started` is appended by
+      // `consumeToken`, so the count travels with the spend.
+      ...(options.envStripped === undefined ? {} : { envStripped: options.envStripped }),
       // One moment for the whole operation: the timestamp already read above is
       // the one the spend records, so `startExecution` and the `execution.started`
       // it produces cannot disagree about when this happened.
@@ -826,6 +910,11 @@ export function startExecution(
         class: declared.class,
         est_cost_usd: declared.est_cost_usd,
         payload_hash: declared.payload_hash,
+        // APRV-205: how many credential-bearing variables the child was starved
+        // of. Additive and optional — an execution that spawns nothing (an
+        // adapter's `act`, which runs in this process) records no count at all,
+        // because "none withheld" and "no child" are different facts.
+        ...(options.envStripped === undefined ? {} : { env_stripped: options.envStripped }),
       },
     },
     options,
@@ -846,6 +935,31 @@ export function startExecution(
 // ---------------------------------------------------------------------------
 // finish
 // ---------------------------------------------------------------------------
+
+/**
+ * What a failure says about itself, beyond its exit status (APRV-211).
+ *
+ * Machine-readable first: `code` is the executor's own closed refusal code (for
+ * the daemon's advance, one of `cli/log-advance.ts`'s
+ * `LOG_ADVANCE_REFUSAL_CODES`), so a status surface can branch on it rather
+ * than parse prose. The message is the sentence a human reads.
+ *
+ * It is a REPORT and never an authorization: nothing in the gate reads either
+ * field back, no decision anywhere turns on them, and SPEC.md §11.1's rule that
+ * self-reported fields never reduce scrutiny is untouched — the only thing they
+ * can do is make a failure explicable. The message is written by this runtime's
+ * own code and must stay that way: a raw child stderr forwarded here could
+ * carry a credential into a permanent log.
+ */
+export interface FailureReason {
+  code: string;
+  message: string;
+}
+
+/** {@link ExecuteOptions} plus the reason a non-zero exit carries (APRV-211). */
+export interface FinishOptions extends ExecuteOptions {
+  reason?: FailureReason;
+}
 
 export type FinishResult =
   | { ok: true; record: EventRecord; event: "execution.completed" | "execution.failed"; exitCode: number; task: string }
@@ -877,12 +991,24 @@ export function finishExecution(
   actionKey: string,
   exitCode: number,
   actor: string,
-  options: ExecuteOptions = {},
+  options: FinishOptions = {},
 ): FinishResult {
   const open = openExecution(logPath, actionKey, options);
   if (!open.ok) return open;
 
   const event = exitCode === 0 ? "execution.completed" : "execution.failed";
+  // APRV-211. A non-zero exit with no reason is not a report: the daemon's
+  // advance recorded `exit_code: 1` and the operator's only surfaces — the
+  // daemon's event stream, which is gone the moment nobody is tailing it, and
+  // the `log-advance-cadence` doctor row, which reads the log — could say
+  // nothing about WHY. So the executor's own words travel with the outcome.
+  // Recorded ONLY on failure, and only when the caller states them: the
+  // completed case has nothing to explain, and a reason nobody supplied would
+  // be a runtime's guess in an append-only log.
+  const reason =
+    event === "execution.failed" && options.reason !== undefined
+      ? { code: options.reason.code, message: options.reason.message }
+      : {};
   const appended = append(
     logPath,
     {
@@ -891,7 +1017,7 @@ export function finishExecution(
       actor,
       task: open.task,
       action_key: actionKey,
-      payload: { exit_code: exitCode },
+      payload: { exit_code: exitCode, ...reason },
     },
     options,
     // The head read above, when the not-started / already-finished checks ran.

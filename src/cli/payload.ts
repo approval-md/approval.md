@@ -1,6 +1,14 @@
 /**
- * `approval payload hash <file|->` — print the content binding for a payload
- * (SPEC.md §6.2; APRV-29).
+ * `approval payload …` — the bytes an approval binds to (SPEC.md §6.2;
+ * APRV-29, APRV-223).
+ *
+ * Two subcommands, and one argument between them: a grant is over CONTENT.
+ * `hash` prints the binding for bytes a caller already holds;
+ * `agentmail-draft` produces the bytes for material only the provider holds,
+ * by snapshotting one AgentMail draft as the payload the adapter will re-read
+ * it against. Neither reads the log, writes a file, or spends anything.
+ *
+ * ## `payload hash <file|->` — print the content binding for a payload
  *
  * The hash was already the whole mechanism of content binding, and until now the
  * only way to obtain one outside the runtime was to import `core/payload.js` by
@@ -39,10 +47,20 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
+import {
+  draftSnapshot,
+  readAgentmailDraft,
+  type AgentmailFetch,
+} from "../adapters/agentmail.js";
+import { canonicalize } from "../core/jcs.js";
 import { payloadHash } from "../core/payload.js";
-import { boolFlag, parseFlags, type FlagKind } from "./args.js";
-import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
-import { PAYLOAD_HASH_HELP, PAYLOAD_HELP } from "./help.js";
+import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
+import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
+import {
+  PAYLOAD_AGENTMAIL_DRAFT_HELP,
+  PAYLOAD_HASH_HELP,
+  PAYLOAD_HELP,
+} from "./help.js";
 import type { Streams } from "./main.js";
 import { usageErrorText } from "./usage.js";
 
@@ -157,8 +175,145 @@ function commandPayloadHash(argv: string[], streams: Streams, cwd: string): numb
   return EXIT_OK;
 }
 
-/** `approval payload …` — dispatch to `hash`, or print the help. */
-export function commandPayload(argv: string[], streams: Streams, cwd: string): number {
+// ---------------------------------------------------------------------------
+// `payload agentmail-draft` (APRV-223)
+// ---------------------------------------------------------------------------
+
+/** The agent's own AgentMail key. Read here and in no other verb. */
+export const AGENTMAIL_API_KEY_ENV = "AGENTMAIL_API_KEY";
+
+/** The API root override, for a deployment that fronts AgentMail. */
+export const AGENTMAIL_API_BASE_ENV = "AGENTMAIL_API_BASE";
+
+const AGENTMAIL_DRAFT_FLAGS: Record<string, FlagKind> = {
+  "--api-base": "string",
+  "--timeout": "string",
+  "--json": "boolean",
+  "--help": "boolean",
+  "-h": "boolean",
+};
+
+/** A refusal with a code of its own: exit 1, and a shape an agent can branch on. */
+function refusal(streams: Streams, json: boolean, code: string, message: string): number {
+  if (json) streams.err(`${JSON.stringify({ error: { code, message } })}\n`);
+  else streams.err(`approval: ${code}: ${message}\n`);
+  return EXIT_INTEGRITY;
+}
+
+/** Test seam: the environment and the transport, both `undefined` in production. */
+export interface AgentmailDraftDeps {
+  env?: NodeJS.ProcessEnv;
+  fetch?: AgentmailFetch;
+}
+
+/**
+ * `approval payload agentmail-draft <inbox-id> <draft-id>`.
+ *
+ * The step BEFORE an approval exists: the agent has composed a draft, and what a
+ * human should be asked about is the words in it, not the id of a mutable
+ * server-side object. This verb reads the draft with the AGENT's key and prints
+ * the canonical payload `approval adapter agentmail` will re-read that draft
+ * against, so a draft edited between the request and the grant is refused
+ * `agentmail-draft-drifted` rather than sent.
+ *
+ * **It is the one verb in this CLI that reads `AGENTMAIL_API_KEY`**, and that is
+ * deliberate: the agent's key composes and cannot send, the vault's key sends
+ * and answers only to a grant, and nothing here touches the vault. It appends
+ * nothing, spends no token, and puts no message anywhere.
+ */
+async function commandPayloadAgentmailDraft(
+  argv: string[],
+  streams: Streams,
+  deps: AgentmailDraftDeps = {},
+): Promise<number> {
+  const json = wantsJson(argv);
+  const parsed = parseFlags(argv, AGENTMAIL_DRAFT_FLAGS);
+  if (!parsed.ok) return usageError(streams, json, parsed.message, PAYLOAD_AGENTMAIL_DRAFT_HELP);
+  if (boolFlag(parsed.flags, "--help") || boolFlag(parsed.flags, "-h")) {
+    streams.out(`${PAYLOAD_AGENTMAIL_DRAFT_HELP}\n`);
+    return EXIT_OK;
+  }
+
+  const inboxId = parsed.positionals[0];
+  const draftId = parsed.positionals[1];
+  if (inboxId === undefined || draftId === undefined) {
+    return usageError(
+      streams,
+      json,
+      "missing <inbox-id> <draft-id> arguments",
+      PAYLOAD_AGENTMAIL_DRAFT_HELP,
+    );
+  }
+  const extra = parsed.positionals[2];
+  if (extra !== undefined) {
+    return usageError(
+      streams,
+      json,
+      `unexpected argument ${JSON.stringify(extra)}`,
+      PAYLOAD_AGENTMAIL_DRAFT_HELP,
+    );
+  }
+
+  const timeoutFlag = stringFlag(parsed.flags, "--timeout");
+  let timeoutMs: number | null = null;
+  if (timeoutFlag !== null) {
+    const value = Number(timeoutFlag);
+    if (!Number.isInteger(value) || value <= 0) {
+      return usageError(
+        streams,
+        json,
+        `--timeout expects a whole number of milliseconds, got ${JSON.stringify(timeoutFlag)}`,
+        PAYLOAD_AGENTMAIL_DRAFT_HELP,
+      );
+    }
+    timeoutMs = value;
+  }
+
+  const env = deps.env ?? process.env;
+  const apiKey = (env[AGENTMAIL_API_KEY_ENV] ?? "").trim();
+  if (apiKey.length === 0) {
+    // A usage error and not a refusal: the command is unrunnable as written,
+    // and the repair is in the caller's environment. The CODE is what an agent
+    // branches on, so it is the adapter's vocabulary and not the word "usage".
+    const message = `${AGENTMAIL_API_KEY_ENV} is unset or empty: this verb reads the AGENT's AgentMail key from that variable and from nowhere else. It never reads the vault, whose key is the one that can send`;
+    if (json) {
+      streams.err(`${JSON.stringify({ error: { code: "agentmail-api-key-unset", message } })}\n`);
+      return EXIT_USAGE;
+    }
+    return usageError(streams, json, message, PAYLOAD_AGENTMAIL_DRAFT_HELP);
+  }
+
+  const apiBase = stringFlag(parsed.flags, "--api-base") ?? env[AGENTMAIL_API_BASE_ENV] ?? null;
+  const read = await readAgentmailDraft({
+    apiKey,
+    inboxId,
+    draftId,
+    ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
+    ...(apiBase === null ? {} : { apiBase }),
+    ...(timeoutMs === null ? {} : { timeoutMs }),
+  });
+  if (!read.ok) return refusal(streams, json, read.code, read.message);
+
+  const snapshot = draftSnapshot(inboxId, draftId, read.draft);
+  if (!snapshot.ok) {
+    return refusal(streams, json, "agentmail-draft-unusable", snapshot.message);
+  }
+
+  // The canonical serialization itself, because the hash is defined over it and
+  // a re-serialization by any other printer is a second answer about what these
+  // bytes are. `--json` prints the same bytes: there is no envelope to add,
+  // since the payload IS the machine-readable result.
+  streams.out(`${canonicalize(snapshot.payload)}\n`);
+  return EXIT_OK;
+}
+
+/** `approval payload …` — dispatch to a subcommand, or print the help. */
+export function commandPayload(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  deps: AgentmailDraftDeps = {},
+): number | Promise<number> {
   const sub = argv[0];
   const rest = argv.slice(1);
 
@@ -178,6 +333,8 @@ export function commandPayload(argv: string[], streams: Streams, cwd: string): n
   switch (sub) {
     case "hash":
       return commandPayloadHash(rest, streams, cwd);
+    case "agentmail-draft":
+      return commandPayloadAgentmailDraft(rest, streams, deps);
     default:
       return usageError(
         streams,

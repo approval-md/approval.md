@@ -39,6 +39,17 @@
  * **`log-advance-not-primary`.** Same rule as sync's: the committed log has one
  * home, and it is not a worktree.
  *
+ * ## One records branch, and one pull request, per day (APRV-204)
+ *
+ * The daemon advances on a cadence, so an advance is no longer a once-a-day
+ * ceremony and the day's records branch usually already exists. When it does,
+ * and its log is a prefix of the working log, the commit is parented on THAT
+ * branch rather than on the trunk: parenting every advance on the trunk makes
+ * the second push of the day a non-fast-forward of a branch a pull request is
+ * already open on. `--pr` asks whether an open pull request exists for the head
+ * branch before creating one, so a day gets a single pull request that later
+ * advances grow.
+ *
  * A local branch that is AHEAD of origin with commits this verb did not make is
  * not a refusal: the advance is based on origin either way, and those commits
  * are simply not part of it. What IS refused is a working log that origin's log
@@ -56,7 +67,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { withAppendLock } from "../core/log.js";
+import { isAdvanceBookkeeping } from "../core/advance-cycle.js";
+import { withAppendLock, type EventRecord } from "../core/log.js";
 import type { LogHead } from "../core/verify.js";
 import { verify } from "../core/verify.js";
 import {
@@ -139,8 +151,19 @@ export interface LogAdvanceReport {
   branch: string;
   recordsBranch: string;
   remote: string;
-  /** The remote branch this commit is parented on, and the sha it was at. */
+  /** The remote branch the advance was measured against, and the sha it was at. */
   base: { branch: string; sha: string } | null;
+  /**
+   * The commit this advance is actually parented on (APRV-204): the base
+   * branch's tip on the first advance of a day, and the day's records branch on
+   * every advance after it, so the push fast-forwards the branch the day's pull
+   * request is open on.
+   */
+  parent?: { ref: string; sha: string };
+  /** True when the parent was the day's existing records branch. */
+  reusedRecordsBranch?: boolean;
+  /** True when this run OPENED the pull request; false when one already stood. */
+  prCreated?: boolean;
   /** The seq range this advance carries, inclusive; null when nothing is owed. */
   range: { from: number; to: number } | null;
   committedHead: LogHead | null;
@@ -295,48 +318,49 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
   }
   const baseSha = fetched.sha;
 
-  // 4. What is owed: the seq range between ORIGIN's committed log and the
-  //    working head. Read through the same comparison sync and doctor read.
-  const committedBlob = showBlob(root, baseSha, repoPath(root, logPath));
-  const compared = compareChains(
-    { label: `the working log ${logPath}`, text: textOfWorking(logPath) },
-    {
-      label: `the committed log ${remote}/${baseBranch}:${repoPath(root, logPath)}`,
-      text: committedBlob === null ? "" : committedBlob.toString("utf8"),
-    },
-  );
-  if (!compared.ok) {
-    return { ok: false, code: "log-advance-unverified", message: compared.message };
-  }
-  const drift: LogDrift = compared.drift;
-  if (drift.relation === "diverged") {
-    return {
-      ok: false,
-      code: "log-advance-remote-diverged",
-      message: `the working log and ${remote}/${baseBranch}'s log part at seq ${String(
-        drift.firstDivergentSeq,
-      )}: two chains, not one. Nothing is advanced over a fork, and nothing was committed. Run \`approval doctor\` for the log-drift report; hash chains do not merge, so which of the two is the log is a human decision.`,
-    };
-  }
-  if (drift.relation === "behind") {
-    return {
-      ok: false,
-      code: "log-advance-behind-remote",
-      message: `${remote}/${baseBranch} carries records this working log does not (its head is ${String(
-        drift.committedHead?.seq ?? 0,
-      )}, the working head is ${String(
-        drift.workingHead?.seq ?? 0,
-      )}). An advance publishes records the remote lacks, so there is nothing here to publish and committing would propose an older chain than the one already on the remote. Run \`approval log sync\` first, then run this again. Nothing was committed.`,
-    };
-  }
-  const committedSeq = drift.committedHead?.seq ?? 0;
-  // `null` when there is nothing owed. A no-op advance is a SUCCESS, exactly as
-  // a no-op `policy amend` is: an operator who runs it on an already-committed
-  // log has established what they wanted to establish.
-  const range =
-    drift.relation === "ahead"
-      ? { from: committedSeq + 1, to: drift.workingHead?.seq ?? committedSeq }
-      : null;
+  // 4. What is owed: the seq range between the committed log and the working
+  //    head. Read through the same comparison sync and doctor read.
+  const workingText = textOfWorking(logPath);
+  const against = (
+    sha: string,
+    label: string,
+  ): { ok: true; drift: LogDrift } | LogAdvanceResult => {
+    const blob = showBlob(root, sha, repoPath(root, logPath));
+    const compared = compareChains(
+      { label: `the working log ${logPath}`, text: workingText },
+      {
+        label: `the committed log ${label}:${repoPath(root, logPath)}`,
+        text: blob === null ? "" : blob.toString("utf8"),
+      },
+    );
+    if (!compared.ok) {
+      return { ok: false, code: "log-advance-unverified", message: compared.message };
+    }
+    if (compared.drift.relation === "diverged") {
+      return {
+        ok: false,
+        code: "log-advance-remote-diverged",
+        message: `the working log and ${label}'s log part at seq ${String(
+          compared.drift.firstDivergentSeq,
+        )}: two chains, not one. Nothing is advanced over a fork, and nothing was committed. Run \`approval doctor\` for the log-drift report; hash chains do not merge, so which of the two is the log is a human decision.`,
+      };
+    }
+    if (compared.drift.relation === "behind") {
+      return {
+        ok: false,
+        code: "log-advance-behind-remote",
+        message: `${label} carries records this working log does not (its head is ${String(
+          compared.drift.committedHead?.seq ?? 0,
+        )}, the working head is ${String(
+          compared.drift.workingHead?.seq ?? 0,
+        )}). An advance publishes records the remote lacks, so there is nothing here to publish and committing would propose an older chain than the one already on the remote. Run \`approval log sync\` first, then run this again. Nothing was committed.`,
+      };
+    }
+    return { ok: true, drift: compared.drift };
+  };
+
+  const trunk = against(baseSha, `${remote}/${baseBranch}`);
+  if (!("drift" in trunk)) return trunk;
 
   const recordsBranch =
     options.branch ?? defaultRecordsBranch(options.today ?? new Date().toISOString());
@@ -348,6 +372,40 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
     };
   }
 
+  // 4a. One records branch per day, updated rather than re-created (APRV-204).
+  //
+  // The day's branch usually already exists: the daemon advances on a cadence
+  // and every tick after the first would otherwise build ANOTHER commit on the
+  // trunk, which the remote rejects as a non-fast-forward of the branch a pull
+  // request is already open on. So when the records branch exists and its log
+  // is a prefix of the working log, THAT is the parent: the push fast-forwards
+  // and the open pull request grows by one commit.
+  //
+  // A fetch failure here is read as "no such branch", which is what it is
+  // whenever the trunk fetch a moment ago succeeded. The alternative — treating
+  // it as a network failure and refusing — would refuse every first advance of
+  // every day, since the branch genuinely does not exist yet.
+  let parent = { ref: `${remote}/${baseBranch}`, sha: baseSha };
+  let drift: LogDrift = trunk.drift;
+  let reusedRecordsBranch = false;
+  const existing = fetchBase(root, remote, recordsBranch);
+  if (existing.ok) {
+    const onBranch = against(existing.sha, `${remote}/${recordsBranch}`);
+    if (!("drift" in onBranch)) return onBranch;
+    parent = { ref: `${remote}/${recordsBranch}`, sha: existing.sha };
+    drift = onBranch.drift;
+    reusedRecordsBranch = true;
+  }
+
+  const committedSeq = drift.committedHead?.seq ?? 0;
+  // `null` when there is nothing owed. A no-op advance is a SUCCESS, exactly as
+  // a no-op `policy amend` is: an operator who runs it on an already-committed
+  // log has established what they wanted to establish.
+  const range =
+    drift.relation === "ahead"
+      ? { from: committedSeq + 1, to: drift.workingHead?.seq ?? committedSeq }
+      : null;
+
   const message = range === null ? "" : advanceMessage(range, branch);
   const carried = ADVANCE_PATHS.filter((path) => existsSync(join(root, path)));
 
@@ -357,6 +415,9 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
     recordsBranch,
     remote,
     base: { branch: baseBranch, sha: baseSha },
+    parent: { ref: parent.ref, sha: parent.sha },
+    reusedRecordsBranch,
+    prCreated: false,
     range,
     committedHead: drift.committedHead,
     workingHead: drift.workingHead,
@@ -375,9 +436,9 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
   //    paths, laid over origin's tree; the operator's index is never touched
   //    and nothing is checked out.
   progress.phase(
-    `building the records commit on ${remote}/${baseBranch} ${baseSha.slice(0, 12)} (nothing is checked out)`,
+    `building the records commit on ${parent.ref} ${parent.sha.slice(0, 12)} (nothing is checked out)`,
   );
-  const built = commitOnBase(root, { base: baseSha, paths: carried, message });
+  const built = commitOnBase(root, { base: parent.sha, paths: carried, message });
   if (!built.ok) {
     return {
       ok: false,
@@ -410,7 +471,7 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
     return {
       ok: false,
       code: "log-advance-push-rejected",
-      message: `the advance is built on ${remote}/${baseBranch} as ${commit.slice(
+      message: `the advance is built on ${parent.ref} as ${commit.slice(
         0,
         12,
       )} and held at ${anchor}, but \`git push ${remote} ${commit.slice(
@@ -431,17 +492,145 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
     return { ok: true, report: report({ commit, pushed: true }) };
   }
 
-  progress.phase(`opening the pull request for ${recordsBranch}`);
+  progress.phase(`opening or updating the pull request for ${recordsBranch}`);
   const pr = ghPullRequest(root, recordsBranch, range);
   progress.done();
   if (!pr.ok) {
     return {
       ok: false,
       code: "log-advance-pr-failed",
-      message: `the advance is committed and pushed to ${recordsBranch}, but \`gh pr create\` failed: ${pr.message}. Open the pull request by hand and merge it with a merge commit.`,
+      message: `the advance is committed and pushed to ${recordsBranch}, but \`gh pr ${pr.step}\` failed: ${pr.message}. Open the pull request by hand and merge it with a merge commit.`,
     };
   }
-  return { ok: true, report: report({ commit, pushed: true, prUrl: pr.url }) };
+  return {
+    ok: true,
+    report: report({ commit, pushed: true, prUrl: pr.url, prCreated: pr.created }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// What is not yet published (APRV-204)
+// ---------------------------------------------------------------------------
+
+/** Where the records that are already published end. */
+export interface PublishedState {
+  /** The highest seq this chain reaches on a records branch, the trunk, or HEAD. */
+  publishedSeq: number;
+  /** The working log's head seq. */
+  workingSeq: number;
+  /** Working records above `publishedSeq`, advance bookkeeping included. */
+  pending: number;
+  /** The same count with the daemon's own advance cycles removed. */
+  substantive: number;
+  /**
+   * Where the OWED SPAN ends: the highest unpublished seq that is not an
+   * advance cycle's own bookkeeping, or {@link publishedSeq} when none is
+   * (APRV-211).
+   *
+   * `workingSeq` was the wrong end of the span for the daemon's idempotency
+   * key. One gated attempt appends its own `task.registered` and
+   * `approval.requested`, which move the head, so the next tick computed a
+   * DIFFERENT key for the SAME owed work and asked the human a second question.
+   * Measured over substantive records, the span is stable for exactly as long
+   * as the owed work is unchanged, which is what makes one owed advance one
+   * question — and it still moves the moment a real record lands, so the
+   * payload hash still differs per distinct advance and the `supervised-live`
+   * draw is never re-rolled for the same span.
+   *
+   * Never below `publishedSeq`: a span that ran backwards would name a range
+   * the commit could not carry.
+   */
+  substantiveSeq: number;
+}
+
+/**
+ * The chain head of one git rev's copy of the log, or `null`.
+ *
+ * `null` covers three cases that mean the same thing here: no such rev, no such
+ * blob, and a copy that is not this chain (a fork, or a chain somehow ahead of
+ * the working log). None is evidence that any working record has been
+ * published, and treating any of them as evidence would UNDER-count what is
+ * owed, which is the direction that loses records.
+ */
+function publishedHeadAt(
+  root: string,
+  logPath: string,
+  workingText: string,
+  rev: string,
+): number | null {
+  const blob = showBlob(root, rev, repoPath(root, logPath));
+  if (blob === null) return null;
+  const compared = compareChains(
+    { label: "the working log", text: workingText },
+    { label: rev, text: blob.toString("utf8") },
+  );
+  if (!compared.ok) return null;
+  if (compared.drift.relation === "diverged" || compared.drift.relation === "behind") return null;
+  return compared.drift.committedHead?.seq ?? 0;
+}
+
+/** Every local anchor a previous advance left behind. Order is irrelevant. */
+function advanceAnchors(root: string): string[] {
+  const listed = git(["for-each-ref", "--format=%(refname)", "refs/approval/advance/"], root);
+  if (!listed.ok) return [];
+  return listed.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+/**
+ * How much of the working log is already on a records branch or the trunk.
+ *
+ * Reads git's object store and NEVER the network: this is asked on every daemon
+ * tick and by `approval doctor`, and a status question must not depend on a
+ * remote being reachable. The revs consulted are the local advance anchors
+ * (`refs/approval/advance/*`, which {@link logAdvance} writes before it pushes),
+ * the remote-tracking refs for the base branch and the day's records branch, and
+ * `HEAD`. The highest head among the copies that are a PREFIX of this chain
+ * wins; anything else is ignored, which can only make a caller advance less
+ * eagerly.
+ *
+ * It lives here rather than beside the daemon's cadence because `approval
+ * doctor` reports the same number and a CLI module may not import the daemon.
+ */
+export function publishedState(
+  root: string,
+  logPath: string,
+  records: readonly EventRecord[],
+  where: { remote: string; base: string | null },
+  today: string,
+): PublishedState {
+  const workingSeq = records.length === 0 ? 0 : (records[records.length - 1]?.seq ?? 0);
+  let workingText: string;
+  try {
+    workingText = readFileSync(logPath, "utf8");
+  } catch {
+    workingText = "";
+  }
+
+  const base = where.base ?? "main";
+  const revs = [
+    ...advanceAnchors(root),
+    `refs/remotes/${where.remote}/${base}`,
+    `refs/remotes/${where.remote}/${defaultRecordsBranch(today)}`,
+    "HEAD",
+  ];
+  let publishedSeq = 0;
+  for (const rev of revs) {
+    const head = publishedHeadAt(root, logPath, workingText, rev);
+    if (head !== null && head > publishedSeq) publishedSeq = head;
+  }
+
+  const unpublished = records.filter((record) => record.seq > publishedSeq);
+  const substantive = unpublished.filter((record) => !isAdvanceBookkeeping(record));
+  return {
+    publishedSeq,
+    workingSeq,
+    pending: unpublished.length,
+    substantive: substantive.length,
+    substantiveSeq: substantive[substantive.length - 1]?.seq ?? publishedSeq,
+  };
 }
 
 /** The working log's text, or the empty string when there is no file. */
@@ -461,27 +650,83 @@ export function advanceMessage(range: { from: number; to: number }, branch: stri
   return `Log advance: ${span} (${branch})`;
 }
 
-/** `gh pr create` for the records branch. Read-only about the log itself. */
+/** The first `http…` line of a `gh` run's output, which is how `gh` names a PR. */
+function urlOf(text: string): string | null {
+  return (
+    text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("http"))
+      .pop() ?? null
+  );
+}
+
+/**
+ * The day's pull request for the records branch: opened once, updated after.
+ *
+ * ONE PR PER DAY, not one per advance (APRV-204). The daemon advances on a
+ * cadence, so `gh pr create` on every run would either fail (a PR for the head
+ * branch already exists) or, on a remote that allows it, litter the repository
+ * with a pull request per tick. The push has already updated the branch by the
+ * time this runs, so an open pull request for that head IS the updated one and
+ * this function's whole job is to notice it.
+ *
+ * `gh pr list` is a read (`read.vcs.remote` in this project's own taxonomy) and
+ * asks nothing of the remote's state.
+ */
 function ghPullRequest(
   root: string,
   recordsBranch: string,
   range: { from: number; to: number },
-): { ok: true; url: string | null } | { ok: false; message: string } {
+):
+  | { ok: true; url: string | null; created: boolean }
+  | { ok: false; step: "list" | "create"; message: string } {
+  const listed = gh(
+    ["pr", "list", "--head", recordsBranch, "--state", "open", "--json", "url"],
+    root,
+  );
+  if (!listed.ok) {
+    return { ok: false, step: "list", message: failureText(listed) };
+  }
+  const open = parsePrList(listed.stdout);
+  if (open.length > 0) {
+    return { ok: true, url: open[0] ?? null, created: false };
+  }
+
   const title = `Log advance: ${
     range.from === range.to ? `seq ${String(range.from)}` : `seq ${String(range.from)}..${String(range.to)}`
   }`;
   const body =
-    "This branch carries exactly one commit: the append-only log advance, its queue projection, and the payload files the records reference. " +
+    "This branch carries the append-only log advance, its queue projection, and the payload files the records reference — one commit per advance, and nothing else. " +
     "Merge with a MERGE COMMIT. Nothing else may ride this branch: a log commit alongside other work is what the one-commit rule forbids.";
   const created = gh(["pr", "create", "--title", title, "--body", body, "--head", recordsBranch], root);
   if (!created.ok) {
-    return { ok: false, message: failureText(created) };
+    return { ok: false, step: "create", message: failureText(created) };
   }
-  const url =
-    created.stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.startsWith("http"))
-      .pop() ?? null;
-  return { ok: true, url };
+  return { ok: true, url: urlOf(created.stdout), created: true };
+}
+
+/**
+ * The urls in `gh pr list --json url` output.
+ *
+ * Unparseable output answers "no open pull request", which is the conservative
+ * reading in exactly one direction: the verb then tries to create one, and a
+ * `gh pr create` that finds an existing PR fails loudly with the reason. The
+ * opposite default would silently skip opening the day's pull request.
+ */
+function parsePrList(text: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text.trim().length === 0 ? "[]" : text) as unknown;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const urls: string[] = [];
+  for (const entry of parsed) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const url = (entry as Record<string, unknown>)["url"];
+    if (typeof url === "string" && url.length > 0) urls.push(url);
+  }
+  return urls;
 }

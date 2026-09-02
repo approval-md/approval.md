@@ -2061,6 +2061,13 @@ test("the refusal-code union is frozen public API", () => {
     "duplicate-request",
     "already-executed",
     "budget-exceeded",
+    // APRV-173: SPEC.md §5.2's request-volume limits stop being vocabulary no
+    // runtime reads. Two additions, distinct from each other and from
+    // `budget-exceeded`: budgets meter the world's exposure, these meter the
+    // approver's queue, and the repairs differ (wait for the queue to drain
+    // versus slow down). Neither appends anything.
+    "queue-full",
+    "rate-limited",
     // APRV-20 pass two, amendment A1: a manual action must bind to bytes, and
     // the schema cannot know autonomy, so intake enforces it. An addition.
     "payload-hash-required",
@@ -2129,6 +2136,14 @@ test("the refusal-code union is frozen public API", () => {
     "proposal-stale",
     "policy-already-attested",
     "append-failed",
+    // APRV-211, one addition. A request that declared self-delivery can only
+    // reach its own grant through the sealed address the request publishes, so
+    // a private key that cannot be written is a refusal rather than the silent
+    // fallback the operator-configured `sealed` mode takes: a decision spent on
+    // an authorization nobody can open would be a human's attention spent on
+    // nothing. Distinct from every other code here because the repair belongs
+    // to the filesystem rather than to the requester.
+    "token-delivery-unavailable",
   ]);
 });
 
