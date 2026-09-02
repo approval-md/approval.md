@@ -95,7 +95,12 @@ import {
 import { payloadHash } from "../core/payload.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
 import { humanOnlyRefusal, resolve as resolvePolicy } from "../core/policy-match.js";
-import { readVerifiedRecords, requestState, type WithdrawReason } from "../core/state.js";
+import {
+  readVerifiedRecords,
+  requestState,
+  useVerifiedSnapshots,
+  type WithdrawReason,
+} from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { primaryRoot as resolvePrimaryRoot } from "./git-scope.js";
@@ -1802,6 +1807,21 @@ function runHarnessHook(
   if (input.toolName !== adapter.shellTool && !adapter.fileTools.includes(input.toolName)) {
     return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind);
   }
+
+  // APRV-188. From here on this process may resume a verified read behind the
+  // snapshot the daemon published, instead of walking the chain from genesis:
+  // the one thing a fresh process per gated tool call cannot amortize, and the
+  // only term in a hook's cost that grows with the log. Turned on HERE rather
+  // than at the CLI's entry point, so it covers exactly the gated path and no
+  // other verb — `approval log verify` and every audit read stay cold.
+  //
+  // It changes what a read COSTS and nothing about what a read PROVES: the
+  // prefix is admitted only against a SHA-256 this process computes over the
+  // bytes it read itself, the head and the line count are re-derived from its
+  // own parse, and the appended tail is walked in full. A snapshot that is
+  // absent, stale, foreign, or wrong in any of those is ignored, and the walk
+  // happens exactly as it does today. See `core/verified-snapshot.ts`.
+  useVerifiedSnapshots(true);
 
   const { logPath, root, options } = hookScope(parsed.flags, cwd);
 

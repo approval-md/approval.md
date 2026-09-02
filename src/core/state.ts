@@ -119,6 +119,7 @@ import { isPolicySha256, POLICY_HASH_FIELD } from "./attest.js";
 import type { EventRecord, LogHead } from "./log.js";
 import { normalizeUsd } from "./money.js";
 import { isPayloadHash } from "./payload.js";
+import { publishSnapshot, snapshotPrefix } from "./verified-snapshot.js";
 import {
   verifyText,
   verifyWithRecords,
@@ -185,6 +186,44 @@ export interface ReadVerifiedOptions extends VerifyOptions {
    * explicit audit wants, and what the equivalence tests compare against.
    */
   cache?: VerifiedReadCache | null;
+  /**
+   * Publish a verified-head snapshot beside the log after a clean read
+   * (APRV-188).
+   *
+   * Off by default, and set by exactly one caller: the daemon, whose warm cache
+   * makes it the process that has already done the walk every hook process
+   * would otherwise repeat. It is set on the READ rather than done afterwards
+   * so the bytes endorsed are the bytes verified — a publisher that re-read the
+   * file to hash it could endorse a digest of bytes nobody walked.
+   */
+  publishSnapshot?: boolean;
+}
+
+/**
+ * Whether this process may resume a read behind a published snapshot
+ * (APRV-188).
+ *
+ * Off by default, so the daemon, every CLI verb, the channels and
+ * `approval log verify` read exactly as they did before this existed. It is
+ * turned on by one caller, `approval hook`, which is the short-lived process
+ * whose empty cache pays for the walk.
+ *
+ * A process-wide switch rather than a per-call option on purpose. A hook's
+ * first verified read is followed by several more from inside `core/gate.ts`,
+ * which threads no options of its own; if the switch were an option only the
+ * first read could carry it, and the value is in the FIRST read of a process,
+ * with the rest served from the cache the first one seeded.
+ */
+let snapshotReads = false;
+
+/** Opt this process into (or out of) snapshot-resumed reads. */
+export function useVerifiedSnapshots(enabled: boolean): void {
+  snapshotReads = enabled;
+}
+
+/** Whether snapshot-resumed reads are enabled here. Diagnostics and tests. */
+export function verifiedSnapshotsEnabled(): boolean {
+  return snapshotReads;
 }
 
 function refuseRead(code: LogReadRefusalCode, message: string): LogReadRefusal {
@@ -218,6 +257,18 @@ const NEWLINE = 0x0a;
  * only a cold read.
  */
 const MAX_CACHED_LOGS = 8;
+
+/**
+ * What one read may do with the published snapshot beside the log (APRV-188).
+ *
+ * Both halves default to off. `consume` is set from the process-wide switch
+ * `useVerifiedSnapshots` (the hook turns it on); `publish` is set per call by
+ * the daemon.
+ */
+export interface SnapshotUse {
+  consume?: boolean;
+  publish?: boolean;
+}
 
 /**
  * One remembered log. Populated only from a `clean` verdict, so the remembered
@@ -276,12 +327,20 @@ export class VerifiedReadCache {
   readonly #entries = new Map<string, CacheEntry>();
   #hits = 0;
   #misses = 0;
+  /**
+   * Misses that were served from a published snapshot instead of a cold walk
+   * (APRV-188). Counted alongside the miss it followed rather than instead of
+   * it: the process cache genuinely had nothing, and the walk was skipped only
+   * because another process's verification was re-proved over these bytes.
+   */
+  #resumed = 0;
 
   /** Forget everything. Tests use this to force a genuinely cold read. */
   clear(): void {
     this.#entries.clear();
     this.#hits = 0;
     this.#misses = 0;
+    this.#resumed = 0;
   }
 
   /** How many logs are remembered. Diagnostics and tests only. */
@@ -296,8 +355,8 @@ export class VerifiedReadCache {
    * prefix is *designed* to be invisible in the result, so a test that wants to
    * assert "this tamper discarded the cache" has nothing else to look at.
    */
-  get stats(): { hits: number; misses: number } {
-    return { hits: this.#hits, misses: this.#misses };
+  get stats(): { hits: number; misses: number; resumed: number } {
+    return { hits: this.#hits, misses: this.#misses, resumed: this.#resumed };
   }
 
   /**
@@ -306,7 +365,7 @@ export class VerifiedReadCache {
    * The whole file is read once, and every decision is made from that single
    * snapshot: nothing is re-`stat`ed and re-read behind its own conclusion.
    */
-  read(logPath: string, options: VerifyOptions): VerifiedLog {
+  read(logPath: string, options: VerifyOptions, snapshot: SnapshotUse = {}): VerifiedLog {
     const key = resolve(logPath);
 
     let raw: Buffer;
@@ -330,11 +389,30 @@ export class VerifiedReadCache {
 
     const schemaKey = options.schemaDir === undefined ? "" : resolve(options.schemaDir);
     const entry = this.#entries.get(key);
-    const prefix =
-      entry === undefined ? null : reusablePrefix(entry, raw, schemaKey, mtimeMs);
-    if (prefix === null) {
+    const cached = entry === undefined ? null : reusablePrefix(entry, raw, schemaKey, mtimeMs);
+
+    // A published snapshot is consulted only where this process has nothing:
+    // the in-process proof always wins, because it is the stronger one (these
+    // records were walked here). See `core/verified-snapshot.ts` for what the
+    // weaker one costs and what it is allowed to skip.
+    let prefix = cached;
+    /** The digest of the endorsed prefix, already re-proved. */
+    let provedDigest: string | null = null;
+    if (cached === null) {
       this.#entries.delete(key);
       this.#misses += 1;
+      if (snapshot.consume === true) {
+        const admitted = snapshotPrefix(logPath, raw, options.schemaDir);
+        if (admitted.ok) {
+          prefix = admitted.prefix;
+          this.#resumed += 1;
+          // `admitSnapshot` hashed exactly these bytes a moment ago, so when the
+          // file has not grown past the endorsed prefix the entry below may
+          // carry that digest instead of hashing the same megabytes twice —
+          // the APRV-206 argument, with the proof coming from the admission.
+          if (raw.length === admitted.prefix.byteLength) provedDigest = admitted.digest;
+        }
+      }
     } else {
       this.#hits += 1;
     }
@@ -350,10 +428,16 @@ export class VerifiedReadCache {
     // taps) is the larger half of the read. Nothing is admitted on trust: this
     // is only reached when the hash comparison above passed.
     const known =
-      entry !== undefined && prefix !== null && raw.length === entry.byteLength
+      entry !== undefined && cached !== null && raw.length === entry.byteLength
         ? entry.prefixHash
-        : null;
+        : provedDigest;
     this.#remember(key, raw, schemaKey, mtimeMs, verified, known);
+    if (snapshot.publish === true) {
+      const result = verified.result;
+      if (result.status === "clean" && result.head !== null) {
+        publishSnapshot(logPath, raw, result.records, result.head, options.schemaDir);
+      }
+    }
     return verified;
   }
 
@@ -493,10 +577,18 @@ export function readVerifiedRecords(
     );
   }
 
-  const { cache: requested, ...verifyOptions } = options;
+  const { cache: requested, publishSnapshot: publish, ...verifyOptions } = options;
   const cache = requested === undefined ? processReadCache : requested;
+  // `cache: null` is the explicit cold read an audit asks for, and it stays
+  // cold: a caller that opted out of this process's own proved prefix has not
+  // opted into another process's.
   const verified =
-    cache === null ? verifyWithRecords(logPath, verifyOptions) : cache.read(logPath, verifyOptions);
+    cache === null
+      ? verifyWithRecords(logPath, verifyOptions)
+      : cache.read(logPath, verifyOptions, {
+          consume: snapshotReads,
+          ...(publish === undefined ? {} : { publish }),
+        });
 
   switch (verified.result.status) {
     case "clean":

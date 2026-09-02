@@ -431,6 +431,16 @@ export interface DaemonOptions {
   observeGit?: DarkSessionSweepOptions["observe"];
   /** The day the records branch is named for. Injected by tests. */
   today?: string;
+  /**
+   * Publish a verified-head snapshot beside the log on every clean read
+   * (APRV-188). On unless explicitly set to `false`.
+   *
+   * On by default, unlike `gitEvidence` and `advance`, because it changes
+   * nothing outside this machine: the file is derived, local, byte-endorsing
+   * state that every reader re-proves and any reader may ignore. Turning it off
+   * costs hook latency and nothing else.
+   */
+  snapshot?: boolean;
   sink: DaemonSink;
 }
 
@@ -974,11 +984,28 @@ export class Daemon {
     }
   }
 
+  /**
+   * The verified log, and — since APRV-188 — the publication of what was
+   * verified.
+   *
+   * The daemon holds a warm {@link VerifiedReadCache} and re-verifies only the
+   * appended tail on every tick. Every hook process, by contrast, starts with an
+   * empty cache and walks the whole chain before it may decide anything. So on
+   * each clean read this loop publishes a verified-head snapshot beside the log:
+   * an endorsement of the exact bytes it just walked, which the next hook
+   * process re-proves for itself (one SHA-256) instead of re-walking. See
+   * `core/verified-snapshot.ts` for what that endorsement claims and what a
+   * reader still checks.
+   *
+   * The publication rides on the read rather than following it, so the bytes
+   * endorsed are the bytes verified: a publisher that re-read the file to hash
+   * it could endorse a digest of bytes nobody walked.
+   */
   private read(): ReadRecordsResult {
-    return readVerifiedRecords(
-      this.options.logPath,
-      this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir },
-    );
+    return readVerifiedRecords(this.options.logPath, {
+      ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
+      publishSnapshot: this.options.snapshot !== false,
+    });
   }
 
   /** The TTL in force right now, re-read every pass: policy files change. */

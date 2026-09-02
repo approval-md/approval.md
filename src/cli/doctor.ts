@@ -98,6 +98,12 @@ import {
   vaultExists,
   vaultPathFor,
 } from "../core/vault.js";
+import {
+  admitSnapshot,
+  logBytes,
+  snapshotPathFor,
+  snapshotSummary,
+} from "../core/verified-snapshot.js";
 import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { policyWebPort } from "./channel-web.js";
@@ -742,6 +748,83 @@ function checkPayloadStore(logPath: string, records: EventRecord[]): DoctorCheck
     check: "payload-store",
     status: "pass",
     detail: `${storeDir} is writable and holds ${files} payload file(s), ${census.pruned} pruned by the log, ${census.orphans} bound to no record${residue}; ${PAYLOAD_STORE_WARNING}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 7b. the verified-head snapshot (APRV-188)
+// ---------------------------------------------------------------------------
+
+/**
+ * Is the daemon's verified-head snapshot present, and does it still cover the
+ * log a hook would read?
+ *
+ * The snapshot is what lets a hook process re-prove a digest instead of
+ * re-walking the chain, so its absence is a latency fact and never a
+ * correctness one. That is why nothing here is a `fail` on the snapshot's own
+ * account: every reader re-proves it, an unusable one is ignored, and a hook
+ * behind an unusable snapshot behaves exactly as it did before APRV-188. The
+ * row exists so an operator can see whether the acceleration is actually in
+ * force, and so a snapshot that is somehow unreadable (a bad mode, a foreign
+ * owner) is visible rather than silent.
+ *
+ * The one `fail` is a snapshot a reader would REFUSE for a reason the operator
+ * should act on: permissions or ownership. A stale one is a `pass` that says so
+ * — it endorses a shorter prefix, and the hook walks the tail.
+ */
+function checkVerifiedSnapshot(logPath: string): DoctorCheck {
+  const path = snapshotPathFor(logPath);
+  const read = snapshotSummary(logPath);
+  if (!read.ok) {
+    if (read.reason === "absent") {
+      return {
+        check: "verified-snapshot",
+        status: "skip",
+        detail: `no snapshot at ${path}; every hook invocation verifies the log from genesis. It is published by \`approval daemon run\`, so this is expected when the daemon has never run here.`,
+      };
+    }
+    if (read.reason === "foreign-owner" || read.reason === "loose-permissions") {
+      return {
+        check: "verified-snapshot",
+        status: "fail",
+        detail: `${path} would be refused by every reader: ${read.detail}. Hooks fall back to a full chain walk, which is correct but slower.`,
+        fix: `rm ${path} — remove it and let \`approval daemon run\` republish it as this user at mode 0600`,
+      };
+    }
+    return {
+      check: "verified-snapshot",
+      status: "pass",
+      detail: `${path} is present but not usable (${read.reason}: ${read.detail}); hooks verify the log from genesis, which is the behaviour without a snapshot at all.`,
+    };
+  }
+
+  const raw = logBytes(logPath);
+  if (raw === null) {
+    return {
+      check: "verified-snapshot",
+      status: "pass",
+      detail: `${path} endorses ${String(read.snapshot.lines)} record(s), and the log could not be read here to check it against.`,
+    };
+  }
+
+  const admitted = admitSnapshot(logPath, raw, read.snapshot, undefined);
+  if (!admitted.ok) {
+    return {
+      check: "verified-snapshot",
+      status: "pass",
+      detail: `${path} no longer applies to the log (${admitted.reason}: ${admitted.detail}); hooks verify from genesis until the daemon republishes it.`,
+    };
+  }
+
+  const behind = raw.length - read.snapshot.byte_length;
+  const currency =
+    behind === 0
+      ? "the whole log"
+      : `all but the last ${String(behind)} byte(s), which a hook walks itself`;
+  return {
+    check: "verified-snapshot",
+    status: "pass",
+    detail: `${path} endorses ${currency}: ${String(read.snapshot.lines)} record(s) through seq ${String(read.snapshot.head.seq)}, published ${read.snapshot.verified_at}. A hook re-proves the digest rather than re-walking the chain.`,
   };
 }
 
@@ -2021,6 +2104,8 @@ export function commandDoctor(
         verified.records,
         verified.result.status === "clean",
       ),
+      // APRV-188: appended, eleventh time, same reason.
+      checkVerifiedSnapshot(logPath),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");
