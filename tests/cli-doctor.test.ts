@@ -351,6 +351,12 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // for the same reason. The sharing it reports is what put a demo gate on
       // the production bot and had a human's tap answered by the wrong listener.
       "keychain-scope",
+      // APRV-204: how far the log has run ahead of any records branch and how
+      // the daemon's last cadence advance ended, appended for the same reason.
+      // It is the status surface the cadence needed: the daemon's own event
+      // stream is gone once nobody is tailing it, and this row answers from the
+      // log and from local refs, in whatever process asks.
+      "log-advance-cadence",
     ],
   );
   assert.deepEqual(
@@ -378,6 +384,9 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
     // (APRV-151).
     // keychain-scope passes: the fixture has no .approval/env, so no line names
     // anybody's keystore item and there is nothing to share (APRV-178).
+    // log-advance-cadence skips: the fixture is a scratch directory and not a
+    // git checkout, so there is no records branch for records to be waiting for
+    // — the same absence log-drift skips on (APRV-204).
     [
       "pass",
       "pass",
@@ -395,6 +404,7 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       "skip",
       "skip",
       "pass",
+      "skip",
     ],
   );
   for (const entry of parsed.checks) {
@@ -433,7 +443,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 16);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 17);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
@@ -892,7 +902,7 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  assert.equal(parsed.checks.length, 16);
+  assert.equal(parsed.checks.length, 17);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);

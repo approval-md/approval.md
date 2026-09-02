@@ -1476,7 +1476,7 @@ Flags:
   --policy <path> / --dir <path>   the policy file, or where to discover it
   --interval <d> / --debounce <d>  tick period (30s) / event settle time (250ms)
   --once / --json  one tick then exit / machine-readable, one object per line
-  --git-evidence   OPT-IN: commit the log to the log home's own git repository
+  --git-evidence / --advance  OPT-IN: git-repo evidence / gated cadence advance
   --with-channels  the channels in this process too: SAME VERB as "approval up"
   -h, --help       this text
 

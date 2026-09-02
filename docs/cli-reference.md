@@ -188,6 +188,17 @@ branch that is AHEAD of origin with commits the verb did not make is not a
 refusal; the advance is based on origin either way and those commits are simply
 not part of it.
 
+**One records branch and one pull request per day (APRV-204).** The branch is
+`records-log-<YYYY-MM-DD>` unless `--branch` names another. The first advance of
+a day is parented on `origin/<base>` and opens the pull request; every later
+advance that day fetches the records branch, parents its commit on THAT, and
+fast-forwards the branch the open pull request is already on — so a second
+advance updates the day's pull request rather than being rejected as a
+non-fast-forward or opening a second one. `--pr` asks `gh pr list --head <branch>
+--state open` first and runs `gh pr create` only when nothing is open. A records
+branch whose log the working log is not a prefix of is refused with the same two
+codes the trunk is, naming the branch.
+
 Five refusals are the point of the verb.
 
 `log-advance-fetch-failed`: the base branch could not be fetched, so there is no
@@ -2273,6 +2284,30 @@ not survive a merge, and an outer repository's rebases, amends and force-pushes
 rewrite the bytes the evidence is made of. The nested layout stays fully valid
 WITHOUT the flag; the two patterns do not mix. See `docs/git-evidence.md`.
 
+**Cadence advance (`--advance`, off by default).** The daemon runs `log advance`
+itself, so the committed log's freshness stops depending on somebody remembering
+to publish it. It advances when `--advance-after` records are owed (default 20),
+when `--advance-interval` has elapsed since the last attempt (default 15m, and
+the clock starts when the daemon starts), and at a clean shutdown when records
+are still owed. Every attempt goes through the gate as `agent:daemon`: the cycle
+registers, requests, and proceeds only where the policy lets it, so a
+`supervised-live` draw that selects the advance, or a class that resolves
+`manual`, stops it with nothing committed and the question in the queue. A gated
+or failed attempt is an `advance` line plus an `advance-refused` warning, and the
+next tick tries again — the cadence interval is the retry bound, so a refusal
+never loops. One records branch and ONE PULL REQUEST PER DAY: the first advance
+of the day opens it, every later one is parented on the branch and updates it in
+place. The daemon never merges; `gh pr merge` is `vcs.push.main` and stays a
+human's act or a session's.
+
+The count that drives the cadence excludes the advance cycle's OWN records
+(`task.registered`, `execution.started`, `execution.completed` under
+`daemon-advance-*`): each advance leaves its completion record unpublished, and a
+trigger that counted those would advance an idle repository forever. The count
+REPORTED is the honest one. `approval doctor`'s `log-advance-cadence` row reports
+both, plus the last advance attempt and how it ended, read from the log — so the
+answer survives the daemon's own process.
+
 **Each tick, in order.**
 
 - ENVELOPE DRIFT — a task file whose `state:` contradicts the log gets an
@@ -2309,6 +2344,10 @@ exit 4; `log-dir-not-repo` and `log-dir-nested` exit 2.
  "skipped":0,"audit_backlog":0}
 {"event":"escalated","task":"task-042","consecutive_failures":3}
 {"event":"escalation_cleared","task":"task-042"}
+{"event":"advance","outcome":"advanced","records_pending":7,
+ "records_branch":"records-log-2026-09-01","range":{"from":4,"to":10},
+ "commit":"<40hex>","pr_url":"https://github.com/…","pr_created":true,
+ "code":null,"message":"seq 4..10 is on records-log-2026-09-01","flush":false}
 {"event":"tick","n":1,"head":10,"drift":1,"expired":1,"escalated":0}
 {"event":"stopped","reason":"SIGINT","ticks":3,"drift":1,"expired":1,
  "renders":3}
@@ -2319,7 +2358,8 @@ exit 4; `log-dir-not-repo` and `log-dir-nested` exit 2.
 Warnings go to stderr as `{"event":"warning","code":"...","message":"..."}`, with
 `code` one of `task-unreadable`, `frontmatter-invalid`, `envelope-invalid`,
 `task-id-missing`, `tasks-dir-unreadable`, `append-refused`, `expire-refused`,
-`render-failed`, `watch-unavailable`, `prune-refused`. A warning never stops the
+`render-failed`, `watch-unavailable`, `prune-refused`, `write-back-refused`,
+`advance-refused`. A warning never stops the
 loop, and neither does `{"event":"git_evidence_failed","step":"commit",…}`.
 
 Payload retention: with `payload_retention` set in policy, each tick appends

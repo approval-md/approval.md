@@ -942,6 +942,9 @@ test("the DaemonEvent union is frozen public output: every variant, listed", () 
   // quietly different meaning behind an unchanged name.
   const variants: Record<DaemonEvent["event"], true> = {
     started: true,
+    // APRV-204: the cadence advance's line. Appended to the union, so no
+    // existing entry changed meaning.
+    advance: true,
     drift: true,
     write_back: true,
     expired: true,
@@ -956,6 +959,7 @@ test("the DaemonEvent union is frozen public output: every variant, listed", () 
   };
 
   assert.deepEqual(Object.keys(variants).sort(), [
+    "advance",
     "drift",
     "escalated",
     "escalation_cleared",
