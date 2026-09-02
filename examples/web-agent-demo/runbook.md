@@ -79,7 +79,31 @@ the opening beat exists. If you want a buzz before the room fills, stop the
 demo instance's listener first: two processes long-polling one bot compete for
 the same updates.
 
-**5. Export the finale's addresses, then start the server.**
+**5. Mint the agent child's token.**
+
+```sh
+claude setup-token
+export CLAUDE_CODE_OAUTH_TOKEN="<the token it prints>"
+```
+
+The agent child does **not** run in your account. It runs with a `HOME` and a
+`CLAUDE_CONFIG_DIR` the demo generates under the instance
+(`~/demo-gate/agent-home/`), so that an attendee's prompt never reaches your
+plugins, your connected MCP servers, your user memory, your slash commands or
+your hooks. That isolation is also why a keychain login does not reach it: on
+2026-08-31 the scrubbed child came back `Not logged in` /
+`authentication_failed` for exactly this reason. `claude setup-token` mints a
+token that lives in an environment variable instead, and
+`CLAUDE_CODE_OAUTH_TOKEN` is one of the five names the server forwards
+(`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` and
+`ANTHROPIC_MODEL` are the API-key alternative). Nothing else from this shell
+crosses into the child.
+
+Export it in the same shell you start the server in, and check the startup
+banner: `agent auth:` names the credential it found, or says in as many words
+that none passed and the child will fail to authenticate.
+
+**6. Export the finale's addresses, then start the server.**
 
 ```sh
 cd /Users/carter/dev/approval-md
@@ -96,10 +120,13 @@ security contract at the top of `server.mjs`, and it is what makes the port safe
 to expose.
 
 The startup banner names the gate instance, the log, the tasks directory, the
-agent binary (`CLAUDE_BIN`, default `claude`) and the routes. Read it back
-before you tunnel anything.
+agent's home and credential, the agent binary (`CLAUDE_BIN`, default `claude`)
+and the routes. Read it back before you tunnel anything. If it prints a
+`memory above:` line, a `CLAUDE.md` in a directory above the instance is still
+project memory the child can see: move the instance somewhere without one, or
+remove them.
 
-**6. Rehearse the finale once**, on the real instance, before the audience
+**7. Rehearse the finale once**, on the real instance, before the audience
 arrives. It is the only beat with a credential in its path and the only beat
 whose failure burns a token. Details in beat 4.
 
@@ -288,6 +315,13 @@ resolving. Tap the newest message. If the Bot API is unreachable, decide at the
 CLI (`approval grant` / `approval reject` from `~/demo-gate`) and tell the room
 that the phone is one channel and the log is the truth.
 
+**The agent exits immediately, "Not logged in" / `authentication_failed`.** The
+child has no credential. Its `HOME` is the demo's, so your keychain login is
+invisible to it by design. Stop the server, run `claude setup-token`, export
+`CLAUDE_CODE_OAUTH_TOKEN` in that shell, restart, and check the banner's `agent
+auth:` line before resubmitting. The submitted task is only a queue entry: it
+appended nothing, and nothing needs undoing.
+
 **A `wait` timed out.** Exit 6: nothing was appended, the request is still live,
 and waiting again is legitimate. On stage, do not stack a second request on top
 of the first. Say the wait elapsed, decide the live request, and move on.
@@ -335,7 +369,12 @@ the audience is still watching. `approval expire` materializes it early if you
 want the row gone; the daemon's sweep does it on its own.
 
 The `tasks/` directory under the demo instance accumulates envelopes, payloads,
-transcripts and `mcp-config.json`. It goes with the instance.
+transcripts and `mcp-config.json`. `agent-home/` holds the child's generated
+configuration (its settings, its `CLAUDE.md`, and whatever cache the binary
+writes). Both go with the instance, and both are regenerated at the next
+server startup, so a fresh instance needs no copying: export
+`CLAUDE_CODE_OAUTH_TOKEN` again if you started a new shell, and restart the
+server with the new `--dir`.
 
 ---
 
@@ -352,6 +391,13 @@ transcripts and `mcp-config.json`. It goes with the instance.
 >   it writes to disk is the child's own stdout, untruncated. Treat that
 >   directory as local-only, publish nothing out of it, and throw it away with
 >   the instance.
+> - **The child is not your laptop, and must stay that way.** It runs with the
+>   demo's own `HOME` and `CLAUDE_CONFIG_DIR` under the instance, one MCP server
+>   declared with `--strict-mcp-config`, and settings with no hooks and no
+>   plugins. Do not "fix" an authentication failure by handing it your `HOME` or
+>   your `CLAUDE_CONFIG_DIR`: that puts your plugins, connected servers, memory
+>   and hooks behind an attendee's prompt and on the projector. Mint a token
+>   (preflight step 5) instead.
 > - **Demo payloads only.** Attendee text and every payload the gate renders go
 >   on a projector and into the phone. Nothing real, nothing private, nothing
 >   belonging to anyone who is not in the room.

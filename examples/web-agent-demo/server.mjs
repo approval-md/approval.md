@@ -65,6 +65,17 @@
  *                               transcript, so the queue, the throttle, the
  *                               tee and the distiller can be exercised without
  *                               burning tokens or needing a real model.
+ *   CLAUDE_CODE_OAUTH_TOKEN     the agent child's credential, and the only auth
+ *                               path this server supports. The child runs with
+ *                               a demo-owned HOME (see AGENT_HOME below), so a
+ *                               keychain login in the operator's account does
+ *                               not reach it at all: `claude setup-token` in
+ *                               the operator's own shell, exported here. An
+ *                               `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`
+ *                               (with optional `ANTHROPIC_BASE_URL` and
+ *                               `ANTHROPIC_MODEL`) is accepted in its place.
+ *                               NOTHING ELSE from this process's environment
+ *                               reaches the child.
  *   APPROVAL_DEMO_EMAIL_TO      recipient/sender the email finale declares
  *   APPROVAL_DEMO_EMAIL_FROM    (both default to demo@example.invalid).
  *
@@ -75,7 +86,7 @@
 import { createServer } from "node:http";
 import { execFile, spawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readFile, writeFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -159,12 +170,39 @@ if (!existsSync(DEMO_DIR)) fail(`demo gate directory does not exist: ${DEMO_DIR}
 const LOG_PATH = join(DEMO_DIR, ".approval", "log", "events.jsonl");
 
 /**
- * Everything this server writes for an agent run lives under <demo dir>/tasks/:
- * the generated MCP config, the seeded task envelopes and payloads, and one
- * transcript file per run. Nothing here is under `.approval/`.
+ * Everything this server writes for an agent run lives in two directories of
+ * the demo instance: <demo dir>/tasks/ holds the generated MCP config, the
+ * seeded task envelopes and payloads, and one transcript file per run, and
+ * <demo dir>/agent-home/ (below) holds the child's isolated configuration.
+ * Nothing here is under `.approval/`, and both go with the instance.
  */
 const TASKS_DIR = join(DEMO_DIR, "tasks");
 const MCP_CONFIG_PATH = join(TASKS_DIR, "mcp-config.json");
+
+/**
+ * The agent child's entire world outside the repository (APRV-177).
+ *
+ * Before this existed the child was handed the operator's `HOME`, and a
+ * `claude -p` given the operator's home directory is given the operator: their
+ * installed plugins, their connected MCP servers, their user memory, their
+ * slash commands and their hooks all loaded into a session an attendee is
+ * typing prompts at. `--allowedTools mcp__approval__*` kept any of it from
+ * being *used* silently, which is not the same as it not being there — a demo
+ * that behaves differently on every laptop, and puts the operator's setup on a
+ * projector, is a demo with an unowned dependency.
+ *
+ * So the child gets a home the demo owns, generated fresh at startup and thrown
+ * away with the instance: `HOME` here, `CLAUDE_CONFIG_DIR` at `claude-config/`
+ * inside it, and in that directory exactly two files this file writes — a
+ * settings file with no hooks and no plugins, and a `CLAUDE.md` that says what
+ * the session is. The approval MCP server is passed on the command line with
+ * `--strict-mcp-config`, so it is not merely the first server on the list: it
+ * is the only one that can be on it.
+ */
+const AGENT_HOME = join(DEMO_DIR, "agent-home");
+const AGENT_CONFIG_DIR = join(AGENT_HOME, "claude-config");
+const AGENT_SETTINGS_PATH = join(AGENT_CONFIG_DIR, "settings.json");
+const AGENT_MEMORY_PATH = join(AGENT_CONFIG_DIR, "CLAUDE.md");
 
 const portArg = argValue(argv, "--port") ?? process.env.PORT;
 const PORT = portArg === undefined ? DEFAULT_PORT : Number(portArg);
@@ -515,6 +553,77 @@ function writeMcpConfig() {
   writeFileSync(MCP_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`);
 }
 
+/**
+ * The settings the agent child runs under: the demo's, stated, and nobody
+ * else's.
+ *
+ * Every field here is a refusal written down. `hooks: {}` is the important
+ * one — a hook in the operator's user settings is code that runs on the child's
+ * tool calls, and an attendee's prompt is not a thing to run the operator's
+ * shell scripts behind. The rest close the doors that would otherwise open
+ * themselves: no project MCP servers adopted implicitly, no co-author trailer,
+ * no telemetry-ish extras, and an empty plugin set.
+ *
+ * `--settings` is passed on the command line as well as this file being inside
+ * `CLAUDE_CONFIG_DIR`, so the demo's settings are the session's settings on any
+ * build whose discovery order differs from the one this was written against.
+ */
+const AGENT_SETTINGS = {
+  hooks: {},
+  enabledPlugins: {},
+  enableAllProjectMcpServers: false,
+  includeCoAuthoredBy: false,
+};
+
+/**
+ * The child's memory file. It exists so that the nearest CLAUDE.md the session
+ * can find is one this file wrote, and so that a person reading the demo
+ * instance later can see what the agent was told.
+ *
+ * It deliberately says the same thing as {@link SYSTEM_CONTRACT} rather than
+ * something new: two documents that can disagree about what the agent may do
+ * would be a worse answer than one that can.
+ */
+const AGENT_MEMORY = [
+  "# The approval.md demo agent",
+  "",
+  "This session is the web-agent demo's child (`examples/web-agent-demo/server.mjs`).",
+  "It runs in a configuration the demo owns: no personal settings, no plugins, no",
+  "hooks, and exactly one MCP server — the approval gate's own.",
+  "",
+  "Every side effect goes through the approval tools, and there is no `grant` tool",
+  "among them. A refusal is an answer: report it and stop.",
+  "",
+].join("\n");
+
+/** Write the child's isolated config directory. Fresh at every startup. */
+function writeAgentConfig() {
+  mkdirSync(AGENT_CONFIG_DIR, { recursive: true });
+  writeFileSync(AGENT_SETTINGS_PATH, `${JSON.stringify(AGENT_SETTINGS, null, 2)}\n`);
+  writeFileSync(AGENT_MEMORY_PATH, AGENT_MEMORY);
+}
+
+/**
+ * The one leak a demo-owned home cannot close, reported rather than hidden.
+ *
+ * A `CLAUDE.md` in a directory ABOVE the demo instance is project memory, found
+ * by walking up from the child's working directory, and no `HOME` or
+ * `CLAUDE_CONFIG_DIR` this file sets makes it invisible. The honest fix is
+ * where the instance lives, which is the operator's decision, so this names the
+ * files at startup and leaves the decision to them.
+ */
+function ancestorMemoryFiles() {
+  const found = [];
+  let dir = dirname(DEMO_DIR);
+  for (;;) {
+    const candidate = join(dir, "CLAUDE.md");
+    if (existsSync(candidate)) found.push(candidate);
+    const parent = dirname(dir);
+    if (parent === dir) return found;
+    dir = parent;
+  }
+}
+
 /** The demo contract, appended to the agent's system prompt on every run. */
 const SYSTEM_CONTRACT = [
   "You are the demo agent for approval.md, running in front of a live audience.",
@@ -537,33 +646,75 @@ const SYSTEM_CONTRACT = [
 ].join("\n");
 
 /**
- * The environment the agent child gets.
+ * The credential names that cross into the child, and the complete list of
+ * them (APRV-177).
+ *
+ * This used to be the prefix test `ANTHROPIC_*` / `CLAUDE_*`, which is the
+ * wrong shape for the job: it passes whatever the operator's shell happens to
+ * hold under those prefixes, including `CLAUDE_CONFIG_DIR` itself, which would
+ * hand the child straight back the personal configuration the rest of this
+ * change exists to keep out of it. An allowlist can only pass what is on it.
+ *
+ * `CLAUDE_CODE_OAUTH_TOKEN` is the documented path: the child's `HOME` is the
+ * demo's, so a keychain login in the operator's account is invisible to it and
+ * a token from `claude setup-token` is what actually authenticates. The
+ * `ANTHROPIC_*` three are the API-key alternative for a machine set up that
+ * way.
+ */
+const AGENT_CREDENTIAL_ENV = [
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_MODEL",
+];
+
+/**
+ * The environment the agent child gets: PATH, a home the demo generated, and
+ * exactly the credential this server was given. Nothing else.
  *
  * The read verbs run with PATH and nothing else, and the agent would too if it
- * did not need to authenticate: `HOME` (its own credentials and settings) and
- * the `ANTHROPIC_*` / `CLAUDE_*` variables are passed through for that reason
- * and no other. The gate's own secrets are NOT: `APPROVAL_HUMAN` would let the
- * child speak as a human, and the vault passphrase and the Telegram token are
- * the approver's, not the agent's. The demo server should not be holding any
- * of them in the first place (it warns at startup if it is), and it certainly
- * does not hand them on.
+ * did not need to authenticate. What it does NOT get is as deliberate:
+ *
+ *   - not the operator's `HOME`, and so not their plugins, their connected MCP
+ *     servers, their memory, their slash commands or their hooks (APRV-177 —
+ *     see {@link AGENT_HOME});
+ *   - not the gate's own secrets. `APPROVAL_HUMAN` would let the child speak
+ *     as a human, and the vault passphrase and the Telegram token are the
+ *     approver's, not the agent's. This server should not be holding any of
+ *     them in the first place (it warns at startup if it is), and it certainly
+ *     does not hand them on;
+ *   - not any other variable of the operator's shell, whatever it is named.
+ *     The list is closed, so a name nobody thought about here does not travel.
+ *
+ * `XDG_*` are pinned under the demo home rather than left unset, because an
+ * unset one falls back to `~/.config` and `~/.cache` — which, with `HOME`
+ * already redirected, is harmless, and pinning them says so out loud instead of
+ * relying on it.
  */
 function agentEnv() {
   const env = {
     PATH: process.env.PATH ?? "",
-    HOME: process.env.HOME ?? "",
+    HOME: AGENT_HOME,
+    CLAUDE_CONFIG_DIR: AGENT_CONFIG_DIR,
+    XDG_CONFIG_HOME: join(AGENT_HOME, ".config"),
+    XDG_CACHE_HOME: join(AGENT_HOME, ".cache"),
+    XDG_DATA_HOME: join(AGENT_HOME, ".local", "share"),
     NO_COLOR: "1",
   };
-  if (process.env.SHELL !== undefined) env["SHELL"] = process.env.SHELL;
-  for (const [name, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (!name.startsWith("ANTHROPIC_") && !name.startsWith("CLAUDE_")) continue;
-    // Belt and braces: no gate credential can wear an ANTHROPIC_/CLAUDE_ name
-    // by accident either.
-    if (/APPROVAL|VAULT|TELEGRAM|TG_/u.test(name)) continue;
+  for (const name of AGENT_CREDENTIAL_ENV) {
+    const value = process.env[name];
+    // Belt and braces: no gate credential can wear one of these names by
+    // accident either.
+    if (value === undefined || /APPROVAL|VAULT|TELEGRAM|TG_/u.test(name)) continue;
     env[name] = value;
   }
   return env;
+}
+
+/** Which credential names actually made the crossing. For the banner. */
+function agentCredentialNames() {
+  return AGENT_CREDENTIAL_ENV.filter((name) => process.env[name] !== undefined);
 }
 
 /** The argv for one agent run. Arrays throughout: no shell, ever. */
@@ -573,6 +724,13 @@ function agentArgv(promptText) {
     promptText,
     "--mcp-config",
     MCP_CONFIG_PATH,
+    // One MCP server, not one server plus whatever the machine had configured:
+    // without this the file above is merged with the user and project scopes,
+    // and the operator's own connected servers ride along (APRV-177).
+    "--strict-mcp-config",
+    // The demo's settings, named rather than discovered: no hooks, no plugins.
+    "--settings",
+    AGENT_SETTINGS_PATH,
     // The gate's tools, and only the gate's tools.
     "--allowedTools",
     "mcp__approval__*",
@@ -1193,14 +1351,30 @@ const server = createServer((req, res) => {
 
 mkdirSync(TASKS_DIR, { recursive: true });
 writeMcpConfig();
+writeAgentConfig();
 
 server.listen(PORT, "0.0.0.0", () => {
+  const credentials = agentCredentialNames();
+  const ancestors = ancestorMemoryFiles();
   process.stdout.write(
     `web-agent-demo: status server and task desk on http://0.0.0.0:${PORT}\n` +
       `  gate instance: ${DEMO_DIR}\n` +
       `  log:           ${LOG_PATH}\n` +
       `  tasks:         ${TASKS_DIR} (envelopes, payloads, transcripts, mcp-config.json)\n` +
+      `  agent home:    ${AGENT_HOME} (the child's HOME and CLAUDE_CONFIG_DIR;\n` +
+      "                 no operator plugins, hooks, memory or MCP servers reach it)\n" +
+      `  agent auth:    ${
+        credentials.length === 0
+          ? "NONE PASSED — the child will fail to authenticate. Run `claude " +
+            "setup-token`\n                 and export CLAUDE_CODE_OAUTH_TOKEN before the room fills."
+          : credentials.join(", ")
+      }\n` +
       `  agent:         ${CLAUDE_BIN} as ${AGENT_ID}, one at a time, ${QUEUE_MAX} may wait\n` +
+      (ancestors.length === 0
+        ? ""
+        : `  memory above:  ${ancestors.join(", ")}\n` +
+          "                 (project memory above the instance is still visible to the\n" +
+          "                 child — move the instance or remove them)\n") +
       "  endpoints:     GET / /api/state /api/templates /api/tasks /api/task/:id\n" +
       "                 POST /api/task — submits a task, decides nothing\n" +
       "  reminder:      tunnel THIS port if you must tunnel anything. The gate's\n" +
