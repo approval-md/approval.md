@@ -422,12 +422,12 @@ interface Repo {
 
 /** A scratch repo the CLI itself built: attested policy, registered task, live request. */
 function repo(
-  options: { withRequest?: boolean; payload?: Record<string, unknown> } = {},
+  options: { withRequest?: boolean; payload?: Record<string, unknown>; policy?: string } = {},
 ): Repo {
   repoCounter += 1;
   const dir = join(scratch.root, `cli-${repoCounter}`);
   mkdirSync(join(dir, "payloads"), { recursive: true });
-  writeFileSync(join(dir, "APPROVAL.md"), CHILD_POLICY, "utf8");
+  writeFileSync(join(dir, "APPROVAL.md"), options.policy ?? CHILD_POLICY, "utf8");
 
   const key = "task-042:chaser";
   const payload = options.payload ?? { to: ["ap@vendor.example"], subject: "Invoice 41 chaser" };
@@ -1006,4 +1006,135 @@ test("no model is spawned without --gloss, on any path", () => {
     // way, which is the whole point of the split.
     assert.match(run.stdout, /command_breakdown/u, JSON.stringify(args));
   }
+});
+
+// ---------------------------------------------------------------------------
+// What the subprocess is given: an environment, not the gate's keys (APRV-207)
+// ---------------------------------------------------------------------------
+
+// The gloss is a convenience, and it must not be the process that holds the
+// gate's secrets. `claude -p` is a third-party CLI that talks to the network on
+// every render; until APRV-207 it inherited the whole session environment,
+// including the Telegram bot token and the vault passphrase. It is now spawned
+// through APRV-205's `childEnvironment`, the same scrub a granted child gets,
+// with no declared credentials — a gloss is not a granted action.
+//
+// The fake `claude` prints its own environment, so both halves are proven from
+// the child's point of view rather than from the parent's intent.
+
+/** The environment the fake `claude` actually received, by name. */
+function spawnedEnv(witness: string): Map<string, string> {
+  const seen = new Map<string, string>();
+  for (const line of readFileSync(witness, "utf8").split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0) seen.set(line.slice(0, eq), line.slice(eq + 1));
+  }
+  return seen;
+}
+
+test("the gloss subprocess cannot read the gate's credentials (APRV-207 #1)", () => {
+  const world = repo({ payload: COMMAND_PAYLOAD });
+  const witness = join(world.dir, "gloss-env");
+  const run = runCli(
+    ["channel", "cli", "--payload-dir", "payloads", "--interactive", "--gloss", "--as", HUMAN],
+    world.dir,
+    {
+      input: "s\n",
+      env: {
+        ...fakeClaudeEnv(world.dir, `env > ${JSON.stringify(witness)}\necho "a sentence."`),
+        // The two the task names, plus one of each other prefixed family.
+        APPROVAL_TG_TOKEN: "1234:secret-bot-token",
+        APPROVAL_VAULT_PASSPHRASE: "correct horse battery staple",
+        TELEGRAM_BOT_TOKEN: "1234:the-other-spelling",
+        VAULT_MASTER_KEY: "not-this-one-either",
+        // The runtime's own non-secret names survive (APRV-194's allowlist),
+        // which is why this is a scrub and not a blanket empty environment.
+        APPROVAL_HUMAN: HUMAN,
+      },
+    },
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  const child = spawnedEnv(witness);
+  for (const name of [
+    "APPROVAL_TG_TOKEN",
+    "APPROVAL_VAULT_PASSPHRASE",
+    "TELEGRAM_BOT_TOKEN",
+    "VAULT_MASTER_KEY",
+  ]) {
+    assert.equal(child.has(name), false, `${name} reached the model subprocess`);
+  }
+  // And no value of theirs arrived under some other name.
+  const values = [...child.values()].join("\n");
+  for (const secret of ["secret-bot-token", "correct horse battery staple", "not-this-one-either"]) {
+    assert.equal(values.includes(secret), false, `a credential value reached the child: ${secret}`);
+  }
+  assert.equal(child.get("APPROVAL_HUMAN"), HUMAN, "the non-secret allowlist must still pass");
+});
+
+test("the model's own auth and a working environment still pass (APRV-207 #2)", () => {
+  // The other half, and the one a scrub gets wrong by being enthusiastic: the
+  // CLI cannot reach a model without its own credentials, and none of them is
+  // under the gate's credential families. No second list keeps them — they are
+  // simply not the gate's secrets to hold.
+  const world = repo({ payload: COMMAND_PAYLOAD });
+  const witness = join(world.dir, "gloss-env");
+  const auth = {
+    ANTHROPIC_API_KEY: "sk-ant-fixture",
+    ANTHROPIC_AUTH_TOKEN: "auth-token-fixture",
+    CLAUDE_CODE_OAUTH_TOKEN: "oauth-fixture",
+    ANTHROPIC_BASE_URL: "https://api.example.invalid",
+    ANTHROPIC_MODEL: "a-model-fixture",
+  };
+  const fake = fakeClaudeEnv(world.dir, `env > ${JSON.stringify(witness)}\necho "a sentence."`);
+  const run = runCli(
+    ["channel", "cli", "--payload-dir", "payloads", "--interactive", "--gloss", "--as", HUMAN],
+    world.dir,
+    { input: "s\n", env: { ...fake, ...auth, LANG: "en_US.UTF-8" } },
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  const child = spawnedEnv(witness);
+  for (const [name, value] of Object.entries(auth)) {
+    assert.equal(child.get(name), value, `${name} did not reach the model subprocess`);
+  }
+  // PATH is how the fake was found at all, so a broken one would fail loudly;
+  // it is asserted anyway because a scrub that broke it is the regression this
+  // test exists to catch early.
+  assert.equal(child.get("PATH"), fake["PATH"]);
+  assert.equal(child.get("LANG"), "en_US.UTF-8");
+  assert.equal(child.get("HOME"), process.env["HOME"]);
+  // The sentence still arrived, which is the only thing an operator sees.
+  assert.match(run.stdout, /a sentence\. \(model, unverified\)/u);
+});
+
+test("a passphrase variable renamed by the policy is stripped too (APRV-207 #1)", () => {
+  // `vault.passphrase_env` may name anything, including a name outside the
+  // credential-bearing prefixes, and then the prefix rule cannot see it. The
+  // verb reads the policy for this one name and hands it to the same scrub.
+  const renamed = "GLOSS_LANE_PASSPHRASE";
+  const world = repo({
+    payload: COMMAND_PAYLOAD,
+    policy: CHILD_POLICY.replace("```\n", `vault:\n  passphrase_env: ${renamed}\n\`\`\`\n`),
+  });
+  const witness = join(world.dir, "gloss-env");
+  const run = runCli(
+    ["channel", "cli", "--payload-dir", "payloads", "--interactive", "--gloss", "--as", HUMAN],
+    world.dir,
+    {
+      input: "s\n",
+      env: {
+        ...fakeClaudeEnv(world.dir, `env > ${JSON.stringify(witness)}\necho "a sentence."`),
+        [renamed]: "the passphrase under its new name",
+        // A neighbour proves the removal is the NAME the policy gave and not a
+        // prefix invented here.
+        GLOSS_LANE_KEEP: "ordinary",
+      },
+    },
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  const child = spawnedEnv(witness);
+  assert.equal(child.has(renamed), false, "the renamed passphrase reached the model subprocess");
+  assert.equal(child.get("GLOSS_LANE_KEEP"), "ordinary");
 });
