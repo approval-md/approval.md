@@ -1990,26 +1990,26 @@ ${why("setup-service")}`;
 // The MCP wrapper (APRV-87)
 // ---------------------------------------------------------------------------
 
-export const MCP_HELP = `approval mcp serve — the MCP wrapper of SPEC.md §10.5 (stdio, FOREGROUND)
+export const MCP_HELP = `approval mcp serve — the MCP wrapper of SPEC.md §10.5 (FOREGROUND)
 
 Usage:
-  approval mcp serve --as agent:<id> [--dir <path>] [--log <path>]
-                     [--policy <path>]
+  approval mcp serve [--as agent:<id>] [--dir <p>] [--log <p>] [--policy <p>]
+                     [--http [--port <n> | --listen <host:port>] [--guest]]
 
 Flags:
-  --as agent:<id>  the identity EVERY tool call is recorded under. Required
-                   unless APPROVAL_AGENT names one; agent: only
-  --dir <path>     working directory every relative path resolves against
-  --log <p> / --policy <p>   pin the log and the policy for every tool call
-  -h, --help       this text
+  --as agent:<id>  the identity EVERY tool call is recorded under; agent: only,
+                   required unless APPROVAL_AGENT names one. -h for this text
+  --dir/--log/--policy <p>   working directory, and the log and policy pinned
+  --http           streamable HTTP, not stdio: a session per client, 20 live and
+                   200 per process. --port <n>=4681 is loopback; --listen widens
+  --guest          --http only: a fresh agent:guest-<id> per session, so limits
+                   are per connection. Exclusive with --as
 
-Speaks MCP over stdin/stdout and runs until interrupted. THE TOOLS ARE THE
-AGENT SURFACE: the verb registry filtered by human_only false, so grant, reject,
-revoke, attest, amend and the channel listeners are not published: SPEC.md §11
-names the agent the untrusted policy, and an MCP client is an agent's harness.
-Tool calls run SERIALLY, and THIS SERVER READS NO .approval/env. A refusal comes
-back as a tool result with the CLI's own error object, never as a JSON-RPC error.
-POST-V1: mapping the MCP tasks/elicitation extension onto \`awaiting\`.
+On stdio, stdout IS the JSON-RPC stream; both run until interrupted. THE TOOLS
+ARE THE AGENT SURFACE: the registry less human_only, so grant and the channel
+listeners are unpublished (SPEC.md §11 names the agent the untrusted policy).
+IDENTITY IS THE SERVER'S: no client name or argument names an actor. Calls run
+SERIALLY, THIS SERVER READS NO .approval/env. POST-V1: tasks/elicitation.
 
 ${EXIT_CODES_POINTER} (2 is a startup refusal; 0 is a clean shutdown)
 ${JSON_ERRORS}

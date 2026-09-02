@@ -206,6 +206,16 @@ export interface ServerPaths {
 export interface ServerOptions extends ServerPaths {
   /** `agent:<id>`; already validated by {@link resolveAgentActor}. */
   actor: string;
+  /**
+   * The invoke queue this server runs its tool calls through (APRV-174).
+   *
+   * Omitted on stdio, where one process serves one client and
+   * {@link createApprovalMcpServer} builds its own. The HTTP transport passes
+   * ONE queue shared by every session, because the reason the queue exists
+   * (`wait` blocks the event loop with `Atomics.wait`, `run` uses `spawnSync`)
+   * is a property of the process, not of the connection.
+   */
+  serialize?: <T>(work: () => Promise<T>) => Promise<T>;
 }
 
 /** The flag names one verb accepts, from its registry input schema. */
@@ -530,8 +540,13 @@ export function toolResult(result: Invocation): CallToolResult {
  * `core/log.ts`'s lockfile and compare-and-append, so a CLI running beside this
  * server is safe whatever this queue does — the queue is politeness, the
  * lockfile is the guarantee.
+ *
+ * APRV-174: over HTTP one process serves many sessions, and the first reason
+ * above is about the process. `ServerOptions.serialize` therefore lets the HTTP
+ * listener hand every session the SAME queue; stdio passes nothing and gets a
+ * fresh one, exactly as before.
  */
-function serializer(): <T>(work: () => Promise<T>) => Promise<T> {
+export function serializer(): <T>(work: () => Promise<T>) => Promise<T> {
   let tail: Promise<unknown> = Promise.resolve();
   return <T>(work: () => Promise<T>): Promise<T> => {
     const next = tail.then(work, work);
@@ -555,7 +570,7 @@ export function createApprovalMcpServer(options: ServerOptions): Server {
   );
 
   const byName = new Map(publishedVerbs().map((spec) => [toolName(spec), spec]));
-  const serialize = serializer();
+  const serialize = options.serialize ?? serializer();
 
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: toolDefinitions() }));
 
