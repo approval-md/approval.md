@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-m'
 created_date: '2026-09-02 16:14'
-updated_date: '2026-09-04 22:08'
+updated_date: '2026-09-04 22:32'
 labels:
   - channels
   - telegram
@@ -119,4 +119,22 @@ No behaviour diverged from the spec as written; these are additions.
 - `README.md`: three rows in the policy key reference.
 
 No new dependencies.
+
+## Verification (lane M)
+
+Build clean (`npm run build`, exit 0). Lint clean (`npx oxlint`, exit 0).
+
+Per-suite runs on this machine, each with its exit code:
+
+| suites | tests | fail | exit |
+| --- | --- | --- | --- |
+| prompt-layout, channels-cli, channels-web, channels-contract, channels-telegram, layering, policy-load, policy-explain, policy-match, cli-policy | 371 | 0 | 0 |
+| cli, cli-help, cli-long-help, docs-guard, cli-prompt, cli-status, cli-init, cli-doctor, conformance, event-schema | 238 | 0 | 0 |
+| agents-md, cli-import, policy-proposal, cli-amend, cli-attest, cli-instructions, backlog-fixtures, ci-guard, autonomy-split, classify-tier | 274 | 0 | 0 |
+
+That is the whole surface this change can reach: every channel renderer, the policy loader and its schema, the CLI channel verbs, the help/docs guards, and the schema-adjacent generators (`import agents-md`, proposals, amend, attest).
+
+AC #5 is left UNCHECKED for one clause only. `npm test` over all 126 files did not finish inside the window on this machine (the run reached 578 passing tests with zero failures before it was stopped; per-batch wall clock was 160s, 262s and 377s for ten files each, so the whole suite is a 40-minute run here). Everything else in AC #5 is proven: per-channel custom-layout tests through the mock bot, the CLI renderer and the served web page; `docs/cli-reference.md` and the README policy key reference both document the block; lint is clean. The full suite needs one run on a quiet machine.
+
+Related, and not this task: `tests/cli-setup.test.ts` telegram poll timing is the load-sensitive test APRV-248 already records.
 <!-- SECTION:NOTES:END -->
