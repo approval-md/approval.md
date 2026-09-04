@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-r'
 created_date: '2026-09-02 20:15'
-updated_date: '2026-09-02 22:07'
+updated_date: '2026-09-04 21:33'
 labels:
   - daemon
   - bug
@@ -24,10 +24,10 @@ Seen 2026-09-02 on Carter's approval up --advance right after APRV-211 (PR #235)
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A test with a concurrent appender between the advance's read and its finish proves execution.completed lands (bounded retry on head-moved, through compare-and-append) and no execution is left dangling
-- [ ] #2 A test proves that after a finish failure the next tick reconciles the dangling execution and does not run another advance inside --advance-interval for the same owed span
-- [ ] #3 A test proves the log append lock is not held while the advance child runs (a concurrent appender succeeds within the hook's 2 s window during a 5 s advance stub)
-- [ ] #4 The 2026-09-02 transcript (advance at ticks 2, 5, 8; dangling daemon-log-advance-1-13984 and -13991) is explained in the notes
+- [x] #1 A test with a concurrent appender between the advance's read and its finish proves execution.completed lands (bounded retry on head-moved, through compare-and-append) and no execution is left dangling
+- [x] #2 A test proves that after a finish failure the next tick reconciles the dangling execution and does not run another advance inside --advance-interval for the same owed span
+- [x] #3 A test proves the log append lock is not held while the advance child runs (a concurrent appender succeeds within the hook's 2 s window during a 5 s advance stub)
+- [x] #4 The 2026-09-02 transcript (advance at ticks 2, 5, 8; dangling daemon-log-advance-1-13984 and -13991) is explained in the notes
 - [ ] #5 npm test passes; lint clean
 <!-- AC:END -->
 
@@ -223,4 +223,36 @@ remote, `gh` stubbed on PATH, every record written by the real gate:
 
 `npm run build` clean, `npm run lint` clean. Full-suite counts are in the lane
 report. Commit 550c1f2.
+
+## Lane resumption, 2026-09-04: merged main, and the retry is now the shared one
+
+origin/main moved under this branch after the three commits above (APRV-236,
+219, 215, 209, 225, 226, 232 all landed). Merged, never rebased, in
+ace90bf. Three conflicts, all mechanical: the two task files, where this
+branch's In Progress status, plan and notes were kept over main's To Do copy,
+and one import block in daemon/daemon.ts, where APRV-219's log-anchor imports
+and this branch's advance-cycle import both had to stay. Nothing in the merge
+touched the advance logic itself, and the daemon suite (31 cases) passes with
+APRV-219's startup anchor check and APRV-215's preflight in the same file.
+
+The one substantive follow-through, commit d943a99: APRV-236 landed
+core/head-retry.ts, the bounded head-moved retry for every gate writer, which
+is the helper the note above says this task shaped its local loop to accept. So
+the local loop is gone. daemon/advance.ts now calls withHeadRetry over
+attemptsOf(options.retryOnHeadMoved) around the whole finishExecution call, and
+its private FINISH_ATTEMPTS constant and isFinishHeadMoved predicate are
+deleted. Same bound of three, same clamp-downward-only seam the tests use to pin
+the pre-fix shape at 1, same one-attempt-is-one-whole-check-then-append. One
+behaviour changes with the swap: an exhausted refusal now carries the attempt
+count in its message, exactly as every other writer's does since APRV-236, and
+all six cases in tests/daemon-advance-finish.test.ts pass unchanged over it.
+
+Deliberately NOT done: core/execute.ts's finishExecution is still unretried at
+the core level. APRV-236 wrapped startExecution and the gate's writers; giving
+the finish path its own retry inside core would change what every other caller
+of it does with a moved head (approval execution resolve, and the run verb's
+own outcome record), and that is a decision with its own blast radius rather
+than a detail of this task. The advance wraps its own call, which is the caller
+whose incident this is. If the orchestrator wants the core-level version, it is
+a one-line change plus whatever the other callers' tests say.
 <!-- SECTION:NOTES:END -->

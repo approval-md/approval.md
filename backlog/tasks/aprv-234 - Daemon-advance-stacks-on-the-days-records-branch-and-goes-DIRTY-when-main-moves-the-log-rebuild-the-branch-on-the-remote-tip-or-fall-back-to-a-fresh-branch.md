@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-r'
 created_date: '2026-09-02 20:19'
-updated_date: '2026-09-02 22:09'
+updated_date: '2026-09-04 21:34'
 labels:
   - daemon
   - bug
@@ -25,9 +25,9 @@ Seen 2026-09-02: PR #240 (records-log-2026-09-02, opened by the daemon's cadence
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A test with a bare remote where main gains a commit touching the log after the day's branch was pushed proves the next advance produces a branch that merges cleanly into main and whose log is byte-identical to the working log
-- [ ] #2 A working log that is not a superset of main's committed log refuses with a distinct machine-readable code and pushes nothing
-- [ ] #3 The daemon's advance DaemonEvent and the log-advance-cadence doctor row say whether the branch was rebuilt and on which base
+- [x] #1 A test with a bare remote where main gains a commit touching the log after the day's branch was pushed proves the next advance produces a branch that merges cleanly into main and whose log is byte-identical to the working log
+- [x] #2 A working log that is not a superset of main's committed log refuses with a distinct machine-readable code and pushes nothing
+- [x] #3 The daemon's advance DaemonEvent and the log-advance-cadence doctor row say whether the branch was rebuilt and on which base
 - [ ] #4 npm test passes; lint clean
 <!-- AC:END -->
 
@@ -158,4 +158,17 @@ exists: a log-touching commit made where the live log lives is how
 
 `npm run build` clean, `npm run lint` clean. Full-suite counts are in the lane
 report. Commit f050e43.
+
+## Lane resumption, 2026-09-04: merged main, no change needed here
+
+origin/main moved under this branch (APRV-236, 219, 215, 209, 225, 226, 232);
+merged in ace90bf, never rebased. The only conflicts were the task files and one
+import block in daemon/daemon.ts, resolved by keeping both intents. Nothing on
+main touched the rebuild path: APRV-203's scratch-index commit, which this task
+reuses, is unchanged, and cli/git-scope.ts's addition here merged cleanly with
+APRV-215's preflight work. The five rebuild cases and the daemon-advance suite
+pass over the merged tree, and APRV-219's cli-doctor row census (55 cases,
+including the pinned row count) is unaffected by the log-advance-cadence row
+gaining the rebuild words, because the words are in the row's message rather
+than in a new row.
 <!-- SECTION:NOTES:END -->
