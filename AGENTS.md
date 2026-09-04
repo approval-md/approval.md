@@ -35,6 +35,18 @@ Additional rules:
 5. At completion, record implementation notes covering what changed, decisions, and facts the diff does not show.
 6. Definition of Done: acceptance criteria checked with evidence, `npm test` passes, lint is clean, and any behavior divergence from SPEC.md is explicitly raised before a spec edit.
 
+## Codex execution checkpoint (APRV-252)
+
+For Codex sessions, make the workflow observable before substantive planning or implementation:
+
+1. Read applicable AGENTS.md instructions and the required SPEC.md text, run the Backlog overview and matching lifecycle guides, and inspect current Git state, task records, active worktrees and overlapping work. Refresh the baseline without changing another session's checkout or daemon-owned records. Treat unavailable evidence as unknown, not proof that a path is unowned.
+2. Present requested plans concretely: name existing or proposed Backlog tasks, verifiable acceptance criteria, dependencies, exact worker ownership, validation and PR grouping. In Plan Mode, distinguish proposed records from records actually created; create no tracked records until execution is allowed.
+3. Use Astra for orchestration, architecture, safety and final integration; delegate substantive implementation to Sol, and bounded text-based smoke checks to Spark when available. Preserve other harnesses' routing below. Pass each worker the task, binding instructions, owned and forbidden paths and required evidence; never claim a model was used without runtime confirmation.
+4. Keep authoring, review, implementation notes and commits per task. Batch related tasks from the same feature or milestone into one PR where possible, list every task ID, and keep records/log commits on their separate path (APRV-160). Concurrent workers need disjoint ownership or isolated worktrees; inspect and preserve other sessions' uncommitted work, processes and delivery branches.
+5. Before handoff, check the result against these instructions and the task acceptance criteria. Report the exact worktree and branch, reviewed changes, check exit codes, outstanding work and next action, plus actual commit/PR/merge state under the delivery rules below. Backlog-only and documentation-only work still require delivery; task creation does not complete future implementation.
+
+Personal memory may point to these rules, but never replaces reading current repository instructions. Importing prior work does not authorize resuming it.
+
 ## Cursor model orchestration
 
 Grok 4.6 Extra High is the orchestrator. The parent keeps task selection, decomposition, architecture, safety judgment, approval routing, integration decisions, and final review.
