@@ -113,8 +113,19 @@ export function normalizeHarnessVersion(raw: unknown): string | null {
   return PRINTABLE.test(text) ? text : null;
 }
 
-/** How long the probe may take before it is killed and reported as absent. */
-export const HARNESS_PROBE_TIMEOUT_MS = 2_000;
+/**
+ * How long the probe may take before it is killed and reported as absent.
+ *
+ * A bound against a HUNG binary, not a latency target: `<binary> --version`
+ * answers in milliseconds on any machine that is not already in trouble, and
+ * this number is only ever reached by one that is. It is generous for the same
+ * reason `cli/gloss.ts`'s is (20s there): a timeout tuned to a healthy machine
+ * turns a loaded one into a silent, intermittent absence, and an absence that
+ * appears under load is the least useful failure a provenance field could have.
+ * The cost is bounded by the fact that this runs only where a record is being
+ * written, and at most once per process.
+ */
+export const HARNESS_PROBE_TIMEOUT_MS = 10_000;
 
 /**
  * Run `<binary> --version` once, uncached, and normalize what came back.
