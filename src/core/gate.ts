@@ -592,6 +592,18 @@ export interface GateRefusal {
   /** The underlying append error, when `code` is `append-failed`. */
   append?: AppendError;
   /**
+   * The two policy hashes actually compared, when `code` is `policy-drift`
+   * (APRV-235): the hash the request (or the grant) pinned, and the hash
+   * attested at the moment of the refusal.
+   *
+   * Carried on the refusal so that whatever RECORDS the refusal records the
+   * comparison that was made. Re-deriving the pair afterwards would be a second
+   * comparison, at a second instant, against a file that may have moved again,
+   * and a record describing a comparison nobody performed is worse than no
+   * record at all. `core/decision-refusal.ts` copies these verbatim.
+   */
+  drift?: { requested: string; attested: string };
+  /**
    * An event appended *alongside* the refusal: the `budget.exceeded` record, or
    * the lazily-materialised `approval.expired` record. Never an authorization.
    */
@@ -2381,8 +2393,17 @@ function attemptDecide(
     ) {
       return refuse(
         "policy-drift",
-        `action ${actionKey} was requested under policy ${derivation.declared.policy_sha256} and the attested policy is now ${attestedSha256}; the rules that routed this request to a human are no longer the rules in force, so a grant recorded here would claim a decision under a policy the approver was never shown. Nothing was appended: the pending request is void and the action must be requested again, which re-resolves its autonomy, limits and TTL under the current policy.`,
-        { state: derivation.state },
+        `action ${actionKey} was requested under policy ${derivation.declared.policy_sha256} and the attested policy is now ${attestedSha256}; the rules that routed this request to a human are no longer the rules in force, so a grant recorded here would claim a decision under a policy the approver was never shown. Nothing was appended here: the pending request is void and the action must be requested again, which re-resolves its autonomy, limits and TTL under the current policy.`,
+        {
+          state: derivation.state,
+          // APRV-235. The comparison this refusal just made, handed to whoever
+          // records the refusal. `decide` itself still appends nothing — that
+          // contract is what lets a caller retry a refusal without wondering
+          // what it wrote — and the surface that collected the human's gesture
+          // is what appends the `audit.decision_refused` and withdraws the void
+          // request (`core/decision-refusal.ts`).
+          drift: { requested: derivation.declared.policy_sha256, attested: attestedSha256 },
+        },
       );
     }
     // A grant with no class is refused rather than recorded with an empty one.
@@ -3184,7 +3205,10 @@ function attemptHarnessConsume(
     return refuse(
       "policy-drift",
       `action ${actionKey} was approved under policy ${pinned} and the attested policy is now ${attested.sha256}; a human re-attested between the decision and this spend, so the rules the approver saw are not the rules this command would run under. Nothing was appended: the grant is void and the action must be requested again, which re-resolves its autonomy, limits and TTL under the current policy.`,
-      { state: derivation.state },
+      // The comparison, carried for the same reason `decide`'s is (APRV-235).
+      // Nothing records THIS one: the party refused here is an agent spending a
+      // carried grant, and agent-side refusals stay unlogged.
+      { state: derivation.state, drift: { requested: pinned, attested: attested.sha256 } },
     );
   }
 

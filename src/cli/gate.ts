@@ -61,6 +61,7 @@ import {
   type GateOptions,
   type GateRefusal,
 } from "../core/gate.js";
+import { recordRefusedDecision } from "../core/decision-refusal.js";
 import { isWithdrawReason, WITHDRAW_REASONS } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
@@ -501,11 +502,32 @@ export function commandDecide(
   }
 
   const note = stringFlag(flags, "--note");
-  const result = decide(logPath, actionKey, decision, actor, {
+  const decideOptions = {
     ...gateOptions(flags, cwd),
     ...(note === null ? {} : { note }),
-  });
-  if (!result.ok) return emitRefusal(streams, json, result);
+  };
+  const result = decide(logPath, actionKey, decision, actor, decideOptions);
+  if (!result.ok) {
+    // APRV-235, and the same append the channels make through
+    // `recordChannelDecision`: a person ran this verb, the gate would not take
+    // their answer, and the log used to say nothing about it at all. `decide`
+    // appends nothing on a refusal by design; the surface that collected the
+    // gesture is what knows a HUMAN produced it. On `policy-drift` this also
+    // withdraws the request the gate has just declared void, so it stops being
+    // offered on every other surface. Best effort: the refusal below is printed
+    // and the exit code is unchanged whatever this write does.
+    recordRefusedDecision(
+      logPath,
+      { actionKey, decision, actor, channel: "cli" },
+      {
+        code: result.code,
+        message: result.message,
+        ...(result.drift === undefined ? {} : { drift: result.drift }),
+      },
+      decideOptions,
+    );
+    return emitRefusal(streams, json, result);
+  }
 
   // APRV-17: a grant mints the single-use token and this is the ONLY place it is
   // ever printed. The log holds sha256(token) alone, so once this output is gone

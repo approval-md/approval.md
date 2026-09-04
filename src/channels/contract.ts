@@ -51,6 +51,7 @@
 
 import type { AttestationStatus } from "../core/attest.js";
 import type { BudgetVerdict } from "../core/budgets.js";
+import { recordRefusedDecision } from "../core/decision-refusal.js";
 import { decide, type DecideOptions, type GateRefusal } from "../core/gate.js";
 import type { EventRecord } from "../core/log.js";
 import {
@@ -754,7 +755,19 @@ export function recordChannelDecision(
     options,
   );
 
-  if (!result.ok) return { outcome: result };
+  if (!result.ok) {
+    // APRV-235. A human tapped and the gate would not take it. The gate itself
+    // appends nothing on a refusal, by design; this surface knows something the
+    // gate does not, which is that a PERSON produced the gesture, and that is
+    // the fact the log was missing. `core/decision-refusal.ts` states the
+    // argument in full, including why an agent's refusal is not recorded.
+    //
+    // Best effort, deliberately last, and it changes nothing about what the
+    // channel is handed back: the decision has already been refused, and a
+    // failed audit append must not turn one refusal into two.
+    noteRefusedDecision(logPath, decision, actorOptions, gateOptions, result);
+    return { outcome: result };
+  }
 
   const outcome: DecisionOutcome = {
     ok: true,
@@ -765,6 +778,50 @@ export function recordChannelDecision(
     tokenIssued: result.token !== undefined,
   };
   return result.token === undefined ? { outcome } : { outcome, token: result.token };
+}
+
+/**
+ * Append the audit trail of a refused human decision, and swallow whatever goes
+ * wrong doing it (APRV-235).
+ *
+ * The swallowing is the point. Every caller of {@link recordChannelDecision} is
+ * on a path that has already produced its answer — a Telegram listener about to
+ * edit a message, a web handler about to render one, a terminal about to print
+ * one — and an unreadable log or a lost append race here must not take that
+ * answer away from the human who is waiting for it. What a failure costs is the
+ * record, which is exactly what the caller had before this existed.
+ */
+function noteRefusedDecision(
+  logPath: string,
+  decision: ChannelDecision,
+  actorOptions: ChannelActorOptions,
+  gateOptions: DecideOptions,
+  refusal: GateRefusal,
+): void {
+  try {
+    recordRefusedDecision(
+      logPath,
+      {
+        actionKey: decision.action_key,
+        decision: decision.decision,
+        actor: actorOptions.actor,
+        // Every surface in this repository names itself. The fallback is the
+        // local process, which is what a decision that reached the runtime
+        // through no channel at all came through.
+        channel: actorOptions.channel ?? "cli",
+      },
+      {
+        code: refusal.code,
+        message: refusal.message,
+        ...(refusal.drift === undefined ? {} : { drift: refusal.drift }),
+      },
+      gateOptions,
+    );
+  } catch {
+    // Nothing in `core/decision-refusal.ts` throws; this is the belt on the
+    // braces, so that a surprise from the append path cannot become an
+    // exception on a decision path that had already finished deciding.
+  }
 }
 
 /**
