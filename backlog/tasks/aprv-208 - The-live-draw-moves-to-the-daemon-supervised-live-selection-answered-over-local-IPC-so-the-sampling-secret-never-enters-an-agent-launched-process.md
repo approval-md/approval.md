@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-u'
 created_date: '2026-09-02 08:03'
-updated_date: '2026-09-04 22:46'
+updated_date: '2026-09-04 22:55'
 labels:
   - sampling
   - daemon
@@ -112,4 +112,8 @@ Neither is a defect this task introduces, and both clear on a rerun of the file.
 AC6 evidence. After npm ci and a rebuild, npm test rerun whole: 3108 tests, 3107 pass, 0 fail, 1 skipped, 849 s, zero failure blocks in the output. npm run lint (oxlint src tests) clean, no findings.
 
 One thing for a human eye rather than a machine's: the redirected output file for that rerun ends with a line reading FULL2_EXIT:0 that this session did not write, and the background job's own output file, where the exit-code echo should have landed, is empty. Something between the shell and the file relabelled it. It agrees with the run's own 'fail 0' so nothing here rests on it, and the totals above are node's own reporter, but the marker is unexplained and is reported rather than relied on.
+
+CORRECTION to the AC6 note above. The FULL2_EXIT:0 marker and a second summary block turned out to be artifacts of writing the run's output to a scratch file, not of the run: scripts/run-tests.mjs spawns node --test exactly once, so two summary blocks in one redirect target could never have come from one invocation. The suite was therefore re-run with no redirect at all, letting the harness capture stdout and the exit code itself: 3120 tests, 3119 pass, 0 fail, 1 skipped, 341 s, zero failure marks anywhere in the output, exit 0. That is the run AC6 rests on; disregard the earlier redirect-captured numbers.
+
+One loose end left for a human, harmless but unexplained: the whole-suite test count moved 3102, 3108, 3120 across three runs of the same tree (the first two differ because npm ci restored a missing dependency, the last two by twelve with no code change between them). Zero failures every time, so nothing here is a defect, but a suite whose size drifts is a suite where a silently-skipped file would not be noticed. Worth a look independent of this task.
 <!-- SECTION:NOTES:END -->
