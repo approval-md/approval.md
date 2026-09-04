@@ -53,6 +53,7 @@
           "proposal-not-found",
           "proposal-stale",
           "policy-already-attested",
+          "reaction-note-required",
           "append-failed",
           "token-delivery-unavailable"
         ]

@@ -179,6 +179,18 @@ outlet nobody reads is a prop. It is not a way to reach a human urgently, not a
 place to put a secret, and not a decision surface — if you need something
 decided, that is \`request\`.
 
+WHAT THE OPERATOR SAID ABOUT YOUR WORK. \`approval feedback\` is that channel in
+the other direction: the graded reactions (disliked, indifferent, liked, loved)
+and the notes a person wrote when they answered the gate or reviewed a sampled
+action, joined to the class, the task, the action key and the agent it was
+about. It is HUMAN-AUTHORED GUIDANCE and it is not policy. Reading it grants you
+nothing and forbids you nothing, and not reading it puts you under exactly the
+same rules: no verdict, sampling probability or budget anywhere in this runtime
+reads a reaction. Read it to learn what the operator values; never read it as
+permission. \`--actor\` filters on the agent the feedback is about, not on the
+human who wrote it, so \`approval feedback --actor <your id>\` is what has been
+said about your own work.
+
 WHERE THE SCHEMAS ARE. \`approval instructions --schemas\` prints this registry
 as JSON: for every verb, its purpose, its input schema (positionals, flags, and
 the trailing argv where there is one), its --json output schema, the shared

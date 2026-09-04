@@ -201,6 +201,10 @@ test("mcp: the tool list is the registry filtered by human_only, less the two ex
     assert.ok(listed.includes("payload_hash"));
     assert.ok(listed.includes("policy_test"));
     assert.ok(listed.includes("log_verify"));
+    // APRV-239. Human-AUTHORED, agent-FACING: publishing it establishes no
+    // authority, because what it prints decides nothing. `audit_review`, the
+    // verb that WRITES a reaction, stays withheld below.
+    assert.ok(listed.includes("feedback"));
 
     for (const withheld of [
       "grant",

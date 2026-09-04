@@ -200,6 +200,11 @@ test("mcp guest: tools/list is exactly the allowlist", async () => {
       "withdraw",
       "journal_write",
       "journal_read",
+      // APRV-239. Agent-facing, so full mode publishes it; withheld from a
+      // guest for the reason `journal_read` is, and one more besides — it
+      // reports what the OPERATOR said about work in this workspace, which is
+      // the operator's own material and not a visitor's to read.
+      "feedback",
       "doctor",
       "payload_hash",
       "audit_list",
