@@ -333,8 +333,11 @@ export function promptLayoutFor(load: PolicyLoadResult, channel: string): Prompt
 }
 
 /**
- * Apply a block to a layout. Pure, total, and exported so the tests and the
- * `approval policy explain` path can show the result without a policy file.
+ * Apply a block to a layout. Pure, total, and exported so a caller holding a
+ * block already can resolve it without going back through a policy file, which
+ * is what the tests do and what a future `approval policy explain` of a channel
+ * would need. Nothing outside the tests calls it today, and that is fine: the
+ * split keeps {@link promptLayoutFor} to one job, reading the block.
  */
 export function applyPromptBlock(base: PromptLayout, block: PromptBlock): PromptLayout {
   const named = (block.rows ?? []).filter(isPromptRow);
