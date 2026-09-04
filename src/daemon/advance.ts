@@ -83,6 +83,7 @@ import {
   type FinishResult,
 } from "../core/execute.js";
 import { register, request, type GateOptions } from "../core/gate.js";
+import { attemptsOf, withHeadRetry } from "../core/head-retry.js";
 import type { EventRecord } from "../core/log.js";
 import { payloadHash } from "../core/payload.js";
 import { loadPolicy } from "../core/policy-load.js";
@@ -230,7 +231,8 @@ export interface AdvanceInput {
   runner?: { command: string; args: readonly string[] };
   /**
    * How many times the outcome record is re-derived against a moved head
-   * (APRV-233). Clamped to 1..{@link FINISH_ATTEMPTS}, and downward only.
+   * (APRV-233). Clamped to 1..`core/head-retry.ts`'s `HEAD_MOVED_ATTEMPTS` by
+   * that module's own `attemptsOf`, and downward only.
    *
    * The seam a test uses to pin BOTH shapes with one harness, exactly as
    * `GateOptions.retryOnHeadMoved` does for the harness writers: `1` is the
@@ -322,21 +324,6 @@ function answerFor(
 // ---------------------------------------------------------------------------
 
 /**
- * How many times the outcome record is re-derived against a moved head.
- *
- * APRV-150's bound, spelled again rather than imported: `core/gate.ts` keeps
- * its copy private, and this is the same number for the same reason — small,
- * fixed, and not configurable upward, so a busy log cannot turn one advance
- * into an unbounded write loop.
- */
-const FINISH_ATTEMPTS = 3;
-
-/** Did this refusal come from the compare-and-append precondition alone? */
-function isFinishHeadMoved(result: FinishResult): boolean {
-  return !result.ok && result.code === "append-failed" && result.append?.code === "head-moved";
-}
-
-/**
  * Append the advance's outcome, re-deriving it against a fresh head on
  * `head-moved` (APRV-233).
  *
@@ -363,12 +350,15 @@ function isFinishHeadMoved(result: FinishResult): boolean {
  * verdict returned, and the bound is returned unchanged once it is spent, so
  * the caller still fails closed.
  *
- * ## Local on purpose, and briefly
+ * ## One retry, in one place
  *
- * APRV-236 is lifting a shared head-moved retry into `core/` for every gate
- * writer. This is deliberately shaped as one function around one whole
- * operation so that helper can replace the loop body without changing a single
- * caller here.
+ * The loop and the bound are `core/head-retry.ts`'s (APRV-236 lifted them there
+ * for every gate writer, and APRV-233's first draft of this function was the
+ * local copy that helper replaced). `attemptsOf` clamps a caller's
+ * `retryOnHeadMoved` downward only, so the test harness can pin the unretried
+ * shape at `1` and nothing can raise the ceiling; `withHeadRetry` re-runs the
+ * whole `finishExecution` and adds the attempt count to the message it finally
+ * hands back. What remains here is only which operation is retried.
  */
 function finishWithHeadMovedRetry(
   logPath: string,
@@ -376,16 +366,9 @@ function finishWithHeadMovedRetry(
   exitCode: number,
   options: FinishOptions & { retryOnHeadMoved?: number },
 ): FinishResult {
-  const asked = options.retryOnHeadMoved;
-  const attempts =
-    asked === undefined || !Number.isInteger(asked) || asked < 1
-      ? FINISH_ATTEMPTS
-      : Math.min(asked, FINISH_ATTEMPTS);
-  let result = finishExecution(logPath, actionKey, exitCode, ADVANCE_ACTOR, options);
-  for (let n = 1; n < attempts && isFinishHeadMoved(result); n += 1) {
-    result = finishExecution(logPath, actionKey, exitCode, ADVANCE_ACTOR, options);
-  }
-  return result;
+  return withHeadRetry(attemptsOf(options.retryOnHeadMoved), () =>
+    finishExecution(logPath, actionKey, exitCode, ADVANCE_ACTOR, options),
+  );
 }
 
 /**
