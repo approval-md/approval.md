@@ -1732,6 +1732,21 @@ The checks, at length:
   log sync` for a diverged log, `approval up` otherwise — never a `git` command:
   a repair line telling an operator to reset a branch would be doctor making the
   decision this project keeps human.
+- **harness-version-unverified** — whether the harness binary hosting the
+  PreToolUse hook changed since the log last saw a record from it (APRV-227).
+  The only row that asks anything about a program outside this repository, and
+  it asks the one way a log can: `<binary> --version` now, against the
+  `harness_version` on the newest hook-written `task.registered` or
+  `gate.bypassed`. Which harnesses to ask comes from the `approval hook <kind>`
+  commands this checkout's `.claude/settings.json` and `.cursor/hooks.json`
+  register. SKIP, named, for each of the three things that make a comparison
+  impossible: no hook registered here, no record naming a version yet, or no
+  such binary on `PATH`. FAIL when they differ, because an unverified change is
+  precisely the state in which nobody has checked whether the gate still fires;
+  the `fix` is the promptless self-test in `docs/claude-code-hook.md`, one
+  supervised-class tool call, after which the row is green. PASS says only that
+  the versions match — the field is self-reported (SPEC.md §11.1 invariant 4)
+  and reduces nothing anywhere, so a match is not proof the hook fired.
 
 **`--json`** (one object on stdout):
 
@@ -2859,6 +2874,23 @@ of the day opens it, every later one is parented on the branch and updates it in
 place. The daemon never merges; `gh pr merge` is `vcs.push.main` and stays a
 human's act or a session's.
 
+Two rules keep that from turning into a loop of its own (APRV-233, APRV-234).
+An advance whose outcome is not yet in the log has still HAPPENED: the daemon
+records that outcome again against a fresh head (a bounded re-derivation, the
+same one the harness writers have used since APRV-150), authorizes nothing new
+while such a cycle is open (`advance-unreconciled`), and closes a cycle it does
+not remember only where it can see the records on a records branch
+(`advance-reconciled`); where it cannot, the cycle stays open for a person.
+Inside `--advance-interval` the record-count trigger counts only records no
+earlier attempt tried to publish, so the same owed span is never re-pushed. And
+where the trunk has moved under the day's branch, the advance REBUILDS its
+commit on the current trunk rather than stacking on a branch that no longer
+contains it — `rebuilt` and `rebuilt_on` on the `advance` line, an
+`advance-rebuilt` note on the cycle's `execution.completed`, and the same words
+in the `log-advance-cadence` doctor row. A branch the remote will not let it
+update (a protected-branch ruleset, a pull request in the merge queue) gets a
+fresh `records-log-<date>-<n>`, named in the report.
+
 The count that drives the cadence excludes the advance cycle's OWN records
 (`task.registered`, `execution.started`, `execution.completed` under
 `daemon-advance-*`): each advance leaves its completion record unpublished, and a
@@ -2969,6 +3001,7 @@ with the log idle is a bug: file it with the `tick` line's `phases`.
 {"event":"advance","outcome":"advanced","records_pending":7,
  "records_branch":"records-log-2026-09-01","range":{"from":4,"to":10},
  "commit":"<40hex>","pr_url":"https://github.com/…","pr_created":true,
+ "rebuilt":false,"rebuilt_on":null,
  "code":null,"message":"seq 4..10 is on records-log-2026-09-01","flush":false}
 {"event":"tick","n":1,"head":10,"drift":1,"expired":1,"escalated":0,
  "ms":41,"reads":8,"reproof":"full","phases":{"drift":9,"ttl":3,"audit":6,

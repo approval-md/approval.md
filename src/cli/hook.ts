@@ -105,6 +105,11 @@ import {
   type OpenWindow,
 } from "../core/gate-window.js";
 import {
+  harnessProvenance,
+  type HarnessKind,
+  type HarnessProvenance,
+} from "../core/harness-version.js";
+import {
   harnessLoopFloor,
   isLoopEscalated,
   UNKNOWN_SESSION,
@@ -314,8 +319,13 @@ function hookScope(flags: Record<string, string | boolean>, cwd: string): HookSc
 
 type Permission = "allow" | "deny";
 
-/** Which harness JSON envelope to print. Never `ask`. */
-type HarnessKind = "claude-code" | "cursor";
+/**
+ * Which harness JSON envelope to print. Never `ask`.
+ *
+ * One definition since APRV-227, in `core/harness-version.ts`: the set of
+ * harnesses this runtime speaks a protocol for is the same set it knows a
+ * binary name for, and two copies of it would be two lists to drift.
+ */
 
 interface HarnessAdapter {
   kind: HarnessKind;
@@ -404,6 +414,22 @@ interface HookInput {
    * {@link readReportedOutcome}) — never the text inside it.
    */
   toolResponse: Record<string, unknown> | null;
+  /**
+   * `version`, when the harness states its own (APRV-227).
+   *
+   * Claude Code's event may carry it; Cursor's does not, and neither did any
+   * Claude Code release before it. So this is a preference and never a
+   * requirement: `core/harness-version.ts` falls back to `<binary> --version`
+   * and then to absence, and a hook that can establish nothing records nothing.
+   *
+   * SELF-REPORTED, and read at all only because it cannot buy the reporter
+   * anything. Nothing in this module branches on it; it reaches exactly one
+   * payload field whose one reader is a doctor row that can only ADD a red
+   * line, so §11.1 invariant 4 holds by construction rather than by care. A
+   * harness that states a false version defeats a check that would have asked a
+   * human to look, and gains no verdict it did not already have.
+   */
+  harnessVersion: string | null;
 }
 
 function readString(source: Record<string, unknown>, key: string): string | null {
@@ -457,6 +483,7 @@ function parseHookInput(raw: string): ParsedInput {
       toolInput,
       toolUseId: readString(fields, "tool_use_id"),
       hookEventName: readString(fields, "hook_event_name"),
+      harnessVersion: readString(fields, "version"),
       toolResponse:
         typeof responseValue === "object" && responseValue !== null && !Array.isArray(responseValue)
           ? (responseValue as Record<string, unknown>)
@@ -1053,6 +1080,28 @@ interface HookRun {
   ttlMs: number | null;
   harness: HarnessKind;
   originApp: string;
+  /**
+   * The version the hook event stated, or `null` (APRV-227).
+   *
+   * Carried rather than resolved here: resolving it means a `spawnSync` of
+   * `<binary> --version`, and a hook process exists per gated tool call. The
+   * resolution happens at the one place that is about to WRITE a record and
+   * nowhere else, so the pass-through verdict and the autonomous verdict pay
+   * nothing for it. See {@link registrationProvenance}.
+   */
+  eventVersion: string | null;
+}
+
+/**
+ * The provenance pair to stamp on a record this invocation is about to write,
+ * or `null` when this process cannot establish one (APRV-227).
+ *
+ * Called at the write site and not before. `installedHarnessVersion` memoizes,
+ * so a multi-class command that registers once and a session that reaches this
+ * twice both pay at most one probe per process.
+ */
+function registrationProvenance(run: HookRun): HarnessProvenance | null {
+  return harnessProvenance(run.harness, run.eventVersion);
 }
 
 /**
@@ -1462,7 +1511,15 @@ function gateAndWait(
       })),
     };
 
-    const registered = register(run.logPath, { task, envelope }, run.actor, run.options);
+    // APRV-227: which harness binary wrote this registration. A CALL option,
+    // never a field of the envelope above — an envelope is authored by the
+    // party under oversight, and this is a statement about the binary doing
+    // the overseeing.
+    const provenance = registrationProvenance(run);
+    const registered = register(run.logPath, { task, envelope }, run.actor, {
+      ...run.options,
+      ...(provenance === null ? {} : { harness: provenance }),
+    });
     if (!registered.ok) {
       return sayDeny(`hook-gate-refused:${registered.code}`, registered.message);
     }
@@ -2082,6 +2139,11 @@ function runBypass(
     }
   }
 
+  // APRV-227, resolved here because here is where a record is written. The
+  // window path is the one a human comes back to read, so the binary that
+  // printed the allow is named on it.
+  const provenance = harnessProvenance(adapter.kind, input.harnessVersion);
+
   const recorded = recordGateBypass(
     logPath,
     {
@@ -2092,6 +2154,7 @@ function runBypass(
       ...(input.sessionId === UNKNOWN_SESSION ? {} : { sessionId: input.sessionId }),
       ...(input.toolUseId === null ? {} : { toolUseId: input.toolUseId }),
       ...(input.cwd.length === 0 ? {} : { cwd: input.cwd }),
+      ...(provenance === null ? {} : { harness: provenance }),
     },
     actor,
     {},
@@ -2296,6 +2359,7 @@ function runHarnessHook(
     ttlMs: load.durations.approvalTtlMs,
     harness: adapter.kind,
     originApp: adapter.originApp,
+    eventVersion: input.harnessVersion,
   };
 
   const autonomies = classes.map((cls) => resolvePolicy(load, cls).autonomy);

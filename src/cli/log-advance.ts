@@ -163,6 +163,19 @@ export interface LogAdvanceReport {
   parent?: { ref: string; sha: string };
   /** True when the parent was the day's existing records branch. */
   reusedRecordsBranch?: boolean;
+  /**
+   * True when the day's branch existed and did NOT contain the base, so this
+   * advance rebuilt it on the base rather than stacking on its tip (APRV-234).
+   */
+  rebuilt?: boolean;
+  /** The ref and sha the rebuild was parented on, when there was one. */
+  rebuiltOn?: { ref: string; sha: string };
+  /**
+   * The branch this advance would have pushed to, when the rebuilt commit was
+   * refused there and a fresh `records-log-<date>-<n>` was opened instead.
+   * `null` whenever `recordsBranch` is the branch that was asked for.
+   */
+  fallbackFrom?: string | null;
   /** True when this run OPENED the pull request; false when one already stood. */
   prCreated?: boolean;
   /** The seq range this advance carries, inclusive; null when nothing is owed. */
@@ -211,6 +224,20 @@ function stagedPaths(root: string): { ok: true; paths: string[] } | { ok: false;
   return { ok: true, paths };
 }
 
+/**
+ * Does `commit` already carry `candidate` in its history? (APRV-234)
+ *
+ * The question the day's records branch has to answer before another commit is
+ * stacked on it: a branch that no longer contains the trunk cannot be
+ * fast-forwarded into it, and everything built on it inherits that. Answered
+ * with `merge-base --is-ancestor`, whose exit status IS the answer; anything
+ * that is not a clean "yes" reads as "no", which is the direction that rebuilds
+ * rather than the direction that stacks on a base nobody checked.
+ */
+function contains(root: string, commit: string, candidate: string): boolean {
+  return git(["merge-base", "--is-ancestor", candidate, commit], root).ok;
+}
+
 /** Is `path` inside one of the three paths an advance is allowed to carry? */
 function isAdvancePath(path: string): boolean {
   return ADVANCE_PATHS.some((allowed) => path === allowed || path.startsWith(`${allowed}/`));
@@ -241,18 +268,35 @@ export function logAdvance(options: LogAdvanceOptions): LogAdvanceResult {
     };
   }
 
-  const held = withAppendLock<LogAdvanceResult>(logPath, () =>
-    advanceUnderLock({ root, logPath, branch, remote, dryRun, options }),
+  // The lock covers the READ of the log and nothing after it (APRV-233).
+  //
+  // It used to wrap this whole function, `git fetch`, `git push` and `gh pr
+  // create` included, and on 2026-09-02 that stalled every harness hook on the
+  // machine: each one asked for the append lock, waited the full two seconds
+  // and refused its command `append-failed`, for as long as each advance's
+  // network round-trips took. Nothing in the git half of the verb appends
+  // anything, so nothing in it needs the lock. What the lock IS for is the
+  // consistency of one read: the chain must verify, the seq range must be
+  // measured, and the bytes that get committed must be the bytes that were
+  // verified — so the log's exact content is pinned as a git blob HERE, under
+  // the lock, and the commit is assembled from that object rather than from a
+  // file another writer may have grown in the meantime.
+  (options.progress ?? silentProgress).phase(
+    "verifying the log chain before anything is committed from it",
   );
-  if (held.ok) return held.value;
-  return {
-    ok: false,
-    code: held.error.code === "lock-timeout" ? "log-advance-locked" : "log-advance-git-failed",
-    message:
-      held.error.code === "lock-timeout"
-        ? `${held.error.message}. Advance holds the append lock while it READS the chain, so the seq range it names is the range it commits. Wait for the append to finish and run this again.`
-        : held.error.message,
-  };
+  const held = withAppendLock<SnapshotResult>(logPath, () => snapshotUnderLock(root, logPath));
+  if (!held.ok) {
+    return {
+      ok: false,
+      code: held.error.code === "lock-timeout" ? "log-advance-locked" : "log-advance-git-failed",
+      message:
+        held.error.code === "lock-timeout"
+          ? `${held.error.message}. Advance holds the append lock while it READS the chain, so the seq range it names is the range it commits. Wait for the append to finish and run this again.`
+          : held.error.message,
+    };
+  }
+  if (!held.value.ok) return held.value;
+  return advanceOnSnapshot({ root, logPath, branch, remote, dryRun, options }, held.value);
 }
 
 interface UnderLock {
@@ -264,13 +308,32 @@ interface UnderLock {
   options: LogAdvanceOptions;
 }
 
-function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
-  const { root, logPath, branch, remote, dryRun, options } = ctx;
-  const progress = options.progress ?? silentProgress;
+/**
+ * The verified log, as bytes and as a git object, taken at one instant.
+ *
+ * `text` is what the seq range is measured against and `blob` is what the
+ * commit carries, and they are the same bytes by construction: both are taken
+ * under the append lock, before it is released for the slow half of the verb.
+ */
+interface LogSnapshot {
+  ok: true;
+  text: string;
+  /** The sha of the blob holding exactly `text`, already in the object store. */
+  blob: string;
+  staged: readonly string[];
+}
 
+type SnapshotResult = LogSnapshot | Extract<LogAdvanceResult, { ok: false }>;
+
+/**
+ * Everything the advance must read from the log, read once and pinned.
+ *
+ * Short by design: a chain verify, an index read and one `git hash-object`, all
+ * local. Every writer on the machine waits on this and on nothing else.
+ */
+function snapshotUnderLock(root: string, logPath: string): SnapshotResult {
   // 1. The chain, verified. A commit of a log that does not verify would be
   //    publishing the break.
-  progress.phase("verifying the log chain before anything is committed from it");
   const verified = verify(logPath);
   if (verified.status !== "clean") {
     return {
@@ -304,7 +367,28 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
     };
   }
 
-  // 3. The base: the remote's tip, fetched by this verb rather than by the
+  // 3. The bytes, pinned. `hash-object -w` writes the blob into the object
+  //    store and answers its sha, so the commit built after the lock is
+  //    released carries exactly what was verified above, however much the file
+  //    has grown by then.
+  const text = textOfWorking(logPath);
+  const hashed = git(["hash-object", "-w", "--", repoPath(root, logPath)], root);
+  const blob = hashed.stdout.trim();
+  if (!hashed.ok || blob.length === 0) {
+    return {
+      ok: false,
+      code: "log-advance-git-failed",
+      message: `the working log could not be written to the object store: ${failureText(hashed)}; nothing was committed.`,
+    };
+  }
+  return { ok: true, text, blob, staged: staged.paths };
+}
+
+function advanceOnSnapshot(ctx: UnderLock, snapshot: LogSnapshot): LogAdvanceResult {
+  const { root, logPath, branch, remote, dryRun, options } = ctx;
+  const progress = options.progress ?? silentProgress;
+
+  // 4. The base: the remote's tip, fetched by this verb rather than by the
   //    operator (APRV-203). Everything after this is measured against it.
   const baseBranch = options.base ?? branch;
   progress.phase(`fetching ${remote}/${baseBranch}: an advance is based on the remote, not on this checkout`);
@@ -319,9 +403,11 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
   }
   const baseSha = fetched.sha;
 
-  // 4. What is owed: the seq range between the committed log and the working
-  //    head. Read through the same comparison sync and doctor read.
-  const workingText = textOfWorking(logPath);
+  // 5. What is owed: the seq range between the committed log and the working
+  //    head. Measured against the SNAPSHOT (APRV-233), which is the same bytes
+  //    the commit will carry, so the range this names is the range it commits
+  //    even though the lock is no longer held.
+  const workingText = snapshot.text;
   const against = (
     sha: string,
     label: string,
@@ -386,16 +472,46 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
   // whenever the trunk fetch a moment ago succeeded. The alternative — treating
   // it as a network failure and refusing — would refuse every first advance of
   // every day, since the branch genuinely does not exist yet.
+  //
+  // 4b. Unless the trunk has moved under the branch (APRV-234).
+  //
+  // Observed 2026-09-02: a ceremony commit landed on main carrying its own copy
+  // of the log, so `records-log-2026-09-02` no longer contained the trunk. The
+  // daemon went on stacking advance commits on the branch tip — six of them —
+  // each built on a base that was missing main's copy, and the pull request
+  // went DIRTY and stayed DIRTY. Nothing the cadence could do would clear it;
+  // it took a hand `git merge -X ours origin/main` by a person, which is
+  // precisely the tap this feature exists to remove.
+  //
+  // So: stack only while the branch still contains the base. When it does not,
+  // REBUILD — the same commit content, parented on the current trunk instead —
+  // and push it over the branch. That is sound here for a reason peculiar to
+  // this verb: the only paths it carries are the append-only log, its
+  // projection and its content-addressed payloads, and the trunk check above
+  // has already refused unless the working log is a SUPERSET of the trunk's
+  // (`log-advance-behind-remote` in one direction, `log-advance-remote-diverged`
+  // in the other). A rebuilt commit is therefore the trunk's own log plus the
+  // tail it lacks, never a revert of anything the trunk merged.
   let parent = { ref: `${remote}/${baseBranch}`, sha: baseSha };
   let drift: LogDrift = trunk.drift;
   let reusedRecordsBranch = false;
+  let rebuilt = false;
+  let rebuiltOn: { ref: string; sha: string } | undefined;
   const existing = fetchBase(root, remote, recordsBranch);
   if (existing.ok) {
-    const onBranch = against(existing.sha, `${remote}/${recordsBranch}`);
-    if (!("drift" in onBranch)) return onBranch;
-    parent = { ref: `${remote}/${recordsBranch}`, sha: existing.sha };
-    drift = onBranch.drift;
-    reusedRecordsBranch = true;
+    if (contains(root, existing.sha, baseSha)) {
+      const onBranch = against(existing.sha, `${remote}/${recordsBranch}`);
+      if (!("drift" in onBranch)) return onBranch;
+      parent = { ref: `${remote}/${recordsBranch}`, sha: existing.sha };
+      drift = onBranch.drift;
+      reusedRecordsBranch = true;
+    } else {
+      // The branch exists and does not contain the trunk. Keep `parent` at the
+      // trunk and say so: the range is measured against the trunk's log, which
+      // is what `trunk.drift` already holds.
+      rebuilt = true;
+      rebuiltOn = { ref: `${remote}/${baseBranch}`, sha: baseSha };
+    }
   }
 
   const committedSeq = drift.committedHead?.seq ?? 0;
@@ -418,6 +534,8 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
     base: { branch: baseBranch, sha: baseSha },
     parent: { ref: parent.ref, sha: parent.sha },
     reusedRecordsBranch,
+    rebuilt,
+    ...(rebuiltOn === undefined ? {} : { rebuiltOn }),
     prCreated: false,
     range,
     committedHead: drift.committedHead,
@@ -439,7 +557,17 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
   progress.phase(
     `building the records commit on ${parent.ref} ${parent.sha.slice(0, 12)} (nothing is checked out)`,
   );
-  const built = commitOnBase(root, { base: parent.sha, paths: carried, message });
+  const built = commitOnBase(root, {
+    base: parent.sha,
+    paths: carried,
+    message,
+    // APRV-233. The log goes in as the blob taken under the append lock, not as
+    // whatever the file holds now: the lock was released before the fetch, and
+    // a record appended since is a record this commit's message does not claim.
+    blobs: carried.includes(DEFAULT_LOG_PATH)
+      ? [{ path: repoPath(root, logPath), sha: snapshot.blob }]
+      : [],
+  });
   if (!built.ok) {
     return {
       ok: false,
@@ -467,7 +595,34 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
   //    moves no local ref and checks nothing out: the operator's branch stays
   //    exactly where they left it.
   progress.phase(`pushing ${commit.slice(0, 12)} to ${remote} ${recordsBranch}`);
-  const pushed = git(["push", remote, `${commit}:refs/heads/${recordsBranch}`], root);
+  // A rebuilt commit does not descend from the branch it replaces, so it needs
+  // the `+`. It is not a history rewrite in the sense the rule forbids: the
+  // branch is a proposal nobody has merged, every record it carried is in the
+  // new commit's log, and the alternative is a pull request that cannot land.
+  const refspec = `${rebuilt ? "+" : ""}${commit}:refs/heads/${recordsBranch}`;
+  let target = recordsBranch;
+  let fallbackFrom: string | null = null;
+  let pushed = git(["push", remote, refspec], root);
+  if (!pushed.ok && rebuilt) {
+    // The branch cannot be updated in place: a protected-branch ruleset
+    // (GH006), or a pull request the merge queue has already taken. The records
+    // still have to reach a branch somebody can merge, so they get a fresh one
+    // and the report says which (APRV-234).
+    const rejection = failureText(pushed);
+    for (let n = 2; n <= 9 && !pushed.ok; n += 1) {
+      const alternate = `${recordsBranch}-${String(n)}`;
+      const attempt = git(["push", remote, `${commit}:refs/heads/${alternate}`], root);
+      if (attempt.ok) {
+        pushed = attempt;
+        fallbackFrom = recordsBranch;
+        target = alternate;
+        git(["update-ref", `refs/approval/advance/${alternate}`, commit], root);
+        progress.phase(
+          `${recordsBranch} would not take the rebuilt commit (${rejection}); opened ${alternate} instead`,
+        );
+      }
+    }
+  }
   if (!pushed.ok) {
     return {
       ok: false,
@@ -475,37 +630,41 @@ function advanceUnderLock(ctx: UnderLock): LogAdvanceResult {
       message: `the advance is built on ${parent.ref} as ${commit.slice(
         0,
         12,
-      )} and held at ${anchor}, but \`git push ${remote} ${commit.slice(
-        0,
-        12,
-      )}:refs/heads/${recordsBranch}\` was REJECTED: ${failureText(
+      )} and held at ${anchor}, but \`git push ${remote} ${refspec}\` was REJECTED: ${failureText(
         pushed,
-      )}. The commit exists and nothing was lost; push it when the remote will take it (\`git push ${remote} ${commit.slice(
-        0,
-        12,
-      )}:refs/heads/${recordsBranch}\`). Your checkout is exactly as you left it, on ${branch}.`,
+      )}. The commit exists and nothing was lost; push it when the remote will take it (\`git push ${remote} ${refspec}\`). Your checkout is exactly as you left it, on ${branch}.`,
       quote: outputLines(pushed.stderr, pushed.stdout),
     };
   }
 
   if (options.pr !== true) {
     progress.done();
-    return { ok: true, report: report({ commit, pushed: true }) };
+    return {
+      ok: true,
+      report: report({ commit, pushed: true, recordsBranch: target, fallbackFrom }),
+    };
   }
 
-  progress.phase(`opening or updating the pull request for ${recordsBranch}`);
-  const pr = ghPullRequest(root, recordsBranch, range);
+  progress.phase(`opening or updating the pull request for ${target}`);
+  const pr = ghPullRequest(root, target, range);
   progress.done();
   if (!pr.ok) {
     return {
       ok: false,
       code: "log-advance-pr-failed",
-      message: `the advance is committed and pushed to ${recordsBranch}, but \`gh pr ${pr.step}\` failed: ${pr.message}. Open the pull request by hand and merge it with a merge commit.`,
+      message: `the advance is committed and pushed to ${target}, but \`gh pr ${pr.step}\` failed: ${pr.message}. Open the pull request by hand and merge it with a merge commit.`,
     };
   }
   return {
     ok: true,
-    report: report({ commit, pushed: true, prUrl: pr.url, prCreated: pr.created }),
+    report: report({
+      commit,
+      pushed: true,
+      recordsBranch: target,
+      fallbackFrom,
+      prUrl: pr.url,
+      prCreated: pr.created,
+    }),
   };
 }
 

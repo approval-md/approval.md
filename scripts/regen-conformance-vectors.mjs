@@ -1037,7 +1037,13 @@ const SUITES = [
     // 1.3.0 (swept in by APRV-173's regeneration, authored earlier): the two
     // `env_stripped` event fixtures were committed without a regen, so the
     // suite did not cover them. New vectors, no expectation moved: a minor bump.
-    vectors_version: "1.3.0",
+    // 1.4.0 (APRV-227): another MINOR bump. The four harness-provenance event
+    // fixtures — a `task.registered` and a `gate.bypassed` carrying the
+    // `harness`/`harness_version` pair, a multi-line version, an unknown
+    // harness kind — are new vectors. No existing expectation moved: the two
+    // names are OPTIONAL and additive, so every record written before them
+    // validates exactly as it did.
+    vectors_version: "1.4.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",
