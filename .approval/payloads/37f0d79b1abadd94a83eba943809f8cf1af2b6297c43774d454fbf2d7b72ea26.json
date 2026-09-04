@@ -1,0 +1,1 @@
+{"command":"S=/private/tmp/claude-501/-Users-carter-dev-approval-md--claude-worktrees-project-luma-event-relevance-3d2cb0/20b70daa-81b3-4e23-a32b-4c43e22ed7be/scratchpad; node $S/apply-batch3.mjs SPEC.md CLAUDE.md && git diff --stat | tail -n 3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/project-luma-event-relevance-3d2cb0"}
