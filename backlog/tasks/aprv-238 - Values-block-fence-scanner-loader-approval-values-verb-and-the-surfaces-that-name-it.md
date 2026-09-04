@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-238'
 created_date: '2026-09-02 20:45'
-updated_date: '2026-09-04 22:21'
+updated_date: '2026-09-04 22:41'
 labels:
   - welfare
   - cli
@@ -80,3 +80,9 @@ NOT DONE, on purpose: no commit (the orchestrator commits), status left In Progr
 
 ONE THING FOR THE HUMAN. A plain `rm -f $TMPDIR/<scratch test log>` from this session classified files.delete.out_of_scope, went to the gate, and timed out after 540s with no decision; the request is still open against the TTL. The file was a test log under TMPDIR, entirely outside the repo. Not blocking (the run was redone under a different filename), but the practical effect of scratch-file cleanup reaching the phone is that sessions stop cleaning up after themselves rather than asking. Also in the journal.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shipped the values block reader and its surfaces: src/core/md-fence.ts (shared CommonMark fence scanner), src/core/values.ts (three-state loader that never touches the policy loader), approval values (banner on every form, the exact absent sentence, exit 1 with the load code when unreadable), wired in main, help, cli-reference and the verb registry, published as an MCP tool and withheld from guests, named in the MCP instructions and the approval instructions guide, plus a doctor values-block check. tests/values-inert.test.ts carries the behavioural half of invariant 10 for values. Verified with the targeted suites, and a full npm test (3067/3068, one skip) before the merge of origin/main; the affected suites (436 tests) and conformance rerun green after it.
+<!-- SECTION:FINAL_SUMMARY:END -->
