@@ -378,6 +378,11 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // remote-tracking refs, and it fetches nothing: the answer is as fresh as
       // the operator's last fetch, and outside a repository it is a skip.
       "main-behind-origin",
+      // APRV-208: whether a daemon is answering live draws for this log,
+      // appended for the same reason. It is the one row that reports whether
+      // `supervised-live` is actually live on this machine rather than gating
+      // at 100%, a difference invisible from inside the policy file.
+      "live-draw",
     ],
   );
   assert.deepEqual(
@@ -443,6 +448,11 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // git checkout, so there is no origin to be behind — the same absence
       // log-drift, log-advance-cadence and dark-sessions skip on (APRV-215).
       "skip",
+      // live-draw skips: the healthy fixture's policy declares no
+      // supervised-live class, so no draw is ever made and a missing socket is
+      // not a fault. The row only ever fails where a live class is declared and
+      // nothing is answering, which is the state it exists to name (APRV-208).
+      "skip",
     ],
   );
   for (const entry of parsed.checks) {
@@ -481,7 +491,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 21);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 22);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
@@ -940,9 +950,9 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  // 21 since APRV-215 appended `main-behind-origin`, the report half of
-  // `approval up`'s startup preflight.
-  assert.equal(parsed.checks.length, 21);
+  // 22 since APRV-208 appended `live-draw`, the row that says whether a daemon
+  // is answering supervised-live draws for this log.
+  assert.equal(parsed.checks.length, 22);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);
