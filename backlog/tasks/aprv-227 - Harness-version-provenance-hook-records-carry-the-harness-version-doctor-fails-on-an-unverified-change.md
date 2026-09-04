@@ -3,9 +3,11 @@ id: APRV-227
 title: >-
   Harness version provenance: hook records carry the harness version, doctor
   fails on an unverified change
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - 'agent:opus-lane-n'
 created_date: '2026-09-02 17:00'
+updated_date: '2026-09-04 21:16'
 labels:
   - enhancement
 dependencies: []
@@ -32,3 +34,15 @@ A harness upgrade (claude update, a global npm install, an unattended updater su
 - [ ] #5 `approval status` harness coverage figures are unaffected
 - [ ] #6 docs/claude-code-hook.md and docs/cursor-hook.md describe the field and the doctor row
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. New `src/core/harness-version.ts`: the HARNESS_BINARIES map (claude-code -> `claude`, cursor -> `cursor-agent`), `normalizeHarnessVersion` (first line, trimmed, printable-ASCII only, capped at HARNESS_VERSION_LIMIT=64) and `installedHarnessVersion(kind)` — one memoized spawnSync(`<binary> --version`) per process, 2s timeout, PATH-resolved with no configurable binary name (the seam `cli/gloss.ts` already uses), null on anything unclear.
+2. Schema: two OPTIONAL sibling payload names constrained regardless of event type, beside `est_cost_usd` — `harness` (enum claude-code|cursor) and `harness_version` (the normalized string). Deviation from the one-field brief, and the reason is stated in the notes: one log holds both harnesses' records, so doctor needs a discriminator to know which binary a recorded version is about. Additive: older records still validate and verify. New fixtures: 2 valid, 2 invalid (multi-line version, unknown harness).
+3. `core/gate.ts` `register` and `core/gate-window.ts` `recordGateBypass` accept the provenance as a CALL option (never from the envelope or the task file), and copy it into the payload only when both halves are present.
+4. `cli/hook.ts`: derive the pair once per process — the hook event's own `version` field where the harness supplies one, else `installedHarnessVersion`, else absent — and pass it to `register` and `recordGateBypass`. Nothing reads it back: no verdict, floor, budget, streak or sampling path takes it as an input.
+5. `cli/doctor.ts`: row `harness-version-unverified`, appended fourteenth at the end of the list. Harness kind from the `approval hook <kind>` command in this checkout's settings file; latest verified record carrying the pair for that kind; `<binary> --version`. Differs -> fail naming both versions and the self-test; no record, no harness on PATH, no hook entry -> skip with the reason. Row-count pins 21 -> 22.
+6. Docs: a 'Harness version provenance' section in docs/claude-code-hook.md and docs/cursor-hook.md — the field, the doctor row, and the promptless self-test (one supervised-class command piped through the hook writes a fresh task.registered and clears the row).
+7. Tests: tests/harness-version.test.ts (unit + hook end-to-end + AC4 identical-resolution + AC5 status), doctor rows, event-schema fixtures. Conformance regen per conformance/README.md, schema-validation vectors_version 1.3.0 -> 1.4.0 (minor: new vectors, no expectation moved), manifest rehashed.
+<!-- SECTION:PLAN:END -->

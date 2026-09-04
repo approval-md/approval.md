@@ -113,6 +113,14 @@ import {
   reportDarkSessions,
   type DarkSessionFinding,
 } from "../core/dark-session.js";
+import {
+  HARNESS_BINARY,
+  HARNESS_KINDS,
+  installedHarnessVersion,
+  isHarnessKind,
+  readHarnessProvenance,
+  type HarnessKind,
+} from "../core/harness-version.js";
 import { repoRoot } from "./git-scope.js";
 import {
   ScanError,
@@ -1759,6 +1767,197 @@ function checkHarnessWiring(dir: string): DoctorCheck {
 }
 
 // ---------------------------------------------------------------------------
+// harness version provenance (APRV-227)
+// ---------------------------------------------------------------------------
+
+/** The Cursor counterpart of {@link CLAUDE_SETTINGS}. */
+const CURSOR_HOOKS = join(".cursor", "hooks.json");
+
+/** Where a harness hook registration can be written, one file per harness. */
+const HARNESS_SETTINGS: readonly string[] = [CLAUDE_SETTINGS, CURSOR_HOOKS];
+
+/** `approval hook <kind>` inside a command string, whichever file shape holds it. */
+const HOOK_COMMAND = /\bapproval\s+hook\s+(claude-code|cursor)\b/u;
+
+/**
+ * Every harness this checkout registers an `approval hook` command for.
+ *
+ * Shape-agnostic on purpose: `.claude/settings.json` nests the command under
+ * `hooks.PreToolUse[].hooks[].command` and `.cursor/hooks.json` under
+ * `hooks.preToolUse[].command`, and a third harness would nest it somewhere
+ * else again. What all of them have in common is a STRING somewhere in the
+ * document that invokes this CLI, so the document is parsed as JSON (a file
+ * that is not JSON registers nothing this can read) and its string leaves are
+ * searched. The row this feeds can only SKIP when the answer is empty, so a
+ * miss costs a skip and never a false red.
+ */
+function registeredHarnesses(dir: string): HarnessKind[] {
+  const found = new Set<HarnessKind>();
+  for (const relative of HARNESS_SETTINGS) {
+    const path = join(dir, relative);
+    if (!existsSync(path)) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    } catch {
+      continue;
+    }
+    const stack: unknown[] = [parsed];
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (typeof node === "string") {
+        const match = HOOK_COMMAND.exec(node);
+        if (match !== null && isHarnessKind(match[1])) found.add(match[1]);
+        continue;
+      }
+      if (Array.isArray(node)) {
+        stack.push(...node);
+        continue;
+      }
+      if (typeof node === "object" && node !== null) {
+        stack.push(...Object.values(node as Record<string, unknown>));
+      }
+    }
+  }
+  return HARNESS_KINDS.filter((kind) => found.has(kind));
+}
+
+/**
+ * The last version each harness recorded, from the records the hook writes.
+ *
+ * Latest wins: the log is append-only and ordered, so the newest record naming
+ * a harness is the newest statement about that binary. Only `task.registered`
+ * and `gate.bypassed` are consulted, because those are the two the hook stamps
+ * (APRV-227); the pair appearing on any other event type was not written by the
+ * surface this row reports on and is ignored rather than trusted.
+ */
+function recordedHarnessVersions(
+  records: readonly EventRecord[],
+): Map<HarnessKind, { version: string; seq: number }> {
+  const latest = new Map<HarnessKind, { version: string; seq: number }>();
+  for (const record of records) {
+    if (record.event !== "task.registered" && record.event !== "gate.bypassed") continue;
+    const provenance = readHarnessProvenance(record.payload);
+    if (provenance === null) continue;
+    latest.set(provenance.harness, {
+      version: provenance.harness_version,
+      seq: record.seq,
+    });
+  }
+  return latest;
+}
+
+/**
+ * Has the harness binary changed under the hook since the log last saw it?
+ *
+ * ## What this row is for
+ *
+ * A harness upgrade swaps the binary that hosts the PreToolUse hook, and it
+ * happens on a human's own machine, unattended, at whatever hour an updater
+ * runs. A release can change the hook envelope semantics; the gate then answers
+ * a protocol nobody is speaking any more and the tool calls go through
+ * unclassified. Nothing in the log would say so, because the thing that changed
+ * is outside the log entirely.
+ *
+ * So this row compares the two facts it can actually establish: what
+ * `<binary> --version` says now, and what the last hook-written record says the
+ * binary was. A difference is not evidence of a fault, since most upgrades are
+ * fine. It is evidence that the gate has not been exercised since the binary
+ * changed, and the remedy is to exercise it. The self-test in
+ * `docs/claude-code-hook.md` does that and costs nobody a prompt.
+ *
+ * ## Why it fails rather than warns
+ *
+ * The reason `dark-sessions` fails. A row in the pass column would be saying
+ * "the gate may or may not still fire and I am content", and the whole content
+ * of an unverified change is that nobody has checked. It clears the moment one
+ * record is written under the new binary, which is a cheap and bounded remedy,
+ * and that is what makes a red row here honest rather than nagging.
+ *
+ * ## What it will not claim
+ *
+ * A recorded version is SELF-REPORTED (SPEC.md §11.1 invariant 4), so this row
+ * is careful about the direction it can move. A match ADDS nothing: not proof
+ * the hook fired, not proof the harness is honest, and no substitute for
+ * `harness-hook-wiring` or the CI-side guard. A mismatch is the only thing it
+ * asserts, and all it asserts about one is that a human should run the
+ * self-test. Nothing anywhere reads the field as an input to a verdict, a
+ * floor, a budget, a streak or a sampling draw.
+ *
+ * Three skips, each with its reason in the detail: no harness hook registered
+ * in this checkout; no hook-written record naming that harness yet (a fresh log
+ * has nothing to compare against, and inventing a baseline would be inventing
+ * the fact); and no such binary on PATH, since doctor may be running somewhere
+ * the harness is not installed, which is a state and not a fault.
+ */
+function checkHarnessVersion(dir: string, records: readonly EventRecord[]): DoctorCheck {
+  const check = "harness-version-unverified";
+  const root = repoRoot(dir);
+  const where = root === null ? dir : root;
+  const kinds = registeredHarnesses(where);
+  if (kinds.length === 0) {
+    return {
+      check,
+      status: "skip",
+      detail: `${where} registers no \`approval hook\` command in ${HARNESS_SETTINGS.join(" or ")}, so no harness hosts the hook here and there is no installed version for the log to be behind`,
+    };
+  }
+
+  const recorded = recordedHarnessVersions(records);
+  const mismatched: string[] = [];
+  const matched: string[] = [];
+  const unknown: string[] = [];
+
+  for (const kind of kinds) {
+    const last = recorded.get(kind);
+    if (last === undefined) {
+      unknown.push(
+        `${kind}: no hook-written task.registered or gate.bypassed names a version yet, so there is no baseline to compare against`,
+      );
+      continue;
+    }
+    const installed = installedHarnessVersion(kind);
+    if (installed === null) {
+      unknown.push(
+        `${kind}: \`${HARNESS_BINARY[kind]} --version\` gave no usable answer here (not on PATH, a non-zero exit, or output this runtime will not record), so what is installed cannot be established; the log last saw ${JSON.stringify(last.version)} at seq ${String(last.seq)}`,
+      );
+      continue;
+    }
+    if (installed === last.version) {
+      matched.push(
+        `${kind} ${JSON.stringify(installed)} matches the version on the hook record at seq ${String(last.seq)}`,
+      );
+      continue;
+    }
+    mismatched.push(
+      `${kind} is installed at ${JSON.stringify(installed)} and the last hook-written record (seq ${String(last.seq)}) was issued by ${JSON.stringify(last.version)}`,
+    );
+  }
+
+  if (mismatched.length > 0) {
+    const first = kinds[0] as HarnessKind;
+    return {
+      check,
+      status: "fail",
+      detail: `the harness binary changed and the gate has not been exercised since: ${mismatched.join("; ")}. A release can change the hook envelope semantics, so until one record is written under the new binary nothing here shows the hook still fires. The recorded version is self-reported and reduces nothing: a match would not have proved the hook fired either, and what a mismatch says is that nobody has looked.`,
+      fix: `approval hook ${first} --dir ${where} < one PreToolUse event for a supervised-class command — the self-test in docs/${first === "cursor" ? "cursor" : "claude-code"}-hook.md. It prompts nobody and writes one task.registered carrying the installed version.`,
+    };
+  }
+  if (matched.length > 0) {
+    return {
+      check,
+      status: "pass",
+      detail: `${matched.join("; ")}${unknown.length === 0 ? "" : `; ${unknown.join("; ")}`}. A match is not proof the hook fired; it is the absence of the one thing this row can see, an unverified change of the binary hosting it.`,
+    };
+  }
+  return {
+    check,
+    status: "skip",
+    detail: `${where} registers ${kinds.join(", ")} and no comparison could be made: ${unknown.join("; ")}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // dark sessions (APRV-192)
 // ---------------------------------------------------------------------------
 
@@ -2043,6 +2242,11 @@ export function commandDoctor(
       // network to be more accurate would be acting on its own account, so the
       // answer is as fresh as the operator's last fetch and says so.
       checkMainBehindOrigin(logPath, queuePath, root),
+      // APRV-227: appended, fourteenth time, same reason. The only row that
+      // asks a question about a binary OUTSIDE this repository, and it asks it
+      // the one way a log can: what the last record said the harness was,
+      // against what `<binary> --version` says it is now.
+      checkHarnessVersion(dir, verified.records),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

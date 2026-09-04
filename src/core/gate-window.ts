@@ -54,6 +54,7 @@
  */
 
 import { tick, type ClockOptions } from "./clock.js";
+import { type HarnessProvenance } from "./harness-version.js";
 import { attemptsOf, withHeadRetry } from "./head-retry.js";
 import {
   appendEvent,
@@ -535,6 +536,18 @@ export interface GateBypassInput {
   sessionId?: string;
   toolUseId?: string;
   cwd?: string;
+  /**
+   * Which harness binary is printing the allow, and at what version (APRV-227).
+   *
+   * Derived by the hook process from its own event and its own PATH and handed
+   * in here; copied into the payload verbatim when present, omitted entirely
+   * when absent. Nothing reads it back — the window was authorized by a human's
+   * `gate.opened` and this pair moves no part of that (SPEC.md §11.1 invariant
+   * 4, and `core/harness-version.ts`'s header). What it does is let a reviewer
+   * of a bypass see which binary was standing in front of the gate at the time,
+   * which on this path is the record a human actually goes back and reads.
+   */
+  harness?: HarnessProvenance;
 }
 
 /**
@@ -612,6 +625,13 @@ function attemptBypass(
         ...(input.sessionId === undefined ? {} : { session_id: input.sessionId }),
         ...(input.toolUseId === undefined ? {} : { tool_use_id: input.toolUseId }),
         ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+        // APRV-227: both halves or neither.
+        ...(input.harness === undefined
+          ? {}
+          : {
+              harness: input.harness.harness,
+              harness_version: input.harness.harness_version,
+            }),
       },
     },
     appendOptionsOf(options, read.head),
