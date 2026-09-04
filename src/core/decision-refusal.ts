@@ -90,6 +90,15 @@
  *   author.
  * - **Refusals stay machine-readable and distinct** (§11.1). The gate's code is
  *   copied verbatim; nothing here invents, merges or softens one.
+ *
+ * ## No attestation check, deliberately
+ *
+ * Nothing here asks whether the policy is attested, for the reason `reject` and
+ * `revoke` do not: this write confers no authority. Refusing to record a refusal
+ * because a file changed would be the strict direction pointing the wrong way,
+ * and the case where it would bite hardest is `policy-not-attested` itself —
+ * exactly the refusal an operator most needs the log to remember. The write
+ * boundary still validates every record, so what lands is still constrained.
  */
 
 import { tick } from "./clock.js";
@@ -106,6 +115,20 @@ export const DECISION_REFUSAL_ACTOR = "system:gate";
 
 /** The runtime's withdrawal reason, closed to requesters by the event schema. */
 export const POLICY_DRIFT_REASON = "policy-drift";
+
+/**
+ * The decisions this module records: a person's, and nobody else's.
+ *
+ * Matches `core/gate.ts`'s own `HUMAN_ACTOR`, and it is the FIRST thing checked
+ * rather than a schema refusal caught late. `actor-not-human` is a real gate
+ * refusal — a misconfigured channel claiming an `agent:` identity produces it —
+ * and it is precisely the case where no human decided anything, so there is no
+ * spent attention for a record to account for. Letting it through would also
+ * mean composing a record whose `payload.actor` the event schema then refuses,
+ * which is a failure discovered at the write boundary rather than a rule stated
+ * where it belongs.
+ */
+const HUMAN_ACTOR = /^human:.+/u;
 
 /** Who decided what, on which surface — everything the record needs about the tap. */
 export interface RefusedDecision {
@@ -145,8 +168,11 @@ export interface RefusalRecordFailure {
 export type RecordRefusedDecisionResult =
   | {
       ok: true;
-      /** The `audit.decision_refused` record. */
-      audit: EventRecord;
+      /**
+       * The `audit.decision_refused` record, or `null` when the refused actor
+       * was not a person and there was therefore nothing to record.
+       */
+      audit: EventRecord | null;
       /** The `approval.withdrawn` record, on `policy-drift` alone; `null` otherwise. */
       withdrawn: EventRecord | null;
     }
@@ -179,6 +205,10 @@ export function recordRefusedDecision(
   refusal: RefusalFacts,
   options: GateOptions = {},
 ): RecordRefusedDecisionResult {
+  // No person, no record. See {@link HUMAN_ACTOR}: `actor-not-human` is the
+  // refusal a misconfigured channel gets, and it is the one refusal that says
+  // nobody's attention was spent.
+  if (!HUMAN_ACTOR.test(decided.actor)) return { ok: true, audit: null, withdrawn: null };
   return withHeadRetry(attemptsOf(options.retryOnHeadMoved), () =>
     attemptRecord(logPath, decided, refusal, options),
   );

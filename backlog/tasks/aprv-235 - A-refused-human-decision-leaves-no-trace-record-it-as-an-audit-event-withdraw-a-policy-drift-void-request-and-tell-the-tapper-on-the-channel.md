@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-l'
 created_date: '2026-09-02 20:26'
-updated_date: '2026-09-04 22:56'
+updated_date: '2026-09-04 23:19'
 labels:
   - channels
   - log
@@ -47,3 +47,59 @@ Seen 2026-09-02 after the seq 13704 ceremony: Carter tapped approve on a request
 9. Regen conformance vectors per the ritual (npm run build && node scripts/regen-conformance-vectors.mjs); schema-validation bumps MINOR to 1.4.0 (new fixtures, no moved expectation).
 10. git fetch && git merge --no-edit origin/main, resolve keeping both intents, re-run the touched suites, then npm test and oxlint.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## AC5 — draft amendment to section 5.2, for sign-off
+
+Not applied: the spec file is a protected path in this lane, so the sentence is
+drafted here and a human decides whether it lands. It states the choice the task
+asked to be stated, that HUMAN decisions refused are logged and gate refusals to
+AGENTS are not.
+
+> **A refused human decision is recorded; a refused agent is only told.** When
+> the gate refuses a decision made by a `human:` actor through a channel or the
+> CLI, the surface that collected the gesture MUST append one audit-tier record,
+> `audit.decision_refused`, naming the approver, the action key, the decision
+> attempted, the channel that collected it, and the gate's refusal code verbatim.
+> The record is authored by the runtime (a `system:` actor) and grants nothing:
+> no verdict, budget, streak or sampling path may read it, and it MUST NOT
+> settle, re-open, or otherwise move the request it names. Human attention is the
+> audit budget (section 11), and an approver's answer spends it whether or not an
+> authorization comes out the other end; a log holding no trace of that spend
+> cannot afterwards explain why a request sat unanswered. Refusals handed to
+> `agent:` actors are NOT recorded, and the asymmetry is deliberate: an agent
+> reads the code, stops or asks again, and has spent nothing a record would
+> account for, while recording every agent-side refusal would put the runtime's
+> busiest path into the append path with no reader for the result. Where the
+> refusal is `policy-drift`, which declares the REQUEST void rather than merely
+> declining this decision, the surface MUST additionally append
+> `approval.withdrawn` for that request, authored `system:` with the reason
+> `policy-drift` — the one reason closed to requesters, as `system:` remains
+> closed to the other three (section 8) — so that the queue, the queue
+> projection and every channel stop offering a question no answer can settle. The
+> channel that collected the gesture MUST tell the person: a push channel edits
+> its delivery to a terminal state naming the refusal and disarms its decision
+> affordance, a pull channel prints the same line, and the line is the same line.
+> (Amended APRV-235.)
+
+Section 8's withdrawal paragraph needs one consequential clause in the same
+sign-off. Where it reads that the actor MUST NOT be `system:` and that the
+reason is closed to three values, it should read:
+
+> The actor MUST equal the actor of the matching `approval.requested`, and MUST
+> NOT be `system:`, because the runtime's way of ending a request it was not
+> asked to end is the TTL — with one exception, added by APRV-235 and bounded by
+> its reason. The reason is recorded and closed to four values: `timeout`,
+> `cancelled` and `superseded` are the requester's, and `policy-drift` is the
+> runtime's. The pairing is bidirectional and MUST be enforced at the write
+> boundary: `system:` is admitted only with `policy-drift`, and `policy-drift`
+> only with `system:`. What justifies the exception is that the drift verdict is
+> as objective as the clock the TTL exception rests on, and is IN the record: the
+> policy hash the request pinned differs from the hash attested now, the gate
+> already refuses every decision on such a request, and a reader re-derives the
+> verdict from two hashes the log carries. A requester able to spell
+> `policy-drift` would be dressing its own cancellation as the gate's verdict
+> about the policy, which is why the closure runs both ways.
+<!-- SECTION:NOTES:END -->
