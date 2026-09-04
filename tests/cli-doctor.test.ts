@@ -502,7 +502,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 22);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 23);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
