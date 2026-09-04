@@ -3,11 +3,11 @@ id: APRV-233
 title: >-
   Daemon advance: recording the outcome loses the race with concurrent appends,
   leaves the execution dangling, and re-runs the advance every tick
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-r'
 created_date: '2026-09-02 20:15'
-updated_date: '2026-09-04 21:33'
+updated_date: '2026-09-04 23:35'
 labels:
   - daemon
   - bug
@@ -28,7 +28,7 @@ Seen 2026-09-02 on Carter's approval up --advance right after APRV-211 (PR #235)
 - [x] #2 A test proves that after a finish failure the next tick reconciles the dangling execution and does not run another advance inside --advance-interval for the same owed span
 - [x] #3 A test proves the log append lock is not held while the advance child runs (a concurrent appender succeeds within the hook's 2 s window during a 5 s advance stub)
 - [x] #4 The 2026-09-02 transcript (advance at ticks 2, 5, 8; dangling daemon-log-advance-1-13984 and -13991) is explained in the notes
-- [ ] #5 npm test passes; lint clean
+- [x] #5 npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -256,3 +256,9 @@ than a detail of this task. The advance wraps its own call, which is the caller
 whose incident this is. If the orchestrator wants the core-level version, it is
 a one-line change plus whatever the other callers' tests say.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The cadence advance's outcome record goes through the shared head-moved retry, a dangling daemon advance is reconciled on the next tick with the outcome observed, and no outcome resets the cadence so --advance-interval holds; the append lock is proven not held while the advance child runs. Verified by the daemon-advance, daemon-advance-adopt, log-advance and cli-doctor suites (69 pass) on the merged branch and CI's full run; merged in PR #259.
+<!-- SECTION:FINAL_SUMMARY:END -->
