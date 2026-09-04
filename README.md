@@ -187,7 +187,11 @@ Walkthrough: [examples/mcp-demo.md](examples/mcp-demo.md).
 
 A harness that can simply run commands needs neither surface: `request`, `wait`,
 `run` is how sessions in this repository take manual-class actions
-([docs/dogfood-cutover.md](docs/dogfood-cutover.md)).
+([docs/dogfood-cutover.md](docs/dogfood-cutover.md)). The task-file side of that
+flow, on a Backlog.md board with a policy of its own, is the worked example in
+[examples/backlog-md-project/README.md](examples/backlog-md-project/README.md):
+one envelope on one task file, then `register`, `request`, `wait`, `run`, with
+what each prints. There is no Backlog.md adapter, and the example says why.
 
 ## Put approvals on your phone
 

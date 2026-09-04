@@ -83,7 +83,7 @@ import {
 import { readTaskFile } from "../core/frontmatter.js";
 import { instanceFindings, instanceHomeFor, instanceIdFor } from "../core/instance.js";
 import type { EventRecord } from "../core/log.js";
-import { compareChains, describeDrift, describeHead } from "../core/log-reconcile.js";
+import { checkLogAnchor } from "./log-anchor.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
 import { DEFAULT_TASKS_DIR, latestRegistration } from "../core/registration.js";
@@ -113,7 +113,7 @@ import {
   reportDarkSessions,
   type DarkSessionFinding,
 } from "../core/dark-session.js";
-import { repoPath, repoRoot, showBlob } from "./git-scope.js";
+import { repoRoot } from "./git-scope.js";
 import {
   ScanError,
   checkBuildFreshness,
@@ -1401,94 +1401,62 @@ function checkKeychainScope(logPath: string, load: PolicyLoadResult): DoctorChec
  *
  * This is the doctor mitigation named in APRV-104's fork-2 notes: the fork that
  * incident produced was invisible until something tried to append onto it, and
- * the instrument a person reaches for first is `approval doctor`. So the
- * comparison lives here too, and it is the SAME comparison `approval log sync`
- * runs before deciding whether to restore its snapshot
- * (`core/log-reconcile.ts`). Two implementations would be two chances to
- * disagree about whether a repository has forked, and that is the one question
- * where disagreement is intolerable.
+ * the instrument a person reaches for first is `approval doctor`.
+ *
+ * Since APRV-219 the row IS `approval log verify --anchor`'s check
+ * (`cli/log-anchor.ts`), rather than a second comparison written beside it. Two
+ * implementations were two chances to disagree about whether a repository has
+ * forked, and that is the one question where disagreement is intolerable — and
+ * the disagreement duly arrived: APRV-210 recorded this row printing "this log
+ * has never been committed" in a checkout where `git show HEAD:<log>` printed
+ * the log, because it built its blob spec from an unresolved path. The anchor
+ * check resolves that path through `git-scope.repoPath`, realpath on both
+ * sides, and looks at every rev a committed copy may live at rather than only
+ * `HEAD`.
  *
  * Reads only. It never fetches, never pulls and never writes: the committed
  * side comes out of git's object store with `git show`.
  */
-function checkLogDrift(logPath: string): DoctorCheck {
-  const root = repoRoot(dirname(logPath));
-  if (root === null) {
-    return {
-      check: "log-drift",
-      status: "skip",
-      detail: `${logPath} is not inside a git repository, so there is no committed copy to compare it against`,
-    };
-  }
-  const relative = repoPath(root, logPath);
-  const blob = showBlob(root, "HEAD", relative);
-  if (blob === null) {
-    return {
-      check: "log-drift",
-      status: "skip",
-      detail: `git has no HEAD:${relative} blob: this log has never been committed, so every record in it is uncommitted by definition`,
-      fix: "approval log advance --dry-run — what a first advance would carry",
-    };
-  }
-
-  let workingText: string;
-  try {
-    workingText = readFileSync(logPath, "utf8");
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === "ENOENT") workingText = "";
-    else {
+function checkLogDrift(logPath: string, records: readonly EventRecord[]): DoctorCheck {
+  const outcome = checkLogAnchor({ logPath, records });
+  switch (outcome.status) {
+    // A SKIP carries no `fix` — the rule every non-git fixture in
+    // `tests/cli-doctor.test.ts` pins. A check that could not look has nothing
+    // to prescribe, so what a reader might still want to run is said in the
+    // detail. A pass that owes records keeps its `fix`, as this row always has.
+    case "skip":
       return {
         check: "log-drift",
-        status: "fail",
-        detail: `${logPath} could not be read: ${
-          cause instanceof Error ? cause.message : String(cause)
-        }`,
-        fix: "approval log verify — the chain report, once the file is readable",
+        status: "skip",
+        detail: `${outcome.reason}. \`approval log advance --dry-run\` shows what a first advance would carry`,
       };
-    }
-  }
-
-  const compared = compareChains(
-    { label: `the working log ${logPath}`, text: workingText },
-    { label: `HEAD:${relative}`, text: blob.toString("utf8") },
-  );
-  if (!compared.ok) {
-    return {
-      check: "log-drift",
-      status: "fail",
-      detail: `the two copies cannot be compared: ${oneLine(compared.message)}`,
-      fix: "approval log verify — nothing is decided from a log that does not verify",
-    };
-  }
-
-  const drift = compared.drift;
-  switch (drift.relation) {
-    case "equal":
+    case "pass":
       return {
         check: "log-drift",
         status: "pass",
-        detail: `working and committed are the same chain (${describeHead(drift.workingHead)})`,
-      };
-    case "ahead":
-      return {
-        check: "log-drift",
-        status: "pass",
-        detail: `${describeDrift(drift)} — the ordinary state of a checkout that has been recording decisions`,
-        fix: "approval log advance — commit those records onto a records branch",
+        detail:
+          outcome.ahead === 0
+            ? outcome.detail
+            : `${outcome.detail} — the ordinary state of a checkout that has been recording decisions`,
+        ...(outcome.ahead === 0
+          ? {}
+          : { fix: "approval log advance — commit those records onto a records branch" }),
       };
     case "behind":
       return {
         check: "log-drift",
         status: "pass",
-        detail: `${describeDrift(drift)} — the committed copy carries records this working file does not`,
+        detail: `${outcome.detail} — the committed copy carries records this working file does not`,
         fix: "approval log sync — fast-forward, then reconcile the chain",
       };
     case "diverged":
       return {
         check: "log-drift",
         status: "fail",
-        detail: `${describeDrift(drift)} — two chains, not one. Hash chains do not merge and nothing in this runtime will re-chain them: which of these is the log is a human decision`,
-        fix: "approval log verify — then `git log -- .approval/log/events.jsonl` for who committed the other chain",
+        detail: `${oneLine(
+          outcome.message,
+        )} Hash chains do not merge and nothing in this runtime will re-chain them: which of these is the log is a human decision`,
+        fix: "approval log verify --anchor — then `git log -- .approval/log/events.jsonl` for who committed the other chain",
       };
   }
 }
@@ -1546,11 +1514,24 @@ function checkAdvanceCadence(logPath: string, records: readonly EventRecord[]): 
       ? "no daemon advance cycle is in this log yet (the cadence is opt-in: `approval daemon run --advance`)"
       : `the last daemon advance (through seq ${String(last.toSeq)}, ${last.ts}) ended ${last.outcome}${why}`;
 
+  // Which ref the count came from (APRV-210). A row that says "9,875 records
+  // are not yet on a records branch" is unreadable without it: a rev that
+  // resolved to nothing and a rev that carried nothing produce the same number
+  // and are completely different facts, and this row reported the first as the
+  // second on a log whose first 8,379 records had been merged to the trunk an
+  // hour earlier.
+  const from =
+    state.publishedRev === null
+      ? `no rev this checkout can see carries a copy of this chain (tried ${state.revs.join(", ")})`
+      : `read from ${state.publishedRev}`;
+
   if (state.pending === 0) {
     return {
       check,
       status: "pass",
-      detail: `every record through seq ${String(state.publishedSeq)} is on a records branch or the trunk; ${attempt}`,
+      detail: `every record through seq ${String(
+        state.publishedSeq,
+      )} is on a records branch or the trunk (${from}); ${attempt}`,
     };
   }
   return {
@@ -1560,7 +1541,7 @@ function checkAdvanceCadence(logPath: string, records: readonly EventRecord[]): 
       state.substantive,
     )} of them are not the daemon's own advance bookkeeping); published through seq ${String(
       state.publishedSeq,
-    )}, working head seq ${String(state.workingSeq)}. ${attempt}`,
+    )} (${from}), working head seq ${String(state.workingSeq)}. ${attempt}`,
     fix: "approval log advance --pr — publish them now, or run the daemon with --advance",
   };
 }
@@ -2028,7 +2009,7 @@ export function commandDoctor(
       checkEnvironment(logPath, dir, policyLoad),
       // APRV-125: appended, fourth time, same reason. The fork this reports is
       // the one APRV-104 could only find by hand.
-      checkLogDrift(logPath),
+      checkLogDrift(logPath, verified.records),
       // APRV-127: appended, fifth time, same reason.
       checkReconciliation(verified.records),
       // APRV-145: appended, sixth time, same reason.

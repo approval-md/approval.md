@@ -78,6 +78,72 @@ appears only when there is something to report:
 Human output: the status and head on stdout; reason, first bad seq, anomalies,
 and the full message on stderr.
 
+### `--anchor`: the check the file cannot make about itself (APRV-219)
+
+Everything above is a claim about one file's internal consistency, and the
+chain is unkeyed. A process with write access to `.approval/log/events.jsonl`
+can truncate it and recompute a chain that walks clean from genesis; nothing
+inside the file contradicts that, which is why the conformance suite's
+`chain-verification/truncation-unanchored` vector says an implementation
+reporting corruption there is wrong. The word doing the work in that vector's
+name is *unanchored*.
+
+The anchor is the copy of the log somebody else already holds: a records branch
+pushed by the advance cadence, a log sync's fast-forward, the trunk behind a
+protected branch. `--anchor` reads the newest committed copy this checkout can
+see and checks two things about the working file:
+
+1. its first N bytes hash to the anchored copy's digest, where N is the
+   anchored copy's byte length; and
+2. its record at the anchored head's `seq` carries the anchored head's hash.
+
+The byte check is the stricter of the two: a rewrite that preserves every
+record's own hash while changing the bytes around them still fails it.
+
+Which revs are consulted, in order: `refs/approval/advance/*` (what a previous
+`approval log advance` left behind), `refs/remotes/<remote>/<base>`,
+`refs/remotes/<remote>/records-log-<today>`, then `HEAD`. The one that reaches
+the highest `seq` wins. `--anchor-rev <rev>` names one instead, and implies
+`--anchor`.
+
+Git is READ — `git rev-parse <rev>:<path>` and `git show` — and never fetched:
+a verification path that went to the network would be a verification path that
+fails when the network does. Nothing is written: not the log, not a ref, not a
+cache file.
+
+Four outcomes:
+
+| outcome | exit | meaning |
+|---|---|---|
+| `pass` | 0 | the working log carries the anchored prefix byte for byte |
+| `behind` | 0 | the working log is a strict prefix of the anchored copy; `approval log sync` fast-forwards it |
+| `skip` | 0 | no committed copy was found; the reason is printed on stderr |
+| `anchor-diverged` | 1 | the two contradict each other |
+
+A skip is never a pass. A repository with no committed copy of the log has not
+established that the working log is honest; it has failed to say anything about
+it, and the reason names every rev that was tried.
+
+`--json` adds an `anchor` object, and a divergence replaces the verdict rather
+than qualifying it:
+
+```
+pass       {"status":"clean","records":9,"head":{...},
+            "anchor":{"status":"pass","rev":"refs/remotes/origin/main",
+                      "seq":7,"hash":"<64 hex>","bytes":2412}}
+skip       {"status":"clean",...,"anchor":{"status":"skip","reason":"..."}}
+diverged   {"status":"anchor-diverged","records":9,"head":{...},
+            "anchor":{"status":"diverged","rev":"...","seq":7,
+                      "hash":"<64 hex>","bytes":2412,"message":"..."},
+            "message":"..."}
+```
+
+`anchor-diverged` is its own frozen refusal union
+(`conformance/vectors/refusal-unions.v1.json`, `anchor_refusal_codes`).
+`approval doctor`'s `log-drift` row is this same check, and `approval daemon
+run` makes it at startup and on every full prefix re-proof — see
+[git evidence](git-evidence.md).
+
 ## log tail
 
 The chain is verified first. On a torn tail the intact records are printed and the
@@ -418,9 +484,20 @@ create` with a title naming the seq and a body stating the one-commit rule. Merg
 that PR with a merge commit, so the policy edit and its attestation stay one
 commit on main.
 
-Detection runs `gh api repos/{owner}/{repo}/branches/<default>/protection`: exit
-0 is protected, 404 is unprotected, and no `gh` / no GitHub remote / no readable
-answer is UNKNOWN. It is read-only and it never fails the command: a probe that
+Detection reads two endpoints, because GitHub protects a branch two ways and
+answers each from its own place (APRV-232). The classic probe is `gh api
+repos/{owner}/{repo}/branches/<default>/protection`: exit 0 is protected, and
+that ends the lookup. On a 404 (or any other refusal) the rulesets probe runs:
+`gh api repos/{owner}/{repo}/rules/branches/<default>` lists the rules that
+govern the branch, and a non-empty list (a merge queue, required status checks,
+whatever the ruleset carries) is protected; an empty list, or a 404, is no
+rules. Resolution: either probe protected is protected; classic 404 AND no
+rules is unprotected; anything else (no `gh`, no GitHub remote, a token that
+cannot read either endpoint, a body that is not JSON) is UNKNOWN. The classic
+endpoint alone answered 404 for this project's own main, which a ruleset
+governs, so the pre-APRV-232 probe called it unprotected and every ceremony
+printed the remote's GH013 rejection before recovering onto the branch flow.
+Both probes are read-only and neither ever fails the command: a probe that
 could not answer leaves an attestation that already happened exactly where it
 was. When the direct flow is about to push a protected default branch, the
 report prints a one-line warning before the push command rather than letting
@@ -1009,7 +1086,12 @@ to decide whether to fix itself, stop retrying, or ask a human.
   nothing is authorized from a log that does not verify.
 - `append-failed` — the append itself failed; the exit code follows the cause.
   `head-moved` means the log grew between this command's read and its write, so
-  nothing was written.
+  nothing was written. Since APRV-236 you see it only after the command has
+  re-read the log, re-run its checks against the fresh head and tried again, up
+  to three times, and the message says how many attempts were made. One lost race
+  no longer surfaces at all, and a request something else settled in the window
+  is refused for that (`already-decided`, `request-withdrawn`, `expired`,
+  `policy-drift`) rather than for the race.
 
 ## token
 
@@ -2716,6 +2798,15 @@ error before the first tick, and the `started` line prints the mode in force.
 
 **Each tick, in order.**
 
+- ANCHOR (APRV-219) — on every tick whose reads re-proved the prefix in full,
+  the working log's prefix is compared against the newest committed copy of it,
+  exactly as `approval log verify --anchor` does. A divergence STOPS the daemon
+  at exit 1 with the outcome `anchor-diverged`, distinct from `log-corrupt`: one
+  means the file contradicts itself, the other that it contradicts the record of
+  it, and neither is a log to append onto. A working log that is a strict prefix
+  of the committed copy is an `anchor-behind` warning, not a stop. The `started`
+  line names the rev and seq this run is held to (`"anchor"`), and the tick line
+  carries the comparison it made. Git is read, never fetched.
 - ENVELOPE DRIFT — a task file whose `state:` contradicts the log gets an
   `envelope.drift` event (actor `system:daemon`), once per claim.
 - TTL SWEEP — every live request whose TTL lapsed gets an `approval.expired`
