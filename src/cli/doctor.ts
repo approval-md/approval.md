@@ -103,7 +103,7 @@ import {
   snapshotPathFor,
   snapshotSummary,
 } from "../core/verified-snapshot.js";
-import { drawSocketPathFor } from "../core/live-draw.js";
+import { drawSocketPathFor, liveClassesOf } from "../core/live-draw.js";
 import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { policyWebPort } from "./channel-web.js";
@@ -736,12 +736,9 @@ function checkVerifiedSnapshot(logPath: string): DoctorCheck {
  */
 function checkLiveDraw(logPath: string, load: PolicyLoadResult): DoctorCheck {
   const path = drawSocketPathFor(logPath);
-  const liveClasses = load.ok
-    ? Object.entries(load.policy.classes ?? {})
-        .filter(([, rule]) => rule?.autonomy === "supervised-live")
-        .map(([pattern]) => pattern)
-        .sort()
-    : [];
+  // The same helper the daemon's server asks, so this row and the process that
+  // serves draws can never disagree about whether the file declares one.
+  const liveClasses = load.ok ? liveClassesOf(load.policy) : [];
   if (liveClasses.length === 0) {
     return {
       check: "live-draw",

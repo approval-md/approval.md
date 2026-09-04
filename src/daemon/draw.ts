@@ -51,6 +51,7 @@ import {
   drawMac,
   drawSocketPathFor,
   isHex64,
+  liveClassesOf,
   type DrawAnswer,
   type DrawQuestion,
 } from "../core/live-draw.js";
@@ -90,7 +91,7 @@ import type { EventRecord } from "../core/log.js";
  */
 export function drawServerFor(
   options: Omit<DrawServerOptions, "secret"> & { env?: NodeJS.ProcessEnv },
-): { ok: true; server: DrawServer } | { ok: false; reason: LiveSelectorUnavailableReason; message: string } {
+): { ok: true; server: DrawServer } | { ok: false; reason: DrawUnavailableReason; message: string } {
   const where: LoadPolicyOptions =
     options.policy.file !== undefined
       ? { file: options.policy.file }
@@ -98,6 +99,22 @@ export function drawServerFor(
   if (options.schemaDir !== undefined) where.schemaDir = options.schemaDir;
   const load = loadPolicy(where);
   const env = options.env ?? process.env;
+
+  // Asked FIRST, and answered quietly. A policy with no `supervised-live` class
+  // makes no draw at any rate, so an unset secret in this shell is not a fact
+  // about that operator's configuration: it is the ordinary state of every
+  // daemon that has never used the setting, and a warning printed on every start
+  // would be the noise that teaches an operator to stop reading the others. It
+  // has to come before the selector because `core/sampler.ts`'s refusals are
+  // worded for a caller that already knows a live class is in play ("declares a
+  // supervised-live class but names no ...", which would be false here).
+  if (load.ok && liveClassesOf(load.policy).length === 0) {
+    return {
+      ok: false,
+      reason: "no-live-class",
+      message: `${load.source.filename} declares no supervised-live class, so no draw is ever made and none is served.`,
+    };
+  }
 
   // The availability question is asked through `core/sampler.ts`, so this and
   // the in-process draw agree on what "no usable secret" means and on the words
@@ -123,6 +140,17 @@ export function drawServerFor(
     }),
   };
 }
+
+/**
+ * Why {@link drawServerFor} built no server.
+ *
+ * The four inherited from `core/sampler.ts` are all worth telling an operator
+ * about: each one means a class they declared live is gating at 100%.
+ * `no-live-class` is the fifth and the only SILENT one, because it means the
+ * operator never asked for any of this — the reason a caller must branch on it
+ * rather than print every refusal alike.
+ */
+export type DrawUnavailableReason = LiveSelectorUnavailableReason | "no-live-class";
 
 /** Why the server declined to listen. Reported, never fatal to the daemon. */
 export type DrawServeRefusal =

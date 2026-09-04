@@ -654,7 +654,12 @@ export function commandDaemonRun(
   if (!boolFlag(flags, "--no-draw")) {
     const draw = drawServerFor({ logPath, policy });
     if (draw.ok) options.draw = draw.server;
-    else {
+    // `no-live-class` is silent: the policy declares nothing live, so nothing is
+    // gating that would not have gated anyway and there is no operator decision
+    // to inform. Every other refusal names a class this policy declared live and
+    // is now gating at 100%, which is a thing to be told once at startup rather
+    // than to infer from a month of taps.
+    else if (draw.reason !== "no-live-class") {
       streams.err(
         `approval: live draws will not be served (${draw.reason}): ${draw.message} Every supervised-live action gates to a human until the sampling secret resolves in this daemon's own environment.\n`,
       );

@@ -134,6 +134,29 @@ export function drawSocketPathFor(logPath: string): string {
   return join(drawDirFor(logPath), DRAW_SOCKET_NAME);
 }
 
+/**
+ * Which class patterns this policy declares `supervised-live`, sorted.
+ *
+ * The one question that decides whether any of this machinery is the operator's
+ * business at all: with no live class, no draw is ever made, so a missing
+ * socket is not a fault, an unset secret is not a misconfiguration, and neither
+ * deserves a doctor row or a line on the daemon's stderr. Shared by the doctor
+ * row and the daemon's server so the two cannot come to different conclusions
+ * about the same file.
+ *
+ * `defaults.autonomy` is not consulted, and cannot be: `supervised-live` carries
+ * a required rate that `defaults` has no field to hold, which `policy.schema.json`
+ * enforces. Only a class rule can be live.
+ */
+export function liveClassesOf(policy: {
+  classes?: Record<string, { autonomy?: string } | undefined>;
+}): string[] {
+  return Object.entries(policy.classes ?? {})
+    .filter(([, rule]) => rule?.autonomy === "supervised-live")
+    .map(([pattern]) => pattern)
+    .sort();
+}
+
 // ---------------------------------------------------------------------------
 // The question and the answer
 // ---------------------------------------------------------------------------

@@ -691,7 +691,9 @@ export function commandUp(
   if (!boolFlag(flags, "--no-draw")) {
     const draw = drawServerFor({ logPath, policy });
     if (draw.ok) options.draw = draw.server;
-    else {
+    // Silent on `no-live-class`, for the reason `approval daemon run` states:
+    // a policy that declares nothing live has nothing to be told about.
+    else if (draw.reason !== "no-live-class") {
       streams.err(
         `approval: live draws will not be served (${draw.reason}): ${draw.message} Every supervised-live action gates to a human until the sampling secret resolves in this process's own environment.\n`,
       );

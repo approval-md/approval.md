@@ -779,6 +779,15 @@ test("the daemon holds the secret, the asker holds none, and the draw crosses be
 
     // The daemon's first line says where it is serving draws, so an operator can
     // see whether supervised-live is live without asking the process anything.
+    //
+    // WAITED for rather than read straight off, because the socket is bound
+    // before the line is written and everything between the two is other
+    // startup work — APRV-219's anchor resolution shells out to git twice
+    // there. A draw answered before the line lands is the daemon behaving
+    // correctly, so the test waits for the line instead of racing it.
+    for (let waited = 0; waited < 200 && !/"event":"started"/u.test(stdout); waited += 1) {
+      await new Promise((settle) => setTimeout(settle, 50));
+    }
     assert.match(stdout, /"draw":"[^"]*draw\.sock"/u);
     // And nothing it printed carries the secret.
     assert.ok(!stdout.includes(SECRET));
