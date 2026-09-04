@@ -1370,19 +1370,19 @@ Usage:
 
 Flags:
   --out <path>     write the draft YAML to <path>; refuses to overwrite
-  --json           machine-readable output
-  -h, --help       this text
+  --json / -h      machine-readable output / this text
 
 Reads one markdown file, finds its permissions section, and prints a DRAFT
 \`\`\`yaml approval-policy block from a fixed, ordered keyword table.
 THE DRAFT AUTHORIZES NOTHING: this verb never writes APPROVAL.md, never logs and
 never attests. Fail closed: a bullet the table cannot place is kept verbatim.
+"What I value"-style headings become a DRAFT values fence, all under \`wants\`.
 
 JSON shape (stdout, one object):
   {"ok":true,"source":"<path>","out":"<path>"|null,
    "classes":[{"class","autonomy","from","section"}],
    "unmapped":[{"text","section"}],"ignored":["<heading>"],
-   "warnings":["<text>"]}
+   "warnings":["<text>"],"values_draft":"<fence>"|null}
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}

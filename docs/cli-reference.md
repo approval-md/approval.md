@@ -2554,6 +2554,21 @@ silently skipped; a file with no permissions section is exit 0 with an empty dra
 and a warning. `--out` writes the draft YAML without the fence and refuses to
 overwrite an existing file.
 
+**The values draft (APRV-240).** Some AGENTS.md files already carry what the
+operator wants beside what they permit, under headings like "What I value",
+"What good looks like", "How I like to work" or "What I want from you". The
+importer collects the bullets under those headings into a second draft fence,
+` ```yaml approval-values ` (SPEC.md §5.3), printed after the policy draft on
+stdout and written after it with `--out`; `--json` carries it as
+`values_draft`, or `null` when no such heading exists. Every bullet lands in
+`wants` and none in `love`, `like` or `dislike`: grading is the human's act,
+and an importer that guessed a grade would be putting words in their mouth. A
+bullet over the schema's 200 characters is truncated with a warning rather than
+dropped, and bullets past the twentieth are kept as comments inside the fence,
+which is the same stance the permissions half takes on unmapped bullets. The
+draft is guidance and never policy (§11.1 invariant 10): the file it is pasted
+into loads exactly as it did without it.
+
 ## journal
 
 The gate is built to be hard to route around. One consequence of building it
