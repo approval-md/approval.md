@@ -1,11 +1,11 @@
 ---
 id: APRV-250
 title: Clarify mandatory GitHub delivery for backlog-only work
-status: In Progress
+status: Done
 assignee:
   - '@codex'
 created_date: '2026-09-04 20:53'
-updated_date: '2026-09-04 21:01'
+updated_date: '2026-09-04 21:22'
 labels: []
 dependencies: []
 type: docs
@@ -39,6 +39,8 @@ Replaced only the delivery paragraph in the committed AGENTS.md baseline, preser
 Retest: all 111 tests in cli-setup and cli-style-render passed (exit 0) with APPROVAL_HUMAN/NO_COLOR/FORCE_COLOR unset and TERM=xterm-256color. This resolves all three failures from the full run without source changes. The original design task APRV-249 merged through PR #251.
 
 The local-copy grant arrived at seq 15751 and was verified/consumed by the hook before applying the exact replacement. All other bytes of the local AGENTS.md rewrite were preserved. Delivery remains pending publication of the branch-edit grant evidence through the existing log.advance request; no gate bypass was used.
+
+Delivery: instruction commit 1007af7 pushed on codex/aprv-250-delivery-instructions; PR #252 opened and merge armed. All three full-suite GitHub CI shards passed. The remaining protected-path failure was uncovered-hunk because the committed log predated the grant. Operator granted the existing log.advance request at seq 15753; the hook verified and consumed it before approval log advance --pr executed successfully (exit 0), publishing evidence as records commit 730886b831b7 in PR #255. Its merge is armed. No log artifacts were included in this feature branch. Worktree: /private/tmp/approval-aprv-250; next delivery step is wait for records PR #255, update the branch from main, and verify PR #252 merges.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
