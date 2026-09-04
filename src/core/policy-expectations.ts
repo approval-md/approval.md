@@ -143,6 +143,12 @@ export const REPO_POLICY_EXPECTATIONS: readonly PolicyExpectation[] = [
     note: "undeclared class: the absence of a grant is not a grant",
   },
   {
+    actionClass: "deps.upgrade",
+    autonomy: "manual",
+    provenance: "default",
+    note: "undeclared, so the manual default holds; since APRV-228 the classifier emits it for the harness self-update verbs (claude/codex/gemini update, uca) as well as npm update, and a ceremony that declares it must move this pin",
+  },
+  {
     actionClass: "read",
     autonomy: "manual",
     provenance: "default",

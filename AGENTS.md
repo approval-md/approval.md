@@ -53,7 +53,13 @@ Every delegation prompt must be self-contained because subagents start with clea
 
 Keep work in the parent when requirements are ambiguous, the change is small and context-bound, or it touches architecture, security boundaries, the spec, policy, credentials, approvals, release decisions, or final integration. Use research or verification specialists for those roles when appropriate.
 
-Completing user-authorized implementation work includes staging only reviewed, in-scope files, committing them on the current feature branch, and pushing that branch when policy permits. This is standing authorization for the parent to perform those completion steps without a separate prompt unless the user opts out. Never push directly to main, include `.approval/` log, projection, or payload artifacts in feature commits, or stage unrelated user work.
+Completing any user-authorized repository change includes delivery to GitHub. This applies to source changes, documentation-only changes, and Backlog task creation or refinement, including a task whose future design or implementation remains To Do. Unless the user explicitly requests local-only work or otherwise limits delivery, stage only reviewed, in-scope files, commit on a feature branch, push it, open or update a pull request, and run `gh pr merge <n> --merge` to arm the merge queue. These steps have standing authorization subject to APPROVAL.md; do not ask the user to repeat the original request to get a local change committed or pushed.
+
+Verify GitHub checks and merge status before the final handoff. If delivery is blocked, continue resolving issues within scope and report the concrete blocker and next action. Never describe a local file or commit as shipped. Report the commit ID, PR link, and actual state (local only, pushed, queued, or merged); claim merged only after GitHub confirms it. Task creation does not complete the future work tracked by that task, so leave its status and acceptance criteria pending.
+
+Deployment is a separate, scope-dependent step. Complete and verify it when the user-authorized task includes deployment and policy permits; a backlog-only or documentation-only request does not authorize a release or deployment. Report deployed only after verifying the deployment.
+
+Never push directly to main, include `.approval/` log/projection/payload artifacts in feature commits, or stage unrelated user work. Preserve existing user changes and the daemon-owned log by using an isolated worktree when needed.
 
 Parallel editing agents may work only on disjoint files or isolated worktrees. The parent reviews every subagent diff against the task, SPEC.md, global invariants, and current checkout before accepting it. Subagents do not commit or push unless the user explicitly requests it and the parent includes that authorization.
 

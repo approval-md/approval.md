@@ -1355,6 +1355,29 @@ export const COMMAND_RULES: readonly CommandRule[] = [
   { id: "npm-list", bins: ["npm", "pnpm", "yarn", "bun"], subs: ["ls", "list", "config", "help"], class: "read.shell" },
   { id: "npm-script", bins: ["npm", "pnpm", "yarn", "bun"], subs: ["run", "run-script", "test", "start", "build", "lint", "exec"], class: "files.write.workspace" },
 
+  // -- harness self-update (APRV-228) --------------------------------------
+  // The coding-agent harnesses' own `update` verbs, and the unattended updater
+  // that drives them. A harness upgrade swaps the binary that HOSTS this hook,
+  // which SPEC.md §7 already calls a supply-chain decision (`deps.*`), and
+  // before these rows it fell to `unclassified`: denied, but denied as "no
+  // rule", which told the approver nothing and gave a human no class to grant
+  // through the ordinary manual path. `npm install -g <harness>` was `deps.add`
+  // all along and keeps that class; these rows name the spellings that bypass
+  // the package manager.
+  //
+  // Both resolve to an EXISTING class and mint no authority for a human-only
+  // one (SPEC.md §11.1 invariant 9): `deps.upgrade` is manual under the
+  // reference policy, so the refusal now says what it is.
+  //
+  // `claude update` matches on its subcommand, so `claude --version`,
+  // `claude -p …` and a bare `claude` stay unclassified: they are not upgrades,
+  // and this row must not become the rule that lets an agent launch a nested
+  // harness unattended. `uca` matches with ANY arguments, `--dry-run` included:
+  // the classifier reads text, cannot know which flags the script honours, and
+  // the strictest reading of an updater is that it updates.
+  { id: "harness-update", bins: ["claude", "codex", "gemini"], subs: ["update"], class: "deps.upgrade" },
+  { id: "harness-updater", bins: ["uca"], class: "deps.upgrade" },
+
   // -- workspace tools -----------------------------------------------------
   {
     id: "node",
