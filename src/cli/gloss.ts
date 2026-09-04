@@ -85,6 +85,9 @@ export const GLOSS_TIMEOUT_MS = 20_000;
 /** The most characters a gloss may occupy on the prompt. */
 export const GLOSS_MAX_CHARS = 200;
 
+/** Maximum length of an exact provider-supplied model identifier. */
+export const GLOSS_MODEL_ID_MAX_CHARS = 100;
+
 /**
  * The model tier this spends: the cheap one.
  *
@@ -96,7 +99,13 @@ export const GLOSS_MAX_CHARS = 200;
  */
 export const GLOSS_MODEL = "haiku";
 
-/** The author label a gloss is tagged with. Never an actor the log knows. */
+/**
+ * The historical author label for legacy string-valued test runners.
+ *
+ * Production runners return explicit provenance. Keeping this constant is a
+ * compatibility bridge for callers whose injected seam predates APRV-253; it
+ * must never be used to guess the provenance of a typed production result.
+ */
 export const GLOSS_AUTHOR = `model:${GLOSS_MODEL}`;
 
 /**
@@ -158,14 +167,43 @@ export const GLOSS_MAX_INPUT_CHARS = 8_192;
  */
 export const GLOSS_TRUNCATION_NOTE = "(input truncated; describe what is shown)";
 
+/** A summarizer implementation the listener may explicitly select. */
+export type GlossProvider = "claude" | "codex";
+
 /**
- * How a gloss is obtained. Returns the model's raw text, or `null` for every
- * flavour of "no answer".
+ * The model identity a runner can honestly establish.
+ *
+ * `requestedModel` is always present because it is controlled by the
+ * invocation. `confirmedModel` is present only when machine-readable process
+ * output identifies the model that actually served the request. A successful
+ * process exit alone does not confirm that identity.
+ */
+export interface GlossProvenance {
+  provider: GlossProvider;
+  requestedModel: string;
+  confirmedModel?: string;
+}
+
+/** One raw model answer together with runner-supplied provenance. */
+export interface GlossResult {
+  text: string;
+  provenance: GlossProvenance;
+  /** Compatibility marker for the pre-APRV-253 injected string seam. */
+  legacy?: true;
+}
+
+/**
+ * How a gloss is obtained.
+ *
+ * New runners return a {@link GlossResult}. A raw string remains accepted only
+ * so existing injected stubs keep working; it is explicitly interpreted as
+ * the historical Claude/Haiku seam. Every flavour of "no answer" is `null`.
  *
  * MUST NOT throw: a runner that raised would put a language model on the
  * failure path of the listener's dispatch cycle.
  */
-export type GlossRunner = (prompt: string) => string | null;
+export type GlossRunnerOutput = GlossResult | string | null;
+export type GlossRunner = (prompt: string) => GlossRunnerOutput;
 
 /**
  * One line, capped, or `null`.
@@ -182,6 +220,84 @@ export function tidyGloss(raw: string | null): string | null {
   return collapsed.length <= GLOSS_MAX_CHARS
     ? collapsed
     : `${collapsed.slice(0, GLOSS_MAX_CHARS - 1)}…`;
+}
+
+/**
+ * Normalize a runner answer without inventing provenance.
+ *
+ * Objects with incomplete metadata fail toward absence. Raw strings take the
+ * one narrowly documented legacy path and retain the historical Haiku label.
+ */
+export function tidyGlossResult(raw: unknown): GlossResult | null {
+  if (typeof raw === "string" || raw === null) {
+    const text = tidyGloss(raw);
+    return text === null
+      ? null
+      : {
+          text,
+          provenance: { provider: "claude", requestedModel: GLOSS_MODEL },
+          legacy: true,
+        };
+  }
+
+  if (typeof raw !== "object" || raw === null) return null;
+  const candidate = raw as Record<string, unknown>;
+  if (typeof candidate["text"] !== "string") return null;
+  const provenanceValue = candidate["provenance"];
+  if (typeof provenanceValue !== "object" || provenanceValue === null) return null;
+  const provenance = provenanceValue as Record<string, unknown>;
+  const requestedModel = tidyModelId(provenance["requestedModel"]);
+  const confirmedModel =
+    provenance["confirmedModel"] === undefined
+      ? undefined
+      : tidyModelId(provenance["confirmedModel"]);
+  if (
+    (provenance.provider !== "claude" && provenance.provider !== "codex") ||
+    requestedModel === null ||
+    (provenance["confirmedModel"] !== undefined && confirmedModel === null)
+  ) {
+    return null;
+  }
+  const text = tidyGloss(candidate["text"]);
+  if (text === null) return null;
+  const normalizedProvenance: GlossProvenance = {
+    provider: provenance.provider,
+    requestedModel,
+  };
+  if (typeof confirmedModel === "string") normalizedProvenance.confirmedModel = confirmedModel;
+  return { text, provenance: normalizedProvenance };
+}
+
+/** A bounded, single-line identifier, or `null` rather than a misleading fold. */
+function tidyModelId(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (
+    trimmed.length === 0 ||
+    trimmed.length > GLOSS_MODEL_ID_MAX_CHARS ||
+    !/^[\p{L}\p{N}][\p{L}\p{N}._:/+-]*$/u.test(trimmed)
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
+/**
+ * The claimed author rendered beside one gloss.
+ *
+ * Requested and confirmed identities are deliberately distinct. The default
+ * subprocess knows what it asked Claude for, but its plain stdout does not
+ * prove which model served the request, so it renders as requested.
+ */
+export function glossAuthor(result: GlossResult): string {
+  if (result.legacy === true) return GLOSS_AUTHOR;
+  const { provider, requestedModel, confirmedModel } = result.provenance;
+  if (confirmedModel === undefined) {
+    return `model:${provider}/${requestedModel} (requested)`;
+  }
+  return confirmedModel === requestedModel
+    ? `model:${provider}/${confirmedModel} (confirmed)`
+    : `model:${provider}/${confirmedModel} (confirmed; requested:${requestedModel})`;
 }
 
 /**
@@ -212,7 +328,7 @@ export function tidyGloss(raw: string | null): string | null {
  * the deployment that renamed it out from under the prefixes. Omitted, the
  * default (`APPROVAL_VAULT_PASSPHRASE`) is removed by the prefix rule anyway.
  */
-export function spawnGloss(prompt: string, passphraseEnv: string | null = null): string | null {
+export function spawnGloss(prompt: string, passphraseEnv: string | null = null): GlossResult | null {
   let result;
   try {
     result = spawnSync("claude", ["-p", "--model", GLOSS_MODEL, prompt], {
@@ -228,7 +344,12 @@ export function spawnGloss(prompt: string, passphraseEnv: string | null = null):
     return null;
   }
   if (result.error !== undefined || result.status !== 0) return null;
-  return typeof result.stdout === "string" ? result.stdout : null;
+  return typeof result.stdout === "string"
+    ? {
+        text: result.stdout,
+        provenance: { provider: "claude", requestedModel: GLOSS_MODEL },
+      }
+    : null;
 }
 
 /**
@@ -276,15 +397,17 @@ export function glossFor(
   instruction: string,
   material: string,
   run: GlossRunner = spawnGloss,
-): string | null {
+): GlossResult | null {
   if (material.trim().length === 0) return null;
-  let raw: string | null;
+  let raw: GlossRunnerOutput;
   try {
     raw = run(glossPrompt(instruction, material));
+    return tidyGlossResult(raw);
   } catch {
     // A runner is contracted not to throw; if one does anyway, the contract
-    // that matters (a gloss never breaks a dispatch cycle) is upheld here.
+    // that matters (a gloss never breaks a dispatch cycle) is upheld here. The
+    // normalization stays inside this boundary because an injected object can
+    // throw from a property getter just as readily as the runner can throw.
     return null;
   }
-  return tidyGloss(raw);
 }
