@@ -107,8 +107,15 @@ const EXTRA_REQUIRED: Record<string, readonly string[]> = {
   "audit.decision_refused": ["action_key", "channel", "payload"],
 };
 
+/**
+ * The fixture for an event type, by the filename convention the fixtures use:
+ * one file per type, with the separators spelled as dashes. Underscores join
+ * the dots since APRV-235, because `audit.decision_refused` is the first
+ * enumerated type that carries one and `audit-decision_refused.json` would be
+ * a filename nobody would guess.
+ */
 function fixture(event: string): Record<string, unknown> {
-  const file = join(VALID_DIR, `${event.replace(/\./g, "-")}.json`);
+  const file = join(VALID_DIR, `${event.replace(/[._]/gu, "-")}.json`);
   return JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
 }
 
