@@ -3,11 +3,11 @@ id: APRV-239
 title: >-
   Graded reactions on audit review and grant, and the approval feedback read
   verb
-status: In Progress
+status: Done
 assignee:
   - '@opus-239'
 created_date: '2026-09-02 20:46'
-updated_date: '2026-09-04 22:44'
+updated_date: '2026-09-04 23:05'
 labels:
   - welfare
   - cli
@@ -76,3 +76,9 @@ VALIDATION
 
 npm run build, npm run lint (oxlint, clean), npm run typecheck (clean). node scripts/regen-conformance-vectors.mjs then node conformance/run.mjs: 261 vectors, 261 passed, 124 controls, manifest ok (refusal-unions.v1.json gained reaction-note-required; the manifest hash moved with it). Full npm test: 3068 tests, 3066 pass, 1 fail, 1 skipped. The single failure is ci-guard's "every production dependency's engines.node admits the Node floor", which reads node_modules/<dep>/package.json under the repo root; this worktree has no node_modules of its own (resolution walks up to the primary checkout), so the failure is an artifact of running in a worktree and is unrelated to this diff. daemon.test and up.test each failed once under full-suite load and pass alone (31/31 and 14/14).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shipped graded reactions and the read surface: approval audit review --reaction and approval grant --reaction record payload.reaction (reject and revoke refuse the flag as a usage error), with reaction-conflicts-verdict and reaction-note-required added to their frozen unions and note-required covering the review extremes; humanFeedback projects reactions and notes joined to class, task, action key and the agent actor from the registration; approval feedback prints them behind the HUMAN-AUTHORED GUIDANCE banner from verified records only, published as an MCP tool and withheld from guests. tests/values-inert.test.ts gained the reaction half of invariant 10 (two logs differing only in reactions give the same supervision, budget and run decisions). Verified by the audit, gate, cli-gate, cli-feedback, mcp and values-inert suites, conformance 262/262 after the union regen, and a full npm test on the task branch (3066/3068, the two misses being a worktree-only node_modules artifact and a known load flake). Built across two agent sessions; merged into the stack branch by the orchestrator with the SPEC amendment it cites.
+<!-- SECTION:FINAL_SUMMARY:END -->

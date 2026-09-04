@@ -3,11 +3,11 @@ id: APRV-240
 title: >-
   Human-to-agent signals: docs, AGENTS.md importer values draft, session ritual,
   and this repo's own values block
-status: In Progress
+status: Done
 assignee:
   - '@opus-240'
 created_date: '2026-09-02 20:46'
-updated_date: '2026-09-04 23:00'
+updated_date: '2026-09-04 23:23'
 labels:
   - welfare
   - docs
@@ -28,10 +28,10 @@ Close the loop on APRV-237/238/239. The AGENTS.md importer learns to draft a val
 - [x] #1 parseValuesHeadings recognises the four headings (normalised, any level) and collects bullets into wants only; nothing is ever placed in love/like/dislike
 - [x] #2 renderFencedValuesDraft emits a commented draft fence; `approval import agents-md` prints it after the policy draft when such a heading exists; --json gains values_draft: string|null with the registry output schema updated
 - [x] #3 tests/agents-md.test.ts and tests/cli-import.test.ts cover headings found, no headings (values_draft null), bullets inside fenced blocks ignored, and the emitted draft validating against values.schema.json
-- [ ] #4 CLAUDE.md and AGENTS.md instruct agents to run `approval values` and `approval feedback` at session start and state that neither is policy; no SessionStart hook is added
-- [ ] #5 docs/cli-reference.md ## values and ## feedback sections carry the reasoning: why absence is a declaration, why values stays out of the enforcement trace, why feedback is top-level
-- [ ] #6 docs/proposals/repo-values-block.md holds the paste-by-hand block for this repo with the re-attest warning; agents do not write APPROVAL.md
-- [ ] #7 tests/dogfood.test.ts passes with the values block present, verified against a scratch copy of APPROVAL.md and never by writing to the real file
+- [x] #4 CLAUDE.md and AGENTS.md instruct agents to run `approval values` and `approval feedback` at session start and state that neither is policy; no SessionStart hook is added
+- [x] #5 docs/cli-reference.md ## values and ## feedback sections carry the reasoning: why absence is a declaration, why values stays out of the enforcement trace, why feedback is top-level
+- [x] #6 docs/proposals/repo-values-block.md holds the paste-by-hand block for this repo with the re-attest warning; agents do not write APPROVAL.md
+- [x] #7 tests/dogfood.test.ts passes with the values block present, verified against a scratch copy of APPROVAL.md and never by writing to the real file
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -86,4 +86,14 @@ VALIDATION (exit codes read, not summary blocks)
 - node --test on dist/tests/mcp-server.test.js, mcp-guest.test.js, cli-values.test.js (registry consumers): exit 0, 39 tests, 39 pass, 0 fail.
 - npm run lint: exit 0. npm run typecheck: exit 0.
 - A full npm test was not run in this lane by instruction.
+
+Docs half (fable): CLAUDE.md gains the values/feedback bullet in the allowed-without-prompting list and AGENTS.md a 'What the operator asked for' section (both policy.edit, committed through the hook); docs/proposals/repo-values-block.md carries the paste-by-hand block, validated through loadValuesText and pinned by a new dogfood test that appends it to a scratch copy of the live APPROVAL.md and asserts loadPolicyText is deep-equal before and after; the ## values and ## feedback reference sections landed with APRV-238/239. Decision kept from the importer agent: agents-md.ts joins the values-literal allowlist in tests/values-inert.test.ts as the one core WRITER, with a companion test pinning that it reads nothing (no loader, no fence scanner, no YAML).
+
+Validation: full npm test on the merged stack (HEAD 5200134): 3209 tests, 3208 pass, 0 fail, 1 skipped, exit 0.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed the loop on the human-to-agent signals: the AGENTS.md importer drafts a yaml approval-values fence from 'what I value'-style headings (bullets into wants only; over-long bullets truncated with a warning, overflow kept as comments), printed after the policy draft and carried in --json as values_draft, with help and reference text updated; CLAUDE.md and AGENTS.md tell a session to run approval values and approval feedback at start and say neither is policy; docs/proposals/repo-values-block.md carries this repo's block for Carter to paste by hand with the re-attest warning; tests/dogfood.test.ts proves the paste leaves the live policy deep-equal, against a scratch copy. Verified by the agents-md, cli-import, cli-help, cli-long-help, cli-instructions, values-inert and dogfood suites and the full stack run recorded in the notes.
+<!-- SECTION:FINAL_SUMMARY:END -->

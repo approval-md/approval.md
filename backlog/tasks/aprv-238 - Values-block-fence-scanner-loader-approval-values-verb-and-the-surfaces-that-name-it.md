@@ -3,11 +3,11 @@ id: APRV-238
 title: >-
   Values block: fence scanner, loader, approval values verb, and the surfaces
   that name it
-status: In Progress
+status: Done
 assignee:
   - '@opus-238'
 created_date: '2026-09-02 20:45'
-updated_date: '2026-09-04 22:41'
+updated_date: '2026-09-04 23:06'
 labels:
   - welfare
   - cli
