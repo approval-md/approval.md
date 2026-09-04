@@ -22,8 +22,11 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { after, test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { CliChannel, COMPUTED_MARKER, PAYLOAD_BEGIN } from "../src/channels/cli.js";
 import type { ChannelRequest } from "../src/channels/contract.js";
@@ -309,6 +312,46 @@ test("promptBlockErrors is clean on a policy with no channels at all", () => {
   const clean = load();
   assert.equal(clean.ok, true);
   assert.deepEqual(clean.ok ? promptBlockErrors(clean.policy) : ["not loaded"], []);
+});
+
+test("the schema's row enum and PROMPT_ROWS are the same closed list", () => {
+  // Two closed lists say the same thing, deliberately: the schema is the write
+  // boundary SPEC.md §8 wants the check at, and `PROMPT_ROWS` is what the
+  // renderers switch on. Drift between them would be silent in the direction
+  // that matters — a row the schema admits and no channel can place is exactly
+  // the "rule its author believed was in force" a closed enum exists to stop.
+  const schema = JSON.parse(
+    readFileSync(join(fileURLToPath(new URL("../../", import.meta.url)), "schema/policy.schema.json"), "utf8"),
+  ) as { $defs: Record<string, { enum?: string[]; properties?: Record<string, { description?: string }> }> };
+
+  assert.deepEqual(schema.$defs["promptRow"]?.enum, [...PROMPT_ROWS]);
+
+  // The required rows are named in the operator-facing text, not only in code:
+  // a `hide` that refuses at load with no hint of which rows refuse is a
+  // refusal an operator has to guess their way out of.
+  const hideText = schema.$defs["promptLayout"]?.properties?.["hide"]?.description ?? "";
+  for (const row of REQUIRED_PROMPT_ROWS) {
+    assert.ok(hideText.includes(row), `the schema's hide description does not name ${row}`);
+  }
+});
+
+test("a typed channel's unknown row is caught by the SCHEMA, before the semantic pass", () => {
+  // Both nets return the same verdict, so an operator never has to know which
+  // one caught them; this pins that the schema's own closed enum is one of the
+  // two, rather than the semantic pass silently doing all the work.
+  const result = load(["channels:", "  web:", "    prompt:", "      always: [clas]"]);
+  assert.equal(result.ok, false);
+  const keywords = keywordsOf(result);
+  assert.ok(keywords.includes("enum"), keywords.join(","));
+  assert.equal(keywords.includes("prompt-row-unknown"), false, "the semantic pass ran instead");
+});
+
+test("channels.cli exists only to carry a prompt block, and is closed", () => {
+  const good = load(["channels:", "  cli:", "    prompt:", "      hide: [chain]"]);
+  assert.equal(good.ok, true, `a legal channels.cli was refused: ${JSON.stringify(good)}`);
+
+  const bad = load(["channels:", "  cli:", "    port: 4680"]);
+  assert.equal(bad.ok, false, "channels.cli accepted a key it does not define");
 });
 
 // ---------------------------------------------------------------------------
