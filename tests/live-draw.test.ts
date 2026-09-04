@@ -35,7 +35,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -776,6 +776,45 @@ test("the daemon holds the secret, the asker holds none, and the draw crosses be
       "the daemon's MAC does not verify under the operator's secret",
     );
     assert.notEqual(outcome.answer.daemon_pid, process.pid, "the draw was made in this process");
+
+    // AC4 at the level of the actual child. `askDaemonDraw` spawns the relay
+    // with an EMPTY environment, so a deciding process that does somehow hold
+    // the secret still cannot hand it down — the relay is not a way to launder
+    // a session's environment into another process. Proven rather than read
+    // off the source: NODE_OPTIONS is pointed at a module that does not exist,
+    // so a child that inherited this process's environment could not start at
+    // all and the draw would come back `draw-daemon-stale`.
+    const probe = join(scratch, "canary-probe.cjs");
+    writeFileSync(probe, "process.exit(0);\n", "utf8");
+    const priorOptions = process.env["NODE_OPTIONS"];
+    process.env[SECRET_ENV] = SECRET;
+    process.env["NODE_OPTIONS"] = `--require ${join(scratch, "no-such-canary.cjs")}`;
+    let leaked: DrawOutcome;
+    try {
+      // The canary has to bite, or the isolation below proves nothing: a child
+      // that DOES inherit this environment must fail to start. Proven against a
+      // real script rather than `--version`, which answers before NODE_OPTIONS
+      // is ever applied.
+      const inheriting = spawnSync(process.execPath, [probe], {
+        encoding: "utf8",
+        env: process.env,
+      });
+      assert.notEqual(inheriting.status, 0, "the canary does not bite; the isolation proof is vacuous");
+      leaked = askDaemonDraw(unit.logPath, question);
+    } finally {
+      delete process.env[SECRET_ENV];
+      if (priorOptions === undefined) delete process.env["NODE_OPTIONS"];
+      else process.env["NODE_OPTIONS"] = priorOptions;
+    }
+    assert.equal(
+      leaked.ok,
+      true,
+      leaked.ok ? "" : `the relay inherited the asking process's environment (${leaked.reason})`,
+    );
+    if (leaked.ok) {
+      assert.equal(leaked.answer.selected, outcome.answer.selected);
+      assert.equal(leaked.answer.mac, outcome.answer.mac, "the same question answered twice, differently");
+    }
 
     // The daemon's first line says where it is serving draws, so an operator can
     // see whether supervised-live is live without asking the process anything.
