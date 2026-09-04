@@ -133,7 +133,10 @@ grandfathered — apply this to new and rewritten text only.
   and policy, and proceed only on a granted exit, executing through
   `approval run` with the granted token. The decision arrives via the
   Telegram channel; docs/dogfood-cutover.md is the runbook. Unchanged and
-  still binding: gate operations never run in agent worktrees, log-touching
+  still binding: the `approval up` preflight may fast-forward the committed
+  log only when the working copy is clean (a dirty working log plus an
+  upstream change is `approval log sync`'s, always; APRV-215), gate
+  operations never run in agent worktrees, log-touching
   commits never ride feature branches, and hash chains do not survive git
   merges. A session that cannot reach the gate (daemon down, channel dark,
   wait timed out) is back under the old rule: stop and escalate.
