@@ -83,8 +83,16 @@ function runCli(
 // ---------------------------------------------------------------------------
 
 interface GhBehaviour {
-  /** What `gh api …/protection` answers. */
+  /** What `gh api …/branches/<b>/protection` (classic protection) answers. */
   protection?: "protected" | "unprotected" | "error";
+  /**
+   * What `gh api …/rules/branches/<b>` (repository rulesets, APRV-232) answers:
+   * `ruleset` is a non-empty rule list, `none` an empty one, `error` an
+   * unreadable one. Absent, it follows `protection`: `none` when classic said
+   * unprotected (so the pre-APRV-232 cases keep resolving as they did) and
+   * `error` otherwise.
+   */
+  rulesets?: "ruleset" | "none" | "error";
   /** What `gh repo view --json defaultBranchRef` answers; absent means it fails. */
   defaultBranch?: string;
   /** What `gh pr create` prints; absent means it fails. */
@@ -110,6 +118,13 @@ function ghStub(behaviour: GhBehaviour): { dir: string; log: string } {
       : behaviour.protection === "unprotected"
         ? 'echo "gh: Branch not protected (HTTP 404)" >&2; exit 1'
         : 'echo "gh: could not read protection" >&2; exit 1';
+  const rulesets = behaviour.rulesets ?? (behaviour.protection === "unprotected" ? "none" : "error");
+  const rules =
+    rulesets === "ruleset"
+      ? `echo '[{"type":"merge_queue"},{"type":"required_status_checks"}]'; exit 0`
+      : rulesets === "none"
+        ? "echo '[]'; exit 0"
+        : 'echo "gh: could not read rulesets" >&2; exit 1';
   const repo =
     behaviour.defaultBranch === undefined
       ? 'echo "gh: no GitHub remote" >&2; exit 1'
@@ -129,7 +144,12 @@ function ghStub(behaviour: GhBehaviour): { dir: string; log: string } {
     `for arg in "$@"; do printf '%s\\n' "$arg" >> ${JSON.stringify(log)}; done`,
     'case "$1" in',
     '  --version) echo "gh version 2.0.0 (stub)"; exit 0 ;;',
-    `  api) ${api} ;;`,
+    // APRV-232: the two protection endpoints are different answers, so the
+    // stub splits on the endpoint the way it splits `pr` on the subcommand.
+    '  api) case "$2" in',
+    `    */rules/branches/*) ${rules} ;;`,
+    `    *) ${api} ;;`,
+    "  esac ;;",
     `  repo) ${repo} ;;`,
     // APRV-130: `pr create` and `pr merge` are different answers, so the stub
     // splits on the subcommand and not on the noun.
@@ -1373,6 +1393,160 @@ test("gh absent is 'unknown', which is the direct flow and no warning", () => {
   assert.equal(gitPlan["flow"], "direct");
   assert.equal(gitPlan["warning"], null);
   assert.match(gitPlan["protectionReason"] as string, /gh is not on PATH/u);
+});
+
+// ---------------------------------------------------------------------------
+// (g') Repository rulesets (APRV-232)
+//
+// Seen at the seq 13704 ceremony: the classic endpoint answers 404 for a
+// branch a RULESET governs, so the probe called main unprotected, pushed, and
+// printed the remote's GH013 rejection before the recovery branch flow ran.
+// The probe now reads the rulesets endpoint too, and a ruleset is protection.
+// ---------------------------------------------------------------------------
+
+test("a ruleset-governed default branch (classic 404, rules listed) goes straight to the branch flow with no push rejection", () => {
+  const { dir, remote } = repoWithRemote();
+  const stub = ghStub({
+    protection: "unprotected",
+    rulesets: "ruleset",
+    prUrl: "https://github.test/o/r/pull/14",
+  });
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  // The remote behaves the way a merge-queue ruleset does: main refuses the
+  // direct push. A probe that stopped at the classic 404 would hit this wall.
+  protectPushesTo(remote, "refs/heads/main");
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+
+  assert.equal(run.code, 0, run.stderr);
+  // No direct push was attempted, so nothing was rejected and nothing about a
+  // rejection was printed: the transcript reads as the planned branch flow.
+  assert.doesNotMatch(run.stdout, /REJECTED|refused|whatever the probe reported/u);
+  assert.doesNotMatch(run.stderr, /REJECTED|refused|Changes must be made through/u);
+  assert.match(run.stdout, /pull request: https:\/\/github\.test\/o\/r\/pull\/14/u);
+  assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], dir).stdout.trim(), "main");
+  assert.notEqual(remoteHead(remote, "policy-amend-2"), "", "the amendment branch reached origin");
+  assert.equal(
+    git(["rev-parse", "policy-amend-2^"], dir).stdout.trim(),
+    git(["rev-parse", "origin/main"], dir).stdout.trim(),
+  );
+  // Both endpoints were read, in order: classic first, rulesets second.
+  const calls = ghCalls(stub.log);
+  const classicAt = calls.findIndex((c) => c.endsWith("/branches/main/protection"));
+  const rulesAt = calls.findIndex((c) => c.endsWith("/rules/branches/main"));
+  assert.notEqual(classicAt, -1, "the classic endpoint was not read");
+  assert.notEqual(rulesAt, -1, "the rulesets endpoint was not read");
+  assert.equal(classicAt < rulesAt, true, "classic is read before rulesets");
+});
+
+test("a ruleset reports as protected in JSON, naming the rule types, and picks the branch flow", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "unprotected", rulesets: "ruleset" });
+  attest(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  const gitPlan = report(run)["git"] as Record<string, unknown>;
+  assert.equal(gitPlan["protection"], "protected");
+  assert.equal(gitPlan["flow"], "branch");
+  assert.equal(gitPlan["branch"], "policy-amend-2");
+  assert.equal(gitPlan["warning"], null);
+  assert.match(gitPlan["protectionReason"] as string, /ruleset on main \(merge_queue, required_status_checks\)/u);
+});
+
+test("classic protection ends the lookup: the rulesets endpoint is not read when classic says protected", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "protected", rulesets: "error" });
+  attest(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  const gitPlan = report(run)["git"] as Record<string, unknown>;
+  assert.equal(gitPlan["protection"], "protected");
+  assert.match(gitPlan["protectionReason"] as string, /branch protection on main/u);
+  assert.equal(
+    ghCalls(stub.log).some((c) => /\/rules\/branches\//u.test(c)),
+    false,
+    "the rulesets endpoint was read although classic already answered",
+  );
+});
+
+test("classic 404 with an unreadable rulesets answer is UNKNOWN, which never fails the command", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "unprotected", rulesets: "error" });
+  attest(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  const gitPlan = report(run)["git"] as Record<string, unknown>;
+  assert.equal(gitPlan["protection"], "unknown");
+  assert.equal(gitPlan["flow"], "direct");
+  assert.equal(gitPlan["warning"], null);
+  assert.match(gitPlan["protectionReason"] as string, /no classic branch protection; rulesets unreadable/u);
+});
+
+test("classic unreadable with an empty rule list is UNKNOWN too: unprotected needs both answers", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "error", rulesets: "none" });
+  attest(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  const gitPlan = report(run)["git"] as Record<string, unknown>;
+  assert.equal(gitPlan["protection"], "unknown");
+  assert.match(gitPlan["protectionReason"] as string, /classic protection unreadable .*; no ruleset/u);
+});
+
+test("classic 404 and an empty rule list is unprotected, and the reason names both probes", () => {
+  const { dir } = repoWithRemote();
+  const stub = ghStub({ protection: "unprotected", rulesets: "none" });
+  attest(dir);
+  writePolicy(dir, AFTER);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  const gitPlan = report(run)["git"] as Record<string, unknown>;
+  assert.equal(gitPlan["protection"], "unprotected");
+  assert.equal(gitPlan["flow"], "direct");
+  assert.match(gitPlan["protectionReason"] as string, /no branch protection and no ruleset on main/u);
 });
 
 test("with gh absent the branch flow still branches, commits and pushes, and prints the PR line", () => {

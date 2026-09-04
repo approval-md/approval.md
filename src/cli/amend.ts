@@ -405,13 +405,63 @@ function defaultBranchOf(root: string): string | null {
   return null;
 }
 
+/** What one read-only `gh api` lookup said, reduced to what the probe needs. */
+type ProbeAnswer =
+  | { kind: "absent" }
+  | { kind: "ok"; stdout: string }
+  | { kind: "not-found" }
+  | { kind: "error"; detail: string };
+
+/** One `gh api <endpoint>` read, classified. `--silent` is NOT passed: the rulesets read needs the body. */
+function ghApi(root: string, endpoint: string): ProbeAnswer {
+  const run = spawnSync("gh", ["api", endpoint], { cwd: root, encoding: "utf8" });
+  if (run.error !== undefined || run.status === null) return { kind: "absent" };
+  if (run.status === 0) return { kind: "ok", stdout: `${run.stdout}` };
+  const stderr = `${run.stderr}`;
+  if (/404|Branch not protected|Not Found/iu.test(stderr)) return { kind: "not-found" };
+  return { kind: "error", detail: stderr.trim().split("\n")[0] ?? "no detail" };
+}
+
+/**
+ * The rule types a rulesets answer lists, or `null` when the body is not a JSON
+ * array. An empty array is the honest "no rules" and answers `[]`.
+ */
+function ruleTypes(body: string): string[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  return parsed.map((rule) => {
+    if (typeof rule === "object" && rule !== null && typeof (rule as { type?: unknown }).type === "string") {
+      return (rule as { type: string }).type;
+    }
+    return "rule";
+  });
+}
+
 /**
  * Ask GitHub whether the default branch is protected.
  *
- * `gh api …/protection` answers 200 for a protected branch and 404 for an
- * unprotected one, which is the only distinction this verb needs. Anything else
- * (gh absent, not a GitHub remote, an unauthenticated or under-scoped token) is
- * `unknown`.
+ * Two read-only probes, because GitHub has two ways to protect a branch and
+ * answers each from its own endpoint (APRV-232). Classic branch protection
+ * lives at `repos/{owner}/{repo}/branches/<branch>/protection`, which answers
+ * 200 when it is set and 404 when it is not. Repository rulesets (the merge
+ * queue, required checks and the rest of what governs this project's own main)
+ * are invisible there: the classic endpoint answers 404 for a branch a ruleset
+ * governs, and a probe that stopped at that answer concluded "unprotected",
+ * pushed, and printed the remote's GH013 rejection at the human's one hands-on
+ * moment. The rules that apply to a branch are listed at
+ * `repos/{owner}/{repo}/rules/branches/<branch>`: a non-empty array is
+ * protected, an empty array (or a 404) is no rules.
+ *
+ * Resolution: either probe protected => protected. Classic 404 AND rulesets
+ * empty => unprotected. Anything else (gh absent, not a GitHub remote, an
+ * unauthenticated or under-scoped token, a body that is not JSON) is `unknown`.
+ * The classic probe answering protected ends the lookup; the rulesets endpoint
+ * is read only when classic could not prove protection.
  */
 function probeProtection(root: string): ProtectionProbe {
   const branch = currentBranch(root);
@@ -424,42 +474,42 @@ function probeProtection(root: string): ProtectionProbe {
       reason: "no default branch could be resolved (no origin/HEAD and no gh answer)",
     };
   }
-  const probe = spawnSync(
-    "gh",
-    ["api", `repos/{owner}/{repo}/branches/${target}/protection`, "--silent"],
-    { cwd: root, encoding: "utf8" },
-  );
-  if (probe.error !== undefined || probe.status === null) {
-    return {
-      protection: "unknown",
-      defaultBranch: target,
-      currentBranch: branch,
-      reason: "gh is not on PATH, so branch protection could not be read",
-    };
-  }
-  if (probe.status === 0) {
-    return {
-      protection: "protected",
-      defaultBranch: target,
-      currentBranch: branch,
-      reason: `gh reports branch protection on ${target}`,
-    };
-  }
-  const stderr = `${probe.stderr}`;
-  if (/404|Branch not protected|Not Found/iu.test(stderr)) {
-    return {
-      protection: "unprotected",
-      defaultBranch: target,
-      currentBranch: branch,
-      reason: `gh reports no branch protection on ${target}`,
-    };
-  }
-  return {
-    protection: "unknown",
+  const answer = (protection: Protection, reason: string): ProtectionProbe => ({
+    protection,
     defaultBranch: target,
     currentBranch: branch,
-    reason: `gh could not read protection on ${target}: ${stderr.trim().split("\n")[0] ?? "no detail"}`,
-  };
+    reason,
+  });
+
+  const classic = ghApi(root, `repos/{owner}/{repo}/branches/${target}/protection`);
+  if (classic.kind === "absent") {
+    return answer("unknown", "gh is not on PATH, so branch protection could not be read");
+  }
+  if (classic.kind === "ok") {
+    return answer("protected", `gh reports branch protection on ${target}`);
+  }
+
+  const rules = ghApi(root, `repos/{owner}/{repo}/rules/branches/${target}`);
+  const types = rules.kind === "ok" ? ruleTypes(rules.stdout) : null;
+  if (types !== null && types.length > 0) {
+    return answer("protected", `gh reports a ruleset on ${target} (${[...new Set(types)].join(", ")})`);
+  }
+  const noRules = rules.kind === "not-found" || (types !== null && types.length === 0);
+  if (classic.kind === "not-found" && noRules) {
+    return answer("unprotected", `gh reports no branch protection and no ruleset on ${target}`);
+  }
+
+  const classicDetail =
+    classic.kind === "not-found" ? "no classic branch protection" : `classic protection unreadable (${classic.detail})`;
+  const rulesDetail =
+    rules.kind === "absent"
+      ? "gh did not run"
+      : rules.kind === "error"
+        ? `rulesets unreadable (${rules.detail})`
+        : rules.kind === "ok" && types === null
+          ? "rulesets answer was not a JSON array"
+          : "no ruleset";
+  return answer("unknown", `gh could not settle protection on ${target}: ${classicDetail}; ${rulesDetail}`);
 }
 
 /** Does this repository have an `origin` to push to? */

@@ -117,6 +117,8 @@ an addition).
 | `npm-network` | npm, pnpm, yarn, bun | audit \| outdated \| view \| search \| info \| login \| whoami | network.call |
 | `npm-list` | npm, pnpm, yarn, bun | ls \| list \| config \| help | read.shell |
 | `npm-script` | npm, pnpm, yarn, bun | run \| run-script \| test \| start \| build \| lint \| exec | files.write.workspace |
+| `harness-update` | claude, codex, gemini | update | deps.upgrade (APRV-228: the harness's own self-update verb; a version probe, a one-shot prompt and a bare launch stay unclassified) |
+| `harness-updater` | uca | (any) | deps.upgrade (APRV-228: the unattended harness updater, `--dry-run` included, taken at its strictest) |
 | `node` | node | (any) | files.write.workspace, gate.self, log.sync, log.advance |
 | `approval` | approval | (any) | gate.self, log.sync, log.advance |
 | `workspace-tool` | npx, tsx, ts-node, tsc, oxlint, eslint, prettier, vitest, jest, backlog, make | (any) | files.write.workspace |

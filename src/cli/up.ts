@@ -113,11 +113,17 @@ import {
   DEFAULT_DARK_WINDOW_MS,
 } from "../daemon/dark-session.js";
 import { useReadProof } from "../core/state.js";
-import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
+import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { glossRunnerFor } from "./gloss.js";
 import { UP_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
+import {
+  describePreflightEvent,
+  reexecFreshBuild,
+  startupPreflight,
+  type PreflightEvent,
+} from "./preflight.js";
 import { DEFAULT_QUEUE_PATH } from "./render.js";
 import { skipNotice, style, type Style } from "./style.js";
 import { usageErrorText } from "./usage.js";
@@ -159,7 +165,19 @@ export type UpEvent =
     }
   | { event: "part_restarted"; part: UpPart; attempt: number }
   | { event: "part_stopped"; part: UpPart; reason: string }
-  | { event: "up_stopped"; reason: string };
+  | { event: "up_stopped"; reason: string }
+  /**
+   * The startup preflight's two lines (APRV-215), emitted before anything else
+   * and defined in `cli/preflight.ts` because `approval daemon run` prints the
+   * same pair from a module that cannot import this one.
+   *
+   * ADDITIVE, like every line above them: no field is added to a shape that
+   * already existed, and in particular `up_started` is untouched. The commit the
+   * process ends up running is named on `preflight` rather than there, because a
+   * consumer that already parses `up_started` must not have to learn a new key
+   * to keep working.
+   */
+  | PreflightEvent;
 
 /** The first backoff after a part falls over. Doubles to {@link UP_RESTART_MAX_MS}. */
 export const UP_RESTART_BASE_MS = 1_000;
@@ -185,6 +203,11 @@ export function describeUpEvent(
   st: Style = style(),
 ): { text: string; stderr: boolean } {
   switch (event.event) {
+    // Delegated, so `approval daemon run` and `approval up` cannot drift apart
+    // in the words they use for the same fact.
+    case "preflight":
+    case "preflight_warning":
+      return describePreflightEvent(event);
     case "up_started":
       return {
         text: `up: ${event.parts.join(", ")} in one process against ${event.log}; ctrl-c stops all of them`,
@@ -263,6 +286,14 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--no-gloss": "boolean",
   // The supervisor's.
   "--restart-backoff": "string",
+  // The startup preflight (APRV-215).
+  "--no-preflight": "boolean",
+  "--preflight-remote": "string",
+  "--preflight-base": "string",
+  // Test-only, spelled exactly as doctor's: retarget the build-freshness half of
+  // the preflight at a fixture tree. It moves nothing else, and a wrong value
+  // can only make the rebuild decision wrong — never the fast-forward.
+  "--root": "string",
   "--json": "boolean",
   "--help": "boolean",
   "-h": "boolean",
@@ -356,6 +387,54 @@ export function commandUp(
   const queuePath = resolvePath(stringFlag(flags, "--out"), DEFAULT_QUEUE_PATH, cwd);
   const tasksFlag = stringFlag(flags, "--tasks");
   const tasksDir = resolvePath(tasksFlag, DEFAULT_TASKS_DIR, cwd);
+
+  // -------------------------------------------------------------------------
+  // The startup preflight (APRV-215)
+  // -------------------------------------------------------------------------
+  //
+  // First, before the log is even opened, because its whole subject is which
+  // code and which log this process is about to run against. It reads git, and
+  // at most fast-forwards and rebuilds; it never resets, never stashes, and
+  // never touches the working log. A refusal exits without starting anything.
+  //
+  // `--json` emission goes through the same `UpEvent` union as everything else,
+  // so the stream stays one union of additive shapes. The refusal does NOT: it
+  // is an error object on stderr like every other refusal in this file, plus
+  // the facts, so a machine caller can branch on the code without parsing a
+  // runbook.
+  if (!boolFlag(flags, "--no-preflight")) {
+    const rootFlag = stringFlag(flags, "--root");
+    const cleared = startupPreflight({
+      logPath,
+      queuePath,
+      root: rootFlag === null ? null : absolute(rootFlag, cwd),
+      remote: stringFlag(flags, "--preflight-remote"),
+      branch: stringFlag(flags, "--preflight-base"),
+      json,
+      emit: (event) => {
+        if (json) {
+          const line = `${JSON.stringify(event)}\n`;
+          if (event.event === "preflight_warning") streams.err(line);
+          else streams.out(line);
+          return;
+        }
+        const rendered = describePreflightEvent(event);
+        if (rendered.stderr) streams.err(`${rendered.text}\n`);
+        else streams.out(`${rendered.text}\n`);
+      },
+      refuse: (text) => streams.err(text),
+    });
+    // Exit 1, "the runtime decided", rather than 4: nothing failed to read or
+    // write, and a supervisor that read this as an I/O fault would retry a
+    // checkout state only a human can resolve.
+    if (!cleared.ok) return EXIT_INTEGRITY;
+    // A rebuild happened, so THIS process is the stale build the preflight just
+    // replaced: Node loaded it at startup and no amount of new bytes on disk
+    // changes that. Carrying on here would start the writer on exactly the code
+    // the operator was trying to leave behind, which is the defect this
+    // preflight exists to remove. Become the fresh build, and exit as it exits.
+    if (cleared.reexec !== null) return reexecFreshBuild(cleared.reexec, cwd);
+  }
 
   const check = preflightLog(logPath);
   if (!check.ok) return ioError(streams, json, check.message);

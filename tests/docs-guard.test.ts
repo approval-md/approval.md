@@ -32,8 +32,10 @@ import { test } from "node:test";
 import { isAgentmailFailureCode } from "../src/adapters/agentmail.js";
 import { ADAPTER_REFUSAL_CODES } from "../src/adapters/contract.js";
 import { EXECUTE_REFUSAL_CODES } from "../src/core/execute.js";
+import { parseFrontmatter } from "../src/core/frontmatter.js";
 import { GATE_REFUSAL_CODES } from "../src/core/gate.js";
 import { TOKEN_VERIFY_REFUSAL_CODES } from "../src/core/token.js";
+import { validate } from "../src/core/validate.js";
 import { EXIT_CODE_TABLE } from "../src/cli/exit-codes.js";
 
 /** The repository root, from `dist/tests/` at runtime. */
@@ -241,6 +243,52 @@ test("the README states the token-delivery asymmetry and the web CSRF stance", (
     /loopback/iu,
     "README.md no longer states the loopback trust boundary the web channel relies on",
   );
+});
+
+// ---------------------------------------------------------------------------
+// examples/backlog-md-project (APRV-226)
+// ---------------------------------------------------------------------------
+
+/**
+ * The Backlog.md example's task file is the one place a reader is shown a
+ * complete envelope sitting in real board frontmatter. The README tells them
+ * it validates against `schema/envelope.schema.json`, and `approval register`
+ * would refuse it otherwise; the schema is versioned and amended, so this is
+ * the assertion that keeps the example registerable.
+ */
+const BACKLOG_EXAMPLE_TASK =
+  "examples/backlog-md-project/backlog/tasks/task-7 - Publish-0.1.0-to-npm.md";
+
+test("the Backlog.md example's task file carries an envelope the schema accepts", () => {
+  const parsed = parseFrontmatter(readDoc(BACKLOG_EXAMPLE_TASK));
+  assert.ok(parsed.ok, `${BACKLOG_EXAMPLE_TASK} does not parse as a task file`);
+  const envelope = parsed.data["approval"];
+  assert.ok(
+    typeof envelope === "object" && envelope !== null,
+    `${BACKLOG_EXAMPLE_TASK} carries no approval: envelope; the example exists to show one`,
+  );
+  const result = validate("envelope", envelope);
+  assert.equal(
+    result.ok,
+    true,
+    `${BACKLOG_EXAMPLE_TASK} no longer validates against envelope.schema.json: ${
+      result.ok ? "" : JSON.stringify(result.errors)
+    }. The README promises a registerable file; fix the file or the promise.`,
+  );
+});
+
+test("the Backlog.md example's README walks the four verbs in order", () => {
+  const readme = readDoc("examples/backlog-md-project/README.md");
+  const verbs = ["approval register ", "approval request ", "approval wait ", "approval run "];
+  let cursor = -1;
+  for (const verb of verbs) {
+    const at = readme.indexOf(verb, cursor + 1);
+    assert.ok(
+      at > cursor,
+      `examples/backlog-md-project/README.md no longer shows \`${verb.trim()}\` after the verb before it`,
+    );
+    cursor = at;
+  }
 });
 
 // ---------------------------------------------------------------------------
