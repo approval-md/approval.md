@@ -445,7 +445,14 @@ test("live selection FAILS CLOSED: no usable secret gates every action in the cl
   if (!result.ok) return;
   assert.equal(result.proceed, false, "an unconfigured live class must gate, not proceed");
   assert.equal(result.live?.gated, true);
-  assert.equal(result.live?.reason, "secret-unset");
+  // APRV-208 refined the REASON without touching the property. `secret-unset` no
+  // longer settles the question on its own: a process with no secret asks the
+  // operator's daemon, and there is no daemon here, so the verdict names which
+  // delegated refusal happened. Gated either way, and now gated for a reason an
+  // operator can act on ("start the daemon") rather than one they must not
+  // ("export the secret into the agent's environment", which SPEC.md §5.2
+  // forbids and which is why this failed closed for a fortnight, APRV-184).
+  assert.equal(result.live?.reason, "draw-daemon-absent");
   assertClean(gated);
 });
 
