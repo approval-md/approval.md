@@ -2510,6 +2510,69 @@ the channel, which is the failure the channel exists to prevent.
 `--limit` defaults to 20 and counts from the newest end while printing oldest
 first. `--since` filters by the UTC date in the filename.
 
+## values
+
+The mirror of `journal`, running the other way. `journal` exists because an
+agent behind this gate can comply, be refused, and report an exit code, and had
+no way to say anything else. `values` exists because APPROVAL.md carried control
+in one direction only: the policy block says what an agent may do, and nothing
+in the file said what the operator wanted the work to be like. The optional
+` ```yaml approval-values ` block (SPEC.md §5.3) is that, and this verb prints
+it.
+
+**It is guidance, and it is never policy.** Every output form opens with the
+banner saying so, `--json` carries the same sentence in `note`, and the reason
+is the same discipline `journal read` applies in the opposite direction: a
+reader must never have to work out what standing the words on their screen have.
+Nothing in the block grants anything, forbids anything, or changes a verdict. No
+routing, class match, sampling draw, budget, token, gate window or execution
+decision reads it. That is SPEC.md §11.1 invariant 10, and
+`tests/values-inert.test.ts` pins it both statically (no enforcement module may
+name the info string, and only three CLI surfaces may import the reader) and
+behaviourally (a policy resolves identically with the block absent, valid,
+malformed, or duplicated).
+
+**Why absence is a declaration.** A file with no values block prints exactly
+`the operator has declared no values here.` and exits 0. The alternative (say
+nothing, or print an empty result) collapses two different facts into one
+screen: "the operator considered this and wrote nothing" and "I never looked".
+An agent that cannot tell those apart will fill the gap by inferring what the
+operator probably wants, which is the one thing a block about a human's stated
+values must not be used for. Some operators will leave the slot empty, and
+naming the empty slot is worth more than hiding it.
+
+**Why it is out of the policy-check trace.** `approval policy check` prints the
+decision path: which rule matched, at what specificity, and what the answer
+resolves to. That trace is the enforcement story, and every line in it is a line
+something acted on. A values block is read by nobody in that path, so a line
+about it there would be a line asserting relevance it does not have, and the
+next reader would reasonably ask which of the two blocks the answer came from.
+A broken values block is reported by this verb (exit 1, with its load code) and
+by the `values-block` row of `approval doctor`, and by nothing else. It cannot
+make a policy unloadable: the two blocks are parsed on separate paths that share
+only the fence splitter, so guidance can neither widen nor narrow a class.
+
+**Why a broken block does not fail closed.** The policy loader fails closed
+because a half-understood permission document is one whose author believes
+constraints are in force that are not. That argument does not carry here.
+Failing closed on a malformed values block would turn a YAML typo into an
+all-manual repository, and would buy no safety in exchange, because nothing was
+being enforced from the block in the first place. So the verb says the block is
+present and unreadable, says to treat it as absent, and says it grants nothing
+either way.
+
+**It rides the attestation, and an agent cannot write it.** The block lives
+inside APPROVAL.md, the attestation of SPEC.md §5.2 digests the whole file, and
+edits under `.approval/` and to the policy file classify `policy.core`. So the
+operator's stated values are as tamper-evident as their policy, and cannot be
+quietly rewritten by the party they are addressed to. An edit to them invalidates
+the standing attestation until a human re-attests, exactly as a policy edit does.
+
+`--policy` wins over discovery and `--dir` chooses where `APPROVAL.md` then
+`APPROVALS.md` are looked for, with the same precedence `policy check` uses. The
+verb resolves no policy rule, reads no log, mints no token and appends nothing,
+and it takes no `--as`: there is no actor in a read of somebody else's words.
+
 ## payload hash
 
 Canonicalization first is what makes the hash reproducible across

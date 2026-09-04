@@ -62,6 +62,7 @@ import { basename, join } from "node:path";
 
 import { isNode, parseDocument, visit } from "yaml";
 
+import { scanFences, type FenceScan } from "./md-fence.js";
 import { validate, type ValidationError } from "./validate.js";
 
 /**
@@ -454,66 +455,16 @@ function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-/** Normalise a fence info string: trim ends, collapse internal whitespace. */
-function normaliseInfoString(info: string): string {
-  return info.trim().replace(/\s+/gu, " ");
-}
-
-interface FenceScan {
-  /** Bodies of every block whose info string is the policy info string. */
-  blocks: string[];
-  /** True when a matching fence was opened and never closed before EOF. */
-  unterminated: boolean;
-}
-
 /**
- * Scan CommonMark fenced code blocks and collect the bodies of those whose
- * info string is `yaml approval-policy`.
+ * Scan this file's markdown for policy fences.
  *
- * CommonMark rules honoured, because they decide what is and is not a fence:
- * an opening fence is 3+ backticks indented at most 3 spaces; its info string
- * may not contain a backtick; the closing fence is at least as long as the
- * opener and carries nothing but whitespace. Every non-matching fenced block
- * (```js, ```yaml, …) is still scanned as a block, so text *inside* it can
- * never be mistaken for a policy fence. Everything outside a fence — including
- * yaml-looking prose and 4-space-indented code blocks, which are not fences —
- * is ignored entirely.
+ * A one-line wrapper since APRV-238. The CommonMark rules, and the doc comment
+ * arguing them, moved to {@link scanFences} in `core/md-fence.ts` so the values
+ * reader of SPEC.md §5.3 could ask the same question about its own info string
+ * without importing this module. Same rules, same results, one implementation.
  */
 function scanPolicyFences(markdown: string): FenceScan {
-  const lines = markdown.split(/\r\n|\n|\r/u);
-  const blocks: string[] = [];
-
-  let openLength = 0;
-  let openIsPolicy = false;
-  let body: string[] = [];
-  let inFence = false;
-
-  for (const line of lines) {
-    if (!inFence) {
-      const open = /^ {0,3}(`{3,})(.*)$/u.exec(line);
-      if (open === null) continue;
-      const info = open[2] ?? "";
-      // CommonMark: a backtick fence's info string may not contain a backtick.
-      if (info.includes("`")) continue;
-      inFence = true;
-      openLength = (open[1] ?? "").length;
-      openIsPolicy = normaliseInfoString(info) === POLICY_INFO_STRING;
-      body = [];
-      continue;
-    }
-
-    const close = /^ {0,3}(`{3,})[ \t]*$/u.exec(line);
-    if (close !== null && (close[1] ?? "").length >= openLength) {
-      if (openIsPolicy) blocks.push(body.join("\n"));
-      inFence = false;
-      openIsPolicy = false;
-      body = [];
-      continue;
-    }
-    body.push(line);
-  }
-
-  return { blocks, unterminated: inFence && openIsPolicy };
+  return scanFences(markdown, POLICY_INFO_STRING);
 }
 
 /** How a hardened parse should name itself in its failure messages. */

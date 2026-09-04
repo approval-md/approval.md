@@ -18,25 +18,42 @@
  * would have to appear for such a wiring to exist, and names the offending file
  * when it finds one.
  *
- * Why literals rather than a module graph: the values reader does not exist yet
- * (APRV-238 lands `src/core/values.ts`), and a guard that cannot run before the
- * thing it guards would be written after it, which is the wrong order for a
- * safety property. Everything here passes today by construction and keeps
- * passing as the surfaces land.
+ * Why literals rather than a module graph: when these guards were written the
+ * values reader did not exist, and a guard that cannot run before the thing it
+ * guards would be written after it, which is the wrong order for a safety
+ * property. APRV-238 has since landed `src/core/values.ts`, so the import guard
+ * at the bottom of the static half now does real work as well.
  *
- * NOT here, and deliberately: a behavioural equivalence test — the same policy
- * and the same action routed with and without a values block, and with and
- * without a reaction on the preceding record, producing byte-identical verdicts.
- * That test needs the reader and the verbs to exist; APRV-238 (values reader and
- * `approval values`) and APRV-239 (`approval feedback` and the reaction-bearing
- * verbs) each add their half of it.
+ * The behavioural half arrived with APRV-238, at the bottom of this file: the
+ * same policy block routed four ways (values block absent, valid, malformed,
+ * duplicated) through `loadPolicy`, through `resolve` over a class matrix, and
+ * through `approval policy check --json` in a real child process, producing
+ * identical answers every time. It is here rather than in `tests/values.test.ts`
+ * because the property belongs to the invariant and not to the reader: a future
+ * change that made a values block move a verdict would most likely be made by
+ * somebody working on enforcement, and this is the file they are pointed at.
+ * The reaction half of the same argument still waits on APRV-239 (`approval
+ * feedback` and the reaction-bearing verbs).
  */
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "node:test";
+import { after, test } from "node:test";
+
+import { loadPolicy } from "../src/core/policy-load.js";
+import { resolve as resolveClass } from "../src/core/policy-match.js";
+import { DEFAULT_SCHEMA_DIR } from "../src/core/validate.js";
 
 /** The repository root, from `dist/tests/` at runtime. */
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -49,9 +66,9 @@ const CORE_DIR = join(REPO_ROOT, "src", "core");
  * `values.ts` is the reader itself: extracting the block is its whole subject.
  * `md-fence.ts` is the shared fence splitter — the one place that knows how to
  * find a labelled fenced block in APPROVAL.md, and therefore the one place that
- * may know both info strings. Neither exists yet; the list is written to the
- * shape APRV-238 will land, and the test is green whether or not the files are
- * there. Any OTHER core module naming the literal is the wiring this invariant
+ * may know both info strings. The list was written to the shape APRV-238 would
+ * land and the test was green before either file existed; both are here now.
+ * Any OTHER core module naming the literal is the wiring this invariant
  * forbids: the block's content belongs to the surfaces that show it to a human
  * or hand it to an agent's prompt, never to the code that decides.
  */
@@ -231,4 +248,178 @@ test("src/core/values.ts is imported only by the surfaces that show it (APRV-237
       "\n",
     )}`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// The behavioural half (APRV-238): the same policy, four values blocks, one
+// answer. The static guards above say no decision path NAMES the block; these
+// say no decision path is MOVED by it, which is the property the guards are a
+// cheap proxy for.
+// ---------------------------------------------------------------------------
+
+/** dist/tests/values-inert.test.js -> dist/src/cli/main.js */
+const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
+const VALUES_FIXTURES = join(DEFAULT_SCHEMA_DIR, "fixtures", "values-md");
+
+/**
+ * The four whole-file variants, byte-identical in their policy halves.
+ *
+ * That identity is the whole experiment: four files that a policy reader must
+ * be unable to tell apart, two of which carry a values block a values reader
+ * refuses outright. If any assertion below ever fails, the correct response is
+ * not to relax it.
+ */
+const VALUES_VARIANTS: readonly { readonly label: string; readonly path: string }[] = [
+  { label: "absent", path: join(VALUES_FIXTURES, "valid", "absent.md") },
+  { label: "valid", path: join(VALUES_FIXTURES, "valid", "with-values.md") },
+  { label: "malformed", path: join(VALUES_FIXTURES, "invalid", "yaml-error.md") },
+  { label: "duplicated", path: join(VALUES_FIXTURES, "invalid", "two-blocks.md") },
+];
+
+/**
+ * The classes routed through `resolve`, chosen to reach every branch the
+ * resolver has: a wildcard match, several literal matches at each declared
+ * autonomy, a rule carrying limits, and a class the policy never mentions,
+ * which falls to `defaults.autonomy`. Each is asked three times, once for every
+ * state of `reversible`, so the irreversibility floor of SPEC.md §7 is on the
+ * matrix as well.
+ */
+const CLASS_MATRIX: readonly string[] = [
+  "read.file",
+  "files.write.workspace",
+  "calendar.write.own",
+  "communicate.email.draft",
+  "communicate.email.external",
+  "financial.spend",
+  "public.post",
+  "data.delete",
+  "account.auth",
+  "nothing.the.policy.mentions",
+];
+
+const REVERSIBLE_MATRIX: readonly (boolean | undefined)[] = [undefined, true, false];
+
+// The prefix deliberately carries no form of the word this file is about: the
+// last assertion below reads the CLI's own output for it, and a scratch path
+// that matched would be a false positive nobody could see.
+const behaviouralScratch = mkdtempSync(join(tmpdir(), "approval-md-inert-"));
+
+after(() => {
+  rmSync(behaviouralScratch, { recursive: true, force: true });
+});
+
+/**
+ * Write one variant into a FIXED path and return it.
+ *
+ * One directory reused across all four, so the file path every answer embeds is
+ * held constant and the deep-equality below compares whole results rather than
+ * a subset somebody had to choose. A different directory per variant would make
+ * the trace lines differ for a reason that has nothing to do with the property.
+ */
+function writeVariant(dir: string, variantPath: string): string {
+  const policyPath = join(dir, "APPROVAL.md");
+  writeFileSync(policyPath, readFileSync(variantPath, "utf8"), "utf8");
+  return policyPath;
+}
+
+test("loadPolicy answers identically across the four values-block variants (APRV-238)", () => {
+  const dir = mkdtempSync(join(behaviouralScratch, "load-"));
+  const answers = VALUES_VARIANTS.map((variant) => {
+    writeVariant(dir, variant.path);
+    return { label: variant.label, result: loadPolicy({ dir }) };
+  });
+
+  const baseline = answers[0];
+  assert.ok(baseline !== undefined);
+  // A guard on the guard: four identical fail-closed results would satisfy
+  // every comparison below and prove nothing.
+  assert.equal(baseline.result.ok, true, "the shared policy block did not load");
+
+  for (const entry of answers.slice(1)) {
+    assert.deepEqual(
+      entry.result,
+      baseline.result,
+      `the policy load differs between the "${baseline.label}" and "${entry.label}" values blocks. SPEC.md §11.1 invariant 10: the values block is guidance, and guidance may not move the policy by any route.`,
+    );
+  }
+});
+
+test("resolve answers identically across the variants, over a class matrix (APRV-238)", () => {
+  const dir = mkdtempSync(join(behaviouralScratch, "resolve-"));
+
+  const perVariant = VALUES_VARIANTS.map((variant) => {
+    writeVariant(dir, variant.path);
+    const load = loadPolicy({ dir });
+    const rows = CLASS_MATRIX.flatMap((actionClass) =>
+      REVERSIBLE_MATRIX.map((reversible) => ({
+        actionClass,
+        reversible: reversible ?? null,
+        resolution: resolveClass(
+          load,
+          actionClass,
+          reversible === undefined ? {} : { reversible },
+        ),
+      })),
+    );
+    return { label: variant.label, rows };
+  });
+
+  const baseline = perVariant[0];
+  assert.ok(baseline !== undefined);
+  assert.equal(
+    baseline.rows.length,
+    CLASS_MATRIX.length * REVERSIBLE_MATRIX.length,
+    "the matrix collapsed; a resolver comparison over nothing is a green test about an empty set",
+  );
+  // The matrix has to reach more than one verdict, or every variant agreeing on
+  // a single answer would say nothing about routing.
+  assert.ok(
+    new Set(baseline.rows.map((row) => row.resolution.autonomy)).size > 1,
+    "the matrix produced one autonomy for every class; widen it",
+  );
+
+  for (const entry of perVariant.slice(1)) {
+    assert.deepEqual(
+      entry.rows,
+      baseline.rows,
+      `routing differs between the "${baseline.label}" and "${entry.label}" values blocks. A class match, a supervision mode, a limit or an irreversibility floor moved because of human-authored guidance (SPEC.md §11.1 invariant 10).`,
+    );
+  }
+});
+
+test("`policy check --json` is byte-identical across the variants (APRV-238)", () => {
+  // The end-to-end form of the two tests above: a real child process, the real
+  // CLI, the real explanation. What an operator or an agent actually observes.
+  const dir = mkdtempSync(join(behaviouralScratch, "check-"));
+
+  const outputs = VALUES_VARIANTS.map((variant) => {
+    writeVariant(dir, variant.path);
+    const env = { ...process.env };
+    delete env["APPROVAL_HUMAN"];
+    delete env["APPROVAL_AGENT"];
+    const run = spawnSync(
+      process.execPath,
+      [CLI_ENTRY, "policy", "check", "financial.spend", "--json"],
+      { cwd: dir, encoding: "utf8", env },
+    );
+    assert.equal(run.error, undefined, `spawn failed: ${String(run.error)}`);
+    assert.equal(run.status, 0, `${variant.label}: policy check exited ${String(run.status)}: ${run.stderr}`);
+    return { label: variant.label, stdout: run.stdout };
+  });
+
+  const baseline = outputs[0];
+  assert.ok(baseline !== undefined);
+  for (const entry of outputs.slice(1)) {
+    assert.equal(
+      entry.stdout,
+      baseline.stdout,
+      `\`policy check --json\` differs between the "${baseline.label}" and "${entry.label}" values blocks:\n${baseline.stdout}\n---\n${entry.stdout}`,
+    );
+  }
+
+  // …and the trace names no part of the values block. `policy check` explains
+  // enforcement, and guidance appearing in an enforcement trace is how a reader
+  // starts believing it is enforced.
+  assert.ok(!baseline.stdout.includes("approval-values"), baseline.stdout);
+  assert.ok(!baseline.stdout.includes("values"), baseline.stdout);
 });

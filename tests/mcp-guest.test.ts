@@ -200,6 +200,11 @@ test("mcp guest: tools/list is exactly the allowlist", async () => {
       "withdraw",
       "journal_write",
       "journal_read",
+      // APRV-238. A guest is another operator's session reaching this queue,
+      // and the values block is this operator's own words about their own
+      // work. Withholding it takes nothing from the guest, because it never
+      // granted anything to anyone.
+      "values",
       "doctor",
       "payload_hash",
       "audit_list",
@@ -255,7 +260,7 @@ test("mcp guest: full mode still publishes the whole agent surface", async () =>
   const { client, close } = await connect(dir);
   try {
     const listed = (await client.listTools()).tools.map((tool) => tool.name);
-    for (const name of ["run", "token", "journal_write", "payload_hash", "adapter_email"]) {
+    for (const name of ["run", "token", "journal_write", "values", "payload_hash", "adapter_email"]) {
       assert.ok(listed.includes(name), `full mode dropped "${name}"`);
     }
     assert.deepEqual(listed.sort(), publishedVerbs().map(toolName).sort());

@@ -98,6 +98,7 @@ Usage:
                       [--as <id>] [--journal <dir>] [--json]
   approval journal read [--limit <n>] [--since <YYYY-MM-DD>] [--journal <dir>]
                       [--json]
+  approval values     [--policy <path>] [--dir <path>] [--json]
   approval env        [--check] [--policy <path>] [--dir <path>] [--log <path>]
                       [--json]
   approval setup      identity|vault|sampling|channel <name>|adapter <name>
@@ -212,6 +213,13 @@ Ask — an agent declares an action and acts on the answer:
             entry as agent-authored DATA. Nothing written there changes any
             verdict, sampling probability or budget; it is signal for the
             operator, not a decision surface
+  values    the mirror of "journal", running the other way: the operator's own
+            words, in the optional values block of APPROVAL.md. What they value
+            in the work, what they want from an agent, and how they read and
+            answer. It is GUIDANCE and never policy: it grants nothing, forbids
+            nothing, and no enforcement path reads it. A file with no block says
+            so in words, because "nothing was declared" and "I did not look" are
+            different facts
   mcp       "mcp serve" is the optional MCP wrapper of SPEC.md §10.5: the same
             verbs as tools, over stdio, sharing the CLI's code paths. It is
             AGENT-FACING ONLY — grant, reject, revoke, attest, amend, vault,
@@ -1503,6 +1511,31 @@ JSON shape: {"ok":true,"dir":"…","note":"…","total":N,"entries":[…]}
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("journal-read")}`;
+
+export const VALUES_HELP = `approval values — what the operator said they value (human-authored)
+
+Usage:
+  approval values [--policy <path>] [--dir <path>] [--json]
+
+Flags:
+  --policy <path>       the policy file to read (wins over discovery)
+  --dir <path>          where to look for APPROVAL.md, then APPROVALS.md
+  --json / -h, --help   machine-readable output / this text
+
+Prints the optional \`\`\`yaml approval-values block of APPROVAL.md: what the
+operator loves, likes and dislikes, what they want from you as behaviour, and
+how they read and answer. EVERY FORM CARRIES THE LABEL: this is GUIDANCE and
+never policy. It grants nothing, forbids nothing and changes no verdict; what
+you MAY do is the policy block, answered by \`approval policy check\`.
+
+No block prints "the operator has declared no values here." and exits 0. A
+present but unreadable block exits 1 with its load code; treat it as absent.
+Neither moves the policy, and \`approval doctor\` reports the broken one.
+
+JSON shape: {"ok":true,"path":"…","present":true|false,"note":"…","values":{…}|null}
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("values")}`;
 
 export const RENDER_HELP = `approval render — regenerate .approval/QUEUE.md from the log
 

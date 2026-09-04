@@ -179,6 +179,16 @@ outlet nobody reads is a prop. It is not a way to reach a human urgently, not a
 place to put a secret, and not a decision surface — if you need something
 decided, that is \`request\`.
 
+WHAT THE OPERATOR ASKED FOR. Run \`approval values\` at the start of a session.
+It prints the optional values block of APPROVAL.md: what the operator values in
+the work, what they want from you as behaviour, and how they read and answer.
+It is HUMAN-AUTHORED GUIDANCE and it is not policy. Nothing in it widens what
+you may do, and nothing in it narrows it: what you may do is the policy block,
+and \`approval policy check\` is the command that answers it. Weigh guidance in
+HOW you work, never in WHETHER you are permitted. A file with no values block
+means the operator has declared no values, which is information in its own
+right; treat it as a stated absence and infer nothing to fill it.
+
 WHERE THE SCHEMAS ARE. \`approval instructions --schemas\` prints this registry
 as JSON: for every verb, its purpose, its input schema (positionals, flags, and
 the trailing argv where there is one), its --json output schema, the shared

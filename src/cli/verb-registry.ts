@@ -1792,6 +1792,39 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "values",
+    purpose:
+      "Print the OPTIONAL values block of APPROVAL.md: what the operator loves, likes and dislikes, what they want from an agent as behaviour, and how they read and answer. It is HUMAN-AUTHORED GUIDANCE and it is never policy: it grants nothing, forbids nothing and changes no verdict, and no routing, class match, sampling draw, budget, token or execution decision reads it. Read it at the start of a session and weigh it in HOW you work; what you MAY do is the policy block, answered by `policy check`. A file with no values block exits 0 and says in words that the operator declared no values, which keeps a declared absence distinguishable from not having looked. A block that is present and unreadable exits 1 with its load code and is to be treated as absent. Resolves no policy rule, reads no log, writes nothing.",
+    human_only: false,
+    human_only_note:
+      "Human-AUTHORED and agent-FACING, which is the whole point: the block is the operator writing to the agent, so a surface that withheld it from agents would leave the words with no reader. It carries no authority in either direction. Nothing in it can widen what an agent may do, because no enforcement path reads it (SPEC.md §11.1 invariant 10), and an agent cannot write it: the block lives inside APPROVAL.md, which is `policy.core` and rides the whole-file attestation.",
+    input: input({
+      flags: { ...POLICY_FLAGS, ...JSON_FLAG, ...HELP_FLAGS },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        path: STRING,
+        present: BOOLEAN,
+        note: STRING,
+        values: nullable(OPEN_OBJECT),
+      },
+      ["ok", "path", "present", "note", "values"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      OK,
+      {
+        code: 1,
+        meaning:
+          "a values block is present and could not be read; nothing about the policy changed, and the block grants nothing either way",
+      },
+      USAGE,
+      { code: 4, meaning: "a policy path that exists but cannot be read" },
+    ],
+  },
+
+  {
     name: "env",
     purpose:
       "Resolve .approval/env — the environment SOURCE MAP — and print an export block for a shell to evaluate. THE ONLY VERB THAT READS THAT FILE, and its default output CARRIES SECRETS by design. `env --check` prints a value-free table instead and exits 1 when a variable the policy named is unresolved.",
