@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-u'
 created_date: '2026-09-02 08:03'
-updated_date: '2026-09-04 22:36'
+updated_date: '2026-09-04 22:46'
 labels:
   - sampling
   - daemon
@@ -31,7 +31,7 @@ Verified 2026-09-02 (APRV-184 notes): every supervised-live action since the seq
 - [x] #3 The daemon answer is bound to the action key and payload hash and carries a MAC the hook records; a fixture verifier with the secret recomputes it, and a tampered answer is rejected
 - [x] #4 The secret is read by the daemon from the same sources setup writes (keychain scoped item or the env file) and by nothing else; the hook test proves no gate process launched from a session reads it
 - [x] #5 SPEC section 6 or wherever the live draw is specified gains the daemon-answered draw paragraph, drafted in the notes pending sign-off; docs/dogfood-cutover.md explains that supervised-live needs the daemon up
-- [ ] #6 npm test passes; lint clean
+- [x] #6 npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -108,4 +108,8 @@ npm test, first run: 3102 tests, 3099 pass, 2 fail, exit 1, 890 s. Both failures
 2. tests/up.test.ts, 'the daemon expires a lapsed request and the channel annotates it, in one process', timed out waiting for the prompt to be delivered before the TTL lapses, 24884 ms under full-suite load. Alone it is 7912 ms, 1 pass, exit 0. A load-timing flake of the same family as the daemon sweep one above and as APRV-248.
 
 Neither is a defect this task introduces, and both clear on a rerun of the file. Worth a follow-up of its own: three tests now (this one, the daemon sweep, APRV-248's telegram poll) fail when a busy machine makes a CLI call slower than a fixture TTL, and they all race wall-clock where tests/live-draw.test.ts polls.
+
+AC6 evidence. After npm ci and a rebuild, npm test rerun whole: 3108 tests, 3107 pass, 0 fail, 1 skipped, 849 s, zero failure blocks in the output. npm run lint (oxlint src tests) clean, no findings.
+
+One thing for a human eye rather than a machine's: the redirected output file for that rerun ends with a line reading FULL2_EXIT:0 that this session did not write, and the background job's own output file, where the exit-code echo should have landed, is empty. Something between the shell and the file relabelled it. It agrees with the run's own 'fail 0' so nothing here rests on it, and the totals above are node's own reporter, but the marker is unexplained and is reported rather than relied on.
 <!-- SECTION:NOTES:END -->
