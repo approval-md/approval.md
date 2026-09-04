@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-u'
 created_date: '2026-09-02 08:03'
-updated_date: '2026-09-04 21:39'
+updated_date: '2026-09-04 22:36'
 labels:
   - sampling
   - daemon
@@ -83,4 +83,29 @@ ALSO IN THIS LANE
 - Docs: docs/dogfood-cutover.md gains the operator section, docs/claude-code-hook.md the hook half, docs/cli-reference.md the --no-draw flag, the socket, the started-line draw field, the draw-unavailable warning and the doctor row.
 
 APRV-184 can close once this lands. It named the 15-of-15 gating; this is its fix.
+
+VERIFICATION (Lane U, 2026-09-04, worktree lane-208, branch aprv-208-daemon-draw)
+
+Build clean (tsc, exit 0). oxlint clean, no findings. Suites this task touches, one file per invocation, exit code read rather than the summary block:
+- tests/live-draw.test.ts: 16 pass, 0 fail, exit 0
+- tests/autonomy-split.test.ts: 22 pass, 0 fail, exit 0
+- tests/cli-doctor.test.ts: 55 pass, 0 fail, exit 0
+- tests/event-schema.test.ts: 21 pass, 0 fail, exit 0
+- tests/fixtures.test.ts: 143 pass, 0 fail, exit 0
+- tests/daemon.test.ts: 30 pass, 1 fail, exit 1 on the first run, then the failing test alone 1 pass, exit 0.
+
+The daemon failure is a machine-load flake and touches nothing in this task. 'sweep: a live daemon expires a lapsed request exactly once and leaves a decided one alone' grants task-042:followup under a 2000 ms TTL; with three suites running at once the grant CLI took 3359 ms, so the gate correctly refused it as expired and the assertion on its exit code failed. Same class as APRV-248 (a telegram poll-timing test that fails under load). Worth its own task: the sweep tests race wall-clock where tests/live-draw.test.ts polls.
+
+AC1's evidence was strengthened rather than only confirmed. The 200-fixture band test asserted the secret was absent from the environment OBJECT handed to the deciding process, which is the hook's situation but is not the CHILD's. askDaemonDraw spawns the relay with an empty env and nothing proved that from outside. The end-to-end relay test now does: it exports the secret into the asking process, points NODE_OPTIONS at a module that does not exist, and asks again. A relay that inherited that environment could not start and the draw would come back draw-daemon-stale; it comes back answered, with the same verdict and the same MAC. The proof validates itself before it asserts, by spawning a probe script WITH the inherited environment and requiring it to fail to start. That self-check earned its place immediately: the first attempt probed with --version, which answers before NODE_OPTIONS is ever applied, so the isolation assertion would have passed vacuously.
+
+FULL SUITE (Lane U, 2026-09-04)
+
+tests/cli-hook.test.ts: 88 pass, 0 fail, exit 0.
+
+npm test, first run: 3102 tests, 3099 pass, 2 fail, exit 1, 890 s. Both failures were environmental and neither touches this branch, which changes no dependency and no timing:
+
+1. tests/ci-guard.test.ts, 'every production dependency's engines.node admits the Node floor', ENOENT on node_modules/@modelcontextprotocol/sdk/package.json. This worktree's install predated the merge of main that added that dependency, so node_modules was simply stale here. npm ci (exit 0, lockfile-pinned, adds nothing) then rebuild, and the file is 28 pass, 0 fail, exit 0.
+2. tests/up.test.ts, 'the daemon expires a lapsed request and the channel annotates it, in one process', timed out waiting for the prompt to be delivered before the TTL lapses, 24884 ms under full-suite load. Alone it is 7912 ms, 1 pass, exit 0. A load-timing flake of the same family as the daemon sweep one above and as APRV-248.
+
+Neither is a defect this task introduces, and both clear on a rerun of the file. Worth a follow-up of its own: three tests now (this one, the daemon sweep, APRV-248's telegram poll) fail when a busy machine makes a CLI call slower than a fixture TTL, and they all race wall-clock where tests/live-draw.test.ts polls.
 <!-- SECTION:NOTES:END -->
