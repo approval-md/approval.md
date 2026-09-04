@@ -378,6 +378,10 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // remote-tracking refs, and it fetches nothing: the answer is as fresh as
       // the operator's last fetch, and outside a repository it is a skip.
       "main-behind-origin",
+      // APRV-227: whether the harness binary hosting the hook changed since the
+      // log last saw a record from it, appended for the same reason. The only
+      // row that asks anything about a program outside this repository.
+      "harness-version-unverified",
       // APRV-208: whether a daemon is answering live draws for this log,
       // appended for the same reason. It is the one row that reports whether
       // `supervised-live` is actually live on this machine rather than gating
@@ -447,6 +451,13 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // main-behind-origin skips: the fixture is a scratch directory and not a
       // git checkout, so there is no origin to be behind — the same absence
       // log-drift, log-advance-cadence and dark-sessions skip on (APRV-215).
+      "skip",
+      // harness-version-unverified skips: the fixture registers no `approval
+      // hook` command in .claude/settings.json or .cursor/hooks.json, so no
+      // harness hosts the hook there — the same absence harness-hook-outcomes
+      // and harness-hook-wiring skip on. Nothing spawns a version probe on this
+      // path, which is also why this suite never reaches a real `claude`
+      // (APRV-227).
       "skip",
       // live-draw skips: the healthy fixture's policy declares no
       // supervised-live class, so no draw is ever made and a missing socket is
@@ -950,9 +961,10 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  // 22 since APRV-208 appended `live-draw`, the row that says whether a daemon
-  // is answering supervised-live draws for this log.
-  assert.equal(parsed.checks.length, 22);
+  // 23: APRV-227 appended `harness-version-unverified` (whether the binary
+  // hosting the hook changed under it) and APRV-208 appended `live-draw`
+  // (whether a daemon is answering supervised-live draws for this log).
+  assert.equal(parsed.checks.length, 23);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);

@@ -126,6 +126,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 
 import type { BudgetVerdict } from "../core/budgets.js";
+import { isPromptRow, WEB_PROMPT_LAYOUT, type PromptLayout } from "../core/prompt-layout.js";
 import { assembleBatch, type BatchRefusal } from "./batch.js";
 import type {
   ChannelBatch,
@@ -270,42 +271,24 @@ function attribution(field: TaggedField<unknown>): string {
 }
 
 /**
- * Presentation order. Computed identity and authority first, claimed persuasion
- * last. Members absent from a request are skipped; members present but unlisted
- * are appended, so a widened {@link ChannelRequest} cannot silently lose a field.
+ * Presentation order, and which rows render (APRV-218).
+ *
+ * The default is {@link WEB_PROMPT_LAYOUT}: computed identity and authority
+ * first, claimed persuasion last, every row on, because a page scrolls.
+ * `channels.web.prompt` in APPROVAL.md replaces it.
+ *
+ * Members absent from a request are skipped; members the layout does not NAME
+ * are appended, so a widened {@link ChannelRequest} cannot silently lose a
+ * field to a policy written before that field existed.
  */
-const FIELD_ORDER: string[] = [
-  "action_key",
-  "task",
-  "class",
-  "command_breakdown",
-  "protected_path",
-  // APRV-109: on an attestation prompt these two ARE the decision, so they sit
-  // above the resolution lines rather than after them. Absent on every ordinary
-  // request, and `orderedFields` skips a name the request does not carry.
-  "policy_diff",
-  "policy_load",
-  "autonomy",
-  "provenance",
-  "state",
-  "requested_ts",
-  "waiting",
-  "ttl_remaining_ms",
-  "payload_hash",
-  "attestation",
-  "budgets",
-  "chain",
-  "est_cost_usd",
-  "gloss",
-  "summary",
-  "rationale",
-  "confidence",
-];
-
-function orderedFields(request: ChannelRequest): string[] {
+function orderedFields(request: ChannelRequest, layout: PromptLayout): string[] {
   const members = Object.keys(request as unknown as Record<string, unknown>);
-  const ordered = FIELD_ORDER.filter((name) => members.includes(name));
-  for (const name of members) if (!ordered.includes(name)) ordered.push(name);
+  const ordered: string[] = layout.order.filter(
+    (name) => layout.visibility[name] !== "off" && members.includes(name),
+  );
+  for (const name of members) {
+    if (!ordered.includes(name) && !isPromptRow(name)) ordered.push(name);
+  }
   return ordered;
 }
 
@@ -333,12 +316,15 @@ export interface WebRendering {
 }
 
 /** Build the split. Pure: no I/O, no clock, no HTML. */
-export function renderWebRequest(request: ChannelRequest): WebRendering {
+export function renderWebRequest(
+  request: ChannelRequest,
+  layout: PromptLayout = WEB_PROMPT_LAYOUT,
+): WebRendering {
   const members = request as unknown as Record<string, TaggedField<unknown> | undefined>;
   const computedLines: WebLine[] = [];
   const claimedLines: WebLine[] = [];
 
-  for (const name of orderedFields(request)) {
+  for (const name of orderedFields(request, layout)) {
     const field = members[name];
     if (field === undefined) continue;
     // `fullPayload` has a region of its own (§10.4), rendered verbatim inside
@@ -566,6 +552,15 @@ export interface WebChannelOptions {
   /** Channel name recorded for audit. Defaults to `web`. */
   name?: string;
   /**
+   * Which rows the page shows (APRV-218), from `channels.web.prompt`.
+   *
+   * Resolved by the verb, which has already loaded the policy; this channel
+   * neither reads a policy file nor holds an opinion about what an operator
+   * should see. Defaults to {@link WEB_PROMPT_LAYOUT}, so a channel constructed
+   * without one renders exactly what it rendered before the key existed.
+   */
+  layout?: PromptLayout;
+  /**
    * The runtime's live pending queue, re-read on every GET.
    *
    * Optional: without it the page shows whatever was `notify`d. With it the
@@ -626,8 +621,11 @@ export class WebChannel implements TestableChannel {
   private httpServer: Server | null = null;
   private counter = 0;
   private readonly counters: WebStats = { notified: 0, views: 0, decisions: 0, refused: 0 };
+  /** The policy's row layout for this channel (APRV-218). Pure input to the rendering. */
+  private readonly layout: PromptLayout;
 
   constructor(options: WebChannelOptions = {}) {
+    this.layout = options.layout ?? WEB_PROMPT_LAYOUT;
     this.name = options.name ?? "web";
     this.configuredPort = options.port ?? WEB_DEFAULT_PORT;
     this.refresh = options.refresh ?? null;
@@ -668,7 +666,7 @@ export class WebChannel implements TestableChannel {
 
     this.pending = members;
     this.rendered = members.map((member) =>
-      reportOf(renderWebRequest(member), isBatch ? deliveryId : undefined),
+      reportOf(renderWebRequest(member, this.layout), isBatch ? deliveryId : undefined),
     );
     return deliveryId;
   }
@@ -926,7 +924,7 @@ export class WebChannel implements TestableChannel {
    */
   private queuePage(error?: string, notice?: string): string {
     const requests = this.currentRequests();
-    const renderings = requests.map((request) => renderWebRequest(request));
+    const renderings = requests.map((request) => renderWebRequest(request, this.layout));
     this.rendered = renderings.map((rendering) =>
       reportOf(rendering, this.deliveries.get(rendering.actionKey)?.batchDeliveryId),
     );

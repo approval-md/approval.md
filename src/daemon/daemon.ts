@@ -103,16 +103,20 @@ import {
 } from "../core/state.js";
 import { validate } from "../core/validate.js";
 import { publishedState } from "../cli/log-advance.js";
+import { isAdvanceBookkeeping } from "../core/advance-cycle.js";
 import { repoRoot } from "../cli/git-scope.js";
 import { checkLogAnchor, resolveAnchor, type AnchorCheck } from "../cli/log-anchor.js";
 import {
   authorizeAdvance,
+  reconcileDanglingAdvance,
   runAdvanceAsync,
   runAdvanceSync,
+  settleAdvanceFinish,
   type AdvanceAttempt,
   type AdvanceCadence,
   type AdvanceInput,
   type AdvanceOutcome,
+  type PendingAdvanceFinish,
 } from "./advance.js";
 import { sweepAuditSampling } from "./audit.js";
 import {
@@ -293,6 +297,17 @@ export type DaemonEvent =
       pr_url: string | null;
       /** True when this attempt opened the day's pull request rather than updating it. */
       pr_created: boolean;
+      /**
+       * True when the day's records branch was REBUILT on the base rather than
+       * stacked on its own tip, and the ref it was rebuilt on (APRV-234).
+       *
+       * A branch the trunk has moved under cannot be fast-forwarded into it,
+       * and a daemon that kept stacking on it produced a pull request only a
+       * hand merge could land. Rebuilding is the repair, and an operator reading
+       * this stream should not have to infer that it happened from a sha.
+       */
+      rebuilt: boolean;
+      rebuilt_on: string | null;
       /** The refusal or failure code, when the outcome carries one. */
       code: string | null;
       message: string;
@@ -655,6 +670,14 @@ export class Daemon {
   /** How many substantive records were owed at the last attempt. */
   private lastAdvanceOwed: number | null = null;
   /**
+   * Where the owed span ENDED at the last attempt (APRV-233).
+   *
+   * The count trigger measures against this inside the interval, so records an
+   * attempt has already tried to publish are not counted a second time towards
+   * publishing them again.
+   */
+  private lastAdvanceSpanEnd: number | null = null;
+  /**
    * The advance whose git work is still running in a child (APRV-211).
    *
    * One slot, and a tick that finds it taken makes no attempt at all: two
@@ -662,6 +685,18 @@ export class Daemon {
    * branch, and the second would have nothing to publish anyway.
    */
   private advanceInFlight: Promise<void> | null = null;
+  /**
+   * An advance outcome this process observed and could not record (APRV-233).
+   *
+   * The 2026-09-02 residue: a hook's record landed between `recordFinish`'s
+   * read and its append, the bounded retry was spent, and the execution stayed
+   * open. The outcome is a fact this process holds and the log does not, so it
+   * is carried here and settled at the top of the next tick, before any trigger
+   * is looked at. Nothing else may advance while it stands.
+   */
+  private pendingAdvanceFinish: PendingAdvanceFinish | null = null;
+  /** The dangling advance cycle this process has already warned about once. */
+  private reportedDangling: string | null = null;
   /** Epoch ms of the last dark-session sweep (APRV-192); `null` before the first. */
   private lastDarkSweepAt: number | null = null;
   private reportedEscalations = new Set<string>();
@@ -1236,6 +1271,82 @@ export class Daemon {
     if (!read.ok) return;
     const root = this.options.cwd;
     const today = this.options.today ?? readClock(this.clockOptions());
+    const input: AdvanceInput = {
+      logPath: this.options.logPath,
+      cwd: root,
+      policy: this.options.policy,
+      cadence,
+      ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
+      ...(this.options.clock === undefined ? {} : { clock: this.options.clock }),
+      ...(this.options.today === undefined ? {} : { today: this.options.today }),
+      ...(this.options.advanceRunner === undefined ? {} : { runner: this.options.advanceRunner }),
+    };
+
+    // APRV-233, first: an outcome this process observed and could not record.
+    // It is settled BEFORE any trigger is evaluated, on the head as it stands
+    // now, and this tick does nothing else either way — a tick that both closed
+    // an old cycle and opened a new one would be reasoning about a log it read
+    // before it wrote to it.
+    if (this.pendingAdvanceFinish !== null) {
+      const settled = settleAdvanceFinish(input, this.pendingAdvanceFinish);
+      if (settled.ok) {
+        this.pendingAdvanceFinish = null;
+        this.emit({
+          event: "advance",
+          outcome: "nothing-owed",
+          records_pending: 0,
+          records_branch: null,
+          range: null,
+          commit: null,
+          pr_url: null,
+          pr_created: false,
+          rebuilt: false,
+          rebuilt_on: null,
+          code: "advance-settled",
+          message: settled.message,
+          flush,
+        });
+      } else {
+        this.warn("advance-refused", settled.message);
+      }
+      return;
+    }
+
+    // APRV-233, and the same rule for a cycle this process does not remember:
+    // an advance whose outcome nobody recorded is reconciled from the git
+    // evidence before anything else is attempted, and refused (never re-run)
+    // when the evidence is not there. On 2026-09-02 the absence of this made
+    // the next tick's authorization reach `startExecution` on the open key and
+    // come back `already-executed`, which reported a failure and fixed nothing.
+    const reconciled = reconcileDanglingAdvance(input, read.records);
+    if (reconciled !== null) {
+      if (reconciled.settled) {
+        this.emit({
+          event: "advance",
+          outcome: "nothing-owed",
+          records_pending: 0,
+          records_branch: null,
+          range: null,
+          commit: null,
+          pr_url: null,
+          pr_created: false,
+          rebuilt: false,
+          rebuilt_on: null,
+          code: "advance-reconciled",
+          message: reconciled.message,
+          flush,
+        });
+      } else if (this.reportedDangling !== reconciled.actionKey) {
+        // Once per cycle, not once per tick: an operator needs to be told, and
+        // being told every thirty seconds forever is how a warning stops being
+        // read.
+        this.reportedDangling = reconciled.actionKey;
+        this.warn("advance-refused", reconciled.message);
+      }
+      return;
+    }
+    this.reportedDangling = null;
+
     const state = publishedState(root, this.options.logPath, read.records, cadence, today);
     if (state.substantive === 0) return;
 
@@ -1258,20 +1369,39 @@ export class Daemon {
 
     const now = Date.parse(readClock(this.clockOptions()));
     const elapsed = this.lastAdvanceAt === null || Number.isNaN(now) || now - this.lastAdvanceAt >= cadence.intervalMs;
-    if (!flush && state.substantive < cadence.afterRecords && !elapsed) return;
+
+    // APRV-233, second: an advance that ALREADY HAPPENED does not get made
+    // again inside the interval, and the record-count trigger does not run
+    // around the interval for a span an earlier attempt already carried.
+    //
+    // The 2026-09-02 shape. The advance pushed `records-log-2026-09-02` and its
+    // `execution.completed` lost the append race, so the only thing left saying
+    // that a branch had just been pushed was an in-process clock — and the
+    // count trigger, alone among the two, never consulted it. Ticks two, five
+    // and eight each pushed the same branch again, ninety seconds apart, under
+    // a fifteen-minute interval (the three-tick spacing is the one in-flight
+    // slot: the two ticks in between found a child still running).
+    //
+    // An advance cycle still open in the log has already returned above, so
+    // what is left is the trigger itself: inside the interval, the count
+    // trigger fires only on records this process has not already attempted to
+    // publish. `afterRecords` is the busy-hour trigger and it keeps working;
+    // what it no longer does is count the same owed span over and over, which
+    // is how four fresh records re-pushed the branch every ninety seconds while
+    // the published head stood still.
+    const fresh =
+      this.lastAdvanceSpanEnd === null
+        ? state.substantive
+        : read.records.filter(
+            (record) =>
+              record.seq > Math.max(state.publishedSeq, this.lastAdvanceSpanEnd ?? 0) &&
+              !isAdvanceBookkeeping(record),
+          ).length;
+    if (!flush && fresh < cadence.afterRecords && !elapsed) return;
 
     this.lastAdvanceAt = Number.isNaN(now) ? 0 : now;
     this.lastAdvanceOwed = state.substantive;
-    const input: AdvanceInput = {
-      logPath: this.options.logPath,
-      cwd: root,
-      policy: this.options.policy,
-      cadence,
-      ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
-      ...(this.options.clock === undefined ? {} : { clock: this.options.clock }),
-      ...(this.options.today === undefined ? {} : { today: this.options.today }),
-      ...(this.options.advanceRunner === undefined ? {} : { runner: this.options.advanceRunner }),
-    };
+    this.lastAdvanceSpanEnd = state.substantiveSeq;
 
     // The gate, always here: the `supervised-live` draw reads a secret that
     // `core/child-env.ts` strips from every child, so authorization cannot
@@ -1308,7 +1438,10 @@ export class Daemon {
   /** Record and report one finished attempt, from either runner. */
   private reportAdvance(attempt: AdvanceAttempt, flush: boolean): void {
     this.lastAdvance = attempt;
-    if (attempt.outcome === "nothing-owed") return;
+    // APRV-233. Held whatever the outcome was, and before the early return: an
+    // outcome nobody recorded is the one thing this loop must not forget.
+    this.pendingAdvanceFinish = attempt.pendingFinish;
+    if (attempt.outcome === "nothing-owed" && attempt.pendingFinish === null) return;
 
     this.emit({
       event: "advance",
@@ -1319,6 +1452,8 @@ export class Daemon {
       commit: attempt.commit,
       pr_url: attempt.prUrl,
       pr_created: attempt.prCreated,
+      rebuilt: attempt.rebuilt,
+      rebuilt_on: attempt.rebuiltOn,
       code: attempt.code,
       message: attempt.message,
       flush,
