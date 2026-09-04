@@ -144,6 +144,47 @@ export type TaggedField<T> =
  */
 export const GLOSS_UNVERIFIED_SUFFIX = "(model, unverified)";
 
+/**
+ * What a person is told, in one line, when the gate would not take their
+ * decision (APRV-235).
+ *
+ * One function, every surface. A Telegram message edit, a web page and a
+ * terminal are three renderings of one fact, and before this they were three
+ * sentences — or, on the terminal that watched a `policy-drift` refusal on
+ * 2026-09-02, one sentence in a place the person who had tapped could not see.
+ * A human who taps on their phone and then reads the operator's terminal should
+ * find the same words in both, because the alternative is deciding which one to
+ * believe.
+ *
+ * Written to the approver, not to the log: it says what happened to THEIR
+ * answer and what, if anything, they should do next. The machine-readable fact
+ * is `code`, which every caller has and none of them should be paraphrasing.
+ * The wording of the first three is APRV-206's, moved here unchanged.
+ */
+export function refusedDecisionLine(code: string): string {
+  if (code === "already-decided") {
+    return "Already decided — the first answer stands; nothing was recorded.";
+  }
+  // APRV-106. The tap that races the withdrawal, or lands on a message whose
+  // edit did not go through. Nothing is appended and the human is told why in
+  // the terms that matter to them: the asker is gone, so there is nothing their
+  // answer could do.
+  if (code === "request-withdrawn") {
+    return "Withdrawn — the requester took this back and is no longer waiting; nothing was recorded.";
+  }
+  if (code === "expired") return "Expired — the approval window has closed.";
+  // APRV-235, and the reason this helper exists. The distinction the line has to
+  // carry is that nothing is wrong with the ACTION: the policy was re-attested
+  // after the question was asked, so the rules on the approver's screen are not
+  // the rules in force, and the answer cannot be recorded under either. The
+  // request is void and has been withdrawn, so this is not a "try again" — the
+  // caller asks again, and a fresh question arrives under the current rules.
+  if (code === "policy-drift") {
+    return "Policy changed after this was asked — the rules you were shown are no longer in force, so your answer could not be recorded. The request has been withdrawn; the caller will ask again under the current policy.";
+  }
+  return `Refused by the runtime: ${code}.`;
+}
+
 /** Tag `value` as runtime-derived, naming the derivation that produced it. */
 export function computed<T>(value: T, source: ComputedSource | string): TaggedField<T> {
   return { kind: "computed", value, source };
