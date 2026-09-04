@@ -400,6 +400,91 @@ payload binding are all recorded. `approval token <key>` on such a grant reports
 `none minted: harness-executed`, and `approval run` refuses with the same code,
 so nobody hunts for a token that was deliberately never created.
 
+## Harness version provenance (APRV-227)
+
+A harness upgrade swaps the binary that hosts this hook, unattended, on a
+human's own machine. A release can change the hook envelope semantics, and the
+gate then answers a protocol nobody is speaking any more. The gate cannot stop
+the upgrade and should not try; what it can do is notice the effect.
+
+**The records the hook writes name the binary that wrote them.** Two optional
+payload fields, on the two records the hook authors:
+
+| record | when the hook writes it | fields |
+|---|---|---|
+| `task.registered` | a supervised or manual class, at registration | `harness`, `harness_version` |
+| `gate.bypassed` | a gated call allowed by an open window | `harness`, `harness_version` |
+
+```json
+{
+  "event": "gate.bypassed",
+  "payload": {
+    "opened_seq": 41,
+    "tool": "Shell",
+    "classes": ["deps.add"],
+    "harness": "cursor",
+    "harness_version": "cursor-agent 2026.08.19"
+  }
+}
+```
+
+Where the version comes from, in order: the hook event's own `version` field
+where the harness supplies one, then `cursor-agent --version` read at most once
+per process, then absent. **Cursor's event does not state a version**, so on
+this harness the value comes from the binary in practice, and a checkout with no
+`cursor-agent` on `PATH` records neither field rather than a placeholder. Both
+travel together or not at all: a version with no binary named beside it is a
+string nobody can compare against anything, and one log holds the records of
+every harness that ever wrote to it.
+
+The write boundary constrains the SHAPE: one line, printable ASCII, at most 64
+characters. The value is the output of a third-party process going into an
+append-only log, and SPEC.md §11.1 invariant 3 has no exception for provenance.
+
+Both fields are OPTIONAL and additive: every record written before they existed
+still validates and still verifies.
+
+**It reduces nothing.** The version is self-reported, and SPEC.md §11.1
+invariant 4 holds here by construction rather than by care: no verdict, no
+irreversibility floor, no budget, no loop streak and no sampling draw reads the
+field. Its single reader is the doctor row below, which can only ADD a red line.
+
+### `approval doctor`'s `harness-version-unverified` row
+
+The row compares what `cursor-agent --version` says now against what the last
+hook-written record says the binary was.
+
+| verdict | when |
+|---|---|
+| pass | they match |
+| fail | they differ, and no record has been written under the new binary yet |
+| skip | this checkout registers no `approval hook` command; or no hook record names a version yet; or `cursor-agent` is not on `PATH` |
+
+Doctor finds the registration by reading `.cursor/hooks.json` (and
+`.claude/settings.json`) for an `approval hook <harness>` command, so a checkout
+driven by both harnesses is reported for both. It fails rather than warns
+because an unverified change is exactly the state in which nobody has checked. A
+pass is not proof the hook fired; it is the absence of the one thing this row
+can see.
+
+### The self-test
+
+Clearing the row costs nobody a prompt. Run one **supervised-class** tool call
+through the upgraded hook: a supervised class registers the task and allows,
+with no approval lifecycle and no question on anybody's phone (amended SPEC.md
+§6.3, and the table at the top of this page). The `task.registered` it writes
+carries the new version.
+
+```sh
+printf '%s' '{"session_id":"selftest","hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"git push origin main"},"tool_use_id":"selftest-1"}' \
+  | approval hook cursor --dir <primary checkout>
+# {"permission":"allow", …}
+approval doctor --json | jq '.checks[] | select(.check == "harness-version-unverified")'
+```
+
+Substitute a command your own policy resolves to `supervised`; `approval hook
+classify -- <command…>` says which class a command falls under.
+
 ## Limits, stated plainly
 
 - **The classifier is best effort.** It reads shell text without being a shell.
