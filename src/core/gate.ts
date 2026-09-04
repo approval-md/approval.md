@@ -130,6 +130,7 @@ import {
 } from "./intake-limits.js";
 import { tick, type ClockOptions } from "./clock.js";
 import { readTaskFile } from "./frontmatter.js";
+import { type HarnessProvenance } from "./harness-version.js";
 import { attemptsOf, withHeadRetry } from "./head-retry.js";
 import {
   appendEvent,
@@ -1127,9 +1128,25 @@ export function register(
   logPath: string,
   source: RegisterSource,
   actor: string,
-  options: GateOptions = {},
+  options: RegisterOptions = {},
 ): RegisterResult {
   return withHeadMovedRetry(options, () => attemptRegister(logPath, source, actor, options));
+}
+
+/**
+ * {@link register}'s options, plus the one field only a harness hook passes.
+ *
+ * `harness` is APRV-227's provenance pair, and where it comes from is the whole
+ * of its safety. It is a CALL option: the hook process derives it from its own
+ * event and its own PATH and hands it in. It is NOT read from the envelope, the
+ * task file, or anything else on disk — an envelope field would be a value an
+ * agent authors about the binary that is supposed to be watching it, and a task
+ * file is a file an agent edits. Copied into the payload verbatim when present
+ * and omitted entirely when absent; nothing downstream reads it back (SPEC.md
+ * §11.1 invariant 4 — see `core/harness-version.ts`).
+ */
+export interface RegisterOptions extends GateOptions {
+  harness?: HarnessProvenance;
 }
 
 /**
@@ -1146,7 +1163,7 @@ function attemptRegister(
   logPath: string,
   source: RegisterSource,
   actor: string,
-  options: GateOptions,
+  options: RegisterOptions,
 ): RegisterResult {
   if (!PRINCIPAL_ACTOR.test(actor)) {
     return refuse(
@@ -1219,6 +1236,13 @@ function attemptRegister(
   if (typeof envelope.state === "string") payload["state"] = envelope.state;
   const budget = budgetOf(resolved.envelope);
   if (budget !== null) payload["budget"] = budget;
+  // APRV-227. Both halves or neither, and only from the caller's option — see
+  // {@link RegisterOptions.harness}. A CLI registration passes none and the
+  // record looks exactly as it did before the field existed.
+  if (options.harness !== undefined) {
+    payload["harness"] = options.harness.harness;
+    payload["harness_version"] = options.harness.harness_version;
+  }
 
   const appended = append(
     logPath,

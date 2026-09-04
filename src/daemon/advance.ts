@@ -68,13 +68,22 @@ import { tick, type Clock } from "../core/clock.js";
 import {
   ADVANCE_ACTOR,
   ADVANCE_CLASS,
+  ADVANCE_KEY_PREFIX,
   advanceActionKey,
   advanceTaskId,
   openAdvanceRequest,
 } from "../core/advance-cycle.js";
 import { childEnvironment } from "../core/child-env.js";
-import { finishExecution, startExecution } from "../core/execute.js";
+import {
+  danglingExecutions,
+  finishExecution,
+  startExecution,
+  type FailureReason,
+  type FinishOptions,
+  type FinishResult,
+} from "../core/execute.js";
 import { register, request, type GateOptions } from "../core/gate.js";
+import { attemptsOf, withHeadRetry } from "../core/head-retry.js";
 import type { EventRecord } from "../core/log.js";
 import { payloadHash } from "../core/payload.js";
 import { loadPolicy } from "../core/policy-load.js";
@@ -161,6 +170,40 @@ export interface AdvanceAttempt {
   /** The refusal code, for every outcome that carries one. */
   code: string | null;
   message: string;
+  /**
+   * True when the day's records branch was REBUILT on the base rather than
+   * stacked on its own tip (APRV-234), and the ref it was rebuilt on.
+   */
+  rebuilt: boolean;
+  rebuiltOn: string | null;
+  /**
+   * The outcome this attempt observed and could NOT record (APRV-233).
+   *
+   * `null` in the ordinary case, where `execution.completed` or
+   * `execution.failed` landed. Non-null when the bounded head-moved retry was
+   * spent and the execution is therefore left open: the advance's effect has
+   * happened, this process knows how it ended, and the log does not yet. The
+   * daemon carries it to the next tick and settles it there
+   * ({@link settleAdvanceFinish}) before it evaluates any trigger, which is
+   * what stops a lost outcome record from reading as "no advance yet".
+   */
+  pendingFinish: PendingAdvanceFinish | null;
+}
+
+/**
+ * An advance outcome that happened and is not yet in the log (APRV-233).
+ *
+ * Every field is an OBSERVATION this runtime made, carried forward verbatim: a
+ * later tick appends exactly the record the failing one would have appended.
+ * Nothing here is re-derived and nothing is guessed — a dangling execution
+ * whose outcome this process does not hold stays dangling for a human, exactly
+ * as `core/execute.ts` says it must.
+ */
+export interface PendingAdvanceFinish {
+  actionKey: string;
+  exitCode: number;
+  reason?: FailureReason;
+  note?: FailureReason;
 }
 
 /** What {@link attemptAdvance} needs. Everything is injected; nothing is ambient. */
@@ -186,6 +229,19 @@ export interface AdvanceInput {
    * path that publishes the log.
    */
   runner?: { command: string; args: readonly string[] };
+  /**
+   * How many times the outcome record is re-derived against a moved head
+   * (APRV-233). Clamped to 1..`core/head-retry.ts`'s `HEAD_MOVED_ATTEMPTS` by
+   * that module's own `attemptsOf`, and downward only.
+   *
+   * The seam a test uses to pin BOTH shapes with one harness, exactly as
+   * `GateOptions.retryOnHeadMoved` does for the harness writers: `1` is the
+   * pre-APRV-233 writer, whose lost race left the execution dangling. A caller
+   * may ask for less tolerance of a moved head, never for more; ambiguity — a
+   * zero, a fraction, a negative, a larger number — resolves to the runtime's
+   * own value rather than the caller's.
+   */
+  retryOnHeadMoved?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -256,8 +312,217 @@ function answerFor(
     prCreated: false,
     range: null,
     code: null,
+    rebuilt: false,
+    rebuiltOn: null,
+    pendingFinish: null,
     ...over,
   });
+}
+
+// ---------------------------------------------------------------------------
+// The bounded head-moved retry on the outcome record (APRV-233)
+// ---------------------------------------------------------------------------
+
+/**
+ * Append the advance's outcome, re-deriving it against a fresh head on
+ * `head-moved` (APRV-233).
+ *
+ * ## What went wrong without it
+ *
+ * Observed 2026-09-02 on Carter's terminal: the advance pushed
+ * `records-log-2026-09-02`, and then `execution.completed could not be
+ * appended: head moved` — a harness hook's record landed between this module's
+ * read and its append, the compare-and-append refused the stale write exactly
+ * as SPEC.md §11.1 invariant 5 requires, and `daemon-log-advance-1-13984` was
+ * left open. Every other writer on this path has re-derived and re-attempted
+ * since APRV-150; this one did not, and the cost of losing the race was an
+ * execution the log said had never ended.
+ *
+ * ## What an attempt is
+ *
+ * The WHOLE operation, not a re-append: {@link finishExecution} re-reads the
+ * verified log, re-runs its `not-started` / `already-finished` /
+ * `execution-delegated` checks against that read, and appends with the head
+ * THAT read observed. Nothing crosses an attempt except the outcome the caller
+ * observed, which is a fact about the world rather than a conclusion about the
+ * log, so no stale derivation can authorize a write. A verdict that genuinely
+ * changed in the window (another writer closed the execution first) is the
+ * verdict returned, and the bound is returned unchanged once it is spent, so
+ * the caller still fails closed.
+ *
+ * ## One retry, in one place
+ *
+ * The loop and the bound are `core/head-retry.ts`'s (APRV-236 lifted them there
+ * for every gate writer, and APRV-233's first draft of this function was the
+ * local copy that helper replaced). `attemptsOf` clamps a caller's
+ * `retryOnHeadMoved` downward only, so the test harness can pin the unretried
+ * shape at `1` and nothing can raise the ceiling; `withHeadRetry` re-runs the
+ * whole `finishExecution` and adds the attempt count to the message it finally
+ * hands back. What remains here is only which operation is retried.
+ */
+function finishWithHeadMovedRetry(
+  logPath: string,
+  actionKey: string,
+  exitCode: number,
+  options: FinishOptions & { retryOnHeadMoved?: number },
+): FinishResult {
+  return withHeadRetry(attemptsOf(options.retryOnHeadMoved), () =>
+    finishExecution(logPath, actionKey, exitCode, ADVANCE_ACTOR, options),
+  );
+}
+
+/**
+ * Close an execution whose outcome an EARLIER tick observed and could not
+ * record (APRV-233).
+ *
+ * The second half of the fix, and the one that matters after a restart of the
+ * loop rather than of the process: the outcome is carried in memory as a
+ * {@link PendingAdvanceFinish} and re-attempted here, on the fresh head,
+ * before the next tick evaluates any trigger. It appends the same record the
+ * failed attempt would have appended, through the same bounded retry.
+ *
+ * `already-finished` is a SUCCESS here: something (a concurrent settle, a
+ * human's `approval execution resolve`) closed the cycle in the meantime, the
+ * log holds an outcome, and there is nothing left to carry.
+ */
+export function settleAdvanceFinish(
+  input: AdvanceInput,
+  pending: PendingAdvanceFinish,
+): { ok: boolean; code: string | null; message: string } {
+  const result = finishWithHeadMovedRetry(input.logPath, pending.actionKey, pending.exitCode, {
+    policy: input.policy,
+    ...(input.schemaDir === undefined ? {} : { schemaDir: input.schemaDir }),
+    ...(input.clock === undefined ? {} : { clock: input.clock }),
+    ...(input.retryOnHeadMoved === undefined ? {} : { retryOnHeadMoved: input.retryOnHeadMoved }),
+    ...(pending.reason === undefined ? {} : { reason: pending.reason }),
+    ...(pending.note === undefined ? {} : { note: pending.note }),
+  });
+  if (result.ok) {
+    return {
+      ok: true,
+      code: null,
+      message: `the outcome of ${pending.actionKey} is recorded (${result.event})`,
+    };
+  }
+  if (result.code === "already-finished") {
+    return {
+      ok: true,
+      code: null,
+      message: `${pending.actionKey} was already closed by another writer; nothing was appended`,
+    };
+  }
+  return {
+    ok: false,
+    code: result.code,
+    message: `the outcome of ${pending.actionKey} still could not be recorded: ${result.message}`,
+  };
+}
+
+/**
+ * The advance cycle whose execution is open, if one is (APRV-233).
+ *
+ * Read from the log rather than from this process's memory, so a daemon that
+ * restarted still sees that an advance HAPPENED. It is the fact the cadence was
+ * missing on 2026-09-02: with no outcome record, nothing but an in-process
+ * clock said the branch had just been pushed.
+ */
+export function danglingAdvanceExecution(records: readonly EventRecord[]): string | null {
+  const open = danglingExecutions([...records]).filter((entry) =>
+    entry.actionKey.startsWith(`${ADVANCE_KEY_PREFIX}-`),
+  );
+  return open[open.length - 1]?.actionKey ?? null;
+}
+
+/** The seq the span named by `daemon-log-advance-<from>-<to>` ends at, or null. */
+function spanEndOf(actionKey: string): number | null {
+  const parsed = Number.parseInt(actionKey.split("-").pop() ?? "", 10);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+/**
+ * Close a dangling advance cycle whose outcome the git refs still show
+ * (APRV-233).
+ *
+ * ## The loop this breaks
+ *
+ * From Carter's terminal, 2026-09-02, with the APRV-211 build running: tick two
+ * advanced and pushed; its `execution.completed` lost the head race (expected
+ * 14874, found 14875) and `daemon-log-advance-1-14871` was left open. Tick
+ * three's authorization then reached `startExecution` on that same key and was
+ * refused `already-executed: an idempotency key is single-use and nothing here
+ * reconciles or reruns it` — which is the gate saying, correctly, that
+ * somebody has to close the books. Nobody did, so the span moved and the daemon
+ * pushed again, and again, every ninety seconds under a fifteen-minute
+ * interval.
+ *
+ * ## What is and is not a guess here
+ *
+ * {@link settleAdvanceFinish} covers the case this process still holds the
+ * outcome for. This covers the other one — a cycle left open by an earlier
+ * process, or by a tick whose memory of it is gone — and it closes it only on
+ * EVIDENCE: the records the cycle was authorized to publish are demonstrably on
+ * a records branch, read from git's own object store through the same
+ * `publishedState` the cadence and the doctor row read. When the evidence is
+ * there the outcome is recorded as the completion it was, with a note saying
+ * which ref proved it. When it is NOT there, nothing is written: the execution
+ * stays open for a person, the daemon warns, and no new advance is started over
+ * work nobody has accounted for. A false `execution.failed` for an advance that
+ * actually published would be worse than the dangling record.
+ *
+ * This is a deliberate, narrow carve-out to `core/execute.ts`'s rule that
+ * nothing closes a dangling execution automatically. Narrow because it closes
+ * only an execution THIS runtime started, for its own `log.advance` cycle,
+ * whose entire effect is a git ref this runtime can look at and did.
+ */
+export function reconcileDanglingAdvance(
+  input: AdvanceInput,
+  records: readonly EventRecord[],
+): { actionKey: string; settled: boolean; message: string } | null {
+  const actionKey = danglingAdvanceExecution(records);
+  if (actionKey === null) return null;
+
+  const root = repoRoot(input.cwd) ?? input.cwd;
+  const today = input.today ?? tick(input.clock === undefined ? {} : { clock: input.clock });
+  const state = publishedState(root, input.logPath, records, input.cadence, today);
+  const to = spanEndOf(actionKey);
+  if (to === null || state.publishedSeq < to) {
+    return {
+      actionKey,
+      settled: false,
+      message: `${actionKey} is an advance execution nobody closed, and no records branch in this checkout carries seq ${
+        to === null ? "the span it named" : String(to)
+      } (the highest published seq is ${String(
+        state.publishedSeq,
+      )}). Nothing is recorded for it: an outcome this runtime cannot observe is a human's to establish (\`approval status\`, then \`approval execution resolve\`). No further advance is started while it stands.`,
+    };
+  }
+
+  const finished = finishWithHeadMovedRetry(input.logPath, actionKey, 0, {
+    policy: input.policy,
+    ...(input.schemaDir === undefined ? {} : { schemaDir: input.schemaDir }),
+    ...(input.clock === undefined ? {} : { clock: input.clock }),
+    ...(input.retryOnHeadMoved === undefined ? {} : { retryOnHeadMoved: input.retryOnHeadMoved }),
+    note: {
+      code: "advance-reconciled",
+      message: `the outcome record was lost when this cycle ran; seq ${String(
+        to,
+      )} is on a records branch in this checkout, so the advance completed`,
+    },
+  });
+  if (finished.ok) {
+    return {
+      actionKey,
+      settled: true,
+      message: `${actionKey} was left open by an earlier advance; seq ${String(
+        to,
+      )} is on a records branch, so its completion is now recorded`,
+    };
+  }
+  return {
+    actionKey,
+    settled: false,
+    message: `${actionKey} could not be closed: ${finished.message}`,
+  };
 }
 
 /**
@@ -307,6 +572,22 @@ export function authorizeAdvance(
     return no({
       outcome: "nothing-owed",
       message: `every record through seq ${String(state.publishedSeq)} is already on a records branch`,
+    });
+  }
+
+  // APRV-233. An advance cycle nobody closed the books on. Reaching
+  // `startExecution` from here produced the bare `already-executed` Carter saw
+  // on 2026-09-02 — the gate saying, correctly, that an idempotency key is
+  // single-use and nothing there reconciles or reruns it — after which the span
+  // moved and the branch was pushed all over again. The reconciliation belongs
+  // to {@link reconcileDanglingAdvance}, which the caller runs first; if it is
+  // still here, it is still a human's, and nothing is authorized over it.
+  const unreconciled = danglingAdvanceExecution(records);
+  if (unreconciled !== null) {
+    return no({
+      outcome: "refused",
+      code: "advance-unreconciled",
+      message: `the advance ${unreconciled} was started and its outcome was never recorded; nothing new is authorized until that cycle is closed (\`approval status\` shows it; \`approval execution resolve\` closes it).`,
     });
   }
 
@@ -521,21 +802,58 @@ function recordFinish(
   advanced: AdvanceRun,
 ): AdvanceAttempt {
   const answer = answerFor(auth.ts, auth.recordsPending, auth.recordsBranch);
-  const finished = finishExecution(input.logPath, auth.actionKey, advanced.ok ? 0 : 1, ADVANCE_ACTOR, {
+  const exitCode = advanced.ok ? 0 : 1;
+  const reason = advanced.ok ? undefined : { code: advanced.code, message: advanced.message };
+  // APRV-234. A rebuilt branch is worth explaining even when the advance
+  // succeeded: an operator reading the doctor row a day later needs to know
+  // that today's records branch was re-parented on the trunk rather than
+  // stacked, and on which commit. A REPORT, never an authorization — nothing in
+  // the gate reads it back.
+  const note =
+    advanced.ok && advanced.report.rebuilt === true
+      ? {
+          code: "advance-rebuilt",
+          message: `the day's records branch was rebuilt on ${
+            advanced.report.rebuiltOn?.ref ?? "the base"
+          } ${(advanced.report.rebuiltOn?.sha ?? "").slice(0, 12)}${
+            advanced.report.recordsBranch === auth.recordsBranch
+              ? ""
+              : ` and opened as ${advanced.report.recordsBranch}`
+          }`,
+        }
+      : undefined;
+
+  // APRV-233. Bounded, and each attempt a whole operation against a fresh head.
+  const finished = finishWithHeadMovedRetry(input.logPath, auth.actionKey, exitCode, {
     policy: input.policy,
     ...(input.schemaDir === undefined ? {} : { schemaDir: input.schemaDir }),
     ...(input.clock === undefined ? {} : { clock: input.clock }),
-    ...(advanced.ok ? {} : { reason: { code: advanced.code, message: advanced.message } }),
+    ...(input.retryOnHeadMoved === undefined ? {} : { retryOnHeadMoved: input.retryOnHeadMoved }),
+    ...(reason === undefined ? {} : { reason }),
+    ...(note === undefined ? {} : { note }),
   });
+  // The bound is spent and the execution is open. The effect HAPPENED and this
+  // process knows how it ended, so the outcome is carried to the next tick
+  // rather than lost; until it is recorded the cadence treats this advance as
+  // still in hand and starts no other.
+  const pendingFinish: PendingAdvanceFinish | null = finished.ok
+    ? null
+    : {
+        actionKey: auth.actionKey,
+        exitCode,
+        ...(reason === undefined ? {} : { reason }),
+        ...(note === undefined ? {} : { note }),
+      };
   const dangling = finished.ok
     ? ""
-    : ` (the execution outcome could not be recorded: ${finished.message}; ${auth.actionKey} is left dangling)`;
+    : ` (the execution outcome could not be recorded: ${finished.message}; ${auth.actionKey} is left open and the next tick settles it before it advances anything)`;
 
   if (!advanced.ok) {
     return answer({
       outcome: "failed",
       code: advanced.code,
       message: `${advanced.message}${dangling}`,
+      pendingFinish,
     });
   }
   const report = advanced.report;
@@ -546,12 +864,19 @@ function recordFinish(
     prCreated: report.prCreated ?? false,
     range: report.range,
     recordsBranch: report.recordsBranch,
+    rebuilt: report.rebuilt === true,
+    rebuiltOn: report.rebuiltOn === undefined ? null : report.rebuiltOn.ref,
+    pendingFinish,
     message:
       report.commit === null
         ? "the records branch already carried these bytes; nothing was committed"
         : `seq ${String(report.range?.from ?? 0)}..${String(
             report.range?.to ?? 0,
-          )} is on ${report.recordsBranch}${report.prUrl === null ? "" : ` (${report.prUrl})`}${dangling}`,
+          )} is on ${report.recordsBranch}${
+            report.rebuilt === true
+              ? ` (rebuilt on ${report.rebuiltOn?.ref ?? "the base"} ${(report.rebuiltOn?.sha ?? "").slice(0, 12)})`
+              : ""
+          }${report.prUrl === null ? "" : ` (${report.prUrl})`}${dangling}`,
   });
 }
 
