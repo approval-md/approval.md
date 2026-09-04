@@ -246,11 +246,11 @@ export function tidyGlossResult(raw: unknown): GlossResult | null {
   const provenanceValue = candidate["provenance"];
   if (typeof provenanceValue !== "object" || provenanceValue === null) return null;
   const provenance = provenanceValue as Record<string, unknown>;
-  const requestedModel = tidyModelId(provenance["requestedModel"]);
+  const requestedModel = normalizeGlossModelId(provenance["requestedModel"]);
   const confirmedModel =
     provenance["confirmedModel"] === undefined
       ? undefined
-      : tidyModelId(provenance["confirmedModel"]);
+      : normalizeGlossModelId(provenance["confirmedModel"]);
   if (
     (provenance.provider !== "claude" && provenance.provider !== "codex") ||
     requestedModel === null ||
@@ -269,7 +269,7 @@ export function tidyGlossResult(raw: unknown): GlossResult | null {
 }
 
 /** A bounded, single-line identifier, or `null` rather than a misleading fold. */
-function tidyModelId(raw: unknown): string | null {
+export function normalizeGlossModelId(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
   if (
