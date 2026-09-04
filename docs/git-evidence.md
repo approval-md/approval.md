@@ -133,6 +133,48 @@ The last one fires in both nested shapes: a log home tracked by an outer repo,
 and a log home that *is* a repository root but sits inside another repository's
 working tree. Containment is the hazard, not tracking.
 
+## Reading the evidence back: log anchoring (APRV-219)
+
+Everything above is about WRITING a second record of the log. Anchoring is the
+other half: reading it back, and refusing a working log that contradicts it.
+
+Why the two halves are not the same thing is
+`docs/proposals/incremental-prefix-proof.md` §3. The chain is unkeyed, so a
+party with write access to `events.jsonl` can truncate it and recompute a chain
+that walks clean from genesis; every check inside the file agrees with them.
+What they cannot rewrite is a copy of the log already committed somewhere they
+do not control, which is precisely what Layout A's per-tick commits, Layout B's
+human commits, and `approval log advance`'s records branches all produce.
+
+```sh
+approval log verify --anchor          # the newest committed copy this checkout can see
+approval log verify --anchor-rev refs/remotes/origin/main
+approval doctor                       # the `log-drift` row is this same check
+```
+
+The check compares the working log's first N bytes against the anchored copy's
+digest, and the working record at the anchored head's `seq` against the
+anchored head's hash. A contradiction is `anchor-diverged` at exit 1. A working
+log that is a strict *prefix* of the anchored copy is not a contradiction; it is
+`behind`, and `approval log sync` is the repair. No committed copy at all is a
+skip with a reason, never a pass. The rev resolution and the JSON shape are in
+[cli-reference](cli-reference.md).
+
+It reads git, never fetches, and writes nothing at all, which is what lets it
+run on the daemon's hot path. `approval daemon run` resolves the anchor at
+startup (the `started` line names the rev and seq it holds this run to) and
+makes the comparison on every tick whose reads re-proved the prefix in full:
+every tick under `read_proof: full`, and the re-proof cadence under
+`incremental`. A divergence stops the daemon at exit 1 with its own outcome,
+`anchor-diverged`, distinct from `log-corrupt` — one means the file contradicts
+itself, the other means the file contradicts the record of it, and a daemon that
+kept appending after either would be extending a chain nobody else has.
+
+Anchoring applies in BOTH layouts, and it is why Layout B is not
+evidence-free: a project repository whose humans commit `.approval/` gives the
+check a witness at every one of those commits, and on the trunk behind whatever
+branch protection the remote enforces.
+
 ## Demonstrating both layers
 
 `tests/daemon-git-evidence.test.ts` runs the demonstration: commit a log,

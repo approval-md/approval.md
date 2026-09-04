@@ -188,10 +188,10 @@ function assertClean(unit: Case): void {
   assert.equal(result.status, "clean", `log not clean: ${JSON.stringify(result)}`);
 }
 
-function runCli(unit: Case, argv: string[]): { code: number; out: string; err: string } {
+async function runCli(unit: Case, argv: string[]): Promise<{ code: number; out: string; err: string }> {
   let out = "";
   let err = "";
-  const code = main([...argv, "--log", unit.logPath], {
+  const code = await main([...argv, "--log", unit.logPath], {
     cwd: unit.dir,
     streams: {
       out: (text) => {
@@ -260,7 +260,7 @@ function ask(unit: Case, key: string, cls: string, minutes: number, reversible?:
 // 1. The grammar (AC 1)
 // ===========================================================================
 
-test("bare supervised parses as supervised-retro, with a load-time note", () => {
+test("bare supervised parses as supervised-retro, with a load-time note", async () => {
   const unit = newCase(policyText(["  files.write.*:", "    autonomy: supervised"]));
   const load = loadPolicy({ file: unit.policyPath });
   assert.equal(load.ok, true);
@@ -282,7 +282,7 @@ test("bare supervised parses as supervised-retro, with a load-time note", () => 
   assert.match(load.notes[0]?.message ?? "", /supervised-retro/u);
 });
 
-test("a policy with no bare supervised carries no notes", () => {
+test("a policy with no bare supervised carries no notes", async () => {
   const unit = newCase(
     policyText([
       "  files.write.*:",
@@ -309,7 +309,7 @@ test("a policy with no bare supervised carries no notes", () => {
   assert.equal(live.liveRate, 0.25);
 });
 
-test("the grammar's mistakes fail the whole policy closed, never half-understood", () => {
+test("the grammar's mistakes fail the whole policy closed, never half-understood", async () => {
   const cases: Array<[string, string[]]> = [
     ["supervised-live with no live_rate", ["  policy.edit:", "    autonomy: supervised-live"]],
     [
@@ -338,7 +338,7 @@ test("the grammar's mistakes fail the whole policy closed, never half-understood
   }
 });
 
-test("defaults.autonomy cannot be supervised-live: there is nowhere to put the rate", () => {
+test("defaults.autonomy cannot be supervised-live: there is nowhere to put the rate", async () => {
   const unit = newCase(
     [
       "# Policy",
@@ -363,7 +363,7 @@ test("defaults.autonomy cannot be supervised-live: there is nowhere to put the r
 
 const LIVE_CLASS = ["  files.write.*:", "    autonomy: supervised-live", "    live_rate: 0.5"];
 
-test("selection is a pure function of the secret, the payload hash and the rate", () => {
+test("selection is a pure function of the secret, the payload hash and the rate", async () => {
   const unit = newCase(policyText(LIVE_CLASS));
   const load = loadPolicy({ file: unit.policyPath });
   assert.equal(load.ok, true);
@@ -396,7 +396,7 @@ test("selection is a pure function of the secret, the payload hash and the rate"
   }
 });
 
-test("a different secret is a different draw: the agent cannot compute its own luck", () => {
+test("a different secret is a different draw: the agent cannot compute its own luck", async () => {
   const unit = newCase(policyText(LIVE_CLASS));
   const load = loadPolicy({ file: unit.policyPath });
   assert.equal(load.ok, true);
@@ -417,7 +417,7 @@ test("a different secret is a different draw: the agent cannot compute its own l
   assert.ok(differences > 100, `the two secrets drew alike ${String(differences)} times`);
 });
 
-test("live selection FAILS CLOSED: no usable secret gates every action in the class", () => {
+test("live selection FAILS CLOSED: no usable secret gates every action in the class", async () => {
   const unit = newCase(policyText(LIVE_CLASS));
   const load = loadPolicy({ file: unit.policyPath });
   assert.equal(load.ok, true);
@@ -456,7 +456,7 @@ test("live selection FAILS CLOSED: no usable secret gates every action in the cl
   assertClean(gated);
 });
 
-test("a retried request over identical bytes gets the identical verdict", () => {
+test("a retried request over identical bytes gets the identical verdict", async () => {
   // The evasion this closes: ask, dislike the answer, ask again until the draw
   // comes up unsampled. There is nothing to re-roll — the input is the payload
   // hash, so the only way to change the verdict is to change the action.
@@ -487,7 +487,7 @@ function ratesFor(key: string): { gating: number; sparing: number } {
   return { gating: Math.min(1, value + 1e-6), sparing: Math.max(1e-9, value - 1e-6) };
 }
 
-test("a sampled supervised-live request is byte-identical to a manual one", () => {
+test("a sampled supervised-live request is byte-identical to a manual one", async () => {
   const key = "task-042:draft";
   const { gating } = ratesFor(key);
 
@@ -543,7 +543,7 @@ test("a sampled supervised-live request is byte-identical to a manual one", () =
   assertClean(manual);
 });
 
-test("a sampled action is granted, tokened and spent exactly as a manual one", () => {
+test("a sampled action is granted, tokened and spent exactly as a manual one", async () => {
   const key = "task-042:draft";
   const { gating } = ratesFor(key);
   const unit = ready(
@@ -583,7 +583,7 @@ test("a sampled action is granted, tokened and spent exactly as a manual one", (
   assertClean(unit);
 });
 
-test("an unsampled supervised-live action proceeds and still enters the retro pool", () => {
+test("an unsampled supervised-live action proceeds and still enters the retro pool", async () => {
   const key = "task-042:draft";
   const { sparing } = ratesFor(key);
   const unit = ready(
@@ -620,7 +620,7 @@ test("an unsampled supervised-live action proceeds and still enters the retro po
   assertClean(unit);
 });
 
-test("a SAMPLED action is not drawn a second time into the retrospective pool", () => {
+test("a SAMPLED action is not drawn a second time into the retrospective pool", async () => {
   const key = "task-042:draft";
   const { gating } = ratesFor(key);
   const unit = ready(
@@ -655,7 +655,7 @@ test("a SAMPLED action is not drawn a second time into the retrospective pool", 
 // 4. The irreversibility floor, as a floor and not a proof (AC 5)
 // ===========================================================================
 
-test("supervised-retro refuses an action declaring reversible: false", () => {
+test("supervised-retro refuses an action declaring reversible: false", async () => {
   const unit = newCase(policyText(["  files.write.*:", "    autonomy: supervised-retro"]));
   const load = loadPolicy({ file: unit.policyPath });
   assert.equal(load.ok, true);
@@ -670,7 +670,7 @@ test("supervised-retro refuses an action declaring reversible: false", () => {
   assert.equal(floored.provenance, "floor");
 });
 
-test("supervised-live refuses an irreversible action too, at every rate", () => {
+test("supervised-live refuses an irreversible action too, at every rate", async () => {
   for (const rate of ["0.01", "0.5", "1"]) {
     const unit = newCase(
       policyText(["  files.write.*:", "    autonomy: supervised-live", `    live_rate: ${rate}`]),
@@ -687,7 +687,7 @@ test("supervised-live refuses an irreversible action too, at every rate", () => 
   }
 });
 
-test("the floor is a floor, not a proof: a claim of reversible cannot raise scrutiny", () => {
+test("the floor is a floor, not a proof: a claim of reversible cannot raise scrutiny", async () => {
   const unit = newCase(policyText(["  files.write.*:", "    autonomy: supervised-retro"]));
   const load = loadPolicy({ file: unit.policyPath });
   assert.equal(load.ok, true);
@@ -711,14 +711,14 @@ test("the floor is a floor, not a proof: a claim of reversible cannot raise scru
 
 const RETRO_CLASS = ["  files.write.*:", "    autonomy: supervised-retro"];
 
-test("a retro denial obliges a gated revert for an action declared reversible", () => {
+test("a retro denial obliges a gated revert for an action declared reversible", async () => {
   const key = "task-042:draft";
   const unit = ready(policyText(RETRO_CLASS), [
     { key, cls: "files.write.local", reversible: true },
   ]);
   const sample = sampleOne(unit, key, 1);
 
-  const review = runCli(
+  const review = await runCli(
     unit,
     ["audit", "review", String(sample), "--deny", "--note", "should not have been written", "--json", ...AS_CARTER],
   );
@@ -741,14 +741,14 @@ test("a retro denial obliges a gated revert for an action declared reversible", 
   assertClean(unit);
 });
 
-test("a denial of an action that declared no reversibility records a policy finding", () => {
+test("a denial of an action that declared no reversibility records a policy finding", async () => {
   const key = "task-042:draft";
   // Nothing declared. The fail-closed reading is the heavier obligation: a
   // revert nobody said was possible is one that gets closed dishonestly.
   const unit = ready(policyText(RETRO_CLASS), [{ key, cls: "files.write.local" }]);
   const sample = sampleOne(unit, key, 1);
 
-  const review = runCli(
+  const review = await runCli(
     unit,
     ["audit", "review", String(sample), "--deny", "--note", "the class is too loose", "--json", ...AS_CARTER],
   );
@@ -761,20 +761,20 @@ test("a denial of an action that declared no reversibility records a policy find
   assertClean(unit);
 });
 
-test("the obligation shape is a pure function of the declared reversibility", () => {
+test("the obligation shape is a pure function of the declared reversibility", async () => {
   assert.equal(obligationFor(true), "gated-revert");
   assert.equal(obligationFor(false), "policy-finding");
   assert.equal(obligationFor(null), "policy-finding");
 });
 
-test("an ordinary review obliges nothing", () => {
+test("an ordinary review obliges nothing", async () => {
   const key = "task-042:draft";
   const unit = ready(policyText(RETRO_CLASS), [
     { key, cls: "files.write.local", reversible: true },
   ]);
   const sample = sampleOne(unit, key, 1);
 
-  const review = runCli(unit, ["audit", "review", String(sample), "--json", ...AS_CARTER]);
+  const review = await runCli(unit, ["audit", "review", String(sample), "--json", ...AS_CARTER]);
   assert.equal(review.code, 0, review.err);
   const answer = JSON.parse(review.out) as { verdict: string; obligation_seq: number | null };
   assert.equal(answer.verdict, "ok");
@@ -783,14 +783,15 @@ test("an ordinary review obliges nothing", () => {
   assertClean(unit);
 });
 
-test("satisfaction is human-only, needs a note, and a gated revert needs the chain", () => {
+test("satisfaction is human-only, needs a note, and a gated revert needs the chain", async () => {
   const key = "task-042:draft";
   const unit = ready(policyText(RETRO_CLASS), [
     { key, cls: "files.write.local", reversible: true },
   ]);
   const sample = sampleOne(unit, key, 1);
   assert.equal(
-    runCli(unit, ["audit", "review", String(sample), "--deny", "--note", "no", ...AS_CARTER]).code,
+    (await runCli(unit, ["audit", "review", String(sample), "--deny", "--note", "no", ...AS_CARTER]))
+      .code,
     0,
   );
   const seq = openObligations(records(unit))[0]?.seq ?? 0;
@@ -822,7 +823,7 @@ test("satisfaction is human-only, needs a note, and a gated revert needs the cha
   assertClean(unit);
 });
 
-test("a completed gated revert closes the obligation, and only once", () => {
+test("a completed gated revert closes the obligation, and only once", async () => {
   const key = "task-042:draft";
   const revertKey = "task-042:restore";
   const unit = ready(policyText(RETRO_CLASS), [
@@ -831,7 +832,8 @@ test("a completed gated revert closes the obligation, and only once", () => {
   ]);
   const sample = sampleOne(unit, key, 1);
   assert.equal(
-    runCli(unit, ["audit", "review", String(sample), "--deny", "--note", "no", ...AS_CARTER]).code,
+    (await runCli(unit, ["audit", "review", String(sample), "--deny", "--note", "no", ...AS_CARTER]))
+      .code,
     0,
   );
   const seq = openObligations(records(unit))[0]?.seq ?? 0;
@@ -857,23 +859,24 @@ test("a completed gated revert closes the obligation, and only once", () => {
   assertClean(unit);
 });
 
-test("an open obligation is loud: status is unhealthy and doctor fails", () => {
+test("an open obligation is loud: status is unhealthy and doctor fails", async () => {
   const key = "task-042:draft";
   const unit = ready(policyText(RETRO_CLASS), [
     { key, cls: "files.write.local", reversible: true },
   ]);
   const sample = sampleOne(unit, key, 1);
 
-  const before = runCli(unit, ["status", "--json", "--policy", unit.policyPath]);
+  const before = await runCli(unit, ["status", "--json", "--policy", unit.policyPath]);
   assert.equal(before.code, 0, before.err);
   assert.deepEqual((JSON.parse(before.out) as { reconciliation: unknown[] }).reconciliation, []);
 
   assert.equal(
-    runCli(unit, ["audit", "review", String(sample), "--deny", "--note", "no", ...AS_CARTER]).code,
+    (await runCli(unit, ["audit", "review", String(sample), "--deny", "--note", "no", ...AS_CARTER]))
+      .code,
     0,
   );
 
-  const after = runCli(unit, ["status", "--json", "--policy", unit.policyPath]);
+  const after = await runCli(unit, ["status", "--json", "--policy", unit.policyPath]);
   assert.equal(after.code, 1, "an unreconciled denial must not read as healthy");
   const body = JSON.parse(after.out) as {
     healthy: boolean;
@@ -884,7 +887,7 @@ test("an open obligation is loud: status is unhealthy and doctor fails", () => {
   assert.equal(body.reconciliation[0]?.obligation, "gated-revert");
   assert.equal(body.reconciliation[0]?.action_key, key);
 
-  const listed = runCli(unit, ["audit", "obligations", "--json"]);
+  const listed = await runCli(unit, ["audit", "obligations", "--json"]);
   assert.equal(listed.code, 0, listed.err);
   assert.equal((JSON.parse(listed.out) as { open: number }).open, 1);
   assertClean(unit);

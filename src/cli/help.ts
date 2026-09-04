@@ -408,14 +408,14 @@ Flags:
   -h, --help       this text
 
 Holds the append lockfile for the WHOLE operation, verifies the chain, copies
-events.jsonl aside inside .approval/ (never \`git stash\`), fast-forwards, then
-reconciles: the committed chain must be a prefix of the snapshot, equal to it, or
-an extension of it, and anything else is log-diverged with nothing merged.
-QUEUE.md and the index are REBUILT from the reconciled log; any failure at any
-step restores the snapshot first; no event is appended. PRIMARY CHECKOUT ONLY.
+events.jsonl aside (never \`git stash\`), fast-forwards, then reconciles: the
+committed chain must be a prefix of the snapshot, equal to it, or an extension,
+and anything else is log-diverged. Untracked payloads the incoming commit also
+carries are proved byte-identical and stood aside for it. QUEUE.md and the index
+are REBUILT; no event is appended. PRIMARY CHECKOUT ONLY.
 Refusals: log-sync-not-primary, log-sync-unverified, log-sync-not-fast-forward,
-log-diverged, log-sync-locked, log-sync-git-failed, log-sync-projection-failed,
-log-sync-restore-failed, log-sync-io.
+log-sync-payload-mismatch, log-diverged, log-sync-locked, log-sync-git-failed,
+log-sync-projection-failed, log-sync-restore-failed, log-sync-io.
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
@@ -449,22 +449,23 @@ ${why("log-advance")}`;
 export const VERIFY_HELP = `approval log verify — verify the log's hash chain
 
 Usage:
-  approval log verify [--log <path>] [--json]
+  approval log verify [--log <path>] [--anchor] [--anchor-rev <rev>] [--json]
 
 Flags:
-  --log <path>   log file to verify (default .approval/log/events.jsonl)
-  --json         machine-readable output
-  -h, --help     this text
+  --log <path>        log file to verify (default .approval/log/events.jsonl)
+  --anchor            also compare the prefix against the committed copy
+  --anchor-rev <rev>  compare against THIS rev's copy (implies --anchor)
+  --json              machine-readable output
+  -h, --help          this text
 
 Walks every complete line: re-derives each record's digest, follows the prev
-chain and the seq succession, and reports the first place the log stops being
-self-consistent. An absent file is an empty log and verifies clean. Nothing is
-written, and a torn tail is never truncated.
+chain and seq succession, and names where the log stops being self-consistent.
+An absent file verifies clean; nothing is written and a torn tail is not cut.
+--anchor also compares the prefix against the copy on a records branch or the
+trunk: a mismatch refuses anchor-diverged; a missing copy skips, never passes.
 
-JSON shape (stdout, one object):
-  {"status":"clean"|"torn-tail"|"corrupt","records","head",
-   "intactThroughSeq"?,"firstBadSeq"?,"reason"?,"message"?,"anomalies"?}
-  A CLEAN LOG WITH ANOMALIES IS CLEAN and still exits 0.
+JSON (one object): "status" clean|torn-tail|corrupt|anchor-diverged, "records",
+"head", optional reason/message/anomalies/anchor. ANOMALIES ARE CLEAN, exit 0.
 
 ${EXIT_CODES_POINTER} (clean 0, corrupt 1, torn-tail 3; an unreadable log is 4)
 ${JSON_ERRORS}
@@ -1631,7 +1632,7 @@ Flags:
   --log <p> / --out <p> / --tasks <d>  log / queue / task folder (backlog/tasks)
   --policy <path> / --dir <path>   the policy file, or where to discover it
   --interval <d> / --debounce <d>  tick period (30s) / event settle time (250ms)
-  --once / --json  one tick then exit / machine-readable, one object per line
+  --once / --json / --no-preflight  one tick / JSON lines / skip the git check
   --git-evidence / --advance / --dark-sessions  three OPT-INs, off by default
   --read-proof full|incremental    prefix proof per read; full is the default
   --with-channels  the channels in this process too: SAME VERB as "approval up"
@@ -1654,7 +1655,7 @@ export const UP_HELP = `approval up — the daemon and every configured channel,
 Usage:
   approval up [every "daemon run" flag] [--as human:<id>] [--port <n>]
               [--payloads <f>] [--payload-dir <d>] [--api-base <url>] [--no-gloss]
-              [--poll-timeout <s>] [--no-telegram] [--no-web] [--restart-backoff <d>]
+              [--poll-timeout <s>] [--no-telegram] [--no-web] [--no-preflight]
 
 Flags (every "daemon run" flag, unchanged, plus):
   --as human:<id>  the approver every decision is recorded against
@@ -1665,11 +1666,11 @@ Flags (every "daemon run" flag, unchanged, plus):
   --no-gloss / --restart-backoff <d>   drop the model gloss / first retry wait
   -h, --help       this text
 
-Credentials and identity come from THE LAUNCH ENVIRONMENT and nowhere else. A
-channel whose credential is unset is NOT started, is reported in doctor's words,
-and the rest run. One that falls over restarts with backoff; the daemon lives.
+BEFORE ANYTHING STARTS the preflight ("daemon run" runs it too) fetches, then
+fast-forwards and rebuilds when that is safe, else refuses and TOUCHES NOTHING;
+opt out with --no-preflight. Credentials come from THE LAUNCH ENVIRONMENT and
+nowhere else: a channel whose credential is unset is skipped in doctor's words.
 
-JSON shape: docs/cli-reference.md#up
 ${EXIT_CODES_POINTER} (a clean stop is 0; the daemon's outcome chooses it)
 ${JSON_ERRORS}
 ${why("up")}`;

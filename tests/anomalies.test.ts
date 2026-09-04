@@ -158,10 +158,10 @@ function records(unit: Case): EventRecord[] {
     .map((line) => JSON.parse(line) as EventRecord);
 }
 
-function runCli(unit: Case, argv: string[]): { code: number; out: string; err: string } {
+async function runCli(unit: Case, argv: string[]): Promise<{ code: number; out: string; err: string }> {
   let out = "";
   let err = "";
-  const code = main([...argv, "--log", unit.logPath], {
+  const code = await main([...argv, "--log", unit.logPath], {
     cwd: unit.dir,
     streams: {
       out: (text) => {
@@ -179,11 +179,11 @@ function runCli(unit: Case, argv: string[]): { code: number; out: string; err: s
 // The frozen vocabulary and the threshold
 // ===========================================================================
 
-test("the anomaly-kind union is frozen public API", () => {
+test("the anomaly-kind union is frozen public API", async () => {
   assert.deepEqual([...CHAIN_ANOMALY_KINDS], ["gate-ts-regression"]);
 });
 
-test("the skew tolerance is pinned at 2 seconds", () => {
+test("the skew tolerance is pinned at 2 seconds", async () => {
   // The DEFAULT since APRV-58, and still drafted rather than spec-derived:
   // amended SPEC.md §8 names `audit.skew_tolerance` and leaves the absent case
   // to the implementation. Pinned here so a change to it is a deliberate edit
@@ -195,7 +195,7 @@ test("the skew tolerance is pinned at 2 seconds", () => {
 // The policy knob (amended SPEC.md §8, APRV-58)
 // ===========================================================================
 
-test("audit.skew_tolerance tightens the threshold; absent means the default", () => {
+test("audit.skew_tolerance tightens the threshold; absent means the default", async () => {
   // 3s of backwards step: inside no policy's business at 2s? No — past the
   // default, so the shipped behavior reports it, and a policy declaring 5s
   // must not.
@@ -221,7 +221,7 @@ test("audit.skew_tolerance tightens the threshold; absent means the default", ()
   assert.match(tightened.anomalies[0]?.message ?? "", /nothing is refused/u);
 });
 
-test("a policy declaring no tolerance, and one that will not load, leave the default in force", () => {
+test("a policy declaring no tolerance, and one that will not load, leave the default in force", async () => {
   const unit = scenario(600_000, 600_000 - 3_000);
   const withPolicy = verify(unit.logPath, { policy: { file: unit.policyPath } });
   assert.equal(withPolicy.anomalies.length, 1, "the fixture policy declares no tolerance");
@@ -240,7 +240,7 @@ test("a policy declaring no tolerance, and one that will not load, leave the def
   assert.equal(skewToleranceMsOf({ file: join(unit.dir, "nowhere.md") }), GATE_TS_SKEW_TOLERANCE_MS);
 });
 
-test("an unparseable tolerance fails the whole policy, exactly as a bad approval_ttl does", () => {
+test("an unparseable tolerance fails the whole policy, exactly as a bad approval_ttl does", async () => {
   const unit = newCase();
   writeFileSync(unit.policyPath, policyWithSkew("1h30m"), "utf8");
   const load = loadPolicy({ file: unit.policyPath });
@@ -251,7 +251,7 @@ test("an unparseable tolerance fails the whole policy, exactly as a bad approval
   assert.equal(skewToleranceMsOf({ file: unit.policyPath }), GATE_TS_SKEW_TOLERANCE_MS);
 });
 
-test("the configured tolerance is report-only: it moves no verdict and no exit code", () => {
+test("the configured tolerance is report-only: it moves no verdict and no exit code", async () => {
   const unit = scenario(600_000, 600_000 - 500);
   writeFileSync(unit.policyPath, policyWithSkew("250ms"), "utf8");
   // An edited policy is inoperative until a human re-attests it (SPEC.md §5.2),
@@ -265,20 +265,20 @@ test("the configured tolerance is report-only: it moves no verdict and no exit c
 
   // `log verify` resolves the policy from its working directory, where the
   // fixture wrote APPROVAL.md.
-  const run = runCli(unit, ["log", "verify", "--json"]);
+  const run = await runCli(unit, ["log", "verify", "--json"]);
   assert.equal(run.code, 0, "an anomaly the policy asked for still exits 0");
   const body = JSON.parse(run.out) as Record<string, unknown>;
   assert.equal(body["status"], "clean");
   assert.equal((body["anomalies"] as unknown[]).length, 1);
 
-  const status = runCli(unit, ["status", "--policy", unit.policyPath, "--json"]);
+  const status = await runCli(unit, ["status", "--policy", unit.policyPath, "--json"]);
   assert.equal(status.code, 0);
   const health = JSON.parse(status.out) as Record<string, unknown>;
   assert.equal(health["healthy"], true, "a tightened threshold must not move health");
   assert.equal((health["anomalies"] as unknown[]).length, 1);
 });
 
-test("chainAnomalies takes the threshold as an argument and stays pure", () => {
+test("chainAnomalies takes the threshold as an argument and stays pure", async () => {
   const unit = scenario(600_000, 600_000 - 500);
   const all = records(unit);
   assert.deepEqual(chainAnomalies(all), [], "the default is the parameter's default");
@@ -291,14 +291,14 @@ test("chainAnomalies takes the threshold as an argument and stays pure", () => {
 // Detection
 // ===========================================================================
 
-test("an ordinary forward-moving log has no anomalies", () => {
+test("an ordinary forward-moving log has no anomalies", async () => {
   const unit = scenario(1_000, 60_000);
   const result = verify(unit.logPath);
   assert.equal(result.status, "clean");
   assert.deepEqual(result.anomalies, []);
 });
 
-test("a backwards step inside the tolerance is not an anomaly", () => {
+test("a backwards step inside the tolerance is not an anomaly", async () => {
   const unit = scenario(10_000, 10_000 - (GATE_TS_SKEW_TOLERANCE_MS - 1));
   const result = verify(unit.logPath);
   assert.equal(result.status, "clean");
@@ -309,7 +309,7 @@ test("a backwards step inside the tolerance is not an anomaly", () => {
   );
 });
 
-test("a backwards step beyond the tolerance is reported", () => {
+test("a backwards step beyond the tolerance is reported", async () => {
   const unit = scenario(600_000, 600_000 - 300_000);
   const result = verify(unit.logPath);
   assert.equal(result.status, "clean", "the chain still verifies");
@@ -323,7 +323,7 @@ test("a backwards step beyond the tolerance is reported", () => {
   assert.match(anomaly?.message ?? "", /nothing is refused/u);
 });
 
-test("exactly at the tolerance is not yet an anomaly; one millisecond past it is", () => {
+test("exactly at the tolerance is not yet an anomaly; one millisecond past it is", async () => {
   const boundary = scenario(600_000, 600_000 - GATE_TS_SKEW_TOLERANCE_MS);
   assert.deepEqual(verify(boundary.logPath).anomalies, []);
 
@@ -331,7 +331,7 @@ test("exactly at the tolerance is not yet an anomaly; one millisecond past it is
   assert.equal(verify(past.logPath).anomalies.length, 1);
 });
 
-test("a non-gate-typed event's timestamp is never compared", () => {
+test("a non-gate-typed event's timestamp is never compared", async () => {
   // `task.registered` is written directly, and SPEC.md §8 leaves direct writers
   // free to supply their own `ts` (an importer replaying history is the case).
   // Comparing them would manufacture anomalies out of correct behavior.
@@ -349,7 +349,7 @@ test("a non-gate-typed event's timestamp is never compared", () => {
   assert.deepEqual(result.anomalies, []);
 });
 
-test("the comparison is against the previous GATE-TYPED record, not the previous record", () => {
+test("the comparison is against the previous GATE-TYPED record, not the previous record", async () => {
   const unit = scenario(600_000, 700_000);
   // A far-past non-gate record between two gate records must neither raise an
   // anomaly of its own nor become the baseline the next gate record is judged by.
@@ -370,7 +370,7 @@ test("the comparison is against the previous GATE-TYPED record, not the previous
   assert.deepEqual(verify(unit.logPath).anomalies, []);
 });
 
-test("one backdated record produces one anomaly, not two", () => {
+test("one backdated record produces one anomaly, not two", async () => {
   // The forward jump back to normal time on the NEXT record is the same
   // disagreement seen from the other end. Reporting it again would double every
   // entry without adding a fact.
@@ -384,7 +384,7 @@ test("one backdated record produces one anomaly, not two", () => {
   assert.equal(anomalies[0]?.event, "approval.granted");
 });
 
-test("chainAnomalies is pure: same records, same answer, no clock", () => {
+test("chainAnomalies is pure: same records, same answer, no clock", async () => {
   const unit = scenario(600_000, 100_000);
   const all = records(unit);
   const first = chainAnomalies(all);
@@ -393,7 +393,7 @@ test("chainAnomalies is pure: same records, same answer, no clock", () => {
   assert.equal(first.length, 1);
 });
 
-test("an empty log has no anomalies", () => {
+test("an empty log has no anomalies", async () => {
   const unit = newCase();
   const result = verify(unit.logPath);
   assert.equal(result.status, "clean");
@@ -404,20 +404,20 @@ test("an empty log has no anomalies", () => {
 // Anomalies change nothing
 // ===========================================================================
 
-test("a log full of anomalies is still clean, and log verify still exits 0", () => {
+test("a log full of anomalies is still clean, and log verify still exits 0", async () => {
   const unit = scenario(600_000, 100_000);
   const result = verify(unit.logPath);
   assert.equal(result.status, "clean");
   assert.equal(result.anomalies.length, 1);
 
-  const run = runCli(unit, ["log", "verify", "--json"]);
+  const run = await runCli(unit, ["log", "verify", "--json"]);
   assert.equal(run.code, 0, "an anomaly moved the exit code");
   const body = JSON.parse(run.out) as Record<string, unknown>;
   assert.equal(body["status"], "clean");
   assert.equal((body["anomalies"] as unknown[]).length, 1);
   assert.equal(run.err, "", "--json answers in one object on stdout and says nothing on stderr");
 
-  const human = runCli(unit, ["log", "verify"]);
+  const human = await runCli(unit, ["log", "verify"]);
   assert.equal(human.code, 0);
   assert.match(human.out, /^clean: /u, "the verdict is still the verdict");
   assert.match(human.err, /timestamp anomaly\(ies\)/u);
@@ -425,16 +425,16 @@ test("a log full of anomalies is still clean, and log verify still exits 0", () 
   assert.match(human.err, /gate-ts-regression/u);
 });
 
-test("the anomalies field is additive: absent when there is nothing to report", () => {
+test("the anomalies field is additive: absent when there is nothing to report", async () => {
   const unit = scenario(1_000, 60_000);
-  const run = runCli(unit, ["log", "verify", "--json"]);
+  const run = await runCli(unit, ["log", "verify", "--json"]);
   assert.equal(run.code, 0);
   const body = JSON.parse(run.out) as Record<string, unknown>;
   assert.deepEqual(Object.keys(body), ["status", "records", "head"]);
   assert.equal(run.err, "", "a log with no anomaly must print nothing to stderr");
 });
 
-test("a corrupt log reports the corruption and no anomalies", () => {
+test("a corrupt log reports the corruption and no anomalies", async () => {
   const unit = scenario(600_000, 100_000);
   // Truncate the chain to a state that cannot verify: a hand-appended junk line
   // is the one thing in this suite that does not go through the append path,
@@ -449,31 +449,31 @@ test("a corrupt log reports the corruption and no anomalies", () => {
     "a chain that does not verify gets no anomaly report: the corruption is the finding",
   );
 
-  const run = runCli(unit, ["log", "verify", "--json"]);
+  const run = await runCli(unit, ["log", "verify", "--json"]);
   assert.equal(run.code, 1);
   const body = JSON.parse(run.out) as Record<string, unknown>;
   assert.equal(body["status"], "corrupt");
   assert.equal(body["anomalies"], undefined);
 });
 
-test("status reports anomalies without moving health or the exit code", () => {
+test("status reports anomalies without moving health or the exit code", async () => {
   const unit = scenario(600_000, 100_000);
-  const run = runCli(unit, ["status", "--policy", unit.policyPath, "--json"]);
+  const run = await runCli(unit, ["status", "--policy", unit.policyPath, "--json"]);
   const body = JSON.parse(run.out) as Record<string, unknown>;
   assert.equal(body["healthy"], true, "an anomaly must not move the health verdict");
   assert.equal(run.code, 0, "an anomaly must not move the exit code");
   assert.equal((body["anomalies"] as unknown[]).length, 1);
 
   const clean = scenario(1_000, 60_000);
-  const cleanRun = runCli(clean, ["status", "--policy", clean.policyPath, "--json"]);
+  const cleanRun = await runCli(clean, ["status", "--policy", clean.policyPath, "--json"]);
   const cleanBody = JSON.parse(cleanRun.out) as Record<string, unknown>;
   assert.equal(cleanBody["anomalies"], undefined, "the field is additive");
   assert.match(cleanRun.out, /"healthy":true/u);
 });
 
-test("status's human output names anomalies and still says health: ok", () => {
+test("status's human output names anomalies and still says health: ok", async () => {
   const unit = scenario(600_000, 100_000);
-  const run = runCli(unit, ["status", "--policy", unit.policyPath]);
+  const run = await runCli(unit, ["status", "--policy", unit.policyPath]);
   assert.equal(run.code, 0);
   // APRV-91 #14 turned status into an aligned table: the colon after each key
   // became a column of spaces. The claim under test is unchanged — an anomaly
@@ -482,7 +482,7 @@ test("status's human output names anomalies and still says health: ok", () => {
   assert.match(run.out, /^timestamp anomalies {2,}1 \(reported, NOT refused/mu);
 });
 
-test("verification is unchanged by anomalies: the records still verify one by one", () => {
+test("verification is unchanged by anomalies: the records still verify one by one", async () => {
   const unit = scenario(600_000, 100_000);
   const result = verify(unit.logPath);
   assert.equal(result.status, "clean");

@@ -18,6 +18,7 @@ entry here is the summary and the pointer.
 | --- | --- | --- | --- | --- | --- |
 | Tool-gateway adapter (AnyAPI, Monid) | [getanyapi.com](https://api.getanyapi.com/mcp), [monid.ai](https://mcp.monid.ai/v1) | 2026-08-31 | gateway | parked | [docs/proposals/tool-gateway-adapter.md](proposals/tool-gateway-adapter.md) |
 | UCA (Universal Coding Agent Harness Updater) | [UNIVERSAL_CODING_AGENT_HARNESS_UPDATER.md](https://github.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/blob/main/UNIVERSAL_CODING_AGENT_HARNESS_UPDATER.md) | 2026-09-02 | updater | declined | APRV-227, APRV-228 |
+| Claude for commerce agents (anthropics/commerce-agents) | [blog](https://claude.com/blog/claude-for-commerce-agents), [repo](https://github.com/anthropics/commerce-agents) | 2026-09-02 | blueprint | declined | APRV-242, APRV-228 |
 
 Verdicts: **adopted** (code exists or is scheduled in a milestone),
 **parked** (design verified, no code, activated on demand), **declined** (no
@@ -148,6 +149,108 @@ below.
 - APRV-228: `claude update`, `codex update` and the UCA verbs classify
   `deps.upgrade` instead of falling to unclassified, so the refusal names
   the class a human can grant.
+
+## Claude for commerce agents (anthropics/commerce-agents)
+
+Assessed 2026-09-02. Verdict: **declined**.
+
+### What it is
+
+Anthropic's reference blueprint for retail, marketplace and travel agents,
+announced 2026-09-01 and published at
+[github.com/anthropics/commerce-agents](https://github.com/anthropics/commerce-agents)
+(Python 3.11, Apache-2.0, one commit, README: "reference implementation; it
+is not maintained and does not accept contributions"). Two agents, each on
+three runtimes (Messages API, Agent SDK, Managed Agents). The **shopping
+agent** searches, compares, builds a cart and hands off to checkout; it never
+transacts, `checkout_handoff` returns a hosted URL that "never passes through
+the model", and payment stays with the retailer. The **merchant agent**
+analyses performance and drafts listing edits, price moves, promotions,
+restocks and campaigns. Every merchant write is staged
+(`ChangeLedger.stage` in `merchant-agent/core/merchant_agent/changes.py`)
+and `apply_change` succeeds only for a change id the host has marked
+approved. The question asked was whether approval.md should ship a
+pre-launch adapter that integrates with it.
+
+### What it exposes
+
+Verified against the repository on the assessment date (README,
+`docs/safety.md`, `docs/backends.md`, the merchant Agent SDK runtime and
+core). The seam an adapter would target is three methods on an in-memory,
+per-session `MerchantToolset`: `pending_host_approvals()`,
+`host_approve(change_id)`, `host_clear(change_id)`. The host's approval
+surface is a comment in the runtime README (`if operator_approved(change):`)
+and, in the console, a `y/N` prompt. `require_host_approval` is a config
+flag; `--no-host-approval` lets a "yes" typed into the chat apply the change
+instead. The apply itself runs in the agent's own process through the
+deployment's `MerchantBackend`, with whatever credentials that process
+holds. Guardrails (`changes.py`, `gates.py`) are static caps: price move,
+promotion depth, restock size, campaign budget. The Agent SDK runtime sets
+`permission_mode="dontAsk"` over an allow-list of `mcp__merchant__*` tools
+and registers one post-tool-batch hook; no PreToolUse hook, no permission
+callback. Absent: any webhook, queue, callback or plugin interface for an
+external approval system. Every deployment forks the repo and replaces the
+mock backend, so the interface is a code pattern rather than a wire
+contract.
+
+What the gate makes of the commands it would cause an agent to issue, from
+`approval hook classify` on the assessment date:
+
+| Command | Class |
+| --- | --- |
+| `python merchant-agent/runtime-agent-sdk/main.py` | unclassified (denied, `hook-unclassified`) |
+| `pip install -e merchant-agent/core` | unclassified (denied) |
+| `scripts/install.sh` | unclassified (denied) |
+| `claude plugin install commerce-builder@claude-commerce-agents` | unclassified (denied) |
+| `pytest merchant-agent/runtime-agent-sdk/tests` | unclassified (denied) |
+
+### Fit
+
+Poor, on four counts.
+
+1. **There is nothing to integrate with.** The approval seam is three
+   methods on a per-session Python object in a reference repository that is
+   unmaintained by declaration and forks per customer. An adapter would
+   target a README snippet, with no contract to test against. It is neither
+   an executor under `src/adapters/contract.ts` nor a channel under
+   `src/channels/contract.ts`: it is the agent, and its host is the surface
+   approval.md would replace.
+2. **The gate could not hold custody.** SPEC §10.4's boundary is that
+   credentials answer only to tokens. Here the write happens inside the
+   agent's process via `MerchantBackend`, a `host_approve` mark is advisory,
+   and a config flag turns it off. Recording a `financial.spend` or
+   `record.write` grant for a change the gate cannot stop from applying is a
+   self-reported field reducing scrutiny (§11.1). A real integration means
+   the backend's write methods consuming an approval.md token from Python,
+   for which there is no client. Building that client for a reference
+   repository is the wrong order.
+3. **The shopping side has nothing to gate.** Checkout is a handoff; the
+   money moves in the retailer's portal, outside any agent.
+4. **Pre-launch value is nil.** The blueprint's audience is Shopify,
+   Priceline and Accenture-scale integrators with their own merchant portals
+   ("the portal's approve route"). approval.md launches local-first,
+   single-operator. A commerce demo would have no one to run it.
+
+### Conclusion
+
+Declined. No adapter, no commerce-specific code. Two general things the
+question surfaced are filed below. Noted and left alone: no adapter has yet
+driven `financial.*` through the gate (this repo's APPROVAL.md has no
+financial class); that gap is real, and this candidate is not the one to
+fill it.
+
+### Next steps
+
+- APRV-242: an Agent SDK host runs `permission_mode="dontAsk"` with no
+  record, which is the "harness enforces locally" pattern SPEC §2
+  critiques, and M8 covers Claude Code and Cursor but not
+  `claude-agent-sdk` applications. The Python SDK's hooks are callables
+  receiving the same PreToolUse input `approval hook claude-code` reads on
+  stdin, so a documented shim makes every Agent SDK app gateable with no
+  new surface. The JSON shapes are verified there, not assumed.
+- APRV-228, extended: `pip install`, `pipx install` and `uv pip install`
+  classify `deps.add` alongside `npm install -g` and `bun install -g`,
+  instead of falling to unclassified.
 
 ## How to add an entry
 
