@@ -1600,17 +1600,25 @@ function delegatedVerdict(
     };
   }
   const { answer } = outcome;
-  return {
+  const verdict: LiveVerdict = {
     rate,
     gated: answer.selected,
     reason: answer.selected ? "selected" : "not-selected",
     selection: LIVE_SELECTION,
     secretEnv,
-    // Recorded only when the action gates, because an UNSAMPLED action appends
-    // no `approval.requested` at all (amended SPEC.md §6.3) and there is nothing
-    // to carry the field. The unsampled delegation is therefore evidenced the
-    // way every unsampled action already is: by its absence from the queue, and
-    // by an operator recomputing the draw from the registration's payload hash.
+  };
+  // Carried only for a SELECTED action, because that is the only delegated
+  // verdict that ever reaches a record: an unsampled action appends no
+  // `approval.requested` at all (amended SPEC.md §6.3), so there is nothing for
+  // the field to ride on and a `live_draw` describing a "not-selected" outcome
+  // could only ever be a shape nobody reads. The unsampled delegation is
+  // evidenced the way every unsampled action already is: by its absence from
+  // the queue, and by an operator recomputing the draw from the registration's
+  // payload hash. Keeping the two in step here is what makes the schema's
+  // `reason: "selected"` an honest constant rather than an assumption.
+  if (!answer.selected) return verdict;
+  return {
+    ...verdict,
     draw: {
       v: DRAW_PROTOCOL_VERSION,
       source: "daemon",
