@@ -102,8 +102,23 @@
     },
     "payload": {
       "type": "object",
-      "description": "SPEC.md §8: event-type-specific detail (the example record carries an approver's note). Shape is deliberately open at v0.1; per-type payload schemas are a later, separate task. Two names are constrained regardless of event type (APRV-121), because they are the monetary fields the budgets contract reads and the whole payload is hashed material: `est_cost_usd`, and `budget.max_cost_usd` as copied onto `task.registered`. The rest of the payload stays open.",
+      "description": "SPEC.md §8: event-type-specific detail (the example record carries an approver's note). Shape is deliberately open at v0.1; per-type payload schemas are a later, separate task. Four names are constrained regardless of event type. Two are monetary (APRV-121), because they are the fields the budgets contract reads and the whole payload is hashed material: `est_cost_usd`, and `budget.max_cost_usd` as copied onto `task.registered`. Two are harness provenance (APRV-227): `harness` and `harness_version`, which the hook copies onto the `task.registered` and `gate.bypassed` records it writes. The rest of the payload stays open.",
       "properties": {
+        "harness": {
+          "type": "string",
+          "enum": [
+            "claude-code",
+            "cursor"
+          ],
+          "description": "SPEC.md §10.1 (amended, APRV-227): which harness hook wrote this record. A closed set, extended only by a task that adds the case, because it is the discriminator a reader scopes `harness_version` by: one log holds the records of every harness that ever wrote to it, and a version with no binary named beside it is a string nobody can compare against anything. OPTIONAL and additive — every record written before the field existed still validates and still verifies, and the two fields travel together or not at all."
+        },
+        "harness_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[\\u0020-\\u007e]+$",
+          "description": "SPEC.md §10.1 (amended, APRV-227): the version of the harness binary that issued this record, taken from the hook event where the harness supplies one and otherwise from `<binary> --version`, normalized to its first line. SELF-REPORTED, and informational only: nothing in the runtime reads it back as an input to a verdict, a floor, a budget, a streak or a sampling draw, so it satisfies SPEC.md §11.1 invariant 4 by having no path along which it could reduce scrutiny — its single reader is a doctor row that can only ADD a red line. Its SHAPE is constrained here because the value is the output of a third-party process being written to an append-only log: one line, printable ASCII, capped at 64 characters, so a banner or a stack trace (and whatever a stack trace quotes) cannot arrive through it. §11.1 invariant 3 has no exception for provenance. OPTIONAL and additive."
+        },
         "est_cost_usd": {
           "$ref": "#/$defs/usd_amount",
           "description": "SPEC.md §5.2 budgets contract (amended, APRV-121): the authorization's declared cost in USD as a decimal string. Recorded on `approval.requested`, `approval.granted`, `execution.started` and `budget.exceeded`; a JSON number is the pre-APRV-121 form and is accepted on read, never on write."
