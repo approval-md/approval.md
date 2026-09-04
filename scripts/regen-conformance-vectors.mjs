@@ -1037,7 +1037,15 @@ const SUITES = [
     // 1.3.0 (swept in by APRV-173's regeneration, authored earlier): the two
     // `env_stripped` event fixtures were committed without a regen, so the
     // suite did not cover them. New vectors, no expectation moved: a minor bump.
-    vectors_version: "1.3.0",
+    // 1.4.0 (APRV-235): another MINOR bump, and eleven new vectors where this
+    // task authored five. Five are its own — the `audit.decision_refused`
+    // fixture and the two refusals that pin its actor and its required code,
+    // and the `policy-drift` withdrawal with the agent-authored one that must
+    // not validate. The other six are APRV-214's `gate.opened` / `gate.closed`
+    // / `gate.bypassed` fixtures, committed without a regen exactly as the
+    // `env_stripped` pair was. No existing expectation moved: the only removed
+    // line in the diff is `count`.
+    vectors_version: "1.4.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",
