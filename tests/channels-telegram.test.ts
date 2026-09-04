@@ -129,6 +129,7 @@ import type { BudgetVerdict } from "../src/core/budgets.js";
 import { register as registerCore, request as requestCore } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
 import { loadPolicy } from "../src/core/policy-load.js";
+import { applyPromptBlock, TELEGRAM_PROMPT_LAYOUT } from "../src/core/prompt-layout.js";
 import { readVerifiedRecords } from "../src/core/state.js";
 import { expire, register, request, withdraw } from "./clock-adapters.js";
 import { fakeClaudeEnv, FAKE_GLOSS_SENTENCE } from "./fake-claude.js";
@@ -667,6 +668,49 @@ test("an attestation prompt still shows the diff and the loads it asks about", (
   assert.ok(rendered.header.includes("<b>policy diff:</b>"), rendered.header);
   assert.ok(rendered.header.includes("<b>policy loads:</b>"), rendered.header);
 });
+
+// ---------------------------------------------------------------------------
+// The layout the policy chose (APRV-218)
+// ---------------------------------------------------------------------------
+
+test("a policy layout reaches the messages the bot actually sends (APRV-218)", async () => {
+  const world = live(1);
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  // The operator who wants the task id and the chain position on every prompt,
+  // and does not want the "waiting" prose. Everything here was already on the
+  // request: the layout chooses among facts, and teaches the channel nothing
+  // new about the log.
+  const channel = channelFor({
+    layout: applyPromptBlock(TELEGRAM_PROMPT_LAYOUT, {
+      rows: ["task", "class"],
+      always: ["task", "chain"],
+      hide: ["waiting"],
+    }),
+  });
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = mock.sentTexts().length;
+  await channel.notify(request_);
+  const whole = mock.sentTexts().slice(before).join("\n");
+
+  assert.ok(whole.includes("<b>task:</b>"), whole);
+  assert.ok(whole.includes("<b>chain:</b>"), whole);
+  assert.equal(whole.includes("<b>waiting:</b>"), false, whole);
+  assert.ok(whole.indexOf("<b>task:</b>") < whole.indexOf("<b>class:</b>"), whole);
+
+  // What a layout may not touch: the action key, the canonical block, and the
+  // claimed heading that keeps an agent's sentences off the runtime's side of
+  // the line.
+  assert.ok(whole.includes(`<code>${world.keys[0] as string}</code>`), whole);
+  assert.ok(whole.includes(PAYLOAD_CHUNK_LABEL_TAIL), whole);
+  assert.match(whole, CLAIMED_HEADING_ANYWHERE);
+
+  // And rendering under a layout wrote nothing: 3 records in, 3 records out.
+  assert.equal(recordsOf(world.unit.logPath).length, 3);
+});
+
+const CLAIMED_HEADING_ANYWHERE = /<b>WHAT THIS DOES — CLAIMED by [^<]+, NOT verified by the runtime<\/b>/u;
 
 // ---------------------------------------------------------------------------
 // The claimed block beside the buttons (APRV-165)
