@@ -201,7 +201,8 @@
               "default": "paced",
               "description": "SPEC.md §10.3 (APRV-216): how a listener puts the pending set in front of the approver. `paced`, the default and what an absent key means, sends one summary line and the OLDEST pending request, then the next one once that request is decided, skipped, or passed over; the bot commands /queue, /skip and /next drive it. `burst` sends every pending request the process has not sent yet, on every cycle, behind the APRV-196 re-delivery banner. Neither mode changes what is pending: that is re-derived from the verified log on every cycle in both, and the order and the currently shown item are process memory whose loss costs a re-send and nothing else. The enum is closed because an unrecognised mode cannot be ordered against these two; a policy naming one fails validation, which fails closed to all-manual rather than to a guessed delivery.",
               "examples": ["paced", "burst"]
-            }
+            },
+            "prompt": { "$ref": "#/$defs/promptLayout" }
           }
         },
         "web": {
@@ -215,13 +216,78 @@
               "maximum": 65535,
               "description": "SPEC.md §5.1: TCP port for the local approval UI. Valid port range only; 0 (ephemeral) is excluded because the policy must name a port a human can navigate to.",
               "examples": [4680]
-            }
+            },
+            "prompt": { "$ref": "#/$defs/promptLayout" }
+          }
+        },
+        "cli": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "SPEC.md §5.1/§10.3: the zero-config terminal channel. It needs no credential and no port, so until APRV-218 it had nothing to configure and the key did not exist; a policy that omits it is the norm and always will be.",
+          "properties": {
+            "prompt": { "$ref": "#/$defs/promptLayout" }
           }
         }
       }
     }
   },
   "$defs": {
+    "promptRow": {
+      "type": "string",
+      "enum": [
+        "action_key",
+        "task",
+        "class",
+        "command_breakdown",
+        "protected_path",
+        "policy_diff",
+        "policy_load",
+        "autonomy",
+        "provenance",
+        "state",
+        "requested_ts",
+        "waiting",
+        "ttl_remaining_ms",
+        "payload_hash",
+        "attestation",
+        "budgets",
+        "chain",
+        "token_delivery",
+        "est_cost_usd",
+        "gloss",
+        "summary",
+        "rationale",
+        "confidence"
+      ],
+      "description": "SPEC.md §5.2/§10.3 (APRV-218): one INFORMATIONAL row of a channel prompt, named by the `ChannelRequest` member it renders. The enum is closed for the reason `channels.telegram.delivery`'s is: a name this runtime cannot place is a row the author believes is in force that nothing reads, so it fails validation, which fails the policy closed to all-`manual` rather than to a silently ignored key. `fullPayload` is deliberately absent — the canonical rendering of SPEC.md §9 is not a row, it is rendered verbatim, and no layout key can reorder, shorten, or remove it."
+    },
+    "promptRows": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/promptRow" }
+    },
+    "promptLayout": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "SPEC.md §5.2/§10.3 (APRV-218): which rows this channel's prompt shows, and in what order. Absent means the layout the channel ships, so every policy written before this key renders exactly as it did. A layout chooses among rows the approver READS; it cannot touch what the approver SIGNS. Three things stay out of its reach: the canonical payload block (not a row), the buttons (a prompt with no way to answer it is not a prompt), and the computed/claimed split, which is a property of the field rather than of the layout — `rows` reorders, and a channel partitions by kind afterwards, so a claimed line cannot be moved into the computed block.",
+      "properties": {
+        "rows": {
+          "$ref": "#/$defs/promptRows",
+          "description": "ORDER ONLY. The rows named here render in this order, ahead of every row not named; those keep their default relative order behind them. It is never a whitelist: a `ChannelRequest` widened by a later task must not lose a field to a list written before that field existed. Use `hide` to remove a row and `always` to add one.",
+          "examples": [["class", "command_breakdown", "task", "waiting"]]
+        },
+        "always": {
+          "$ref": "#/$defs/promptRows",
+          "description": "Visibility UP: a row this channel renders only when abnormal (Telegram's `autonomy`, `budgets` and `attestation`, per APRV-163), or not at all by default (Telegram's `task`, `state`, `chain`, `provenance`, `requested_ts`, `ttl_remaining_ms` and `payload_hash`, per APRV-143 and APRV-163), renders on every prompt instead. The anomaly mark stays a statement about the VALUE: a row forced on here carries it only when the value is in fact the reason to look.",
+          "examples": [["budgets", "task"]]
+        },
+        "hide": {
+          "$ref": "#/$defs/promptRows",
+          "description": "Visibility DOWN: the row never renders on this channel. Refused for the rows required for a decision — `action_key`, `class`, `command_breakdown`, `protected_path`, `policy_diff`, `policy_load` — and refused at policy load with the machine-readable keyword `prompt-row-required`, which fails the whole policy closed. `payload_hash` is NOT among them because the bound hash is stated inside the canonical block on every channel, so hiding the row removes a duplicate rather than the binding. Naming one row in both `always` and `hide` is refused rather than resolved by precedence: an author who wrote both believes one of them, and picking for them would be a guess.",
+          "examples": [["provenance", "chain", "requested_ts"]]
+        }
+      }
+    },
     "autonomy": {
       "type": "string",
       "enum": ["human-only", "manual", "supervised-live", "supervised", "supervised-retro", "autonomous"],

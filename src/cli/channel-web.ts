@@ -66,6 +66,7 @@ import {
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
 import type { DecideOptions } from "../core/gate.js";
 import { loadPolicy, type PolicyLoadResult } from "../core/policy-load.js";
+import { promptLayoutFor } from "../core/prompt-layout.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { WEB_HELP } from "./help.js";
@@ -269,6 +270,11 @@ export async function startWebChannel(
 
   const channel = new WebChannel({
     ...(options.port === undefined ? {} : { port: options.port }),
+    // APRV-218: which rows the page shows, from `channels.web.prompt`.
+    // Resolved HERE, at the verb, because the channel neither reads a policy
+    // file nor holds an opinion about what an operator should see. A policy
+    // that did not load yields the default layout: a layout is not a permission.
+    layout: promptLayoutFor(loadPolicy(policy), "web"),
     refresh,
     actorLabel: options.actor,
     log: complain,

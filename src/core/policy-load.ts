@@ -62,6 +62,7 @@ import { basename, join } from "node:path";
 
 import { isNode, parseDocument, visit } from "yaml";
 
+import { promptBlockErrors } from "./prompt-layout.js";
 import { validate, type ValidationError } from "./validate.js";
 
 /**
@@ -713,6 +714,22 @@ export function loadPolicyText(
   }
 
   const policy = parsed.value as Policy;
+
+  // `channels.<name>.prompt` (APRV-218), checked once here for every channel
+  // name including the untyped ones the schema admits as free-form objects.
+  // Same fail direction as every other semantic check on this path: the WHOLE
+  // policy fails closed to all-`manual` rather than one channel quietly
+  // rendering a layout its author did not write. See `core/prompt-layout.ts`
+  // for why both nets exist.
+  const promptErrors = promptBlockErrors(policy);
+  if (promptErrors.length > 0) {
+    return failure(
+      "schema-invalid",
+      `${resolved.path}: channel prompt layout is not usable`,
+      promptErrors,
+      parsed.value,
+    );
+  }
 
   const ttlText = policy.defaults?.approval_ttl;
   let approvalTtlMs: number | null = null;

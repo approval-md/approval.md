@@ -2026,6 +2026,81 @@ recorded by the same human-only gate `approval grant` and `approval reject`
 call, with every rule — TTL, budgets, attestation, idempotency — applied
 unchanged.
 
+### Which rows a prompt shows is a policy decision (APRV-218)
+
+Each channel ships a default set of rows. Telegram's is deliberately slim: the
+`waiting … expires HH:MM UTC` line carries the TTL, so there is no separate
+`ttl` row (APRV-143), six bookkeeping rows are off (`task`, `state`,
+`provenance`, `requested_ts`, `payload_hash`, `chain`) and three health rows
+render only when abnormal (`autonomy`, `budgets`, `attestation`, APRV-163). The
+terminal and the page show everything, because they have the room.
+
+That default fits one operator. `channels.<name>.prompt` in `APPROVAL.md`
+replaces it, per channel, for `telegram`, `web` and `cli`:
+
+```yaml
+channels:
+  telegram:
+    prompt:
+      rows: [class, command_breakdown, task, waiting]
+      always: [budgets, task, chain]
+      hide: [provenance, requested_ts]
+```
+
+Three keys, each doing one thing. `rows` is ORDER ONLY: the rows it names
+render in that order ahead of every row it does not name, which keep their
+default relative order behind them. It is never a whitelist, so a field added
+by a later version cannot be lost to a list written before that field existed.
+`always` raises a row's visibility, so a row that is abnormal-only or off by
+default renders on every prompt. `hide` removes a row entirely.
+
+The row names are the `ChannelRequest` member names: `action_key`, `task`,
+`class`, `command_breakdown`, `protected_path`, `policy_diff`, `policy_load`,
+`autonomy`, `provenance`, `state`, `requested_ts`, `waiting`,
+`ttl_remaining_ms`, `payload_hash`, `attestation`, `budgets`, `chain`,
+`token_delivery`, `est_cost_usd`, `gloss`, `summary`, `rationale`,
+`confidence`.
+
+**A layout chooses among rows the approver READS; it cannot touch what the
+approver SIGNS.** Three things are out of its reach entirely. The canonical
+payload block (SPEC.md §9) is not a row: it is rendered verbatim, and it states
+the payload bytes, the renderer version, the class, the kind and the bound
+`payload sha256` whatever the layout says. The buttons are not a row, because a
+prompt with no way to answer it is not a prompt. And the computed/claimed split
+is a property of the field rather than of the layout: `rows` decides the order
+rows are considered in, a channel partitions by `TaggedField.kind` afterwards,
+so a claimed line reordered to the front is first among the CLAIMED lines and
+never above the computed heading.
+
+Six rows are required for a decision and may be reordered but not hidden:
+`action_key`, `class`, `command_breakdown`, `protected_path`, `policy_diff` and
+`policy_load`. `payload_hash` is not among them, because the bound hash is
+stated inside the canonical block on every channel, so hiding the row removes a
+duplicate rather than the binding — which is exactly what Telegram's default
+already does.
+
+The anomaly mark (`!! `) stays a statement about the VALUE. A row forced on
+with `always` carries it only when the value is in fact the reason to look, so
+`always: [budgets]` gets a quiet budget line on an ordinary request and a
+shouted one when a ceiling is in play.
+
+Fail soft on absence, closed on invalidity, the split every other policy key
+keeps. No `prompt` block — and a policy that failed to load at all — means the
+rows the channel ships, because a layout is not a permission and an unrelated
+typo in a class rule must not silently redecorate a phone screen. An unknown
+row name, a required row in `hide`, a row named by both `always` and `hide`, or
+a key the block does not define fails the WHOLE policy at load with a
+machine-readable keyword (`prompt-row-unknown`, `prompt-row-required`,
+`prompt-row-conflict`, `prompt-key-unknown`, `prompt-block-shape`), and every
+class resolves to `manual` until the file is repaired. The check runs for every
+channel name, including the unknown ones the schema admits as free-form
+objects, so a layout is validated wherever it is written.
+
+Nothing here teaches a channel anything about the log. Every row a layout can
+turn on was already on the `ChannelRequest`, and `--json`, `approval queue` and
+the web page carried it all along; rendering stays a pure function of
+(request, layout).
+
 ## channel cli
 
 **The rendering convention (SPEC.md §9).** Every displayed field carries a
@@ -2104,6 +2179,12 @@ percent-encoded name; unset, the bytes come from `.approval/payloads/`. Either w
 they are hashed and checked against the request's recorded `payload_hash`, and
 material that does not match is refused rather than rendered.
 
+**Which rows this walk shows** comes from `channels.cli.prompt` in the policy;
+absent, the terminal shows every row the request carries, computed identity and
+authority first, claimed persuasion last. See "Which rows a prompt shows is a
+policy decision" above. `--json` is unaffected: it holds the tagged queue
+verbatim whatever the layout says.
+
 **`--json`** (one object on stdout):
 
 ```
@@ -2152,6 +2233,11 @@ log (which holds only its SHA-256), never put in a URL, and never shown again.
 This differs from the Telegram channel, which refuses to put a token in a chat:
 that transcript lives on someone else's servers, this page is served over
 loopback to the person deciding, right now, and is persisted nowhere.
+
+**Which rows the page shows** comes from `channels.web.prompt` in the policy;
+absent, the page shows every row the request carries. See "Which rows a prompt
+shows is a policy decision" above. The canonical payload region and the
+CLAIMED/computed split are beyond a layout's reach here as everywhere.
 
 `--port` precedence is `--port`, then `channels.web.port` in the policy, then
 4680. `--as` is required at startup: this page exists to record decisions, so a
@@ -2226,6 +2312,17 @@ log whether or not it has been shown, `approval queue` and `/queue` list them
 all, and nothing expires sooner for having waited its turn. Digest grouping
 still applies to the request being shown, so a set of similar requests is one
 thing to read.
+
+**The prompt is slim on purpose, and `channels.telegram.prompt` changes it.**
+No `ttl` row (the `waiting … expires HH:MM UTC` line is the TTL, stated as the
+instant a reader acts on), no `resolved by`, `payload sha256`, `requested`,
+`chain`, `task` or `state` row, and `autonomy`, `budgets` and `policy` only
+when they are abnormal. An operator who wants the budget line on every prompt,
+or the task id always visible, writes `always: [budgets, task]` under
+`channels.telegram.prompt`; `hide` drops rows and `rows` reorders them. Every
+one of those fields stayed on the request all along, so `--json`, `approval
+queue` and the web page always showed them. See "Which rows a prompt shows is a
+policy decision" above for what a layout may not touch.
 
 `channels.telegram.delivery: burst` restores the pre-APRV-216 behaviour: every
 pending request this process has not sent yet, on every cycle, behind the
