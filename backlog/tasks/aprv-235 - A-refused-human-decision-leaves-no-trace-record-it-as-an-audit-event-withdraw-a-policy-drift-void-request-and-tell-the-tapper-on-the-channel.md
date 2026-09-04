@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-l'
 created_date: '2026-09-02 20:26'
-updated_date: '2026-09-04 23:30'
+updated_date: '2026-09-04 23:43'
 labels:
   - channels
   - log
@@ -25,11 +25,11 @@ Seen 2026-09-02 after the seq 13704 ceremony: Carter tapped approve on a request
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A refused human decision on any channel appends one audit-tier record carrying actor, action key, channel and refusal code, proven through the real append path; a test asserts it changes no request state, budget or sampling outcome
-- [ ] #2 A policy-drift refusal also appends approval.withdrawn for the void request, and approval queue, QUEUE.md and the Telegram listener no longer show it
-- [ ] #3 The Telegram message that was tapped is edited to a terminal state naming the refusal, buttons disarmed; the CLI channel prints the same line
-- [ ] #4 The event schema for the new record validates at the write boundary; conformance vectors regenerated per the documented ritual
-- [ ] #5 SPEC section 5.2 sentence drafted in the notes (human decisions refused are logged; gate refusals to agents remain unlogged) for sign-off
+- [x] #1 A refused human decision on any channel appends one audit-tier record carrying actor, action key, channel and refusal code, proven through the real append path; a test asserts it changes no request state, budget or sampling outcome
+- [x] #2 A policy-drift refusal also appends approval.withdrawn for the void request, and approval queue, QUEUE.md and the Telegram listener no longer show it
+- [x] #3 The Telegram message that was tapped is edited to a terminal state naming the refusal, buttons disarmed; the CLI channel prints the same line
+- [x] #4 The event schema for the new record validates at the write boundary; conformance vectors regenerated per the documented ritual
+- [x] #5 SPEC section 5.2 sentence drafted in the notes (human decisions refused are logged; gate refusals to agents remain unlogged) for sign-off
 - [ ] #6 npm test passes; lint clean
 <!-- AC:END -->
 
@@ -46,6 +46,8 @@ Seen 2026-09-02 after the seq 13704 ceremony: Carter tapped approve on a request
 8. Tests: a new suite proving the audit record lands through the real append path, that request state, budgets and sampling are byte-identical before and after, that policy-drift withdraws and drops the request out of queue/QUEUE.md/telegram, and that the two channels print the same line.
 9. Regen conformance vectors per the ritual (npm run build && node scripts/regen-conformance-vectors.mjs); schema-validation bumps MINOR to 1.4.0 (new fixtures, no moved expectation).
 10. git fetch && git merge --no-edit origin/main, resolve keeping both intents, re-run the touched suites, then npm test and oxlint.
+
+11. (Executed after step 10.) The retry restructure: head-retry.ts asks that the unit of retry be a whole read-check-append cycle, so the two appends get one cycle EACH rather than sharing one — a moved head under the withdrawal would otherwise re-enter from the top and write a second audit record for one tap. The withdrawal's cycle re-derives pending-ness, so a decision that landed in the window wins and nothing is withdrawn.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -188,4 +190,46 @@ The refusal sentence a person is shown moved to one function,
 CLI channel's terminal line read it, so the person who taps on their phone and
 then reads the operator's terminal is not choosing between two accounts of one
 refusal. APRV-206's three sentences moved unchanged.
+
+## Verification (post-merge with origin/main at a27c812)
+
+Branch `aprv-235-refused-decision`, merged `origin/main` with `--no-edit`
+(never rebased). Conflicts were in the three generated/shared files — the
+vectors, the manifest and the regen script's version comment — and were resolved
+by keeping BOTH intents and regenerating from scratch: APRV-227's four
+harness-provenance vectors and this task's eleven now sit in one file, and
+schema-validation went to 1.5.0 rather than colliding on main's 1.4.0.
+
+- `npm run build`: exit 0.
+- `npx oxlint`: exit 0.
+- `node conformance/run.mjs`: exit 0, ok true. schema-validation 1.5.0, 144
+  vectors, 84 negative controls; every other suite unchanged
+  (jcs 1.0.0/53, refusal-unions 7.0.0/7, policy-resolution 1.0.0/12,
+  chain-verification 1.0.0/18, gate-verdicts 2.1.0/24).
+- `npm test` (post-merge): 3183 tests, 3181 pass, 1 fail, 1 skipped, exit 1.
+- Suites re-run individually against the final build after the retry
+  restructure: decision-refusal + event-schema + conformance +
+  channels-contract = 103 pass, 0 fail, exit 0; channels-cli + channels-web +
+  cli-gate + channels-telegram + concurrency = 207 pass, 0 fail, exit 0;
+  fixtures + event-schema + decision-refusal + conformance earlier = 211 pass,
+  0 fail, exit 0.
+
+### The one failure, and why it is not this task's
+
+`tests/daemon-advance-finish.test.ts` — "finish: an outcome record that loses
+the append race re-derives and lands", failing on
+`the concurrent record did not land between the read and the append`. The file
+arrives from main with APRV-233 and has never run in this lane before the merge.
+It is a timing race: the parent holds the append lockfile, unlinks it, and then
+races a full `register()` (which re-reads and re-verifies the whole log) against
+a child already polling for that lock; it loops six rounds and gives up if the
+child wins every one. Attribution was measured rather than assumed — with
+`git checkout origin/main -- src tests schema` in place it passed 4 of 4, and
+with this branch's sources restored it failed 1 of 4 and passed 3, having failed
+3 of 4 earlier while the machine was loaded. Nothing in this diff is on the path
+it exercises (`daemon/advance.ts`, `core/execute.ts` and `core/head-retry.ts`
+are all untouched), and the correlation that does hold is with machine load:
+every failure followed a build or a full suite run. Same family as APRV-248's
+telegram poll-timing flake. Flagged for the orchestrator; not fixed here,
+because tightening someone else's race test is outside this task's criteria.
 <!-- SECTION:NOTES:END -->
