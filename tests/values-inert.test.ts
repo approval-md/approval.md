@@ -38,8 +38,10 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -54,6 +56,23 @@ import { after, test } from "node:test";
 import { loadPolicy } from "../src/core/policy-load.js";
 import { resolve as resolveClass } from "../src/core/policy-match.js";
 import { DEFAULT_SCHEMA_DIR } from "../src/core/validate.js";
+import { main } from "../src/cli/main.js";
+import {
+  openObligations,
+  openSamples,
+  pendingSamples,
+  reviewSample,
+  sampleSupervised,
+  sampledSubjects,
+  type AuditCandidate,
+  type SampledSubject,
+} from "../src/core/audit.js";
+import { evaluateBudgetsWithTask, type BudgetScope } from "../src/core/budgets.js";
+import type { EventRecord } from "../src/core/log.js";
+import { runPayloadHash } from "../src/core/payload.js";
+import { resolveSampler } from "../src/core/sampler.js";
+import { verify } from "../src/core/verify.js";
+import { appendAttestation, decide, register, request, startExecution } from "./clock-adapters.js";
 
 /** The repository root, from `dist/tests/` at runtime. */
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -460,4 +479,386 @@ test("`policy check --json` is byte-identical across the variants (APRV-238)", (
   // starts believing it is enforced.
   assert.ok(!baseline.stdout.includes("approval-values"), baseline.stdout);
   assert.ok(!baseline.stdout.includes("values"), baseline.stdout);
+});
+
+// ===========================================================================
+// The behavioural half: reactions (APRV-239)
+// ===========================================================================
+
+/**
+ * The test the file header promised and could not yet write.
+ *
+ * The static guard above proves that no enforcement module NAMES a reaction.
+ * This proves the consequence: two logs built by the same operations at the same
+ * instants, differing only in the grades and notes a human attached, produce the
+ * same supervision backlog, the same obligations, the same budget verdicts and
+ * the same execution outcomes. A `loved` grant buys nothing and a `disliked`
+ * review costs nothing.
+ *
+ * One field is deliberately NOT compared, and saying why is the point: the chain
+ * hash of every record after the first difference. The two logs contain different
+ * bytes, so of course they hash differently — that is the chain working. What
+ * matters is that no DECISION is derived from the difference, which is what the
+ * comparisons below assert. Sampling at rate 1 makes the selection total, so the
+ * one place a record hash does feed a decision (the retrospective sampler's HMAC
+ * over it, exactly as it already does for a `note`) cannot silently supply the
+ * agreement being asserted.
+ */
+
+const behaviourScratch = mkdtempSync(join(tmpdir(), "approval-md-inert-"));
+let behaviourCounter = 0;
+
+after(() => {
+  rmSync(behaviourScratch, { recursive: true, force: true });
+});
+
+const T0 = "2026-08-05T10:00:00.000Z";
+
+function at(minutes: number): string {
+  return new Date(Date.parse(T0) + minutes * 60_000).toISOString();
+}
+
+const SAMPLING_SECRET_ENV = "APPROVAL_TEST_SAMPLING_SECRET";
+const SAMPLING_ENV: NodeJS.ProcessEnv = { [SAMPLING_SECRET_ENV]: "operator-held-secret" };
+
+const INERT_POLICY = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: manual",
+  '  approval_ttl: "6h"',
+  "  on_expiry: reject",
+  "classes:",
+  "  files.write.*:",
+  "    autonomy: supervised",
+  "  communicate.email.external:",
+  "    autonomy: manual",
+  "budgets:",
+  "  global:",
+  "    daily_usd: 10",
+  "    daily_actions: 50",
+  "audit:",
+  "  supervised_sample_rate: 1",
+  `  sampling_secret_env: ${SAMPLING_SECRET_ENV}`,
+  "```",
+  "",
+].join("\n");
+
+function bindingFor(key: string): string {
+  return createHash("sha256").update(`payload:${key}`, "utf8").digest("hex");
+}
+
+const INERT_ENVELOPE = {
+  origin: { app: "example-capture", created_by: "human:carter" },
+  state: "proposed",
+  actions: [
+    {
+      class: "communicate.email.external",
+      summary: "Send the deposit chaser",
+      reversible: false,
+      est_cost_usd: "0.02",
+      idempotency_key: "task-042:chaser",
+      payload_hash: bindingFor("task-042:chaser"),
+    },
+    {
+      class: "files.write.local",
+      summary: "Write the draft",
+      reversible: true,
+      est_cost_usd: "0.01",
+      idempotency_key: "task-042:draft",
+      payload_hash: bindingFor("task-042:draft"),
+    },
+    {
+      class: "files.write.local",
+      summary: "Write the second draft",
+      reversible: true,
+      est_cost_usd: "0.01",
+      idempotency_key: "task-042:draft2",
+      payload_hash: bindingFor("task-042:draft2"),
+    },
+  ],
+};
+
+interface InertCase {
+  dir: string;
+  logPath: string;
+  policyPath: string;
+}
+
+function inertCase(): InertCase {
+  behaviourCounter += 1;
+  const dir = join(behaviourScratch, `case-${String(behaviourCounter)}`);
+  mkdirSync(dir, { recursive: true });
+  const policyPath = join(dir, "APPROVAL.md");
+  writeFileSync(policyPath, INERT_POLICY, "utf8");
+  return { dir, logPath: join(dir, ".approval", "log", "events.jsonl"), policyPath };
+}
+
+function inertRecords(unit: InertCase): EventRecord[] {
+  return readFileSync(unit.logPath, "utf8")
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as EventRecord);
+}
+
+function must<T extends { ok: boolean }>(result: T, what: string): T {
+  assert.equal(result.ok, true, `${what} failed: ${JSON.stringify(result)}`);
+  return result;
+}
+
+/**
+ * The same eleven operations at the same eleven instants, twice. `feedback`
+ * decides only whether the human attached a grade and words to two of them.
+ */
+function buildInertLog(feedback: boolean): InertCase {
+  const unit = inertCase();
+  const options = { policy: { file: unit.policyPath } };
+  must(appendAttestation(unit.logPath, unit.policyPath, "human:carter", T0), "attest");
+  must(
+    register(unit.logPath, { task: "task-042", envelope: INERT_ENVELOPE }, at(1), "agent:claude"),
+    "register",
+  );
+  must(
+    request(
+      unit.logPath,
+      { task: "task-042", actionKey: "task-042:chaser", cls: "communicate.email.external" },
+      at(2),
+      "agent:claude",
+      options,
+    ),
+    "request",
+  );
+  must(
+    decide(unit.logPath, "task-042:chaser", "grant", "human:carter", at(3), {
+      ...options,
+      ...(feedback ? { note: "good call, and worded well", reaction: "loved" as const } : {}),
+    }),
+    "grant",
+  );
+
+  for (const [key, minutes] of [
+    ["task-042:draft", 4],
+    ["task-042:draft2", 5],
+  ] as Array<[string, number]>) {
+    must(
+      startExecution(
+        unit.logPath,
+        key,
+        { ...options, presentedPayloadHash: bindingFor(key) },
+        at(minutes),
+        "agent:claude",
+      ),
+      `execute ${key}`,
+    );
+  }
+
+  must(
+    sampleSupervised(unit.logPath, unit.dir, {
+      policy: { file: unit.policyPath },
+      env: SAMPLING_ENV,
+      clock: () => at(6),
+    }),
+    "sample",
+  );
+
+  // A denial either way: the VERDICT is the enforcement field and it is the same
+  // in both logs. Only the grade and the words beside it move.
+  must(
+    reviewSample(
+      unit.logPath,
+      { kind: "action-key", actionKey: "task-042:draft" },
+      "human:carter",
+      feedback ? "this should not have been written at all" : null,
+      {
+        clock: () => at(7),
+        verdict: "denied",
+        ...(feedback ? { reaction: "disliked" as const } : {}),
+      },
+    ),
+    "review draft",
+  );
+  must(
+    reviewSample(
+      unit.logPath,
+      { kind: "action-key", actionKey: "task-042:draft2" },
+      "human:carter",
+      null,
+      { clock: () => at(8), ...(feedback ? { reaction: "liked" as const } : {}) },
+    ),
+    "review draft2",
+  );
+
+  assert.equal(
+    verify(unit.logPath).status,
+    "clean",
+    `log not clean for feedback=${String(feedback)}`,
+  );
+  return unit;
+}
+
+/** The chain hash of the sampled record: different bytes, different hash. */
+function withoutChainHash(subject: SampledSubject): Omit<SampledSubject, "subjectHash"> {
+  const { subjectHash: _ignored, ...rest } = subject;
+  return rest;
+}
+
+function withoutCandidateHash(candidate: AuditCandidate): Omit<AuditCandidate, "hash"> {
+  const { hash: _ignored, ...rest } = candidate;
+  return rest;
+}
+
+test("reactions change no supervision decision (APRV-239)", () => {
+  const withFeedback = buildInertLog(true);
+  const without = buildInertLog(false);
+
+  // The difference is real and it is in the log, so the comparison below is not
+  // comparing two identical files.
+  const graded = inertRecords(withFeedback).filter((record) =>
+    Object.hasOwn((record.payload ?? {}) as Record<string, unknown>, "reaction"),
+  );
+  assert.equal(graded.length, 3, "the feedback log did not record three reactions");
+  assert.equal(
+    inertRecords(without).some((record) =>
+      Object.hasOwn((record.payload ?? {}) as Record<string, unknown>, "reaction"),
+    ),
+    false,
+  );
+
+  const a = inertRecords(withFeedback);
+  const b = inertRecords(without);
+
+  // The two logs are the same shape: same events, same order, same instants,
+  // same actors. Anything that diverges below diverged because of a grade.
+  assert.deepEqual(
+    a.map((record) => [record.seq, record.event, record.ts, record.actor]),
+    b.map((record) => [record.seq, record.event, record.ts, record.actor]),
+  );
+
+  assert.deepEqual(
+    sampledSubjects(a).map(withoutChainHash),
+    sampledSubjects(b).map(withoutChainHash),
+  );
+  assert.deepEqual(openSamples(a).map(withoutChainHash), openSamples(b).map(withoutChainHash));
+  assert.deepEqual(openObligations(a), openObligations(b));
+  // Both denials opened an obligation, so the comparison is over a non-empty
+  // backlog rather than over two empty lists.
+  assert.equal(openObligations(a).length, 1);
+
+  const load = loadPolicy({ file: withFeedback.policyPath });
+  assert.equal(load.ok, true);
+  const sampler = resolveSampler(load, SAMPLING_ENV);
+  assert.equal(sampler.enabled, true);
+  assert.deepEqual(
+    pendingSamples(a, load, sampler).map(withoutCandidateHash),
+    pendingSamples(b, load, sampler).map(withoutCandidateHash),
+  );
+});
+
+test("reactions change no budget verdict (APRV-239)", () => {
+  const a = inertRecords(buildInertLog(true));
+  const b = inertRecords(buildInertLog(false));
+
+  const scope: BudgetScope = {
+    classLimits: null,
+    classPattern: null,
+    globalBudgets: { global: { daily_usd: 10, daily_actions: 50 } },
+  };
+  for (const cost of ["0.01", "5", "20"]) {
+    const action = { class: "communicate.email.external", est_cost_usd: cost };
+    const verdictsA = evaluateBudgetsWithTask(a, scope, action, at(9), "task-042");
+    const verdictsB = evaluateBudgetsWithTask(b, scope, action, at(9), "task-042");
+    assert.deepEqual(verdictsA, verdictsB, `budgets diverged at est_cost_usd ${cost}`);
+  }
+  // The largest cost actually fails, so the equality above is over a real
+  // refusal and not over two blanket passes.
+  assert.equal(
+    evaluateBudgetsWithTask(
+      a,
+      scope,
+      { class: "communicate.email.external", est_cost_usd: "20" },
+      at(9),
+      "task-042",
+    ).pass,
+    false,
+  );
+});
+
+test("reactions change no `approval run` outcome (APRV-239)", async () => {
+  // A fresh pair: these logs get a real execution driven through the CLI, whose
+  // timestamps come from the real clock, so only the OUTCOME is comparable —
+  // which is the whole claim.
+  const child = [process.execPath, "-e", 'console.log("child ran")'];
+  const outcomes: Array<{ code: number; events: string[] }> = [];
+  for (const feedback of [true, false]) {
+    const unit = inertCase();
+    const options = { policy: { file: unit.policyPath } };
+    // The real derivation, not a stand-in: the declaration must bind to exactly
+    // the bytes `approval run` will spend, and the hash is cwd-relative.
+    const envelope = {
+      ...INERT_ENVELOPE,
+      actions: INERT_ENVELOPE.actions.map((declared) =>
+        declared.idempotency_key === "task-042:draft"
+          ? { ...declared, payload_hash: runPayloadHash(child, unit.dir) }
+          : declared,
+      ),
+    };
+    must(appendAttestation(unit.logPath, unit.policyPath, "human:carter", T0), "attest");
+    must(
+      register(unit.logPath, { task: "task-042", envelope }, at(1), "agent:claude"),
+      "register",
+    );
+    must(
+      request(
+        unit.logPath,
+        { task: "task-042", actionKey: "task-042:chaser", cls: "communicate.email.external" },
+        at(2),
+        "agent:claude",
+        options,
+      ),
+      "request",
+    );
+    must(
+      decide(unit.logPath, "task-042:chaser", "grant", "human:carter", at(3), {
+        ...options,
+        ...(feedback ? { note: "loved this one", reaction: "loved" as const } : {}),
+      }),
+      "grant",
+    );
+
+    const before = inertRecords(unit).length;
+    let err = "";
+    const code = await main(
+      [
+        "run",
+        "task-042:draft",
+        "--as",
+        "agent:claude",
+        "--log",
+        unit.logPath,
+        "--",
+        ...child,
+      ],
+      {
+        cwd: unit.dir,
+        streams: {
+          out: () => {},
+          err: (text) => {
+            err += text;
+          },
+        },
+      },
+    );
+    assert.equal(code, 0, err);
+    outcomes.push({
+      code,
+      events: inertRecords(unit)
+        .slice(before)
+        .map((record) => record.event),
+    });
+  }
+
+  assert.deepEqual(outcomes[0], outcomes[1]);
+  assert.deepEqual(outcomes[0]?.events, ["execution.started", "execution.completed"]);
 });

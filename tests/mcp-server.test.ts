@@ -208,6 +208,10 @@ test("mcp: the tool list is the registry filtered by human_only, less the two ex
     // an MCP client is as much a session as a shell is.
     assert.ok(listed.includes("values"), "the values tool is not published");
     assert.ok(listed.includes("journal_write"));
+    // APRV-239. Human-AUTHORED, agent-FACING: publishing it establishes no
+    // authority, because what it prints decides nothing. `audit_review`, the
+    // verb that WRITES a reaction, stays withheld below.
+    assert.ok(listed.includes("feedback"));
 
     for (const withheld of [
       "grant",

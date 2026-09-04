@@ -466,6 +466,13 @@ const AGENT_FACING: readonly string[] = [
   // authority in either direction, because what it prints grants nothing,
   // forbids nothing, and moves no verdict.
   "values",
+  // APRV-239. Human-AUTHORED and agent-FACING, which is the whole point: the
+  // words are a person's and the reader is the agent they are about. Publishing
+  // it establishes no authority because what it prints decides nothing — an
+  // agent that reads `disliked` has learned something about the operator and
+  // gained no permission, and one that never reads it is under exactly the same
+  // rules (SPEC.md §11.1 invariant 10).
+  "feedback",
   "doctor",
   "reindex",
   "render",

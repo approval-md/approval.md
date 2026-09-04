@@ -1749,6 +1749,73 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "feedback",
+    purpose:
+      "List what the OPERATOR said about work that already happened (APRV-239): the graded reactions and free-text notes a human wrote on an approval.granted or an audit.reviewed, each joined to the action key, its class, its task and the agent whose work it was. This is HUMAN-AUTHORED GUIDANCE and it is not policy: it grants nothing, forbids nothing, and changes no verdict, sampling probability or budget, and no enforcement path in this runtime reads a reaction (SPEC.md §11.1 invariant 10). Read it to learn what the operator values; do not read it as permission. `verdict` on a review is the enforcement field and is reported beside the reaction so the two are never confused. An entry with neither a reaction nor a note is omitted, because absence of feedback is not feedback. --actor filters on the AGENT the feedback is about, not on the human who wrote it. Reads VERIFIED records and writes nothing: no policy is resolved, no clock is read, nothing is appended.",
+    human_only: false,
+    human_only_note:
+      "Human-AUTHORED and agent-FACING, which is the whole point: the words are a person's and the reader is the agent they are about. Publishing it establishes no authority, because what it prints decides nothing — an agent that reads `disliked` has learned something about the operator and gained no permission, and one that never reads it is under exactly the same rules. It is the mirror of `journal read`, where the authorship and the audience swap.",
+    input: input({
+      flags: {
+        "--task": "string",
+        "--actor": "string",
+        "--reaction": "string",
+        "--source": "string",
+        "--since": "string",
+        "--limit": "string",
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        log: STRING,
+        note: STRING,
+        total: INTEGER,
+        entries: arrayOf(
+          object(
+            {
+              seq: INTEGER,
+              ts: STRING,
+              source: { enum: ["review", "decision"] },
+              event: STRING,
+              actor: STRING,
+              reaction: nullable({ enum: ["disliked", "indifferent", "liked", "loved"] }),
+              note: nullable(STRING),
+              verdict: nullable({ enum: ["ok", "denied"] }),
+              actionKey: nullable(STRING),
+              task: nullable(STRING),
+              class: nullable(STRING),
+              agentActor: nullable(STRING),
+              sampleSeq: nullable(INTEGER),
+            },
+            [
+              "seq",
+              "ts",
+              "source",
+              "event",
+              "actor",
+              "reaction",
+              "note",
+              "verdict",
+              "actionKey",
+              "task",
+              "class",
+              "agentActor",
+              "sampleSeq",
+            ],
+          ),
+        ),
+      },
+      ["ok", "log", "note", "total", "entries"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, USAGE, IO, TORN, INTEGRITY],
+  },
+
+  {
     name: "journal",
     subcommand: "read",
     purpose:

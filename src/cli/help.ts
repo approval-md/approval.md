@@ -99,6 +99,9 @@ Usage:
   approval journal read [--limit <n>] [--since <YYYY-MM-DD>] [--journal <dir>]
                       [--json]
   approval values     [--policy <path>] [--dir <path>] [--json]
+  approval feedback   [--task <id>] [--actor <agent id>] [--reaction <word>]
+                      [--source review|decision] [--since <YYYY-MM-DD>]
+                      [--limit <n>] [--log <path>] [--json]
   approval env        [--check] [--policy <path>] [--dir <path>] [--log <path>]
                       [--json]
   approval setup      identity|vault|sampling|channel <name>|adapter <name>
@@ -220,6 +223,13 @@ Ask — an agent declares an action and acts on the answer:
             nothing, and no enforcement path reads it. A file with no block says
             so in words, because "nothing was declared" and "I did not look" are
             different facts
+  feedback  the same channel in the other direction: what the OPERATOR said
+            about the work. Lists the reactions and notes a person wrote on a
+            grant or on a retrospective review, joined to the class, the task,
+            the action key and the agent it was about. HUMAN-AUTHORED GUIDANCE
+            and never policy — it grants nothing, forbids nothing, and changes
+            no verdict, sampling probability or budget. Reads a verified log
+            and writes nothing
   mcp       "mcp serve" is the optional MCP wrapper of SPEC.md §10.5: the same
             verbs as tools, over stdio, sharing the CLI's code paths. It is
             AGENT-FACING ONLY — grant, reject, revoke, attest, amend, vault,
@@ -706,9 +716,9 @@ function decisionHelp(verb: "grant" | "reject" | "revoke"): string {
   const noun = verb === "grant" ? "approval" : verb === "reject" ? "refusal" : "withdrawal";
   const body =
     verb === "grant"
-      ? `Appends one approval.granted, MINTS the single-use execution token and
-PRINTS IT ONCE. HUMAN-ONLY. Legal only on a request awaiting a decision;
-attestation is required, and budgets are re-evaluated here.`
+      ? `Appends one approval.granted, MINTS the single-use execution token and PRINTS
+IT ONCE. HUMAN-ONLY. Legal only on a request awaiting a decision; attestation is
+required, budgets re-evaluated; loved/disliked need --note; read back: feedback.`
       : verb === "reject"
         ? `Appends one approval.rejected. HUMAN-ONLY. Legal only on a request awaiting a
 decision, and a second decision is refused. No attestation is required and no
@@ -720,16 +730,21 @@ authorization withdrawn was never a commitment.`;
   return `approval ${verb} — record a human ${noun} (HUMAN-ONLY)
 
 Usage:
-  approval ${verb} <action-key> [--note <text>] [--as human:<id>]
+  approval ${verb} <action-key> [--note <text>]${
+    verb === "grant" ? " [--reaction <w>]" : ""
+  } [--as human:<id>]
                  [--policy <path>] [--dir <path>] [--log <path>] [--json]
 
 Flags:
-  --note <text>    free-text note recorded in the event payload
+  --note <text>    free-text note recorded in the event payload${
+    verb === "grant"
+      ? "\n  --reaction <w>   disliked|indifferent|liked|loved. GUIDANCE, never policy"
+      : ""
+  }
   --as human:<id>  the deciding human; overrides APPROVAL_HUMAN
   --policy <path> / --dir <path>   the policy file, or where to discover it
   --log <path>     log file to read and append to
-  --json           machine-readable output
-  -h, --help       this text
+  --json / -h, --help              machine-readable output / this text
 
 ${body}
 
@@ -1063,23 +1078,23 @@ export const AUDIT_REVIEW_HELP = `approval audit review — record that a human 
 
 Usage:
   approval audit review <seq|action-key> [--deny] [--note "<text>"]
-                        [--as human:<id>] [--log <path>] [--json]
+                        [--reaction <w>] [--as human:<id>] [--log <path>] [--json]
 
 Arguments:
   <seq|action-key> a bare integer is the SEQ OF THE audit.sampled RECORD; any
                    other value is an action key with one open sample
 Flags:
   --deny           this action should NOT have happened. Opens an obligation
-  --note <text>    what you concluded. OPTIONAL
+  --note <text>    what you concluded. OPTIONAL, but loved/disliked REQUIRE it
+  --reaction <w>   disliked|indifferent|liked|loved. GUIDANCE, never enforcement
   --as human:<id>  the reviewer; else APPROVAL_HUMAN. HUMAN-ONLY
-  --log <path>     log file to read and append to
-  --json           machine-readable output
-  -h, --help       this text
+  --log <path> / --json / -h, --help   the log / machine-readable output / help
 
 Appends audit.reviewed. NO ATTESTATION IS REQUIRED. Refuses (exit 1) not-sampled,
-already-reviewed, ambiguous-subject, actor-not-human, log untouched. --deny ALSO
-appends reconciliation.required (system:audit), shaped by the action's DECLARED
-reversible and never by you. JSON: docs/cli-reference.md#audit-review
+already-reviewed, ambiguous-subject, actor-not-human, note-required and
+reaction-conflicts-verdict (--deny with liked or loved); log untouched. --deny
+ALSO appends reconciliation.required, shaped by the DECLARED reversible, not you.
+JSON: docs/cli-reference.md#audit-review
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("audit-review")}`;
@@ -1537,6 +1552,30 @@ JSON shape: {"ok":true,"path":"…","present":true|false,"note":"…","values":{
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("values")}`;
+export const FEEDBACK_HELP = `approval feedback — what the operator thought of the work
+
+Usage:
+  approval feedback [--task <id>] [--actor <agent id>] [--reaction <w>] [--limit <n>]
+                    [--source review|decision] [--since <YYYY-MM-DD>] [--log <path>] [--json]
+
+Flags:
+  --task <id>           only feedback about this task
+  --actor <agent id>    the AGENT the feedback is about, not its human author
+  --reaction <w>        disliked|indifferent|liked|loved
+  --source <s>          review (audit.reviewed) or decision (approval.granted)
+  --since <YYYY-MM-DD>  only records timestamped on or after this UTC date
+  --limit <n>           how many entries, newest last (default 20)
+  --log <path> / --json / -h, --help   the log, READ never written / JSON / help
+
+Lists the reactions and notes a person wrote on a grant or a review, joined to the
+class, task, action key and the agent it was about. Reads VERIFIED records, writes
+nothing. EVERY OUTPUT FORM CARRIES THE BANNER: HUMAN-AUTHORED GUIDANCE, not policy.
+An entry with neither a reaction nor a note is omitted; "_no feedback_" when empty.
+
+JSON shape: {"ok":true,"log":"…","note":"…","total":N,"entries":[…]}
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("feedback")}`;
 
 export const RENDER_HELP = `approval render — regenerate .approval/QUEUE.md from the log
 
