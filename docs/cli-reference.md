@@ -1732,6 +1732,21 @@ The checks, at length:
   log sync` for a diverged log, `approval up` otherwise — never a `git` command:
   a repair line telling an operator to reset a branch would be doctor making the
   decision this project keeps human.
+- **harness-version-unverified** — whether the harness binary hosting the
+  PreToolUse hook changed since the log last saw a record from it (APRV-227).
+  The only row that asks anything about a program outside this repository, and
+  it asks the one way a log can: `<binary> --version` now, against the
+  `harness_version` on the newest hook-written `task.registered` or
+  `gate.bypassed`. Which harnesses to ask comes from the `approval hook <kind>`
+  commands this checkout's `.claude/settings.json` and `.cursor/hooks.json`
+  register. SKIP, named, for each of the three things that make a comparison
+  impossible: no hook registered here, no record naming a version yet, or no
+  such binary on `PATH`. FAIL when they differ, because an unverified change is
+  precisely the state in which nobody has checked whether the gate still fires;
+  the `fix` is the promptless self-test in `docs/claude-code-hook.md`, one
+  supervised-class tool call, after which the row is green. PASS says only that
+  the versions match — the field is self-reported (SPEC.md §11.1 invariant 4)
+  and reduces nothing anywhere, so a match is not proof the hook fired.
 
 **`--json`** (one object on stdout):
 
