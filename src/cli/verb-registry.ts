@@ -2268,8 +2268,12 @@ const VERBS: VerbSpec[] = [
         unmapped: arrayOf(object({ text: STRING, section: STRING }, ["text", "section"])),
         ignored: arrayOf(STRING),
         warnings: arrayOf(STRING),
+        // APRV-240: the fenced DRAFT values block, or null when the source
+        // named none of the four values headings. Null is a declaration and
+        // not a gap; the verb never drafts a values block nobody asked for.
+        values_draft: nullable(STRING),
       },
-      ["ok", "source", "out", "classes", "unmapped", "ignored", "warnings"],
+      ["ok", "source", "out", "classes", "unmapped", "ignored", "warnings", "values_draft"],
     ),
     error: ERROR_SCHEMA,
     exit_codes: BASE_EXIT_CODES,

@@ -71,8 +71,30 @@ const CORE_DIR = join(REPO_ROOT, "src", "core");
  * Any OTHER core module naming the literal is the wiring this invariant
  * forbids: the block's content belongs to the surfaces that show it to a human
  * or hand it to an agent's prompt, never to the code that decides.
+ *
+ * `agents-md.ts` was added by APRV-240 and is the one WRITER on the list. It
+ * renders a DRAFT values block for a human to paste, so it has to spell the
+ * label it emits, and it does nothing else with it: it reads no APPROVAL.md,
+ * extracts no block, parses no YAML, imports no reader, and no decision path
+ * calls it. Writing a label is the opposite direction from the one this
+ * invariant is about, and `the draft renderer emits a block and reads none`
+ * below holds that entry to exactly that. Nothing else may be added here on the
+ * strength of this precedent: the next writer argues its own case.
  */
-const VALUES_LITERAL_ALLOWED: readonly string[] = ["values.ts", "md-fence.ts"];
+const VALUES_LITERAL_ALLOWED: readonly string[] = ["values.ts", "md-fence.ts", "agents-md.ts"];
+
+/**
+ * The reading machinery {@link VALUES_LITERAL_ALLOWED}'s writer entry must not
+ * touch. Naming a fence label is not reading a block, and this is where that
+ * distinction stops being a claim in a comment.
+ */
+const READING_MACHINERY: readonly string[] = [
+  "loadValues",
+  "loadValuesText",
+  "scanFences",
+  "parseHardenedYaml",
+  "./values.js",
+];
 
 /** The info string that marks the values block in APPROVAL.md (SPEC.md §5.3). */
 const VALUES_INFO_STRING = "approval-values";
@@ -136,6 +158,22 @@ test("only the values reader and the fence splitter name the values block (APRV-
     `SPEC.md §11.1 invariant 10: the values block is human-authored guidance and no enforcement path may read it. Only ${VALUES_LITERAL_ALLOWED.join(
       ", ",
     )} may name "${VALUES_INFO_STRING}":\n${offenders.join("\n")}`,
+  );
+});
+
+test("the draft renderer emits a block and reads none (APRV-240)", () => {
+  // The condition `agents-md.ts` sits on VALUES_LITERAL_ALLOWED under. It may
+  // spell the label of the block it writes; the moment it can extract, parse or
+  // load one, it has become a reader inside `src/core/` and this fails.
+  assert.ok(CORE_FILES.includes("agents-md.ts"), "src/core/agents-md.ts has moved or been renamed");
+  const source = coreSource("agents-md.ts");
+  const found = READING_MACHINERY.filter((name) => source.includes(name));
+  assert.deepEqual(
+    found,
+    [],
+    `SPEC.md §11.1 invariant 10: src/core/agents-md.ts is on the values-literal allowlist as a WRITER of draft blocks. It names ${found.join(
+      ", ",
+    )}, which is reading machinery. Either drop that, or take the file off the allowlist and argue the case again.`,
   );
 });
 

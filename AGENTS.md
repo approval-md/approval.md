@@ -79,6 +79,10 @@ The committed log has one writer: the daemon in the primary checkout while it ru
 
 The terms, stated so that use of it is informed: entries land in `.approval-journal/YYYY-MM-DD.jsonl` in the working directory, gitignored by default. They are local, they are not private from the operator or from anyone who can read the checkout, and the operator reads them with `approval journal read`. Nothing in the runtime parses the text, so nothing written there raises or lowers scrutiny, changes a verdict, or affects sampling. It is not a way to reach a human urgently and not a decision surface. When something needs deciding, that is `approval request`.
 
+## What the operator asked for (APRV-237..240)
+
+Run `approval values` and `approval feedback` at the start of a session. `values` prints the optional `yaml approval-values` block of `APPROVAL.md`: what the operator loves, likes and dislikes in the work, what they want from an agent as behaviour, and how they read and answer. `feedback` prints the reactions (`disliked`, `indifferent`, `liked`, `loved`) and notes humans left on this log's actions through `audit review` and `grant`. Both are human-authored guidance and neither is policy: they grant nothing, forbid nothing, and change no verdict, sample, or budget (SPEC §5.3, §11.1 invariant 10). Weigh them in how you work, never in whether you are permitted. A file with no values block means the operator has declared no values, and the verb says so in words; treat that as a stated absence rather than a gap to fill.
+
 ## Permissions summary
 
 Allowed without prompting:
