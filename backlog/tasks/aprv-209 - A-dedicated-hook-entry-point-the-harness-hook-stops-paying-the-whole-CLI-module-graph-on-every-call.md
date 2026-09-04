@@ -3,11 +3,11 @@ id: APRV-209
 title: >-
   A dedicated hook entry point: the harness hook stops paying the whole CLI
   module graph on every call
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-x'
 created_date: '2026-09-02 08:06'
-updated_date: '2026-09-02 20:07'
+updated_date: '2026-09-02 20:30'
 labels:
   - performance
   - hook
@@ -237,3 +237,9 @@ suites (88 + 31 cases) pass with the same verdicts and exit codes.
 Both are worth knowing for review: neither is visible in the hook suites, and
 the first is exactly the class of bug a mechanical async conversion produces.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Every CLI verb loads on demand through await import(); main() is async and a settle helper returns each verb's exit code (fixing a race that let a usage error exit 0). Cold pass-through hook 903 to 799 ms at 1k records and 1619 to 1487 ms at 10k (interleaved A/B, 21 pairs, loaded box); better-sqlite3 and the channel modules no longer load; verdict JSON and exit codes byte-identical on every hook fixture; settings.json entry unchanged. Verified by tests/hook-module-graph.test.ts, full suite 2987 pass, lint clean; merged in PR #239.
+<!-- SECTION:FINAL_SUMMARY:END -->

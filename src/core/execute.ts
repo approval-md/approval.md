@@ -81,6 +81,7 @@ import { join } from "node:path";
 import { attestationRefusal, checkAttestation, type AttestationRefusalDetail } from "./attest.js";
 import { evaluateBudgetsWithTask, type BudgetVerdict } from "./budgets.js";
 import { tick, type ClockOptions } from "./clock.js";
+import { attemptsOf, withHeadRetry } from "./head-retry.js";
 import {
   appendEvent,
   type AppendError,
@@ -228,7 +229,11 @@ export const EXECUTE_REFUSAL_CODES = [
    * The append itself failed; `append` carries the underlying error. Its `code`
    * is `head-moved` when a record landed between this module's read and its
    * append, so the idempotency and budget checks that authorized the write were
-   * made against an older log. Nothing was written and nothing is retried here.
+   * made against an older log. Nothing was written. Since APRV-236 this code
+   * reaches a caller of {@link startExecution} only after the bounded
+   * read-check-append retry is spent (`core/head-retry.ts`), and its message
+   * says how many attempts were made; a single lost race is re-derived rather
+   * than reported.
    */
   "append-failed",
 ] as const;
@@ -304,6 +309,17 @@ export interface ExecuteOptions extends ClockOptions {
    * `token_sealed`; unlinked once the token is spent.
    */
   keyStoreDir?: string;
+  /**
+   * How many times {@link startExecution} re-derives its verdict after a
+   * `head-moved` refusal, at most `core/head-retry.ts`'s `HEAD_MOVED_ATTEMPTS`
+   * (APRV-236).
+   *
+   * Only ever lowers the bound, on the same terms as `core/gate.ts`'s option of
+   * the same name: `1` is the unretried writer, which is what a test pins the
+   * pre-APRV-236 shape with, and a larger number, a zero or a fraction falls
+   * back to the runtime's own value. The ceiling is not a caller's to raise.
+   */
+  retryOnHeadMoved?: number;
 }
 
 function refuse(
@@ -636,6 +652,36 @@ export type StartResult =
  * enforced in one place.
  */
 export function startExecution(
+  logPath: string,
+  actionKey: string,
+  options: ExecuteOptions,
+  actor: string,
+): StartResult {
+  return withHeadRetry(attemptsOf(options.retryOnHeadMoved), () =>
+    attemptStart(logPath, actionKey, options, actor),
+  );
+}
+
+/**
+ * One whole start, from the clock read to the append (APRV-236 put it under the
+ * bounded head-moved retry; see `core/head-retry.ts`).
+ *
+ * `approval run` is the verb a session drives, and a start that lost the append
+ * race used to hand the session a refusal about someone else's write. The
+ * re-entry re-derives the lot: the fresh verified read, the declaration and its
+ * cross-task collision check, custody, the policy resolution and the human-only
+ * test, the approval-cycle test, attestation, loop escalation, the single-use
+ * scan, the content binding and the budgets. So a key another writer started in
+ * the window is refused `already-executed`, a ceiling it exhausted is
+ * `budget-exceeded`, and a task it escalated is `loop-escalated`.
+ *
+ * The manual path's append happens inside `core/token.ts`'s `consumeToken`,
+ * which keeps no retry of its own: the retried cycle re-enters it whole, so its
+ * own read, its digest comparison and its single-use scan are re-run rather than
+ * skipped, and a token another process spent in the window is refused
+ * `token-consumed`. Double-spend stays exactly as pinned.
+ */
+function attemptStart(
   logPath: string,
   actionKey: string,
   options: ExecuteOptions,

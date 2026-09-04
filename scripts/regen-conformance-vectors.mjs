@@ -255,6 +255,10 @@ const unionVectors = [
   ["token_refusal_codes", "the token verbs' union: verification plus the log-and-append failures"],
   ["execute_refusal_codes", "every way `approval run` and the adapter contract can refuse"],
   ["append_error_codes", "every way the write boundary itself can refuse an append"],
+  [
+    "anchor_refusal_codes",
+    "every way the log-anchoring check can refuse a working log that contradicts the committed copy of it",
+  ],
 ].map(([union, description]) => ({
   id: `union-${union}`,
   description: `${description}. Order is definition order; conformance means emitting exactly these codes, no more, no fewer.`,
@@ -993,7 +997,13 @@ const SUITES = [
     // produce now that a runtime reads them. The vector pins the whole array in
     // definition order, so a longer union is a changed expectation and a major
     // bump, exactly as 4.0.0 and 5.0.0 were.
-    vectors_version: "6.0.0",
+    // 7.0.0 (APRV-219): a SIXTH union, `anchor_refusal_codes`, for the
+    // log-anchoring check's `anchor-diverged`. A major bump because this suite
+    // pins WHICH unions exist as well as what each one holds: an
+    // implementation that answers five of them covers five sixths of invariant
+    // 6, and a runner reporting that as a pass would be reporting coverage of
+    // work nobody did.
+    vectors_version: "7.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",

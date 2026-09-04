@@ -15,7 +15,15 @@
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve as resolvePathSegments, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve as resolvePathSegments,
+  sep,
+} from "node:path";
 
 /** One git invocation's result. `ok` is "exit status 0", nothing more. */
 export interface GitRun {
@@ -132,9 +140,39 @@ export function primaryCheckout(
   return { ok: true, root: top };
 }
 
-/** A repo-relative, forward-slashed path, as git spells one. */
+/**
+ * `realpathSync` for a path that may not exist yet.
+ *
+ * The existing part of the path is resolved and the missing tail is appended.
+ * A log file that has not been created yet still has to produce the same
+ * repo-relative spelling as one that has, or a check would answer differently
+ * depending on whether it ran before or after the first append.
+ */
+function realish(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    const parent = dirname(path);
+    if (parent === path) return path;
+    return join(realish(parent), basename(path));
+  }
+}
+
+/**
+ * A repo-relative, forward-slashed path, as git spells one.
+ *
+ * BOTH sides are resolved through `realpath` first (APRV-210). `git rev-parse
+ * --show-toplevel` prints the physical path, so a checkout reached through a
+ * symlinked spelling (`/tmp/x` for `/private/tmp/x` on macOS, a symlinked home
+ * directory, a bind mount) hands this function a root and a path that live in
+ * different spellings of the same place. `relative()` on those two produces a
+ * path that climbs out of the repository (`../../private/tmp/…`), git has no
+ * blob at `HEAD:<that>`, and the caller concludes the file has never been
+ * committed. That is the misread APRV-210 recorded on a log with thousands of
+ * committed records.
+ */
 export function repoPath(root: string, path: string): string {
-  return relative(root, path).split(sep).join("/");
+  return relative(realish(root), realish(path)).split(sep).join("/");
 }
 
 /** The checked-out branch, or `null` on a detached HEAD. */
