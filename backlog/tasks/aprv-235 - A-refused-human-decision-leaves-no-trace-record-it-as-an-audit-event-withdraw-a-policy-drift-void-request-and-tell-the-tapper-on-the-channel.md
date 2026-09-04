@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-l'
 created_date: '2026-09-02 20:26'
-updated_date: '2026-09-04 23:43'
+updated_date: '2026-09-04 23:48'
 labels:
   - channels
   - log
@@ -30,7 +30,7 @@ Seen 2026-09-02 after the seq 13704 ceremony: Carter tapped approve on a request
 - [x] #3 The Telegram message that was tapped is edited to a terminal state naming the refusal, buttons disarmed; the CLI channel prints the same line
 - [x] #4 The event schema for the new record validates at the write boundary; conformance vectors regenerated per the documented ritual
 - [x] #5 SPEC section 5.2 sentence drafted in the notes (human decisions refused are logged; gate refusals to agents remain unlogged) for sign-off
-- [ ] #6 npm test passes; lint clean
+- [x] #6 npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -232,4 +232,16 @@ are all untouched), and the correlation that does hold is with machine load:
 every failure followed a build or a full suite run. Same family as APRV-248's
 telegram poll-timing flake. Flagged for the orchestrator; not fixed here,
 because tightening someone else's race test is outside this task's criteria.
+
+## Final run
+
+`npm test` against the final build (commit 7e69407's sources): **3183 tests,
+3182 pass, 0 fail, 1 skipped, exit 0**, 321s. `npx oxlint`: exit 0.
+`node conformance/run.mjs`: exit 0, ok true.
+
+The APRV-233 race test passed in this run, which is the fourth data point that
+it is load-sensitive rather than broken: it fails when the machine is busy
+(3 of 4 immediately after a build) and passes when it is not (this run, and
+4 of 4 on pristine main sources). Still worth a follow-up to make it
+deterministic; it is not this task's to fix.
 <!-- SECTION:NOTES:END -->
