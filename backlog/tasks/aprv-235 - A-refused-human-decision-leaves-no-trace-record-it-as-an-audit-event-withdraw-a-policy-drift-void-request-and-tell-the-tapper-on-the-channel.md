@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-l'
 created_date: '2026-09-02 20:26'
-updated_date: '2026-09-04 23:19'
+updated_date: '2026-09-04 23:30'
 labels:
   - channels
   - log
@@ -102,4 +102,90 @@ reason is closed to three values, it should read:
 > verdict from two hashes the log carries. A requester able to spell
 > `policy-drift` would be dressing its own cancellation as the gate's verdict
 > about the policy, which is why the closure runs both ways.
+
+## What was built
+
+**The record.** `audit.decision_refused` joins the closed event set (schema and
+`core/log.ts`). Actor `system:gate`, top-level `action_key` and `channel`
+required, payload naming the human who decided, the verb attempted, the gate's
+code verbatim, its message, and on drift the two policy hashes. The actor rule
+is `audit.dark_session`'s argument applied to a different subject: the record
+is the runtime's statement about a refusal the runtime made, and neither party
+to a refusal authors the account of it. The human is the SUBJECT, in
+`payload.actor`, which the schema pins to `^human:` because the event exists
+only for a human decision.
+
+**Where it is appended, and where it is not.** `recordRefusedDecision` in the
+new `core/decision-refusal.ts`, called by the two human decision surfaces:
+`recordChannelDecision` (telegram, web and the cli channel all route through it)
+and `commandDecide` in `cli/gate.ts`. NOT inside `decide()`, for two reasons
+that point the same way: `decide()`'s contract is that a refusal appends
+nothing, which is what lets a caller retry one without wondering what it wrote;
+and the fact being recorded is that a HUMAN decided, which only a surface that
+collected a human's gesture can assert. `actor-not-human` records nothing at
+all — it is the one refusal saying nobody decided.
+
+**The drift withdrawal.** `policy-drift` is the only refusal where the gate
+declares the REQUEST void rather than declining this decision, so it also gets
+an `approval.withdrawn` with the runtime's own reason. The schema's
+`approval.withdrawn` branch grew a fourth reason and a bidirectional cross-rule:
+`system:` is admitted only with `policy-drift`, and `policy-drift` only with
+`system:`. That keeps APRV-106's ban intact for the requester's three reasons
+(the runtime must not cancel a question a human is about to answer with no clock
+to justify it) while admitting the one case where the justification is as
+objective as a clock and is IN the record. An agent cannot spell `policy-drift`,
+so it cannot dress a cancellation as the gate's verdict; `WITHDRAW_REASONS` is
+unchanged, so `approval withdraw --reason policy-drift` is a usage error and
+`withdraw()` still refuses a `system:` actor outright. Nothing new derives
+state: `core/state.ts` settles on `approval.withdrawn` without reading who
+wrote it or why, so one withdrawal removes the request from `approval queue`,
+QUEUE.md and every channel at once.
+
+**Order.** Audit record first, withdrawal second naming it in `refused_seq`.
+Two appends are two records, so a crash between them is reachable, and the order
+is chosen for which half is safe alone: the explanation without the withdrawal
+leaves the request pending exactly as today and says why; the withdrawal without
+the explanation takes a request out of a human's queue with nothing on the
+record. Each write states the head it was derived against, and the whole cycle
+re-enters from a fresh read on `head-moved` through `core/head-retry.ts`.
+
+**GateRefusal carries the drift pair.** `decide()` (and the harness spend) now
+put the two hashes they compared on the refusal, so whatever records a refusal
+records the comparison that was MADE. Re-deriving them afterwards would be a
+second comparison at a second instant against a file that may have moved again.
+
+**No attestation check here, deliberately**, for the reason reject and revoke do
+not have one: this write confers no authority, and refusing to record a refusal
+because a file changed would bite hardest on `policy-not-attested` itself.
+
+**Invariants touched** (CLAUDE.md asks that a task touching one say so):
+gate-typed events never accept caller timestamps — `ts` comes from the injected
+clock, there is no parameter; every check-then-append passes through
+compare-and-append — both writes, per attempt; refusals stay machine-readable
+and distinct — the gate's code is copied verbatim and nothing is invented,
+merged or softened; self-reported fields never reduce scrutiny — the record only
+ADDS to what a reviewer sees, its author is the runtime, and the approver's
+identity comes from the surface's configured actor, the same source a grant's
+does. The new record moves no verdict, budget, streak or sampling path, and
+`tests/decision-refusal.test.ts` asserts that by construction rather than by
+intention: the derived request state, the budget verdicts and the sampling
+candidates are taken before and after and compared.
+
+## Behaviour changes reviewers should look at
+
+Six existing assertions said "a refused decision appends nothing" by counting
+BYTES, where the requirement was that no DECISION was recorded. They now say the
+thing they meant. In `src/channels/conformance.ts` this is a change to what a
+second implementation is held to, so it is a named helper with the argument
+written out: no `approval.granted`/`rejected`/`revoked`, and nothing beyond the
+refusal's audit trail and the withdrawal of a void request.
+`tests/cli-gate.test.ts` moves twice for the same reason — an early refused
+revoke shifts a later seq from 5 to 6, and the lazily materialised
+`approval.expired` is no longer the log's last record.
+
+The refusal sentence a person is shown moved to one function,
+`refusedDecisionLine` in `channels/contract.ts`. Telegram's message edit and the
+CLI channel's terminal line read it, so the person who taps on their phone and
+then reads the operator's terminal is not choosing between two accounts of one
+refusal. APRV-206's three sentences moved unchanged.
 <!-- SECTION:NOTES:END -->

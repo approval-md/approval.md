@@ -198,6 +198,15 @@ export function voidsTheRequest(code: string): boolean {
  * Best-effort by design: a failure here is returned, never thrown, and the
  * caller shows the gate's refusal either way. The decision was already refused
  * before this ran, and nothing about that outcome depends on this write landing.
+ *
+ * **Two writes, two retry cycles, and deliberately not one.** `head-retry.ts`
+ * asks that the unit of retry be a whole read-check-append cycle, and putting
+ * both appends inside one cycle would break that in the direction that matters:
+ * a moved head under the SECOND write would re-enter from the top and append a
+ * second `audit.decision_refused` for one tap. So each write has its own cycle,
+ * each re-reads and re-derives, and the withdrawal's cycle re-checks that the
+ * request is still pending — a decision or a withdrawal that landed in the
+ * window is the new verdict, and there is then nothing left to withdraw.
  */
 export function recordRefusedDecision(
   logPath: string,
@@ -209,24 +218,35 @@ export function recordRefusedDecision(
   // refusal a misconfigured channel gets, and it is the one refusal that says
   // nobody's attention was spent.
   if (!HUMAN_ACTOR.test(decided.actor)) return { ok: true, audit: null, withdrawn: null };
-  return withHeadRetry(attemptsOf(options.retryOnHeadMoved), () =>
-    attemptRecord(logPath, decided, refusal, options),
+
+  const attempts = attemptsOf(options.retryOnHeadMoved);
+  const audit = withHeadRetry(attempts, () => appendAudit(logPath, decided, refusal, options));
+  if (!audit.ok) return audit;
+
+  if (!voidsTheRequest(refusal.code)) return { ok: true, audit: audit.record, withdrawn: null };
+  const withdrawn = withHeadRetry(attempts, () =>
+    appendWithdrawal(logPath, decided, refusal, audit.record.seq, options),
   );
+  if (!withdrawn.ok) return withdrawn;
+  return { ok: true, audit: audit.record, withdrawn: withdrawn.record };
 }
 
-/** One whole cycle: a fresh read, a fresh derivation, and up to two appends. */
-function attemptRecord(
+/** One appended record, or the reason there is none. */
+type AppendOutcome = { ok: true; record: EventRecord } | RefusalRecordFailure;
+
+/** As {@link AppendOutcome}, with "there was nothing to write" as a third answer. */
+type MaybeAppendOutcome = { ok: true; record: EventRecord | null } | RefusalRecordFailure;
+
+/** The audit record's whole cycle: a fresh read, the task off it, one append. */
+function appendAudit(
   logPath: string,
   decided: RefusedDecision,
   refusal: RefusalFacts,
   options: GateOptions,
-): RecordRefusedDecisionResult {
+): AppendOutcome {
   const ts = tick(options);
-  const read = readVerifiedRecords(
-    logPath,
-    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
-  );
-  if (!read.ok) return { ok: false, code: "log-unreadable", message: read.message };
+  const read = readRecords(logPath, options);
+  if (!read.ok) return read;
 
   // The task the request named, off the verified log rather than off the
   // caller: a surface holds a rendering, and the record should say what the log
@@ -234,18 +254,18 @@ function attemptRecord(
   // is asked for the task alone.
   const derivation = requestState(read.records, decided.actionKey, ts, null);
 
-  const auditPayload: Record<string, unknown> = {
+  const payload: Record<string, unknown> = {
     actor: decided.actor,
     decision: decided.decision,
     code: refusal.code,
     message: refusal.message,
   };
   if (refusal.drift !== undefined) {
-    auditPayload["policy_sha256_requested"] = refusal.drift.requested;
-    auditPayload["policy_sha256_attested"] = refusal.drift.attested;
+    payload["policy_sha256_requested"] = refusal.drift.requested;
+    payload["policy_sha256_attested"] = refusal.drift.attested;
   }
 
-  const audit = appendOne(
+  return appendOne(
     logPath,
     {
       ts,
@@ -254,28 +274,38 @@ function attemptRecord(
       ...(derivation.task === null ? {} : { task: derivation.task }),
       action_key: decided.actionKey,
       channel: decided.channel,
-      payload: auditPayload,
+      payload,
     },
     options,
     read.head,
   );
-  if (!audit.ok) return audit;
+}
 
-  // Only `policy-drift`, and only a request that is still pending. A request
-  // already settled needs no withdrawal, and a second one would be refused by
-  // the schema-and-state pair anyway; deriving it here keeps the write off the
-  // log rather than relying on that.
-  if (!voidsTheRequest(refusal.code) || derivation.state !== "requested") {
-    return { ok: true, audit: audit.record, withdrawn: null };
-  }
+/**
+ * The withdrawal's whole cycle, run only for `policy-drift`.
+ *
+ * The pending-ness check is inside the cycle rather than carried from the audit
+ * record's read, which is what makes the retry safe: a request that was decided
+ * or withdrawn while this was writing is settled by that record, and appending
+ * a second terminal event for it would be this module overwriting an answer.
+ * `record: null` is that case, and it is a success — there was nothing to
+ * withdraw.
+ */
+function appendWithdrawal(
+  logPath: string,
+  decided: RefusedDecision,
+  refusal: RefusalFacts,
+  refusedSeq: number,
+  options: GateOptions,
+): MaybeAppendOutcome {
+  const ts = tick(options);
+  const read = readRecords(logPath, options);
+  if (!read.ok) return read;
 
-  const withdrawnPayload: Record<string, unknown> = {
-    action_key: decided.actionKey,
-    reason: POLICY_DRIFT_REASON,
-    note: driftNote(refusal),
-    refused_seq: audit.record.seq,
-  };
-  const withdrawn = appendOne(
+  const derivation = requestState(read.records, decided.actionKey, ts, null);
+  if (derivation.state !== "requested") return { ok: true, record: null };
+
+  return appendOne(
     logPath,
     {
       ts,
@@ -283,17 +313,27 @@ function attemptRecord(
       actor: DECISION_REFUSAL_ACTOR,
       ...(derivation.task === null ? {} : { task: derivation.task }),
       action_key: decided.actionKey,
-      payload: withdrawnPayload,
+      payload: {
+        action_key: decided.actionKey,
+        reason: POLICY_DRIFT_REASON,
+        note: driftNote(refusal),
+        refused_seq: refusedSeq,
+      },
     },
     options,
-    // The head the FIRST append produced. Compare-and-append holds per write,
-    // so the second one is refused if anything landed in between rather than
-    // written over it.
-    { seq: audit.record.seq, hash: audit.record.hash },
+    read.head,
   );
-  if (!withdrawn.ok) return withdrawn;
+}
 
-  return { ok: true, audit: audit.record, withdrawn: withdrawn.record };
+function readRecords(
+  logPath: string,
+  options: GateOptions,
+): { ok: true; records: EventRecord[]; head: LogHead | null } | RefusalRecordFailure {
+  const read = readVerifiedRecords(
+    logPath,
+    options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
+  );
+  return read.ok ? read : { ok: false, code: "log-unreadable", message: read.message };
 }
 
 /**
