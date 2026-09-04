@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-n'
 created_date: '2026-09-02 17:00'
-updated_date: '2026-09-04 22:15'
+updated_date: '2026-09-04 22:42'
 labels:
   - enhancement
 dependencies: []
@@ -104,4 +104,19 @@ Regenerated per conformance/README.md (`node scripts/regen-conformance-vectors.m
 ## For the orchestrator
 
 The autonomous path writes an `execution.started` and is NOT stamped, by the design in the brief (two record types only). So a session that runs nothing but autonomous-class commands never re-records a version, and its doctor row stays red until somebody runs the self-test. That is the intended cost — the row is asking for a deliberate act — but if the red row proves noisy in practice, stamping the unattended `execution.started` too would make the re-record automatic. It is a one-line change at `recordUnattended` plus a schema note, and it is deliberately NOT in this task.
+
+## Follow-up found while verifying: the suite was spawning a real `claude`
+
+The full run surfaced a regression this change itself introduced. The probe spawns `<binary> --version` off PATH with no configurable binary name (the `cli/gloss.ts` design), so on a developer machine with Claude Code installed, every EXISTING hook test that writes a supervised or manual registration started spawning the real `claude`, and the recorded version became machine-dependent.
+
+Fixed at the runner, one place: `scripts/run-tests.mjs` writes a refusing stub for `claude` and `cursor-agent` into `dist/test-bin` and puts it in front of PATH for the whole suite (commit a8a418a). No test run through the runner reaches a real harness binary; the stub answers `--version` with a fixed string and refuses everything else, so a file that forgets a fake gloss runner now gets a fast null rather than ten seconds and a real model call — the failure `tests/fake-claude.ts` documents having gone unnoticed for several tasks. A file that wants particular behaviour still prepends its own stub and wins.
+
+Stated rather than papered over, in the code and here: this covers `npm test` and CI, NOT a bare `node --test dist/tests/x.test.js`, which still inherits the developer's PATH. Closing that gap would mean a test-only switch inside the code that decides what to execute, which is a worse thing to own than a documented gap.
+
+## Full-suite result
+
+`npm test` (first run, before the stub landed): exit 1, 3109 passing, 2 failing, NEITHER related to this task.
+
+1. `tests/ci-guard.test.ts` — 'every production dependency's engines.node admits the Node floor': ENOENT on `<worktree>/node_modules/@modelcontextprotocol/sdk/package.json`. The test joins REPO_ROOT with `node_modules`, and a lane worktree has none — Node's own resolution walks up to the primary checkout, that one assertion does not. Environmental, reproduces without this branch's diff, fixed by `npm ci` in the worktree.
+2. `tests/e2e-web-agent-demo.test.ts` — 'timed out waiting for the demo server to listen' after 63s. A load-timing failure; the demo never invokes `approval hook <harness>`, so nothing on this branch can reach it.
 <!-- SECTION:NOTES:END -->
