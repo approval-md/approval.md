@@ -120,6 +120,26 @@ const FIXTURES: readonly Fixture[] = [
   { command: "npm test", class: "files.write.workspace", rule: "npm-script" },
   { command: "npm run build", class: "files.write.workspace", rule: "npm-script" },
 
+  // -- harness self-update (APRV-228) -----------------------------------------
+  // Every spelling the task names, one row each. The verbs resolve to the
+  // EXISTING deps.upgrade: a harness upgrade is a supply-chain decision for the
+  // binary that hosts the hook, and naming it lets the refusal say so.
+  { command: "claude update", class: "deps.upgrade", rule: "harness-update" },
+  { command: "codex update", class: "deps.upgrade", rule: "harness-update" },
+  { command: "gemini update", class: "deps.upgrade", rule: "harness-update" },
+  // A flag ahead of the verb must not hide it.
+  { command: "claude --verbose update", class: "deps.upgrade", rule: "harness-update" },
+  { command: "uca", class: "deps.upgrade", rule: "harness-updater" },
+  { command: "uca claude", class: "deps.upgrade", rule: "harness-updater" },
+  { command: "uca service install", class: "deps.upgrade", rule: "harness-updater" },
+  // `--dry-run` claims to change nothing; the classifier cannot verify the
+  // claim from text and takes the updater at its strictest.
+  { command: "uca --dry-run", class: "deps.upgrade", rule: "harness-updater" },
+  // The package-manager route to the same upgrade was `deps.add` before this
+  // task and stays so: the rows above add spellings, they do not move rows.
+  { command: "npm install -g @anthropic-ai/claude-code", class: "deps.add", rule: "npm-install-package", row: "npm-install" },
+  { command: "bun install -g @openai/codex", class: "deps.add", rule: "npm-install-package", row: "npm-install" },
+
   // -- workspace tools ------------------------------------------------------
   { command: "node scripts/run-tests.mjs", class: "files.write.workspace", rule: "node-script", row: "node" },
   { command: "node dist/src/cli/main.js log verify", class: GATE_SELF_CLASS, rule: "node-approval-cli", row: "node" },
@@ -512,7 +532,22 @@ for (const opaque of [
   });
 }
 
-for (const unknown of ["vim CLAUDE.md", "docker compose up", "git frobnicate", "gh weird thing"]) {
+for (const unknown of [
+  "vim CLAUDE.md",
+  "docker compose up",
+  "git frobnicate",
+  "gh weird thing",
+  // APRV-228 names the harnesses' `update` verb and nothing else about them:
+  // a version probe, a one-shot prompt and a bare launch are not upgrades, and
+  // the row must not become the rule that runs a nested harness unattended.
+  "claude --version",
+  "claude -p 'summarize this'",
+  "claude",
+  "codex --help",
+  "gemini",
+  // The updater's state dumper is a different binary and is not named.
+  "ucas --json",
+]) {
   test(`unclassified: ${unknown}`, () => {
     const result = classifyCommand(unknown);
     assert.equal(result.ok, false);
