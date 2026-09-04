@@ -3,11 +3,11 @@ id: APRV-236
 title: >-
   Bounded head-moved retry for every gate writer, not only the hook: approval
   grant lost the append race on a busy log and told the human to retype
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-s'
 created_date: '2026-09-02 20:28'
-updated_date: '2026-09-02 22:13'
+updated_date: '2026-09-04 21:18'
 labels:
   - core
   - gate
@@ -94,3 +94,9 @@ Not applied: the spec is a protected path, and a divergence is called out rather
 - Per-file runs during development, all exit 0: `gate.test.js` 88/88, `execute.test.js` 33/33, `concurrency.test.js` 14/14 (6 pre-existing plus 8 new), `head-retry.test.js` 11/11, `cli-hook.test.js` 88/88, and `gate-window + token + evidence-append + human-only + clock` 81/81 together.
 - The latency RATIO test deserves the explicit note because `decide` is on the path it measures: the retry adds one closure call on the happy path and no extra read, and the test passes on a quiet machine (2574ms, ratio within bound).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+One shared head-moved retry helper (src/core/head-retry.ts, three attempts) wraps register, request, decide, withdraw, the harness writers and startExecution; each attempt is a fresh verified read, a fresh check and a fresh compare-and-append; the open window's duplicate loop is gone; finishHarnessExecution retries per key; lock timeouts are not retried. Contract change: the APRV-106 grant-vs-withdraw race loser now gets its own code, not append-failed. Verified by tests/head-retry.test.ts (11) and eight two-process races in tests/concurrency.test.ts, full suite green bar one environmental AgentMail fetch, lint clean; merged in PR #250.
+<!-- SECTION:FINAL_SUMMARY:END -->

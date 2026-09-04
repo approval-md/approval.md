@@ -1,11 +1,11 @@
 ---
 id: APRV-226
 title: 'examples/backlog-md-project: the Backlog.md on-ramp'
-status: In Progress
+status: Done
 assignee:
   - 'agent:fable-lane-p'
 created_date: '2026-09-02 17:00'
-updated_date: '2026-09-02 21:40'
+updated_date: '2026-09-04 21:18'
 labels:
   - docs
   - release
@@ -52,3 +52,9 @@ Observed in passing, not changed: examples/telegram-demo.md step 10 shows approv
 
 Verification: npm run build exit 0; node --test dist/tests/docs-guard.test.js 11 pass exit 0; dist/tests/fixtures.test.js 143 pass exit 0; dist/tests/backlog-fixtures.test.js 9 pass exit 0 (drift guard ran, pinned CLI present); npx oxlint tests/docs-guard.test.ts exit 0. No em dashes or not-X-but-Y constructions in the new prose (grep). Gate verbs ran only against scratch directories under the session scratchpad; the primary log was touched by nothing but the hook's own records.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+examples/backlog-md-project: a Backlog.md-shaped task file with a valid envelope, the example's own policy.md, and a README walking register, request, wait and run with real output, the status/state independence sentence and the one-sentence no-adapter reason; README front page links it. Verified by two docs-guard cases plus fixtures and backlog-fixtures suites, lint clean; merged in PR #246.
+<!-- SECTION:FINAL_SUMMARY:END -->
