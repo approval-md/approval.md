@@ -3658,6 +3658,18 @@ Warnings go to stderr as `{"event":"warning","code":"...","message":"..."}`, wit
 `advance-refused`, `draw-unavailable`. A warning never stops the
 loop, and neither does `{"event":"git_evidence_failed","step":"commit",…}`.
 
+Dangling advance cycles (APRV-264): at startup and before every trigger, the
+daemon lists every advance execution nobody closed and closes each one this
+checkout's refs can prove, appending `execution.completed` with a note naming
+the ref and recording that the RUNTIME observed it rather than a person. Each
+closure is an `advance` line with `"code":"advance-reconciled"`. What no ref can
+prove is nobody's to guess: it is reported once, on the `started` line's
+`dangling_advances` array and then in a single `advance-refused` warning if it
+appears mid-run, and never once per tick. While any of them stands no further
+advance is authorized, and the refusal that says so names every outstanding key
+and `approval execution resolve --dangling`, which is also the
+`log-advance-cadence` doctor row's `fix`.
+
 Payload retention: with `payload_retention` set in policy, each tick appends
 `payload.pruned` and THEN removes the payload file for every payload whose action
 has been terminal longer than the duration, and for orphaned store files. With the
