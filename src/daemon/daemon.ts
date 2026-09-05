@@ -388,7 +388,28 @@ export type DaemonEvent =
        * anchor for the same reason: a tick that re-proved nothing about the
        * prefix has learned nothing new about the records inside it.
        */
-      checkpoints?: { status: "pass" | "skip"; verified: number; keys: number };
+      checkpoints?: {
+        status: "pass" | "skip";
+        verified: number;
+        keys: number;
+        /**
+         * Whether `audit.checkpoint_every` says one is DUE (APRV-257).
+         *
+         * The daemon's half of the cadence, and the same answer the channel
+         * prompt is enqueued from: both read `core/checkpoint.ts`'s one
+         * due-ness rule, so there is no arrangement in which this line says a
+         * checkpoint is owed and no prompt is offered, or the reverse. The
+         * ENQUEUE is the dispatch cycle's, which is where SPEC.md §10.2's
+         * dispatch job lives in this runtime (see `cli/channel-telegram.ts`'s
+         * module doc): the daemon holds no channel credential and reaches no
+         * network, and giving it either to send one prompt would undo that.
+         *
+         * Report-only, like everything else on this path. Nothing turns a
+         * `true` into a refusal; the outcome beside it is a `warn`, never a
+         * `fatal`.
+         */
+        due: boolean;
+      };
       /** Per-phase duration in milliseconds, in the order the tick runs them. */
       phases: {
         drift: number;
@@ -747,6 +768,7 @@ export class Daemon {
     status: "pass" | "skip";
     verified: number;
     keys: number;
+    due: boolean;
   } | null = null;
   /** Basenames {@link writeBack} placed this tick, so the watcher can ignore them. */
   private selfWrites = new Set<string>();
@@ -1093,13 +1115,21 @@ export class Daemon {
             return { kind: "checkpoint-invalid", message: checkpoints.message };
           }
           if (checkpoints.status === "skip") {
-            this.checkpointsThisTick = { status: "skip", verified: 0, keys: 0 };
+            this.checkpointsThisTick = { status: "skip", verified: 0, keys: 0, due: false };
           } else {
+            // APRV-257. The warning and the `due` flag are one fact read once:
+            // `checkpoints.warning` is non-null exactly when
+            // `core/checkpoint.ts`'s due-ness rule says a checkpoint is owed,
+            // which is the same rule the dispatch cycle enqueues its prompt
+            // from. A `warn`, deliberately, and there is no branch below it
+            // that could become a `fatal`: a human who has been away is not
+            // tampering.
             if (checkpoints.warning !== null) this.warn("checkpoint-due", checkpoints.warning);
             this.checkpointsThisTick = {
               status: "pass",
               verified: checkpoints.checkpoints.length,
               keys: checkpoints.keys,
+              due: checkpoints.warning !== null,
             };
           }
         }
