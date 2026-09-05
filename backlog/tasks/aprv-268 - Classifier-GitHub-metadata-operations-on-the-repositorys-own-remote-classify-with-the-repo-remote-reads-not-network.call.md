@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-b'
 created_date: '2026-09-05 10:31'
-updated_date: '2026-09-05 11:01'
+updated_date: '2026-09-05 11:11'
 labels:
   - classifier
 dependencies: []
@@ -78,4 +78,12 @@ Two sentences, to sit beside read.vcs.remote and vcs.pr.*:
   invocation alone that the target is the checkout's own repository must not
   emit this class, which is why naming any repository explicitly falls back to
   the class the operation had before.
+
+### Suite fallout, found and fixed
+
+The first full run was 3521 tests, 3519 pass, 1 fail, exit 1. The single failure was tests/cli-hook.test.ts 'hook classify reads gh api by its method and field flags', which pinned 'gh api repos/x/y/pulls' at read.vcs.remote through the real CLI. That is precisely the assertion this task moves, so it was updated rather than worked around: it now pins vcs.remote.meta for the default-resolution GET and read.vcs.remote for the same GET behind a -R, and a second case walks a graphql query and a graphql mutation through hook classify end to end. Commit 3ac2319; cli-hook is 90/90 exit 0 with it.
+
+I missed it on the first pass because I ran cli-hook during the APRV-267-only phase of the branch, before restoring the gh changes. Worth noting for the next lane that splits one file across two commits.
+
+Also checked and unaffected: every other test touching gh uses 'gh pr create' (still vcs.pr.open), and no test outside command-class asserts files.delete.out_of_scope. conformance/run.mjs is 279/279 exit 0, so no policy-resolution vector moved and the conformance ritual is not needed.
 <!-- SECTION:NOTES:END -->
