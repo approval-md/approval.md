@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-09-04 21:58'
-updated_date: '2026-09-05 02:03'
+updated_date: '2026-09-05 02:15'
 labels: []
 dependencies: []
 type: docs
@@ -46,4 +46,6 @@ Parent review and independent Sol scenario review passed: additive 12-line check
 Delivery checkpoint: /private/tmp/approval-workflow-checkpoint, codex/workflow-checkpoint; reviewed amendment and task evidence committed as 87c281b and pushed in PR https://github.com/approval-md/approval.md/pull/261. A subsequent local merge of main a27c812 remains unpushed. PR is OPEN, not merged. Protected-path CI requires the granted edit to reach committed main through the separate records path; hook:codex-aprv252:aprv252-records-advance:log.advance is awaiting its human gate decision. CI full shards 2 and 3 passed; shard 1 failed an upstream daemon-advance-finish append-race assertion. Isolated daemon-adopt diagnostic passed 7/7 exit 0; existing cli-setup timing diagnostic failed exit 1. Scenario review, build, lint, typecheck and diff checks passed. Next: after the exact records-advance grant, run the frozen primary-checkout command, complete its separate records PR, refresh this branch, push and re-arm PR 261, then verify checks and actual merge. No live service restart. Authorized personal memory note was written separately. The feature integrated suite subsequently passed 3187 tests with 1 skip on main a27c812; that is feature evidence, not a claim that this PR CI has passed.
 
 2026-09-05 resumed delivery: primary hook confirmed the existing log.advance grant. Ran the exact approved command approval log advance --pr, exit 0, publishing records commit 67eba0a800c4 in separate PR https://github.com/approval-md/approval.md/pull/269. PostToolUse recorded completion successfully. Armed its merge with gh pr merge 269 --merge; GitHub checks and merge remain pending. No primary checkout, daemon or listener changes. Next: once GitHub confirms records merged, refresh this isolated branch, push updated task notes and baseline, and re-arm PR 261. Summarizer draft PR 262 CI is fully successful, but live smoke still rejects output and remains incomplete.
+
+Records PR 269 passed its PR checks, then merge-group run 33938030791 failed the existing daemon-advance-finish test assertion that the concurrent record must land between read and append. The same candidate passed that shard on Node 20. GitHub removed the merge-queue entry; re-armed the records merge once after verifying this exact failure. No daemon source/test modifications and no gh run rerun performed. Workflow worktree HEAD 4010456 remains local ahead of PR 261; next step is still wait for records merge, refresh the baseline and push/re-arm the workflow PR. Feature runner correction 94f7e14 now has successful gated live evidence; shared docs coordination remains pending.
 <!-- SECTION:NOTES:END -->
