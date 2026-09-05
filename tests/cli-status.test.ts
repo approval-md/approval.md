@@ -275,6 +275,11 @@ test("status --json on a healthy repo emits the frozen shape and exits 0", () =>
     // `healthy` nor the exit code, for the reason `anomalies` moves neither:
     // it is a coverage measurement, not an integrity verdict.
     harness_outcomes: { started: 0, reported: 0, unreported: 0 },
+    // Additive (APRV-245): what git witnessed on this branch, against the log.
+    // Informational for the same reason, and unavailable here because the
+    // fixture is a scratch directory under the OS temp root rather than a
+    // checkout — which is the honest answer, not a zero.
+    coverage: { available: false, reason: "not a git checkout", observed: 0, covered: 0 },
     // Additive (APRV-127): reconciliation obligations opened by a retrospective
     // denial and not yet discharged. Empty here, and — unlike the payload store
     // — a non-empty list DOES move `healthy` and the exit code, because an
@@ -329,6 +334,9 @@ test("status text mode names health, attestation, verification, dangling and bud
   assert.match(run.stdout, /^loop escalations {2,}none$/mu);
   // APRV-145: informational, and it says so by never moving `health` above.
   assert.match(run.stdout, /^harness outcomes {2,}0 started, 0 reported, 0 unreported$/mu);
+  // APRV-245: informational too, and in a scratch directory it says why it has
+  // no number rather than printing a zero it cannot stand behind.
+  assert.match(run.stdout, /^git coverage {2,}not a git checkout$/mu);
   assert.match(run.stdout, /^payload store {2,}not created yet, 0 pruned, 0 unbound$/mu);
   // The log path is written the way the operator would type it, and piped
   // output carries no escape codes.

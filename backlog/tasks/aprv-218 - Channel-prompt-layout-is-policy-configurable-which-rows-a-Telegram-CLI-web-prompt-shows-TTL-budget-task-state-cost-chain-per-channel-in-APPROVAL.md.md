@@ -4,11 +4,11 @@ title: >-
   Channel prompt layout is policy-configurable: which rows a Telegram/CLI/web
   prompt shows (TTL, budget, task, state, cost, chain) per channel in
   APPROVAL.md
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-m'
 created_date: '2026-09-02 16:14'
-updated_date: '2026-09-04 22:32'
+updated_date: '2026-09-04 23:35'
 labels:
   - channels
   - telegram
@@ -37,7 +37,7 @@ Today the Telegram prompt layout is fixed in code (src/channels/telegram.ts rend
 - [x] #2 With no prompt block, every channel renders byte-for-byte what it renders today (existing rendering tests unchanged)
 - [x] #3 Rows that must not be hidden are documented and enforced: a policy that hides them fails to load
 - [x] #4 Claimed lines stay under the CLAIMED heading regardless of ordering; a test pins it
-- [ ] #5 Tests cover each channel with a custom layout through the mock bot / CLI renderer / web page; docs/cli-reference.md and the policy reference document the block; npm test passes; lint clean
+- [x] #5 Tests cover each channel with a custom layout through the mock bot / CLI renderer / web page; docs/cli-reference.md and the policy reference document the block; npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -137,4 +137,14 @@ That is the whole surface this change can reach: every channel renderer, the pol
 AC #5 is left UNCHECKED for one clause only. `npm test` over all 126 files did not finish inside the window on this machine (the run reached 578 passing tests with zero failures before it was stopped; per-batch wall clock was 160s, 262s and 377s for ten files each, so the whole suite is a 40-minute run here). Everything else in AC #5 is proven: per-channel custom-layout tests through the mock bot, the CLI renderer and the served web page; `docs/cli-reference.md` and the README policy key reference both document the block; lint is clean. The full suite needs one run on a quiet machine.
 
 Related, and not this task: `tests/cli-setup.test.ts` telegram poll timing is the load-sensitive test APRV-248 already records.
+
+## Full suite: green
+
+`npm test` over all 126 files finished after the notes above were written: **3108 tests, 3107 pass, 0 fail, 1 skipped, exit 0**, 849s wall clock. The single skip is the pre-existing opt-in sandbox probe (`demonstration: curl https://example.com fails inside the sandbox`, gated on `SANDBOX_PROBE_EXTERNAL=1`), unrelated to this change. `npx oxlint` exit 0. AC #5 checked on that evidence; the earlier caveat about an unfinished run is superseded.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Prompt rows are policy-configurable per channel (channels.<telegram|web|cli>.prompt with rows, always, hide over 23 row names); the canonical rendering is not a row and cannot be reordered or removed, six rows are required, missing keys fail soft and invalid values refuse at policy load with five distinct codes; a parity test pins the schema enum to the code's row list. Verified by prompt-layout (21) plus channel, policy, CLI and docs suites and a full run of 3107 pass, lint clean; merged in PR #257.
+<!-- SECTION:FINAL_SUMMARY:END -->

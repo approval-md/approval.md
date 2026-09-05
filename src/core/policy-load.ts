@@ -62,6 +62,7 @@ import { basename, join } from "node:path";
 
 import { isNode, parseDocument, visit } from "yaml";
 
+import { scanFences, type FenceScan } from "./md-fence.js";
 import { promptBlockErrors } from "./prompt-layout.js";
 import { validate, type ValidationError } from "./validate.js";
 
@@ -271,6 +272,20 @@ export interface Policy {
      * log that already verified, and no verdict reads it.
      */
     skew_tolerance?: string;
+    /**
+     * Amended SPEC.md §9 (APRV-220): the PUBLIC halves of the keys permitted to
+     * sign a `log.checkpoint`, base64 DER SPKI. The one key-shaped field in
+     * this file holding material rather than the NAME of a variable, because a
+     * public key is not a secret and the value of writing it here is that this
+     * file is committed and attested.
+     */
+    checkpoint_keys?: string[];
+    /**
+     * Amended SPEC.md §9 (APRV-220): how long a log may go without a signed
+     * checkpoint before verification says one is due. Report-only in every
+     * direction; there is no path from due to refused.
+     */
+    checkpoint_every?: string;
   };
   /**
    * Amended SPEC.md §5.2 (APRV-217): how the long-lived readers of this log
@@ -310,6 +325,12 @@ export interface PolicyDurations {
    * allowance would report every healthy fleet's ordinary clock disagreement.
    */
   skewToleranceMs: number | null;
+  /**
+   * `audit.checkpoint_every` in milliseconds, or `null` when unset (APRV-220).
+   * `null` means the cadence is off: nothing is ever reported as due, which is
+   * the behaviour of every policy written before the key existed.
+   */
+  checkpointEveryMs: number | null;
 }
 
 /**
@@ -455,66 +476,16 @@ function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-/** Normalise a fence info string: trim ends, collapse internal whitespace. */
-function normaliseInfoString(info: string): string {
-  return info.trim().replace(/\s+/gu, " ");
-}
-
-interface FenceScan {
-  /** Bodies of every block whose info string is the policy info string. */
-  blocks: string[];
-  /** True when a matching fence was opened and never closed before EOF. */
-  unterminated: boolean;
-}
-
 /**
- * Scan CommonMark fenced code blocks and collect the bodies of those whose
- * info string is `yaml approval-policy`.
+ * Scan this file's markdown for policy fences.
  *
- * CommonMark rules honoured, because they decide what is and is not a fence:
- * an opening fence is 3+ backticks indented at most 3 spaces; its info string
- * may not contain a backtick; the closing fence is at least as long as the
- * opener and carries nothing but whitespace. Every non-matching fenced block
- * (```js, ```yaml, …) is still scanned as a block, so text *inside* it can
- * never be mistaken for a policy fence. Everything outside a fence — including
- * yaml-looking prose and 4-space-indented code blocks, which are not fences —
- * is ignored entirely.
+ * A one-line wrapper since APRV-238. The CommonMark rules, and the doc comment
+ * arguing them, moved to {@link scanFences} in `core/md-fence.ts` so the values
+ * reader of SPEC.md §5.3 could ask the same question about its own info string
+ * without importing this module. Same rules, same results, one implementation.
  */
 function scanPolicyFences(markdown: string): FenceScan {
-  const lines = markdown.split(/\r\n|\n|\r/u);
-  const blocks: string[] = [];
-
-  let openLength = 0;
-  let openIsPolicy = false;
-  let body: string[] = [];
-  let inFence = false;
-
-  for (const line of lines) {
-    if (!inFence) {
-      const open = /^ {0,3}(`{3,})(.*)$/u.exec(line);
-      if (open === null) continue;
-      const info = open[2] ?? "";
-      // CommonMark: a backtick fence's info string may not contain a backtick.
-      if (info.includes("`")) continue;
-      inFence = true;
-      openLength = (open[1] ?? "").length;
-      openIsPolicy = normaliseInfoString(info) === POLICY_INFO_STRING;
-      body = [];
-      continue;
-    }
-
-    const close = /^ {0,3}(`{3,})[ \t]*$/u.exec(line);
-    if (close !== null && (close[1] ?? "").length >= openLength) {
-      if (openIsPolicy) blocks.push(body.join("\n"));
-      inFence = false;
-      openIsPolicy = false;
-      body = [];
-      continue;
-    }
-    body.push(line);
-  }
-
-  return { blocks, unterminated: inFence && openIsPolicy };
+  return scanFences(markdown, POLICY_INFO_STRING);
 }
 
 /** How a hardened parse should name itself in its failure messages. */
@@ -776,6 +747,30 @@ export function loadPolicyText(
     }
   }
 
+  // And once more for the checkpoint cadence (APRV-220). Report-only like the
+  // skew tolerance, and parsed the same strict way for the same reason: an
+  // operator who wrote `1 day` should be told, not quietly given no cadence at
+  // all and left believing one is in force.
+  const checkpointText = policy.audit?.checkpoint_every;
+  let checkpointEveryMs: number | null = null;
+  if (checkpointText !== undefined) {
+    checkpointEveryMs = parseDuration(checkpointText);
+    if (checkpointEveryMs === null) {
+      return failure(
+        "schema-invalid",
+        `${resolved.path}: audit.checkpoint_every "${checkpointText}" is not a valid duration`,
+        [
+          {
+            path: "/audit/checkpoint_every",
+            keyword: "duration",
+            message: "expected <positive integer><unit> with unit in ms|s|m|h|d|w",
+          },
+        ],
+        parsed.value,
+      );
+    }
+  }
+
   // The `daemon` block (APRV-217), read the same way: one parse here, defaults
   // applied once, and an unparseable duration fails the WHOLE policy rather
   // than leaving a key the author believed was in force quietly unread.
@@ -811,7 +806,7 @@ export function loadPolicyText(
     ok: true,
     policy,
     source: { path: resolved.path, filename: basename(resolved.path) },
-    durations: { approvalTtlMs, skewToleranceMs },
+    durations: { approvalTtlMs, skewToleranceMs, checkpointEveryMs },
     daemon: daemonRead,
     notes: aliasNotes(policy),
   };

@@ -102,7 +102,7 @@ writes — MUST:
 | suite | what it pins |
 |---|---|
 | `jcs-canonicalization` | RFC 8785 serialization: key ordering at every level, string escaping, and ECMAScript number formatting named by IEEE-754 bit pattern. The digest of every record in SPEC.md §8 is taken over these bytes. |
-| `refusal-unions` | The six closed refusal-code unions of SPEC.md §11.1 invariant 6, in definition order. A caller branches on these strings. |
+| `refusal-unions` | The seven closed refusal-code unions of SPEC.md §11.1 invariant 6, in definition order. A caller branches on these strings. |
 | `policy-resolution` | SPEC.md §5.2 matching and specificity, §7's irreversibility floor, and the fail-closed rule for a policy that does not parse. |
 | `chain-verification` | SPEC.md §8: mutation, reorder, splice, duplication, truncation (anchored and not), a torn tail, and `alg` tampering, each with the reason a verifier must report. |
 | `schema-validation` | Write-boundary validation of every committed schema fixture, with the constraint each refusal violates named — and the APRV-121 read boundary, where a pre-change monetary amount must still validate. |
@@ -130,12 +130,22 @@ expectation rather than a new vector. It reached 2.0.0 when APRV-146 added
 added `not-delegated` and `already-finished` to the gate union — the two
 refusals the SPEC.md §10.2 completion counterpart can produce.
 
-It is 7.0.0 since APRV-219, which added a sixth union rather than a code:
+It reached 7.0.0 at APRV-219, which added a sixth union rather than a code:
 `anchor_refusal_codes` (`anchor-diverged`), the refusal the log-anchoring check
 produces when a working log's prefix contradicts the copy already committed to
 a records branch or the trunk. The set of unions is pinned along with each
 one's contents, so an implementation that answers five of them covers five
 sixths of invariant 6 and does not conform.
+
+It is 8.0.0 since APRV-220, which added a seventh on the same reasoning:
+`checkpoint_refusal_codes` (`checkpoint-key-unknown`,
+`checkpoint-signature-invalid`, `checkpoint-hash-mismatch`,
+`checkpoint-out-of-order`, `checkpoint-malformed`), the refusals a runtime
+produces when a `log.checkpoint` record — a human's signature over the chain
+head, made with a key no agent process holds — does not validate or names a
+head this log does not carry. The anchor and the checkpoint are independent
+witnesses against the same forger, and a runtime that implements one of them
+has not implemented the other.
 
 ## Changing the suite
 
@@ -149,3 +159,13 @@ Inputs are authored by hand in that script; every `expect` block is computed by
 running the reference implementation. **Review the diff.** A regeneration that
 moves an expectation is a behaviour change in the runtime, and the vectors are
 what a second implementation is held to.
+
+`schema-validation` has no 1.5.0. Two branches minted that number without seeing
+each other (APRV-220's checkpoint fixtures on main, APRV-235's decision-refusal
+fixtures on its own branch), so the same version named two different vector sets
+for as long as the branches were apart. Merging them produced **1.6.0**, which
+carries both, and both 1.5.0 claims are superseded: a second implementation
+holds itself to 1.6.0, and a run reporting 1.5.0 is reporting a set that was
+never the suite. The general rule the collision illustrates: a version number is
+claimed at merge, not at branch, and two additive changes to one file resolve to
+one minor bump above the highest version either side saw.

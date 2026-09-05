@@ -185,7 +185,7 @@
 
 import { createHash } from "node:crypto";
 
-import { GLOSS_UNVERIFIED_SUFFIX } from "./contract.js";
+import { GLOSS_UNVERIFIED_SUFFIX, refusedDecisionLine } from "./contract.js";
 import type {
   ChannelBatch,
   ChannelDecision,
@@ -2701,20 +2701,16 @@ export class TelegramChannel implements TestableChannel {
    * gate has already decided produces `already-decided`, no second event, and
    * this text. Telegram redelivers callbacks on its own, so this path is
    * ordinary traffic, not an error.
+   *
+   * The sentences themselves moved to `channels/contract.ts` in APRV-235, so
+   * that this message edit and the line the terminal channel prints are the
+   * same words and cannot drift apart: a human who taps on their phone and
+   * then reads the operator's terminal should not have to decide which of two
+   * wordings to believe. The edit puts {@link TELEGRAM_NOT_RECORDED} above it
+   * and clears the buttons, in `annotate`'s single call.
    */
   private answerFor(outcome: GateRefusal): string {
-    if (outcome.code === "already-decided") {
-      return "Already decided — the first answer stands; nothing was recorded.";
-    }
-    // APRV-106. The tap that races the withdrawal, or lands on a message whose
-    // edit did not go through. Nothing is appended and the human is told why
-    // in the terms that matter to them: the asker is gone, so there is nothing
-    // their answer could do.
-    if (outcome.code === "request-withdrawn") {
-      return "Withdrawn — the requester took this back and is no longer waiting; nothing was recorded.";
-    }
-    if (outcome.code === "expired") return "Expired — the approval window has closed.";
-    return `Refused by the runtime: ${outcome.code}.`;
+    return refusedDecisionLine(outcome.code);
   }
 
   private async ignore(

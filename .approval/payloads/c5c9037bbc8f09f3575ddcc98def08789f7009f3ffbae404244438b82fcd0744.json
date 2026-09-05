@@ -1,0 +1,1 @@
+{"command":"git checkout -- AGENTS.md && git merge --no-edit origin/main 2>&1 | tail -8","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/pre-launch-adapter-integration-beb12d"}

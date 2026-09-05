@@ -50,14 +50,16 @@
         "audit.sampled",
         "audit.reviewed",
         "audit.dark_session",
+        "audit.decision_refused",
         "reconciliation.required",
         "reconciliation.satisfied",
         "payload.pruned",
         "gate.opened",
         "gate.closed",
-        "gate.bypassed"
+        "gate.bypassed",
+        "log.checkpoint"
       ],
-      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of twenty-eight event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, `execution.indeterminate` with `execution.reconciled` (APRV-120) the third and fourth, `reconciliation.required` / `reconciliation.satisfied` (APRV-127) the fifth and sixth, `policy.proposed` / `policy.declined` (APRV-109) the seventh and eighth, `audit.dark_session` (APRV-192) the ninth, and `gate.opened` / `gate.closed` / `gate.bypassed` (APRV-214) the tenth, eleventh and twelfth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept them all."
+      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of thirty event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, `execution.indeterminate` with `execution.reconciled` (APRV-120) the third and fourth, `reconciliation.required` / `reconciliation.satisfied` (APRV-127) the fifth and sixth, `policy.proposed` / `policy.declined` (APRV-109) the seventh and eighth, `audit.dark_session` (APRV-192) the ninth, `gate.opened` / `gate.closed` / `gate.bypassed` (APRV-214) the tenth, eleventh and twelfth, `log.checkpoint` (APRV-220) the thirteenth, and `audit.decision_refused` (APRV-235) the fourteenth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept them all."
     },
     "actor": {
       "type": "string",
@@ -122,6 +124,48 @@
         "est_cost_usd": {
           "$ref": "#/$defs/usd_amount",
           "description": "SPEC.md §5.2 budgets contract (amended, APRV-121): the authorization's declared cost in USD as a decimal string. Recorded on `approval.requested`, `approval.granted`, `execution.started` and `budget.exceeded`; a JSON number is the pre-APRV-121 form and is accepted on read, never on write."
+        },
+        "live_draw": {
+          "type": "object",
+          "description": "SPEC.md §6 (amended, APRV-208): how a `supervised-live` action's draw was made, present on `approval.requested` ONLY when the draw was delegated to the daemon over the local draw socket because the deciding process held no sampling secret. Absent for an in-process draw, which is why a sampled request made where the secret resolves stays byte-for-byte identical to a manual one (APRV-127). A delegated verdict is an assertion by another process, so it is recorded with the MAC that makes it checkable — HMAC-SHA-256 over a domain separator, the canonical question and the verdict, keyed by the sampling secret, reconstructible from the record's own `action_key`, `payload_hash` and `policy_sha256` plus this object's `live_rate` — or, when no usable answer came back, with the distinct machine-readable reason the action gated instead. It never carries the secret, the selection value, or any clock: a self-reported field that reduces scrutiny must arrive with a proof its author could not forge (§11).",
+          "required": ["v", "source", "reason", "live_rate"],
+          "properties": {
+            "v": {
+              "type": "integer",
+              "const": 1,
+              "description": "The draw protocol version the answer was made under. A reader that does not know this version must not treat the record as an evidenced draw."
+            },
+            "source": {
+              "type": "string",
+              "enum": ["daemon", "unavailable"],
+              "description": "`daemon`: a MAC'd answer from the daemon holding the secret. `unavailable`: no usable answer, so the action gated; `reason` says which refusal."
+            },
+            "reason": {
+              "type": "string",
+              "enum": ["selected", "draw-daemon-absent", "draw-daemon-stale", "draw-answer-invalid"],
+              "description": "`selected`: the daemon's draw put this action in the live fraction. The three refusals are distinct because an operator's action differs — no socket at all (start the daemon), a socket that will not answer or whose daemon is gone (it is wedged or was killed), and an answer that could not be matched to the question asked (something answered and it was not this operator's daemon)."
+            },
+            "live_rate": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1,
+              "description": "The rate the draw was made at, as the DAEMON resolved it from its own policy. Recorded so a verifier can reconstruct the question without re-resolving a policy that may have been amended since."
+            },
+            "selected": {
+              "type": "boolean",
+              "description": "The daemon's verdict, present only with a `mac` to check it against. Always `true` on a recorded request: an unselected action appends no `approval.requested` at all (§6.3)."
+            },
+            "mac": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "description": "The MAC over the question and the verdict. A digest under a key no party to this record holds, which is what makes it evidence rather than a claim."
+            },
+            "daemon_pid": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "The process that answered, for an operator correlating a draw with a daemon's own logs. Carries no authority: a pid is not a proof, and the MAC is."
+            }
+          }
         },
         "budget": {
           "type": "object",
@@ -250,6 +294,16 @@
                   "denied"
                 ],
                 "description": "SPEC.md §5.2 (amended, APRV-127): what the reviewer concluded. `ok`: the action should have happened — the spelling the v0.1 fixtures already used, kept rather than renamed, because a second word for a verdict already in logs is the drift this vocabulary exists to avoid. `denied`: it should not have, and the runtime appends a `reconciliation.required` naming the obligation the denial creates. Optional and additive — a review written before the split carries none and reads as the observation it was, which is why the ABSENCE of this field is never read as a denial."
+              },
+              "reaction": {
+                "type": "string",
+                "enum": [
+                  "disliked",
+                  "indifferent",
+                  "liked",
+                  "loved"
+                ],
+                "description": "SPEC.md §5.2 (amended, APRV-237): what the human thought of the action, graded. `verdict` remains the ENFORCEMENT field and is the only one any enforcement path reads; `reaction` is guidance travelling the human-to-agent direction and no routing, matching, sampling, budgeting or token decision consults it (SPEC.md §11.1 invariant 10). Optional and additive: a review written before the field existed still validates and still verifies, and the ABSENCE of the field is absence — it is never read as `indifferent`, which is a thing a person had to actually say. The four words are the whole vocabulary; a fifth is refused here rather than left to accumulate synonyms across surfaces."
               }
             }
           }
@@ -260,7 +314,92 @@
       }
     },
     {
+      "$comment": "SPEC.md §5.2 (amended, APRV-237): a grant may carry the same graded `reaction` a review may, because a human answering the gate is already saying what they think of the action and this is where they can say it in one word rather than in prose nothing can read back. The constraint is the same four-word enum as on `audit.reviewed`, written here rather than shared by a `$ref` so the two events' descriptions can each say what the field means where it appears. Optional and additive, and never enforcement: `verdict` on a review and the grant record itself are what any enforcement path reads; nothing reads this (SPEC.md §11.1 invariant 10).",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "approval.granted"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "reaction": {
+                "type": "string",
+                "enum": [
+                  "disliked",
+                  "indifferent",
+                  "liked",
+                  "loved"
+                ],
+                "description": "SPEC.md §5.2 (amended, APRV-237): what the human thought of the action they were approving, graded. The grant is the enforcement fact; this is the human-to-agent signal riding alongside it, and no enforcement path reads it (SPEC.md §11.1 invariant 10). Optional and additive, and its ABSENCE is absence rather than `indifferent`. The four words are the whole vocabulary here and on `audit.reviewed`; one field name, one enum, two surfaces."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §5.2 (amended, APRV-237): the two extreme grades require a note. `loved` and `disliked` are the reactions an agent is most likely to act on and least able to interpret alone — \"disliked\" with no words says something went wrong and nothing about what — so the grade that carries the most weight must carry a sentence with it. This is expressible in a schema (one record, two of its own fields) and so it is expressed HERE, at the write boundary SPEC.md §8 requires every event to pass, rather than left to the verbs alone. The verbs refuse it too, as `note-required`, because a refusal a person sees on their phone must name itself; the schema is what makes the rule true of every record regardless of which surface wrote it. `liked` and `indifferent` need no note: they are the ordinary readings, and demanding prose for them would turn a one-tap signal into a form and get the signal switched off.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "enum": [
+              "audit.reviewed",
+              "approval.granted"
+            ]
+          },
+          "payload": {
+            "type": "object",
+            "properties": {
+              "reaction": {
+                "enum": [
+                  "disliked",
+                  "loved"
+                ]
+              }
+            },
+            "required": [
+              "reaction"
+            ]
+          }
+        },
+        "required": [
+          "event",
+          "payload"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": [
+              "note"
+            ],
+            "properties": {
+              "note": {
+                "type": "string",
+                "minLength": 1,
+                "description": "SPEC.md §5.2 (amended, APRV-237): the human's own words, REQUIRED when `reaction` is `loved` or `disliked`. Blank is not a note: an empty string would satisfy a presence check while telling an auditor and an agent exactly as much as the absent field would, so the minimum length is part of the rule."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "SPEC.md §6.3/§8 (APRV-106): a withdrawal is the requester retracting their own pending request, so the actor is the party that opened it — `agent:` for an agent-originated request, `human:` for a person's. Never `system:`: the runtime already has a way to end a request it was not asked to end, and that is `approval.expired` on TTL lapse. A `system:` withdrawal would let the runtime cancel a question a human was about to answer, with no clock to justify it. That the actor is the SAME party that appended the matching `approval.requested` is not expressible here (a schema sees one record), and is enforced by the gate as `not-requester`; what the schema can rule out is the actor kind that must never appear. `reason` is required and closed: a withdrawal that does not say why is a decision nobody can audit, and the three values are the three things that actually happen — the requester's wait elapsed, the requester changed its mind, or a newer request replaced this one.",
+      "$comment": "SPEC.md §6.3/§8 (APRV-106, amended APRV-235): a withdrawal is normally the requester retracting their own pending request, so the actor is the party that opened it — `agent:` for an agent-originated request, `human:` for a person's. That the actor is the SAME party that appended the matching `approval.requested` is not expressible here (a schema sees one record), and is enforced by the gate as `not-requester`. `reason` is required and closed: a withdrawal that does not say why is a decision nobody can audit, and the first three values are the three things that happen to a requester — its wait elapsed, it changed its mind, or a newer request replaced this one.\n\nAPRV-235 admits the runtime as a fourth author, on ONE reason and no other, and the cross-rule below is bidirectional: `system:` requires `policy-drift`, and `policy-drift` requires `system:`. The original ban existed because a `system:` withdrawal on the requester's reasons would let the runtime cancel a question a human was about to answer with no clock to justify it. `policy-drift` is the case where the justification is not a clock but is every bit as objective, and it is IN THE RECORD: the policy hash the `approval.requested` pinned differs from the hash attested now, so the rules that routed the question are gone and the gate already refuses every decision on it (`policy-drift` in `core/gate.ts`). The request is void by the gate's own verdict; leaving it pending offers a human a tap that cannot be honoured. A reader checks the justification the same way the runtime derived it, from two hashes the log carries. The requester's three reasons stay closed to the runtime, and the runtime's one reason stays closed to the requester — an agent cannot spell `policy-drift`, so it cannot dress a cancellation as the gate's verdict.",
       "if": {
         "type": "object",
         "properties": {
@@ -281,8 +420,8 @@
         "properties": {
           "actor": {
             "type": "string",
-            "pattern": "^(human|agent):",
-            "description": "SPEC.md §6.3: the requester. `system:` is refused — expiry, not withdrawal, is the runtime's way to end a request."
+            "pattern": "^(human|agent|system):",
+            "description": "SPEC.md §6.3: the requester, or (APRV-235) `system:` on the one runtime reason `policy-drift`. The bidirectional cross-rule under `allOf` is what keeps those two sets from mixing."
           },
           "payload": {
             "type": "object",
@@ -301,17 +440,84 @@
                 "enum": [
                   "timeout",
                   "cancelled",
-                  "superseded"
+                  "superseded",
+                  "policy-drift"
                 ],
-                "description": "Why the requester retracted. `timeout`: the requester stopped waiting and can no longer consume a decision. `cancelled`: the requester no longer wants the action. `superseded`: a newer request covers the same effect."
+                "description": "Why the request ended without a decision. The first three are the REQUESTER's: `timeout`, the requester stopped waiting and can no longer consume a decision; `cancelled`, the requester no longer wants the action; `superseded`, a newer request covers the same effect. `policy-drift` (APRV-235) is the RUNTIME's and is `system:`-only: the policy attested now is not the policy this request pinned, so the gate refuses every decision on it and the request is void. The two hashes belong in `note`, where a reader can check the verdict against the log rather than take it."
               },
               "note": {
                 "type": "string",
-                "description": "The requester's free-text elaboration. Claimed, never a control."
+                "description": "The requester's free-text elaboration. Claimed, never a control. On a `policy-drift` withdrawal it is the runtime's own, and names both policy hashes."
+              },
+              "refused_seq": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "APRV-235, `policy-drift` only: the `seq` of the `audit.decision_refused` record that voided this request. The audit record is appended FIRST and this names it, so the pair is readable in one direction and an interrupted write leaves the explanation without the withdrawal rather than the withdrawal without the explanation."
               }
             }
           }
-        }
+        },
+        "allOf": [
+          {
+            "$comment": "`policy-drift` is the runtime's reason and only the runtime's: a requester that could spell it would be dressing its own cancellation as the gate's verdict about the policy.",
+            "if": {
+              "type": "object",
+              "required": [
+                "payload"
+              ],
+              "properties": {
+                "payload": {
+                  "type": "object",
+                  "required": [
+                    "reason"
+                  ],
+                  "properties": {
+                    "reason": {
+                      "const": "policy-drift"
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "type": "object",
+              "properties": {
+                "actor": {
+                  "type": "string",
+                  "pattern": "^system:"
+                }
+              }
+            }
+          },
+          {
+            "$comment": "And the converse: the runtime withdraws for drift or not at all. `approval.expired` remains its only other way to end a request nobody answered, and the pre-APRV-235 ban on a `system:` withdrawal for a requester's reason is unchanged.",
+            "if": {
+              "type": "object",
+              "required": [
+                "actor"
+              ],
+              "properties": {
+                "actor": {
+                  "type": "string",
+                  "pattern": "^system:"
+                }
+              }
+            },
+            "then": {
+              "type": "object",
+              "properties": {
+                "payload": {
+                  "type": "object",
+                  "properties": {
+                    "reason": {
+                      "const": "policy-drift"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
       }
     },
     {
@@ -1174,6 +1380,86 @@
       }
     },
     {
+      "$comment": "SPEC.md §5.2/§8 (amended, APRV-235): a human decided, through a channel or the CLI, and the gate refused to record the decision. Seen live on 2026-09-02: an approve tap on a request asked under the previous policy was refused `policy-drift`, correctly, and nothing was appended at all — the log, which is the truth, held no trace that a person had answered, and a later reader could not explain why a request sat unanswered.\n\nThis is an AUDIT-TIER record and grants nothing. No verdict, no budget, no streak and no sampling path reads it: `core/state.ts` does not settle on it, `core/budgets.ts` charges nothing for it, and it mints no token. What it establishes is that a human's attention was spent and the answer could not be taken — which is a fact about the gate, not an authorization by it.\n\nThe actor MUST be `^system:` for the same reason `audit.dark_session`'s is: this is the RUNTIME's statement about a refusal the runtime made, and a record of a refusal authored by either party to it is a record neither party can be held to. The human who decided is named in the payload, from the decision surface's configured identity — the same source the `actor` of a grant comes from — so nothing here is a self-report that lowers scrutiny (§11.1 invariant 4); an audit record can only ADD to what a reviewer sees.\n\nGate-side refusals to AGENTS stay unlogged, deliberately. An agent that is refused is told, retries or stops, and can be asked again; a human who is refused has already spent the thing SPEC.md §11 calls the audit budget, and cannot be asked to spend it again without a record saying the first spend happened.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "audit.decision_refused"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "action_key",
+          "channel",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^system:",
+            "description": "The runtime. A `human:` or `agent:` actor is refused: the record states that the gate refused a decision, and the parties to that refusal do not author it."
+          },
+          "action_key": {
+            "$ref": "#/properties/action_key"
+          },
+          "channel": {
+            "$ref": "#/properties/channel",
+            "description": "Which surface collected the gesture — `telegram`, `web`, `cli`. Required here and optional in the base shape: a refused decision a reader cannot attribute to a surface is one they cannot go and reproduce, and every decision surface knows its own name."
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "actor",
+              "decision",
+              "code"
+            ],
+            "properties": {
+              "actor": {
+                "type": "string",
+                "pattern": "^human:",
+                "description": "The person whose decision was refused, `human:<id>`. Distinct from the record's own `actor`, which is the runtime: this field is the SUBJECT of the observation, and the record's actor is its author. `^human:` because this event exists only for a human decision; a refusal handed to an agent is not recorded at all."
+              },
+              "decision": {
+                "type": "string",
+                "enum": [
+                  "grant",
+                  "reject",
+                  "revoke"
+                ],
+                "description": "Which of `core/gate.ts`'s three human-only decisions was attempted. Recorded so a reader can tell an unrecordable YES from an unrecordable NO, which are very different facts about an unanswered request."
+              },
+              "code": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The gate's machine-readable refusal code, verbatim (§11.1 invariant 6: refusals are machine-readable and distinct). Not pinned to an enum here on purpose. The closed union is `GATE_REFUSAL_CODES` in `core/gate.ts`, pinned for conformance in `conformance/vectors/refusal-unions.v1.json`, and a log is append-only: a code retired from the union must still READ, so the schema constrains the shape and the union constrains what may be written."
+              },
+              "policy_sha256_requested": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "description": "The policy hash the `approval.requested` pinned, on a `policy-drift` refusal. Copied from the request record, never recomputed."
+              },
+              "policy_sha256_attested": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$",
+                "description": "The policy hash in force at the moment of the refusal, as the runtime attested it. Assigned at the write boundary like `ts`; there is no parameter through which a caller could supply either hash."
+              },
+              "message": {
+                "type": "string",
+                "description": "The gate's own refusal message, as the approver was shown it. A convenience for a reader; `code` is what anything machine-readable branches on."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "SPEC.md §5.2 (amended, APRV-214), 'The open window': a person opening the harness gate on themselves so the gate can be debugged from inside. The actor MUST be `^human:`, in the schema as well as in `core/gate-window.ts`, for the reason attestation refuses an agent: this is the one act that suspends the policy, and an agent able to author it could authorize its own next command. The window's state lives here and in no file, so what a reader derives is derived from a verified chain and nothing else. Expiry is `ts` plus `duration`, and a record claiming an `expires_at` beyond that reads as the shorter of the two: the field is a convenience for a human reading the log, never the authority.",
       "if": {
         "type": "object",
@@ -1352,6 +1638,73 @@
               "cwd": {
                 "type": "string",
                 "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §9 (amended, APRV-220): a human's signature over the chain head at a moment. The chain is unkeyed, so a party with write access to `events.jsonl` can truncate it and recompute a chain that walks clean from genesis (the boundary the conformance suite states as `chain-verification/truncation-unanchored`); what that party cannot do is reproduce a signature over the hashes they replaced. The actor MUST be `^human:`, in the schema as well as in `core/checkpoint.ts`, for the reason `gate.opened` carries the same rule: an agent able to author a checkpoint could vouch for a chain it had just written. `key_sha256` is a HINT and never the authority — a verifier looks the public key up in the policy's `audit.checkpoint_keys`, so a record naming a key nobody lists is a refusal and not a self-signed pass (§11.1: self-reported fields never reduce scrutiny). Gate-typed, so `ts` is stamped at the write boundary and never accepted from the caller: the whole content of this record is a claim about a moment.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "log.checkpoint"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^human:"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "seq",
+              "hash",
+              "alg",
+              "key_sha256",
+              "signature"
+            ],
+            "properties": {
+              "seq": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The `seq` of the record whose hash was signed. That it is below this record's own seq, and that the log carries this hash there, are the runtime's checks; a schema sees one record and can only constrain the shape."
+              },
+              "hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "The chain hash at that seq, as the signer read it. A chain recomputed after this record was written cannot produce a signature over this value, which is the whole of what a checkpoint proves."
+              },
+              "alg": {
+                "type": "string",
+                "enum": [
+                  "ed25519"
+                ],
+                "description": "The signature scheme. One value at v0.1, and an enum rather than a free string so that a second scheme is an explicit schema change and never a value a signer invents."
+              },
+              "key_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "SHA-256 of the signing key's DER SPKI bytes, hex. A pointer, not a credential and not an authority: the verifier resolves it against `audit.checkpoint_keys` in the attested policy, and a fingerprint naming a key the policy does not list is refused. Recording the fingerprint rather than the key itself is deliberate — a record carrying its own public key invites a reader to verify the signature against it, which any forger could satisfy."
+              },
+              "signature": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9+/]+={0,2}$",
+                "description": "Base64 Ed25519 signature over `\"approval.md/log-checkpoint/v1\\n\"` followed by the RFC 8785 canonicalization of `{alg, hash, seq}`. Domain-separated, so a signature made here cannot be lifted into another use of the same key and one made elsewhere cannot be presented as a checkpoint."
               }
             }
           }

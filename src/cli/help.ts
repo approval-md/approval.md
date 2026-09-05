@@ -74,6 +74,8 @@ Usage:
   approval withdraw   <task> --action <key> [--reason <r>] [--note "<text>"]
                       [--as <id>] [--json]
   approval queue      [--policy <path>] [--dir <path>] [--json]
+  approval coverage   [--base <ref>] [--head <ref>] [--since <duration>]
+                      [--source git,gh,agentmail] [--json]
   approval channel cli [--policy-dir <path>] [--payload-dir <path>]
                       [--as human:<id>] [--interactive] [--json]
   approval channel web [--port <n>] [--payload-dir <path>] [--as human:<id>]
@@ -98,6 +100,10 @@ Usage:
                       [--as <id>] [--journal <dir>] [--json]
   approval journal read [--limit <n>] [--since <YYYY-MM-DD>] [--journal <dir>]
                       [--json]
+  approval values     [--policy <path>] [--dir <path>] [--json]
+  approval feedback   [--task <id>] [--actor <agent id>] [--reaction <word>]
+                      [--source review|decision] [--since <YYYY-MM-DD>]
+                      [--limit <n>] [--log <path>] [--json]
   approval env        [--check] [--policy <path>] [--dir <path>] [--log <path>]
                       [--json]
   approval setup      identity|vault|sampling|channel <name>|adapter <name>
@@ -212,6 +218,20 @@ Ask — an agent declares an action and acts on the answer:
             entry as agent-authored DATA. Nothing written there changes any
             verdict, sampling probability or budget; it is signal for the
             operator, not a decision surface
+  values    the mirror of "journal", running the other way: the operator's own
+            words, in the optional values block of APPROVAL.md. What they value
+            in the work, what they want from an agent, and how they read and
+            answer. It is GUIDANCE and never policy: it grants nothing, forbids
+            nothing, and no enforcement path reads it. A file with no block says
+            so in words, because "nothing was declared" and "I did not look" are
+            different facts
+  feedback  the same channel in the other direction: what the OPERATOR said
+            about the work. Lists the reactions and notes a person wrote on a
+            grant or on a retrospective review, joined to the class, the task,
+            the action key and the agent it was about. HUMAN-AUTHORED GUIDANCE
+            and never policy — it grants nothing, forbids nothing, and changes
+            no verdict, sampling probability or budget. Reads a verified log
+            and writes nothing
   mcp       "mcp serve" is the optional MCP wrapper of SPEC.md §10.5: the same
             verbs as tools, over stdio, sharing the CLI's code paths. It is
             AGENT-FACING ONLY — grant, reject, revoke, attest, amend, vault,
@@ -256,6 +276,10 @@ Inspect — what the log says, and whether anything needs repair:
             the latest chain verdict, loop escalations. Exit 1 when any of
             those needs attention. queue is what a human must answer; status is
             what an operator must fix, and neither carries the other's content
+  coverage  what the witnesses this project does NOT write (git, gh, a
+            provider's own record) say happened, joined to the verified log:
+            per effect, the evidence seq or none. INFORMATIONAL — exit 0 with
+            or without gaps, because a coverage measurement is not a verdict
   doctor    is this ENVIRONMENT sane? build freshness, declared identity, policy
             attestation, chain health, the Telegram token, the web port — each
             with a concrete repair. status asks whether the SYSTEM needs
@@ -380,17 +404,18 @@ Usage:
   approval log export  [--log <path>] [--json]
   approval log sync    [--remote <name>] [--branch <name>] [--json]
   approval log advance [--branch <name>] [--pr] [--dry-run] [--json]
+  approval log checkpoint --as human:<id> [--key-file <path>] [--json]
 
 Subcommands:
   verify   walk the hash chain end to end; clean | torn-tail | corrupt
-  tail     print the last N records (default 10)
-  export   stream every stored line to stdout, byte for byte
+  tail / export   the last N records (default 10) / every line, verbatim
   sync     fast-forward pull, with a snapshot and a chain reconcile
   advance  commit the log's new records onto a records branch
+  checkpoint  sign the current head with your own key (human-only)
 
-verify, tail and export open the log for reading only. sync and advance move the
-FILE and never a record: neither appends an event, and neither rewinds a chain.
-Default log: .approval/log/events.jsonl · JSON shapes: docs/cli-reference.md
+verify, tail and export only read. sync and advance move the FILE and append no
+record; checkpoint appends one. Default log: .approval/log/events.jsonl
+JSON shapes: docs/cli-reference.md
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
@@ -449,27 +474,52 @@ ${why("log-advance")}`;
 export const VERIFY_HELP = `approval log verify — verify the log's hash chain
 
 Usage:
-  approval log verify [--log <path>] [--anchor] [--anchor-rev <rev>] [--json]
+  approval log verify [--log <path>] [--anchor] [--checkpoints] [--json]
 
 Flags:
   --log <path>        log file to verify (default .approval/log/events.jsonl)
-  --anchor            also compare the prefix against the committed copy
-  --anchor-rev <rev>  compare against THIS rev's copy (implies --anchor)
-  --json              machine-readable output
-  -h, --help          this text
+  --anchor [--anchor-rev <rev>]   compare the prefix against the committed copy
+  --checkpoints       also demand every human-signed checkpoint in range
+  --json / -h, --help   machine-readable output / this text
 
 Walks every complete line: re-derives each record's digest, follows the prev
 chain and seq succession, and names where the log stops being self-consistent.
 An absent file verifies clean; nothing is written and a torn tail is not cut.
---anchor also compares the prefix against the copy on a records branch or the
-trunk: a mismatch refuses anchor-diverged; a missing copy skips, never passes.
+--anchor compares the prefix against the committed copy; --checkpoints demands
+that every log.checkpoint verify under audit.checkpoint_keys and name the hash
+this log carries. Either mismatch refuses; a missing witness skips, never passes.
 
-JSON (one object): "status" clean|torn-tail|corrupt|anchor-diverged, "records",
-"head", optional reason/message/anomalies/anchor. ANOMALIES ARE CLEAN, exit 0.
+JSON: "status" clean|torn-tail|corrupt|anchor-diverged|checkpoint-invalid, plus
+"records", "head" and optional anomalies/anchor/checkpoints. ANOMALIES ARE CLEAN.
 
 ${EXIT_CODES_POINTER} (clean 0, corrupt 1, torn-tail 3; an unreadable log is 4)
 ${JSON_ERRORS}
 ${why("log-verify")}`;
+
+export const LOG_CHECKPOINT_HELP = `approval log checkpoint — sign the log's head, by hand
+
+Usage:
+  approval log checkpoint --as human:<id> [--key-file <path>] [--json]
+
+Flags:
+  --as human:<id>    who is signing; or set APPROVAL_HUMAN
+  --key-file <path>  read the signing key from this file instead of the vault
+  --log <path>       log file to checkpoint (default .approval/log/events.jsonl)
+  --json / -h, --help   machine-readable output / this text
+
+Signs the CURRENT chain head with your Ed25519 checkpoint key and appends one
+log.checkpoint record naming (seq, hash) and the signature. The key comes from
+the vault credential approval.checkpoint.key; its PUBLIC half belongs in
+APPROVAL.md under audit.checkpoint_keys, which only you may edit. HUMAN-ONLY:
+an agent that could sign one could vouch for a chain it had just written.
+
+The chain is unkeyed, so anyone who can write events.jsonl can recompute a
+forgery that walks clean from genesis. What they cannot do is re-sign the
+hashes they replaced, which is what \`log verify --checkpoints\` then catches.
+
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("log-checkpoint")}`;
 
 export const TAIL_HELP = `approval log tail — print the last records of the log
 
@@ -698,9 +748,9 @@ function decisionHelp(verb: "grant" | "reject" | "revoke"): string {
   const noun = verb === "grant" ? "approval" : verb === "reject" ? "refusal" : "withdrawal";
   const body =
     verb === "grant"
-      ? `Appends one approval.granted, MINTS the single-use execution token and
-PRINTS IT ONCE. HUMAN-ONLY. Legal only on a request awaiting a decision;
-attestation is required, and budgets are re-evaluated here.`
+      ? `Appends one approval.granted, MINTS the single-use execution token and PRINTS
+IT ONCE. HUMAN-ONLY. Legal only on a request awaiting a decision; attestation is
+required, budgets re-evaluated; loved/disliked need --note; read back: feedback.`
       : verb === "reject"
         ? `Appends one approval.rejected. HUMAN-ONLY. Legal only on a request awaiting a
 decision, and a second decision is refused. No attestation is required and no
@@ -712,16 +762,21 @@ authorization withdrawn was never a commitment.`;
   return `approval ${verb} — record a human ${noun} (HUMAN-ONLY)
 
 Usage:
-  approval ${verb} <action-key> [--note <text>] [--as human:<id>]
+  approval ${verb} <action-key> [--note <text>]${
+    verb === "grant" ? " [--reaction <w>]" : ""
+  } [--as human:<id>]
                  [--policy <path>] [--dir <path>] [--log <path>] [--json]
 
 Flags:
-  --note <text>    free-text note recorded in the event payload
+  --note <text>    free-text note recorded in the event payload${
+    verb === "grant"
+      ? "\n  --reaction <w>   disliked|indifferent|liked|loved. GUIDANCE, never policy"
+      : ""
+  }
   --as human:<id>  the deciding human; overrides APPROVAL_HUMAN
   --policy <path> / --dir <path>   the policy file, or where to discover it
   --log <path>     log file to read and append to
-  --json           machine-readable output
-  -h, --help       this text
+  --json / -h, --help              machine-readable output / this text
 
 ${body}
 
@@ -970,12 +1025,38 @@ Flags:
 THIS IS NOT "approval queue": queue is what a human must answer, status is what
 an operator must fix. Writes nothing, and reports in one object: attestation,
 verification, dangling executions, budget headroom per global limit,
-loop_escalations, payload_store, and anomalies when there are any.
+loop_escalations, harness_outcomes, git coverage, payload_store, and anomalies
+when there are any. The coverage numbers move neither health nor the exit code.
 
 JSON shape: docs/cli-reference.md#status
 ${EXIT_CODES_POINTER} (1 when anything needs attention, including a torn tail)
 ${JSON_ERRORS}
 ${why("status")}`;
+
+export const COVERAGE_HELP = `approval coverage — observed side effects, joined to the log
+
+Usage:
+  approval coverage [--base <ref>] [--head <ref>] [--since <d>] [--until <ts>]
+                    [--source git,gh,agentmail] [--vault <p>] [--policy <p>]
+                    [--dir <p>] [--log <p>] [--json]
+
+Flags:
+  --base <ref> / --head <ref>   the commit range (default: since the trunk)
+  --since <d> / --until <ts>    the adapter window (default 7d, ending now)
+  --source <list>   the witnesses to ask: git, gh, agentmail (default git,gh)
+  --policy <p> / --dir <p> / --log <p> / --vault <p>   policy, its dir, the log
+  --json            machine-readable output;  -h, --help   this text
+
+Asks the witnesses this project does NOT write — git, gh, a provider's own
+record — what happened, and prints what the verified log says about each: an
+evidence seq, or none. INFORMATIONAL, and writes nothing: exit 0 with or
+without gaps. Three tiers: custody PREVENTS, this verb WITNESSES, and an effect
+made with a credential the agent itself holds is covered by neither.
+
+JSON shape: docs/cli-reference.md#coverage
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("coverage")}`;
 
 export const DOCTOR_HELP = `approval doctor — environment sanity in one verb
 
@@ -1055,23 +1136,23 @@ export const AUDIT_REVIEW_HELP = `approval audit review — record that a human 
 
 Usage:
   approval audit review <seq|action-key> [--deny] [--note "<text>"]
-                        [--as human:<id>] [--log <path>] [--json]
+                        [--reaction <w>] [--as human:<id>] [--log <path>] [--json]
 
 Arguments:
   <seq|action-key> a bare integer is the SEQ OF THE audit.sampled RECORD; any
                    other value is an action key with one open sample
 Flags:
   --deny           this action should NOT have happened. Opens an obligation
-  --note <text>    what you concluded. OPTIONAL
+  --note <text>    what you concluded. OPTIONAL, but loved/disliked REQUIRE it
+  --reaction <w>   disliked|indifferent|liked|loved. GUIDANCE, never enforcement
   --as human:<id>  the reviewer; else APPROVAL_HUMAN. HUMAN-ONLY
-  --log <path>     log file to read and append to
-  --json           machine-readable output
-  -h, --help       this text
+  --log <path> / --json / -h, --help   the log / machine-readable output / help
 
 Appends audit.reviewed. NO ATTESTATION IS REQUIRED. Refuses (exit 1) not-sampled,
-already-reviewed, ambiguous-subject, actor-not-human, log untouched. --deny ALSO
-appends reconciliation.required (system:audit), shaped by the action's DECLARED
-reversible and never by you. JSON: docs/cli-reference.md#audit-review
+already-reviewed, ambiguous-subject, actor-not-human, note-required and
+reaction-conflicts-verdict (--deny with liked or loved); log untouched. --deny
+ALSO appends reconciliation.required, shaped by the DECLARED reversible, not you.
+JSON: docs/cli-reference.md#audit-review
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("audit-review")}`;
@@ -1347,19 +1428,19 @@ Usage:
 
 Flags:
   --out <path>     write the draft YAML to <path>; refuses to overwrite
-  --json           machine-readable output
-  -h, --help       this text
+  --json / -h      machine-readable output / this text
 
 Reads one markdown file, finds its permissions section, and prints a DRAFT
 \`\`\`yaml approval-policy block from a fixed, ordered keyword table.
 THE DRAFT AUTHORIZES NOTHING: this verb never writes APPROVAL.md, never logs and
 never attests. Fail closed: a bullet the table cannot place is kept verbatim.
+"What I value"-style headings become a DRAFT values fence, all under \`wants\`.
 
 JSON shape (stdout, one object):
   {"ok":true,"source":"<path>","out":"<path>"|null,
    "classes":[{"class","autonomy","from","section"}],
    "unmapped":[{"text","section"}],"ignored":["<heading>"],
-   "warnings":["<text>"]}
+   "warnings":["<text>"],"values_draft":"<fence>"|null}
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
@@ -1504,6 +1585,55 @@ JSON shape: {"ok":true,"dir":"…","note":"…","total":N,"entries":[…]}
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("journal-read")}`;
+
+export const VALUES_HELP = `approval values — what the operator said they value (human-authored)
+
+Usage:
+  approval values [--policy <path>] [--dir <path>] [--json]
+
+Flags:
+  --policy <path>       the policy file to read (wins over discovery)
+  --dir <path>          where to look for APPROVAL.md, then APPROVALS.md
+  --json / -h, --help   machine-readable output / this text
+
+Prints the optional \`\`\`yaml approval-values block of APPROVAL.md: what the
+operator loves, likes and dislikes, what they want from you as behaviour, and
+how they read and answer. EVERY FORM CARRIES THE LABEL: this is GUIDANCE and
+never policy. It grants nothing, forbids nothing and changes no verdict; what
+you MAY do is the policy block, answered by \`approval policy check\`.
+
+No block prints "the operator has declared no values here." and exits 0. A
+present but unreadable block exits 1 with its load code; treat it as absent.
+Neither moves the policy, and \`approval doctor\` reports the broken one.
+
+JSON shape: {"ok":true,"path":"…","present":true|false,"note":"…","values":{…}|null}
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("values")}`;
+export const FEEDBACK_HELP = `approval feedback — what the operator thought of the work
+
+Usage:
+  approval feedback [--task <id>] [--actor <agent id>] [--reaction <w>] [--limit <n>]
+                    [--source review|decision] [--since <YYYY-MM-DD>] [--log <path>] [--json]
+
+Flags:
+  --task <id>           only feedback about this task
+  --actor <agent id>    the AGENT the feedback is about, not its human author
+  --reaction <w>        disliked|indifferent|liked|loved
+  --source <s>          review (audit.reviewed) or decision (approval.granted)
+  --since <YYYY-MM-DD>  only records timestamped on or after this UTC date
+  --limit <n>           how many entries, newest last (default 20)
+  --log <path> / --json / -h, --help   the log, READ never written / JSON / help
+
+Lists the reactions and notes a person wrote on a grant or a review, joined to the
+class, task, action key and the agent it was about. Reads VERIFIED records, writes
+nothing. EVERY OUTPUT FORM CARRIES THE BANNER: HUMAN-AUTHORED GUIDANCE, not policy.
+An entry with neither a reaction nor a note is omitted; "_no feedback_" when empty.
+
+JSON shape: {"ok":true,"log":"…","note":"…","total":N,"entries":[…]}
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("feedback")}`;
 
 export const RENDER_HELP = `approval render — regenerate .approval/QUEUE.md from the log
 

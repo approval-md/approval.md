@@ -31,10 +31,14 @@ import {
   classifyBullet,
   importAgentsMd,
   parseAgentsMd,
+  parseValuesHeadings,
   renderDraftPolicy,
   renderFencedDraft,
+  renderFencedValuesDraft,
+  valuesDraftOf,
 } from "../src/core/agents-md.js";
 import { loadPolicy } from "../src/core/policy-load.js";
+import { VALUES_INFO_STRING, loadValuesText } from "../src/core/values.js";
 
 /** The repository root, from `dist/tests/` at runtime. */
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -253,4 +257,223 @@ test("the CLAUDE.md fixture keeps its provenance note", () => {
   const text = fixture("claude-md-permissions.md");
   assert.ok(text.includes("FIXTURE PROVENANCE"));
   assert.ok(text.includes("copied verbatim on 2026-08-17"));
+});
+
+// ---------------------------------------------------------------------------
+// The values draft (APRV-240)
+//
+// The property under test in almost every case below is a NEGATIVE one: the
+// importer fills `wants` and never grades. A generator that put a bullet in
+// `love:` would be writing an opinion into the one block of APPROVAL.md that
+// exists to carry the human's own, and the human would find out by reading
+// their own file back and seeing a feeling they never expressed.
+
+/** Load an emitted values fence the way `APPROVAL.md` would carry it. */
+function loadValuesDraft(fenced: string): ReturnType<typeof loadValuesText> {
+  counter += 1;
+  return loadValuesText(join(scratch, `values-${counter}.md`), `# Draft\n\n${fenced}`, {
+    schemaDir: SCHEMA_DIR,
+  });
+}
+
+/** Write a two-block draft to disk and read it back through `loadPolicy`. */
+function loadTwoBlockDraft(markdown: string): ReturnType<typeof loadPolicy> {
+  counter += 1;
+  const path = join(scratch, `two-block-${counter}.md`);
+  writeFileSync(path, markdown, "utf8");
+  return loadPolicy({ file: path, schemaDir: SCHEMA_DIR });
+}
+
+test("the restated schema caps still match values.schema.json", () => {
+  // `core/agents-md.ts` restates maxItems/maxLength rather than importing a
+  // validator. This is the test that keeps the copy honest.
+  const schema = JSON.parse(
+    readFileSync(join(SCHEMA_DIR, "values.schema.json"), "utf8"),
+  ) as { $defs: { valueList: { maxItems: number; items: { maxLength: number } } } };
+  assert.equal(schema.$defs.valueList.maxItems, 20);
+  assert.equal(schema.$defs.valueList.items.maxLength, 200);
+});
+
+test("the rendered fence carries the values reader's own info string", () => {
+  // `core/agents-md.ts` spells the label rather than importing it, because
+  // `tests/values-inert.test.ts` lets no `src/core/` module import the values
+  // reader (SPEC.md §11.1 invariant 10). This is the drift guard that pays for
+  // that copy: the renderer's fence and the reader's constant, side by side.
+  const fenced = renderFencedValuesDraft(parseValuesHeadings("## What I value\n\n- A\n"), "x.md");
+  assert.ok(fenced.startsWith(`\`\`\`${VALUES_INFO_STRING}\n`), fenced.slice(0, 40));
+});
+
+test("recognises the four values headings at any level and normalises them", () => {
+  const draft = parseValuesHeadings(fixture("values-headings.md"));
+  assert.deepEqual(draft.headings, [
+    "what i value",
+    "what good looks like",
+    "how i like to work",
+    "what i want from you",
+  ]);
+});
+
+test("every values bullet goes to wants, and nothing is graded", () => {
+  const draft = parseValuesHeadings(fixture("values-headings.md"));
+  // The parse result has one destination for bullets, by construction.
+  assert.deepEqual(Object.keys(draft).sort(), ["headings", "overflow", "wants", "warnings"]);
+
+  const fenced = renderFencedValuesDraft(draft, "fixture");
+  // No emitted KEY is love/like/dislike. Comment lines start with `#`, so the
+  // header's mention of them cannot satisfy this.
+  assert.ok(!/^\s*(love|like|dislike):/mu.test(fenced), fenced);
+
+  const loaded = loadValuesDraft(fenced);
+  assert.ok(loaded.ok, loaded.ok ? "" : loaded.message);
+  assert.ok(loaded.present);
+  assert.equal(loaded.values.love, undefined);
+  assert.equal(loaded.values.like, undefined);
+  assert.equal(loaded.values.dislike, undefined);
+  assert.deepEqual(loaded.values.wants, draft.wants);
+});
+
+test("values bullets inside a fenced block, and under other headings, are ignored", () => {
+  const draft = parseValuesHeadings(fixture("values-headings.md"));
+  for (const want of draft.wants) {
+    assert.ok(!want.includes("inside a fenced block"), want);
+    assert.ok(!want.includes("does not recognise"), want);
+  }
+  // And the permissions bullets of the same file did not leak in either.
+  assert.ok(!draft.wants.some((want) => want.includes("Adding or upgrading dependencies")));
+});
+
+test("a wrapped values bullet is joined, and a repeat is collapsed with a note", () => {
+  const draft = parseValuesHeadings(fixture("values-headings.md"));
+  assert.ok(draft.wants.includes("A diff that says what it changed and why it changed it"));
+  assert.equal(
+    draft.wants.filter((want) => want === "Work I can check without rerunning it myself").length,
+    1,
+  );
+  const note = draft.warnings.find((text) => text.includes("repeated values"));
+  assert.ok(note !== undefined, draft.warnings.join(" | "));
+});
+
+test("a bullet over 200 characters is truncated and reported, never dropped", () => {
+  const draft = parseValuesHeadings(fixture("values-headings.md"));
+  const long = draft.wants.find((want) => want.startsWith("Tell me the exit code"));
+  assert.ok(long !== undefined);
+  assert.equal([...long].length, 200);
+  assert.ok(long.endsWith("…"));
+  const note = draft.warnings.find((text) => text.includes("215 characters"));
+  assert.ok(note !== undefined, draft.warnings.join(" | "));
+  // Truncated, and still a valid entry: the human edits it in place.
+  const loaded = loadValuesDraft(renderFencedValuesDraft(draft, "fixture"));
+  assert.ok(loaded.ok, loaded.ok ? "" : loaded.message);
+});
+
+test("bullets past the cap of 20 are preserved as comments, not in wants", () => {
+  const markdown = [
+    "## What I want from you",
+    "",
+    ...Array.from({ length: 25 }, (_, index) => `- Want number ${String(index + 1)}`),
+    "",
+  ].join("\n");
+  const draft = parseValuesHeadings(markdown);
+  assert.equal(draft.wants.length, 20);
+  assert.deepEqual(draft.overflow, [
+    "Want number 21",
+    "Want number 22",
+    "Want number 23",
+    "Want number 24",
+    "Want number 25",
+  ]);
+  const note = draft.warnings.find((text) => text.includes("past the cap of 20"));
+  assert.ok(note !== undefined, draft.warnings.join(" | "));
+
+  const fenced = renderFencedValuesDraft(draft, "inline");
+  assert.ok(fenced.includes("# OVER THE CAP:"));
+  assert.ok(fenced.includes("#   Want number 25"));
+  const loaded = loadValuesDraft(fenced);
+  assert.ok(loaded.ok, loaded.ok ? "" : loaded.message);
+  assert.ok(loaded.present);
+  assert.equal(loaded.values.wants?.length, 20);
+});
+
+test("a heading with no bullets still declares itself, with an empty list", () => {
+  const draft = parseValuesHeadings("## How I like to work\n\nNothing yet.\n");
+  assert.deepEqual(draft.headings, ["how i like to work"]);
+  assert.deepEqual(draft.wants, []);
+  const fenced = renderFencedValuesDraft(draft, "inline");
+  assert.ok(fenced.includes("wants: []"));
+  const loaded = loadValuesDraft(fenced);
+  assert.ok(loaded.ok, loaded.ok ? "" : loaded.message);
+  assert.ok(loaded.present);
+});
+
+test("a source with no values heading drafts nothing at all", () => {
+  for (const name of ["claude-md-permissions", "tolerant-variants", "no-permissions"] as const) {
+    const result = importAgentsMd(fixture(`${name}.md`));
+    assert.deepEqual(result.values.headings, [], name);
+    assert.deepEqual(result.values.wants, [], name);
+    assert.equal(valuesDraftOf(result, name), null, name);
+    // And the policy draft is byte-identical to the one-block form: passing a
+    // values draft that is not there changes nothing.
+    assert.equal(
+      renderDraftPolicy(result, name, result.values),
+      renderDraftPolicy(result, name),
+      name,
+    );
+    assert.equal(
+      renderFencedDraft(result, name, result.values),
+      renderFencedDraft(result, name),
+      name,
+    );
+  }
+});
+
+test("the two-block draft matches its pinned bytes on both surfaces", () => {
+  const source = "tests/fixtures/agents-md/values-headings.md";
+  const result = importAgentsMd(fixture("values-headings.md"));
+  const expected = fixture("values-headings.expected.md");
+  assert.equal(renderDraftPolicy(result, source, result.values), expected);
+  // `--out` and stdout agree: one draft, one set of bytes, two ways to get it.
+  assert.equal(renderFencedDraft(result, source, result.values), expected);
+  // And `--json`'s `values_draft` is exactly the tail of it: the same fence,
+  // reachable without parsing the two-block form back apart.
+  const valuesFence = valuesDraftOf(result, source);
+  assert.ok(valuesFence !== null);
+  assert.ok(valuesFence.startsWith("```yaml approval-values\n"));
+  assert.ok(expected.endsWith(valuesFence), valuesFence);
+});
+
+test("the two-block draft loads as a policy AND as a values block", () => {
+  const source = "tests/fixtures/agents-md/values-headings.md";
+  const result = importAgentsMd(fixture("values-headings.md"));
+  const markdown = renderDraftPolicy(result, source, result.values);
+
+  const policy = loadTwoBlockDraft(markdown);
+  assert.ok(policy.ok, policy.ok ? "" : `${policy.code}: ${policy.message}`);
+  assert.equal(policy.policy.version, "0.1");
+  assert.equal(policy.policy.defaults?.autonomy, "manual");
+
+  const values = loadValuesText(join(scratch, "two-block.md"), markdown, {
+    schemaDir: SCHEMA_DIR,
+  });
+  assert.ok(values.ok, values.ok ? "" : values.message);
+  assert.ok(values.present);
+  assert.equal(values.values.version, 1);
+  assert.deepEqual(values.values.wants, result.values.wants);
+});
+
+test("the values warnings reach the import result, and never the classes", () => {
+  const result = importAgentsMd(fixture("values-headings.md"));
+  assert.ok(result.warnings.some((text) => text.includes("repeated values")));
+  assert.deepEqual(
+    result.classes.map((entry) => entry.cls),
+    ["read.*", "deps.add"],
+  );
+  assert.deepEqual(result.unmapped, []);
+});
+
+test("the values draft is deterministic: same bytes twice", () => {
+  const markdown = fixture("values-headings.md");
+  const first = renderFencedValuesDraft(parseValuesHeadings(markdown), "x.md");
+  const second = renderFencedValuesDraft(parseValuesHeadings(markdown), "x.md");
+  assert.equal(first, second);
+  assert.ok(!/\d{4}-\d{2}-\d{2}/u.test(first));
 });

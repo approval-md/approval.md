@@ -90,6 +90,7 @@
  * {@link redactSecrets} against the API key.
  */
 
+import type { ObservationWindow, ObservedEffect } from "../core/coverage.js";
 import type { CredentialSpec } from "../core/credential-spec.js";
 import { canonicalize } from "../core/jcs.js";
 import { payloadHash } from "../core/payload.js";
@@ -367,6 +368,11 @@ interface Transport {
  * One request. Throws on transport failure — the caller decides whether that is
  * `agentmail-unreachable` (a pre-send read) or a propagated indeterminacy (the
  * send itself).
+ *
+ * `path` is appended to the API base verbatim, so it may carry a query string
+ * (`/v0/inboxes/x/messages?limit=100`). The callers that need one build it with
+ * `URLSearchParams`, so the escaping question is asked in one place and this
+ * function stays "put these bytes after the base".
  */
 async function call(
   transport: Transport,
@@ -871,6 +877,184 @@ export async function readAgentmailDraft(
 }
 
 // ---------------------------------------------------------------------------
+// Observation (APRV-245): what the provider says this inbox actually sent
+// ---------------------------------------------------------------------------
+
+/**
+ * How many messages one page asks for. The API's own cap is higher; this is the
+ * page size, and {@link OBSERVE_MAX_PAGES} bounds how many pages are walked.
+ */
+export const AGENTMAIL_OBSERVE_PAGE_SIZE = 100;
+
+/**
+ * How many pages one observation walks.
+ *
+ * A bound rather than a full drain, because a reporting verb must terminate
+ * against an inbox of any size. A run that hits the bound says so, so a reader
+ * never mistakes a truncated page walk for a quiet mailbox.
+ */
+export const OBSERVE_MAX_PAGES = 10;
+
+/** One sent message, reduced to what a coverage report may say out loud. */
+export interface AgentmailObservedMessage {
+  messageId: string;
+  /** RFC 3339, as the provider reported it. */
+  at: string;
+  subject: string;
+  recipients: number;
+}
+
+export type AgentmailObservation =
+  | {
+      ok: true;
+      messages: AgentmailObservedMessage[];
+      /** Set when the page bound stopped the walk before the far side ran out. */
+      truncated: boolean;
+    }
+  | { ok: false; code: AgentmailFailureCode; message: string };
+
+export interface AgentmailObserveOptions extends AgentmailProbeOptions {
+  /** Override {@link AGENTMAIL_OBSERVE_PAGE_SIZE}. */
+  pageSize?: number;
+  /** Override {@link OBSERVE_MAX_PAGES}. */
+  maxPages?: number;
+}
+
+/** The list of messages a page carries, under whichever key the body used. */
+function messagesOf(body: Record<string, unknown> | null): Record<string, unknown>[] {
+  if (body === null) return [];
+  for (const key of ["messages", "data", "items"] as const) {
+    const held = body[key];
+    if (!Array.isArray(held)) continue;
+    return held.filter(
+      (entry): entry is Record<string, unknown> =>
+        typeof entry === "object" && entry !== null && !Array.isArray(entry),
+    );
+  }
+  return [];
+}
+
+/** The next page token a body offers, or `null` when it offers none. */
+function pageTokenOf(body: Record<string, unknown> | null): string | null {
+  if (body === null) return null;
+  for (const key of ["next_page_token", "page_token", "next_cursor"] as const) {
+    const held = body[key];
+    if (typeof held === "string" && held.length > 0) return held;
+  }
+  return null;
+}
+
+/** How many addresses a message went to, counting `to`, `cc` and `bcc`. */
+function recipientCount(message: Record<string, unknown>): number {
+  let count = 0;
+  for (const key of ["to", "cc", "bcc"] as const) {
+    const held = message[key];
+    if (Array.isArray(held)) count += held.filter((entry) => typeof entry === "string").length;
+    else if (typeof held === "string" && held.length > 0) count += 1;
+  }
+  return count;
+}
+
+/** Does this message's `labels` array carry `sent`? Case-insensitively. */
+function isSent(message: Record<string, unknown>): boolean {
+  const labels = message["labels"];
+  if (!Array.isArray(labels)) return false;
+  return labels.some((label) => typeof label === "string" && label.toLowerCase() === "sent");
+}
+
+/**
+ * `GET /v0/inboxes/{inbox_id}/messages`: what this inbox actually sent.
+ *
+ * The endpoint and its fields are AgentMail's own, documented at
+ * https://docs.agentmail.to/api-reference/inboxes/messages/list — `message_id`,
+ * `labels`, `timestamp`, `to` and `subject`. The query carries `after`, `before`
+ * and `limit`, and `page_token` on every page after the first.
+ *
+ * **The sent filter is client-side, and that is a limit worth stating.** The
+ * documented list endpoint exposes no sent-only parameter, so this asks for the
+ * window's messages and keeps the ones whose `labels` include `sent`. Two
+ * consequences follow and neither is papered over: the request reads received
+ * mail as well as sent (a read, changing nothing), and a provider that stopped
+ * labelling sent mail would make this source report an empty window rather than
+ * an error. The remedy for the second is the same as for everything else here:
+ * the source reports what the provider said, and a source that says nothing is
+ * a gap a reader can see rather than a pass.
+ *
+ * Sends nothing. Spends no token. Reads no clock: the window is the caller's.
+ */
+export async function observeAgentmail(
+  config: AgentmailConfig,
+  window: { since: string; until: string },
+  options: AgentmailObserveOptions = {},
+): Promise<AgentmailObservation> {
+  const transport: Transport = {
+    fetch: options.fetch ?? (globalThis.fetch as unknown as AgentmailFetch),
+    apiBase: (options.apiBase ?? AGENTMAIL_DEFAULT_API_BASE).replace(/\/+$/u, ""),
+    timeoutMs: options.timeoutMs ?? AGENTMAIL_DEFAULT_TIMEOUT_MS,
+    apiKey: config.apiKey,
+  };
+  const scrub = (text: string): string => redactSecrets(text, [config.apiKey]).text;
+  const pageSize = options.pageSize ?? AGENTMAIL_OBSERVE_PAGE_SIZE;
+  const maxPages = options.maxPages ?? OBSERVE_MAX_PAGES;
+
+  const messages: AgentmailObservedMessage[] = [];
+  let token: string | null = null;
+  let truncated = false;
+  for (let page = 0; page < maxPages; page += 1) {
+    const query = new URLSearchParams({
+      after: window.since,
+      before: window.until,
+      limit: String(pageSize),
+    });
+    if (token !== null) query.set("page_token", token);
+    const path = `${inboxPath(config.inboxId)}/messages?${query.toString()}`;
+
+    let answer: HttpAnswer;
+    try {
+      answer = await call(transport, "GET", path);
+    } catch (cause) {
+      return {
+        ok: false,
+        code: "agentmail-unreachable",
+        message: scrub(
+          `the AgentMail API could not be reached to list the messages of ${config.inboxId}: ${describeThrow(cause)}. Nothing was sent and nothing was changed`,
+        ),
+      };
+    }
+    if (answer.status < 200 || answer.status >= 300) {
+      return {
+        ok: false,
+        code: codeForStatus(answer.status),
+        message: scrub(
+          `listing the messages of ${config.inboxId} answered HTTP ${String(answer.status)}: ${describeBody(answer.body)}. Nothing was sent and nothing was changed`,
+        ),
+      };
+    }
+
+    const body = parseObject(answer.body);
+    for (const message of messagesOf(body)) {
+      if (!isSent(message)) continue;
+      const id = message["message_id"];
+      const at = message["timestamp"];
+      if (typeof id !== "string" || id.length === 0) continue;
+      const subject = message["subject"];
+      messages.push({
+        messageId: id,
+        at: typeof at === "string" ? at : "",
+        subject: typeof subject === "string" ? subject : "",
+        recipients: recipientCount(message),
+      });
+    }
+
+    token = pageTokenOf(body);
+    if (token === null) break;
+    if (page === maxPages - 1) truncated = true;
+  }
+
+  return { ok: true, messages, truncated };
+}
+
+// ---------------------------------------------------------------------------
 // The adapter
 // ---------------------------------------------------------------------------
 
@@ -953,6 +1137,54 @@ export function agentmailAdapter(options: AgentmailAdapterOptions = {}): Adapter
     name: "agentmail",
     classes,
     requiredCredentials: requiredAgentmailCredentials(names),
+    /**
+     * What this inbox actually sent in `window` (APRV-245).
+     *
+     * Read-only and outside any grant window, as the contract requires. It
+     * reads the vault through the provider the CALLER built — the same
+     * `vaultCredentialProvider` `approval setup adapter agentmail` uses for its
+     * probe, and never the `.approval/env` passphrase fallback, which is
+     * defensible only inside a consumed-token window.
+     *
+     * The effect id is the provider's `message_id`. It is deliberately NOT
+     * matched against the log: `execution.completed` records an `exit_code` and
+     * the provider's id reaches only the CLI result, so an id-level binding
+     * would need a schema amendment. That amendment is APRV-251; until it
+     * lands, this source is joined by class and time window like every other,
+     * and `docs/cli-reference.md` says so where a reader will see it.
+     */
+    async observe(
+      window: ObservationWindow,
+      credentials: CredentialProvider,
+    ): Promise<readonly ObservedEffect[]> {
+      const configured = readAgentmailConfig(credentials, names);
+      const scrub = (text: string): string => redactSecrets(text, configured.secrets).text;
+      if (!configured.ok) {
+        // Already scrubbed with everything read before it failed. A throw
+        // rather than an empty list, because "the vault would not open" and
+        // "this inbox sent nothing" are different facts and the source layer
+        // reports them differently.
+        throw new Error(configured.message);
+      }
+      const observed = await observeAgentmail(configured.config, window, {
+        ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+        apiBase,
+        timeoutMs,
+      });
+      if (!observed.ok) throw new Error(scrub(observed.message));
+      return observed.messages.map((message) => ({
+        source: "agentmail",
+        id: message.messageId,
+        class: AGENTMAIL_CLASS,
+        at: message.at,
+        actorHint: configured.config.inboxId,
+        // The subject and a COUNT. Never the body, and never the addresses:
+        // this line is read by somebody who did not approve the message.
+        detail: scrub(
+          `sent ${JSON.stringify(message.subject)} to ${String(message.recipients)} recipient(s)`,
+        ),
+      }));
+    },
     async act(input: ActInput): Promise<ActOutcome> {
       // (1) The mode, then the shape. Both refused before any credential is
       //     read: a malformed payload is not a reason to touch the vault.

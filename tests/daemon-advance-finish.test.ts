@@ -27,17 +27,21 @@
  * is the one thing that would reach the network. Nothing here writes a log line
  * by hand: every record is written by the real gate through the real append
  * path.
+ *
+ * The two head-moved cases construct their interleaving rather than waiting for
+ * it (APRV-261): the record that moves the head is appended, by another
+ * process's parent, while the writer is held between its read and its append by
+ * a seam. No case in this file asserts on wall-clock ordering, and the only
+ * durations left in it are the ones the cadence cases are about.
  */
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
-  closeSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -104,10 +108,6 @@ const POLICY = [
   "```",
   "",
 ].join("\n");
-
-function sleep(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
 
 function git(args: string[], cwd: string): { code: number; stdout: string; stderr: string } {
   const result = spawnSync("git", args, {
@@ -238,27 +238,52 @@ interface SettleOutcome {
   ok: boolean;
   code: string | null;
   message: string;
+  /** How many whole read-check-append cycles the writer made. */
+  attempts: number;
 }
 
 /**
- * Race one out-of-process `settleAdvanceFinish` against a concurrent append.
+ * Put one record into the window between an out-of-process
+ * `settleAdvanceFinish`'s read and its append, and hold the window open until
+ * it is there (APRV-261).
  *
- * The parent holds the append lock across the child's READ, so the child is
- * provably deciding against a log ending where the parent left it; the parent
- * then releases the lock and immediately appends its own record through the
- * real gate. Which of the two reaches the lock first is not ours to decide, so
- * the caller checks the ordering it got and asks for another round when the
- * child happened to win — the property under test is about the child LOSING.
+ * ## Why this is a handshake and not a race
+ *
+ * It used to be a race. The parent took the append lockfile, spawned the child,
+ * waited for a `ready` file the child wrote BEFORE it began, slept a flat
+ * 300 ms hoping the child had reached its read inside that, released the lock,
+ * and appended. Two scheduling bets, both silent when lost. The first: that
+ * 300 ms is enough for a cold Node to boot, import `dist`, and read a verified
+ * log — when it is not, the parent's record lands first, the child then reads a
+ * log that already holds it, no head moves, and the case passes having proved
+ * nothing (which is what the second case's six-round `continue` is absorbing,
+ * until the round budget runs out and the suite fails "the unretried writer
+ * never lost the race in six rounds"). The second: that after `unlinkSync` the
+ * parent completes a policy load, a verified read, a hash and a lock
+ * acquisition before the child's next lock poll, which `core/log.ts` fixes at
+ * 20 ms — when it does not, the child appends first, the outcome sits BELOW the
+ * filler, and the case fails outright.
+ *
+ * Neither bet is made now. The child's seam (`AdvanceInput.afterFinishRead`,
+ * forwarded to the finish path as `FinishOptions.afterRead`) fires between the
+ * read and the append of the first attempt, signals `ready` from THERE, and
+ * blocks until this process says `go`. So the parent's record is appended while
+ * the child is demonstrably holding a read of a log without it, every time, at
+ * any load, with no delay anywhere. The child is not holding the append lock
+ * while it waits — its append has not started — so the filler takes the lock at
+ * once.
+ *
+ * Returns the child's own report, which carries the number of attempts it made,
+ * and the seq of the record that moved the head under it.
  */
-async function raceFinish(
+async function interleavedFinish(
   repo: Repo,
   actionKey: string,
   attempts: "default" | number,
   marker: string,
-): Promise<{ outcome: SettleOutcome; fillerSeq: number; interleaved: boolean }> {
+): Promise<{ outcome: SettleOutcome; fillerSeq: number }> {
   const ready = join(repo.dir, `ready-${marker}`);
-  const lock = `${repo.logPath}.lock`;
-  closeSync(openSync(lock, "wx"));
+  const go = join(repo.dir, `go-${marker}`);
 
   const child = spawn(
     process.execPath,
@@ -271,30 +296,45 @@ async function raceFinish(
       "0",
       attempts === "default" ? "default" : String(attempts),
       ready,
+      go,
     ],
     { cwd: repo.dir, stdio: ["ignore", "pipe", "pipe"] },
   );
   let out = "";
+  let err = "";
+  let closed = false;
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => (out += chunk));
-
-  const deadline = Date.now() + 10_000;
-  while (!existsSync(ready)) {
-    assert.ok(Date.now() < deadline, "the settle child never signalled ready");
-    sleep(5);
-  }
-  // The child is inside `finishExecution` now: it has read the log and is
-  // blocked on the lock this process holds.
-  sleep(300);
-  unlinkSync(lock);
-  const filler = appendRecord(repo.dir, marker);
-
-  const outcome = await new Promise<SettleOutcome>((resolve) => {
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => (err += chunk));
+  const finished = new Promise<void>((resolve) => {
     child.on("close", () => {
-      resolve(JSON.parse(out.trim()) as SettleOutcome);
+      closed = true;
+      resolve();
     });
   });
-  return { outcome, fillerSeq: filler.seq, interleaved: filler.ok };
+
+  // A poll for a condition, never a wait for a duration: however long the child
+  // takes to get there, the window opens when it arrives and not before. A
+  // refusal above the seam (`not-started`, `already-finished`) exits the child
+  // instead, which is caught here rather than waited out; the minute is a bound
+  // on FAILING, and no passing run consults a clock.
+  const deadline = Date.now() + 60_000;
+  while (!existsSync(ready)) {
+    assert.ok(!closed, `the settle child exited before its read: ${out}${err}`);
+    assert.ok(Date.now() < deadline, "the settle child never reached its read");
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+
+  // The child has read the log and is inside `finishExecution`, one statement
+  // above its append. This is where the 2026-09-02 hook's record landed.
+  const filler = appendRecord(repo.dir, marker);
+  assert.equal(filler.ok, true, "the record that moves the head could not be appended");
+  writeFileSync(go, "go", "utf8");
+
+  await finished;
+  assert.ok(out.trim().length > 0, `the settle child produced no result: ${err}`);
+  return { outcome: JSON.parse(out.trim()) as SettleOutcome, fillerSeq: filler.seq };
 }
 
 /** Authorize one advance for real: registered, requested, started. */
@@ -310,56 +350,63 @@ function authorized(repo: Repo): string {
 // ===========================================================================
 
 test("finish: an outcome record that loses the append race re-derives and lands", async () => {
-  for (let round = 1; round <= 6; round += 1) {
-    const repo = newRepo();
-    appendRecord(repo.dir, `seed-${String(round)}`);
-    const actionKey = authorized(repo);
+  const repo = newRepo();
+  appendRecord(repo.dir, "seed");
+  const actionKey = authorized(repo);
 
-    const raced = await raceFinish(repo, actionKey, "default", `r${String(round)}`);
-    if (!raced.interleaved) continue; // the child won the lock; try again
+  const raced = await interleavedFinish(repo, actionKey, "default", "r1");
 
-    // The record that moved the head landed, and so did the outcome: the
-    // retry re-read, re-ran `finishExecution`'s own checks against that read,
-    // and appended against the head THAT read observed.
-    assert.equal(raced.outcome.ok, true, JSON.stringify(raced.outcome));
-    assert.deepEqual(eventsFor(repo, actionKey), [
-      // (a supervised advance proceeds without an approval.requested of its own)
-      "execution.started",
-      "execution.completed",
-    ]);
-    assert.deepEqual(danglingKeys(repo), [], "an execution was left dangling");
-    assert.equal(verify(repo.logPath).status, "clean");
-    // And the interleaving really happened: the filler is BELOW the outcome.
-    const completed = records(repo).find(
-      (record) => record.action_key === actionKey && record.event === "execution.completed",
-    );
-    assert.ok(
-      completed !== undefined && completed.seq > raced.fillerSeq,
-      "the concurrent record did not land between the read and the append",
-    );
-    return;
-  }
-  assert.fail("the concurrent appender never won the lock in six rounds");
+  // The sequence, as the writer itself reports it: two whole cycles. The first
+  // read, ran `finishExecution`'s not-started / already-finished /
+  // execution-delegated checks, and had its append refused by the
+  // compare-and-append because the head it named was no longer the tail. The
+  // second re-read, re-ran those same checks against the log as it now stood,
+  // and appended against the head THAT read observed.
+  //
+  // Two is therefore also the assertion that the first attempt met a MOVED
+  // HEAD and nothing else: `core/head-retry.ts` re-runs the cycle on
+  // `append-failed` / `head-moved` and on no other refusal, so a second attempt
+  // cannot have happened for any other reason.
+  assert.equal(raced.outcome.attempts, 2, JSON.stringify(raced.outcome));
+  assert.equal(raced.outcome.ok, true, JSON.stringify(raced.outcome));
+  assert.deepEqual(eventsFor(repo, actionKey), [
+    // (a supervised advance proceeds without an approval.requested of its own)
+    "execution.started",
+    "execution.completed",
+  ]);
+  assert.deepEqual(danglingKeys(repo), [], "an execution was left dangling");
+  assert.equal(verify(repo.logPath).status, "clean");
+  // And the interleaving really was an interleaving: the record that moved the
+  // head is BELOW the outcome, so the outcome was written after it.
+  const completed = records(repo).find(
+    (record) => record.action_key === actionKey && record.event === "execution.completed",
+  );
+  assert.ok(
+    completed !== undefined && completed.seq > raced.fillerSeq,
+    "the concurrent record did not land between the read and the append",
+  );
 });
 
 test("finish: the pre-APRV-233 writer loses the race and leaves the execution dangling", async () => {
-  for (let round = 1; round <= 6; round += 1) {
-    const repo = newRepo();
-    appendRecord(repo.dir, `seed-${String(round)}`);
-    const actionKey = authorized(repo);
+  const repo = newRepo();
+  appendRecord(repo.dir, "seed");
+  const actionKey = authorized(repo);
 
-    // `retryOnHeadMoved: 1` is the writer as it was: one read, one set of
-    // checks, one append. The same harness pins both shapes.
-    const raced = await raceFinish(repo, actionKey, 1, `p${String(round)}`);
-    if (!raced.interleaved || raced.outcome.ok) continue;
+  // `retryOnHeadMoved: 1` is the writer as it was: one read, one set of checks,
+  // one append. The same handshake, the same record in the same window, and the
+  // only difference is the bound — so what follows is caused by the bound and
+  // by nothing else.
+  const raced = await interleavedFinish(repo, actionKey, 1, "p1");
 
-    assert.equal(raced.outcome.code, "append-failed", JSON.stringify(raced.outcome));
-    assert.deepEqual(eventsFor(repo, actionKey), ["execution.started"]);
-    assert.deepEqual(danglingKeys(repo), [actionKey], "this is the 2026-09-02 residue");
-    assert.equal(verify(repo.logPath).status, "clean", "the log is fine; the bookkeeping is not");
-    return;
-  }
-  assert.fail("the unretried writer never lost the race in six rounds");
+  assert.equal(raced.outcome.attempts, 1, JSON.stringify(raced.outcome));
+  assert.equal(raced.outcome.ok, false, JSON.stringify(raced.outcome));
+  assert.equal(raced.outcome.code, "append-failed", JSON.stringify(raced.outcome));
+  // The compare-and-append precondition, not a lock timeout and not a schema
+  // refusal: this is the line the 2026-09-02 terminal printed.
+  assert.match(raced.outcome.message, /head moved/);
+  assert.deepEqual(eventsFor(repo, actionKey), ["execution.started"]);
+  assert.deepEqual(danglingKeys(repo), [actionKey], "this is the 2026-09-02 residue");
+  assert.equal(verify(repo.logPath).status, "clean", "the log is fine; the bookkeeping is not");
 });
 
 // ===========================================================================

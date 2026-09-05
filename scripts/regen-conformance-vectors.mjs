@@ -259,6 +259,10 @@ const unionVectors = [
     "anchor_refusal_codes",
     "every way the log-anchoring check can refuse a working log that contradicts the committed copy of it",
   ],
+  [
+    "checkpoint_refusal_codes",
+    "every way the human-signed checkpoint check can refuse a range whose signed heads the log contradicts",
+  ],
 ].map(([union, description]) => ({
   id: `union-${union}`,
   description: `${description}. Order is definition order; conformance means emitting exactly these codes, no more, no fewer.`,
@@ -493,7 +497,11 @@ const chainVectors = [
 function schemaFixtureVectors() {
   const vectors = [];
   const root = join(REPO_ROOT, "schema", "fixtures");
-  for (const schema of ["envelope", "event", "policy", "sample-record"]) {
+  // Every schema in `schema/`, named rather than discovered, so adding one is a
+  // reviewable diff. `values` joined in APRV-237 (SPEC.md §5.3): the block is
+  // guidance and never enforcement, but the SHAPE it must have to be shown to a
+  // human at all is a write-boundary rule like any other.
+  for (const schema of ["envelope", "event", "policy", "sample-record", "values"]) {
     for (const kind of ["valid", "invalid"]) {
       const dir = join(root, schema, kind);
       let entries;
@@ -1003,7 +1011,12 @@ const SUITES = [
     // implementation that answers five of them covers five sixths of invariant
     // 6, and a runner reporting that as a pass would be reporting coverage of
     // work nobody did.
-    vectors_version: "7.0.0",
+    // 8.0.0 (APRV-220): a SEVENTH union, `checkpoint_refusal_codes`, for the
+    // human-signed checkpoint check. Major for the reason 7.0.0 was major: the
+    // suite pins which unions exist, and an implementation that verifies a
+    // chain and an anchor but cannot say what a bad checkpoint signature is
+    // called has not implemented invariant 6 for checkpoints at all.
+    vectors_version: "8.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
@@ -1043,7 +1056,27 @@ const SUITES = [
     // harness kind — are new vectors. No existing expectation moved: the two
     // names are OPTIONAL and additive, so every record written before them
     // validates exactly as it did.
-    vectors_version: "1.4.0",
+    // 1.5.0 was claimed twice, on two branches that did not see each other:
+    // APRV-220 published it from main, APRV-235 from its own branch, and each
+    // carried a different vector set under the same number. Both claims are
+    // superseded here. 1.6.0 is the single version that contains both, and
+    // neither 1.5.0 is a version a second implementation should hold itself to.
+    // 1.6.0 (APRV-220 + APRV-235): a MINOR bump carrying eighteen new vectors,
+    // none of which moves an existing expectation. Seven are APRV-220's: the
+    // five `log.checkpoint` event fixtures (a well-formed checkpoint, an agent
+    // actor, a missing signature, a truncated signed hash, an unimplemented
+    // signature alg) and the two policy fixtures for `audit.checkpoint_keys` /
+    // `audit.checkpoint_every`. Five are APRV-235's: the
+    // `audit.decision_refused` fixture with the two refusals that pin its
+    // actor and its required code, and the `policy-drift` withdrawal with the
+    // agent-authored one that must not validate. The other six are APRV-214's
+    // `gate.opened` / `gate.closed` / `gate.bypassed` fixtures, committed
+    // without a regen exactly as the `env_stripped` pair was before 1.3.0.
+    // Nothing moved: both event types are new, so no record written before
+    // them names either, and the two policy keys are OPTIONAL, so every policy
+    // written before them validates exactly as it did. The only removed line
+    // in the fixture diff is `count`.
+    vectors_version: "1.6.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

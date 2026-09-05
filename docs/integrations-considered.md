@@ -18,6 +18,8 @@ entry here is the summary and the pointer.
 | --- | --- | --- | --- | --- | --- |
 | Tool-gateway adapter (AnyAPI, Monid) | [getanyapi.com](https://api.getanyapi.com/mcp), [monid.ai](https://mcp.monid.ai/v1) | 2026-08-31 | gateway | parked | [docs/proposals/tool-gateway-adapter.md](proposals/tool-gateway-adapter.md) |
 | UCA (Universal Coding Agent Harness Updater) | [UNIVERSAL_CODING_AGENT_HARNESS_UPDATER.md](https://github.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/blob/main/UNIVERSAL_CODING_AGENT_HARNESS_UPDATER.md) | 2026-09-02 | updater | declined | APRV-227, APRV-228 |
+| Grok Build (xAI coding-agent harness) | [docs.x.ai/build](https://docs.x.ai/build/overview), [xai-org/grok-build](https://github.com/xai-org/grok-build) | 2026-09-02 | harness | parked | APRV-243 |
+| Grok Bot (xAI agent product) | [x.ai/news/grok-bot-and-x](https://x.ai/news/grok-bot-and-x) | 2026-09-02 | agent product (MCP client) | adopted (demo) | APRV-245, APRV-246 |
 | Claude for commerce agents (anthropics/commerce-agents) | [blog](https://claude.com/blog/claude-for-commerce-agents), [repo](https://github.com/anthropics/commerce-agents) | 2026-09-02 | blueprint | declined | APRV-242, APRV-228 |
 
 Verdicts: **adopted** (code exists or is scheduled in a milestone),
@@ -154,6 +156,186 @@ below.
 - APRV-228: `claude update`, `codex update` and the UCA verbs classify
   `deps.upgrade` instead of falling to unclassified, so the refusal names
   the class a human can grant.
+
+## Grok Build (xAI coding-agent harness)
+
+Assessed 2026-09-02. Verdict: **parked**, activated by the live probe in
+APRV-243.
+
+### What it is
+
+xAI's terminal coding agent (`grok`, open source under Apache 2.0 at
+xai-org/grok-build, installed by `curl -fsSL https://x.ai/cli/install.sh |
+bash`). It runs shell commands and edits files the way Claude Code and Cursor
+Agent do, reads `AGENTS.md` and `CLAUDE.md`, and has a permission system
+(`ask`, `auto`, `always-approve`, plus allow and deny rules in
+`~/.grok/config.toml`). The question asked was whether approval.md should
+build a pre-launch adapter or integration for it.
+
+### What it exposes
+
+Verified against docs.x.ai/build/features/hooks on the assessment date,
+quoted verbatim. Hooks are modelled on Claude Code's, with `PreToolUse` among
+fourteen events, configured in `~/.grok/hooks/*.json` or
+`<project>/.grok/hooks/*.json`, with a per-hook `timeout` (default 5s) and a
+`type` of `command` or `http`.
+
+- Input: "The event arrives as JSON on stdin, including `hookEventName`,
+  `sessionId`, `cwd`, `workspaceRoot`, and for tool events `toolName` and
+  `toolInput`." CamelCase, so the claude-code parser reads no `tool_name`.
+- Decision: "A `PreToolUse` hook decides by writing JSON to stdout:
+  `{ "decision": "deny", "reason": "Unsafe command detected" }`. Exit code 0
+  allows, exit code 2 denies."
+- Failure: "Everything else, timeouts, crashes, malformed output, is
+  fail-open: the failure is recorded in the session but the tool call
+  proceeds." No flag changes this.
+- Compatibility: "Claude Code (`.claude/settings.json`) and Cursor
+  (`.cursor/hooks.json`) hook files are read as well, including Cursor's
+  camelCase event names." How their output dialects are handled is not
+  documented.
+
+Unverified: the version history (secondary sources say 1.0.0 on 2026-08-07;
+the xAI release-notes page shows a conflicting date and the changelog page
+refused the fetch), and any npm package name. Grok Bot, a separate product,
+has its own entry below.
+
+What the gate makes of the commands involved, from `approval hook classify`
+on the assessment date:
+
+| Command | Class |
+| --- | --- |
+| `curl -fsSL https://x.ai/cli/install.sh \| bash` | opaque (denied, `hook-opaque`) |
+| `npm install -g @xai/grok-build` (name unverified) | `deps.add` |
+| `grok` | unclassified (denied) |
+| `grok -p "fix the tests"` | unclassified (denied) |
+| `grok mcp add --transport stdio approval approval mcp` | unclassified (denied) |
+
+### Fit
+
+Good on the shape, with one contradiction and one hazard.
+
+1. **It is a harness with a pre-tool hook**, the same kind of surface
+   `approval hook claude-code` and `approval hook cursor` already answer. A
+   Grok adapter is a third row in the harness table in `src/cli/hook.ts`
+   (input keys, output dialect, deny by exit 2), the same deterministic core
+   behind it, and a `docs/grok-hook.md`. Neither the adapter contract in
+   `src/adapters/contract.ts` nor the channel contract is involved.
+2. **Its failure model contradicts the fail-closed invariant.** A hook that
+   times out, crashes or prints something Grok cannot parse lets the tool
+   run. Cursor has `failClosed: true`; Grok documents no equivalent. An
+   adapter can make every answered case honest and must state plainly that
+   the unanswered cases are open. A manual-class wait is minutes long, so the
+   per-hook `timeout` has to be raised above `--timeout` or every wait is an
+   allow.
+3. **The compatibility read is the hazard, and it exists today with no
+   adapter.** If a Grok session in this repository fires the committed
+   `.claude/settings.json` entry, the hook receives a camelCase envelope,
+   parses no tool name, prints its deny in the Claude nested envelope and
+   exits 0. Grok reads exit 0 with no `decision` key. The most likely result
+   is that every command looks gated and none is, with a deny reason nobody
+   reads. Whether the read fires at all is undocumented, which is why the
+   probe comes before the code.
+
+"Pre-launch" in the sense of a `SessionStart` hook is rejected on the UCA
+reasoning: a session-start check is invalidated by anything that happens
+later. Per-tool gating is the surface; harness version provenance (APRV-227)
+covers the rest.
+
+### Conclusion
+
+Parked. The adapter is cheap and the shape fits, but the two facts the
+verdict rests on (does the Claude-file compatibility read fire, and how does
+Grok treat the Claude output dialect on exit 0) are undocumented and need a
+running Grok Build, which a human installs (the installer is opaque to the
+classifier). Until then: do not run Grok Build in this repository expecting
+the gate to hold, and treat `grok` as the unclassified command it is.
+
+### Next steps
+
+- APRV-243: the live probe, then `approval hook grok` (Grok envelope in,
+  Grok dialect out, exit 2 on deny), `.grok/hooks/` classified `policy.core`,
+  and a hook doc that names the fail-open cases. The entry moves to adopted
+  or declined on the probe's result.
+
+## Grok Bot (xAI agent product)
+
+Assessed 2026-09-02. Verdict: **adopted (demo)**, through the MCP surface
+that already exists; no Grok-specific code.
+
+### What it is
+
+A separate xAI product from Grok Build, in early beta from around
+2026-08-11: persistent agents that run tasks end to end and "return for
+approval" through xAI's desktop app and an iPhone companion app. The
+approval step and the runtime are xAI's own; no official documentation page
+for either was reachable on the assessment date, so the product description
+rests on secondary sources.
+
+### What it exposes
+
+Revised 2026-09-05 against xAI's own pages. Grok Bot runs on Cursor-hosted
+cloud computers and is bundled into Cursor Pro+/Ultra/Teams and SuperGrok
+Plus/Heavy tiers (docs.x.ai/grok-bot/security, reported tiers). It ships its
+own approval layer: sends, publishes, purchases, deletes, permission changes
+and production changes prompt Allow or Deny in the desktop and phone apps, and
+admins can set Auto Review rules (docs.x.ai/grok-bot/approvals-security-and-privacy).
+AgentMail is an official plugin inside it, with a built-in "Approval" template
+that holds one send until a yes reply (agentmail.to/build/grokbot). No
+third-party pre-action hook, no webhook, and no documented link to Grok
+Build's hook files.
+
+The one surface we can wire to is custom MCP connectors
+(docs.x.ai/grok/connectors): a server URL plus auth, reachable over the public
+internet, with a tunnel named as the way to expose a local server; transports
+are streamable HTTP and SSE (docs.x.ai/developers/tools/remote-mcp). No
+command line was found to classify.
+
+That is the client half of `approval mcp serve --http` (SPEC §10.5,
+APRV-174): a streamable-HTTP MCP server on a loopback bind behind a tunnel,
+`--guest` minting one `agent:guest-<id>` per session, the guest tool list
+intersected rather than extended, and the `wait` clamp of APRV-175. The
+server checks no header and authenticates nobody by design; guest mode and
+the session caps are the protection.
+
+### Fit
+
+Good as a demo, and honest only if three tiers are stated with it. MCP use
+is voluntary: a connected agent can call `request`, `wait` and `run`, or
+simply act. The gate does not have to be trusted to be useful, because side
+effects leave witnesses elsewhere.
+
+| Tier | What holds | Where it holds |
+| --- | --- | --- |
+| Prevented by custody | Adapter-held credentials answer only to a token (SPEC §10.4, the AgentMail two-key model, APRV-222). An agent holding the connector and not the key cannot send around the gate. | send, spend, delete on a provider |
+| Witnessed by a log we do not write | `approval coverage` (APRV-245) joins effects git, `gh` and a provider's own records can see against verified records, and reports each with its evidence or `none`. Informational: no verdict moves. | repository effects, adapter-backed effects |
+| Not covered | Effects made with credentials the agent holds itself, for example pasted into Grok Bot and used from xAI's cloud. No witness reaches us. The remedy is custody, the first tier. | everything else |
+
+Grok Bot's own Allow/Deny prompt and AgentMail's Approval template are
+single-vendor approve-clicks: each answers inside one product, neither writes a
+record a third party can verify, and neither reaches an effect made through a
+different tool. That is the pitch, stated affirmatively: approval.md is one
+policy file and one hash-chained log across Cursor, Grok Build, Grok Bot and
+the adapters, with credential custody the agent cannot route around and a
+coverage report for what it did not route through. A decision that is not in
+the verified log did not happen as far as the gate is concerned.
+
+### Conclusion
+
+Adopted as the connector demo: a Grok Bot agent uses the gate through the
+connector, then skips it, and the witnesses show the difference. The demo is
+the runbook in APRV-246 and the coverage verb in APRV-245. No Grok Bot code
+is written; if xAI documents an approval API or webhook, the product is
+assessed again as a channel candidate.
+
+### Next steps
+
+- APRV-245: `approval coverage`, the observed-effects join (git, `gh`,
+  adapter `observe`), informational, with the three tiers written under the
+  verb.
+- APRV-246: `examples/grok-bot-connector/runbook.md`, the beats above, with
+  the TBDs only a rehearsal settles (connector transport, whether Grok Bot
+  holds a long `wait`, the identity it presents, whether its cloud computer
+  reaches a quick tunnel).
 
 ## Claude for commerce agents (anthropics/commerce-agents)
 

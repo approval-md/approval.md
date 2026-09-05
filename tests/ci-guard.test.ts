@@ -831,3 +831,109 @@ test("every production dependency's engines.node admits the Node floor", () => {
     );
   }
 });
+
+// --------------------------------------------------------------------------
+// The guard's log sourcing, and the workflow that clears a stale failure
+// --------------------------------------------------------------------------
+//
+// The guard reads a COMMITTED copy of the log, and the freshest one that
+// carries this head's chain may live on a records branch (APRV-260). Two
+// workflow-side pieces make that work: the records refs have to be fetched
+// before the guard runs, and a guard that failed for want of an advance has to
+// be re-run when the advance lands. Both are asserted from the checked-in
+// bytes, for the same reason everything else on this page is.
+
+const RERUN_PATH = join(REPO_ROOT, ".github", "workflows", "guard-rerun.yml");
+const RERUN_TEXT = readFileSync(RERUN_PATH, "utf8");
+
+/** The rerun workflow as data, under the same hardened parse. */
+function rerunWorkflow(): Record<string, unknown> {
+  const parsed = parseHardenedYaml(RERUN_TEXT, {
+    subject: "workflow YAML",
+    tagContext: "a workflow file",
+  });
+  assert.ok(
+    parsed.ok,
+    `.github/workflows/guard-rerun.yml does not parse under the hardened settings: ${parsed.ok ? "" : parsed.message}`,
+  );
+  const value = parsed.value;
+  assert.ok(
+    typeof value === "object" && value !== null && !Array.isArray(value),
+    ".github/workflows/guard-rerun.yml is not a YAML mapping",
+  );
+  return value as Record<string, unknown>;
+}
+
+test("the protected-paths job fetches the records refs the guard may read", () => {
+  const steps = job("protected-paths")["steps"] as Array<Record<string, unknown>>;
+  const fetches = steps.filter((step) =>
+    String(step["run"] ?? "").includes("refs/remotes/origin/records-*"),
+  );
+  assert.equal(
+    fetches.length,
+    1,
+    "the protected-paths job no longer fetches the records branches. The guard looks past head for the freshest copy of the log that carries head's own chain; with the refs absent it silently has only head to read, and a correctly gated pull request fails until two merges land.",
+  );
+  const script = String(fetches[0]?.["run"] ?? "");
+  assert.match(script, /git fetch --no-tags origin/u);
+  assert.match(script, /\+refs\/heads\/records-\*:refs\/remotes\/origin\/records-\*/u);
+  // It runs before the guard, or it does nothing at all.
+  const fetchAt = steps.indexOf(fetches[0] as Record<string, unknown>);
+  const guardAt = steps.findIndex((step) =>
+    String(step["run"] ?? "").includes("scripts/protected-path-guard.mjs"),
+  );
+  assert.ok(guardAt > fetchAt, "the records fetch must run before the guard");
+  // And the guard's provenance line is printed, so a reader can tell a stale
+  // log from a missing grant without opening the log.
+  assert.match(String(steps[guardAt]?.["run"] ?? ""), /grep '\^log from '/u);
+});
+
+test("the rerun workflow triggers only on a log advance reaching main", () => {
+  const triggers = rerunWorkflow()["on"] as Record<string, unknown>;
+  assert.ok(
+    typeof triggers === "object" && triggers !== null,
+    "guard-rerun.yml has no trigger mapping (the parse is YAML 1.2 core: `on` is a string key)",
+  );
+  const push = triggers["push"] as Record<string, unknown>;
+  assert.ok(push !== undefined, "guard-rerun.yml no longer triggers on push");
+  assert.deepEqual(push["branches"], ["main"]);
+  assert.deepEqual(
+    push["paths"],
+    [".approval/log/events.jsonl"],
+    "the rerun workflow must fire on the log advancing and on nothing else; a broader trigger re-runs other people's checks for reasons that have nothing to do with the guard",
+  );
+  assert.deepEqual(Object.keys(triggers), ["push"], "guard-rerun.yml gained another trigger");
+});
+
+test("the rerun workflow holds exactly the two permissions it needs, and no other secret", () => {
+  const doc = rerunWorkflow();
+  assert.deepEqual(
+    doc["permissions"],
+    { actions: "write", "pull-requests": "read" },
+    "guard-rerun.yml's permissions changed. It re-runs a workflow run and reads the list of open pull requests; anything more (contents, checks, the ability to comment or merge) is a capability a pull request would be worth attacking for.",
+  );
+  const secrets = scalars(doc).filter((text) => text.includes("secrets."));
+  for (const reference of secrets) {
+    assert.match(
+      reference,
+      /^\$\{\{ secrets\.GITHUB_TOKEN \}\}$/u,
+      `guard-rerun.yml reads ${reference}. The workflow's own GITHUB_TOKEN, scoped by its permissions block, is the whole credential it may hold.`,
+    );
+  }
+  assert.equal(secrets.length, 1, "guard-rerun.yml should read GITHUB_TOKEN exactly once");
+  // The work is done by a script in this repository, reviewable as code, rather
+  // than by shell in a workflow nobody tests.
+  const steps = ((doc["jobs"] as Record<string, Record<string, unknown>>)["rerun"]?.[
+    "steps"
+  ] ?? []) as Array<Record<string, unknown>>;
+  assert.ok(
+    steps.some((step) => String(step["run"] ?? "").includes("scripts/guard-rerun.mjs")),
+    "guard-rerun.yml no longer runs scripts/guard-rerun.mjs",
+  );
+  // No context value is interpolated into shell text anywhere in the file.
+  assert.equal(
+    /run:[^\n]*\$\{\{/u.test(RERUN_TEXT),
+    false,
+    "guard-rerun.yml interpolates a context value into a run: line; context reaches a script through env, never as shell syntax",
+  );
+});

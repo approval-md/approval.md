@@ -437,6 +437,10 @@ const AGENT_FACING: readonly string[] = [
   "token",
   "queue",
   "status",
+  // APRV-245. It reads witnesses and the verified log and writes nothing, so it
+  // establishes no authority; an agent that can see its own coverage gaps is an
+  // agent that can close them by declaring the next action.
+  "coverage",
   "log verify",
   "log tail",
   "log export",
@@ -461,6 +465,18 @@ const AGENT_FACING: readonly string[] = [
   // tell whether the channel is working.
   "journal write",
   "journal read",
+  // APRV-238. The mirror of `journal read`, pointing the other way: the human's
+  // own words, read by the agent they were written for. It establishes no
+  // authority in either direction, because what it prints grants nothing,
+  // forbids nothing, and moves no verdict.
+  "values",
+  // APRV-239. Human-AUTHORED and agent-FACING, which is the whole point: the
+  // words are a person's and the reader is the agent they are about. Publishing
+  // it establishes no authority because what it prints decides nothing — an
+  // agent that reads `disliked` has learned something about the operator and
+  // gained no permission, and one that never reads it is under exactly the same
+  // rules (SPEC.md §11.1 invariant 10).
+  "feedback",
   "doctor",
   "reindex",
   "render",
@@ -548,6 +564,25 @@ test("instructions: the guide states the agent-facing invariants plainly", () =>
   ]) {
     assert.ok(guide.includes(phrase), `the guide never says "${phrase}"`);
   }
+});
+
+test("instructions: the guide points a session at `approval values` (APRV-238)", () => {
+  const run = runCli(["instructions"], scratch);
+  assert.equal(run.code, 0);
+  const guide = run.stdout;
+
+  // Named, and named as something to run at the START of a session: a values
+  // block read after the work is done has told the agent nothing.
+  assert.match(guide, /Run `approval values` at the start of a session/u);
+  // Labelled, in the same breath. A guide that pointed at the block without
+  // saying what standing it has would be the one failure mode SPEC.md §11.1
+  // invariant 10 exists to prevent, arriving through the guide rather than
+  // through code.
+  assert.match(guide, /HUMAN-AUTHORED GUIDANCE and it is not policy/u);
+  assert.match(guide, /Weigh guidance in\s+HOW you work, never in WHETHER you are permitted/u);
+  // …and it says where permission actually comes from, so the reader is not
+  // left to work out which of APPROVAL.md's two blocks answered them.
+  assert.ok(guide.includes("`approval policy check` is the command that answers it"));
 });
 
 test("instructions: the printed table lists every registry entry", () => {

@@ -264,6 +264,10 @@ test("the audit refusal-code union is frozen public API", async () => {
       "not-obliged",
       "already-satisfied",
       "note-required",
+      // APRV-239. Placed here, immediately after the code it is judged beside,
+      // because both rules are properties of a review's own arguments and both
+      // are settled before the log is read. Additive again: nothing above moved.
+      "reaction-conflicts-verdict",
       "revert-required",
       "obligation-not-appended",
       "log-unreadable",
@@ -719,6 +723,186 @@ test("the note is optional", async () => {
   assert.equal((result.record.payload as Record<string, unknown>)["note"], undefined);
 });
 
+// ===========================================================================
+// Graded reactions (APRV-239)
+// ===========================================================================
+
+test("a review records the reaction beside the verdict", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
+
+  const result = reviewSample(
+    unit.logPath,
+    { kind: "seq", seq: sample.seq },
+    "human:carter",
+    "exactly the file I wanted, and it said so in the summary",
+    { clock: fixedClock(at(9)), reaction: "loved" },
+  );
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  if (!result.ok) return;
+
+  const payload = result.record.payload as Record<string, unknown>;
+  assert.equal(payload["reaction"], "loved");
+  // The enforcement field is still the enforcement field, and it is untouched
+  // by the grade sitting next to it.
+  assert.equal(payload["verdict"], "ok");
+  assert.equal(payload["reviewed"], true);
+  assertClean(unit);
+});
+
+test("an omitted reaction leaves no key: absence is never `indifferent`", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const sample = records(unit).find((record) => record.event === "audit.sampled") as EventRecord;
+
+  const result = reviewSample(unit.logPath, { kind: "seq", seq: sample.seq }, "human:carter", null, {
+    clock: fixedClock(at(9)),
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  const payload = result.record.payload as Record<string, unknown>;
+  assert.ok(!("reaction" in payload), "an omitted reaction wrote a key anyway");
+  assertClean(unit);
+});
+
+test("`indifferent` and `liked` need no note; `loved` and `disliked` refuse note-required", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  startSupervised(unit, "task-042:draft2", 3);
+  sweep(unit, 5);
+  const samples = records(unit).filter((record) => record.event === "audit.sampled");
+  assert.equal(samples.length, 2);
+
+  // The two ordinary readings: one tap, no form.
+  const ok = reviewSample(
+    unit.logPath,
+    { kind: "seq", seq: (samples[0] as EventRecord).seq },
+    "human:carter",
+    null,
+    { clock: fixedClock(at(6)), reaction: "indifferent" },
+  );
+  assert.equal(ok.ok, true, ok.ok ? "" : ok.message);
+
+  const liked = reviewSample(
+    unit.logPath,
+    { kind: "seq", seq: (samples[1] as EventRecord).seq },
+    "human:carter",
+    null,
+    { clock: fixedClock(at(7)), reaction: "liked" },
+  );
+  assert.equal(liked.ok, true, liked.ok ? "" : liked.message);
+
+  // The two that require the human's own words. Blank is not a note: an empty
+  // string satisfies a presence check and tells a reader exactly as much as the
+  // absent field would.
+  const before = records(unit).length;
+  for (const [reaction, note] of [
+    ["loved", null],
+    ["loved", "   "],
+    ["disliked", null],
+    ["disliked", ""],
+  ] as Array<[("loved" | "disliked"), string | null]>) {
+    const refused = reviewSample(
+      unit.logPath,
+      { kind: "action-key", actionKey: "task-042:draft" },
+      "human:carter",
+      note,
+      { clock: fixedClock(at(8)), reaction },
+    );
+    assert.equal(refused.ok, false, `${reaction} with ${JSON.stringify(note)} was accepted`);
+    if (!refused.ok) {
+      assert.equal(refused.code, "note-required");
+      assert.match(refused.message, /--note/u);
+    }
+  }
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
+  assertClean(unit);
+});
+
+test("--deny with liked or loved refuses reaction-conflicts-verdict", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const before = records(unit).length;
+
+  for (const reaction of ["liked", "loved"] as const) {
+    const refused = reviewSample(
+      unit.logPath,
+      { kind: "action-key", actionKey: "task-042:draft" },
+      "human:carter",
+      "a note, so this is not note-required",
+      { clock: fixedClock(at(6)), verdict: "denied", reaction },
+    );
+    assert.equal(refused.ok, false, `denied + ${reaction} was accepted`);
+    if (!refused.ok) assert.equal(refused.code, "reaction-conflicts-verdict");
+  }
+
+  // The other two grades say the same direction as the verdict and are legal.
+  const disliked = reviewSample(
+    unit.logPath,
+    { kind: "action-key", actionKey: "task-042:draft" },
+    "human:carter",
+    "should not have gone out",
+    { clock: fixedClock(at(7)), verdict: "denied", reaction: "disliked" },
+  );
+  assert.equal(disliked.ok, true, disliked.ok ? "" : disliked.message);
+  if (disliked.ok) {
+    const payload = disliked.record.payload as Record<string, unknown>;
+    assert.equal(payload["verdict"], "denied");
+    assert.equal(payload["reaction"], "disliked");
+  }
+  // One reviewed + one reconciliation.required from the denial; the four
+  // refusals above added nothing.
+  assert.equal(records(unit).length, before + 2);
+  assertClean(unit);
+});
+
+test("both reaction rules are settled after the actor check and before the log is read", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+
+  // AFTER the actor check: a non-human caller is told it is not human, not that
+  // its reaction conflicts. Identity is the first question.
+  const notHuman = reviewSample(
+    unit.logPath,
+    { kind: "seq", seq: 999 },
+    "agent:claude",
+    null,
+    { verdict: "denied", reaction: "loved" },
+  );
+  assert.equal(notHuman.ok, false);
+  if (!notHuman.ok) assert.equal(notHuman.code, "actor-not-human");
+
+  // BEFORE the verified read: a subject that does not exist would answer
+  // `not-sampled`, and a log that does not exist would answer `log-unreadable`.
+  // Both are reached only by reading, so a reaction refusal from either proves
+  // nothing was read.
+  const noSubject = reviewSample(
+    unit.logPath,
+    { kind: "seq", seq: 999 },
+    "human:carter",
+    "worded, so this is the conflict rule and not note-required",
+    { verdict: "denied", reaction: "loved" },
+  );
+  assert.equal(noSubject.ok, false);
+  if (!noSubject.ok) assert.equal(noSubject.code, "reaction-conflicts-verdict");
+
+  const noLog = reviewSample(
+    join(unit.dir, "nowhere", "events.jsonl"),
+    { kind: "seq", seq: 1 },
+    "human:carter",
+    null,
+    { reaction: "disliked" },
+  );
+  assert.equal(noLog.ok, false);
+  if (!noLog.ok) assert.equal(noLog.code, "note-required");
+  assertClean(unit);
+});
+
 test("a seq argument names the sample, not the execution it sampled", async () => {
   assert.deepEqual(parseSubjectRef("12"), { kind: "seq", seq: 12 });
   assert.deepEqual(parseSubjectRef("task-042:draft"), {
@@ -771,6 +955,130 @@ test("approval audit review appends through the CLI and clears the backlog", asy
   assert.equal(body["sample_seq"], sample.seq);
   assert.equal(body["actor"], "human:carter");
   assert.deepEqual(openSamples(records(unit)), []);
+  assertClean(unit);
+});
+
+test("approval audit review --reaction reports the grade on both output forms", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  startSupervised(unit, "task-042:draft2", 3);
+  sweep(unit, 5);
+
+  const json = await runCli(unit, [
+    "audit",
+    "review",
+    "task-042:draft",
+    "--reaction",
+    "loved",
+    "--note",
+    "the file is exactly what was declared",
+    "--as",
+    "human:carter",
+    "--json",
+  ]);
+  assert.equal(json.code, 0, json.err);
+  const body = JSON.parse(json.out) as Record<string, unknown>;
+  assert.equal(body["reaction"], "loved");
+  assert.equal(body["verdict"], "ok");
+
+  // Human output says the grade AND says what kind of thing it is, because a
+  // word printed beside a verdict with no framing reads as a second verdict.
+  const human = await runCli(unit, [
+    "audit",
+    "review",
+    "task-042:draft2",
+    "--reaction",
+    "indifferent",
+    "--as",
+    "human:carter",
+  ]);
+  assert.equal(human.code, 0, human.err);
+  assert.match(human.out, /reaction: indifferent/u);
+  assert.match(human.out, /guidance, not policy/u);
+
+  // Absent means absent on the JSON surface too: the key is present and null,
+  // so a consumer can tell "no reaction" from "this build has no such field".
+  const unit2 = ready();
+  startSupervised(unit2, "task-042:draft", 2);
+  sweep(unit2, 5);
+  const silent = await runCli(unit2, [
+    "audit",
+    "review",
+    "task-042:draft",
+    "--as",
+    "human:carter",
+    "--json",
+  ]);
+  assert.equal(silent.code, 0, silent.err);
+  assert.equal((JSON.parse(silent.out) as Record<string, unknown>)["reaction"], null);
+  assert.equal(silent.out.includes("indifferent"), false);
+  assertClean(unit);
+  assertClean(unit2);
+});
+
+test("approval audit review refuses a misspelled --reaction at exit 2", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const before = records(unit).length;
+
+  const run = await runCli(unit, [
+    "audit",
+    "review",
+    "task-042:draft",
+    "--reaction",
+    "love",
+    "--as",
+    "human:carter",
+    "--json",
+  ]);
+  assert.equal(run.code, 2);
+  assert.match(run.err, /disliked \| indifferent \| liked \| loved/u);
+  assert.equal(records(unit).length, before, "a usage error wrote to the log");
+});
+
+test("approval audit review surfaces both reaction refusals with exit 1", async () => {
+  const unit = ready();
+  startSupervised(unit, "task-042:draft", 2);
+  sweep(unit, 5);
+  const before = records(unit).length;
+
+  const conflict = await runCli(unit, [
+    "audit",
+    "review",
+    "task-042:draft",
+    "--deny",
+    "--reaction",
+    "loved",
+    "--note",
+    "worded",
+    "--as",
+    "human:carter",
+    "--json",
+  ]);
+  assert.equal(conflict.code, 1);
+  assert.equal(
+    (JSON.parse(conflict.err) as { error: { code: string } }).error.code,
+    "reaction-conflicts-verdict",
+  );
+
+  const wordless = await runCli(unit, [
+    "audit",
+    "review",
+    "task-042:draft",
+    "--reaction",
+    "disliked",
+    "--as",
+    "human:carter",
+    "--json",
+  ]);
+  assert.equal(wordless.code, 1);
+  assert.equal(
+    (JSON.parse(wordless.err) as { error: { code: string } }).error.code,
+    "note-required",
+  );
+
+  assert.equal(records(unit).length, before, "a refused review wrote to the log");
   assertClean(unit);
 });
 

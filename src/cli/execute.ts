@@ -59,6 +59,12 @@ import { openObligations } from "../core/audit.js";
 import { evaluateBudgets, type BudgetVerdict } from "../core/budgets.js";
 import { declaredCredentialsForClass } from "../adapters/registry.js";
 import { childEnvironment, type ChildEnvironment } from "../core/child-env.js";
+import { coverageReport } from "../core/coverage.js";
+import {
+  DEFAULT_TRUNK_REF,
+  defaultRange,
+  observeGit,
+} from "../core/coverage-sources/git.js";
 import {
   danglingExecutions,
   findDeclaration,
@@ -96,6 +102,7 @@ import {
   EXIT_TORN_TAIL,
   EXIT_USAGE,
 } from "./exit-codes.js";
+import { repoRoot } from "./git-scope.js";
 import {
   EXECUTION_HELP,
   QUEUE_HELP,
@@ -1059,6 +1066,68 @@ function payloadStoreSummary(
   };
 }
 
+/** The `git coverage` row's state: what git witnessed, and what the log says. */
+interface GitCoverageSummary {
+  available: boolean;
+  reason: string | null;
+  observed: number;
+  covered: number;
+}
+
+/**
+ * The informational git-coverage line of `approval status` (APRV-245).
+ *
+ * The range is the CURRENT BRANCH's own commits: `defaultRange` takes the merge
+ * base with `origin/main`, so what this counts is what this branch added and not
+ * the whole history. Two states are reported instead of a count, because in
+ * neither of them would a count mean anything: a directory that is not a git
+ * checkout, and a checkout where `origin/main` does not resolve. The second is
+ * NOT quietly swapped for the last twenty commits here — `approval coverage`
+ * announces that fallback in its own output where there is room to say so, and
+ * a one-line summary that silently changed what it measured would be worse than
+ * one that says it cannot measure.
+ *
+ * Informational, exactly as `harness outcomes` beside it is (APRV-145): it is a
+ * coverage measurement rather than an integrity verdict, so it is deliberately
+ * outside `healthy` and outside the exit code. A gap here is a question for a
+ * person ("was that commit ever declared?"), and questions with legitimate
+ * answers must not turn a `status` run red.
+ */
+function gitCoverageSummary(
+  records: readonly EventRecord[],
+  flags: Record<string, string | boolean>,
+  cwd: string,
+): GitCoverageSummary {
+  const empty = (reason: string): GitCoverageSummary => ({
+    available: false,
+    reason,
+    observed: 0,
+    covered: 0,
+  });
+  const root = repoRoot(cwd);
+  if (root === null) return empty("not a git checkout");
+  const range = defaultRange(root, DEFAULT_TRUNK_REF);
+  if (range.note !== undefined) return empty(`${DEFAULT_TRUNK_REF} absent`);
+
+  const location = policyLocation(flags, cwd);
+  const load = loadPolicy(
+    location.file === undefined ? { dir: location.dir ?? cwd } : { file: location.file },
+  );
+  const seen = observeGit(root, {
+    base: range.base,
+    head: range.head,
+    policyProtectedPaths: load.ok ? (load.policy.protected_paths ?? []) : [],
+  });
+  if (!seen.available) return empty(seen.reason ?? "git could not be asked");
+  const report = coverageReport(seen.effects, records);
+  return {
+    available: true,
+    reason: seen.reason ?? null,
+    observed: report.observed,
+    covered: report.covered,
+  };
+}
+
 export function commandStatus(argv: string[], streams: Streams, cwd: string): number {
   const outcome = front(
     argv,
@@ -1143,6 +1212,11 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
   // not an integrity verdict. A persistently high `unreported` is how an
   // operator learns the post-execution hook is not installed or not firing.
   const harnessOutcomes = harnessOutcomeCoverage(records);
+  // APRV-245, and informational for the reason directly above: the same rule,
+  // applied to a witness this project does not write. `harness outcomes` counts
+  // the tool calls the runtime was told about; this counts the commits git saw
+  // whether or not anybody told the runtime anything.
+  const coverage = gitCoverageSummary(records, flags, cwd);
   // APRV-127. The reconciliation backlog: obligations opened by a retrospective
   // DENIAL and not yet discharged by a person. It counts toward `healthy` for
   // the same reason a dangling execution does — an unreconciled denial is a "no"
@@ -1226,6 +1300,15 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
       budgets,
       loop_escalations: escalations,
       harness_outcomes: harnessOutcomes,
+      // APRV-245. Always present, so every consumer sees the same four keys
+      // whether or not this directory is a checkout, and outside `healthy` and
+      // the exit code for the APRV-145 reason stated where it is computed.
+      coverage: {
+        available: coverage.available,
+        reason: coverage.reason,
+        observed: coverage.observed,
+        covered: coverage.covered,
+      },
       reconciliation: obligations,
       payload_store: payloadStore,
       ...(anomalies.length === 0 ? {} : { anomalies }),
@@ -1356,6 +1439,19 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
         left: "harness outcomes",
         right: st.muted(
           `${harnessOutcomes.started} started, ${harnessOutcomes.reported} reported, ${harnessOutcomes.unreported} unreported`,
+        ),
+      },
+      {
+        // APRV-245, and INFORMATIONAL for the APRV-145 reason the row above is:
+        // a coverage measurement is not an integrity verdict, so it moves
+        // neither `healthy` nor the exit code. What it counts is this branch's
+        // own commits, as git recorded them, against the verified log. The full
+        // report, `gh` and the adapters included, is `approval coverage`.
+        left: "git coverage",
+        right: st.muted(
+          coverage.available
+            ? `${String(coverage.covered)} of ${String(coverage.observed)} effects carry evidence`
+            : (coverage.reason ?? "unavailable"),
         ),
       },
       {

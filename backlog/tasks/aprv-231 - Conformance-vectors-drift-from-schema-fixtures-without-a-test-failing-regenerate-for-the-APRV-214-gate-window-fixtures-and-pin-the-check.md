@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-02 19:18'
+updated_date: '2026-09-02 22:04'
 labels:
   - conformance
   - test
@@ -26,3 +27,13 @@ Found by the APRV-211 lane on 2026-09-02: APRV-214 (PR #223) added six schema/fi
 - [ ] #2 A test regenerates the vectors in memory from the current fixtures and fails with the regen command in its message when the committed file differs
 - [ ] #3 npm test passes; lint clean
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: @fable
+created: 2026-09-02 22:04
+---
+APRV-237's conformance regen (branch claude/approval-signals-human-values-f0cf71) swept in the six APRV-214 gate fixtures this task names, so the drift half is fixed there. The 'pin the check' half (a test that fails when schema fixtures and schema-validation.v1.json disagree) is still open and stays with this task.
+---
+<!-- COMMENTS:END -->
