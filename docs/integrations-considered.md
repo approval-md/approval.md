@@ -273,10 +273,22 @@ rests on secondary sources.
 
 ### What it exposes
 
-One surface, from xAI's own announcement (x.ai/news/grok-bot-and-x): custom
-connectors. A user adds an MCP server by name, server URL and one header.
-No approval API, no webhook, no pre-action hook, and no Slack, Telegram or
-email surface. No command line was found to classify.
+Revised 2026-09-05 against xAI's own pages. Grok Bot runs on Cursor-hosted
+cloud computers and is bundled into Cursor Pro+/Ultra/Teams and SuperGrok
+Plus/Heavy tiers (docs.x.ai/grok-bot/security, reported tiers). It ships its
+own approval layer: sends, publishes, purchases, deletes, permission changes
+and production changes prompt Allow or Deny in the desktop and phone apps, and
+admins can set Auto Review rules (docs.x.ai/grok-bot/approvals-security-and-privacy).
+AgentMail is an official plugin inside it, with a built-in "Approval" template
+that holds one send until a yes reply (agentmail.to/build/grokbot). No
+third-party pre-action hook, no webhook, and no documented link to Grok
+Build's hook files.
+
+The one surface we can wire to is custom MCP connectors
+(docs.x.ai/grok/connectors): a server URL plus auth, reachable over the public
+internet, with a tunnel named as the way to expose a local server; transports
+are streamable HTTP and SSE (docs.x.ai/developers/tools/remote-mcp). No
+command line was found to classify.
 
 That is the client half of `approval mcp serve --http` (SPEC §10.5,
 APRV-174): a streamable-HTTP MCP server on a loopback bind behind a tunnel,
@@ -298,10 +310,14 @@ effects leave witnesses elsewhere.
 | Witnessed by a log we do not write | `approval coverage` (APRV-245) joins effects git, `gh` and a provider's own records can see against verified records, and reports each with its evidence or `none`. Informational: no verdict moves. | repository effects, adapter-backed effects |
 | Not covered | Effects made with credentials the agent holds itself, for example pasted into Grok Bot and used from xAI's cloud. No witness reaches us. The remedy is custody, the first tier. | everything else |
 
-Grok Bot's own "return for approval" prompt is a competing approver with
-undocumented criteria and is not treated as evidence of anything: a decision
-that is not in the verified log did not happen as far as the gate is
-concerned.
+Grok Bot's own Allow/Deny prompt and AgentMail's Approval template are
+single-vendor approve-clicks: each answers inside one product, neither writes a
+record a third party can verify, and neither reaches an effect made through a
+different tool. That is the pitch, stated affirmatively: approval.md is one
+policy file and one hash-chained log across Cursor, Grok Build, Grok Bot and
+the adapters, with credential custody the agent cannot route around and a
+coverage report for what it did not route through. A decision that is not in
+the verified log did not happen as far as the gate is concerned.
 
 ### Conclusion
 
