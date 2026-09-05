@@ -3,11 +3,11 @@ id: APRV-261
 title: >-
   tests/daemon-advance-finish.test.ts races the wall clock: the finish
   head-moved cases depend on a 300 ms sleep and a six-round coin flip
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-f'
 created_date: '2026-09-05 08:38'
-updated_date: '2026-09-05 08:55'
+updated_date: '2026-09-05 10:06'
 labels:
   - test
   - daemon
@@ -173,3 +173,9 @@ inside the hook's own 2 s give-up window. Those are the property, not the
 harness. If the orchestrator wants the 2 s bounds moved behind an opt-in the way
 APRV-248 AC2 does for tap latency, that is its own task.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The finish-race cases inject their interleaving through a read-to-append seam (FinishOptions.afterRead) with a signalling child fixture instead of a 300 ms bet; case 1 asserts two attempts and a clean landing, case 2 one attempt and append-failed with a dangling execution. Verified by daemon-advance-finish 6/6, full run 3401 pass, nine load rounds green; merged in PR #275.
+<!-- SECTION:FINAL_SUMMARY:END -->
