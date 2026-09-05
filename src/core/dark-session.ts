@@ -105,6 +105,7 @@ import { basename, join } from "node:path";
 
 import { policyBytesHash } from "./attest.js";
 import { childEnvironment } from "./child-env.js";
+import type { ProtectedPathEntry } from "./command-class.js";
 import { tick as readClock, type Clock } from "./clock.js";
 import { loadPayload, payloadStoreDirFor } from "./payload-store.js";
 import { loadPolicy, type LoadPolicyOptions } from "./policy-load.js";
@@ -234,7 +235,7 @@ export interface DarkSessionInput {
   /** Why the log could not be used, when `records` is `null`. */
   logDetail?: string;
   /** `policy.protected_paths`, widening the built-in guarded set. */
-  policyProtectedPaths: readonly string[];
+  policyProtectedPaths: readonly ProtectedPathEntry[];
   /** The policy file's repository-relative path, e.g. `APPROVAL.md`. */
   policyPath: string;
   /** SHA-256 of the policy bytes now on disk, for the `attested` verdict. */
@@ -977,7 +978,7 @@ export interface DarkSessionSweepOptions {
 function policyFacts(options: DarkSessionSweepOptions): {
   path: string;
   sha256: string | null;
-  protectedPaths: readonly string[];
+  protectedPaths: readonly ProtectedPathEntry[];
 } {
   const where: LoadPolicyOptions =
     options.policy.file !== undefined

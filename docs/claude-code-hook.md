@@ -233,17 +233,64 @@ Five overrides sit on top of the table:
   | `policy.core` | `APPROVAL.md`, `APPROVALS.md`, the rest of `.approval/` (env, payloads, vault, keys, `QUEUE.md`), `.claude/settings*`, `.cursor/hooks.json`, `.cursor/hooks/`, `.cursor/agents/` | the gate's own organs, including the files that install the hook |
   | `policy.edit` | `CLAUDE.md`, `AGENTS.md`, `.npmrc`, `.github/workflows/`, and every `policy.protected_paths` entry | the prose and configuration *about* the gate |
 
+  | `policy.edit.<name>` | nothing built in: only what a routed `policy.protected_paths` entry names (APRV-266) | one family of that same surface, carrying its own line |
+
   The check order is the precedence: a path is answered by the strictest
-  surface it names (`log.mutate`, then `policy.core`, then `policy.edit`), and
-  so is a segment naming several of them. The built-ins hold whatever the
-  policy says, so a policy can widen the protected surface and never narrow it,
-  and every path a policy adds lands on `policy.edit`. `policy.protected_paths`
-  (SPEC.md §5.2, APRV-107) lists repo-relative paths: an exact file (`SPEC.md`,
-  matched against a candidate's trailing segments, so a bare filename matches
-  in any directory as the built-ins do) or a directory prefix ending in `/`
-  (`design/`, matched wherever those segments appear). No globs, no negation.
-  `approval hook classify --dir <checkout>` answers under that checkout's
-  policy, which is how to ask what a path classifies as before touching it.
+  surface it names (`log.mutate`, then `policy.core`, then a routed
+  `policy.edit` sub-class, then built-in `policy.edit`), and so is a segment
+  naming several of them. The built-ins hold whatever the policy says, so a
+  policy can widen the protected surface and never narrow it.
+  `policy.protected_paths` (SPEC.md §5.2, APRV-107) lists repo-relative paths:
+  an exact file (`SPEC.md`, matched against a candidate's trailing segments, so
+  a bare filename matches in any directory as the built-ins do) or a directory
+  prefix ending in `/` (`design/`, matched wherever those segments appear). No
+  globs, no negation. `approval hook classify --dir <checkout>` answers under
+  that checkout's policy, which is how to ask what a path classifies as before
+  touching it.
+
+  Since APRV-266 an entry may also be written `{path, class}`, routing that
+  path family to a named sub-class under `policy.edit`:
+
+  ```yaml
+  protected_paths:
+    - SPEC.md                                            # policy.edit, as before
+    - { path: design/, class: policy.edit.design }
+    - { path: .github/workflows/, class: policy.edit.ci }
+  ```
+
+  A routed class is an ordinary §7 class taking an ordinary `classes` line, so
+  a project can see one in ten specification edits and every CI edit and no
+  design-doc edits at all, with no new class per path in the runtime. Four
+  names are reserved with fixed meanings, so two policies mean the same thing
+  by them: `policy.edit.spec` (the governing specification),
+  `policy.edit.harness` (agent instruction files and harness configuration that
+  is not the hook itself), `policy.edit.ci` (continuous-integration and release
+  configuration), `policy.edit.design` (design documents and decision records).
+  An author may mint any other lowercase word beside them. A routed class with
+  no line of its own **inherits the `policy.edit` line**, so adopting a routing
+  changes nothing until the author declares otherwise.
+
+  Two rules bound it, and both fail the policy rather than bending:
+
+  - The namespace is closed to exactly one extra segment under `policy.edit`. A
+    route to `policy.core`, to `log.mutate`, or to any class outside it is
+    refused: those are the gate's own organs and the record of what happened,
+    and a policy widening its own protected surface mints no authority over
+    them (SPEC.md §11.1 invariant 9). A route aimed at a path the runtime
+    already answers as `policy.core` or `log.mutate` could never fire, and is
+    refused at load rather than left inert for an author to misread.
+  - A route aimed at a path the runtime protects on its own — the built-in
+    `policy.edit` set — must resolve **at least as strictly** as the
+    `policy.edit` line itself, comparing the level first and the live rate on a
+    tie. Routing `.github/workflows/` to `manual` under a supervised-live line
+    is the point of the feature; routing it to `autonomous` would be a policy
+    editing its way out of the gate, and the loader refuses it with
+    `protected-route-floor`. A refused policy does not load, and a policy that
+    does not load resolves every class to `manual`.
+
+  Paths the runtime does not protect on its own are unfloored. `design/` is
+  protected only because the policy lists it, so its author is choosing the
+  autonomy of a surface they invented, and a loose choice there narrows nothing.
 - **`credential-path` / `credential-env` / `env-dump` → `account.credential`.**
   Credential material, whatever binary names it (APRV-194). A segment naming
   `.approval/vault*`, `.approval/keys/` or `.approval/env` is
@@ -889,7 +936,7 @@ Three verdicts pass, ordered by how much they prove.
 | verdict | what it establishes |
 |---|---|
 | `attested` | CONTENT-level. The policy file's bytes at the head commit hash to a digest some `policy.updated` record carries, which is what `approval policy amend --commit` writes. No grant is sought, which is how amendment pull requests pass — they have an attestation and would never have a `policy.edit` grant. |
-| `granted-file` | HUNK-level. An `approval.granted` of class `policy.edit`/`policy.core` whose `payload_hash` resolves in the committed payload store to material whose `file` names this path. Since APRV-124 the hook binds the CHANGE rather than the touch, so the payload carries the exact edit, and since APRV-202 that is what is checked: the granted `after` bytes must occur verbatim in the blob at head, the `before` bytes in the blob at base, and the lines they contain are the ones they cover. |
+| `granted-file` | HUNK-level. An `approval.granted` of class `policy.edit`, `policy.core` or (since APRV-266) any `policy.edit` sub-class, whose `payload_hash` resolves in the committed payload store to material whose `file` names this path. Since APRV-124 the hook binds the CHANGE rather than the touch, so the payload carries the exact edit, and since APRV-202 that is what is checked: the granted `after` bytes must occur verbatim in the blob at head, the `before` bytes in the blob at base, and the lines they contain are the ones they cover. |
 | `granted-command` | ATTRIBUTED, one notch weaker. The granted command is re-run through this runtime's own `classifyCommand`, and it counts only when a segment classifies as a granting class BECAUSE of a word naming this path (`ClassifiedSegment.path`, or another word of that same segment that resolves exactly to this checkout's copy of the path — a batch names several files and the field holds one). A mention is not a grant: `cat SPEC.md` is `read.shell` and proves nothing. A command payload describes no bytes, so it covers the whole path only with the three tests below. |
 
 There is deliberately **no class-level pass**. A `policy.edit` grant that exists
@@ -898,6 +945,15 @@ accepting it would let one approved edit launder every other edit beside it.
 Class-level grants appear in the failure text as diagnosis, never as a verdict.
 A grant whose payload the committed store does not carry is likewise not
 evidence, and the failure names those hashes.
+
+Routing changes which class opens the door and nothing about what decides
+(APRV-266). Both a grant of the routed sub-class and a grant of `policy.edit`
+itself are accepted for a routed path: the first is the ordinary case once a
+policy adopts routing, and the second is accepted because a routing is itself a
+policy edit and the two are never synchronized — a grant taken before the
+routing existed was correct evidence for the edit it authorized, and adopting a
+routing must not retroactively invalidate it. The naming and coverage tests are
+untouched.
 
 Where several grants qualify, the report names the strongest and then the
 nearest, rather than the first one it happened to find. A true verdict resting

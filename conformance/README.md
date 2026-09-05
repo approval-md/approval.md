@@ -171,6 +171,32 @@ bump nobody reviewed or block one somebody made. What the test does say is when
 content moved while the version stood still, since that is the shape a
 regeneration without the ritual takes.
 
+`policy-resolution` reached **2.0.0** at APRV-266, and the reason is its
+`algorithm` line rather than its vector count. 1.0.0 stated the no-rule-matched
+rule without qualification: a class no rule matches takes `defaults.autonomy`.
+That is now narrowed in one namespace. A `policy.edit` sub-class — the class a
+`protected_paths` entry routes a path family to — inherits the `policy.edit`
+line when it has no rule of its own, with the provenance `inherited`, a value
+1.0.0 does not name. The five new vectors move no existing expectation, and an
+implementation that read 1.0.0 and implemented exactly what it said resolves
+such a class to the default and does not conform. The suite also gained a
+control for the routing floor: a policy whose routing would resolve a built-in
+protected path below what the `policy.edit` line resolves to is refused at load
+with `protected-route-floor`, and every class then resolves to `manual`.
+
+`schema-validation` reached **2.0.0** in the same change, for two vectors and
+reluctantly. `protected_paths` gained the routed `{path, class}` entry beside
+the bare string, so its `items` is a union, and a `..` path and an absolute path
+now report `schema-oneOf` where they reported `schema-pattern`. Both documents
+are still refused, at the same instance path, with the `pattern` failure still
+in the error list; the union reports itself first. Every alternative spelling
+moves the same expectation or a worse one: `if`/`then`/`else` on the entry type
+emits an `if` error, and the flat form that JSON Schema's own type-applicability
+rules would allow (`pattern` and `minLength` at the item level, ignored for an
+object entry) is refused by Ajv's `strictTypes`, which requires a declared type
+for those keywords. A suite whose premise is that a refusal for the wrong reason
+is a failure cannot call a renamed refusal a minor.
+
 `schema-validation` has no 1.5.0. Two branches minted that number without seeing
 each other (APRV-220's checkpoint fixtures on main, APRV-235's decision-refusal
 fixtures on its own branch), so the same version named two different vector sets

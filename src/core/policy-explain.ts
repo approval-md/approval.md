@@ -347,6 +347,16 @@ function describeWinner(
     decisionPath.push(`winner: ${winner?.pattern ?? "?"} -> ${autonomy} (${reason})`);
     return;
   }
+  // APRV-266: a `policy.edit` sub-class nothing matched, decided by the
+  // `policy.edit` line. The trace says so in as many words, because the winning
+  // pattern does not match the class being explained and a reader who assumed
+  // it did would go looking for a rule that is not there.
+  if (provenance === "inherited") {
+    decisionPath.push(
+      `no rule matched this policy.edit sub-class; it inherits the policy.edit line (SPEC §5.2, APRV-266) -> ${autonomy}`,
+    );
+    return;
+  }
   if (load.policy.defaults?.autonomy === undefined) {
     decisionPath.push(
       "no rule matched and defaults.autonomy is absent; the absence of a grant is not a grant -> manual",
