@@ -1,11 +1,11 @@
 ---
 id: APRV-263
 title: Wait for protected socket readiness in live draw integration test
-status: In Progress
+status: Done
 assignee:
   - '@codex'
 created_date: '2026-09-05 10:04'
-updated_date: '2026-09-05 10:06'
+updated_date: '2026-09-05 10:07'
 labels: []
 dependencies: []
 type: bug
@@ -22,7 +22,7 @@ PR262 CI run33959288301 failed because the existing end-to-end draw test polls o
 <!-- AC:BEGIN -->
 - [x] #1 The integration test waits for a Unix socket with owner-only0600 permissions before making its first draw request
 - [x] #2 The readiness wait stays bounded and reports a useful failure; production permission checks remain unchanged
-- [ ] #3 Focused live-draw checks, build, lint and typecheck pass; CI runs on the updated PR head
+- [x] #3 Focused live-draw checks, build, lint and typecheck pass; CI runs on the updated PR head
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -37,4 +37,12 @@ PR262 CI run33959288301 failed because the existing end-to-end draw test polls o
 Parent review verified a bounded200x50ms readiness loop requiring stat.isSocket and exact0600 mode, with observed path/mode/error details on timeout. The production draw server and fail-closed socket checks are unchanged. The previous feature full suite passed3426 with1skip; GitHub run33959288301 exposed the pre-existing readiness race. Lint, typecheck and diff check exit0 after removing the unused import. Sol owns only the test file; parent owns records/review/delivery.
 
 Focused live-draw validation passed16/16 with exit0 using permitted host sockets. The initial sandbox attempt could not create usable Unix sockets and failed; the host retry passed, including daemon cleanup. Build also passed, exit0. Remaining acceptance: updated-head GitHub CI.
+
+GitHub started CI run33959768336 on pushed fix commit a5c4407. All stated local acceptance checks passed; GitHub delivery remains subject to the required checks and merge queue. No production code or live service was changed.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Removed the existing socket creation/chmod readiness race from the integration test while retaining the bounded wait and fail-closed production checks. Focused live-draw16/16, build, lint, typecheck and diff check passed. GitHub CI started on a5c4407; final PR merge verification remains the delivery step.
+<!-- SECTION:FINAL_SUMMARY:END -->
