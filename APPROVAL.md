@@ -30,6 +30,12 @@ approvers:
 protected_paths:            # widens policy.edit; the built-ins hold regardless
   - SPEC.md
 
+channels:
+  telegram:
+    prompt:
+      rows: [class, command_breakdown, policy_diff, protected_path, task, summary, gloss]
+      hide: [ttl_remaining_ms, est_cost_usd, chain, attestation, provenance, requested_ts, waiting]
+
 classes:
   read.*:                    { autonomy: autonomous }
   files.write.workspace:     { autonomy: autonomous }   # src, tests, fixtures, backlog/
@@ -48,7 +54,7 @@ classes:
   log.mutate:                { autonomy: human-only }   # any write aimed at .approval/log/ (APRV-198)
   account.credential:        { autonomy: human-only }   # keychain, APPROVAL_*/TELEGRAM_*/VAULT_* probes, vault/keys/env reads (APRV-194)
   log.sync:                  { autonomy: autonomous }       # ff-pull with chain reconcile; APRV-125
-  log.advance:               { autonomy: supervised-live, live_rate: 0.1 }       # records commit to a records branch; APRV-125
+  log.advance:               { autonomy: supervised-live, live_rate: 0.01 }       # records commit to a records branch; APRV-125
 
 budgets:
   global: { daily_actions: 20000 }
@@ -62,3 +68,38 @@ daemon:
   full_reproof_every: 50
   full_reproof_after: 60s
 ```
+
+````markdown
+Below the policy is a second block the runtime never enforces. It is what I
+value, for agents that want to know; `approval values` prints it.
+
+```yaml approval-values
+version: 1
+
+love:
+  - honest thoughts on what we are building, including when you think I am wrong
+  - a journal entry of about five points at the end of each milestone
+  - "a tight ship loop: task, plan, diff, tests, PR, merge armed, all in one session"
+
+like:
+  - success reported first, caveats after, in a message that stands on its own
+  - a runbook I can paste into a terminal rather than prose about one
+  - the real change shown, not a description of it
+  - small diffs with one reviewable idea in them
+
+dislike:
+  - work that lands without a Backlog task
+  - a PR left waiting for a hand click when the merge could have been armed
+  - confident documentation that is stale
+
+wants:
+  - say when you are stuck rather than guessing a fourth time; the journal is for that
+  - tell me when a policy or an instruction reads as wrong, then comply or stop, your call
+  - name the window and the full command when you hand me something to run
+
+responds: >-
+  I read the journal after a session and react on the samples that reach me.
+  Silence is not disapproval. A loved or disliked reaction always carries a
+  note saying why; a bare ok means I looked and it was fine.
+```
+````
