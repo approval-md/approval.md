@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-d'
 created_date: '2026-09-05 10:23'
-updated_date: '2026-09-05 10:24'
+updated_date: '2026-09-05 10:52'
 labels: []
 dependencies: []
 ordinal: 200000
@@ -19,19 +19,19 @@ The page at https://approval.md (GitHub Pages from index.html at the repo root) 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 index.html is self-contained: inline CSS and JS, no external scripts, no build step; the only remote asset is the Google Fonts stylesheet for JetBrains Mono, behind a real monospace fallback stack
-- [ ] #2 The brand holds: brand/wordmark.svg is unchanged and the inline appr[check]val.md wordmark SVG is still the logo
-- [ ] #3 The interactive Try the loop approve/reject card survives, with copy refreshed to today's real event names and record fields
-- [ ] #4 Every feature claim on the page is true of main today, and each feature behind a policy key says plainly that it is
-- [ ] #5 Dark-first palette with a light theme and a three-way light/dark/system toggle in the bottom-left, persisted in localStorage and honouring prefers-color-scheme
-- [ ] #6 A left sidebar on wide screens with collapsible groups (Documentation, Product, Examples, Compare, Invariants) that becomes a top row on narrow screens
-- [ ] #7 A filter-chip row filters a card grid; each card carries a lowercase tag row, a one-sentence claim, and a link into the README section, doc or example
-- [ ] #8 A search box filters cards by text with no network, and Cmd/Ctrl-K focuses it
-- [ ] #9 Mobile-first responsive with no horizontal scroll at 360px
-- [ ] #10 The green accent is used only for the approve state and the tick; everything else is monochrome
-- [ ] #11 Accessibility: visible focus rings, aria labels on the toggle and the search box, and the tick animation respects prefers-reduced-motion
-- [ ] #12 Every link target exists on main: README anchors, docs files and examples paths verified by grep
-- [ ] #13 No em dashes and no not-X-but-Y constructions in the page copy
+- [x] #1 index.html is self-contained: inline CSS and JS, no external scripts, no build step; the only remote asset is the Google Fonts stylesheet for JetBrains Mono, behind a real monospace fallback stack
+- [x] #2 The brand holds: brand/wordmark.svg is unchanged and the inline appr[check]val.md wordmark SVG is still the logo
+- [x] #3 The interactive Try the loop approve/reject card survives, with copy refreshed to today's real event names and record fields
+- [x] #4 Every feature claim on the page is true of main today, and each feature behind a policy key says plainly that it is
+- [x] #5 Dark-first palette with a light theme and a three-way light/dark/system toggle in the bottom-left, persisted in localStorage and honouring prefers-color-scheme
+- [x] #6 A left sidebar on wide screens with collapsible groups (Documentation, Product, Examples, Compare, Invariants) that becomes a top row on narrow screens
+- [x] #7 A filter-chip row filters a card grid; each card carries a lowercase tag row, a one-sentence claim, and a link into the README section, doc or example
+- [x] #8 A search box filters cards by text with no network, and Cmd/Ctrl-K focuses it
+- [x] #9 Mobile-first responsive with no horizontal scroll at 360px
+- [x] #10 The green accent is used only for the approve state and the tick; everything else is monochrome
+- [x] #11 Accessibility: visible focus rings, aria labels on the toggle and the search box, and the tick animation respects prefers-reduced-motion
+- [x] #12 Every link target exists on main: README anchors, docs files and examples paths verified by grep
+- [x] #13 No em dashes and no not-X-but-Y constructions in the page copy
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -44,3 +44,52 @@ The page at https://approval.md (GitHub Pages from index.html at the repo root) 
 5. Verify in the browser: dark, light, and mobile at 360px. Screenshot each, fix layout and contrast faults, and paste the observations into the notes.
 6. Grep every href in the finished file against the tree to prove no link points at something that is not on main. No test run: no guard covers index.html (grep of tests/ and scripts/ finds no reference).
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## What was built
+
+index.html is one self-contained file: inline CSS and JS, no build step, no external scripts. The only remote asset is the Google Fonts stylesheet for JetBrains Mono, behind the fallback stack ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace. brand/wordmark.svg, CNAME and .nojekyll are untouched; the inline appr[tick]val.md SVG is still the logo, with its bracket paths switched to fill:var(--fg) so the mark inverts with the theme while the tick keeps the #17A15E green.
+
+Structure, top to bottom: a sidebar (Documentation, Product, Examples, Compare, Invariants) as a left rail at 900px and up and a horizontally scrolling row of collapsible dropdowns below that; a one-line H1 (the wordmark plus the claim); a two-line subtitle; the install line; the Try the loop card; the feature set (search box, chip row, card grid); How this compares; Global invariants; Exit codes; What this does not defend; Read on; footer.
+
+66 cards across nine facets: gate 13, channels 7, adapters 6, hooks 6, mcp 5, log 7, daemon 8, verification 7, examples 7. Tag vocabulary: shipped, spec, example, behind a policy key, behind a flag, human-only. The brief listed guest MCP mode, streamable-HTTP MCP, log anchoring and git evidence among the policy-key features; they are behind flags rather than policy keys (--guest, --http, --anchor, --git-evidence), so they carry 'behind a flag' instead. That is the honest label and still says plainly that the feature is not on by default.
+
+## Sources and the claims drawn from them
+
+Read before writing: README.md in full, docs/cli-reference.md (verb headings plus the doctor, up, mcp serve, gate, coverage, log verify, log checkpoint, import agents-md sections at length), docs/claude-code-hook.md, docs/cursor-hook.md, docs/git-evidence.md, all seven examples/ entries, SPEC.md sections 5.2, 7 and 11/11.1, package.json, schema/policy.schema.json and schema/event.schema.json.
+
+Two places where the page follows the source rather than the README:
+- Autonomy levels. The README dictionary still says 'manual, supervised, autonomous' at classes.<pattern>.autonomy. schema/policy.schema.json line 309 is the shipped enum: human-only, manual, supervised-live, supervised, supervised-retro, autonomous, with supervised an alias of supervised-retro. The card states the five levels and the alias, and links to the schema rather than the README. Worth a follow-up task on the README dictionary row.
+- doctor row count. The README says eleven lines from a fresh directory (a fresh directory skips many). The full ordered list in tests/cli-doctor.test.ts is 25 rows, which is what the card claims.
+
+The Try the loop card's fields come from real records in the committed log: action_key, class, reversible, payload_hash and the chain head in the COMPUTED block, est_cost_usd and summary in the CLAIMED block, and the tail renders task.registered, approval.requested, approval.granted (with token_sha256), execution.started and execution.completed with exit_code, which are the payload shapes those events actually carry.
+
+## Link verification
+
+Every href was checked by grep against the worktree rather than by fetching. 19 distinct repo paths, all present on main. 8 README anchors and 18 docs/cli-reference.md anchors, each matched to an existing heading with grep -nE. 7 in-page anchors matched to their ids. The npm link was dropped: the package is not published yet, so it would have been the one dead link on the page. Only external hosts left are github.com, fonts.googleapis.com and fonts.gstatic.com.
+
+## Interruption worth recording
+
+Partway through the browser verification the harness hook began refusing every shell command with hook-gate-refused:policy-not-attested (attested ab75eb35..., live cbc003f9...), including approval journal write itself. Nothing was bypassed: shell work stopped, the remaining visual checks were done through the browser tools, and the gate returned on its own a few minutes later. A journal entry now records it.
+
+## Visual verification
+
+Served over a loopback static server (a node script in the session scratchpad, 127.0.0.1:8899) because the browser pane renders a file:// page as a static snapshot with no scripting. Viewport emulated at 1100x2400, 980x740 and 360x1500.
+
+Dark, 1100px wide, three columns: hero, install line and loop card read cleanly on #050608; hairline borders at rgba(247,248,248,.10) are visible without weight; the card grid is even and the tag row, claim and uppercase link line stack consistently. Compare and Invariants render as numbered hairline rows, and the exit-code table, the posture prose and the Read on chips close the page.
+
+Light, 1100px: the wall #f3f3f2 against card surface #f7f7f6 with rgba(28,28,26,.07) borders is subtle and still legible; the wordmark brackets invert to #121211 while the tick stays green; the tail block sits on #ececeb so it reads as a terminal inset rather than a hole.
+
+Mobile, 360px: document.documentElement.scrollWidth equals innerWidth (360), so there is no horizontal page scroll. The sidebar is a scrolling top row; an open group drops a wrapped chip list under it and only one group may stand open. The loop card stacks its rows, and the log tail scrolls inside its own overflow-x container rather than widening the page. The chip row wraps to three lines and cards go single-column.
+
+Interaction: clicking Approve draws the tick, turns the verdict line green ('granted, token minted at the terminal'), appends approval.granted, execution.started, execution.completed and a log verify line to the tail, and disables both buttons. Filtering measured live: the mcp chip gives 7 of 66, mcp plus the search term 'vault' gives 1 of 66, all plus 'vault' gives 8 of 66, and clearing returns 66 cards. No console errors on load.
+
+Three faults found and fixed during the pass:
+1. The sidebar summaries shrank and their labels overflowed on the narrow row (fixed with flex:0 0 auto).
+2. The wide rail lost its sub-links whenever the page had loaded narrow, because the old sync only ever closed groups and never reopened them. Replaced with a rule that closes groups on the transition to narrow and lets CSS own the wide state, plus a +/- disclosure marker on the rail.
+3. Two dropdowns could stand open at once on mobile and stacked over the H1. A toggle handler now closes the others, a tap on a link closes the panel, and Escape closes it.
+
+Also fixed: the inline code spans in the install note were inheriting the boxed style meant for the install command (scoped to a direct child), and the H1 was wrapping to two lines because .lede capped at 70ch.
+<!-- SECTION:NOTES:END -->
