@@ -1,0 +1,56 @@
+# Clear a protected-path guard failure that the next log advance answers.
+#
+# The guard (`ci.yml`, job "protected paths (grant cross-check)") reads a
+# COMMITTED copy of the log. A grant a human tapped during a session is in the
+# primary checkout's live log immediately and in a committed one only when the
+# daemon's next advance is pushed or merged, so a correctly gated pull request
+# can fail the guard for a reason that stops being true a few minutes later,
+# with no diff to push and nothing for the author to fix. GitHub re-runs
+# nothing on its own, so the stale red check would sit there until somebody
+# clicked it.
+#
+# When an advance lands on main, this re-runs the FAILED jobs of the latest CI
+# run of every open pull request whose guard job failed. It re-decides nothing:
+# the guard runs again and reaches its own verdict against the new log. A run
+# that is still in flight is left alone.
+name: guard rerun
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.approval/log/events.jsonl'
+
+# The whole grant this workflow needs, and nothing beside it: re-run a workflow
+# run, and read the list of open pull requests. No `contents: write`, no
+# checks:write, no ability to approve, merge, or comment.
+permissions:
+  actions: write
+  pull-requests: read
+
+# One at a time. Two advances landing minutes apart would otherwise both try to
+# re-run the same runs, and the second would race the first.
+concurrency:
+  group: guard-rerun
+  cancel-in-progress: false
+
+jobs:
+  rerun:
+    name: rerun failed protected-path guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: rerun the guard where the log is why it failed
+        # Context values reach the script as environment variables and are
+        # never interpolated into shell text, for the reason ci.yml's classify
+        # job states: anything carried from the event is attacker-shaped input
+        # and must not become shell syntax. The token is the workflow's own
+        # GITHUB_TOKEN, scoped by the permissions block above; this workflow
+        # reads no other secret.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: node scripts/guard-rerun.mjs

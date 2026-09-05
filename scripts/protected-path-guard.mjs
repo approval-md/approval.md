@@ -10,14 +10,33 @@
  * the evidence rules, the exempt evidence surface, and the ordering rule the
  * log's lag behind the primary checkout implies.
  *
- * Everything git touches is read at the HEAD COMMIT's tree, never the working
- * tree: `git show <head>:<path>`. A guard that read the checkout could be told
- * a different story than the one the pull request carries.
+ * Everything git touches is read at a COMMIT's tree, never the working tree:
+ * `git show <ref>:<path>`. A guard that read the checkout could be told a
+ * different story than the one the pull request carries.
+ *
+ * ## Where the log comes from (APRV-260)
+ *
+ * The log at head is main's log at branch time, and it trails the primary
+ * checkout's live log: a grant a human tapped during the session reaches a
+ * COMMITTED log only when the daemon's next advance lands on a records branch
+ * and merges. Reading head alone therefore failed gated edits whose grant was
+ * already pushed, and the ordering rule became "wait for two merges".
+ *
+ * So the guard considers several committed copies — the head ref, `origin/main`,
+ * and every `origin/records-*` branch — and uses the FRESHEST one that is
+ * provably the same chain as head's: verified clean end to end, and carrying
+ * head's last record at head's own index with head's hash. A copy that fails
+ * either test is named and skipped. Head's log still defines the chain; nothing
+ * that disagrees with it is ever read, so the widening is "look further along
+ * THIS log", never "look at some other log".
  *
  * Usage:
  *   node scripts/protected-path-guard.mjs --base <ref> --head <ref>
  *   ... --json          machine-readable report
  *   ... --repo <dir>    run against another checkout (default: this one)
+ *   ... --log-ref <ref> name a log candidate explicitly (repeatable). Replaces
+ *                       the origin/main and origin/records-* discovery; the
+ *                       head ref is always considered first regardless.
  *
  * Exit codes: 0 pass, 1 a protected path lacks evidence (or the log fails
  * closed), 2 usage, 4 the guard itself could not look.
@@ -60,17 +79,24 @@ function showBlob(repo, ref, path) {
 function usage(message) {
   process.stderr.write(`protected-path-guard: ${message}\n`);
   process.stderr.write(
-    "usage: node scripts/protected-path-guard.mjs --base <ref> --head <ref> [--repo <dir>] [--json]\n",
+    "usage: node scripts/protected-path-guard.mjs --base <ref> --head <ref> [--repo <dir>] [--json] [--log-ref <ref>]...\n",
   );
   return EXIT_USAGE;
 }
 
 function parseArgs(argv) {
-  const flags = { base: null, head: null, repo: REPO_ROOT, json: false };
+  const flags = { base: null, head: null, repo: REPO_ROOT, json: false, logRefs: [] };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--json") {
       flags.json = true;
+      continue;
+    }
+    if (arg === "--log-ref") {
+      const value = argv[index + 1];
+      if (value === undefined) return { ok: false, message: "--log-ref needs a value" };
+      flags.logRefs.push(value);
+      index += 1;
       continue;
     }
     if (arg === "--base" || arg === "--head" || arg === "--repo") {
@@ -113,10 +139,178 @@ function protectedPathsFrom(repo, refs, parsePolicy) {
   return [...found];
 }
 
+/**
+ * The refs whose committed log may be read, in fixed precedence order.
+ *
+ * Head first, always: it is the copy the pull request itself carries and the
+ * one that defines the chain. Then `origin/main`, then every records branch,
+ * newest name last — the order only settles ties, and a tie means two copies
+ * end at the same record, so which one is named is cosmetic.
+ *
+ * `--log-ref` replaces the discovery rather than adding to it, so a test can
+ * name its candidates without depending on what remote refs a checkout happens
+ * to have fetched.
+ */
+function candidateRefsFor(repo, head, explicit) {
+  const refs = [head];
+  const add = (ref) => {
+    if (ref.length > 0 && !refs.includes(ref)) refs.push(ref);
+  };
+  if (explicit.length > 0) {
+    for (const ref of explicit) add(ref);
+    return refs;
+  }
+  add("origin/main");
+  const listed = git(repo, [
+    "for-each-ref",
+    "--format=%(refname:short)",
+    "refs/remotes/origin/records-*",
+  ]);
+  if (listed !== null) for (const line of listed.split("\n")) add(line.trim());
+  return refs;
+}
+
+/**
+ * One candidate's log, verified through the real verifier.
+ *
+ * The verifier wants a path, so the blob is materialized in the scratch
+ * directory under a per-candidate name and removed with the rest of it.
+ */
+function readLogAt(repo, ref, scratch, slot, verifyModule, cache) {
+  // Two refs holding the same log blob are one read. Verification walks the
+  // whole chain, and a repository accumulates records branches that were never
+  // deleted; this repository had 46 of them the day this was written.
+  const oid = git(repo, ["rev-parse", `${ref}:${LOG_PATH}`]);
+  const key = oid === null ? null : oid.trim();
+  if (key !== null && cache.has(key)) return cache.get(key);
+  const remember = (outcome) => {
+    if (key !== null) cache.set(key, outcome);
+    return outcome;
+  };
+  const text = showBlob(repo, ref, LOG_PATH);
+  if (text === null) return remember({ status: "missing", records: null });
+  const path = join(scratch, `events-${slot}.jsonl`);
+  writeFileSync(path, text, "utf8");
+  const verified = verifyModule.verifyWithRecords(path);
+  if (verified.result.status !== "clean") {
+    return remember({
+      status: "unverified",
+      records: null,
+      detail: JSON.stringify(verified.result),
+    });
+  }
+  return remember({ status: "ok", records: verified.records });
+}
+
+/**
+ * Pick the log the guard will read for evidence.
+ *
+ * The rule, stated as the invariant it is: **head's log defines the chain.**
+ * A candidate is admitted only when it is verified clean AND its record at
+ * head's last index is head's last record, seq and hash both. That is what
+ * makes it an EXTENSION of the copy the pull request carries rather than a
+ * different history that happens to be longer; a copy that disagrees is
+ * reported `diverged` and never read. Among admitted candidates the one
+ * reaching the highest seq wins, because the only reason to look past head is
+ * that a later advance may carry the grant.
+ *
+ * Head's own log is the fallback in every degenerate case: missing, unverified,
+ * or empty. An empty log at head anchors nothing (there is no record to match),
+ * so no extension is admitted onto it — fail closed, the same direction every
+ * other unknown in this guard resolves.
+ */
+function chooseLogSource(repo, head, explicit, scratch, verifyModule) {
+  const refs = candidateRefsFor(repo, head, explicit);
+  const blobCache = new Map();
+  const headRead = readLogAt(repo, head, scratch, 0, verifyModule, blobCache);
+  const headRecords = headRead.records;
+  const headLastSeq =
+    headRecords === null || headRecords.length === 0
+      ? null
+      : headRecords[headRecords.length - 1].seq;
+  const candidates = [
+    {
+      ref: head,
+      status: headRead.status === "ok" ? "admitted" : headRead.status,
+      lastSeq: headLastSeq,
+    },
+  ];
+  const chosenFallback = {
+    ref: head,
+    status: headRead.status,
+    detail: headRead.detail,
+    records: headRecords,
+    lastSeq: headLastSeq,
+    headLastSeq,
+    candidates,
+  };
+  if (headRecords === null || headRecords.length === 0) {
+    // Nothing to anchor to. The other candidates are not even read: admitting
+    // one would mean trusting a log the pull request's own tree cannot confirm.
+    // A head log that is missing or unverified keeps that status; an empty one
+    // verified clean is still the log this run read.
+    if (headRecords !== null) candidates[0].status = "chosen";
+    return chosenFallback;
+  }
+
+  const anchor = headRecords[headRecords.length - 1];
+  let best = { ref: head, records: headRecords, lastSeq: headLastSeq, index: 0 };
+  for (let slot = 1; slot < refs.length; slot += 1) {
+    const ref = refs[slot];
+    const read = readLogAt(repo, ref, scratch, slot, verifyModule, blobCache);
+    if (read.records === null) {
+      candidates.push({ ref, status: read.status, lastSeq: null });
+      continue;
+    }
+    const at = read.records[headRecords.length - 1];
+    const anchored = at !== undefined && at.seq === anchor.seq && at.hash === anchor.hash;
+    const lastSeq = read.records.length === 0 ? null : read.records[read.records.length - 1].seq;
+    if (!anchored) {
+      candidates.push({ ref, status: "diverged", lastSeq });
+      continue;
+    }
+    candidates.push({ ref, status: "admitted", lastSeq });
+    if (lastSeq !== null && best.lastSeq !== null && lastSeq > best.lastSeq) {
+      best = { ref, records: read.records, lastSeq, index: candidates.length - 1 };
+    }
+  }
+  candidates[best.index].status = "chosen";
+  return {
+    ref: best.ref,
+    status: "ok",
+    records: best.records,
+    lastSeq: best.lastSeq,
+    headLastSeq,
+    candidates,
+  };
+}
+
+/**
+ * The one-line provenance the human output leads with.
+ *
+ * `firstSeq` is the chosen log's own first seq, which is head's too: an
+ * admitted candidate carries head's prefix by construction.
+ */
+function logSourceLine(source, firstSeq) {
+  if (source.records === null) {
+    const why =
+      source.status === "missing"
+        ? "the tree carries no log"
+        : `the log does not verify (${source.detail ?? "no detail"})`;
+    return `log from ${source.ref}: ${why}`;
+  }
+  const range = firstSeq === null || source.lastSeq === null ? "empty" : `seq ${firstSeq}..${source.lastSeq}`;
+  const carried =
+    firstSeq === null || source.headLastSeq === null
+      ? "head carried an empty log"
+      : `head carried ${firstSeq}..${source.headLastSeq}`;
+  return `log from ${source.ref}, ${range} (${carried})`;
+}
+
 async function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (!parsed.ok) return usage(parsed.message);
-  const { base, head, repo, json } = parsed.flags;
+  const { base, head, repo, json, logRefs } = parsed.flags;
 
   let guard;
   let verifyModule;
@@ -162,13 +356,10 @@ async function main() {
     policyProtectedPaths = [];
   }
 
-  // The log AT HEAD, verified through the real verifier. It wants a path, so
-  // the blob is materialized in a scratch directory and removed after.
-  const logText = showBlob(repo, head, LOG_PATH);
+  // The committed log, taken from the freshest copy that is provably the same
+  // chain as the one head carries (APRV-260). Every candidate is verified
+  // through the real verifier before it is looked at.
   const scratch = mkdtempSync(join(tmpdir(), "approval-md-guard-"));
-  let logStatus = "ok";
-  let logDetail;
-  let records = null;
   let window = {
     firstSeq: null,
     lastSeq: null,
@@ -178,44 +369,49 @@ async function main() {
     head: resolvedHead.trim().slice(0, 12),
   };
   try {
-    if (logText === null) {
-      logStatus = "missing";
-    } else {
-      const scratchLog = join(scratch, "events.jsonl");
-      writeFileSync(scratchLog, logText, "utf8");
-      const verified = verifyModule.verifyWithRecords(scratchLog);
-      if (verified.result.status !== "clean") {
-        logStatus = "unverified";
-        logDetail = JSON.stringify(verified.result);
-      } else {
-        records = verified.records;
-        const first = records[0];
-        const last = records[records.length - 1];
-        window = {
-          ...window,
-          firstSeq: first?.seq ?? null,
-          lastSeq: last?.seq ?? null,
-          firstTs: first?.ts ?? null,
-          lastTs: last?.ts ?? null,
-        };
-      }
+    const source = chooseLogSource(repo, head, logRefs, scratch, verifyModule);
+    const records = source.records;
+    const logStatus = source.status === "ok" ? "ok" : source.status;
+    const logDetail = source.detail;
+    if (records !== null) {
+      const first = records[0];
+      const last = records[records.length - 1];
+      window = {
+        ...window,
+        firstSeq: first?.seq ?? null,
+        lastSeq: last?.seq ?? null,
+        firstTs: first?.ts ?? null,
+        lastTs: last?.ts ?? null,
+      };
     }
+    const logSource = {
+      ref: source.ref,
+      lastSeq: source.lastSeq,
+      headLastSeq: source.headLastSeq,
+      candidates: source.candidates,
+    };
 
     const policyBytes = showBlob(repo, head, POLICY_PATH);
     const policySha256AtHead =
       policyBytes === null ? null : createHash("sha256").update(policyBytes, "utf8").digest("hex");
 
+    // Bound material, from the payload store beside the log that was chosen and
+    // then from head's. A grant only reachable in a records branch has its
+    // payload only there, and a grant head already carried has it at head.
     const payloadCache = new Map();
+    const payloadRefs = source.ref === head ? [head] : [source.ref, head];
     const payloadFor = (hash) => {
       if (payloadCache.has(hash)) return payloadCache.get(hash);
-      const blob = showBlob(repo, head, `${PAYLOAD_DIR}/${hash}.json`);
       let value = null;
-      if (blob !== null) {
+      for (const ref of payloadRefs) {
+        const blob = showBlob(repo, ref, `${PAYLOAD_DIR}/${hash}.json`);
+        if (blob === null) continue;
         try {
           value = JSON.parse(blob);
         } catch {
           value = null;
         }
+        if (value !== null) break;
       }
       payloadCache.set(hash, value);
       return value;
@@ -281,8 +477,33 @@ async function main() {
       window,
     });
 
-    if (json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-    else process.stdout.write(guard.renderGuardReport(report));
+    if (json) {
+      process.stdout.write(`${JSON.stringify({ ...report, log_source: logSource }, null, 2)}\n`);
+    } else {
+      process.stdout.write(`${logSourceLine(source, window.firstSeq)}\n`);
+      // Every candidate that was read and set aside for a reason worth acting
+      // on is named. The stale records branches that simply end before head
+      // are summarized: this repository has dozens of them and they say
+      // nothing, while an unverifiable copy says a great deal.
+      const diverged = [];
+      for (const candidate of logSource.candidates) {
+        if (candidate.status === "chosen") continue;
+        if (candidate.status === "diverged") {
+          diverged.push(candidate.ref);
+          continue;
+        }
+        const seq = candidate.lastSeq === null ? "no records" : `through seq ${candidate.lastSeq}`;
+        process.stdout.write(`  candidate ${candidate.ref}: ${candidate.status} (${seq})\n`);
+      }
+      if (diverged.length > 0) {
+        const named = diverged.slice(0, 5).join(", ");
+        const more = diverged.length > 5 ? `, and ${diverged.length - 5} more` : "";
+        process.stdout.write(
+          `  ${diverged.length} candidate ref(s) did not anchor to head's chain and were not read: ${named}${more}\n`,
+        );
+      }
+      process.stdout.write(guard.renderGuardReport(report));
+    }
 
     return report.ok ? EXIT_OK : EXIT_FAIL;
   } finally {
