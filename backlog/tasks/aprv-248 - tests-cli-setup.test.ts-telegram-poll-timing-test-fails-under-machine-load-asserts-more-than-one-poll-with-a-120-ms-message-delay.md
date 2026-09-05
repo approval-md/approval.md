@@ -3,11 +3,11 @@ id: APRV-248
 title: >-
   tests/cli-setup.test.ts telegram poll-timing test fails under machine load:
   asserts more than one poll with a 120 ms message delay
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-k'
 created_date: '2026-09-02 22:12'
-updated_date: '2026-09-04 23:33'
+updated_date: '2026-09-05 10:06'
 labels:
   - test
 dependencies: []
@@ -84,3 +84,9 @@ None touched. No production file changed; every log in these tests is still buil
 - main's new scripts/run-tests.mjs (APRV-227) still discovers *.test.js only, so the bench file stays out of the suite after that merge.
 - The 1ms TTL is the shortest the duration grammar accepts (parseDuration rejects zero), which is why lapse() uses it rather than 0s.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Four wall-clock-racing tests cause their conditions instead of awaiting them (mock poll hook; caused TTL lapse re-attested through the real verb); the tap-latency bounds move behind APPROVAL_BENCH=1 while their claims stay as sequence and read-count assertions. Verified green under 16 busy-loop children and by the shortened-delay negative control, full run 3125 pass; merged in PR #264.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -36,7 +36,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -215,6 +215,21 @@ function serve(unit: Case, secret = SECRET): DrawServer {
   const started = server.start();
   assert.equal(started.ok, true, started.ok ? "" : `${started.reason}: ${started.detail}`);
   return server;
+}
+
+/** The socket is ready only after the daemon has applied its owner-only mode. */
+function drawSocketReadiness(path: string): { ready: boolean; detail: string } {
+  try {
+    const socket = statSync(path);
+    if (!socket.isSocket()) return { ready: false, detail: `${path} is not a socket` };
+    const mode = socket.mode & 0o777;
+    return mode === 0o600
+      ? { ready: true, detail: `${path} is an owner-only socket` }
+      : { ready: false, detail: `${path} has mode ${mode.toString(8)}, waiting for 600` };
+  } catch (cause) {
+    const code = cause instanceof Error && "code" in cause ? String(cause.code) : "unknown";
+    return { ready: false, detail: `${path} is not ready (${code})` };
+  }
 }
 
 /** One question over the real socket, the way the relay child asks it. */
@@ -757,10 +772,12 @@ test("the daemon holds the secret, the asker holds none, and the draw crosses be
   });
 
   try {
-    for (let waited = 0; waited < 200 && !existsSync(socketPath); waited += 1) {
+    let readiness = drawSocketReadiness(socketPath);
+    for (let waited = 0; waited < 200 && !readiness.ready; waited += 1) {
       await new Promise((settle) => setTimeout(settle, 50));
+      readiness = drawSocketReadiness(socketPath);
     }
-    assert.equal(existsSync(socketPath), true, `no socket appeared: ${stdout}`);
+    assert.equal(readiness.ready, true, `draw socket did not become ready: ${readiness.detail}; ${stdout}`);
 
     // This process's environment carries no secret — the hook's situation.
     assert.equal(SECRET_ENV in process.env, false);

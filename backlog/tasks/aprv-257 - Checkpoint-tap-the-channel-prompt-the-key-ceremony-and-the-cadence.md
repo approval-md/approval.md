@@ -1,11 +1,11 @@
 ---
 id: APRV-257
 title: 'Checkpoint tap: the channel prompt, the key ceremony and the cadence'
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-g'
 created_date: '2026-09-04 23:57'
-updated_date: '2026-09-05 09:18'
+updated_date: '2026-09-05 10:06'
 labels:
   - channels
   - log
@@ -114,3 +114,9 @@ COST NOTE. With a cadence configured, each dispatch cycle now pays one extra pol
 
 LEFT FOR CARTER: two commands, once. `approval setup checkpoint --as human:carter` at a terminal in the primary checkout with the vault passphrase in the shell, then paste the printed audit.checkpoint_keys block plus checkpoint_every into APPROVAL.md and run `approval policy amend`. Until that second step lands the key is inert and the doctor row skips. docs/dogfood-cutover.md carries the runbook.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+approval setup checkpoint mints and vaults the key and prints the policy block for the human's amend (rotate appends, retire refuses to drop a signing key); the listener offers one checkpoint prompt when the cadence lapses and signs the shown (seq, hash) on the human's machine through compare-and-append; the CLI channel renders the same prompt; checkpointDue() is one rule for verify, daemon, doctor row checkpoint and the enqueue; custody in one place, vault header names two callers with a pinning test, hook path proven keyless. Verified by checkpoint-tap 32, log-checkpoint 32 and the doctor, telegram, setup and classifier suites, full run 3433 pass; merged in PR #276. Carter: run the ceremony and one policy amend to turn it on.
+<!-- SECTION:FINAL_SUMMARY:END -->

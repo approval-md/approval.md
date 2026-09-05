@@ -34,8 +34,8 @@ import {
 } from "../channels/payload-view.js";
 import { claimed, type ChannelRequest } from "../channels/contract.js";
 import {
+  glossAuthor,
   glossFor,
-  GLOSS_AUTHOR,
   GLOSS_EDIT_INSTRUCTION,
   GLOSS_EMAIL_INSTRUCTION,
   GLOSS_INSTRUCTION,
@@ -77,9 +77,12 @@ export interface GlossAttachment {
 export function attachGloss(request: ChannelRequest, run: GlossRunner): GlossAttachment {
   const asked = glossMaterial(request.fullPayload.value?.value);
   if (asked === null) return { request, outcome: "opaque" };
-  const sentence = glossFor(asked.instruction, asked.material, run);
-  if (sentence === null) return { request, outcome: "absent" };
-  return { request: { ...request, gloss: claimed(sentence, GLOSS_AUTHOR) }, outcome: "attached" };
+  const result = glossFor(asked.instruction, asked.material, run);
+  if (result === null) return { request, outcome: "absent" };
+  return {
+    request: { ...request, gloss: claimed(result.text, glossAuthor(result)) },
+    outcome: "attached",
+  };
 }
 
 /**
