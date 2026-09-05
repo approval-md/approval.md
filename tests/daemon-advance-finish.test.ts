@@ -315,9 +315,14 @@ async function interleavedFinish(
   });
 
   // A poll for a condition, never a wait for a duration: however long the child
-  // takes to get there, the window opens when it arrives and not before.
+  // takes to get there, the window opens when it arrives and not before. A
+  // refusal above the seam (`not-started`, `already-finished`) exits the child
+  // instead, which is caught here rather than waited out; the minute is a bound
+  // on FAILING, and no passing run consults a clock.
+  const deadline = Date.now() + 60_000;
   while (!existsSync(ready)) {
     assert.ok(!closed, `the settle child exited before its read: ${out}${err}`);
+    assert.ok(Date.now() < deadline, "the settle child never reached its read");
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
 
@@ -357,6 +362,11 @@ test("finish: an outcome record that loses the append race re-derives and lands"
   // compare-and-append because the head it named was no longer the tail. The
   // second re-read, re-ran those same checks against the log as it now stood,
   // and appended against the head THAT read observed.
+  //
+  // Two is therefore also the assertion that the first attempt met a MOVED
+  // HEAD and nothing else: `core/head-retry.ts` re-runs the cycle on
+  // `append-failed` / `head-moved` and on no other refusal, so a second attempt
+  // cannot have happened for any other reason.
   assert.equal(raced.outcome.attempts, 2, JSON.stringify(raced.outcome));
   assert.equal(raced.outcome.ok, true, JSON.stringify(raced.outcome));
   assert.deepEqual(eventsFor(repo, actionKey), [
@@ -391,6 +401,9 @@ test("finish: the pre-APRV-233 writer loses the race and leaves the execution da
   assert.equal(raced.outcome.attempts, 1, JSON.stringify(raced.outcome));
   assert.equal(raced.outcome.ok, false, JSON.stringify(raced.outcome));
   assert.equal(raced.outcome.code, "append-failed", JSON.stringify(raced.outcome));
+  // The compare-and-append precondition, not a lock timeout and not a schema
+  // refusal: this is the line the 2026-09-02 terminal printed.
+  assert.match(raced.outcome.message, /head moved/);
   assert.deepEqual(eventsFor(repo, actionKey), ["execution.started"]);
   assert.deepEqual(danglingKeys(repo), [actionKey], "this is the 2026-09-02 residue");
   assert.equal(verify(repo.logPath).status, "clean", "the log is fine; the bookkeeping is not");
