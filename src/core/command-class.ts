@@ -1196,6 +1196,16 @@ function refineApprovalVerb(positionals: readonly string[]): Refinement | null {
   if (verb === "log") {
     if (sub === "sync") return { class: "log.sync", rule: "approval-log-sync" };
     if (sub === "advance") return { class: "log.advance", rule: "approval-log-advance" };
+    // APRV-220. Signing a checkpoint is the human's own ceremony, exactly as
+    // `gate open` is: the whole value of a checkpoint is that an agent process
+    // cannot produce one, and an agent that could run this verb could vouch for
+    // a chain it had just written. Classified `policy.core`, which the
+    // reference policy holds human-only, so the hook denies it with
+    // `hook-class-human-only` — the classification lock, sitting behind the
+    // vault passphrase an agent's environment does not carry. It mints no new
+    // class (SPEC.md §11.1 invariant 9): `policy.core` already exists and is
+    // already in this row's `emits`.
+    if (sub === "checkpoint") return { class: "policy.core", rule: "approval-log-checkpoint" };
     return null;
   }
   if (verb === "gate") {
