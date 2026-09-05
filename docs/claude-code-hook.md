@@ -186,9 +186,9 @@ an addition).
 | `git-remote-read` | git | fetch \| ls-remote \| remote | read.vcs.remote |
 | `git-read` | git | blame \| describe \| diff \| grep \| log \| ls-files \| reflog \| rev-list \| rev-parse \| shortlog \| show \| status | read.shell |
 | `gh-release` | gh | release | release.publish |
-| `gh-api` | gh | api \| auth \| gist \| secret \| workflow | read.vcs.remote for a `gh api` with no method flag (or `GET`) and no `-f`/`-F`/`--field`/`--raw-field`/`--input`; every other call, and every other subcommand on the row, network.call |
+| `gh-api` | gh | api \| auth \| gist \| secret \| workflow | read.vcs.remote for a `gh api` with no method flag (or `GET`) and no `-f`/`-F`/`--field`/`--raw-field`/`--input`; vcs.remote.meta § for `gh api graphql` on the checkout's own repository whose document carries no `mutation`; every other call, and every other subcommand on the row, network.call |
 | `gh-simple-read` | gh | browse \| search \| status | read.vcs.remote |
-| `gh` | gh | pr \| issue \| repo \| run \| cache | read.vcs.remote for view/list/status/checks/diff; `gh pr create` vcs.pr.open, `gh pr edit/comment/review/ready/close/reopen` vcs.pr.update, `gh pr merge` vcs.push.main, `gh pr checkout` vcs.commit.branch; every other write network.call |
+| `gh` | gh | pr \| issue \| repo \| run \| cache | read.vcs.remote for view/list/status/checks/diff; vcs.remote.meta § for `pr update-branch` and `run rerun` on the checkout's own repository; `gh pr create` vcs.pr.open, `gh pr edit/comment/review/ready/close/reopen` vcs.pr.update, `gh pr merge` vcs.push.main, `gh pr checkout` vcs.commit.branch; every other write network.call |
 | `npm-publish` | npm, pnpm, yarn, bun | publish \| version \| deprecate \| dist-tag \| unpublish | release.publish |
 | `npm-install` | npm, bun | install \| i \| add | deps.add, deps.install |
 | `yarn-add` | yarn, pnpm | add | deps.add |
@@ -206,7 +206,7 @@ an addition).
 | `approval` | approval | (any) | gate.self, log.sync, log.advance |
 | `workspace-tool` | npx, tsx, ts-node, tsc, oxlint, eslint, prettier, vitest, jest, backlog, make | (any) | files.write.workspace |
 | `workspace-write` | mkdir, cp, mv, touch, tee, ln, chmod, truncate, rmdir | (any) | files.write.workspace |
-| `rm` | rm | (any) | files.write.workspace, files.delete.out_of_scope |
+| `rm` | rm | (any) | files.write.workspace, files.delete.out_of_scope, files.delete.scratch ‡ |
 | `sed` | sed | (any) | read.shell, files.write.workspace |
 | `web-fetch` | curl, wget, http, httpie | (any) | read.web for a GET-shaped fetch; network.call for a body, an upload, a non-GET method, or anything ambiguous |
 | `network` | ssh, scp, sftp, rsync, nc, telnet, ftp | (any) | network.call |
@@ -217,6 +217,12 @@ an addition).
 † These rewrites are LOCAL, and the hook refines them against the checkout it
 runs in: see [Rewriting unpublished history](#rewriting-unpublished-history).
 `git push --force` is not marked, and never refines.
+
+‡ `files.delete.scratch` needs roots the classifier cannot know and checks it
+cannot make from text: see [Deleting scratch](#deleting-scratch).
+
+§ `vcs.remote.meta` is reserved for the checkout's OWN repository: see
+[GitHub metadata on your own remote](#github-metadata-on-your-own-remote).
 
 Five overrides sit on top of the table:
 
@@ -406,6 +412,103 @@ one of them failing, or answering ambiguously, leaves the class alone.
 it prints is what the hook decides, and a refined segment shows the rule name
 `rewrite-unpublished`. When the hook refines, its
 `permissionDecisionReason` says so.
+
+### GitHub metadata on your own remote
+
+`network.call` exists for the calls whose whole purpose is that something
+leaves: a webhook, an email, an arbitrary POST. In this repository's log, 52 of
+those questions between 2026-08-17 and 2026-09-05 produced 48 approvals, and
+three forms account for the bulk of them: `gh api graphql` queries, `gh pr
+update-branch` and `gh run rerun`, all aimed at the repository the checkout
+already tracks. Asking GitHub a question about your own pull request, or telling
+it to redo bookkeeping about work you already pushed, is not the act the class
+was written for, and it had no class of its own to be granted through. APRV-268
+gives it one, `vcs.remote.meta`, beside `read.vcs.remote` and `vcs.pr.open`.
+
+**Exactly three forms**, and no wider:
+
+| form | condition |
+|---|---|
+| `gh pr update-branch` | the checkout's own repository |
+| `gh run rerun` | the checkout's own repository |
+| `gh api graphql` | the checkout's own repository, and a document carrying no `mutation` anywhere, not read from a file (`-f query=@doc`, `--input`) |
+
+Every one of those classified `network.call` before APRV-268. Nothing that
+already read moves: `gh pr view`, `gh pr list`, `gh pr checks`, `gh pr diff`,
+`gh pr status`, `gh run view`, `gh run list`, `gh run watch`, `gh issue
+view/list`, `gh repo view` and a plain `gh api` GET all stay `read.vcs.remote`.
+That restraint is deliberate. `vcs.remote.meta` is undeclared until a policy
+ceremony names it, and an undeclared class falls to the manual default, so
+moving a read onto it would RAISE the friction on the commonest commands in the
+repository rather than lower it.
+
+**The target must be the checkout's own repository**, which means gh's DEFAULT
+repository resolution, reading the repository off this checkout's git remotes.
+The classifier is pure and cannot resolve a remote, so it cannot tell
+`-R approval-md/approval-md` from `-R someone/else`: **any** `-R`, `--repo` or
+`--hostname` makes the invocation foreign and it keeps the class it had before.
+So does any `$VAR` or `$(…)` in the argv, because one of the words the
+classifier cannot see could be a `--repo`.
+
+`pr update-branch` and `run rerun` are mutations, and are included because what
+they change is GitHub's bookkeeping about work already pushed (a branch's
+merge-base, a re-run of a workflow that already ran), with no content of the
+operator's authorship leaving the machine.
+
+Everything else is untouched. `gh pr create` stays `vcs.pr.open`, `gh pr merge`
+stays `vcs.push.main`; `gh release`, `gh gist`, `gh secret`, `gh auth`,
+`gh workflow`, a `gh api` with a method or a body, a graphql document carrying a
+`mutation`, and every `curl` that is not a plain GET stay where they were.
+
+### Deleting scratch
+
+`files.delete.out_of_scope` exists to hold a delete that leaves the workspace.
+In this repository's own log every one of those questions between 2026-08-17 and
+2026-09-05 was an agent removing the temp directory it had just made: eleven
+approved, two expired, thirteen interruptions and no decisions. `rm` of the
+agent's own scratch is not a decision, so APRV-267 gives it a class of its own,
+`files.delete.scratch`, a sibling of `files.delete.out_of_scope` rather than a
+replacement for it.
+
+The rule has two halves, and both must say yes.
+
+**Text (pure, in the classifier).** Every target of the `rm` must be an absolute
+path, hold no `..` segment, hold nothing the classifier cannot read (`$VAR`, a
+glob, `~`), and be a STRICT descendant of a scratch root the caller supplied.
+All of them, not some: a command removing one scratch file beside one real one
+is not a scratch delete. A root is never under itself, so `rm -rf /tmp` does not
+qualify. With no roots supplied, nothing qualifies and the answer is exactly
+what it was before this rule existed.
+
+**Disk (impure, in the hook).** The hook resolves the roots and then re-checks
+each target, tightening back to `files.delete.out_of_scope` (rule
+`rm-scratch-rejected`) on any doubt at all:
+
+| the hook finds | class |
+|---|---|
+| the target's nearest existing ancestor resolves, stays under a root, and no `.git` sits at or above the target up to that root | `files.delete.scratch`, rule `rm-scratch` |
+| a symlink in the path resolves the target out of every root | `files.delete.out_of_scope`, rule `rm-scratch-rejected` |
+| a `.git` at or above the target: a checkout living inside the temp root | `files.delete.out_of_scope`, rule `rm-scratch-rejected` |
+| nothing on the path resolves, or the segment cannot be re-read | `files.delete.out_of_scope`, rule `rm-scratch-rejected` |
+
+The roots are `CLAUDE_SCRATCHPAD_DIR` and `CLAUDE_CODE_SCRATCHPAD_DIR` when a
+harness exports them (none does today: Claude Code names the session scratchpad
+in its system prompt and nowhere else), plus `os.tmpdir()` and the fixed temp
+roots `/tmp`, `/private/tmp` and `/var/tmp`. Each is realpath'd, and three
+guards mean no value an agent could reach can widen the class: a root must
+resolve to a real directory, must clear the depth floor, and must not contain
+the directory the hook runs in.
+
+The depth floor is two path segments, so `/` can never be a scratch root even
+from a poisoned `TMPDIR`, and neither can `/etc` or `/home`. The three fixed
+temp roots are exempt from it, because on Linux `os.tmpdir()` IS `/tmp`, one
+segment, while on macOS the same directory resolves through the `/tmp` symlink
+to `/private/tmp` and clears the floor by accident of layout. The exemption is
+keyed on the resolved value being one of those three compiled-in names, so a
+reported value still has to resolve to a directory that is already a root.
+
+`approval hook classify` runs both halves in the same directory, so what it
+prints is what the hook decides.
 
 ### What the approver reads (APRV-124)
 

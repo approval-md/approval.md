@@ -945,6 +945,37 @@ function skipHeredocBody(command: string, start: number, heredoc: PendingHeredoc
 // The rule table
 // ===========================================================================
 
+/**
+ * Facts about the machine the command will run on, resolved by the CALLER
+ * (APRV-267).
+ *
+ * The classifier is pure and stays pure. Some rules, though, turn on something
+ * no string can carry: whether a path names the agent's own scratch space. So
+ * the impure half is hoisted out of this file entirely — the caller resolves
+ * the roots, this file only compares path segments against them — and the
+ * shape is the one `protectedPaths` already established: an optional argument
+ * whose absence yields the strictly NARROWER answer. A caller that forgets it
+ * classifies every delete the way this file classified it before the field
+ * existed; it never invents an authorization.
+ *
+ * Every root must be ABSOLUTE and already resolved (symlinks followed) by the
+ * caller. This file does not touch the disk and cannot check either property,
+ * so a caller handing it a relative or unresolved root gets segment matching
+ * against exactly what it passed.
+ */
+export interface ClassifierContext {
+  /**
+   * Roots under which a delete is the agent tidying after itself: the session
+   * scratchpad the harness allots, and the system temp directory.
+   *
+   * `src/cli/hook.ts` resolves these (`resolveScratchRoots`) and tightens the
+   * answer afterwards with the checks that need the disk — a symlink escaping
+   * the root, a git checkout living inside it. Nothing here is a grant on its
+   * own: a path under a root still has to survive that second pass.
+   */
+  scratchRoots?: readonly string[];
+}
+
 /** Everything a refinement needs: the binary and the words that followed it. */
 interface RuleContext {
   bin: string;
@@ -960,6 +991,8 @@ interface RuleContext {
    * (APRV-114's fetch refinement) needs to know that one of them is a hole.
    */
   substituted: boolean;
+  /** What the caller knows about the machine (APRV-267). Never read from here. */
+  context: ClassifierContext;
 }
 
 /** A refinement's answer: a class and the rule id that chose it. */
@@ -1060,10 +1093,75 @@ function refineGitPush(ctx: RuleContext): Refinement {
     : { class: "vcs.push.branch", rule: "git-push-branch" };
 }
 
+/**
+ * The class of a delete that only removes the agent's own scratch (APRV-267).
+ *
+ * Every `files.delete.out_of_scope` question this repository's log held between
+ * 2026-08-17 and 2026-09-05 was a lane removing its own session scratchpad or a
+ * probe directory under the system temp root. Eleven were approved and two
+ * expired, which is thirteen human interruptions and zero decisions: an agent
+ * deleting the temp files it just made is not a decision, and pricing it at a
+ * person's attention spends the audit budget SPEC.md §11 asks to protect.
+ *
+ * It is a sibling of `files.delete.out_of_scope` and not a replacement for it.
+ * Everything that is not provably scratch keeps the old class.
+ */
+const SCRATCH_DELETE_CLASS = "files.delete.scratch";
+
+/**
+ * Is `candidate` a STRICT descendant of `root`? Both are compared by path
+ * segment, so `/private/tmpfoo` is not under `/private/tmp` and a root is never
+ * under itself: deleting the temp root wholesale is not tidying up.
+ *
+ * Pure segment matching, like every other path test in this file. The caller
+ * has already resolved both sides (see {@link ClassifierContext}).
+ */
+function isUnderRoot(candidate: string, root: string): boolean {
+  const want = pathSegments(root);
+  const have = pathSegments(candidate);
+  if (want.length === 0) return false;
+  if (have.length <= want.length) return false;
+  return want.every((segment, index) => segment === have[index]);
+}
+
+/**
+ * Does every one of these targets sit strictly under a scratch root?
+ *
+ * Four ways to say no, and each is a fail-closed branch rather than a filter:
+ * an empty target list (an `rm` with only flags is not a delete this rule can
+ * vouch for), a relative path (its meaning depends on a working directory the
+ * classifier does not have), a `..` segment or an unreadable value (either can
+ * leave the root after expansion), and a path under no root at all. ALL targets
+ * must pass, because the class describes the command and a command that removes
+ * one scratch file and one real one is not a scratch delete.
+ */
+function allTargetsAreScratch(
+  targets: readonly string[],
+  roots: readonly string[],
+): boolean {
+  if (targets.length === 0 || roots.length === 0) return false;
+  for (const target of targets) {
+    if (!target.startsWith("/")) return false;
+    if (isUnknownValue(target)) return false;
+    if (pathSegments(target).includes("..")) return false;
+    if (!roots.some((root) => isUnderRoot(target, root))) return false;
+  }
+  return true;
+}
+
 /** `rm` — everything outside the workspace, and every unreadable path, is manual. */
 function refineRm(ctx: RuleContext): Refinement {
   const recursive =
     hasFlag(ctx.args, ["--recursive"]) || hasShortFlag(ctx.args, ["r", "R"]);
+  // APRV-267, checked first because it is the narrowest branch: every target
+  // strictly under a root the CALLER resolved, with no `..` and nothing the
+  // text cannot read. The symlink and git-checkout halves of the rule need the
+  // disk and live in `src/cli/hook.ts`, which can only tighten this answer back
+  // to `files.delete.out_of_scope`; a caller that passes no roots never reaches
+  // this branch at all.
+  if (allTargetsAreScratch(ctx.positionals, ctx.context.scratchRoots ?? [])) {
+    return { class: SCRATCH_DELETE_CLASS, rule: "rm-scratch" };
+  }
   for (const path of ctx.positionals) {
     if (path.startsWith("/")) return { class: "files.delete.out_of_scope", rule: "rm-absolute" };
     if (pathSegments(path).includes("..")) {
@@ -1262,25 +1360,157 @@ function refineWebFetch(ctx: RuleContext): Refinement {
  */
 const GH_API_FIELD_FLAGS: readonly string[] = ["-f", "--field", "-F", "--raw-field", "--input"];
 
+// ---------------------------------------------------------------------------
+// GitHub metadata on the repository's own remote (APRV-268)
+// ---------------------------------------------------------------------------
+
 /**
- * `gh api` — a call with no method and no fields is a GET (APRV-114).
+ * Nudging the forge about THIS checkout's own repository.
+ *
+ * From the log, 2026-09-05: of 52 `network.call` questions since 2026-08-17, 48
+ * were approved, and three forms account for the bulk of them: `gh api graphql`
+ * queries, `gh pr update-branch` and `gh run rerun`, all against this
+ * repository's own origin. Sending things is what `network.call` is FOR (a
+ * webhook, an email, an arbitrary POST), and those stay manual. Asking GitHub a
+ * question about the repository the checkout already tracks, or telling it to
+ * redo bookkeeping about work already pushed, is a different act, and it had no
+ * class of its own to be granted through.
+ *
+ * The class is exactly three forms wide, and that width is the point. APRV-268
+ * first drew it wider, over `gh pr view`, `gh run list`, `gh issue view` and a
+ * plain `gh api` GET as well. Those were already `read.vcs.remote`, which this
+ * repository's policy makes autonomous, and an undeclared class falls to the
+ * manual default: moving them would have RAISED friction on the commonest reads
+ * in the repo to buy a class none of them needed. So the rule covers only the
+ * forms the log showed as `network.call`, and every read keeps the class it had.
+ *
+ * The class sits beside `read.vcs.remote` and `vcs.pr.open`: same forge, same
+ * repository, and no payload of the operator's authorship leaves the machine.
+ * Two of the three are metadata MUTATIONS (`pr update-branch`, `run rerun`), in
+ * because what they change is the forge's own bookkeeping about work already
+ * pushed, not content: the merge-base of a branch, a re-run of a workflow that
+ * already ran.
+ */
+const REMOTE_META_CLASS = "vcs.remote.meta";
+
+/**
+ * Flags that point `gh` at a repository other than the checkout's own, or at
+ * another forge entirely.
+ *
+ * The classifier is pure: it cannot resolve `origin`, so it cannot tell
+ * `-R approval-md/approval-md` (this repository, named explicitly) from
+ * `-R someone/else`. It therefore treats EVERY one of these as foreign and
+ * falls back to today's class. Over-classifying costs one approval prompt; the
+ * other direction would let `gh api -R victim/repo` ride a rule written for
+ * this repository's own metadata.
+ */
+const GH_FOREIGN_TARGET_FLAGS: readonly string[] = ["-R", "--repo", "--hostname"];
+
+/**
+ * Does this invocation use gh's DEFAULT repository resolution?
+ *
+ * `gh` with no `-R`/`--repo` resolves the repository from the checkout's git
+ * remotes, which is exactly "the checkout's own origin repository" — the only
+ * form this rule vouches for. A substitution or an unexpanded `$VAR` anywhere
+ * in the argv hides words the classifier never sees, one of which could be a
+ * `--repo`, so those are foreign too.
+ */
+function isOwnRepoInvocation(ctx: RuleContext): boolean {
+  if (ctx.substituted) return false;
+  if (ctx.args.some((arg) => arg.includes("$"))) return false;
+  return !hasFlag(ctx.args, GH_FOREIGN_TARGET_FLAGS);
+}
+
+/**
+ * The gh noun/action pairs that are metadata on the repository's own remote.
+ *
+ * Exactly the two the log showed as `network.call`, and no wider. Every other
+ * action on these nouns keeps the class it had: `gh pr view`, `gh pr list`,
+ * `gh pr checks`, `gh pr diff`, `gh pr status`, `gh run view`, `gh run list`
+ * and `gh issue view/list` stay `read.vcs.remote`, `gh pr create` stays
+ * `vcs.pr.open`, `gh pr merge` stays `vcs.push.main`. A rule that grew by
+ * analogy would be a rule nobody reviewed.
+ */
+const GH_META_ACTIONS: Readonly<Record<string, readonly string[]>> = {
+  pr: ["update-branch"],
+  run: ["rerun"],
+};
+
+/**
+ * The GraphQL keyword that turns a query into a write.
+ *
+ * Matched as a word so a field named `mutationCount` cannot trip it and a
+ * `mutation(` cannot slip past. Anchored nowhere: an operation can appear
+ * anywhere in a document, and a document with a mutation anywhere in it is a
+ * mutation.
+ */
+const GRAPHQL_MUTATION = /(^|[^A-Za-z0-9_])mutation([^A-Za-z0-9_]|$)/u;
+
+/**
+ * Is this `gh api graphql` call a pure query?
+ *
+ * Every word of the invocation is searched, because gh takes the document in a
+ * field (`-f query=…`, `--field query=@file`) and the classifier does not know
+ * gh's option grammar well enough to say which word is the document. Two ways
+ * to answer no, both fail-closed: the text contains `mutation` anywhere, or it
+ * reads the document from a file (`@path`, `--input`), whose contents this
+ * classifier will never see.
+ */
+function isGraphqlQueryOnly(args: readonly string[]): boolean {
+  if (hasFlag(args, ["--input"])) return false;
+  for (const arg of args) {
+    if (GRAPHQL_MUTATION.test(arg)) return false;
+    // `-f query=@file` and `--field query=@-` read the document from elsewhere.
+    const equals = arg.indexOf("=");
+    if (equals !== -1 && arg.slice(equals + 1).startsWith("@")) return false;
+  }
+  return true;
+}
+
+/**
+ * `gh api` — a GET reads as it always has (APRV-114); a GraphQL query on this
+ * checkout's own repository is metadata (APRV-268); everything else is a call.
  *
  * gh defaults to GET, and to POST the moment a field appears, so those two flag
- * families are the whole test. The read class is `read.vcs.remote`, the one
- * `refineGh` already gives `gh pr view`: the same forge, read the same way,
- * through a lower-level verb.
+ * families were the whole test before APRV-268 and remain it: a bodyless,
+ * methodless call is `read.vcs.remote`, whatever repository it names, exactly as
+ * it has classified since APRV-114.
+ *
+ * GraphQL is the one shape that test could not read, and the only thing APRV-268
+ * moves here. A query is carried in a field, so `gh api graphql -f query='query
+ * {…}'` looks exactly like a POST and classified `network.call`, which is how a
+ * run of approved read questions came to sit in the log. It is promoted only out
+ * of `network.call`, never out of the read class: the branch below runs after
+ * the GET test, so a form that read before still reads.
  *
  * The row this refines also matches `auth`, `gist`, `secret` and `workflow`,
  * which stay `network.call` unconditionally.
  */
 function refineGhApi(ctx: RuleContext): Refinement {
   if (ctx.sub !== "api") return { class: "network.call", rule: "gh-api" };
-  const write: Refinement = { class: "network.call", rule: "gh-api-write" };
   const bundles = ctx.args.filter((arg) => arg.startsWith("--") || !arg.startsWith("-X"));
-  if (hasFlag(ctx.args, GH_API_FIELD_FLAGS) || hasShortFlag(bundles, ["f", "F"])) return write;
-  if (ctx.substituted || ctx.args.some((arg) => arg.startsWith("$"))) return write;
-  if (readMethodFlag(ctx.args, ["-X", "--method"], "-X") === "other") return write;
-  return { class: "read.vcs.remote", rule: "gh-api-read" };
+  const methodIsWrite = readMethodFlag(ctx.args, ["-X", "--method"], "-X") === "other";
+  const bodied =
+    hasFlag(ctx.args, GH_API_FIELD_FLAGS) ||
+    hasShortFlag(bundles, ["f", "F"]) ||
+    ctx.substituted ||
+    ctx.args.some((arg) => arg.startsWith("$")) ||
+    methodIsWrite;
+  // Unchanged by APRV-268: no body and no method is a GET, and a GET reads.
+  if (!bodied) return { class: "read.vcs.remote", rule: "gh-api-read" };
+  // The one carve-out: a GraphQL document carrying no `mutation`, on the
+  // repository gh resolves from this checkout's own remotes. Anything the
+  // classifier cannot read (a document from a file, a `$VAR`, an explicit
+  // `--repo`) fails closed to the class it had.
+  if (
+    ctx.positionals[1] === "graphql" &&
+    !methodIsWrite &&
+    isOwnRepoInvocation(ctx) &&
+    isGraphqlQueryOnly(ctx.args)
+  ) {
+    return { class: REMOTE_META_CLASS, rule: "gh-api-graphql-query" };
+  }
+  return { class: "network.call", rule: "gh-api-write" };
 }
 
 /** Does this path invoke the compiled `approval` CLI? */
@@ -1480,7 +1710,7 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     bins: ["gh"],
     subs: ["api", "auth", "gist", "secret", "workflow"],
     class: "network.call",
-    emits: ["read.vcs.remote"],
+    emits: ["read.vcs.remote", REMOTE_META_CLASS],
     refine: refineGhApi,
   },
   {
@@ -1496,7 +1726,15 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     bins: ["gh"],
     subs: ["pr", "issue", "repo", "run", "cache"],
     class: "network.call",
-    emits: ["read.vcs.remote", "network.call", "vcs.pr.open", "vcs.pr.update", "vcs.push.main", "vcs.commit.branch"],
+    emits: [
+      "read.vcs.remote",
+      "network.call",
+      REMOTE_META_CLASS,
+      "vcs.pr.open",
+      "vcs.pr.update",
+      "vcs.push.main",
+      "vcs.commit.branch",
+    ],
     refine: refineGh,
   },
 
@@ -1561,7 +1799,13 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     bins: ["mkdir", "cp", "mv", "touch", "tee", "ln", "chmod", "truncate", "rmdir"],
     class: "files.write.workspace",
   },
-  { id: "rm", bins: ["rm"], class: "files.write.workspace", emits: ["files.delete.out_of_scope"], refine: refineRm },
+  {
+    id: "rm",
+    bins: ["rm"],
+    class: "files.write.workspace",
+    emits: ["files.delete.out_of_scope", SCRATCH_DELETE_CLASS],
+    refine: refineRm,
+  },
   { id: "sed", bins: ["sed"], class: "read.shell", emits: ["files.write.workspace"], refine: refineSed },
 
   // -- network -------------------------------------------------------------
@@ -1675,6 +1919,19 @@ const GH_PR_UPDATE_ACTIONS: readonly string[] = [
 function refineGh(ctx: RuleContext): Refinement {
   const noun = ctx.positionals[0];
   const action = ctx.positionals[1];
+  // APRV-268: the two listed noun/action pairs (`pr update-branch`, `run
+  // rerun`), on the repository gh would resolve from this checkout's own
+  // remotes. Neither is a read, so this sits above the read branch only for
+  // symmetry with the rest of the refinement; everything else on these nouns,
+  // reads included, falls through unchanged.
+  if (
+    noun !== undefined &&
+    action !== undefined &&
+    (GH_META_ACTIONS[noun] ?? []).includes(action) &&
+    isOwnRepoInvocation(ctx)
+  ) {
+    return { class: REMOTE_META_CLASS, rule: "gh-remote-meta" };
+  }
   if (action !== undefined && GH_READ_ACTIONS.includes(action)) {
     return { class: "read.vcs.remote", rule: "gh-read" };
   }
@@ -1854,6 +2111,7 @@ type SegmentOutcome =
 function classifySegment(
   segment: LexSegment,
   protectedPaths: readonly ProtectedPathEntry[],
+  context: ClassifierContext,
 ): SegmentOutcome {
   if (segment.opaque !== null) {
     return { ok: false, code: "opaque", detail: segment.opaque };
@@ -1864,7 +2122,7 @@ function classifySegment(
   // outer command even starts and the outer class would not describe it.
   for (const word of segment.words) {
     for (const inner of word.substitutions) {
-      const nested = classifyCommand(inner, protectedPaths);
+      const nested = classifyCommand(inner, protectedPaths, context);
       if (!nested.ok) {
         return {
           ok: false,
@@ -1960,7 +2218,7 @@ function classifySegment(
   const substituted = segment.words
     .slice(cursor + 1)
     .some((word) => word.substitutions.length > 0);
-  const ctx: RuleContext = { bin: basename, args, positionals, sub, substituted };
+  const ctx: RuleContext = { bin: basename, args, positionals, sub, substituted, context };
   const refined = rule.refine === undefined ? null : rule.refine(ctx);
   if (rule.refine !== undefined && refined === null) {
     return { ok: false, code: "opaque", detail: `${basename} runs inline source` };
@@ -2007,12 +2265,18 @@ function classifySegment(
  * Since APRV-266 an entry may be `{path, class}`, routing that path family to a
  * `policy.edit` sub-class. The classifier stays what it was: the entry's class
  * is DATA it copies out of the policy, matched by the same segment matcher as
- * every other entry, so this remains a pure function of
- * `(command, protectedPaths)` and resolves no autonomy at all.
+ * every other entry, so this resolves no autonomy at all.
+ *
+ * `context` (APRV-267) carries the machine facts a caller has resolved: today
+ * only `scratchRoots`. It behaves exactly as `protectedPaths` does: omitting it
+ * yields the strictly narrower answer, because every rule that reads it can only
+ * ever LOOSEN a class, and no rule reads it to loosen a protected or credential
+ * one.
  */
 export function classifyCommand(
   command: string,
   protectedPaths: readonly ProtectedPathEntry[] = [],
+  context: ClassifierContext = {},
 ): CommandClassification {
   const lexed = lex(command);
   if (!lexed.ok) {
@@ -2025,7 +2289,7 @@ export function classifyCommand(
   const segments: ClassifiedSegment[] = [];
   const classes: string[] = [];
   for (const segment of lexed.segments) {
-    const outcome = classifySegment(segment, protectedPaths);
+    const outcome = classifySegment(segment, protectedPaths, context);
     if (!outcome.ok) {
       return { ok: false, code: outcome.code, segment: segment.text, detail: outcome.detail };
     }

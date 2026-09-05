@@ -444,9 +444,20 @@ test("hook classify keeps a body-carrying fetch at network.call", () => {
 
 test("hook classify reads gh api by its method and field flags", () => {
   const dir = caseDir();
+  // APRV-268 left this split alone: a bodyless, methodless `gh api` is a GET and
+  // reads, whatever repository it names, exactly as it has since APRV-114. Only
+  // the graphql shape moved, and only out of `network.call` (see below).
   const read = runCli(["hook", "classify", "--json", "--", "gh api repos/x/y/pulls"], dir);
   assert.equal(read.code, 0, read.stderr);
   assert.deepEqual((JSON.parse(read.stdout) as Record<string, unknown>)["classes"], [
+    "read.vcs.remote",
+  ]);
+  const foreign = runCli(
+    ["hook", "classify", "--json", "--", "gh api -R other/repo repos/x/y/pulls"],
+    dir,
+  );
+  assert.equal(foreign.code, 0, foreign.stderr);
+  assert.deepEqual((JSON.parse(foreign.stdout) as Record<string, unknown>)["classes"], [
     "read.vcs.remote",
   ]);
   const write = runCli(["hook", "classify", "--json", "--", "gh api -X POST repos/x/y/issues"], dir);
@@ -454,6 +465,64 @@ test("hook classify reads gh api by its method and field flags", () => {
   assert.deepEqual((JSON.parse(write.stdout) as Record<string, unknown>)["classes"], [
     "network.call",
   ]);
+});
+
+test("hook classify separates a graphql query from a graphql mutation", () => {
+  // APRV-268, end to end: the verb a session is told to run when in doubt has
+  // to show the carve-out, or the carve-out does not exist where it is used.
+  const dir = caseDir();
+  const query = runCli(
+    ["hook", "classify", "--json", "--", "gh api graphql -f query='query{viewer{login}}'"],
+    dir,
+  );
+  assert.equal(query.code, 0, query.stderr);
+  assert.deepEqual((JSON.parse(query.stdout) as Record<string, unknown>)["classes"], [
+    "vcs.remote.meta",
+  ]);
+  const mutation = runCli(
+    ["hook", "classify", "--json", "--", "gh api graphql -f query='mutation{addComment{id}}'"],
+    dir,
+  );
+  assert.equal(mutation.code, 0, mutation.stderr);
+  assert.deepEqual((JSON.parse(mutation.stdout) as Record<string, unknown>)["classes"], [
+    "network.call",
+  ]);
+  // The same query aimed at a repository the classifier cannot resolve stays a
+  // call: `-R` is unreadable to a pure classifier, so it fails closed.
+  const foreign = runCli(
+    [
+      "hook",
+      "classify",
+      "--json",
+      "--",
+      "gh api graphql -R other/repo -f query='query{viewer{login}}'",
+    ],
+    dir,
+  );
+  assert.equal(foreign.code, 0, foreign.stderr);
+  assert.deepEqual((JSON.parse(foreign.stdout) as Record<string, unknown>)["classes"], [
+    "network.call",
+  ]);
+});
+
+test("hook classify moves gh pr update-branch but leaves gh pr view reading", () => {
+  // APRV-268's narrowing, end to end: the two gh verbs the log showed as
+  // network.call gain the new class, and the reads beside them keep the
+  // autonomous class they already had. A read that moved onto an undeclared
+  // class would be a friction INCREASE, which is the mistake this pins against.
+  const dir = caseDir();
+  for (const [command, expected] of [
+    ["gh pr update-branch 51", "vcs.remote.meta"],
+    ["gh run rerun 12345 --failed", "vcs.remote.meta"],
+    ["gh pr view 51", "read.vcs.remote"],
+    ["gh pr list --state open", "read.vcs.remote"],
+    ["gh run list --limit 5", "read.vcs.remote"],
+    ["gh issue view 12", "read.vcs.remote"],
+  ] as const) {
+    const run = runCli(["hook", "classify", "--json", "--", command], dir);
+    assert.equal(run.code, 0, run.stderr);
+    assert.deepEqual((JSON.parse(run.stdout) as Record<string, unknown>)["classes"], [expected], command);
+  }
 });
 
 test("hook classify reports a refusal without failing", () => {

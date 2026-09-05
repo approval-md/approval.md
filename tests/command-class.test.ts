@@ -26,6 +26,7 @@ import {
   NON_SECRET_ENV_NAMES,
   SECRET_ENV_PREFIXES,
   isSecretEnvName,
+  type ClassifierContext,
 } from "../src/core/command-class.js";
 
 interface Fixture {
@@ -38,7 +39,27 @@ interface Fixture {
   row?: string;
   /** Every class the whole command should produce, when there is more than one. */
   classes?: string[];
+  /**
+   * Machine facts the caller resolved (APRV-267). Omitted on every fixture but
+   * the scratch-delete ones, which is itself the assertion that the field is
+   * additive: with no context the table classifies exactly as it did before it
+   * existed.
+   */
+  context?: ClassifierContext;
 }
+
+/**
+ * Scratch roots for the APRV-267 fixtures.
+ *
+ * SYNTHETIC and never touched: the pure half compares path segments, so roots
+ * that existed would prove nothing the strings do not already say, and a
+ * fixture table that stat'd the disk would stop being a specification. The
+ * physical half of the rule (a symlink escaping the root, a git checkout inside
+ * it) is proved against real directories in `tests/cli-hook.test.ts`.
+ */
+const SCRATCH_ROOTS: ClassifierContext = {
+  scratchRoots: ["/private/tmp/claude-501/sess/scratchpad", "/private/tmp", "/var/folders/qy/T"],
+};
 
 const FIXTURES: readonly Fixture[] = [
   // -- git pushes: the three classes that differ only by flags and refspec ---
@@ -75,8 +96,9 @@ const FIXTURES: readonly Fixture[] = [
 
   // -- gh -------------------------------------------------------------------
   { command: "gh release create v0.1.0", class: "release.publish", rule: "gh-release" },
-  // `gh api` splits on its method and field flags (APRV-114); the other
-  // subcommands on the row are `network.call` whatever their flags say.
+  // `gh api` splits on its method and field flags (APRV-114), and APRV-268 did
+  // not move that split: a GET reads, whatever repository it names, and the
+  // other subcommands on the row are `network.call` whatever their flags say.
   { command: "gh api repos/x/y/pulls", class: "read.vcs.remote", rule: "gh-api-read", row: "gh-api" },
   { command: "gh api -X GET repos/x/y", class: "read.vcs.remote", rule: "gh-api-read", row: "gh-api" },
   { command: "gh api --method GET repos/x/y", class: "read.vcs.remote", rule: "gh-api-read", row: "gh-api" },
@@ -84,7 +106,6 @@ const FIXTURES: readonly Fixture[] = [
   { command: "gh api -X POST repos/x/y/issues", class: "network.call", rule: "gh-api-write", row: "gh-api" },
   { command: "gh api --method=PATCH repos/x/y", class: "network.call", rule: "gh-api-write", row: "gh-api" },
   { command: "gh api -XDELETE repos/x/y", class: "network.call", rule: "gh-api-write", row: "gh-api" },
-  { command: "gh api graphql -f query=Q", class: "network.call", rule: "gh-api-write", row: "gh-api" },
   { command: "gh api repos/x/y --field a=b", class: "network.call", rule: "gh-api-write", row: "gh-api" },
   { command: "gh api repos/x/y --raw-field a=b", class: "network.call", rule: "gh-api-write", row: "gh-api" },
   { command: "gh api repos/x/y -F a=b", class: "network.call", rule: "gh-api-write", row: "gh-api" },
@@ -92,9 +113,77 @@ const FIXTURES: readonly Fixture[] = [
   { command: "gh auth status", class: "network.call", rule: "gh-api" },
   { command: "gh secret set TOKEN", class: "network.call", rule: "gh-api" },
   { command: "gh status", class: "read.vcs.remote", rule: "gh-simple-read" },
+
+  // -- gh metadata on this checkout's own remote (APRV-268) ------------------
+  // POSITIVE, and the whole of it. Of 52 network.call questions in the repo log
+  // since 2026-08-17, 48 were approved, and three forms account for the bulk: a
+  // graphql query, `gh pr update-branch` and `gh run rerun`, on this
+  // repository's own origin. Those three move, with default repo resolution.
+  { command: "gh pr update-branch 51", class: "vcs.remote.meta", rule: "gh-remote-meta", row: "gh" },
+  { command: "gh run rerun 12345 --failed", class: "vcs.remote.meta", rule: "gh-remote-meta", row: "gh" },
+  // A GraphQL document with no `mutation` in it is a query, whatever field flag
+  // carries it. This is the shape the APRV-114 field test could not read: the
+  // field that carries the document made a query look exactly like a POST.
+  {
+    command: "gh api graphql -f query='query { repository(owner: \"a\", name: \"b\") { id } }'",
+    class: "vcs.remote.meta",
+    rule: "gh-api-graphql-query",
+    row: "gh-api",
+  },
+
+  // NEGATIVE, and the reason the rule is only three forms wide. Every gh read
+  // below classified `read.vcs.remote` before APRV-268, which this repository's
+  // policy makes autonomous; an undeclared class falls to the manual default, so
+  // moving them onto `vcs.remote.meta` would have RAISED friction on the
+  // commonest reads in the repo. They do not move.
   { command: "gh pr view 51", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh pr list --state open", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
   { command: "gh pr checks", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh run view 12345", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh run list --limit 5", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh issue view 12", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
   { command: "gh issue list", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  // NEGATIVE. A mutation is a write, wherever the word appears.
+  {
+    command: "gh api graphql -f query='mutation { addComment(input: {}) { id } }'",
+    class: "network.call",
+    rule: "gh-api-write",
+    row: "gh-api",
+  },
+  // A document the classifier will never see cannot be vouched for.
+  { command: "gh api graphql -f query=@doc.graphql", class: "network.call", rule: "gh-api-write", row: "gh-api" },
+  { command: "gh api graphql --input doc.json", class: "network.call", rule: "gh-api-write", row: "gh-api" },
+  { command: "gh api graphql -f query=$Q", class: "network.call", rule: "gh-api-write", row: "gh-api" },
+  // `-R`, `--repo` and `--hostname` all name a target the classifier cannot
+  // resolve, so every one of them falls back to today's class — including a
+  // `-R` that happens to name this very repository.
+  {
+    command: "gh api graphql -R other/repo -f query='query{viewer{login}}'",
+    class: "network.call",
+    rule: "gh-api-write",
+    row: "gh-api",
+  },
+  { command: "gh pr update-branch -R other/repo 1", class: "network.call", rule: "gh-write", row: "gh" },
+  { command: "gh run rerun --repo other/repo 1", class: "network.call", rule: "gh-write", row: "gh" },
+  { command: "gh pr view -R other/repo 1", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh pr view --repo approval-md/approval-md 1", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh api --hostname ghe.example.com repos/x/y", class: "read.vcs.remote", rule: "gh-api-read", row: "gh-api" },
+  { command: "gh api -R other/repo repos/x/y", class: "read.vcs.remote", rule: "gh-api-read", row: "gh-api" },
+  // An unexpanded expansion could BE a `--repo`, so it is foreign too.
+  { command: "gh pr update-branch $NUMBER", class: "network.call", rule: "gh-write", row: "gh" },
+  { command: "gh pr view $NUMBER", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  // Actions APRV-268 did not list stay exactly where they were, on the nouns it
+  // did list. A rule that grew by analogy would be a rule nobody reviewed.
+  { command: "gh pr diff 51", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh pr status", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh repo view", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh run watch 1", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  // Sending something is what network.call is for, and none of it moves.
+  { command: "gh gist create notes.md", class: "network.call", rule: "gh-api" },
+  { command: "gh release upload v0.1.0 dist.tgz", class: "release.publish", rule: "gh-release" },
+  { command: "curl -X POST https://hooks.example.com/notify", class: "network.call", rule: "web-write", row: "web-fetch" },
+  { command: "curl -d payload https://api.example.com/send", class: "network.call", rule: "web-write", row: "web-fetch" },
+
   { command: "gh pr create --fill", class: "vcs.pr.open", rule: "gh-pr-open", row: "gh" },
   { command: "gh pr edit 51 --title t", class: "vcs.pr.update", rule: "gh-pr-update", row: "gh" },
   { command: "gh pr comment 51 --body hi", class: "vcs.pr.update", rule: "gh-pr-update", row: "gh" },
@@ -182,6 +271,124 @@ const FIXTURES: readonly Fixture[] = [
   { command: "rm -rf .", class: "files.delete.out_of_scope", rule: "rm-recursive-root", row: "rm" },
   { command: "rm -rf $TARGET", class: "files.delete.out_of_scope", rule: "rm-unreadable-path", row: "rm" },
   { command: "rm -rf node_modules", class: "files.write.workspace", rule: "rm-workspace", row: "rm" },
+
+  // -- scratch deletes (APRV-267) -------------------------------------------
+  // POSITIVE: every target strictly under a root the caller resolved. These are
+  // the shapes the log actually held — a lane removing its own session
+  // scratchpad, a probe file under the system temp root.
+  {
+    command: "rm -rf /private/tmp/claude-501/sess/scratchpad/build.log",
+    class: "files.delete.scratch",
+    rule: "rm-scratch",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  {
+    command: "rm -rf /private/tmp/claude-501/sess/scratchpad",
+    class: "files.delete.scratch",
+    rule: "rm-scratch",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  {
+    command: "rm /private/tmp/probe-267.json",
+    class: "files.delete.scratch",
+    rule: "rm-scratch",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  {
+    command: "rm -rf /var/folders/qy/T/approval-index-abc123",
+    class: "files.delete.scratch",
+    rule: "rm-scratch",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // Flags between the targets are still flags; both targets are under a root.
+  {
+    command: "rm -f -v /private/tmp/a.txt /private/tmp/b.txt",
+    class: "files.delete.scratch",
+    rule: "rm-scratch",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+
+  // NEGATIVE, one per way the rule declines. Each keeps today's class.
+  // Outside every root.
+  {
+    command: "rm -rf /Users/carter/dev/approval-md/dist",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // A `..` segment: the text says one place, the kernel goes to another.
+  {
+    command: "rm -rf /private/tmp/claude-501/sess/scratchpad/../../../etc",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // The root itself is not under the root: deleting the temp root is not tidying.
+  {
+    command: "rm -rf /private/tmp",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // A sibling whose name merely starts with a root's: segment matching, not
+  // string prefixes.
+  {
+    command: "rm -rf /private/tmpevil/x",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // Unreadable values: an unexpanded variable and a glob could name anything.
+  {
+    command: "rm -rf /private/tmp/$SESSION",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  {
+    command: "rm -rf /private/tmp/probe-*",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // A relative path has no meaning without a working directory this classifier
+  // does not have, so it keeps the class it had (a workspace delete here).
+  {
+    command: "rm -rf scratchpad/build.log",
+    class: "files.write.workspace",
+    rule: "rm-workspace",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // ALL targets or none: one scratch file beside one real one is not a scratch
+  // delete.
+  {
+    command: "rm -rf /private/tmp/probe.json /etc/hosts",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // No context at all: the caller resolved no roots, so nothing is scratch.
+  // This is the pre-APRV-267 answer, unchanged.
+  {
+    command: "rm -rf /private/tmp/claude-501/sess/scratchpad/no-context",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+  },
+
   { command: "sed -n '1,20p' README.md", class: "read.shell", rule: "sed-read", row: "sed" },
   { command: "sed -i.bak s/a/b/ src/x.ts", class: "files.write.workspace", rule: "sed-in-place", row: "sed" },
 
@@ -266,7 +473,7 @@ const FIXTURES: readonly Fixture[] = [
 for (const fixture of FIXTURES) {
   if (fixture.rule === "") continue;
   test(`classify: ${fixture.command}`, () => {
-    const result = classifyCommand(fixture.command);
+    const result = classifyCommand(fixture.command, [], fixture.context ?? {});
     assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
     if (!result.ok) return;
     const first = result.segments[0];
