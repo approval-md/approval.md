@@ -1,0 +1,14 @@
+{
+  "seq": 58,
+  "ts": "2026-09-05T20:11:07Z",
+  "event": "gate.organ.attested",
+  "actor": "human:carter",
+  "channel": "cli",
+  "payload": {
+    "organ_path": "/Users/carter/dev/approval-md/.claude/settings.json",
+    "sha256": "5f2d0c9b7a1e34860df5c2b8a90e17436d81cf05e2a934b7c60d18ea3f905c21"
+  },
+  "alg": "sha256/jcs",
+  "prev": "7f625051c176f2f260a1f7e25c9a933717ebb49917a8788ac25ae7a4614ebb30",
+  "hash": "2c9a41f8e07d5b6139fbc84a2e0d97c31556a08bf4e2913d7ca60b85f9d3e70f"
+}

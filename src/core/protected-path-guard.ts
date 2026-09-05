@@ -32,13 +32,26 @@
  *
  * Three verdicts pass, and they are ordered by how much they prove:
  *
- * 1. `attested` — the policy file itself. `approval policy amend --commit`
- *    appends `policy.updated` carrying `{policy_path, sha256}`, the SHA-256 of
- *    the policy bytes a human attested. So for `APPROVAL.md` the guard does not
- *    look for a grant at all: it hashes the file's bytes AT THE HEAD COMMIT and
- *    requires that exact digest in the log. This is the strongest match in the
- *    system — content-level, not path-level — and it is why amendment PRs pass
- *    without a `policy.edit` grant, which they would never have.
+ * 1. `attested` — the policy file, and the gate's ORGANS. `approval policy
+ *    amend --commit` appends `policy.updated` carrying `{policy_path, sha256}`,
+ *    the SHA-256 of the policy bytes a human attested. So for `APPROVAL.md` the
+ *    guard does not look for a grant at all: it hashes the file's bytes AT THE
+ *    HEAD COMMIT and requires that exact digest in the log. This is the
+ *    strongest match in the system — content-level, not path-level — and it is
+ *    why amendment PRs pass without a `policy.edit` grant, which they would
+ *    never have.
+ *
+ *    Since APRV-272 the same verdict covers the gate's organs, the harness
+ *    files that install the hook (`.claude/settings.json` and kin), on a
+ *    `gate.organ.attested` record carrying that path and that digest. They need
+ *    it for a stronger reason than the policy file does: an organ is
+ *    `policy.core`, `policy.core` is human-only, and the gate mints NOTHING for
+ *    a human-only class — so `granted-file` and `granted-command` cannot exist
+ *    for one however correctly a human edited it, and before this the guard
+ *    could only ever fail such a change (PR #300). The path is part of the
+ *    match: a digest attested for one organ is not evidence for another, which
+ *    is why the organ record carries a whole relative path where the policy
+ *    record carries a basename.
  * 2. `granted-file` — a file-tool edit. The hook binds the CHANGE rather than
  *    the touch (APRV-124), so the bound material carries `file` plus the exact
  *    edit: `{before, after}` for an Edit, `{content}` for a Write. That is
@@ -178,9 +191,12 @@
  * git plumbing and file reads live in the caller.
  */
 
+import { organAttestationOf } from "./attest.js";
 import {
   classifyCommand,
+  isGateOrganPath,
   isProtectedPath,
+  normalizePathSpelling,
   POLICY_EDIT_SUBCLASS,
   type ProtectedPathEntry,
 } from "./command-class.js";
@@ -360,6 +376,26 @@ export interface GuardInput {
   policySha256AtHead: string | null;
   /** The policy file's repository-relative path, e.g. `APPROVAL.md`. */
   policyPath: string;
+  /**
+   * SHA-256 of one GATE ORGAN's bytes at the head commit, or `null` when the
+   * head tree does not carry that path (APRV-272).
+   *
+   * The per-path counterpart of {@link policySha256AtHead}, computed the same
+   * way and from the same place — the blob at the head COMMIT, never the
+   * working tree. Only used for the `attested` verdict on an organ.
+   *
+   * OPTIONAL, and a caller that omits it gets no organ verdict at all rather
+   * than a weaker one: an organ change then falls through to the grant search
+   * and fails like any other unevidenced protected path. That is the
+   * fail-closed direction, and it is what keeps a caller written before this
+   * field existed correct rather than newly permissive.
+   *
+   * A DELETED organ resolves to `null` here, so removing one cannot pass by
+   * attestation: there are no bytes at head for a human to have signed. That is
+   * deliberate — the repair for a deletion is a grant or a human's own commit
+   * outside a pull request, not a record about bytes that no longer exist.
+   */
+  organSha256AtHead?: (path: string) => string | null;
   /**
    * Resolve bound material from the committed payload store, by hash.
    * Returns `null` when the head tree does not carry that payload.
@@ -850,6 +886,17 @@ function attributeRun(
   };
 }
 
+/**
+ * The organ attestation index's key: the normalized path AND the digest.
+ *
+ * One key rather than a map of maps. The digest is a fixed 64 hex characters
+ * and it comes last, so the split point is unambiguous however the path is
+ * spelled: two different (path, digest) pairs cannot collide into one key.
+ */
+function organKey(organPath: string, sha256: string): string {
+  return `${normalizePathSpelling(organPath)} ${sha256}`;
+}
+
 /** The ordering rule, stated identically on every failure that could be lag. */
 const ORDERING_RULE =
   "the committed log trails the primary checkout's live log, so if this edit WAS granted, " +
@@ -908,6 +955,17 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
     if (typeof sha === "string") attestations.set(sha, record);
   }
 
+  // The ORGAN attestation index (APRV-272), keyed by PATH AND digest, because
+  // a digest attested for one organ is not evidence for another. Kept separate
+  // from the policy index above, and fed by a different event type, so that
+  // neither can ever answer the other's question.
+  const organAttestations = new Map<string, EventRecord>();
+  for (const record of records) {
+    const fields = organAttestationOf(record);
+    if (fields === null) continue;
+    organAttestations.set(organKey(fields.organPath, fields.sha256), record);
+  }
+
   // The grants of a class that can authorize a protected write.
   const grants = records.filter(
     (record) =>
@@ -955,6 +1013,29 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
       // Not attested: fall through to the grant search rather than failing
       // here, because an ordinary policy.edit grant on the policy file is also
       // valid evidence and a human amendment is not the only way it changes.
+    }
+
+    // 1b. A gate organ, by attestation of THAT path's bytes (APRV-272).
+    if (isGateOrganPath(path)) {
+      const digest = input.organSha256AtHead?.(path) ?? null;
+      if (digest !== null) {
+        const attested = organAttestations.get(organKey(path, digest));
+        if (attested !== undefined) {
+          findings.push({
+            path,
+            ok: true,
+            evidence: "attested",
+            seq: attested.seq,
+            ts: attested.ts,
+            actor: attested.actor,
+            detail: `${path} at ${input.window.head} hashes to ${digest}, which ${attested.actor} attested FOR THAT PATH at seq ${attested.seq}. A gate organ is policy.core and policy.core is human-only, so no grant for this edit can exist; content attestation is the evidence`,
+          });
+          continue;
+        }
+      }
+      // Not attested: fall through, exactly as the policy file does. A policy
+      // that does not make policy.core human-only can still produce a grant
+      // naming this path, and that grant is evidence like any other.
     }
 
     // 2 and 3. A grant whose bound material names this path, close enough in
@@ -1220,6 +1301,19 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
     ) {
       diagnosis.push(
         `no policy.updated record attests the bytes this pull request would install (${input.policySha256AtHead}); an amendment lands through \`approval policy amend --commit\`, whose attestation record is the evidence`,
+      );
+    }
+    if (isGateOrganPath(path)) {
+      // The one failure in this guard whose repair is NOT "take the change to
+      // the gate": there is no gate for it. `policy.core` is human-only, the
+      // gate mints nothing for a human-only class, so a grant for this edit
+      // cannot be obtained by anybody. Naming the verb is the whole point of
+      // the message (APRV-272).
+      const digest = input.organSha256AtHead?.(path) ?? null;
+      diagnosis.push(
+        digest === null
+          ? `${path} is one of the gate's organs and no bytes for it could be hashed at ${input.window.head} (this change deletes it, or the caller supplied no digest), so no attestation can match it; a deletion is not evidenced by a record about bytes that no longer exist`
+          : `no gate.organ.attested record attests ${path} at ${digest}, and a digest attested for some OTHER path is not evidence for this one. A gate organ is policy.core, policy.core is human-only, and the gate mints nothing for a human-only class — so no grant for this edit can exist and content attestation is the only evidence there is. The human route, in the PRIMARY checkout: \`approval policy attest --organ ${path} --as human:<id>\`, then a log advance carrying that record`,
       );
     }
 

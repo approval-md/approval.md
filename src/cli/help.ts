@@ -636,22 +636,22 @@ export const POLICY_TEST_HELP = policyVerbHelp("test", "check");
 export const POLICY_ATTEST_HELP = `approval policy attest — record a human's sign-off on the policy file
 
 Usage:
-  approval policy attest [--policy <path>] [--dir <path>] [--as human:<id>]
-                         [--log <path>] [--json]
+  approval policy attest [--policy <path>] [--dir <path>] [--organ <path>]
+                         [--as human:<id>] [--log <path>] [--json]
 
 Flags:
   --policy <path> / --dir <path>   the policy file, or where to discover it
+  --organ <path>   attest a GATE ORGAN instead; one path per call, under --dir
   --as human:<id>  the human attesting; overrides APPROVAL_HUMAN
   --log <path>     log file to append to (default .approval/log/events.jsonl)
   --json           machine-readable output
   -h, --help       this text
 
 Appends one policy.updated event carrying the SHA-256 of the policy file's exact
-bytes. Gate operations refuse while the live hash differs from the latest
-attestation, with the reason "policy-not-attested". Human-only, and identity is
-CONFIG-DECLARED: the trust boundary is the local machine, so an attestation
-proves that someone with local control signed off, not who. Bytes, not parse:
-the file is hashed as it sits on disk and does not have to be loadable.
+bytes; gate operations refuse while it differs ("policy-not-attested").
+Human-only, identity CONFIG-DECLARED: the trust boundary is the local machine,
+so it proves someone with local control signed off, not who. Bytes, not parse.
+--organ appends gate.organ.attested for a policy.core harness file instead.
 
 JSON shape: docs/cli-reference.md#policy-attest
 ${EXIT_CODES_POINTER}

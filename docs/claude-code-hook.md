@@ -48,6 +48,22 @@ configures the gate is part of the gate, and an agent that could write its own
 hook entry could write itself out of it. The hook classifies edits to it as
 `policy.core` for the same reason.
 
+**After editing it, attest it (APRV-272).** Because the class is human-only the
+gate mints nothing for the change (no request, no grant), so the CI-side guard
+below has only one kind of evidence it can accept for this file, and it is this:
+
+```
+approval policy attest --organ .claude/settings.json --as human:<id>
+```
+
+That appends one `gate.organ.attested` record carrying the path and the SHA-256
+of the bytes you just committed, and the guard passes the file when the blob at
+head hashes to a digest attested for that same path. The record is invisible to
+the gate itself: it makes no policy operative and changes no verdict. Skip it
+and the pull request carrying your edit fails `no-evidence`, with the command
+above in the failure text. `approval doctor`'s `gate-organs` row says, before
+you open the pull request, which harness files are in that state.
+
 ```json
 {
   "hooks": {
@@ -1034,11 +1050,13 @@ read the checkout could be told a different story than the pull request carries.
 
 ### What counts as evidence
 
-Three verdicts pass, ordered by how much they prove.
+Three kinds of verdict pass, ordered by how much they prove, with attestation
+covering two different surfaces.
 
 | verdict | what it establishes |
 |---|---|
 | `attested` | CONTENT-level. The policy file's bytes at the head commit hash to a digest some `policy.updated` record carries, which is what `approval policy amend --commit` writes. No grant is sought, which is how amendment pull requests pass — they have an attestation and would never have a `policy.edit` grant. |
+| `attested` (a gate ORGAN, APRV-272) | CONTENT-level, and PATH-bound. The organ's bytes at the head commit hash to a digest a `gate.organ.attested` record carries **for that same path**, which is what `approval policy attest --organ <path>` writes. A digest attested for another organ is not evidence for this one. The organs need this more than the policy file does: they are `policy.core`, `policy.core` is human-only, and the gate mints nothing for a human-only class, so `granted-file` and `granted-command` cannot exist for one however carefully a human edited it. PR #300 is that case: hand-committed `PostToolUse` entries that no evidence in the world could have passed. A deleted organ has no bytes at head and so cannot be attested; that fails, which is the fail-closed direction. |
 | `granted-file` | HUNK-level. An `approval.granted` of class `policy.edit`, `policy.core` or (since APRV-266) any `policy.edit` sub-class, whose `payload_hash` resolves in the committed payload store to material whose `file` names this path. Since APRV-124 the hook binds the CHANGE rather than the touch, so the payload carries the exact edit, and since APRV-202 that is what is checked: the granted `after` bytes must occur verbatim in the blob at head, the `before` bytes in the blob at base, and the lines they contain are the ones they cover. |
 | `granted-command` | ATTRIBUTED, one notch weaker. The granted command is re-run through this runtime's own `classifyCommand`, and it counts only when a segment classifies as a granting class BECAUSE of a word naming this path (`ClassifiedSegment.path`, or another word of that same segment that resolves exactly to this checkout's copy of the path — a batch names several files and the field holds one). A mention is not a grant: `cat SPEC.md` is `read.shell` and proves nothing. A command payload describes no bytes, so it covers the whole path only with the three tests below. |
 

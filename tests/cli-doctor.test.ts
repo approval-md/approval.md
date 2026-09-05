@@ -403,6 +403,10 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // look must never report a pass, which is the rule the whole row is built
       // on (APRV-257).
       "skip",
+      // gate-organs skips: the fixture carries no `.claude` or `.cursor`
+      // directory, so there is no harness file here for a human to have
+      // attested — the same absence harness-hook-wiring skips on (APRV-272).
+      "skip",
     ],
   );
   for (const entry of parsed.checks) {
@@ -441,7 +445,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 25);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 26);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
@@ -900,11 +904,13 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  // 25: APRV-257 appended `checkpoint` (the second witness, as a row).
+  // 26: APRV-257 appended `checkpoint` (the second witness, as a row).
   // APRV-227 appended `harness-version-unverified` (whether the binary
-  // hosting the hook changed under it) and APRV-208 appended `live-draw`
-  // (whether a daemon is answering supervised-live draws for this log).
-  assert.equal(parsed.checks.length, 25);
+  // hosting the hook changed under it), APRV-208 appended `live-draw`
+  // (whether a daemon is answering supervised-live draws for this log), and
+  // APRV-272 appended `gate-organs` (which harness files carry no attestation
+  // of their current bytes).
+  assert.equal(parsed.checks.length, 26);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);
@@ -1707,4 +1713,64 @@ test("doctor: a value inherited from the shell over the instance's own line is r
   assert.equal(scope.status, "skip");
   assert.match(scope.detail, /APPROVAL_TG_TOKEN is exported in this environment/u);
   assert.equal(bled.stdout.includes(TOKEN), false, "the bleed report carried the value");
+});
+
+// ---------------------------------------------------------------------------
+// gate-organs (APRV-272)
+// ---------------------------------------------------------------------------
+
+const ORGAN_TEXT = '{"hooks":{"PreToolUse":[]}}\n';
+
+/** Write the harness settings file into a doctor home. */
+function writeOrgan(home: string, text = ORGAN_TEXT): void {
+  mkdirSync(join(home, ".claude"), { recursive: true });
+  writeFileSync(join(home, ".claude", "settings.json"), text, "utf8");
+}
+
+test("doctor: a hand-edited gate organ nobody attested is reported, and never fails", async () => {
+  const home = await makeHome({ port: await freePort() });
+  writeOrgan(home);
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, {});
+  const organs = checkNamed(run, "gate-organs");
+
+  assert.equal(organs.status, "skip");
+  assert.match(organs.detail, /NOT ATTESTED/u);
+  assert.match(organs.detail, /\.claude\/settings\.json/u);
+  assert.match(organs.detail, /never attested/u);
+  assert.match(organs.fix ?? "", /approval policy attest --organ \.claude\/settings\.json/u);
+  // The row is informational: an unattested organ breaks nothing on this
+  // machine, and the enforcement is the CI-side guard. The run's verdict must
+  // come from the other rows alone.
+  assert.equal(
+    parseDoctor(run).checks.some((entry) => entry.check === "gate-organs" && entry.status === "fail"),
+    false,
+  );
+});
+
+test("doctor: attesting the organ turns the row green, and editing it turns it back", async () => {
+  const home = await makeHome({ port: await freePort() });
+  writeOrgan(home);
+
+  const attested = await runCli(
+    ["policy", "attest", "--organ", ".claude/settings.json"],
+    home,
+    { APPROVAL_HUMAN: "human:carter" },
+  );
+  assert.equal(attested.code, 0, attested.stderr);
+
+  const green = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, {});
+  const passing = checkNamed(green, "gate-organs");
+  assert.equal(passing.status, "pass");
+  assert.match(passing.detail, /carry an attestation of their current bytes/u);
+  assert.equal(passing.fix, undefined);
+
+  // One more hand edit, and the row names the record the bytes have moved past.
+  writeOrgan(home, '{"hooks":{"PreToolUse":[],"PostToolUse":[]}}\n');
+  const drifted = checkNamed(
+    await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, {}),
+    "gate-organs",
+  );
+  assert.equal(drifted.status, "skip");
+  assert.match(drifted.detail, /edited since seq \d+/u);
 });

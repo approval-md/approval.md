@@ -72,7 +72,15 @@ import {
   telegramChatEnvFor,
   telegramTokenEnvFor,
 } from "../channels/telegram.js";
-import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
+import {
+  HUMAN_ACTOR_ENV,
+  checkAttestation,
+  findOrganAttestation,
+  latestOrganAttestation,
+  policyBytesHash,
+  resolveHumanActor,
+} from "../core/attest.js";
+import { isGateOrganPath } from "../core/command-class.js";
 import { VALUES_INFO_STRING, loadValues } from "../core/values.js";
 import {
   KEYSTORE_DEFERRED,
@@ -2308,6 +2316,125 @@ function checkDarkSessions(
   };
 }
 
+// ---------------------------------------------------------------------------
+// 27. gate-organs (APRV-272)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where the gate's organs live, as repository-relative prefixes.
+ *
+ * The enumeration is deliberately narrow and one level deep. `core/command-class.ts`
+ * decides what IS an organ (and every path listed here is put to it before it
+ * is reported); this list only says where to look, so a directory nobody uses
+ * costs nothing and a file nobody named is not invented.
+ */
+const ORGAN_SEARCH: readonly { dir: string; prefix?: string }[] = [
+  { dir: ".claude", prefix: "settings" },
+  { dir: ".cursor", prefix: "hooks.json" },
+  { dir: join(".cursor", "hooks") },
+  { dir: join(".cursor", "agents") },
+];
+
+/** The organ files this checkout actually carries, repository-relative, sorted. */
+function listGateOrgans(root: string): string[] {
+  const found: string[] = [];
+  for (const entry of ORGAN_SEARCH) {
+    let names: string[];
+    try {
+      names = readdirSync(join(root, entry.dir));
+    } catch {
+      continue;
+    }
+    for (const name of names.sort()) {
+      if (entry.prefix !== undefined && !name.startsWith(entry.prefix)) continue;
+      const relative = `${entry.dir.split(/[/\\]+/u).join("/")}/${name}`;
+      let isFile: boolean;
+      try {
+        isFile = statSync(join(root, relative)).isFile();
+      } catch {
+        continue;
+      }
+      // The classifier has the last word on what an organ is, so a file that
+      // merely sits in one of these directories is not reported as one.
+      if (isFile && isGateOrganPath(relative)) found.push(relative);
+    }
+  }
+  return found;
+}
+
+/**
+ * Which gate organs in this checkout carry no attestation of their CURRENT
+ * bytes (APRV-272)?
+ *
+ * **This row never moves the exit code, by design.** It reports a fact about
+ * files a human edits by hand, and the enforcement for that fact lives in the
+ * CI-side protected-path guard, which fails the pull request. Doctor's job here
+ * is to make the state visible BEFORE a pull request fails on it: a human who
+ * has just hand-edited the settings file should be told they owe an
+ * attestation while they are still at the terminal, not by a red check twenty
+ * minutes later. A failing row would also be wrong on its own terms — an
+ * unattested organ breaks nothing on this machine, unlike an unattested policy,
+ * which makes every gated operation refuse.
+ *
+ * A checkout with no organ files at all is a skip: there is no harness
+ * configuration here, which is a state and not a fault, exactly as
+ * `harness-hook-wiring` treats the same absence.
+ */
+function checkGateOrgans(dir: string, records: readonly EventRecord[]): DoctorCheck {
+  const check = "gate-organs";
+  const root = repoRoot(dir) ?? dir;
+  const organs = listGateOrgans(root);
+  if (organs.length === 0) {
+    return {
+      check,
+      status: "skip",
+      detail: `${root} carries no gate organ files (${ORGAN_SEARCH.map((entry) => entry.dir).join(", ")}), so there is nothing here for a human to have attested`,
+    };
+  }
+
+  const unattested: string[] = [];
+  const unreadable: string[] = [];
+  let attested = 0;
+  for (const organ of organs) {
+    let sha256: string;
+    try {
+      sha256 = policyBytesHash(readFileSync(join(root, organ)));
+    } catch (cause) {
+      unreadable.push(`${organ} (${detailOf(cause)})`);
+      continue;
+    }
+    if (findOrganAttestation(records, organ, sha256) !== null) {
+      attested += 1;
+      continue;
+    }
+    const previous = latestOrganAttestation(records, organ);
+    unattested.push(
+      previous === null
+        ? `${organ} (never attested, live ${sha256.slice(0, 12)}…)`
+        : `${organ} (edited since seq ${previous.record.seq}: attested ${previous.sha256.slice(0, 12)}…, live ${sha256.slice(0, 12)}…)`,
+    );
+  }
+
+  if (unattested.length === 0 && unreadable.length === 0) {
+    return {
+      check,
+      status: "pass",
+      detail: `${String(attested)} gate organ file(s) carry an attestation of their current bytes: ${organs.join(", ")}`,
+    };
+  }
+
+  const parts: string[] = [];
+  if (unattested.length > 0) parts.push(`NOT ATTESTED: ${unattested.join("; ")}`);
+  if (unreadable.length > 0) parts.push(`unreadable: ${unreadable.join("; ")}`);
+  return {
+    check,
+    // Never a fail: see the note above. The exit code belongs to the guard.
+    status: "skip",
+    detail: `${parts.join(". ")}. A gate organ is policy.core, so no grant for a hand edit to one can exist and the protected-path guard accepts only an attestation of these exact bytes; a pull request carrying this change will fail until one is in the committed log`,
+    fix: `approval policy attest --organ ${(unattested[0] ?? "<path>").split(" ")[0] ?? "<path>"} --as human:<id> — after reading the file`,
+  };
+}
+
 /** The Backlog.md board key a task file's name begins with (`task-3 - Slug.md`). */
 function taskIdFromFileName(name: string): string | null {
   const match = /^([A-Za-z][A-Za-z0-9_]*-\d+)/u.exec(name);
@@ -2517,6 +2644,11 @@ export function commandDoctor(
       // walk of the log every other row here reads, so three instruments cannot
       // disagree about one file.
       checkCheckpoints(verified.records, policyFlag === null ? { dir } : { file: policyPath }),
+      // APRV-272: appended, seventeenth time, same reason. Informational and
+      // never a fail: the enforcement for an unattested organ is the CI-side
+      // protected-path guard, and this row exists so a hand edit is visible at
+      // the terminal before a pull request fails on it.
+      checkGateOrgans(dir, verified.records),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");
