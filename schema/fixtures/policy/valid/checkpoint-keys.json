@@ -1,0 +1,18 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual",
+    "approval_ttl": "24h",
+    "on_expiry": "reject"
+  },
+  "classes": {
+    "record.write.stage": { "autonomy": "supervised" }
+  },
+  "audit": {
+    "checkpoint_every": "24h",
+    "checkpoint_keys": [
+      "MCowBQYDK2VwAyEA9dqzvJnn0VtpD6ETeDRUsCn4l6MPyfaV9Xx6KN+e678=",
+      "MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE="
+    ]
+  }
+}
