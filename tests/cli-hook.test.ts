@@ -444,14 +444,47 @@ test("hook classify keeps a body-carrying fetch at network.call", () => {
 
 test("hook classify reads gh api by its method and field flags", () => {
   const dir = caseDir();
+  // APRV-268: a GET under gh's default repository resolution is metadata on the
+  // checkout's OWN remote, which has a class of its own since this task; naming
+  // any repository explicitly falls back to the read class it held before.
   const read = runCli(["hook", "classify", "--json", "--", "gh api repos/x/y/pulls"], dir);
   assert.equal(read.code, 0, read.stderr);
   assert.deepEqual((JSON.parse(read.stdout) as Record<string, unknown>)["classes"], [
+    "vcs.remote.meta",
+  ]);
+  const foreign = runCli(
+    ["hook", "classify", "--json", "--", "gh api -R other/repo repos/x/y/pulls"],
+    dir,
+  );
+  assert.equal(foreign.code, 0, foreign.stderr);
+  assert.deepEqual((JSON.parse(foreign.stdout) as Record<string, unknown>)["classes"], [
     "read.vcs.remote",
   ]);
   const write = runCli(["hook", "classify", "--json", "--", "gh api -X POST repos/x/y/issues"], dir);
   assert.equal(write.code, 0, write.stderr);
   assert.deepEqual((JSON.parse(write.stdout) as Record<string, unknown>)["classes"], [
+    "network.call",
+  ]);
+});
+
+test("hook classify separates a graphql query from a graphql mutation", () => {
+  // APRV-268, end to end: the verb a session is told to run when in doubt has
+  // to show the carve-out, or the carve-out does not exist where it is used.
+  const dir = caseDir();
+  const query = runCli(
+    ["hook", "classify", "--json", "--", "gh api graphql -f query='query{viewer{login}}'"],
+    dir,
+  );
+  assert.equal(query.code, 0, query.stderr);
+  assert.deepEqual((JSON.parse(query.stdout) as Record<string, unknown>)["classes"], [
+    "vcs.remote.meta",
+  ]);
+  const mutation = runCli(
+    ["hook", "classify", "--json", "--", "gh api graphql -f query='mutation{addComment{id}}'"],
+    dir,
+  );
+  assert.equal(mutation.code, 0, mutation.stderr);
+  assert.deepEqual((JSON.parse(mutation.stdout) as Record<string, unknown>)["classes"], [
     "network.call",
   ]);
 });
