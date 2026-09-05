@@ -243,9 +243,56 @@ repair is to run the verb again. Nothing partial is left behind.
 ```
 
 Refusals: `actor-not-human`, `checkpoint-key-unreadable`,
-`checkpoint-key-unusable`, `log-empty`, `log-unreadable`, `log-torn-tail`,
-`log-corrupt`, `append-failed`. A torn or corrupt log is exit 1; everything else
-here is exit 4, because an operator without a key does not have a broken log.
+`checkpoint-key-unusable`, `checkpoint-head-unknown`, `log-empty`,
+`log-unreadable`, `log-torn-tail`, `log-corrupt`, `append-failed`. A torn or
+corrupt log is exit 1; everything else here is exit 4, because an operator
+without a key does not have a broken log.
+
+### The tap: being asked instead of remembering (APRV-257)
+
+This verb is the terminal form, and it requires you to remember. With
+`audit.checkpoint_every` set in the policy, you do not have to.
+
+When the cadence has lapsed, the listener puts one prompt in the chat:
+
+```
+CHECKPOINT DUE — sign the log head at seq 14892?
+head  seq 14892  <64 hex>
+The newest checkpoint is at seq 14310.
+audit.checkpoint_every is 24.0h and the newest checkpoint … is 31.2h old …
+[ Sign ]  [ Not now ]
+```
+
+`approval channel cli` asks the same question in a terminal, with `s` and `n`
+instead of buttons, before it walks the queue.
+
+Four properties, and each one is a decision rather than an accident.
+
+**What you are shown is what gets signed.** The prompt carries a `(seq, hash)`,
+and the signature covers exactly that, however long the phone stays in a pocket
+and however far the head has moved by the time you tap. This is why APRV-220's
+verify rule asks only that a checkpoint signs a seq *below* its own rather than
+its immediate predecessor. If the chain no longer carries those bytes at that
+seq, the tap is refused (`checkpoint-head-unknown`) and nothing is signed:
+signing there would mint a record that `checkpoint-hash-mismatch` refuses
+forever after.
+
+**The signing happens where the listener runs.** That process holds the vault
+passphrase because a human exported it into the shell they started it from, and
+`core/child-env.ts` strips that variable from every child an agent's session
+spawns. Nothing an agent can do produces a process that reaches the key.
+
+**At most one outstanding, and never a nag.** A lapsed cadence would otherwise
+produce an offer on every dispatch cycle. The listener asks once per lapse, and
+asks again only after a checkpoint actually lands (which is also when the
+cadence resets). A restart re-asks once, which is the same direction every other
+piece of a channel's bookkeeping degrades in.
+
+**Declining costs nothing.** There is no path in this runtime from a checkpoint
+that is due to a refusal of anything: it is a warning on `log verify`, a
+`checkpoint-due` warning on the daemon's tick, and a `fix` line on `approval
+doctor`'s `checkpoint` row. A gate that held up an action for want of a tap is a
+gate whose operator turns the check off.
 
 ## log tail
 

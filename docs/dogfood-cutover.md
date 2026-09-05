@@ -298,6 +298,61 @@ surface that collected it differs, and `approval.granted` records which one.
 Once the listener is healthy again it annotates the chat prompts it delivered
 with the outcome the log now carries, so the transcript catches up on its own.
 
+### Turning on the checkpoint tap (APRV-220, APRV-257)
+
+A one-time ceremony, and the only part of this runbook that cannot be delegated
+to an agent by design. It gives the log a second witness beside git anchoring: a
+key no agent process holds, signing the head on a cadence.
+
+**Step 1, at a terminal in the primary checkout.** The vault passphrase must be
+in the shell first, because the private half goes into the vault:
+
+```sh
+eval "$(approval env)"
+approval setup checkpoint --as human:carter
+```
+
+It mints an Ed25519 keypair, stores the private half under
+`approval.checkpoint.key`, prints the public half, and stops. It edits no
+policy: an edited `APPROVAL.md` is inoperative until it is re-attested, and a
+wizard that edited an attested policy would be forging the sign-off.
+
+**Step 2, your hands only.** Paste the printed block and attest it:
+
+```yaml
+audit:
+  checkpoint_keys:
+    - <the base64 public key the verb printed>
+  checkpoint_every: "24h"
+```
+
+```sh
+approval policy amend
+```
+
+Until that lands the key is inert: a checkpoint signed by a key
+`audit.checkpoint_keys` does not carry is `checkpoint-key-unknown`, a refusal.
+
+**Then nothing.** With the cadence set, `approval up`'s listener puts one
+`CHECKPOINT DUE` prompt on the phone when one is owed, showing the `(seq, hash)`
+you are being asked to sign. Tap Sign and the listener signs that head — the one
+you were shown, not whatever the head has become in the meantime — and appends
+the record. `approval channel cli` asks the same question in a terminal. At most
+one prompt is outstanding at a time, and it is never repeated for one lapse.
+
+**A checkpoint that is due is never a reason anything stops.** It is a warning
+on `approval log verify --checkpoints`, a `checkpoint-due` warning on the
+daemon's tick, and a `fix` line on `approval doctor`'s `checkpoint` row. A
+session that finds one owed carries on.
+
+**If the key is lost** (a wiped laptop, a forgotten passphrase): mint another
+with `approval setup checkpoint --rotate` and add it to the list. **Leave the
+old public key where it is.** Every checkpoint it signed verifies against that
+public half and against nothing else, so removing it would refuse a range of a
+log nobody has touched. That is why `--retire` refuses to drop a key that signed
+anything, and names the seqs it would break. A lost key costs future signatures,
+never past ones.
+
 ## Drafts for the human's hands
 
 At the time of the cutover, agents edited neither CLAUDE.md nor APPROVAL.md,
