@@ -523,10 +523,11 @@ SPEC §7's irreversibility floor.
 ```
 {"class":"vcs.push.main","reversible":null,
  "outcome":{"autonomy":"supervised","approvers":null,"limits":null},
- "provenance":"rule"|"default"|"fail-closed"|"floor",
+ "provenance":"rule"|"default"|"inherited"|"fail-closed"|"floor",
  "manualBecause":null|"matched-rule"|"irreversibility-floor"|"load-failure",
  "loadFailure":null|{"code":"file-missing"|"no-block"|"multiple-blocks"|
-                     "yaml-error"|"schema-invalid","message":"..."},
+                     "yaml-error"|"schema-invalid"|"protected-route-floor",
+                     "message":"..."},
  "matched":null|{"pattern":"vcs.push.main","rule":{"autonomy":"supervised"}},
  "overridden":null|{"pattern":"read.web"|null,"autonomy":"autonomous"},
  "candidates":[{"pattern":"read.*","specificity":[1,1,2],
@@ -539,6 +540,23 @@ SPEC §7's irreversibility floor.
 `specificity` is [literalSegments, wildcardSegments, totalSegments] (SPEC §5.2).
 `overridden.pattern` is null when the floor overrode `defaults.autonomy` rather
 than a rule.
+
+`provenance: "inherited"` is the APRV-266 case: a `policy.edit` sub-class that
+no rule matched, decided by the `policy.edit` line it is a sub-class of.
+`matched` names that line, and `candidates` is empty, because the line decided
+without matching the class being asked about — which is exactly why this is not
+`"rule"`. It is not `"default"` either: `defaults.autonomy` was not consulted.
+The `decisionPath` says so in as many words. Inheritance is the `policy.edit`
+namespace and nothing else; every other class with no matching rule still takes
+`defaults.autonomy`, and `read` under a `read.*` rule is still `manual` for
+exactly the reason §5.2 gives.
+
+`loadFailure.code` gained `protected-route-floor` in the same change: a
+`protected_paths` entry routed a built-in protected path to a sub-class that
+resolves more loosely than the `policy.edit` line itself, which would narrow the
+protected surface without removing a path from any list. The policy does not
+load, so every class answers `manual` with `manualBecause: "load-failure"`, and
+the message names the offending entry.
 
 Human output: the `decisionPath` lines, then a final line `-> <autonomy>`
 carrying "(fail-closed: `<code>`)" or "(floor applied over `<pattern>`:
@@ -2337,6 +2355,61 @@ success  {"ok":true,"action_key":"...","task":"...",
 refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
 ```
 
+### execution resolve --dangling
+
+The bulk form, for the pile rather than the one. It exists because of what a
+pile costs: on 2026-09-05 `approval status` listed five dangling daemon advance
+executions, the daemon refused one advance per tick naming one key each, and
+they were closed by hand with five near-identical commands in a second terminal
+window.
+
+It decides nothing the single form would not. Human-only, one
+`execution.completed` per key through the same compare-and-append,
+`exit_code: null`, `attested_by_human: true`, and a mandatory non-empty note on
+every record, generated rather than typed: what the note has to say is the
+evidence the runtime showed and the operator agreed with, which is a sentence
+retyping only makes less exact.
+
+**What counts as proof.** A key is provable when it is one of the daemon's own
+`daemon-log-advance-<from>-<to>` keys and a ref in this checkout carries the seq
+that key names: a records branch, the trunk's remote-tracking ref, or a local
+`refs/approval/advance/*` anchor, read through the same `publishedState` the
+cadence and the `log-advance-cadence` doctor row read. Every other dangling
+execution is UNPROVABLE, is listed with its own one-line command, and is left
+exactly alone. An outcome nobody can demonstrate is a person's to go and look
+at, and a bulk verb that guessed would write many guesses instead of one.
+
+**One confirmation.** The list is printed, then a single `[y/N]`. Without a
+terminal it refuses `dangling-stdin-not-tty` unless `--yes` is passed, the flag
+a runbook uses after it has read the same list with `--json`. A declined answer
+is `dangling-declined`, and neither refusal appends anything. `--class <class>`
+narrows the list to executions whose `task.registered` declaration names that
+class, so an operator can sweep `log.advance` without touching anything else.
+
+Exit 0 when every provable key was closed, including when there were none to
+close; exit 1 when an append was refused. A refused key does not stop the rest,
+and each is reported under its own code.
+
+**`--json`** (one object on stdout):
+
+```
+success  {"ok":true,
+          "dangling":[{"action_key":"daemon-log-advance-1-13984","task":"...",
+                       "class":"log.advance","seq":13980,"ts":"...",
+                       "provable":true,
+                       "proven_by":"refs/remotes/origin/records-log-2026-09-02",
+                       "proven_seq":13984}],
+          "resolved":[{"action_key":"daemon-log-advance-1-13984","seq":14903,
+                       "proven_by":"refs/remotes/origin/records-log-2026-09-02"}],
+          "unresolved":[],"attested_by_human":true,"actor":"human:alice"}
+refusal  {"ok":false,"error":{"code":"...","message":"..."}}
+```
+
+An unprovable entry carries `"provable":false`, `"proven_by":null` and a `"fix"`
+naming its own single-form command, and its key appears in `unresolved`. A key
+whose append was refused appears in `unresolved` and in `failed` with the
+refusal's own code, and `ok` is `false`.
+
 ## execution reconcile
 
 Three things a log can say about an execution that did not simply complete, and
@@ -3602,6 +3675,18 @@ Warnings go to stderr as `{"event":"warning","code":"...","message":"..."}`, wit
 `render-failed`, `watch-unavailable`, `prune-refused`, `write-back-refused`,
 `advance-refused`, `draw-unavailable`. A warning never stops the
 loop, and neither does `{"event":"git_evidence_failed","step":"commit",…}`.
+
+Dangling advance cycles (APRV-264): at startup and before every trigger, the
+daemon lists every advance execution nobody closed and closes each one this
+checkout's refs can prove, appending `execution.completed` with a note naming
+the ref and recording that the RUNTIME observed it rather than a person. Each
+closure is an `advance` line with `"code":"advance-reconciled"`. What no ref can
+prove is nobody's to guess: it is reported once, on the `started` line's
+`dangling_advances` array and then in a single `advance-refused` warning if it
+appears mid-run, and never once per tick. While any of them stands no further
+advance is authorized, and the refusal that says so names every outstanding key
+and `approval execution resolve --dangling`, which is also the
+`log-advance-cadence` doctor row's `fix`.
 
 Payload retention: with `payload_retention` set in policy, each tick appends
 `payload.pruned` and THEN removes the payload file for every payload whose action

@@ -108,7 +108,7 @@ import {
 import { POLICY_AMEND_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
-import { commitOnBase, fetchBase, showBlob } from "./git-scope.js";
+import { GIT_OUTPUT_LIMIT_BYTES, commitOnBase, fetchBase, showBlob } from "./git-scope.js";
 import { createProgress, silentProgress, type ProgressReporter } from "./progress.js";
 import { readLineFromStdin } from "./prompt.js";
 import {
@@ -345,9 +345,18 @@ function repoPath(root: string, path: string): string {
  * Read as a Buffer, never as text: the baseline is compared by SHA-256 against
  * an attestation over exact bytes, and an encoding round-trip would silently
  * change what is being compared.
+ *
+ * The explicit `maxBuffer` is the second half of the same lesson the anchor
+ * check learned the hard way: `spawnSync`'s one-mebibyte default KILLS the
+ * child, and a check that reads `null` as "HEAD has no such file" then reports
+ * a missing baseline for a file git is holding. This one reads the policy file,
+ * which is nowhere near the ceiling today — and neither was the log.
  */
 function showHead(root: string, relative_: string): Buffer | null {
-  const result = spawnSync("git", ["show", `HEAD:${relative_}`], { cwd: root });
+  const result = spawnSync("git", ["show", `HEAD:${relative_}`], {
+    cwd: root,
+    maxBuffer: GIT_OUTPUT_LIMIT_BYTES,
+  });
   if (result.error !== undefined || result.status !== 0) return null;
   return result.stdout;
 }

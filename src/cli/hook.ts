@@ -72,6 +72,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { tmpdir } from "node:os";
 import {
   basename,
   dirname,
@@ -85,9 +86,12 @@ import { attestationRefusal, checkAttestation } from "../core/attest.js";
 import { childEnvironment } from "../core/child-env.js";
 import {
   classifyCommand,
+  commandSegmentWords,
   GATE_SELF_CLASS,
   protectedPathClass,
+  type ClassifiedSegment,
   type CommandClassification,
+  type ProtectedPathEntry,
 } from "../core/command-class.js";
 import {
   consumeHarnessGrant,
@@ -698,6 +702,295 @@ export function refineRewrite(result: CommandClassification, cwd: string): Refin
 }
 
 // ===========================================================================
+// Scratch-delete refinement (APRV-267)
+// ===========================================================================
+
+/*
+ * Where the agent's own scratch space is, and whether a delete really stays
+ * inside it.
+ *
+ * The classifier cannot answer either question. It is pure over command text,
+ * and "is this path under the scratchpad this process was allotted" is a fact
+ * about a machine. So the work splits the way APRV-108's rewrite refinement
+ * split: `command-class.ts` compares path segments against roots it is HANDED
+ * (`ClassifierContext.scratchRoots`), and everything that needs a disk or an
+ * environment lives here, in the impure layer that already runs git.
+ *
+ * ## What the roots are read from
+ *
+ * No harness exports the session scratchpad as an environment variable today.
+ * Claude Code names it in the system prompt and nowhere else, and this process
+ * inherits no `CLAUDE_SCRATCHPAD*` and no `TMPDIR` from it. So the roots are
+ * built from what a process CAN observe:
+ *
+ *  - `CLAUDE_SCRATCHPAD_DIR` and `CLAUDE_CODE_SCRATCHPAD_DIR`, read if a
+ *    harness ever starts exporting them, so that the day it does the rule is
+ *    already narrow enough to name one session's own directory;
+ *  - `os.tmpdir()`, which is where every observed scratchpad actually lives
+ *    (`/private/tmp/claude-501/<project>/<session>/scratchpad` on this Mac);
+ *  - the fixed platform temp roots `/tmp` and `/var/tmp`, plus `/private/tmp`
+ *    on macOS, where `/tmp` is a symlink to it.
+ *
+ * ## Why nothing an agent controls widens the class
+ *
+ * SPEC.md §11.1: self-reported fields never reduce scrutiny. `os.tmpdir()`
+ * reads `TMPDIR`, so a poisoned value could in principle nominate `/` and turn
+ * every absolute delete into a scratch delete. Three guards close that, and
+ * none of them trusts the value: a root must resolve to a real directory, must
+ * clear the depth floor, and must not contain the directory the hook was
+ * invoked in. A checkout is never inside its own scratch root.
+ *
+ * The depth floor is two path segments, so `/` and one-segment directories like
+ * `/etc` are out, with the three compiled-in temp roots (`/tmp`, `/private/tmp`,
+ * `/var/tmp`) exempt from it because on Linux `os.tmpdir()` IS `/tmp`, a single
+ * segment. See {@link scratchRootDepthAccepted} for why that exemption cannot
+ * be reached by a poisoned value.
+ *
+ * ## Why the second pass exists at all
+ *
+ * A path can be textually under a root and physically somewhere else (a symlink
+ * in the middle of it), and a git checkout can live inside the temp root
+ * (`/tmp/probe-clone`), where a delete destroys work rather than tidying up.
+ * Neither is visible in the argv. So this pass re-reads each target, resolves
+ * the nearest ancestor that exists, and TIGHTENS back to
+ * `files.delete.out_of_scope` on any doubt: a target it cannot resolve, a
+ * resolution that leaves the root, a `.git` at or above the target.
+ */
+
+/** The class the classifier hands over, and the one this pass falls back to. */
+const OUT_OF_SCOPE_CLASS = "files.delete.out_of_scope";
+
+/** The classifier rule whose segments this pass re-reads. */
+const SCRATCH_RULE = "rm-scratch";
+
+/** The rule a tightened segment reports. */
+const SCRATCH_REJECTED_RULE = "rm-scratch-rejected";
+
+/**
+ * Environment variables a HARNESS may use to name the session scratchpad.
+ *
+ * None is set by any harness this runtime has seen; they are read so the rule
+ * narrows the day one starts exporting it, rather than staying pinned to the
+ * whole temp root forever. A value that fails any of the guards (absolute, a
+ * real directory, deep enough, clear of the cwd) is ignored like any other
+ * candidate.
+ */
+const SCRATCHPAD_ENV_NAMES: readonly string[] = [
+  "CLAUDE_SCRATCHPAD_DIR",
+  "CLAUDE_CODE_SCRATCHPAD_DIR",
+];
+
+/**
+ * Fixed temp roots, beyond whatever `os.tmpdir()` reports.
+ *
+ * These are the well-known system temp directories, and the depth rule below
+ * exempts them: they are compiled-in constants, not anything a caller reports.
+ */
+const FIXED_TEMP_ROOTS: readonly string[] = ["/tmp", "/private/tmp", "/var/tmp"];
+
+/** Segments a root must have when it is not one of {@link FIXED_TEMP_ROOTS}. */
+const MIN_ROOT_SEGMENTS = 2;
+
+/** Non-empty path segments in `path`. */
+function segmentDepth(path: string): number {
+  return path.split(sep).filter((segment) => segment.length > 0).length;
+}
+
+/**
+ * Is a candidate deep enough, once resolved, to stand as a scratch root?
+ *
+ * The depth floor is the anti-poisoning guard (SPEC.md §11.1: self-reported
+ * fields never reduce scrutiny). A `TMPDIR` naming `/` resolves and exists, and
+ * a root of `/` would turn every absolute delete into a scratch delete, so a
+ * resolved root is refused below {@link MIN_ROOT_SEGMENTS}.
+ *
+ * The well-known system temp roots are the one exception, and they are one on
+ * every platform: on Linux `os.tmpdir()` is `/tmp`, a single segment, and
+ * refusing it would mean `files.delete.scratch` could never fire there, while
+ * on macOS the same directory resolves through the `/tmp` symlink to
+ * `/private/tmp` and clears the floor by accident of layout. The exemption is
+ * keyed on the RESOLVED value being one of the three compiled-in names, so
+ * nothing a caller reports widens it: a poisoned `TMPDIR` still has to resolve
+ * to `/tmp`, `/private/tmp` or `/var/tmp` to get in, and those are roots
+ * already. `/` is not among them, and every other one-segment directory
+ * (`/etc`, `/home`, `/usr`) stays refused.
+ */
+export function scratchRootDepthAccepted(resolved: string): boolean {
+  if (FIXED_TEMP_ROOTS.includes(resolved)) return true;
+  return segmentDepth(resolved) >= MIN_ROOT_SEGMENTS;
+}
+
+/** `realpathSync`, or `null` for anything that does not resolve. */
+function resolvedPath(candidate: string): string | null {
+  try {
+    return realpathSync(candidate);
+  } catch {
+    return null;
+  }
+}
+
+/** Is `candidate` a strict descendant of `root`, by path segment? */
+function isBelow(candidate: string, root: string): boolean {
+  const prefix = root.endsWith(sep) ? root : `${root}${sep}`;
+  return candidate.startsWith(prefix) && candidate.length > prefix.length;
+}
+
+/**
+ * The scratch roots this process may vouch for, resolved and guarded.
+ *
+ * `cwd` is the directory the hook itself resolved from; a candidate containing
+ * it is discarded, because a root that swallowed the checkout would make every
+ * delete in the repository a scratch delete.
+ */
+export function resolveScratchRoots(
+  cwd: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const resolvedCwd = resolvedPath(cwd) ?? cwd;
+  const candidates: string[] = [];
+  for (const name of SCRATCHPAD_ENV_NAMES) {
+    const value = env[name];
+    if (typeof value === "string" && value.length > 0) candidates.push(value);
+  }
+  candidates.push(tmpdir(), ...FIXED_TEMP_ROOTS);
+
+  const roots: string[] = [];
+  for (const candidate of candidates) {
+    if (!isAbsolute(candidate)) continue;
+    const resolved = resolvedPath(candidate);
+    if (resolved === null) continue;
+    if (!scratchRootDepthAccepted(resolved)) continue;
+    if (resolved === resolvedCwd || isBelow(resolvedCwd, resolved)) continue;
+    if (!roots.includes(resolved)) roots.push(resolved);
+  }
+  return roots;
+}
+
+/**
+ * Is there a `.git` at `target` or above it, stopping at `root`?
+ *
+ * `root` itself is checked too: a checkout whose top IS a scratch root would
+ * otherwise hide from the walk. Any filesystem error answers `true`, because an
+ * unreadable directory is not one this pass may vouch for.
+ */
+function insideCheckout(target: string, root: string): boolean {
+  let at = target;
+  for (let depth = 0; depth < 64; depth += 1) {
+    try {
+      if (existsSync(join(at, ".git"))) return true;
+    } catch {
+      return true;
+    }
+    if (at === root) return false;
+    const up = dirname(at);
+    if (up === at) return true;
+    at = up;
+  }
+  return true;
+}
+
+/**
+ * Does this one target survive the physical checks?
+ *
+ * The target itself may or may not exist, so the nearest EXISTING ancestor is
+ * resolved and the unresolved tail re-appended. A symlink anywhere in that
+ * ancestor chain therefore cannot smuggle the path out of the root, which is
+ * the escape the pure half cannot see.
+ */
+function targetStaysInScratch(target: string, roots: readonly string[]): boolean {
+  let existing = target;
+  const tail: string[] = [];
+  for (let depth = 0; depth < 64; depth += 1) {
+    if (existsSync(existing)) break;
+    const up = dirname(existing);
+    if (up === existing) return false;
+    tail.unshift(basename(existing));
+    existing = up;
+  }
+  const resolved = resolvedPath(existing);
+  if (resolved === null) return false;
+  const full = tail.length === 0 ? resolved : join(resolved, ...tail);
+  const root = roots.find((candidate) => isBelow(full, candidate));
+  if (root === undefined) return false;
+  return !insideCheckout(full, root);
+}
+
+/**
+ * Tighten `files.delete.scratch` back to `files.delete.out_of_scope` wherever
+ * the disk disagrees with the text.
+ *
+ * IMPURE by design and by contract, exactly as {@link refineRewrite} is: it
+ * stats paths. It only ever moves a segment toward the stricter class, so a
+ * caller that skipped it would never be MORE permissive than one that runs it,
+ * which is what lets `hook classify` and `hook claude-code` share it without
+ * either becoming the authority.
+ */
+export function refineScratchDelete(
+  result: CommandClassification,
+  roots: readonly string[],
+): RefinedClassification {
+  if (!result.ok) return { result, notes: [] };
+  if (!result.segments.some((segment) => segment.rule === SCRATCH_RULE)) {
+    return { result, notes: [] };
+  }
+
+  const notes: string[] = [];
+  const segments = result.segments.map((segment) => {
+    if (segment.rule !== SCRATCH_RULE) return segment;
+    const reject = (detail: string): ClassifiedSegment => {
+      notes.push(`${SCRATCH_REJECTED_RULE}: ${detail}`);
+      return { ...segment, class: OUT_OF_SCOPE_CLASS, rule: SCRATCH_REJECTED_RULE };
+    };
+    const words = commandSegmentWords(segment.text);
+    const parsed = words === null ? undefined : words[0];
+    // The classifier read this segment a moment ago, so a parse that disagrees
+    // here is two reads of the same bytes disagreeing. Fail closed.
+    if (parsed === undefined) {
+      return reject(`\`${segment.text}\` could not be re-read, so it stays ${OUT_OF_SCOPE_CLASS}`);
+    }
+    const targets = parsed.args.filter((arg) => !arg.startsWith("-") || arg === "-");
+    if (targets.length === 0) {
+      return reject(`\`${segment.text}\` names no target, so it stays ${OUT_OF_SCOPE_CLASS}`);
+    }
+    const escaped = targets.find((target) => !targetStaysInScratch(target, roots));
+    if (escaped === undefined) return segment;
+    return reject(
+      `${escaped} does not resolve to a path inside a scratch root clear of any git checkout, so \`${segment.text}\` stays ${OUT_OF_SCOPE_CLASS}`,
+    );
+  });
+  if (notes.length === 0) return { result, notes };
+
+  const classes: string[] = [];
+  for (const segment of segments) {
+    if (!classes.includes(segment.class)) classes.push(segment.class);
+  }
+  return { result: { ok: true, segments, classes }, notes };
+}
+
+/**
+ * The classifier, its scratch context, and both impure refinements, in the one
+ * order every caller must use.
+ *
+ * `hook classify` printing a different class from the one `hook claude-code`
+ * decides would make the explainer a different program (APRV-108's note), and
+ * that stays true now there are two refinements in the chain.
+ */
+export function classifyForHook(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  cwd: string,
+): RefinedClassification {
+  const roots = resolveScratchRoots(cwd);
+  const classified = classifyCommand(command, protectedPaths, { scratchRoots: roots });
+  const rewritten = refineRewrite(classified, cwd);
+  const scratched = refineScratchDelete(rewritten.result, roots);
+  return {
+    result: scratched.result,
+    notes: [...rewritten.notes, ...scratched.notes],
+  };
+}
+
+// ===========================================================================
 // hook classify
 // ===========================================================================
 
@@ -777,12 +1070,13 @@ function commandClassify(argv: string[], streams: Streams, cwd: string): number 
   }
   const protectedPaths = load.ok ? (load.policy.protected_paths ?? []) : [];
 
-  // The same impure refinement `hook claude-code` applies (APRV-108), run
-  // against the same directory: an explainer that printed the pure class where
-  // the hook decides a refined one would be explaining a different program.
+  // The same impure refinements `hook claude-code` applies (APRV-108,
+  // APRV-267), run against the same directory: an explainer that printed the
+  // pure class where the hook decides a refined one would be explaining a
+  // different program.
   streams.out(
     renderClassification(
-      refineRewrite(classifyCommand(command, protectedPaths), cwd).result,
+      classifyForHook(command, protectedPaths, cwd).result,
       boolFlag(parsed.flags, "--json"),
     ),
   );
@@ -989,7 +1283,7 @@ interface FileGate {
 function fileToolGate(
   toolName: string,
   toolInput: Record<string, unknown>,
-  protectedPaths: readonly string[],
+  protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
 ): FileGate | null {
   const declared =
@@ -1929,7 +2223,7 @@ type ToolDescription =
 function describeToolCall(
   input: HookInput,
   adapter: HarnessAdapter,
-  protectedPaths: readonly string[],
+  protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
 ): ToolDescription {
   if (input.toolName === adapter.shellTool) {
@@ -1945,7 +2239,12 @@ function describeToolCall(
     // and the directory it runs in, so the FULL PAYLOAD block on the phone
     // carries every byte the harness will execute. Only `summary` is shortened.
     const payload = { command: raw, cwd: input.cwd };
-    const classified = classifyCommand(raw, protectedPaths);
+    // APRV-108: a local rewrite of history this checkout never published is a
+    // commit. APRV-267: a delete confined to the agent's own scratch is not a
+    // decision. Both run in the hook's own cwd, after classification and never
+    // inside it, and neither claims anything it cannot establish from the disk.
+    const refined = classifyForHook(raw, protectedPaths, cwd);
+    const classified = refined.result;
     if (!classified.ok) {
       return {
         kind: "deny",
@@ -1953,14 +2252,9 @@ function describeToolCall(
         detail: `${classified.detail} (segment: ${classified.segment}). Rewrite it as a command the classifier can read, or run the effect through \`approval run\` with a granted token.`,
       };
     }
-    // APRV-108: a local rewrite of history this checkout never published is a
-    // commit. Runs in the hook's own cwd, after classification and never inside
-    // it, and downgrades nothing it cannot establish from git.
-    const refined = refineRewrite(classified, cwd);
-    const answer = refined.result.ok ? refined.result : classified;
     return {
       kind: "gated",
-      classes: answer.classes.filter((cls) => cls !== GATE_SELF_CLASS),
+      classes: classified.classes.filter((cls) => cls !== GATE_SELF_CLASS),
       payload,
       headline: raw,
       notes: refined.notes,

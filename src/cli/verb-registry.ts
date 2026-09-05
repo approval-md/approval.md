@@ -289,7 +289,9 @@ const POLICY_RESOLUTION_OUTPUT: JsonSchema = object(
       },
       ["autonomy", "declaredAutonomy", "supervision", "liveRate", "approvers", "limits"],
     ),
-    provenance: { enum: ["rule", "default", "fail-closed", "floor"] },
+    // `inherited` since APRV-266: a `policy.edit` sub-class the policy declares
+    // no rule for, decided by the `policy.edit` line it is a sub-class of.
+    provenance: { enum: ["rule", "default", "inherited", "fail-closed", "floor"] },
     manualBecause: nullable({
       enum: ["matched-rule", "irreversibility-floor", "load-failure"],
     }),
@@ -989,32 +991,92 @@ const VERBS: VerbSpec[] = [
     name: "execution",
     subcommand: "resolve",
     purpose:
-      "Record the outcome a HUMAN OBSERVED for a dangling execution — one that started and whose end nobody knows, the state a crash between execution.started and its outcome leaves. It demands a non-empty note, records exit_code null rather than inventing one, and marks attested_by_human so no reader mistakes an observation for a measurement. Nothing in this codebase closes a dangling execution automatically.",
+      "Record the outcome a HUMAN OBSERVED for a dangling execution — one that started and whose end nobody knows, the state a crash between execution.started and its outcome leaves. It demands a non-empty note, records exit_code null rather than inventing one, and marks attested_by_human so no reader mistakes an observation for a measurement. Nothing in this codebase closes a dangling execution automatically. --dangling is the BULK form: it lists every dangling execution with what this checkout can PROVE about each (the ref carrying the seq a daemon advance named, or nothing), asks once, and appends one human-attested completed per provable key with a note naming that ref. Keys nothing proves are listed with their own one-line command and left untouched.",
     human_only: true,
     input: input({
-      positionals: positionals([{ name: "action-key", description: "the action's idempotency_key" }], 1),
+      // Exactly one action key without `--dangling`, and none with it, which
+      // is a dependency between a positional and a flag that no positional
+      // TUPLE can state: a 1-tuple whose `minItems` is 0 is not a tuple at all
+      // under the strict Ajv this registry compiles with. So the arity is
+      // spelled as a bounded list and which of the two forms was asked for is
+      // checked in the verb, where the refusal can say so in a sentence.
+      positionals: {
+        type: "array",
+        items: { type: "string", title: "action-key", description: "the action's idempotency_key" },
+        maxItems: 1,
+        description: "the action key, for the single form; absent with --dangling",
+      },
       flags: {
         "--outcome": "string",
         "--note": "string",
+        "--dangling": "boolean",
+        "--class": "string",
+        "--yes": "boolean",
         ...AS_FLAG,
         ...LOG_FLAG,
         ...JSON_FLAG,
         ...HELP_FLAGS,
       },
     }),
-    output: object(
-      {
-        ok: { const: true },
-        action_key: STRING,
-        task: STRING,
-        event: { enum: ["execution.completed", "execution.failed"] },
-        outcome: { enum: ["completed", "failed"] },
-        seq: INTEGER,
-        attested_by_human: { const: true },
-        actor: STRING,
-      },
-      ["ok", "action_key", "task", "event", "outcome", "seq", "attested_by_human", "actor"],
-    ),
+    // Two shapes for two forms, and a reader branches on which keys are there:
+    // the single form answers about ONE key it was given, the bulk form answers
+    // with the LIST it derived. Collapsing them into one object with everything
+    // optional would make `action_key` absent mean two different things.
+    output: {
+      anyOf: [
+        object(
+          {
+            ok: { const: true },
+            action_key: STRING,
+            task: STRING,
+            event: { enum: ["execution.completed", "execution.failed"] },
+            outcome: { enum: ["completed", "failed"] },
+            seq: INTEGER,
+            attested_by_human: { const: true },
+            actor: STRING,
+          },
+          ["ok", "action_key", "task", "event", "outcome", "seq", "attested_by_human", "actor"],
+        ),
+        object(
+          {
+            ok: BOOLEAN,
+            dangling: arrayOf(
+              object(
+                {
+                  action_key: STRING,
+                  task: nullable(STRING),
+                  class: nullable(STRING),
+                  seq: INTEGER,
+                  ts: STRING,
+                  provable: BOOLEAN,
+                  proven_by: nullable(STRING),
+                  proven_seq: nullable(INTEGER),
+                  fix: STRING,
+                },
+                ["action_key", "task", "class", "seq", "ts", "provable", "proven_by", "proven_seq"],
+              ),
+            ),
+            resolved: arrayOf(
+              object(
+                { action_key: STRING, seq: INTEGER, proven_by: nullable(STRING) },
+                ["action_key", "seq", "proven_by"],
+              ),
+            ),
+            unresolved: arrayOf(STRING),
+            failed: arrayOf(
+              object({ action_key: STRING, code: STRING, message: STRING }, [
+                "action_key",
+                "code",
+                "message",
+              ]),
+            ),
+            attested_by_human: { const: true },
+            actor: STRING,
+          },
+          ["ok", "dangling", "resolved", "unresolved", "actor"],
+        ),
+      ],
+    },
     error: ERROR_SCHEMA,
     exit_codes: BASE_EXIT_CODES,
   },

@@ -56,6 +56,7 @@ import {
   type BudgetScope,
   type BudgetVerdict,
 } from "../core/budgets.js";
+import type { ProtectedPathEntry } from "../core/command-class.js";
 import type { EventRecord } from "../core/log.js";
 import { usdNumber } from "../core/money.js";
 import { payloadHash } from "../core/payload.js";
@@ -562,7 +563,7 @@ function waitingLine(
  * which paths are protected rather than inventing a protection, and autonomy
  * has already failed closed to `manual` by the time this is read.
  */
-function protectedPathsOf(load: PolicyLoadResult): readonly string[] {
+function protectedPathsOf(load: PolicyLoadResult): readonly ProtectedPathEntry[] {
   return load.ok ? (load.policy.protected_paths ?? []) : [];
 }
 

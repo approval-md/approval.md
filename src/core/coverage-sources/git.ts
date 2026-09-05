@@ -42,7 +42,7 @@
  * object being reported.
  */
 
-import { isProtectedPath } from "../command-class.js";
+import { isProtectedPath, type ProtectedPathEntry } from "../command-class.js";
 import type { ObservedEffect } from "../coverage.js";
 import { git } from "../git-run.js";
 
@@ -76,7 +76,7 @@ export interface GitSourceOptions {
   /** The ref that decides `vcs.push.main`. Defaults to {@link DEFAULT_TRUNK_REF}. */
   trunk?: string;
   /** `policy.protected_paths` from the policy, widening the built-in set. */
-  policyProtectedPaths?: readonly string[];
+  policyProtectedPaths?: readonly ProtectedPathEntry[];
   /** Override {@link MAX_COMMITS}. */
   maxCommits?: number;
 }

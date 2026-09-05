@@ -26,7 +26,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { CLASSIFIER_CLASSES } from "./command-class.js";
+import { emittableClass } from "./command-class.js";
 import type { Autonomy, PolicyLoadResult } from "./policy-load.js";
 import { resolve, type Provenance } from "./policy-match.js";
 
@@ -149,6 +149,18 @@ export const REPO_POLICY_EXPECTATIONS: readonly PolicyExpectation[] = [
     note: "undeclared, so the manual default holds; since APRV-228 the classifier emits it for the harness self-update verbs (claude/codex/gemini update, uca) as well as npm update, and a ceremony that declares it must move this pin",
   },
   {
+    actionClass: "files.delete.scratch",
+    autonomy: "manual",
+    provenance: "default",
+    note: "undeclared, so the manual default holds; APRV-267 taught the classifier to emit it for an rm confined to the session scratchpad or the system temp root, and until a ceremony declares it (autonomous is the intent) it gates exactly as files.delete.out_of_scope always did, which is why landing the rule ahead of the ceremony costs nothing",
+  },
+  {
+    actionClass: "vcs.remote.meta",
+    autonomy: "manual",
+    provenance: "default",
+    note: "undeclared, so the manual default holds until Carter declares it (supervised is the intent); APRV-268 taught the classifier to emit it for exactly three forms on the checkout's own origin (`gh pr update-branch`, `gh run rerun`, `gh api graphql` without a mutation), each of which classified network.call before, so every one of them gates exactly as it did and landing the rule ahead of the ceremony costs nothing. The task's wider first draft also moved `gh pr view`, `gh run list`, `gh issue view` and a plain `gh api` GET, which were read.vcs.remote and therefore autonomous here; on an undeclared class those would have become MORE gated, so the rule was narrowed instead and every read keeps read.vcs.remote",
+  },
+  {
     actionClass: "read",
     autonomy: "manual",
     provenance: "default",
@@ -238,13 +250,19 @@ export function checkPolicyExpectations(
         actual: "the policy declares this class and nothing pins what it resolves to",
       });
     }
-    if (!CLASSIFIER_CLASSES.includes(actionClass)) {
+    // APRV-266: reachability is asked WITH the policy's own `protected_paths`,
+    // because a `policy.edit` sub-class is emitted only where an entry routes a
+    // path family to it. The question is the one this check always asked —
+    // would this line ever fire? — and a routed class nothing routes to still
+    // answers no, which is the case worth catching: a `policy.edit.ci` rule
+    // whose routing was deleted looks like protection and is not.
+    if (!emittableClass(actionClass, load.policy.protected_paths ?? [])) {
       failures.push({
         kind: "unreachable",
         actionClass,
         expected: "a class the command classifier can emit",
         actual:
-          "no rule in src/core/command-class.ts emits it, so the policy line would never fire",
+          "no rule in src/core/command-class.ts emits it and no protected_paths entry routes to it, so the policy line would never fire",
       });
     }
   }
