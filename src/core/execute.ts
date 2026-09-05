@@ -219,6 +219,22 @@ export const EXECUTE_REFUSAL_CODES = [
    * record is never rewritten.
    */
   "already-reconciled",
+  /**
+   * `execution resolve --dangling` was asked to attest with no terminal to
+   * attest at, and without `--yes` (APRV-264). The bulk form writes
+   * `attested_by_human: true` on every record it appends, and a confirmation a
+   * pipe could answer is not an attestation. Distinct from `actor-not-human`,
+   * which is about WHO is attesting: this one is about whether anybody was
+   * actually asked.
+   */
+  "dangling-stdin-not-tty",
+  /**
+   * The bulk confirmation was declined, or withdrawn at the prompt (APRV-264).
+   * Nothing was appended and the dangling executions stand exactly as they
+   * were. Its own code because "the operator said no" and "the operator could
+   * not be asked" are different facts about the same prompt.
+   */
+  "dangling-declined",
   /** The log could not be read, or holds a line that is not a record. */
   "log-unreadable",
   /** The log's final line is unterminated (a crashed write). */

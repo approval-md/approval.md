@@ -2337,6 +2337,61 @@ success  {"ok":true,"action_key":"...","task":"...",
 refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
 ```
 
+### execution resolve --dangling
+
+The bulk form, for the pile rather than the one. It exists because of what a
+pile costs: on 2026-09-05 `approval status` listed five dangling daemon advance
+executions, the daemon refused one advance per tick naming one key each, and
+they were closed by hand with five near-identical commands in a second terminal
+window.
+
+It decides nothing the single form would not. Human-only, one
+`execution.completed` per key through the same compare-and-append,
+`exit_code: null`, `attested_by_human: true`, and a mandatory non-empty note on
+every record, generated rather than typed: what the note has to say is the
+evidence the runtime showed and the operator agreed with, which is a sentence
+retyping only makes less exact.
+
+**What counts as proof.** A key is provable when it is one of the daemon's own
+`daemon-log-advance-<from>-<to>` keys and a ref in this checkout carries the seq
+that key names: a records branch, the trunk's remote-tracking ref, or a local
+`refs/approval/advance/*` anchor, read through the same `publishedState` the
+cadence and the `log-advance-cadence` doctor row read. Every other dangling
+execution is UNPROVABLE, is listed with its own one-line command, and is left
+exactly alone. An outcome nobody can demonstrate is a person's to go and look
+at, and a bulk verb that guessed would write many guesses instead of one.
+
+**One confirmation.** The list is printed, then a single `[y/N]`. Without a
+terminal it refuses `dangling-stdin-not-tty` unless `--yes` is passed, the flag
+a runbook uses after it has read the same list with `--json`. A declined answer
+is `dangling-declined`, and neither refusal appends anything. `--class <class>`
+narrows the list to executions whose `task.registered` declaration names that
+class, so an operator can sweep `log.advance` without touching anything else.
+
+Exit 0 when every provable key was closed, including when there were none to
+close; exit 1 when an append was refused. A refused key does not stop the rest,
+and each is reported under its own code.
+
+**`--json`** (one object on stdout):
+
+```
+success  {"ok":true,
+          "dangling":[{"action_key":"daemon-log-advance-1-13984","task":"...",
+                       "class":"log.advance","seq":13980,"ts":"...",
+                       "provable":true,
+                       "proven_by":"refs/remotes/origin/records-log-2026-09-02",
+                       "proven_seq":13984}],
+          "resolved":[{"action_key":"daemon-log-advance-1-13984","seq":14903,
+                       "proven_by":"refs/remotes/origin/records-log-2026-09-02"}],
+          "unresolved":[],"attested_by_human":true,"actor":"human:alice"}
+refusal  {"ok":false,"error":{"code":"...","message":"..."}}
+```
+
+An unprovable entry carries `"provable":false`, `"proven_by":null` and a `"fix"`
+naming its own single-form command, and its key appears in `unresolved`. A key
+whose append was refused appears in `unresolved` and in `failed` with the
+refusal's own code, and `ok` is `false`.
+
 ## execution reconcile
 
 Three things a log can say about an execution that did not simply complete, and

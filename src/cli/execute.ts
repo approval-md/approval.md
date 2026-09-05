@@ -55,6 +55,10 @@ import { constants as osConstants } from "node:os";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
+import {
+  RESOLVE_DANGLING_COMMAND,
+  proveDanglingAdvances,
+} from "../core/advance-cycle.js";
 import { openObligations } from "../core/audit.js";
 import { evaluateBudgets, type BudgetVerdict } from "../core/budgets.js";
 import { declaredCredentialsForClass } from "../adapters/registry.js";
@@ -69,6 +73,7 @@ import {
   danglingExecutions,
   findDeclaration,
   finishExecution,
+  indexDeclarations,
   indeterminateExecutions,
   isReconcileResolution,
   loopEscalation,
@@ -103,6 +108,8 @@ import {
   EXIT_USAGE,
 } from "./exit-codes.js";
 import { repoRoot } from "./git-scope.js";
+import { publishedState } from "./log-advance.js";
+import { confirmUntil, createPrompter, type Prompter } from "./prompt.js";
 import {
   EXECUTION_HELP,
   QUEUE_HELP,
@@ -1502,6 +1509,274 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
 // ===========================================================================
 
 /**
+ * Injected seams for `execution resolve`. `prompter` is the terminal, exactly
+ * as `gate open`'s is: a test passes a scripted one and asserts on what was
+ * asked as well as on what was done, and passing `null` is how "there is no
+ * terminal" becomes a test rather than a claim.
+ */
+export interface ResolveDeps {
+  prompter?: Prompter | null;
+}
+
+/** One dangling execution as `--dangling` lists it. */
+interface DanglingCandidate {
+  actionKey: string;
+  task: string | null;
+  ts: string;
+  seq: number;
+  /** The declared class, from `task.registered` and never from a payload claim. */
+  cls: string | null;
+  /** The ref that carries the seq this key names, or `null`. */
+  provenBy: string | null;
+  /** The seq the key names, when it is one of the daemon's advance keys. */
+  toSeq: number | null;
+}
+
+/** The manual command for a key nothing can prove, spelled once. */
+function manualResolveCommand(actionKey: string): string {
+  return `approval execution resolve ${actionKey} --outcome completed|failed --note "<what you observed>"`;
+}
+
+/**
+ * The note a bulk resolution writes, which is the evidence and not a summary.
+ *
+ * It names the ref, the seq that ref carries, and the fact that the operator
+ * confirmed it after being shown exactly that. A human-attested record whose
+ * note said only "closed in bulk" would be the unexplained attestation the
+ * single form refuses, arriving five at a time.
+ */
+function sweptNote(entry: DanglingCandidate): string {
+  return `${entry.actionKey} named seq ${String(entry.toSeq)}, which ${String(
+    entry.provenBy,
+  )} carries in this checkout, so the action it was authorized for completed. Confirmed against that evidence and closed with \`${RESOLVE_DANGLING_COMMAND}\`.`;
+}
+
+/**
+ * `approval execution resolve --dangling [--class <class>] [--yes] [--json]`
+ *
+ * The bulk form, and the manual step it removes (APRV-264). On 2026-09-05
+ * `approval status` listed five dangling daemon advance executions left by the
+ * 2026-09-02 loop; the daemon refused one advance per tick naming one key each,
+ * and Carter closed all five by hand with five near-identical commands in a
+ * second terminal window. The cadence exists to remove taps, and this was five
+ * of them for one fact.
+ *
+ * What it does NOT do is decide anything the single form would not. Every rule
+ * of `resolve` is intact: human-only, one `execution.completed` per key through
+ * {@link resolveExecution}'s own compare-and-append, `exit_code: null`,
+ * `attested_by_human: true`, and a mandatory non-empty note — generated here
+ * rather than typed, because what it has to say is the evidence the runtime
+ * showed the operator and the operator agreed with, which is a sentence a
+ * person retyping it five times would only ever get less exact.
+ *
+ * The evidence is the trunk. A key is provable when it is one of the daemon's
+ * own advance keys and a ref in this checkout carries the seq that key names
+ * (`core/advance-cycle.ts`'s rule, read through the same `publishedState` the
+ * daemon and the doctor row read). Everything else is UNPROVABLE and is left
+ * exactly alone, listed with the one-line manual command: an outcome nobody can
+ * demonstrate is a person's to go and look at, and a bulk verb that guessed at
+ * one would be writing five guesses instead of one.
+ *
+ * One confirmation, on a terminal. Without a terminal it refuses
+ * (`dangling-stdin-not-tty`) unless `--yes` is passed, which is the flag a
+ * runbook uses after it has read the same list with `--json`. `--json` on its
+ * own still asks, because the list and the question are the whole of what makes
+ * this safe.
+ */
+function resolveDangling(
+  streams: Streams,
+  cwd: string,
+  front_: Front,
+  actor: string,
+  deps: ResolveDeps,
+): number {
+  const { flags, json, logPath } = front_;
+
+  const check = preflightLog(logPath);
+  if (!check.ok) return ioError(streams, json, check.message);
+  const read = readVerifiedRecords(logPath);
+  if (!read.ok) return emitRefusal(streams, json, read);
+
+  const classFilter = stringFlag(flags, "--class");
+  const index = indexDeclarations(read.records);
+  const root = repoRoot(cwd);
+  // The git read, once, for the whole list. `null` when this is not a git
+  // checkout at all, in which case nothing is provable and every key is listed
+  // as a person's — the fail-closed direction, and the honest one.
+  const published =
+    root === null
+      ? { publishedSeq: 0, publishedRev: null }
+      : publishedState(
+          root,
+          logPath,
+          read.records,
+          { remote: "origin", base: null },
+          now(),
+        );
+  const proved = new Map(
+    proveDanglingAdvances(read.records, published).map((entry) => [entry.actionKey, entry]),
+  );
+
+  const candidates: DanglingCandidate[] = danglingExecutions([...read.records])
+    .map((entry) => {
+      const advance = proved.get(entry.actionKey);
+      return {
+        actionKey: entry.actionKey,
+        task: entry.task,
+        ts: entry.ts,
+        seq: entry.seq,
+        cls: index.declarations.get(entry.actionKey)?.class ?? null,
+        provenBy: advance?.provenBy ?? null,
+        toSeq: advance?.toSeq ?? null,
+      };
+    })
+    .filter((entry) => classFilter === null || entry.cls === classFilter);
+
+  const provable = candidates.filter((entry) => entry.provenBy !== null);
+  const unprovable = candidates.filter((entry) => entry.provenBy === null);
+
+  const listed = candidates.map((entry) => ({
+    action_key: entry.actionKey,
+    task: entry.task,
+    class: entry.cls,
+    seq: entry.seq,
+    ts: entry.ts,
+    provable: entry.provenBy !== null,
+    proven_by: entry.provenBy,
+    proven_seq: entry.provenBy === null ? null : entry.toSeq,
+    ...(entry.provenBy === null ? { fix: manualResolveCommand(entry.actionKey) } : {}),
+  }));
+
+  // Nothing to do is exit 0 and says so: an empty list is a healthy log, and a
+  // repair verb that failed when there was nothing to repair would be a repair
+  // verb nobody could put in a runbook.
+  if (candidates.length === 0) {
+    if (json) emitJson(streams, { ok: true, dangling: [], resolved: [], unresolved: [], actor });
+    else {
+      streams.out(
+        classFilter === null
+          ? "no dangling executions: every execution in this log has an outcome\n"
+          : `no dangling executions in class ${classFilter}\n`,
+      );
+    }
+    return EXIT_OK;
+  }
+
+  const st = style({ json });
+  if (!json) streams.out(renderDanglingList(st, candidates));
+
+  // The confirmation. `--yes` is the runbook's answer to it and the ONLY way
+  // past it without a terminal: a prompter that fell back to a pipe would let
+  // anything that can write bytes attest, on a record whose whole content is
+  // that a person looked.
+  if (!boolFlag(flags, "--yes")) {
+    const prompter = deps.prompter === undefined ? createPrompter(streams) : deps.prompter;
+    if (prompter === null) {
+      return emitRefusal(
+        streams,
+        json,
+        {
+          ok: false,
+          code: "dangling-stdin-not-tty",
+          message: `stdin is not a terminal, so nobody can be asked to attest. ${String(
+            provable.length,
+          )} execution(s) would be closed as completed on this checkout's own evidence, and a human-attested outcome nobody was asked about is not an attestation. Re-run it from a terminal, or pass --yes after reading the list (\`${RESOLVE_DANGLING_COMMAND} --json\`)`,
+        },
+      );
+    }
+    if (provable.length === 0) {
+      // There is nothing to confirm: the whole list is a person's to go and
+      // look at, and asking a yes/no question about zero records would train an
+      // operator to say yes to this prompt.
+      if (json) emitJson(streams, { ok: true, dangling: listed, resolved: [], unresolved: listed.map((entry) => entry.action_key), actor });
+      return EXIT_OK;
+    }
+    const agreed = confirmUntil(
+      streams,
+      prompter,
+      `Close ${String(provable.length)} execution(s) as completed, attested by ${actor}?`,
+      false,
+    );
+    if (!agreed) {
+      return emitRefusal(streams, json, {
+        ok: false,
+        code: "dangling-declined",
+        message: "nothing was appended: the confirmation was declined",
+      });
+    }
+  }
+
+  const resolved: { action_key: string; seq: number; proven_by: string | null }[] = [];
+  const failed: { action_key: string; code: string; message: string }[] = [];
+  for (const entry of provable) {
+    const result = resolveExecution(logPath, entry.actionKey, "completed", sweptNote(entry), actor, {
+      policy: policyLocation(flags, cwd),
+    });
+    if (result.ok) {
+      resolved.push({
+        action_key: entry.actionKey,
+        seq: result.record.seq,
+        proven_by: entry.provenBy,
+      });
+      continue;
+    }
+    // One refusal does not stop the sweep: the keys are independent, and a
+    // fourth that cannot be closed is no reason to leave the fifth open. Every
+    // refusal is reported by code, and the exit code below says some of them
+    // were refused.
+    failed.push({ action_key: entry.actionKey, code: result.code, message: result.message });
+  }
+
+  if (json) {
+    emitJson(streams, {
+      ok: failed.length === 0,
+      dangling: listed,
+      resolved,
+      unresolved: [
+        ...unprovable.map((entry) => entry.actionKey),
+        ...failed.map((entry) => entry.action_key),
+      ],
+      ...(failed.length === 0 ? {} : { failed }),
+      attested_by_human: true,
+      actor,
+    });
+  } else {
+    for (const entry of resolved) {
+      streams.out(
+        `resolved ${entry.action_key} as completed at seq ${String(entry.seq)} by ${actor} (human-attested, no exit code; ${String(entry.proven_by)})\n`,
+      );
+    }
+    for (const entry of failed) {
+      streams.err(`${renderRefusal(st, entry.code, `${entry.action_key}: ${entry.message}`)}\n`);
+    }
+    if (unprovable.length > 0) {
+      streams.out(
+        `${String(unprovable.length)} execution(s) were left alone: nothing in this checkout can prove how they ended, and only a person who goes and looks may say. Close each with its own command, listed above.\n`,
+      );
+    }
+  }
+  return failed.length === 0 ? EXIT_OK : EXIT_INTEGRITY;
+}
+
+/** The list, as a person reads it: what is provable, by what, and what is not. */
+function renderDanglingList(st: Style, candidates: readonly DanglingCandidate[]): string {
+  const rows: TableRow[] = candidates.map((entry) => ({
+    left: entry.actionKey,
+    right:
+      entry.provenBy === null
+        ? st.fail("nothing proves how it ended")
+        : st.ok(`${entry.provenBy} carries seq ${String(entry.toSeq)}`),
+    under: [
+      `seq ${String(entry.seq)}  ${entry.ts}  ${entry.cls ?? "class undeclared"}${
+        entry.task === null ? "" : `  ${entry.task}`
+      }`,
+      ...(entry.provenBy === null ? [manualResolveCommand(entry.actionKey)] : []),
+    ],
+  }));
+  return `${st.table(rows)}\n`;
+}
+
+/**
  * `approval execution resolve <action-key> --outcome completed|failed --note …`
  *
  * The human recovery verb for a dangling execution: the runtime died between
@@ -1521,11 +1796,27 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
  * No attestation is required, and the help text says why: resolve records a
  * fact a human observed; it exercises no policy authority, so it does not
  * require an attested policy.
+ *
+ * `--dangling` is the bulk form of the same verb ({@link resolveDangling}): the
+ * whole list, one confirmation, one record per key the checkout can prove.
  */
-export function commandResolve(argv: string[], streams: Streams, cwd: string): number {
+export function commandResolve(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  deps: ResolveDeps = {},
+): number {
   const outcomeFront = front(
     argv,
-    { ...COMMON_FLAGS, "--outcome": "string", "--note": "string", "--as": "string" },
+    {
+      ...COMMON_FLAGS,
+      "--outcome": "string",
+      "--note": "string",
+      "--as": "string",
+      "--dangling": "boolean",
+      "--class": "string",
+      "--yes": "boolean",
+    },
     RESOLVE_HELP,
     streams,
     cwd,
@@ -1533,9 +1824,58 @@ export function commandResolve(argv: string[], streams: Streams, cwd: string): n
   if (outcomeFront.kind === "handled") return outcomeFront.code;
   const { flags, positionals, json, logPath } = outcomeFront;
 
+  // The actor is settled before the two forms diverge: both write a
+  // human-attested record and neither may be performed by an agent.
+  const asFlag0 = stringFlag(flags, "--as");
+  const actor0 = resolveHumanActor(asFlag0 === null ? {} : { actor: asFlag0 });
+
+  const bulk = boolFlag(flags, "--dangling");
   const actionKey = positionals[0];
+  if (bulk) {
+    if (actionKey !== undefined) {
+      return usageError(
+        streams,
+        json,
+        `--dangling takes no <action-key>: it acts on every dangling execution the log holds, and naming one is the single form (drop --dangling). Got ${JSON.stringify(actionKey)}`,
+        RESOLVE_HELP,
+      );
+    }
+    if (stringFlag(flags, "--outcome") !== null || stringFlag(flags, "--note") !== null) {
+      return usageError(
+        streams,
+        json,
+        "--dangling takes neither --outcome nor --note: it records `completed` for exactly the keys this checkout can prove completed, and writes each note from that evidence. Nothing is inferred for a key nothing proves — those are listed and left alone",
+        RESOLVE_HELP,
+      );
+    }
+    if (actor0 === null) {
+      return usageError(
+        streams,
+        json,
+        asFlag0 === null
+          ? `no human identity: set ${HUMAN_ACTOR_ENV}=human:<id> or pass --as human:<id>`
+          : `--as expects a human identity matching human:<id>, got ${JSON.stringify(asFlag0)}; resolve records what a person observed and an agent: or system: actor cannot perform it`,
+        RESOLVE_HELP,
+      );
+    }
+    return resolveDangling(streams, cwd, outcomeFront, actor0, deps);
+  }
+  if (stringFlag(flags, "--class") !== null || boolFlag(flags, "--yes")) {
+    return usageError(
+      streams,
+      json,
+      "--class and --yes belong to the bulk form: they select and confirm a LIST, and the single form already names its one key and takes its one note. Add --dangling, or drop them",
+      RESOLVE_HELP,
+    );
+  }
+
   if (actionKey === undefined) {
-    return usageError(streams, json, "missing <action-key> argument", RESOLVE_HELP);
+    return usageError(
+      streams,
+      json,
+      "missing <action-key> argument (or --dangling for every dangling execution at once)",
+      RESOLVE_HELP,
+    );
   }
   const extra = positionals[1];
   if (extra !== undefined) {
@@ -1737,7 +2077,12 @@ export function commandReconcile(argv: string[], streams: Streams, cwd: string):
 }
 
 /** `approval execution <subcommand>`: `resolve` and `reconcile`. */
-export function commandExecution(argv: string[], streams: Streams, cwd: string): number {
+export function commandExecution(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  deps: ResolveDeps = {},
+): number {
   const sub = argv[0];
   const rest = argv.slice(1);
   const json = argv.includes("--json");
@@ -1749,7 +2094,7 @@ export function commandExecution(argv: string[], streams: Streams, cwd: string):
     streams.out(`${EXECUTION_HELP}\n`);
     return EXIT_OK;
   }
-  if (sub === "resolve") return commandResolve(rest, streams, cwd);
+  if (sub === "resolve") return commandResolve(rest, streams, cwd, deps);
   if (sub === "reconcile") return commandReconcile(rest, streams, cwd);
   return usageError(
     streams,

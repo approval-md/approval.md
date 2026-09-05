@@ -1235,12 +1235,17 @@ Usage:
   approval execution resolve <action-key> --outcome completed|failed
                             --note "<text>" [--as human:<id>] [--log <path>]
                             [--json]
+  approval execution resolve --dangling [--class <class>] [--yes]
+                            [--as human:<id>] [--log <path>] [--json]
 
 Flags:
   --outcome <o>    completed or failed. REQUIRED, and nothing is inferred
   --note <text>    what you observed and how you know. MANDATORY and non-empty
   --as human:<id>  the person recording it; else APPROVAL_HUMAN. HUMAN-ONLY
   --log <path>     log file to read and append to
+  --dangling       the BULK form: every dangling execution at once
+  --class <class>  with --dangling, only executions declared in that class
+  --yes            with --dangling, proceed without the confirmation
   --json / -h, --help   machine-readable output / this text
 
 Appends execution.completed or execution.failed with payload
@@ -1248,6 +1253,14 @@ Appends execution.completed or execution.failed with payload
 nobody ran anything. NO ATTESTATION IS REQUIRED: resolve records a fact a human
 observed and exercises no policy authority. Refuses (exit 1) when there is
 nothing to close: not-started, already-finished.
+
+--dangling lists every dangling execution with what this checkout can PROVE for
+each — the ref carrying the seq a daemon advance named, or nothing — asks ONCE,
+then appends one completed per provable key with a note naming that ref. Keys
+nothing proves are listed with their own one-line command and left alone: an
+outcome nobody can demonstrate is a person's to go and look at. Refuses
+dangling-stdin-not-tty without a terminal (pass --yes after reading the list
+with --json) and dangling-declined when the answer is no; neither appends.
 
 JSON shape: docs/cli-reference.md#execution-resolve
 ${EXIT_CODES_POINTER}
