@@ -1226,12 +1226,18 @@ export async function dispatchPending(
     );
   }
 
-  // APRV-257. The checkpoint tap, offered before the requests and taking one
-  // cycle's turn when it is offered at all. Everything about it is decided by
-  // `checkpointOfferFor`, which reads the policy and the verified log; this
-  // cycle's only jobs are "has this process already asked" and "is the approver
-  // already looking at something".
-  if (await offerCheckpoint(setup, streams, state, result)) return result;
+  // APRV-257. The checkpoint tap, offered before the requests. Everything about
+  // WHETHER to offer is `checkpointOfferFor`, which reads the policy and the
+  // verified log; this cycle's only jobs are "has this process already asked"
+  // and "is the approver already looking at something".
+  //
+  // Under `paced` a prompt that went out ends the cycle, because the approver
+  // is now looking at a question and sending a request underneath it would be
+  // two. Under `burst` it does NOT: burst sends everything pending on every
+  // cycle, and `--once` is one cycle, so returning here would leave a startup
+  // batch undelivered for the sake of a prompt that blocks nothing.
+  const offered = await offerCheckpoint(setup, streams, state, result);
+  if (offered && setup.delivery === "paced") return result;
 
   // Everything the log calls pending that this process has not put on the
   // phone. Both modes start here and differ only in how much of it they send.
@@ -1389,11 +1395,10 @@ export async function dispatchPending(
 /**
  * The checkpoint prompt, at most one outstanding and never a nag (APRV-257).
  *
- * Returns `true` when this cycle sent one, which ends the cycle: under `paced`
- * the approver is now looking at a question, and sending a request underneath
- * it would be two. It costs the queue one cycle and never more, because a
- * checkpoint prompt is never `paced.current` — nothing releases it, so nothing
- * could be waiting on it.
+ * Returns `true` when this cycle sent one; the caller decides what that means,
+ * and under `paced` it means the cycle is over. It costs the queue one cycle
+ * and never more, because a checkpoint prompt is never `paced.current` —
+ * nothing releases it, so nothing could be left waiting on it.
  *
  * Three conditions, and each one is a different failure it avoids:
  *
