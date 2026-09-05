@@ -719,6 +719,16 @@ for integration has an entry in
 exposes, how it fits, the verdict, and the next step, so the question is
 answered once.
 
+One of those entries has a runbook of its own.
+[examples/grok-bot-connector/runbook.md](examples/grok-bot-connector/runbook.md)
+puts a Grok Bot agent on the far end of `approval mcp serve --http --guest`,
+behind a tunnel that is itself gated, and rehearses both halves of the story: the
+agent asking for a branch push and an email and a human deciding them on a phone,
+then the agent skipping the gate entirely. What holds when it does is the point.
+Credentials answer only to single-use tokens, so the send it was never granted
+stays impossible, and `approval coverage` reports every observed effect with its
+evidence seq or `none`.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
