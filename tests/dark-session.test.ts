@@ -110,11 +110,23 @@ function world(): World {
   return { unit, store: new Map() };
 }
 
-/** Register, request and grant one `policy.edit` bound to `material`. */
-function grantEdit(unit: World, key: string, material: unknown, minute: number): EventRecord {
+/**
+ * Register, request and grant one action of `cls`, bound to `material`.
+ *
+ * Parameterized by class since APRV-266: a routed `protected_paths` entry
+ * means the class on the record is the sub-class the hook asked about, and a
+ * helper that could only mint `policy.edit` could not build that log.
+ */
+function grantOfClass(
+  unit: World,
+  key: string,
+  cls: string,
+  material: unknown,
+  minute: number,
+): EventRecord {
   const hash = payloadHash(material);
   const task = `hook:${key}`;
-  const actionKey = `${task}:policy.edit`;
+  const actionKey = `${task}:${cls}`;
 
   const registered = register(
     unit.unit.logPath,
@@ -125,7 +137,7 @@ function grantEdit(unit: World, key: string, material: unknown, minute: number):
         state: "proposed",
         actions: [
           {
-            class: "policy.edit",
+            class: cls,
             summary: `Edit ${key}`,
             reversible: true,
             est_cost_usd: "0",
@@ -145,7 +157,7 @@ function grantEdit(unit: World, key: string, material: unknown, minute: number):
     {
       task,
       actionKey,
-      cls: "policy.edit",
+      cls,
       est_cost_usd: "0",
       summary: `Edit ${key}`,
       payload_hash: hash,
@@ -166,6 +178,11 @@ function grantEdit(unit: World, key: string, material: unknown, minute: number):
 
   unit.store.set(hash, material);
   return granted.record;
+}
+
+/** The `policy.edit` case, which is what most of this suite is about. */
+function grantEdit(unit: World, key: string, material: unknown, minute: number): EventRecord {
+  return grantOfClass(unit, key, "policy.edit", material, minute);
 }
 
 function verified(unit: World): EventRecord[] {
@@ -352,6 +369,46 @@ test("the same two edits, with the grant the remediation actually made, are not 
     // And the grant is what attributed the records to this worktree.
     assert.ok((finding?.attributed.length ?? 0) > 0, "no record was attributed");
   }
+});
+
+test("a routed protected path is guarded, and its own sub-class grant clears it (APRV-266)", () => {
+  // The evaluator reads `policy.protected_paths` and now takes the routed
+  // `{path, class}` form. Two things have to hold, and neither implies the
+  // other: `design/` becomes GUARDED because the policy routes it, and the
+  // grant that clears it carries the routed class rather than `policy.edit`.
+  const routed = [{ path: "design/", class: "policy.edit.design" }];
+  const material = {
+    tool: "Edit",
+    rule: "protected path",
+    file: `${WORKTREES}/agent-routed/design/adr-1.md`,
+    before: "a",
+    after: "b",
+  };
+  const touched = () =>
+    checkout({
+      name: "agent-routed",
+      commits: [commit({ changedPaths: ["design/adr-1.md"], ref: "agent-routed" })],
+    });
+
+  const dark = world();
+  const before = evaluateDarkSessions(
+    inputFor(dark, [touched()], { policyProtectedPaths: routed }),
+  );
+  assert.equal(before.ok, false, renderDarkSessionReport(before));
+  assert.equal(before.findings[0]?.code, "no-evidence");
+  assert.deepEqual(
+    before.findings[0]?.guardedPaths,
+    ["design/adr-1.md"],
+    "a routed entry must widen the guarded set exactly as a bare string does",
+  );
+
+  const hooked = world();
+  grantOfClass(hooked, "agent-routed", "policy.edit.design", material, 4);
+  const after = evaluateDarkSessions(
+    inputFor(hooked, [touched()], { policyProtectedPaths: routed }),
+  );
+  assert.equal(after.ok, true, renderDarkSessionReport(after));
+  assert.equal(after.findings[0]?.verdict, "hooked");
 });
 
 // ---------------------------------------------------------------------------

@@ -178,7 +178,12 @@
  * git plumbing and file reads live in the caller.
  */
 
-import { classifyCommand, isProtectedPath } from "./command-class.js";
+import {
+  classifyCommand,
+  isProtectedPath,
+  POLICY_EDIT_SUBCLASS,
+  type ProtectedPathEntry,
+} from "./command-class.js";
 import type { EventRecord } from "./log.js";
 
 /**
@@ -190,6 +195,33 @@ import type { EventRecord } from "./log.js";
  * should not lose its evidence.
  */
 export const GRANTING_CLASSES: readonly string[] = ["policy.edit", "policy.core"];
+
+/**
+ * Does a grant of this class authorize a protected-path write? (APRV-266.)
+ *
+ * The named classes above, plus any `policy.edit` sub-class a policy routes a
+ * path to. Both directions of the cross-check matter and both are accepted:
+ *
+ * - A grant of the ROUTED class is the ordinary case once a policy adopts
+ *   routing. `policy.edit.spec` is the class the hook asked about and the class
+ *   the human decided, so it is the class the record carries.
+ * - A grant of `policy.edit` ITSELF is accepted for a path now routed, because
+ *   a routing is a policy edit and the two are not synchronized: a grant taken
+ *   under yesterday's string-only policy, or under the daemon's own fallback
+ *   when the policy would not load, names `policy.edit` for a path today's
+ *   policy routes. Refusing it would make adopting a routing retroactively
+ *   invalidate evidence that was correct when it was taken.
+ *
+ * What this does NOT do is loosen the guard: the class only opens the door, and
+ * the naming test — the grant's own material has to name THIS path, and since
+ * APRV-202 has to cover the actual hunks — is unchanged and is what decides.
+ * A sub-class name is not authority over anything; the namespace is closed to
+ * `policy.edit.*` in the classifier, so no grant of `log.mutate` or
+ * `policy.core` can be manufactured by naming one (SPEC.md §11.1 invariant 9).
+ */
+export function isGrantingClass(actionClass: string): boolean {
+  return GRANTING_CLASSES.includes(actionClass) || POLICY_EDIT_SUBCLASS.test(actionClass);
+}
 
 /**
  * The daemon's own append surface: evidence, not a protected write.
@@ -320,7 +352,7 @@ export interface GuardInput {
   /** Why the log did not verify, when `logStatus` is not `ok`. */
   logDetail?: string;
   /** `policy.protected_paths` from the policy, widening the built-in set. */
-  policyProtectedPaths: readonly string[];
+  policyProtectedPaths: readonly ProtectedPathEntry[];
   /**
    * SHA-256 of the policy file's bytes at the head commit, or `null` when the
    * head tree carries no policy file. Only used for the `attested` verdict.
@@ -418,13 +450,13 @@ function endsWithSegments(candidate: string, want: string): boolean {
 function commandWritesPath(
   command: string,
   path: string,
-  policyProtectedPaths: readonly string[],
+  policyProtectedPaths: readonly ProtectedPathEntry[],
   cwd: string | undefined,
 ): { text: string; named: string } | null {
   const classified = classifyCommand(command, policyProtectedPaths);
   if (!classified.ok) return null;
   for (const segment of classified.segments) {
-    if (!GRANTING_CLASSES.includes(segment.class)) continue;
+    if (!isGrantingClass(segment.class)) continue;
     const named = segment.path;
     if (typeof named === "string" && endsWithSegments(named, path)) {
       return { text: segment.text, named };
@@ -472,7 +504,10 @@ export function isExemptPath(path: string): boolean {
  * hook's would fail the changes the hook already gated and pass the ones it
  * would have caught.
  */
-export function isGuardedPath(path: string, policyProtectedPaths: readonly string[]): boolean {
+export function isGuardedPath(
+  path: string,
+  policyProtectedPaths: readonly ProtectedPathEntry[],
+): boolean {
   if (isExemptPath(path)) return false;
   return isProtectedPath(path, policyProtectedPaths);
 }
@@ -535,7 +570,7 @@ function commandTargetsPath(target: string, cwd: string | undefined, path: strin
 function evidenceFor(
   material: unknown,
   path: string,
-  policyProtectedPaths: readonly string[],
+  policyProtectedPaths: readonly ProtectedPathEntry[],
 ): NamingMatch | null {
   if (typeof material !== "object" || material === null || Array.isArray(material)) return null;
   const map = material as Record<string, unknown>;
@@ -877,7 +912,7 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
   const grants = records.filter(
     (record) =>
       record.event === "approval.granted" &&
-      GRANTING_CLASSES.includes(String(payloadOf(record)["class"] ?? "")),
+      isGrantingClass(String(payloadOf(record)["class"] ?? "")),
   );
 
   // The runs, by action key: what a granted COMMAND is attributed through

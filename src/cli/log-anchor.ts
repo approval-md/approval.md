@@ -46,7 +46,7 @@ import type { EventRecord } from "../core/log.js";
 import type { LogHead } from "../core/verify.js";
 import { verifyText } from "../core/verify.js";
 import { compareChains, describeDrift } from "../core/log-reconcile.js";
-import { git, repoPath, repoRoot, showBlob } from "./git-scope.js";
+import { git, readBlob, repoPath, repoRoot } from "./git-scope.js";
 
 /**
  * The refusal this check can produce. A closed union, per SPEC.md §11.1
@@ -161,12 +161,53 @@ function sha256(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-/** The blob id of `<rev>:<relative>`, or `null` when git has no such blob. */
-function blobOid(root: string, rev: string, relative: string): string | null {
-  const result = git(["rev-parse", "--verify", "--quiet", `${rev}:${relative}`], root);
-  if (!result.ok) return null;
+/**
+ * What one candidate rev's lookup did, in the words a skip reason quotes.
+ *
+ * `git rev-parse --verify --quiet <rev>:<path>` exiting 1 with nothing on
+ * stderr is the ordinary "this rev does not carry that file" and reads as such;
+ * anything else is the lookup itself failing and has to read differently.
+ */
+interface GitAttempt {
+  command: string;
+  detail: string;
+}
+
+/** One attempt, folded onto one line. Skip reasons are single-line by contract. */
+function describeAttempt(attempt: GitAttempt): string {
+  return `\`${attempt.command}\` ${attempt.detail}`;
+}
+
+/** The blob id of `<rev>:<relative>`, or the attempt that failed to name one. */
+function blobOid(
+  root: string,
+  rev: string,
+  relative: string,
+): { oid: string } | { oid: null; attempt: GitAttempt } {
+  const spec = `${rev}:${relative}`;
+  const command = `git rev-parse --verify --quiet ${spec}`;
+  const result = git(["rev-parse", "--verify", "--quiet", spec], root);
+  const said = result.stderr
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join(" | ");
+  if (!result.ok) {
+    return {
+      oid: null,
+      attempt: {
+        command,
+        detail: `${
+          result.status === null ? "did not complete" : `exited ${String(result.status)}`
+        }${said.length === 0 ? " and printed nothing" : `: ${said}`}`,
+      },
+    };
+  }
   const oid = result.stdout.trim();
-  return oid.length === 0 ? null : oid;
+  if (oid.length === 0) {
+    return { oid: null, attempt: { command, detail: "exited 0 and named no blob" } };
+  }
+  return { oid };
 }
 
 /**
@@ -183,19 +224,36 @@ function anchoredCopy(
   rev: string,
   relative: string,
   options: { schemaDir?: string },
-): { ok: true; copy: AnchoredCopy; oid: string } | { ok: false; reason: string | null } {
-  const oid = blobOid(root, rev, relative);
-  if (oid === null) return { ok: false, reason: null };
+):
+  | { ok: true; copy: AnchoredCopy; oid: string }
+  | { ok: false; reason: string | null; attempt: GitAttempt | null } {
+  const found = blobOid(root, rev, relative);
+  if (found.oid === null) return { ok: false, reason: null, attempt: found.attempt };
+  const oid = found.oid;
 
   const cached = BLOBS.get(oid);
   if (cached !== undefined) {
     return cached === null
-      ? { ok: false, reason: `${rev} carries a copy of the log that does not verify or is empty` }
+      ? {
+          ok: false,
+          reason: `${rev} carries a copy of the log that does not verify or is empty`,
+          attempt: null,
+        }
       : { ok: true, copy: cached, oid };
   }
 
-  const bytes = showBlob(root, rev, relative);
-  if (bytes === null) return { ok: false, reason: null };
+  const read = readBlob(root, rev, relative);
+  if (!read.ok) {
+    // `git rev-parse` named a blob and `git show` could not hand it over. That
+    // is never "this rev has no committed copy" — the object store says it
+    // does — so it must not be reported as a rev with nothing to say.
+    return {
+      ok: false,
+      reason: `${rev} names a blob for ${relative} that could not be read`,
+      attempt: { command: read.command, detail: read.detail },
+    };
+  }
+  const bytes = read.bytes;
 
   const verified = verifyText(
     `${rev}:${relative}`,
@@ -213,6 +271,7 @@ function anchoredCopy(
         verified.result.status === "clean"
           ? `${rev} carries an empty copy of the log, which anchors nothing`
           : `${rev} carries a copy of the log that does not verify (${verified.result.status})`,
+      attempt: null,
     };
   }
 
@@ -253,10 +312,12 @@ export function resolveAnchor(
 
   let best: Anchor | null = null;
   const notes: string[] = [];
+  const attempts: string[] = [];
   for (const rev of revs) {
     const found = anchoredCopy(root, rev, relative, options);
     if (!found.ok) {
       if (found.reason !== null) notes.push(found.reason);
+      if (found.attempt !== null) attempts.push(describeAttempt(found.attempt));
       continue;
     }
     if (best !== null && found.copy.head.seq <= best.head.seq) continue;
@@ -275,12 +336,26 @@ export function resolveAnchor(
   const where = explicit
     ? `${revs[0] ?? "the requested rev"} has no ${relative} blob`
     : `no rev this checkout can see carries a committed copy of ${relative} (tried ${revs.join(", ")})`;
+  /**
+   * What git was actually asked, and what it answered, for every rev.
+   *
+   * Printed only when NOTHING resolved, which is the one state where a reader
+   * has to distinguish "this repository has never committed the log" from "the
+   * lookup is broken". Those two produced the same sentence until this was
+   * added, and the second one shipped: `approval log verify --anchor` named
+   * four revs and no reason in a checkout where `git show refs/remotes/origin/
+   * main:.approval/log/events.jsonl` printed the log, because the read was
+   * outrunning the runner's output buffer and the failure had nowhere to go.
+   * A skip that lists revs without saying how each lookup failed is a skip a
+   * person cannot act on.
+   */
+  const said = [...notes, ...attempts];
   return {
     ok: false,
     reason:
-      notes.length === 0
+      said.length === 0
         ? `${where}, so there is no external witness to compare the working log against`
-        : `${where}. ${notes.join("; ")}`,
+        : `${where}. ${said.join("; ")}`,
     revs,
   };
 }

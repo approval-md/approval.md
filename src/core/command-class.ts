@@ -110,6 +110,55 @@ export const GATE_SELF_CLASS = "gate.self";
 export type ProtectedPathClass = "log.mutate" | "policy.core" | "policy.edit";
 
 /**
+ * The `policy.edit` sub-class namespace a `protected_paths` entry may route to
+ * (APRV-266).
+ *
+ * One protected surface with one autonomy was the shape until now, so a policy
+ * that wanted its specification sampled at one tenth and its release workflows
+ * gated every time had to choose one of those numbers for both. A routed entry
+ * says which sub-class a path family takes, and the sub-class is an ordinary
+ * §7 class with an ordinary policy line, so each family gets its own autonomy
+ * and its own live rate without any new grammar in `classes`.
+ *
+ * The namespace is closed to ONE extra segment under `policy.edit` and nothing
+ * else. A policy may not route a path to `policy.core`, to `log.mutate`, or to
+ * any class outside this namespace: those are the gate's own organs and the
+ * record of what happened, and §11.1 invariant 9 reserves them — a policy
+ * widening its own protected surface is naming prose and configuration, and
+ * mints no authority over anything else. `policy.schema.json` enforces the
+ * shape; this pattern is the same rule where the matcher can see it.
+ */
+export const POLICY_EDIT_SUBCLASS = /^policy\.edit\.[a-z][a-z0-9-]*$/u;
+
+/**
+ * Sub-class names this spec reserves, with the meaning an implementation must
+ * give them (APRV-266).
+ *
+ * Reserved so that two policies written by two people mean the same thing by
+ * `policy.edit.ci`, and so a reader of somebody else's policy does not have to
+ * infer it. An author is free to mint their own word beside these — the pattern
+ * above admits any lowercase word — and a minted name carries only the meaning
+ * its own policy line gives it.
+ */
+export const RESERVED_POLICY_EDIT_SUBCLASSES: Readonly<Record<string, string>> = {
+  "policy.edit.spec": "the project's governing specification and its amendments",
+  "policy.edit.harness": "agent instruction files and harness configuration that is not the hook itself",
+  "policy.edit.ci": "continuous-integration and release configuration",
+  "policy.edit.design": "design documents and decision records",
+};
+
+/**
+ * One `protected_paths` entry: a bare path, or a path routed to a sub-class.
+ *
+ * The bare string is the APRV-107 spelling and keeps its meaning exactly —
+ * `policy.edit`, as though the object form did not exist. Nothing about a
+ * string-only policy changes by a byte, which is the compatibility rule this
+ * type exists to state: `approval hook classify` over such a policy answers
+ * today's class with today's rule name.
+ */
+export type ProtectedPathEntry = string | { path: string; class: string };
+
+/**
  * Files whose edit is `policy.core` wherever they sit: the policy itself,
  * under either spelling.
  */
@@ -137,6 +186,12 @@ function pathSegments(candidate: string): string[] {
 interface ProtectedEntry {
   segments: string[];
   directory: boolean;
+  /**
+   * The class this entry routes to (APRV-266). `null` for a bare string entry,
+   * which means `policy.edit` and is matched in the built-in `policy.edit`
+   * tier exactly where it always was.
+   */
+  routed: string | null;
 }
 
 /**
@@ -147,15 +202,29 @@ interface ProtectedEntry {
  * validation gets an entry that matches nothing rather than an entry that
  * matches surprisingly. Pure, like everything else here: no resolution against
  * a checkout, no disk.
+ *
+ * The same defensiveness covers the routed form (APRV-266): an object whose
+ * `class` is not a well-formed `policy.edit` sub-class matches NOTHING at all
+ * rather than falling back to `policy.edit`. A silent fallback would be the
+ * worst of the three available answers — the author would read their file and
+ * see a rate that is not the rate in force — and the loader refuses such a
+ * policy outright, so this branch is only ever reached by a caller that
+ * skipped validation.
  */
-function parseProtectedEntry(entry: string): ProtectedEntry | null {
-  const trimmed = entry.trim();
+export function parseProtectedEntry(entry: ProtectedPathEntry): ProtectedEntry | null {
+  const raw = typeof entry === "string" ? entry : entry.path;
+  const routed = typeof entry === "string" ? null : entry.class;
+  if (typeof raw !== "string") return null;
+  if (routed !== null && (typeof routed !== "string" || !POLICY_EDIT_SUBCLASS.test(routed))) {
+    return null;
+  }
+  const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
   const directory = /[/\\]$/u.test(trimmed);
   const segments = pathSegments(trimmed);
   if (segments.length === 0) return null;
   if (segments.some((segment) => segment === "..")) return null;
-  return { segments, directory };
+  return { segments, directory, routed };
 }
 
 /** Does `segments` match one parsed entry? */
@@ -197,15 +266,46 @@ function matchesEntry(segments: readonly string[], entry: ProtectedEntry): boole
  * `extra` carries `policy.protected_paths` (APRV-107). It is strictly
  * ADDITIVE: the built-in set above is protected whatever a policy says, so a
  * policy can widen the protected surface and can never narrow it, and every
- * path it adds lands on `policy.edit` — the reviewable class — because a
- * policy widening its own surface is naming prose and configuration, not
- * minting authority over the gate's organs. Still pure: the caller loads the
- * policy, this function only matches segments.
+ * path it adds in the APRV-107 bare-string spelling lands on `policy.edit` —
+ * the reviewable class — because a policy widening its own surface is naming
+ * prose and configuration, not minting authority over the gate's organs. Still
+ * pure: the caller loads the policy, this function only matches segments.
+ *
+ * ## Routed entries (APRV-266)
+ *
+ * An entry written as `{path, class}` answers with the class it names, and the
+ * routed tier sits between the built-in `policy.core` tier and the built-in
+ * `policy.edit` tier. That position is the whole of the routing rule:
+ *
+ * - It is BELOW `log.mutate` and `policy.core`, so a routing can never reach
+ *   the log or the gate's own organs. `{path: .approval/, class:
+ *   policy.edit.home}` matches nothing, because tier 2 answered first — which
+ *   is invariant 9's "no verb minting authority" holding at the one place a
+ *   policy could otherwise have reached past it. The loader refuses such an
+ *   entry outright rather than letting it sit inert.
+ * - It is ABOVE the built-in `policy.edit` set, so a routing CAN re-label a
+ *   built-in `policy.edit` path: `{path: .github/workflows/, class:
+ *   policy.edit.ci}` is exactly the sentence a project wants to write. What
+ *   stops that from being a demotion is not this function but the load-time
+ *   floor in `policy-load.ts`, which refuses a policy whose routing would
+ *   resolve a built-in path below what the `policy.edit` line itself resolves
+ *   to. The classifier stays pure: it reports the class the policy named and
+ *   judges no autonomy.
+ *
+ * Among several routed entries matching one path, the MOST SPECIFIC wins (most
+ * segments), and declaration order breaks a tie. Most-specific is what a
+ * carve-out means — `design/` routed one way and `design/frozen/` another — and
+ * a tie is two entries of equal depth both claiming one path, which is the
+ * author's own ambiguity and is resolved the only way a pure function can:
+ * by the order they wrote them in.
+ *
+ * A string-only `extra` cannot reach the routed tier at all, so a policy that
+ * has not adopted the object form classifies byte for byte as it did before.
  */
 export function protectedPathClass(
   candidate: string,
-  extra: readonly string[] = [],
-): ProtectedPathClass | null {
+  extra: readonly ProtectedPathEntry[] = [],
+): string | null {
   if (candidate.length === 0) return null;
   const segments = pathSegments(candidate);
 
@@ -237,18 +337,48 @@ export function protectedPathClass(
     }
   }
 
-  // 3. The prose and configuration about the gate.
+  // 3. The policy's own routed entries (APRV-266), above the built-in
+  //    `policy.edit` set so a routing can re-label one of those paths, and
+  //    below tiers 1 and 2 so it can never reach the log or the gate's organs.
+  //    Most segments win; declaration order breaks a tie.
+  let routed: { entry: ProtectedEntry; depth: number } | null = null;
+  for (const raw of extra) {
+    const entry = parseProtectedEntry(raw);
+    if (entry === null || entry.routed === null) continue;
+    if (!matchesEntry(segments, entry)) continue;
+    const depth = entry.segments.length;
+    if (routed === null || depth > routed.depth) routed = { entry, depth };
+  }
+  if (routed !== null) return routed.entry.routed;
+
+  // 4. The prose and configuration about the gate.
   if (last !== undefined && PROTECTED_FILENAMES.includes(last)) return "policy.edit";
   for (let index = 0; index < segments.length; index += 1) {
     // CI configuration.
     if (segments[index] === ".github" && segments[index + 1] === "workflows") return "policy.edit";
   }
 
+  // 5. The policy's own bare-string entries, which mean `policy.edit` (APRV-107).
   for (const raw of extra) {
     const entry = parseProtectedEntry(raw);
-    if (entry !== null && matchesEntry(segments, entry)) return "policy.edit";
+    if (entry !== null && entry.routed === null && matchesEntry(segments, entry)) {
+      return "policy.edit";
+    }
   }
   return null;
+}
+
+/**
+ * The class a path takes from the BUILT-IN set alone, ignoring every policy
+ * entry (APRV-266).
+ *
+ * The load-time routing floor needs this and nothing else: "is the path this
+ * entry routes one the runtime protects on its own?" decides whether the floor
+ * applies to it, and asking {@link protectedPathClass} with the policy's own
+ * entries in hand would answer with the routing under test.
+ */
+export function builtinProtectedPathClass(candidate: string): ProtectedPathClass | null {
+  return protectedPathClass(candidate) as ProtectedPathClass | null;
 }
 
 /**
@@ -258,7 +388,10 @@ export function protectedPathClass(
  * (`core/wysiwys.ts`'s protected-path view and the hook's file-tool gate) ask
  * whether a path is protected at all before they ask which surface it is.
  */
-export function isProtectedPath(candidate: string, extra: readonly string[] = []): boolean {
+export function isProtectedPath(
+  candidate: string,
+  extra: readonly ProtectedPathEntry[] = [],
+): boolean {
   return protectedPathClass(candidate, extra) !== null;
 }
 
@@ -1867,30 +2000,56 @@ const PROTECTED_PRECEDENCE: readonly ProtectedPathClass[] = [
 ];
 
 /**
+ * Where a surface sits in {@link PROTECTED_PRECEDENCE}.
+ *
+ * A `policy.edit` sub-class (APRV-266) ranks exactly where `policy.edit` ranks,
+ * and that is not a shortcut: routing re-labels the `policy.edit` tier and can
+ * reach no other, so a routed class IS a `policy.edit` surface wearing the name
+ * its policy gave it. Ranking it by the autonomy the policy declares for it was
+ * the alternative and is rejected — this function is the pure classifier, it
+ * has no policy to resolve against, and a precedence that moved with a rate
+ * would make the class a command takes depend on a number an author was tuning.
+ */
+function protectedRank(surface: string): number {
+  const index = PROTECTED_PRECEDENCE.indexOf(surface as ProtectedPathClass);
+  return index === -1 ? PROTECTED_PRECEDENCE.indexOf("policy.edit") : index;
+}
+
+/**
  * The strictest protected surface named by these words, with the word itself.
  *
  * `null` when none of them is protected. The word is returned verbatim, which
  * is what {@link ClassifiedSegment.path} carries to the approver.
+ *
+ * Among several words at the same rank the FIRST wins, which is what it always
+ * did and is what keeps a bare-string policy byte-identical: two routed paths
+ * in one segment are two equally consequential surfaces, and the segment's
+ * class names one of them while `ClassifiedSegment.path` names the word.
  */
 function strictestProtected(
   words: readonly string[],
-  protectedPaths: readonly string[],
-): { surface: ProtectedPathClass; path: string } | null {
-  let best: { surface: ProtectedPathClass; path: string } | null = null;
+  protectedPaths: readonly ProtectedPathEntry[],
+): { surface: string; path: string } | null {
+  let best: { surface: string; path: string } | null = null;
   for (const word of words) {
     const surface = protectedPathClass(word, protectedPaths);
     if (surface === null) continue;
-    if (
-      best === null ||
-      PROTECTED_PRECEDENCE.indexOf(surface) < PROTECTED_PRECEDENCE.indexOf(best.surface)
-    ) {
+    if (best === null || protectedRank(surface) < protectedRank(best.surface)) {
       best = { surface, path: word };
     }
   }
   return best;
 }
 
-/** Every class the table can emit, for docs and for the dogfood test. */
+/**
+ * Every class the table can emit, for docs and for the dogfood test.
+ *
+ * Fixed, and it does not include the `policy.edit` sub-classes (APRV-266): a
+ * routed class is emitted only because a particular policy named it, so the set
+ * of them is a property of that file rather than of this table. A reader
+ * asking "can the classifier ever emit this class?" of a routed name must ask
+ * it WITH the policy in hand — {@link emittableClass} is that question.
+ */
 export const CLASSIFIER_CLASSES: readonly string[] = (() => {
   const seen = new Set<string>();
   for (const rule of COMMAND_RULES) {
@@ -1907,6 +2066,31 @@ export const CLASSIFIER_CLASSES: readonly string[] = (() => {
   seen.add("read.shell");
   return [...seen].sort();
 })();
+
+/**
+ * Can the classifier emit `actionClass` for a project whose policy carries
+ * these `protected_paths`? (APRV-266.)
+ *
+ * {@link CLASSIFIER_CLASSES} answers for the binary table, which is fixed. A
+ * routed class is not in that table and never will be: it exists because one
+ * policy wrote it beside one path, and the same name in another project's
+ * policy would be a different class over different files. So the reachability
+ * question — the one `core/policy-expectations.ts` asks of every class a policy
+ * declares, so that a policy line nobody can ever fire is caught at the
+ * ceremony rather than believed for a year — takes the policy's own entries.
+ *
+ * A routed name is reachable exactly when some entry routes to it. A
+ * `policy.edit.spec` rule in a policy whose `protected_paths` routes nothing to
+ * it is a line that will never fire, and saying so is the whole point.
+ */
+export function emittableClass(
+  actionClass: string,
+  protectedPaths: readonly ProtectedPathEntry[] = [],
+): boolean {
+  if (CLASSIFIER_CLASSES.includes(actionClass)) return true;
+  if (!POLICY_EDIT_SUBCLASS.test(actionClass)) return false;
+  return protectedPaths.some((entry) => parseProtectedEntry(entry)?.routed === actionClass);
+}
 
 /** Find the first table row matching this binary and subcommand. */
 function matchRule(bin: string, sub: string | null): CommandRule | null {
@@ -1926,7 +2110,7 @@ type SegmentOutcome =
 
 function classifySegment(
   segment: LexSegment,
-  protectedPaths: readonly string[],
+  protectedPaths: readonly ProtectedPathEntry[],
   context: ClassifierContext,
 ): SegmentOutcome {
   if (segment.opaque !== null) {
@@ -2078,15 +2262,20 @@ function classifySegment(
  * caller that forgets it under-reports the protected classes rather than inventing an
  * authorization; every enforcement path passes the loaded policy's list.
  *
+ * Since APRV-266 an entry may be `{path, class}`, routing that path family to a
+ * `policy.edit` sub-class. The classifier stays what it was: the entry's class
+ * is DATA it copies out of the policy, matched by the same segment matcher as
+ * every other entry, so this resolves no autonomy at all.
+ *
  * `context` (APRV-267) carries the machine facts a caller has resolved: today
- * only `scratchRoots`. It behaves exactly as `protectedPaths` does — omitting
- * it yields the strictly narrower answer, because every rule that reads it can
- * only ever LOOSEN a class, and no rule reads it to loosen a protected or
- * credential one.
+ * only `scratchRoots`. It behaves exactly as `protectedPaths` does: omitting it
+ * yields the strictly narrower answer, because every rule that reads it can only
+ * ever LOOSEN a class, and no rule reads it to loosen a protected or credential
+ * one.
  */
 export function classifyCommand(
   command: string,
-  protectedPaths: readonly string[] = [],
+  protectedPaths: readonly ProtectedPathEntry[] = [],
   context: ClassifierContext = {},
 ): CommandClassification {
   const lexed = lex(command);

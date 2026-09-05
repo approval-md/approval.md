@@ -62,7 +62,19 @@ import { basename, join } from "node:path";
 
 import { isNode, parseDocument, visit } from "yaml";
 
+import {
+  builtinProtectedPathClass,
+  parseProtectedEntry,
+  type ProtectedPathEntry,
+} from "./command-class.js";
 import { scanFences, type FenceScan } from "./md-fence.js";
+// The routing floor (APRV-266) needs the resolver's own strictness table and
+// its own resolution of two classes, so this module imports the matcher that
+// imports this module's TYPES. The cycle is type-only in the other direction
+// and erased at build, so nothing circular exists at runtime — and the
+// alternative, a private strictness table here, is exactly the drift a floor
+// must never have from the resolution it floors.
+import { resolve, STRICTNESS } from "./policy-match.js";
 import { promptBlockErrors } from "./prompt-layout.js";
 import { validate, type ValidationError } from "./validate.js";
 
@@ -240,8 +252,15 @@ export interface Policy {
    * negation. Purely ADDITIVE: the built-ins stay protected whatever this
    * list says, so a policy can widen the protected surface and never narrow
    * it.
+   *
+   * Amended again (APRV-266): an entry may instead be `{path, class}`, routing
+   * that path family to a named `policy.edit` sub-class so each family carries
+   * its own autonomy and its own live rate. A bare string keeps its APRV-107
+   * meaning exactly. What a routing may not do is weaken a BUILT-IN protected
+   * path: {@link checkProtectedRouteFloor} runs at load and makes such a policy
+   * inoperative.
    */
-  protected_paths?: string[];
+  protected_paths?: ProtectedPathEntry[];
   approvers?: Record<string, { channels: string[] }>;
   classes?: Record<string, PolicyClassRule>;
   /**
@@ -377,7 +396,16 @@ export type PolicyLoadErrorCode =
   | "no-block"
   | "multiple-blocks"
   | "yaml-error"
-  | "schema-invalid";
+  | "schema-invalid"
+  /**
+   * Amended SPEC.md §5.2 (APRV-266): a `protected_paths` routing that a
+   * built-in protected path may not take. Distinct from `schema-invalid`
+   * because the file IS valid against the schema and the fault is a
+   * relationship between two of its parts — the route and the `policy.edit`
+   * line — which no JSON Schema can state. See
+   * {@link checkProtectedRouteFloor}.
+   */
+  | "protected-route-floor";
 
 /**
  * Result of {@link loadPolicy}.
@@ -802,7 +830,7 @@ export function loadPolicyText(
     declared: policy.daemon !== undefined,
   };
 
-  return {
+  const loaded: PolicyLoadResult = {
     ok: true,
     policy,
     source: { path: resolved.path, filename: basename(resolved.path) },
@@ -810,6 +838,86 @@ export function loadPolicyText(
     daemon: daemonRead,
     notes: aliasNotes(policy),
   };
+
+  // APRV-266: the routing floor is the LAST gate on a load, because it is the
+  // only check here that needs the resolved policy rather than the parsed one.
+  const floor = checkProtectedRouteFloor(loaded);
+  if (floor !== null) {
+    return failure("protected-route-floor", `${resolved.path}: ${floor}`, undefined, parsed.value);
+  }
+  return loaded;
+}
+
+/**
+ * The routing floor (amended SPEC.md §5.2, APRV-266): a `protected_paths`
+ * routing may make a BUILT-IN protected path stricter and never weaker.
+ *
+ * `protected_paths` has been additive-only since APRV-107 for a reason that
+ * routing does not repeal: a policy that could shrink its own protected surface
+ * is a policy an agent can edit its way out of. Routing is a new way to try —
+ * `{path: CLAUDE.md, class: policy.edit.docs}` with `policy.edit.docs:
+ * autonomous` would take the agent instruction files out of the gate without
+ * removing a single path from any list, and every surface downstream would
+ * report the policy as widened.
+ *
+ * So: for each entry that routes a path the runtime protects on its own, the
+ * sub-class must resolve at least as strictly as the `policy.edit` line does.
+ * Strictness is `policy-match.ts`'s own table, so the floor and the resolver
+ * cannot come to different conclusions about which of two levels is stricter,
+ * and a tie on the level compares the live RATE: `supervised-live 0.01` under a
+ * `policy.edit` of `supervised-live 0.1` gates one tenth as often as the line it
+ * replaces, which is a weakening whatever the level says.
+ *
+ * A route aimed at a `policy.core` or `log.mutate` path is refused outright
+ * rather than allowed to sit inert. It never fires — `protectedPathClass` tier 2
+ * answers before the routed tier, which is §11.1 invariant 9 holding — but an
+ * author reading their own file would believe a rule is in force that the
+ * runtime will never consult, and a policy nobody can read correctly is the
+ * failure this project exists to prevent.
+ *
+ * The consequence of a failure is that the policy does not load AT ALL, and a
+ * policy that does not load resolves every class to `manual`. That is the
+ * strictest available answer and the one this file has always given: an author
+ * who wrote a weakening they did not intend gets everything gated, plus a
+ * message naming the entry, rather than the weakening.
+ *
+ * `null` when the policy is clear; otherwise the message.
+ */
+export function checkProtectedRouteFloor(load: PolicyLoadResult): string | null {
+  if (!load.ok) return null;
+  const entries = load.policy.protected_paths ?? [];
+  if (!entries.some((entry) => typeof entry !== "string")) return null;
+
+  const line = resolve(load, "policy.edit");
+  for (const entry of entries) {
+    if (typeof entry === "string") continue;
+    const parsedEntry = parseProtectedEntry(entry);
+    if (parsedEntry === null || parsedEntry.routed === null) {
+      return `protected_paths entry ${JSON.stringify(entry.path)} routes to ${JSON.stringify(entry.class)}, which is not a \`policy.edit\` sub-class. A policy may name its own sub-classes under \`policy.edit\` and nothing else: the gate's own organs and the record of what happened are the runtime's to classify (SPEC.md §11.1 invariant 9).`;
+    }
+    const builtin = builtinProtectedPathClass(entry.path);
+    if (builtin === "log.mutate" || builtin === "policy.core") {
+      return `protected_paths entry ${JSON.stringify(entry.path)} routes a built-in ${builtin} path to ${JSON.stringify(parsedEntry.routed)}. That route can never fire — the runtime answers a path by the strictest surface it names, and ${builtin} is decided before any policy entry is read — so the policy is refused rather than loaded with a rule its author believes is in force.`;
+    }
+    if (builtin === null) continue;
+
+    const routed = resolve(load, parsedEntry.routed);
+    const weaker =
+      STRICTNESS[routed.declaredAutonomy] > STRICTNESS[line.declaredAutonomy] ||
+      (STRICTNESS[routed.declaredAutonomy] === STRICTNESS[line.declaredAutonomy] &&
+        routed.liveRate !== null &&
+        line.liveRate !== null &&
+        routed.liveRate < line.liveRate);
+    if (weaker) {
+      return `protected_paths entry ${JSON.stringify(entry.path)} routes a built-in policy.edit path to ${JSON.stringify(parsedEntry.routed)}, which resolves ${describeLevel(routed.declaredAutonomy, routed.liveRate)} — weaker than the \`policy.edit\` line's own ${describeLevel(line.declaredAutonomy, line.liveRate)}. \`protected_paths\` is additive: it may widen the protected surface and may never narrow it, and routing a built-in path to a looser sub-class would narrow it without removing anything from any list. Declare ${JSON.stringify(parsedEntry.routed)} at least as strictly as \`policy.edit\`, or route a path the runtime does not already protect.`;
+    }
+  }
+  return null;
+}
+
+/** A level and its rate, as the floor's message names them. */
+function describeLevel(declared: DeclaredAutonomy, liveRate: number | null): string {
+  return liveRate === null ? declared : `${declared} at ${String(liveRate)}`;
 }
 
 /**
