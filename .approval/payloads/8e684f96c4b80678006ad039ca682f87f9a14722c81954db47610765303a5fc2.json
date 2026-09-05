@@ -1,0 +1,1 @@
+{"command":"rm -f \"$TMPDIR/aprv238-full-test.log\"; npm test > \"$TMPDIR/aprv238-full-test.log\" 2>&1; echo \"EXIT=$?\" >> \"$TMPDIR/aprv238-full-test.log\"; echo started","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
