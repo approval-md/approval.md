@@ -153,12 +153,20 @@
  *
  * The log on `main` trails the primary checkout's live log; advances land
  * periodically as records pull requests. A grant made this morning may not be
- * on `main` yet, and this guard can only see what the head commit's tree
- * carries. That is not a bug to paper over — it is an ordering rule, and every
- * failure states it: **the log advance carrying the grant must merge before or
- * with the protected-path pull request.** Each failure also names the window it
- * searched (the seq and timestamp range of the log at head) so the reader can
- * tell "the grant is not there" from "the grant is newer than this log".
+ * on `main` yet, and this module can only see the records its caller hands it.
+ * That is not a bug to paper over, it is an ordering rule, and every failure
+ * states it: **the log advance carrying the grant must be pushed to a records
+ * branch or merged to main before or with the protected-path pull request.**
+ * Each failure also names the window it searched (the seq and timestamp range
+ * of the records it was given) so the reader can tell "the grant is not there"
+ * from "the grant is newer than this log".
+ *
+ * A records branch counts because the caller may read further along the same
+ * chain than the head commit does (APRV-260): `scripts/protected-path-guard.mjs`
+ * takes the freshest committed copy that carries head's own last record at
+ * head's index, so an advance that is pushed but not yet merged is already
+ * evidence. Nothing here changes: this module still reads only the verified
+ * records it was handed, and the window it reports is the window it searched.
  *
  * ## Fail closed
  *
@@ -810,7 +818,8 @@ function attributeRun(
 /** The ordering rule, stated identically on every failure that could be lag. */
 const ORDERING_RULE =
   "the committed log trails the primary checkout's live log, so if this edit WAS granted, " +
-  "the log advance carrying the grant must merge to main before or with this pull request";
+  "the log advance carrying the grant must be pushed to a records branch or merged to main " +
+  "before or with this pull request";
 
 /**
  * Evaluate a candidate against the committed log. Pure: no IO, no clock.
