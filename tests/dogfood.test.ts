@@ -238,42 +238,90 @@ test("the classifier's read.* classes are covered by the policy's read.* rule", 
 /**
  * docs/proposals/repo-values-block.md carries the `yaml approval-values`
  * block Carter pastes into APPROVAL.md by hand (agents may not write that
- * file). Prove, against a scratch copy and never the real file, that the paste
- * changes nothing about the policy: the block loads as values, and the policy
- * parsed from the combined bytes is the policy parsed from the live bytes.
+ * file). The property under test is SPEC.md §5.3's: a values block changes
+ * nothing about the parsed policy. It is proved against scratch strings and
+ * never by writing the real file, and it holds in both states the live file
+ * can be in. Before the paste, the block is appended to the live bytes and the
+ * policy must parse identically. After the paste (the live file already
+ * carries a block), appending a second one would be the `multiple-blocks`
+ * refusal rather than a paste, so the check runs the other way: the live block
+ * must load, and the policy must parse identically with the block cut out.
  */
-test("the proposed values block leaves the live policy byte-for-byte the same (APRV-240)", () => {
+
+/**
+ * The values fence of `markdown` as the LOADER sees it, or null where it sees
+ * none. Deciding by the loader rather than by a substring search matters: a
+ * fence pasted inside a wider fence (the proposal's own ````markdown wrapper,
+ * which one paste of the live file did carry) is text to the loader, and a
+ * test that found it by searching would strip something the loader never read.
+ */
+function valuesFenceOf(markdown: string): { start: number; end: number } | null {
+  const seen = loadValuesText(join(REPO_ROOT, "APPROVAL.md"), markdown);
+  if (!(seen.ok && seen.present)) return null;
+  const fence = rawValuesFenceOf(markdown);
+  assert.ok(fence !== null, "the loader saw a values block the text does not name");
+  return fence;
+}
+
+/** The first `yaml approval-values` fence by text, wrapper or no wrapper. */
+function rawValuesFenceOf(markdown: string): { start: number; end: number } | null {
+  const open = markdown.indexOf("```yaml approval-values");
+  if (open < 0) return null;
+  const close = markdown.indexOf("\n```", open + 1);
+  assert.ok(close > open, "the values fence is unterminated");
+  return { start: open, end: close + 4 };
+}
+
+function proposedValuesBlock(): string {
   const proposal = readFileSync(join(REPO_ROOT, "docs", "proposals", "repo-values-block.md"), "utf8");
-  const open = proposal.indexOf("```yaml approval-values");
-  assert.ok(open >= 0, "the proposal names no approval-values fence");
-  const close = proposal.indexOf("\n```\n", open);
-  assert.ok(close > open, "the proposal's values fence is unterminated");
-  const block = proposal.slice(open, close + 4);
+  const fence = rawValuesFenceOf(proposal);
+  assert.ok(fence !== null, "the proposal names no approval-values fence");
+  return proposal.slice(fence.start, fence.end);
+}
 
-  const live = readFileSync(APPROVAL_MD, "utf8");
+/** The assertion both states share: values load, and the policy is unmoved. */
+function assertValuesInert(withBlock: string, withoutBlock: string): void {
   const scratchPath = join(REPO_ROOT, "APPROVAL.md");
-
-  // Once the paste has happened (the seq 23351 ceremony), the live file carries
-  // the block itself. Then the proof is that it parses as values and that the
-  // policy is what it is; pasting a second copy would be a duplicate fence, and
-  // refusing one is the loader's job, not this test's claim.
-  if (live.includes("```yaml approval-values")) {
-    const present = loadValuesText(scratchPath, live);
-    assert.equal(present.ok, true, present.ok ? "" : `${present.code}: ${present.message}`);
-    assert.equal(present.ok && present.present, true);
-    assert.equal(loadPolicyText(scratchPath, live).ok, true);
-    return;
-  }
-
-  const pasted = `${live.trimEnd()}\n\n${block}\n`;
-
-  const values = loadValuesText(scratchPath, pasted);
+  const values = loadValuesText(scratchPath, withBlock);
   assert.equal(values.ok, true, values.ok ? "" : `${values.code}: ${values.message}`);
   assert.equal(values.ok && values.present, true);
+  const absent = loadValuesText(scratchPath, withoutBlock);
+  assert.equal(absent.ok && !absent.present, true, "the stripped copy still carries a values block");
 
-  const before = loadPolicyText(scratchPath, live);
-  const afterPaste = loadPolicyText(scratchPath, pasted);
-  assert.deepEqual(afterPaste, before);
+  assert.deepEqual(loadPolicyText(scratchPath, withBlock), loadPolicyText(scratchPath, withoutBlock));
+}
+
+test("the proposed values block leaves the live policy byte-for-byte the same (APRV-240)", () => {
+  const live = readFileSync(APPROVAL_MD, "utf8");
+  const fence = valuesFenceOf(live);
+  if (fence === null) {
+    // Before the paste: the proposal goes onto the live bytes.
+    assertValuesInert(`${live.trimEnd()}\n\n${proposedValuesBlock()}\n`, live);
+    return;
+  }
+  // After the paste: the live block comes off the live bytes.
+  assertValuesInert(live, `${live.slice(0, fence.start)}${live.slice(fence.end)}`);
+});
+
+test("the values check holds in the state the live file is not in (APRV-240)", () => {
+  // Whichever state APPROVAL.md is in, exercise the other one against a scratch
+  // string, so a paste (or its reversal) cannot leave one branch of the check
+  // untested.
+  const live = readFileSync(APPROVAL_MD, "utf8");
+  const fence = valuesFenceOf(live);
+  if (fence === null) {
+    // The block goes on the end, so the block that comes off is the LAST fence
+    // by text: a file whose earlier fence is hidden inside a wrapper still has
+    // exactly one the loader can see, and it is the one just appended.
+    const block = proposedValuesBlock();
+    const pasted = `${live.trimEnd()}\n\n${block}\n`;
+    const cutStart = pasted.lastIndexOf(block);
+    assert.ok(cutStart > 0);
+    assertValuesInert(pasted, `${pasted.slice(0, cutStart)}${pasted.slice(cutStart + block.length)}`);
+    return;
+  }
+  const stripped = `${live.slice(0, fence.start)}${live.slice(fence.end)}`;
+  assertValuesInert(`${stripped.trimEnd()}\n\n${proposedValuesBlock()}\n`, stripped);
 });
 
 test("APPROVAL.md is unchanged mid-suite", () => {

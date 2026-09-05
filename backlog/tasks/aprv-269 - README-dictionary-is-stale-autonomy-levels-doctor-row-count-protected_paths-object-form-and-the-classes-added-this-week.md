@@ -3,10 +3,10 @@ id: APRV-269
 title: >-
   README dictionary is stale: autonomy levels, doctor row count, protected_paths
   object form and the classes added this week
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-09-05 15:59'
-updated_date: '2026-09-05 16:14'
+updated_date: '2026-09-05 19:50'
 labels:
   - docs
 dependencies: []
@@ -25,7 +25,7 @@ Found by the APRV-265 landing-page lane on 2026-09-05 while cross-checking every
 - [x] #1 Every top-level policy key and every classes.<pattern> field in schema/policy.schema.json has a dictionary row naming its default; the autonomy row lists the schema's enum verbatim
 - [x] #2 A docs-guard test derives the autonomy list from the schema enum and the doctor row count from the doctor row list and fails when the README disagrees
 - [x] #3 The running-the-checks section's doctor description matches the current row count and names the rows that skip on a fresh directory
-- [ ] #4 npm test passes; lint clean
+- [x] #4 npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -61,3 +61,9 @@ NOT DONE, FOR THE REVIEWER: AC #4's 'npm test passes' was not run in full. This 
 
 ALSO NOTICED, NOT FIXED: src/cli/help.ts's DOCTOR_HELP still says 'Twelve checks' and lists twelve of the 25. That is a source string with its own cli-help test, outside a docs lane's scope.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The README dictionary matches schema/policy.schema.json: one row per key naming its default, all six autonomy levels, the protected_paths object form and reserved policy.edit sub-classes, this week's keys and classes, and the measured 25-row doctor cascade with the 15 fresh-directory skips; tests/doctor-rows.ts holds the roster once and three docs-guard tests derive the autonomy list, the doctor count and dictionary key coverage from the schema and roster. Verified by docs-guard 16, cli-doctor 55, ci-guard 31 and CI's full tier; merged in PR #297.
+<!-- SECTION:FINAL_SUMMARY:END -->
