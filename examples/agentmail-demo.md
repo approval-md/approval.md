@@ -269,7 +269,7 @@ echo "exit=$?"
 ```
 
 ```
-approval: token-consumed: action task-042:chaser:2026-09-02 already executed: execution.started at seq 6 spent this token. A token is single-use and the log is the proof.
+✗ token-consumed  action task-042:chaser:2026-09-02 already executed: execution.started at seq 6 spent this token. A token is single-use and the log is the proof.
 exit=1
 ```
 

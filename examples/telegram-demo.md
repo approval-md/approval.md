@@ -10,6 +10,12 @@ command runs because of it.
 Everything below happens in a scratch directory. Nothing here touches the
 repository's own `APPROVAL.md` or `.approval/`.
 
+Every command and output block below was captured from one run of the current
+CLI, in the order shown. The two Telegram steps are the exception, and they are
+marked where they appear: the transcript for those came from the same run driven
+against `tests/telegram-mock.ts` rather than the real Bot API, because a real bot
+is exactly the part a document cannot ship. Everything else is verbatim.
+
 ## What the demo shows
 
 1. An agent registers a task and requests a `manual` action.
@@ -68,6 +74,22 @@ approval() { node "$APPROVAL_MD/dist/src/cli/main.js" "$@"; }
 mkdir -p /tmp/approval-demo && cd /tmp/approval-demo
 approval init
 ```
+
+```
+approval.md v0.1.0
+
+approval: scaffolded /private/tmp/approval-demo
+  wrote    APPROVAL.md
+  wrote    .approval/log/
+  wrote    .approval/QUEUE.md
+  wrote    .gitignore
+```
+
+Five numbered next steps follow that, and they are worth reading once. The
+directory printed is the *physical* path: this transcript is from macOS, where
+`/tmp` is a symlink to `/private/tmp`, and on Linux the same line reads
+`/tmp/approval-demo`. Which of the two your machine prints matters in step 2,
+where the payload records a directory.
 
 `approval init` scaffolds the directory: `APPROVAL.md` (SPEC.md section 5.1's
 canonical policy), the empty `.approval/log/` directory, `.approval/QUEUE.md` in
@@ -139,7 +161,7 @@ eval "$(approval env)"
 `^human:.+` pattern the human-only verbs enforce, and records
 `APPROVAL_HUMAN=human:<id>`. The prefix is printed because it is what separates
 a human from the `agent:` and `system:` actors those verbs refuse, and it need
-not be retyped: answer `carter` and the line reads `human:carter`. A wrong
+not be retyped: answer `alice` and the line reads `human:alice`. A wrong
 answer to this question, or to any other prompt in `setup`, is one line saying
 what was wrong followed by the same question, never an exit code with a help
 page under it.
@@ -149,7 +171,9 @@ with `getMe`, waits for you to send your bot a message, reads the chat id back o
 the update queue, and writes both variables.
 
 The wait is a continuous long poll of up to 90 seconds and it asks you for
-nothing while it runs (Ctrl-C stops it, and nothing has been written by then):
+nothing while it runs (Ctrl-C stops it, and nothing has been written by then).
+This is its shape, quoted from `src/cli/setup-channel.ts` rather than captured
+from a run, since it needs a bot only you have:
 
 ```
 waiting for a message to @your_bot (up to 90s, Ctrl-C to stop):
@@ -216,18 +240,19 @@ it as `set-in-environment` and does not consult the line.
 
 ### Step 2: write the payload and its binding
 
-An approval binds to specific bytes (SPEC.md section 6.2). The action's payload
-lives in a file, and its `payload_hash` is SHA-256 over the RFC 8785 canonical
-serialization of that value. `approval payload hash` computes it with the same
-function the runtime uses, so the value below is exactly what the request and its
-grant will record.
+An approval binds to specific bytes (SPEC.md section 6.2). For `approval run`
+those bytes are the argv it will spawn and the directory it will spawn it in,
+and nothing else: the payload of a run action *is* `{argv, cwd}`. The runtime
+recomputes that hash from what it is about to execute and never accepts a
+caller's substitute for it (APRV-140), so the payload file here has to be the
+command itself. Write it with `cwd` as `pwd -P` prints it, since the physical
+path is what the runtime records:
 
 ```sh
-cat > payload.json <<'EOF'
+cat > payload.json <<EOF
 {
-  "to": ["agency@example.co.uk"],
-  "subject": "Deposit refund chaser <second> & final",
-  "body": "Following up on the deposit refund, now 21 days past the scheme deadline."
+  "argv": ["echo", "sent <second> & final, 21 days past the scheme deadline"],
+  "cwd": "$(pwd -P)"
 }
 EOF
 
@@ -235,9 +260,28 @@ HASH=$(approval payload hash payload.json)
 echo "$HASH"
 ```
 
-Expected: `ce0edde10155883e7c6c7dceea7c5717889b590134eb6bb4b1be1329441f4b17`
-for exactly the payload above. A different payload gives a different hash, and
-that is the point.
+```
+983db918cc0c2501e47f64cb3ccbbb1f49db5371ba7bc4a608ac00255d32b04d
+```
+
+That value is this transcript's, for a `cwd` of `/private/tmp/approval-demo`.
+Yours will differ, and the difference is the point: hashing the directory in is
+what makes "the same command from somewhere else" a different action. Use what
+your own `echo "$HASH"` printed in the task file below.
+
+`approval payload hash` computes it with the same function the runtime uses
+(SHA-256 over the RFC 8785 canonical serialization), so what it prints is exactly
+what the request, the grant and the run each record.
+
+The argv carries `<` and `&` on purpose. Section 10.4 requires the channel to
+present the payload, and step 8 checks that those characters reach your phone as
+themselves rather than as markup.
+
+In a real deployment the command after `--` is the adapter that sends the email.
+Here it is `echo`, so the demo has no side effect outside the log. An action
+whose payload is a message body rather than an argv goes through the adapter
+contract of section 10.4 instead, which hashes those bytes itself:
+examples/email-demo.md and examples/agentmail-demo.md walk that path.
 
 ### Step 3: write the task file
 
@@ -267,6 +311,12 @@ The agency has not answered two emails. Chase once more, then escalate.
 EOF
 ```
 
+The `summary` describes an email and the payload spawns `echo`, and that gap is
+worth keeping rather than tidying away. A summary is a claim the requesting
+party writes about its own action, and the runtime checks none of it; the
+binding, which the runtime does check, is the hash above. Step 8 shows how the
+message on your phone labels the two differently.
+
 ### Step 4: attest the policy
 
 ```sh
@@ -274,12 +324,13 @@ approval policy attest
 ```
 
 ```
-attested /tmp/approval-demo/APPROVAL.md at seq 1: sha256 b9388aeb...
+attested /private/tmp/approval-demo/APPROVAL.md at seq 1: sha256 b9388aebfd45ec9317869dad80f774bb45c6c26f1ab72506906d63aba9964faf
 ```
 
-Attestation records that a human saw these policy bytes. Edit `APPROVAL.md`
-afterwards and every gate operation refuses with `hash-mismatch` until you attest
-again.
+The digest is over the file's bytes, so it is the same on your machine if you
+pasted the policy above unchanged. Attestation records that a human saw these
+bytes. Edit `APPROVAL.md` afterwards and every gate operation refuses with
+`hash-mismatch` until you attest again.
 
 ### Step 5: register and request
 
@@ -314,8 +365,8 @@ approval status
 
 ```
 action            task       class                       cost   requested                 ttl
-task-demo:chaser  task-demo  communicate.email.external  $0.02  2026-08-05T12:07:51.447Z  1h 0m left
-wrote /tmp/approval-demo/.approval/QUEUE.md: 3204 byte(s), head seq 3 c0ec5027..., 1 pending, 0 not summarized, 0 awaiting audit review
+task-demo:chaser  task-demo  communicate.email.external  $0.02  2026-09-04T23:54:25.164Z  1h 0m left
+wrote /private/tmp/approval-demo/.approval/QUEUE.md: 3874 byte(s), head seq 3 f4bbf2c8b3dee0b33c98cc222e00d4d7f2ad7360d1b1003ff243dd0ec25e753a, 1 pending, 0 not summarized, 0 awaiting audit review
 health                    ok
 attestation               attested (seq 1)
 verification              clean (3 record(s))
@@ -325,31 +376,43 @@ indeterminate executions  none
 budgets                   none configured
 payload store             1 file(s), 0 pruned, 0 unbound
 loop escalations          none
+harness outcomes          0 started, 0 reported, 0 unreported
+gate window               closed
+reconciliation            none open
 log                       .approval/log/events.jsonl
 ```
 
-Note `1 pending, 0 not summarized`, agreeing with `approval queue`. `approval
-render` still takes no payload flag and needs none: the material went into the
-payload store at request time, so the renderer can summarize the request like
-every other surface. It still does not print the bytes. QUEUE.md carries the
-binding only, by design: it is regenerated on every event and read by anyone with
-the working directory, and it collects no decision. The decision surfaces are the
-channels, which do present the payload (SPEC.md section 10.4).
+QUEUE.md's byte count is a function of the paths and hashes inside it, so yours
+will not be 3874. Note `1 pending, 0 not summarized`, agreeing with `approval
+queue`. `approval render` still takes no payload flag and needs none: the
+material went into the payload store at request time, so the renderer can
+summarize the request like every other surface. It still does not print the
+bytes. QUEUE.md carries the binding only, by design: it is regenerated on every
+event and read by anyone with the working directory, and it collects no
+decision. The decision surfaces are the channels, which do present the payload
+(SPEC.md section 10.4).
 
 ### Step 7: try to run it before it is approved
 
 ```sh
-approval run task-demo:chaser --payload-hash "$HASH" --as agent:drafter -- echo sent
+approval run task-demo:chaser --payload-hash "$HASH" --as agent:drafter \
+  -- echo 'sent <second> & final, 21 days past the scheme deadline'
 echo "exit=$?"
 ```
 
 ```
-approval: token-required: action task-demo:chaser resolves to manual (rule) and cannot execute without the single-use token minted at grant. Request the action, have a human grant it, and pass the token that grant printed.
+✗ token-required  action task-demo:chaser resolves to manual (rule) and cannot execute without the single-use token minted at grant. Request the action, have a human grant it, and pass the token that grant printed.
 exit=5
 ```
 
 Nothing was spawned, and nothing was appended to the log. This is the demo's
 whole point stated as a refusal.
+
+`--payload-hash` is optional, and it is not how the binding is computed. `run`
+derives the hash from the argv after `--` and the physical `cwd`, then checks the
+flag against it. The flag states what you believe you are about to run, so a
+mismatch is a refusal to run something else, never a licence to run it. Drop the
+flag and the refusal above is identical.
 
 ### Step 8: start the listener
 
@@ -358,42 +421,85 @@ approval channel telegram listen
 ```
 
 ```
-notified task-demo:chaser (message 501)
+notified task-demo:chaser (message 504)
 ```
 
-Your phone now has a message from the bot. It shows, in order: the action key,
-a **COMPUTED** block (class, task, state, binding, budget verdicts, chain head)
-derived by the runtime, a **CLAIMED** block naming `agent:drafter` as its author
-and marked unverified, the **FULL PAYLOAD** with the recipients, subject and
-body, and two buttons: Approve and Reject.
+Your phone now has the request, as four messages: a one-line header, then the
+three blocks below. The message id is Telegram's own, so yours will differ.
+
+```
+1 pending — oldest just now — communicate.email.external
+
+APPROVAL REQUIRED
+task-demo:chaser
+
+COMPUTED — derived by the runtime from the log, the policy and the payload bytes
+• class: communicate.email.external (log)
+• waiting: requested just now · expires tomorrow 00:54 UTC (clock)
+
+PAYLOAD — the canonical rendering this approval's display_hash names; raw bytes at the store path inside
+--- canonical rendering begins ---
+renderer: approval.md/wysiwys/2
+class: communicate.email.external
+payload kind: opaque
+payload sha256: 983db918cc0c2501e47f64cb3ccbbb1f49db5371ba7bc4a608ac00255d32b04d
+
+payload — no structural view applies to this shape; every byte of it is in the canonical JSON below, and every value is CLAIMED, authored by the requesting party
+
+--- the same bytes, canonical JSON ---
+{
+  "argv": [
+    "echo",
+    "sent <second> & final, 21 days past the scheme deadline"
+  ],
+  "cwd": "/private/tmp/approval-demo"
+}
+--- canonical rendering ends ---
+
+WHAT THIS DOES — CLAIMED by agent:drafter, NOT verified by the runtime
+• summary: Send the deposit chaser to agency@example.co.uk (agent:drafter)
+• est. cost: $0.02 (agent:drafter)
+```
+
+That block, and the listener output in step 9, came from `tests/telegram-mock.ts`
+rather than a real bot; they are the two exceptions this document opened with.
+It is written above as the phone shows it: on the wire those lines carry HTML,
+and the two buttons, Approve and Reject, ride an inline keyboard rather than the
+text.
+
+The order is the argument. What the runtime **computed** comes first, the
+**payload** itself next, and what the agent **claims** about it last, labelled as
+a claim and attributed. A summary is the requesting party's own sentence about
+its own action; putting it under the bytes rather than over them is what keeps it
+from reading as a description you can rely on.
 
 One line of the COMPUTED block is worth finding before you tap anything:
 
 ```
-• waiting: requested 4 min ago · expires 13:07 UTC (clock)
+• waiting: requested just now · expires tomorrow 00:54 UTC (clock)
 ```
 
 That is how old the question is and when an answer stops reaching anyone
 (APRV-106). It is computed — arithmetic on the log's own timestamps against the
 moment the message was built — and for a request made by a process that is
 waiting on it (`approval hook claude-code`, `approval wait
---withdraw-on-timeout`) the second half reads `requester waits until 13:07 UTC`
-instead, naming the deadline that actually applies to you rather than the
-policy's TTL.
+--withdraw-on-timeout`) the second half names the requester's own deadline
+instead, which is the one that actually applies to you rather than the policy's
+TTL.
 
 If that deadline passes and the requester gives up, it withdraws the request,
 and this message is edited in place: the buttons disappear and the text becomes
-`WITHDRAWN — no decision is needed … withdrawn by the requester at 13:07 UTC
-(timeout) · nothing to do`. Tapping a stale button answers *"Withdrawn — the
-requester took this back and is no longer waiting; nothing was recorded"*, and
-the gate refuses it as `request-withdrawn`. Your attention is the audit budget,
-and a decision nobody can consume is not solicited.
+`WITHDRAWN — no decision is needed …`, naming who withdrew it and why. Tapping a
+stale button answers *"Withdrawn — the requester took this back and is no longer
+waiting; nothing was recorded"*, and the gate refuses it as `request-withdrawn`.
+Your attention is the audit budget, and a decision nobody can consume is not
+solicited.
 
-Check that the subject reads `Deposit refund chaser <second> & final`. The
-angle brackets and the ampersand arrived intact and did not become markup: the
-channel sends HTML and escapes agent-authored text, because an agent that could
-inject markup into an approval prompt could reshape what you think you are
-approving.
+Check that the argv reads `sent <second> & final, 21 days past the scheme
+deadline`. The angle brackets and the ampersand arrived intact and did not become
+markup: the channel sends HTML and escapes agent-authored text (`&lt;second&gt;
+&amp; final` on the wire), because an agent that could inject markup into an
+approval prompt could reshape what you think you are approving.
 
 ### Step 9: tap Approve
 
@@ -403,7 +509,7 @@ The listener's terminal prints:
 granted task-demo:chaser (seq 4) by human:alice via telegram
 ─────────────────────────────────────────────────────────────
   execution token   task-demo:chaser
-  9c92f89a81cbfc4e6c2f1ebc48f8539dc904dd894cff5b665aaabce0f1fee629
+  6c249f970ecd36c6100423f1d1c221a035c6c7c94531b49fb185f0b0d001507f
   single-use · stored nowhere · not sent to Telegram · copy it now
 ─────────────────────────────────────────────────────────────
 ```
@@ -412,45 +518,48 @@ Copy the token. It was never sent to Telegram (a chat transcript is not a secret
 store) and the log holds only its SHA-256, so nothing can recover it. If you lose
 it, revoke the grant and request again.
 
-Stop the listener with Ctrl-C, and check the two scans the scripted test makes
+Stop the listener with Ctrl-C, and check the scan the scripted test makes
 automatically:
 
 ```sh
-grep -c 9c92f89a .approval/log/events.jsonl   # expect 0: the raw token is in no log byte
+grep -c 6c249f97 .approval/log/events.jsonl   # expect 0: the raw token is in no log byte
 ```
 
 ### Step 10: spend the token
 
 ```sh
-export TOKEN=9c92f89a...     # what the listener printed
+export TOKEN=6c249f97...     # what the listener printed
 approval run task-demo:chaser --token "$TOKEN" --payload-hash "$HASH" \
-  --as agent:drafter -- echo sent
+  --as agent:drafter -- echo 'sent <second> & final, 21 days past the scheme deadline'
 echo "exit=$?"
 ```
 
 ```
-sent
+sent <second> & final, 21 days past the scheme deadline
 exit=0
 ```
 
-Two records were appended around that command: `execution.started` before the
-child was spawned, and `execution.completed` with `exit_code: 0` after it
-finished. `approval run` exits with the child's own exit code, so it composes
-with `make`, CI, and `&&` exactly as an unwrapped command would.
+`run` hashed the argv and the physical cwd it was about to spawn, checked that
+against the binding the grant recorded, appended `execution.started`, spawned the
+command, and appended `execution.completed` with `exit_code: 0`. It exits with
+the child's own exit code, so it composes with `make`, CI, and `&&` exactly as an
+unwrapped command would.
 
-In a real deployment the command after `--` is the adapter that sends the email.
-Here it is `echo`, so the demo has no side effect outside the log.
+A different command after `--`, or the same command from a different directory,
+is refused `payload-mismatch` before anything is spawned. That is step 7's flag
+check from the other side: the approved bytes and the run bytes are one value,
+computed once, in one place.
 
 ### Step 11: try to spend it twice
 
 ```sh
 approval run task-demo:chaser --token "$TOKEN" --payload-hash "$HASH" \
-  --as agent:drafter -- echo sent
+  --as agent:drafter -- echo 'sent <second> & final, 21 days past the scheme deadline'
 echo "exit=$?"
 ```
 
 ```
-approval: token-consumed: action task-demo:chaser already executed: execution.started at seq 5 spent this token. A token is single-use and the log is the proof.
+✗ token-consumed  action task-demo:chaser already executed: execution.started at seq 5 spent this token. A token is single-use and the log is the proof.
 exit=1
 ```
 
@@ -476,14 +585,17 @@ indeterminate executions  none
 budgets                   none configured
 payload store             1 file(s), 0 pruned, 0 unbound
 loop escalations          none
+harness outcomes          0 started, 0 reported, 0 unreported
+gate window               closed
+reconciliation            none open
 log                       .approval/log/events.jsonl
-1  2026-08-05T12:07:51.096Z  policy.updated       human:alice    -
-2  2026-08-05T12:07:51.285Z  task.registered      agent:drafter  task-demo
-3  2026-08-05T12:07:51.447Z  approval.requested   agent:drafter  task-demo
-4  2026-08-05T12:07:52.371Z  approval.granted     human:alice    task-demo
-5  2026-08-05T12:08:05.292Z  execution.started    agent:drafter  task-demo
-6  2026-08-05T12:08:05.524Z  execution.completed  agent:drafter  task-demo
-clean: 6 record(s), head seq 6 81627b0e...
+1	2026-09-04T23:54:24.763Z	policy.updated	human:alice	-
+2	2026-09-04T23:54:24.989Z	task.registered	agent:drafter	task-demo
+3	2026-09-04T23:54:25.164Z	approval.requested	agent:drafter	task-demo
+4	2026-09-04T23:54:26.355Z	approval.granted	human:alice	task-demo
+5	2026-09-04T23:54:26.573Z	execution.started	agent:drafter	task-demo
+6	2026-09-04T23:54:26.617Z	execution.completed	agent:drafter	task-demo
+clean: 6 record(s), head seq 6 5c4a888279dc7375f9928d183751f858a72bfaf73ba1022ac4cf9b7885b1efbe
 ```
 
 Six records: policy attested, task registered, approval requested by an agent,
@@ -521,7 +633,7 @@ BotFather (`/revoke`) or delete the bot (`/deletebot`).
 | `telegram cannot deliver ... (payload-mismatch)` | The stored (or overriding) payload no longer hashes to the recorded binding. A store file is refused rather than rendered when its contents stop matching its name. |
 | Tapping Approve answers "only accepts decisions from its configured approval chat" | The tap came from a chat other than `APPROVAL_TG_CHAT`. Nothing was logged, and the request is still live. |
 | `policy-not-attested` / `hash-mismatch` at exit 1 | `APPROVAL.md` changed since it was attested. Run `approval policy attest` again. |
-| `payload-mismatch` from `approval run` | The `--payload-hash` presented is not the one the grant approved. A grant approves specific bytes. |
+| `payload-mismatch` from `approval run` | The argv after `--` and the physical `cwd` do not hash to what the grant approved. A grant approves specific bytes, and for `run` those bytes are the command and the directory it runs in. |
 
 ## Exit codes worth knowing
 

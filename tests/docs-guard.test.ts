@@ -17,6 +17,12 @@
  * under test is "this vocabulary still exists", not "this invocation still
  * behaves", and the second is already covered by `tests/e2e-demo.test.ts`.
  *
+ * The second guard is the refusal RENDERING (APRV-247). A code that still
+ * exists can still be printed in a shape the CLI retired, and that drift is
+ * invisible to the vocabulary checks above, since both shapes name the same
+ * code. So the examples are swept for the old `approval: <code>:` prefix and
+ * the demo is asserted to carry what `cli/style.ts` produces today.
+ *
  * The third guard is the neutrality sweep. A steward-private product name was
  * removed from the canonical example, the fixtures descended from it, and the
  * prose (APRV-32, human-mandated). Frozen fixtures outlive the decision that
@@ -37,6 +43,7 @@ import { GATE_REFUSAL_CODES } from "../src/core/gate.js";
 import { TOKEN_VERIFY_REFUSAL_CODES } from "../src/core/token.js";
 import { validate } from "../src/core/validate.js";
 import { EXIT_CODE_TABLE } from "../src/cli/exit-codes.js";
+import { makeStyle, refusal as renderRefusal } from "../src/cli/style.js";
 
 /** The repository root, from `dist/tests/` at runtime. */
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -108,6 +115,92 @@ test("every refusal name the demo transcript prints is still in the CLI vocabula
     assert.ok(
       REFUSAL_VOCABULARY.has(code),
       `examples/telegram-demo.md shows the refusal ${code}, which no frozen union in core/ declares any more. A renamed refusal code makes the transcript state a refusal the runtime cannot produce.`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The refusal rendering, across every example (APRV-247)
+// ---------------------------------------------------------------------------
+
+/**
+ * The shape a refusal is printed in, asked of the renderer rather than spelled
+ * out here (APRV-102, `cli/style.ts`).
+ *
+ * A UTF-8 locale and an explicit `noColor` pin the two axes that would
+ * otherwise make this depend on the machine running the suite: the glyph
+ * degrades to `[x]` under a non-UTF-8 locale, and colour would wrap the code in
+ * escape sequences no markdown file contains. Everything else about the line,
+ * the glyph and the two spaces and the order, comes from `refusal()` itself, so
+ * a change to the shape reaches the examples through this test rather than
+ * through a reader copying a line the CLI stopped printing.
+ */
+function refusalHead(code: string): string {
+  const plain = makeStyle({ env: { LANG: "en_US.UTF-8" }, noColor: true });
+  // A sentinel message rather than an empty one, so the separator between the
+  // code and the message survives into the returned prefix. An empty message
+  // would let a doc that lost the two spaces still match.
+  const marker = "<<message>>";
+  return renderRefusal(plain, code, marker).split(marker)[0] ?? "";
+}
+
+/** Every `.md` file under `examples/`, relative to the repository root. */
+function exampleDocs(): string[] {
+  return walk(join(REPO_ROOT, "examples"))
+    .filter((path) => path.endsWith(".md"))
+    .map((path) => path.slice(REPO_ROOT.length));
+}
+
+/**
+ * The retired refusal form, gone from every example.
+ *
+ * Refusals used to print as `approval: <code>: <message>`, and the examples
+ * were written against that. The current shape is the glyph line above, which
+ * is what makes a refusal scannable in a wall of output and machine-readable at
+ * the same time (SPEC.md section 11: refusals are machine-readable and
+ * distinct). A transcript still showing the old prefix teaches a reader to grep
+ * for a string the CLI no longer emits, and the drift is silent, because both
+ * forms name the same code and every existing guard here checks only the code.
+ *
+ * The scan is over the frozen vocabulary rather than a general `approval: \w+:`
+ * pattern, deliberately. `approval wait`'s timeout is not a refusal and is
+ * still printed as `approval: timeout: …` by `cli/execute.ts`; a looser pattern
+ * would fail examples/backlog-md-project/README.md for showing that line
+ * correctly.
+ */
+test("no example shows a refusal in the retired `approval: <code>:` form", () => {
+  const offenders: string[] = [];
+  for (const relative of exampleDocs()) {
+    const text = readDoc(relative);
+    for (const code of REFUSAL_VOCABULARY) {
+      if (text.includes(`approval: ${code}:`)) offenders.push(`${relative} — ${code}`);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `these examples print a refusal in the retired \`approval: <code>:\` form: ${offenders.join(
+      "; ",
+    )}. The CLI prints \`${refusalHead(
+      "token-required",
+    )}\` — glyph, code, two spaces, message. Re-run the walkthrough and paste what it says.`,
+  );
+});
+
+/**
+ * And the positive half: the demo transcript's refusals are in the current
+ * shape, rather than merely absent from the old one. Without this, a rewrite
+ * that dropped the glyph entirely, or reordered the line, would pass the sweep
+ * above by saying nothing at all.
+ */
+test("the demo transcript prints its refusals in the shape the CLI renders today", () => {
+  const demo = readDoc("examples/telegram-demo.md");
+  for (const code of ["token-required", "token-consumed"]) {
+    assert.ok(
+      demo.includes(refusalHead(code)),
+      `examples/telegram-demo.md does not show \`${refusalHead(
+        code,
+      )}\`. The walkthrough's steps 7 and 11 ARE those two refusals; a reader who cannot match what their terminal printed against the transcript has lost the only check the document offers.`,
     );
   }
 });
