@@ -380,6 +380,7 @@ Usage:
   approval log export  [--log <path>] [--json]
   approval log sync    [--remote <name>] [--branch <name>] [--json]
   approval log advance [--branch <name>] [--pr] [--dry-run] [--json]
+  approval log checkpoint --as human:<id> [--key-file <path>] [--json]
 
 Subcommands:
   verify   walk the hash chain end to end; clean | torn-tail | corrupt
@@ -387,10 +388,10 @@ Subcommands:
   export   stream every stored line to stdout, byte for byte
   sync     fast-forward pull, with a snapshot and a chain reconcile
   advance  commit the log's new records onto a records branch
+  checkpoint  sign the current head with your own key (human-only)
 
-verify, tail and export open the log for reading only. sync and advance move the
-FILE and never a record: neither appends an event, and neither rewinds a chain.
-Default log: .approval/log/events.jsonl · JSON shapes: docs/cli-reference.md
+verify, tail and export only read. sync and advance move the FILE and append no
+record; checkpoint appends one. Default log: .approval/log/events.jsonl
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
@@ -449,27 +450,52 @@ ${why("log-advance")}`;
 export const VERIFY_HELP = `approval log verify — verify the log's hash chain
 
 Usage:
-  approval log verify [--log <path>] [--anchor] [--anchor-rev <rev>] [--json]
+  approval log verify [--log <path>] [--anchor] [--checkpoints] [--json]
 
 Flags:
   --log <path>        log file to verify (default .approval/log/events.jsonl)
-  --anchor            also compare the prefix against the committed copy
-  --anchor-rev <rev>  compare against THIS rev's copy (implies --anchor)
-  --json              machine-readable output
-  -h, --help          this text
+  --anchor [--anchor-rev <rev>]   compare the prefix against the committed copy
+  --checkpoints       also demand every human-signed checkpoint in range
+  --json / -h, --help   machine-readable output / this text
 
 Walks every complete line: re-derives each record's digest, follows the prev
 chain and seq succession, and names where the log stops being self-consistent.
 An absent file verifies clean; nothing is written and a torn tail is not cut.
---anchor also compares the prefix against the copy on a records branch or the
-trunk: a mismatch refuses anchor-diverged; a missing copy skips, never passes.
+--anchor compares the prefix against the committed copy; --checkpoints demands
+that every log.checkpoint verify under audit.checkpoint_keys and name the hash
+this log carries. Either mismatch refuses; a missing witness skips, never passes.
 
-JSON (one object): "status" clean|torn-tail|corrupt|anchor-diverged, "records",
-"head", optional reason/message/anomalies/anchor. ANOMALIES ARE CLEAN, exit 0.
+JSON: "status" clean|torn-tail|corrupt|anchor-diverged|checkpoint-invalid, plus
+"records", "head" and optional anomalies/anchor/checkpoints. ANOMALIES ARE CLEAN.
 
 ${EXIT_CODES_POINTER} (clean 0, corrupt 1, torn-tail 3; an unreadable log is 4)
 ${JSON_ERRORS}
 ${why("log-verify")}`;
+
+export const LOG_CHECKPOINT_HELP = `approval log checkpoint — sign the log's head, by hand
+
+Usage:
+  approval log checkpoint --as human:<id> [--key-file <path>] [--json]
+
+Flags:
+  --as human:<id>    who is signing; or set APPROVAL_HUMAN
+  --key-file <path>  read the signing key from this file instead of the vault
+  --log <path>       log file to checkpoint (default .approval/log/events.jsonl)
+  --json / -h, --help   machine-readable output / this text
+
+Signs the CURRENT chain head with your Ed25519 checkpoint key and appends one
+log.checkpoint record naming (seq, hash) and the signature. The key comes from
+the vault credential approval.checkpoint.key; its PUBLIC half belongs in
+APPROVAL.md under audit.checkpoint_keys, which only you may edit. HUMAN-ONLY:
+an agent that could sign one could vouch for a chain it had just written.
+
+The chain is unkeyed, so anyone who can write events.jsonl can recompute a
+forgery that walks clean from genesis. What they cannot do is re-sign the
+hashes they replaced, which is what \`log verify --checkpoints\` then catches.
+
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("log-checkpoint")}`;
 
 export const TAIL_HELP = `approval log tail — print the last records of the log
 

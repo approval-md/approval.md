@@ -130,6 +130,22 @@
           "$ref": "#/$defs/duration",
           "description": "SPEC.md §8 (amended, APRV-58): how far a gate-typed event's `ts` may step backwards from the previous gate-typed event before verification reports a `gate-ts-regression` anomaly. Duration string, `<positive integer><unit>` with unit in ms|s|m|h|d|w, the same grammar `defaults.approval_ttl` uses. Absent means the reference runtime's 2 seconds, which is generous enough that ordinary clock disagreement between NTP-disciplined hosts is not reported and far below the skew a useful lie requires. Operators on one host may tighten it; operators across a WAN with poor time discipline may loosen it. This threshold is REPORT-ONLY: it changes which anomalies a verified log carries and never changes a verdict, an exit code, or an authorization, so widening it hides evidence from a human rather than permitting anything.",
           "examples": ["250ms", "5s"]
+        },
+        "checkpoint_keys": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+          },
+          "uniqueItems": true,
+          "description": "SPEC.md §9 (amended, APRV-220): the PUBLIC halves of the keys permitted to sign a `log.checkpoint`, base64 DER SPKI, Ed25519. Unlike every other key-shaped field in this file this one holds the material itself rather than the name of a variable, because a public key is not a secret and the point of writing it here is that it is written somewhere a human has committed and attested: an agent that edited this list would leave a visible diff AND de-attest the policy, which stops every gate operation until a human re-attests. The private halves live in the credential vault and never appear in this file, in the log, or in any path an agent may read. A LIST rather than one key so that rotation can retain a retired key: a checkpoint signed by a key this list does not carry is refused (`checkpoint-key-unknown`), so removing a key that signed anything de-verifies the range it signed rather than tidying the file. Absent, empty, or unreadable means verification SKIPS the checkpoint check with a reason and never reports it as a pass.",
+          "examples": [["MCowBQYDK2VwAyEA9dqzvJnn0VtpD6ETeDRUsCn4l6MPyfaV9Xx6KN+e678="]]
+        },
+        "checkpoint_every": {
+          "$ref": "#/$defs/duration",
+          "description": "SPEC.md §9 (amended, APRV-220): how long a log may go without a human-signed checkpoint before verification says one is due. Duration string, `<positive integer><unit>` with unit in ms|s|m|h|d|w, the same grammar `defaults.approval_ttl` uses. Absent means the cadence is off and nothing is ever reported as due. REPORT-ONLY, and more strongly than `skew_tolerance` is: a lapsed cadence is a WARNING at every layer and there is no path from due to refused anywhere in this runtime. A human who has been away is not a forger, and a gate that refused a log for want of a tap is a gate whose operator turns the check off.",
+          "examples": ["24h", "7d"]
         }
       }
     },

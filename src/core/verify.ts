@@ -107,6 +107,11 @@ function isGateTyped(event: string): boolean {
     // timestamp could author the window's length; holding the trio to the
     // runtime's clock is what makes §8's skew report cover it.
     event.startsWith("gate.") ||
+    // Amended SPEC.md §8/§9 (APRV-220): a checkpoint's whole content is a claim
+    // about a moment — "this head was signed then" — so its `ts` is stamped at
+    // the write boundary, and a signer who could author it could backdate the
+    // one record whose value is when it was taken.
+    event === "log.checkpoint" ||
     event === "policy.updated"
   );
 }
