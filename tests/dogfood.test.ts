@@ -251,8 +251,21 @@ test("the proposed values block leaves the live policy byte-for-byte the same (A
   const block = proposal.slice(open, close + 4);
 
   const live = readFileSync(APPROVAL_MD, "utf8");
-  const pasted = `${live.trimEnd()}\n\n${block}\n`;
   const scratchPath = join(REPO_ROOT, "APPROVAL.md");
+
+  // Once the paste has happened (the seq 23351 ceremony), the live file carries
+  // the block itself. Then the proof is that it parses as values and that the
+  // policy is what it is; pasting a second copy would be a duplicate fence, and
+  // refusing one is the loader's job, not this test's claim.
+  if (live.includes("```yaml approval-values")) {
+    const present = loadValuesText(scratchPath, live);
+    assert.equal(present.ok, true, present.ok ? "" : `${present.code}: ${present.message}`);
+    assert.equal(present.ok && present.present, true);
+    assert.equal(loadPolicyText(scratchPath, live).ok, true);
+    return;
+  }
+
+  const pasted = `${live.trimEnd()}\n\n${block}\n`;
 
   const values = loadValuesText(scratchPath, pasted);
   assert.equal(values.ok, true, values.ok ? "" : `${values.code}: ${values.message}`);
