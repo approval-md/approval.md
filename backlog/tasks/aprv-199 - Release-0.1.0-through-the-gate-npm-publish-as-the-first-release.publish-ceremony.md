@@ -21,7 +21,7 @@ approval:
     app: manual
     created_by: 'agent:fable'
   route:
-    assignee: 'human:carter'
+    assignee: human
     rationale: >-
       Release 0.1.0 of approval-md to npm from the primary checkout, as the
       first release.publish ceremony run through the gate. Preflight recorded
