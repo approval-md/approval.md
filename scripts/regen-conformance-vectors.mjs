@@ -1054,10 +1054,12 @@ const SUITES = [
     // validates exactly as it did.
     // 1.5.0 (APRV-220): another MINOR bump. The five `log.checkpoint` event
     // fixtures — a well-formed checkpoint, an agent actor, a missing
-    // signature, a truncated signed hash, an unimplemented signature alg — are
-    // new vectors. No existing expectation moved: the type is new, so no record
-    // written before it names it, and every other type's conditional block is
-    // untouched.
+    // signature, a truncated signed hash, an unimplemented signature alg — and
+    // the two policy fixtures for `audit.checkpoint_keys` /
+    // `audit.checkpoint_every` are new vectors. No existing expectation moved:
+    // the event type is new, so no record written before it names it, and the
+    // two policy keys are OPTIONAL, so every policy written before them
+    // validates exactly as it did.
     vectors_version: "1.5.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
