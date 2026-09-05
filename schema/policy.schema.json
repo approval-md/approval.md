@@ -55,14 +55,34 @@
     "protected_paths": {
       "type": "array",
       "uniqueItems": true,
-      "description": "SPEC.md §5.2 (amended, APRV-107): repo-relative paths whose edit the runtime classifies as `policy.edit`, so an agent editing them must go through the gate. ADDITIVE ONLY: the built-in protected set (APPROVAL.md, APPROVALS.md, CLAUDE.md, AGENTS.md, .npmrc, anything under .approval/, .claude/settings*, .github/workflows/) is protected whatever this list says or omits, because a policy that could shrink the protected surface would be a policy an agent could edit its way out of. Grammar: an entry is either an exact file path (`SPEC.md`, `docs/constitution.md`) or a directory prefix ending in `/` (`design/`). No globs, no negation, no absolute paths, no `..` — the classifier is a pure segment matcher, not a shell, and a pattern language it half-implemented would be a protection an author believed was in force and the runtime did not apply. Matching is by path segments and never resolves against a checkout, so it answers the same in a worktree as in the primary: an exact path matches a candidate whose TRAILING segments are that path (`SPEC.md` matches `SPEC.md`, `./SPEC.md` and `/abs/repo/SPEC.md`; a single-segment entry therefore also matches `docs/SPEC.md`, exactly as the built-in filenames match anywhere), and a directory prefix matches a candidate containing those segments as a contiguous run (`design/` matches `design/x.md` and `/abs/repo/design/sub/x.md`). Both directions err wide on purpose: a false positive costs one approval prompt, a false negative costs the property the gate exists to defend.",
+      "description": "SPEC.md §5.2 (amended, APRV-107 and APRV-266): repo-relative paths whose edit the runtime classifies as `policy.edit`, or as a named `policy.edit` sub-class, so an agent editing them must go through the gate. ADDITIVE ONLY: the built-in protected set (APPROVAL.md, APPROVALS.md, CLAUDE.md, AGENTS.md, .npmrc, anything under .approval/, .claude/settings*, .github/workflows/) is protected whatever this list says or omits, because a policy that could shrink the protected surface would be a policy an agent could edit its way out of. Grammar: an entry is either a bare path string (APRV-107, meaning `policy.edit`) or an object `{path, class}` routing that path family to a `policy.edit` sub-class (APRV-266), so a project can give its specification, its CI configuration and its design directory each their own autonomy and live rate. A path is an exact file (`SPEC.md`, `docs/constitution.md`) or a directory prefix ending in `/` (`design/`). No globs, no negation, no absolute paths, no `..` — the classifier is a pure segment matcher, not a shell, and a pattern language it half-implemented would be a protection an author believed was in force and the runtime did not apply. Matching is by path segments and never resolves against a checkout, so it answers the same in a worktree as in the primary: an exact path matches a candidate whose TRAILING segments are that path (`SPEC.md` matches `SPEC.md`, `./SPEC.md` and `/abs/repo/SPEC.md`; a single-segment entry therefore also matches `docs/SPEC.md`, exactly as the built-in filenames match anywhere), and a directory prefix matches a candidate containing those segments as a contiguous run (`design/` matches `design/x.md` and `/abs/repo/design/sub/x.md`). Both directions err wide on purpose: a false positive costs one approval prompt, a false negative costs the property the gate exists to defend. What this schema CANNOT state is the routing floor: a route aimed at a built-in protected path must resolve at least as strictly as the `policy.edit` line itself, and a policy that breaks that is refused at load with the code `protected-route-floor`.",
       "items": {
-        "type": "string",
-        "minLength": 1,
-        "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)[^*?\\[\\]{}\\\\\\s]+$",
-        "description": "A repo-relative path: exact file (`SPEC.md`) or directory prefix with a trailing `/` (`design/`). Leading `/`, `.`/`..` segments, whitespace and the glob characters `* ? [ ] { }` are rejected — each would be a path the matcher cannot honour literally, and silently ignoring one would leave the author believing a file is gated when it is not."
+        "$comment": "A `oneOf` over the two entry shapes, which costs a refusal-code change and is still the right spelling. A malformed path now answers `oneOf` with the `pattern` failure nested under it rather than `pattern` at the top, because every union construct this validator admits reports the union first: `if`/`then`/`else` on the entry type emits an `if` error the same way, and the flat form that would have avoided both — `pattern` and `minLength` at the item level, ignored for an object by JSON Schema's own rules — is refused by Ajv's `strictTypes`, which requires a declared type for those keywords. So the conformance suite's `schema-validation` moves to 2.0.0 for these two vectors; see conformance/README.md.",
+        "oneOf": [
+          { "$ref": "#/$defs/protectedPath" },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "class"],
+            "description": "SPEC.md §5.2 (amended, APRV-266): one path family routed to a named `policy.edit` sub-class, so that family carries its own autonomy and its own live rate. The sub-class is an ordinary §7 class and takes an ordinary `classes` line; a routed class with no line of its own inherits the `policy.edit` line.",
+            "properties": {
+              "path": { "$ref": "#/$defs/protectedPath" },
+              "class": {
+                "type": "string",
+                "pattern": "^policy\\.edit\\.[a-z][a-z0-9-]*$",
+                "description": "A `policy.edit` sub-class: exactly one extra lowercase segment under `policy.edit`. Four names are reserved with fixed meanings so two policies mean the same thing by them — `policy.edit.spec` (the governing specification), `policy.edit.harness` (agent instruction files and harness configuration that is not the hook itself), `policy.edit.ci` (continuous-integration and release configuration), `policy.edit.design` (design documents and decision records) — and an author may mint any other lowercase word beside them. The namespace is closed on purpose: a policy may not route a path to `policy.core`, to `log.mutate`, or to any class outside `policy.edit`, because those are the gate's own organs and the record of what happened, and a policy widening its own protected surface mints no authority over them (SPEC.md §11.1 invariant 9)."
+              }
+            }
+          }
+        ]
       },
-      "examples": [["SPEC.md", "design/"]]
+      "examples": [
+        ["SPEC.md", "design/"],
+        [
+          { "path": "SPEC.md", "class": "policy.edit.spec" },
+          { "path": ".github/workflows/", "class": "policy.edit.ci" }
+        ]
+      ]
     },
     "approvers": {
       "type": "object",
@@ -449,6 +469,12 @@
       "type": "number",
       "exclusiveMinimum": 0,
       "description": "A strictly positive number. Zero and negatives are rejected: budget and limit arithmetic treats them as unreachable ceilings, which policy authors express with `autonomy: manual`."
+    },
+    "protectedPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)[^*?\\[\\]{}\\\\\\s]+$",
+      "description": "A repo-relative path: exact file (`SPEC.md`) or directory prefix with a trailing `/` (`design/`). Leading `/`, `.`/`..` segments, whitespace and the glob characters `* ? [ ] { }` are rejected — each would be a path the matcher cannot honour literally, and silently ignoring one would leave the author believing a file is gated when it is not. Named as a `$def` since APRV-266 so the bare-string entry and the `path` of a routed entry are held to one grammar and cannot drift apart."
     }
   }
 }

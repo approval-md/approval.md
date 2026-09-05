@@ -88,6 +88,7 @@ import {
   GATE_SELF_CLASS,
   protectedPathClass,
   type CommandClassification,
+  type ProtectedPathEntry,
 } from "../core/command-class.js";
 import {
   consumeHarnessGrant,
@@ -989,7 +990,7 @@ interface FileGate {
 function fileToolGate(
   toolName: string,
   toolInput: Record<string, unknown>,
-  protectedPaths: readonly string[],
+  protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
 ): FileGate | null {
   const declared =
@@ -1929,7 +1930,7 @@ type ToolDescription =
 function describeToolCall(
   input: HookInput,
   adapter: HarnessAdapter,
-  protectedPaths: readonly string[],
+  protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
 ): ToolDescription {
   if (input.toolName === adapter.shellTool) {

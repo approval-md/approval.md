@@ -87,6 +87,57 @@ const POLICY = [
 ].join("\n");
 
 /**
+ * A policy that routes protected paths to `policy.edit` sub-classes (APRV-266).
+ *
+ * `design/` gets its own line, `SPEC.md` gets none: the pair is what makes the
+ * inheritance rule visible, because the first resolves by its own rule and the
+ * second by the `policy.edit` line it is a sub-class of. `.github/workflows/`
+ * is here too, routed STRICTER than the line, because it is a path the runtime
+ * protects on its own and is therefore the one the load-time floor governs.
+ */
+const POLICY_ROUTED = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: manual",
+  '  approval_ttl: "1h"',
+  "  on_expiry: reject",
+  "protected_paths:",
+  "  - { path: SPEC.md, class: policy.edit.spec }",
+  "  - { path: design/, class: policy.edit.design }",
+  "  - { path: .github/workflows/, class: policy.edit.ci }",
+  "classes:",
+  "  read.*:",
+  "    autonomy: autonomous",
+  "  policy.edit:",
+  "    autonomy: supervised-live",
+  "    live_rate: 0.1",
+  "  policy.edit.design:",
+  "    autonomy: supervised",
+  "  policy.edit.ci:",
+  "    autonomy: manual",
+  "```",
+  "",
+].join("\n");
+
+/**
+ * The same routing with the floor broken (APRV-266): `.github/workflows/` is a
+ * built-in `policy.edit` path, and routing it to an `autonomous` sub-class
+ * would take it out of the gate without removing a path from any list.
+ *
+ * A control, and a fail-closed one: the policy does not load, so EVERY class
+ * resolves to `manual`. An implementation that loaded it and honoured the
+ * routing has narrowed its own protected surface on the strength of a file it
+ * should have refused.
+ */
+const POLICY_ROUTE_FLOOR_BROKEN = POLICY_ROUTED.replace(
+  "  policy.edit.ci:\n    autonomy: manual",
+  "  policy.edit.ci:\n    autonomy: autonomous",
+);
+
+/**
  * SPEC.md §5.2's request-volume limits, one policy per limit (APRV-173).
  *
  * Written separately rather than as one policy carrying both, so each vector
@@ -363,6 +414,38 @@ const policyVectors = [
     description: "the same, for an irreversible action: still manual, and still no rule",
     control: true,
     input: { policy: POLICY_BROKEN, class: "financial.spend", reversible: false },
+  },
+  // --- routed policy.edit sub-classes (APRV-266) ----------------------------
+  {
+    id: "routed-subclass-with-its-own-rule",
+    description:
+      "a `policy.edit` sub-class a `protected_paths` entry routes to, with a rule of its own: it resolves by that rule like any other class, which is the whole point of routing — one protected surface no longer means one autonomy",
+    input: { policy: POLICY_ROUTED, class: "policy.edit.design" },
+  },
+  {
+    id: "routed-subclass-inherits-the-policy-edit-line",
+    description:
+      "a `policy.edit` sub-class with NO rule of its own inherits the `policy.edit` line, with provenance `inherited` rather than `default`. The general no-rule-matched rule is narrowed here and only here: falling to `defaults.autonomy` would gate every routed path the moment a project adopted routing, which reads as the feature being broken. `inherited` is distinct from `rule` because the winning pattern does not match the class being resolved, and a trace that claimed it did would send a reader looking for a line that is not there",
+    input: { policy: POLICY_ROUTED, class: "policy.edit.spec" },
+  },
+  {
+    id: "routed-builtin-path-may-be-routed-stricter",
+    description:
+      "`.github/workflows/` is protected by the runtime whatever a policy says, and routing it to a sub-class the policy declares MANUAL — stricter than its own supervised-live `policy.edit` line — is exactly what routing is for. The load-time floor bounds this in one direction only: stricter always loads, and the companion control shows what looser costs",
+    input: { policy: POLICY_ROUTED, class: "policy.edit.ci" },
+  },
+  {
+    id: "routed-namespace-does-not-generalize",
+    description:
+      "the inheritance rule is the `policy.edit` namespace and nothing else: a class outside it with no matching rule still takes `defaults.autonomy`. A universal parent walk would silently change the resolution of every class in SPEC.md §7's taxonomy — `read` is manual in a policy whose `read.*` is autonomous, precisely because a bare namespace is not matched by its own wildcard (§5.2)",
+    input: { policy: POLICY_ROUTED, class: "read" },
+  },
+  {
+    id: "fail-closed-routing-below-the-protected-floor",
+    description:
+      "`protected_paths` is additive: it may widen the protected surface and may never narrow it. A routing that would resolve a BUILT-IN protected path below what the `policy.edit` line itself resolves to is refused at load with `protected-route-floor`, and the policy is inoperative — so every class, including unrelated ones, resolves to manual with no matched rule. An implementation that loaded this file and honoured the routing has let a policy edit its way out of the gate",
+    control: true,
+    input: { policy: POLICY_ROUTE_FLOOR_BROKEN, class: "policy.edit.ci" },
   },
 ];
 
@@ -1047,9 +1130,21 @@ const SUITES = [
   {
     file: "policy-resolution.v1.json",
     suite: "policy-resolution",
-    algorithm: "SPEC.md §5.2 class matching and specificity, §7 irreversibility floor",
+    // 2.0.0 (APRV-266): a MAJOR bump, and the reason is the `algorithm` line
+    // below rather than the vector count. 1.0.0 stated the no-rule-matched rule
+    // without qualification — `unmatched-falls-to-default` says a class no rule
+    // matches takes `defaults.autonomy` — and an implementation that read the
+    // suite and implemented exactly that is now wrong for one namespace: a
+    // `policy.edit` sub-class with no rule of its own inherits the
+    // `policy.edit` line, with a provenance 1.0.0 does not name. The five new
+    // vectors move no existing expectation, but the general rule they narrow is
+    // one a second implementation was required to implement, so a run that
+    // passed 1.0.0 does not pass this.
+    vectors_version: "2.0.0",
+    algorithm:
+      "SPEC.md §5.2 class matching and specificity, the policy.edit sub-class inheritance rule, §7 irreversibility floor",
     description:
-      "Which rule governs an action, what autonomy it resolves to, and where the floor and the fail-closed rule bind.",
+      "Which rule governs an action, what autonomy it resolves to, where a routed policy.edit sub-class inherits from, and where the floor, the protected-path routing floor and the fail-closed rule bind.",
     vectors: policyVectors,
   },
   {
@@ -1098,7 +1193,22 @@ const SUITES = [
     // them names either, and the two policy keys are OPTIONAL, so every policy
     // written before them validates exactly as it did. The only removed line
     // in the fixture diff is `count`.
-    vectors_version: "1.6.0",
+    // 2.0.0 (APRV-266): a MAJOR bump, and a reluctant one — no fixture was
+    // added and no new constraint was written. `protected_paths` gained the
+    // routed `{path, class}` entry beside the bare string, so `items` is a
+    // `oneOf` over two shapes, and two existing vectors move their
+    // `failure_class` from `schema-pattern` to `schema-oneOf`: a `..` path and
+    // an absolute path are still refused, still at `/protected_paths/0`, and
+    // the `pattern` failure is still in the error list, but the union reports
+    // itself first. Every alternative spelling was tried and each moves the
+    // same expectation or worse — `if`/`then`/`else` on the entry type emits an
+    // `if` error, and the flat form (`pattern` and `minLength` at the item
+    // level, which JSON Schema ignores for an object) is refused by Ajv's
+    // `strictTypes`. A second implementation holding itself to 1.6.0 refuses
+    // the same documents this does; it names one of them differently, and the
+    // suite's whole premise is that a refusal for the wrong reason is a
+    // failure, so this is a major.
+    vectors_version: "2.0.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

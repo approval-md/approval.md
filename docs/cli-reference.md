@@ -523,10 +523,11 @@ SPEC §7's irreversibility floor.
 ```
 {"class":"vcs.push.main","reversible":null,
  "outcome":{"autonomy":"supervised","approvers":null,"limits":null},
- "provenance":"rule"|"default"|"fail-closed"|"floor",
+ "provenance":"rule"|"default"|"inherited"|"fail-closed"|"floor",
  "manualBecause":null|"matched-rule"|"irreversibility-floor"|"load-failure",
  "loadFailure":null|{"code":"file-missing"|"no-block"|"multiple-blocks"|
-                     "yaml-error"|"schema-invalid","message":"..."},
+                     "yaml-error"|"schema-invalid"|"protected-route-floor",
+                     "message":"..."},
  "matched":null|{"pattern":"vcs.push.main","rule":{"autonomy":"supervised"}},
  "overridden":null|{"pattern":"read.web"|null,"autonomy":"autonomous"},
  "candidates":[{"pattern":"read.*","specificity":[1,1,2],
@@ -539,6 +540,23 @@ SPEC §7's irreversibility floor.
 `specificity` is [literalSegments, wildcardSegments, totalSegments] (SPEC §5.2).
 `overridden.pattern` is null when the floor overrode `defaults.autonomy` rather
 than a rule.
+
+`provenance: "inherited"` is the APRV-266 case: a `policy.edit` sub-class that
+no rule matched, decided by the `policy.edit` line it is a sub-class of.
+`matched` names that line, and `candidates` is empty, because the line decided
+without matching the class being asked about — which is exactly why this is not
+`"rule"`. It is not `"default"` either: `defaults.autonomy` was not consulted.
+The `decisionPath` says so in as many words. Inheritance is the `policy.edit`
+namespace and nothing else; every other class with no matching rule still takes
+`defaults.autonomy`, and `read` under a `read.*` rule is still `manual` for
+exactly the reason §5.2 gives.
+
+`loadFailure.code` gained `protected-route-floor` in the same change: a
+`protected_paths` entry routed a built-in protected path to a sub-class that
+resolves more loosely than the `policy.edit` line itself, which would narrow the
+protected surface without removing a path from any list. The policy does not
+load, so every class answers `manual` with `manualBecause: "load-failure"`, and
+the message names the offending entry.
 
 Human output: the `decisionPath` lines, then a final line `-> <autonomy>`
 carrying "(fail-closed: `<code>`)" or "(floor applied over `<pattern>`:

@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 
-import { CLASSIFIER_CLASSES } from "../src/core/command-class.js";
+import { CLASSIFIER_CLASSES, emittableClass } from "../src/core/command-class.js";
 import { loadPolicy, loadPolicyText, type PolicyLoadResult } from "../src/core/policy-load.js";
 import { loadValuesText } from "../src/core/values.js";
 import { resolve } from "../src/core/policy-match.js";
@@ -171,15 +171,49 @@ test("every literal class in APPROVAL.md is reachable from the command classifie
   // classifier emits members of it (`read.shell`, `read.vcs.remote`), and the
   // pattern itself is never an action class.
   const literal = declared.filter((pattern) => !pattern.includes("*"));
-  const unreachable = literal.filter((cls) => !CLASSIFIER_CLASSES.includes(cls));
+  // Asked WITH this policy's own `protected_paths` (APRV-266), which is the
+  // same question `core/policy-expectations.ts` asks at the ceremony: a
+  // `policy.edit` sub-class is emitted only where an entry routes a path family
+  // to it, so its reachability is a property of this file rather than of the
+  // classifier's fixed table. A routed line whose entry was deleted still
+  // fails here, which is the case worth catching.
+  const routes = policy.protected_paths ?? [];
+  const unreachable = literal.filter((cls) => !emittableClass(cls, routes));
   assert.deepEqual(
     unreachable,
     [],
     `APPROVAL.md gates ${unreachable.join(", ")}, and no rule in the Claude Code hook's classifier ` +
-      "can emit it: a command in that class would be classified as something else, or refused as " +
-      "unclassified, and the policy line would never fire. Add a rule to src/core/command-class.ts " +
+      "can emit it and no protected_paths entry routes to it: a command in that class would be " +
+      "classified as something else, or refused as unclassified, and the policy line would never " +
+      "fire. Add a rule to src/core/command-class.ts, route a path to it in protected_paths, " +
       "or remove the class from the policy.",
   );
+});
+
+test("a routed policy makes every one of its literal classes reachable (APRV-266)", () => {
+  // The fixture is the shape this repository's own policy is expected to take
+  // once Carter adopts routing, and it exercises the branch the live policy
+  // cannot yet reach: a `policy.edit` sub-class declared in `classes` and
+  // routed in `protected_paths`, which the fixed classifier table knows nothing
+  // about. Without it the check above would keep passing for the wrong reason.
+  const load = loadPolicy({
+    file: join(REPO_ROOT, "schema", "fixtures", "policy-md", "valid", "routed-protected-paths.md"),
+  });
+  assert.equal(load.ok, true, load.ok ? "" : `${load.code}: ${load.message}`);
+  if (!load.ok) return;
+
+  const routes = load.policy.protected_paths ?? [];
+  const literal = Object.keys(load.policy.classes ?? {}).filter(
+    (pattern) => !pattern.includes("*"),
+  );
+  assert.ok(literal.includes("policy.edit.design"), "the fixture must declare a routed class");
+  for (const cls of literal) {
+    assert.equal(emittableClass(cls, routes), true, `${cls} must be reachable`);
+  }
+
+  // And the negative, which is the whole value of asking with the policy: a
+  // sub-class nothing routes to is a line that will never fire.
+  assert.equal(emittableClass("policy.edit.harness", routes), false);
 });
 
 test("the classifier's read.* classes are covered by the policy's read.* rule", () => {
