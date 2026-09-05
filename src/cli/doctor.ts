@@ -1560,11 +1560,19 @@ function checkLogDrift(logPath: string, records: readonly EventRecord[]): Doctor
     // `tests/cli-doctor.test.ts` pins. A check that could not look has nothing
     // to prescribe, so what a reader might still want to run is said in the
     // detail. A pass that owes records keeps its `fix`, as this row always has.
+    // The reason is carried through whole, `oneLine`d rather than trimmed. When
+    // no rev resolved it now names the git command each candidate ran and what
+    // git answered, and that is the half of the sentence a person acts on: the
+    // row that misread a twelve-megabyte committed log said only which revs it
+    // had tried, which is equally true of a repository that has genuinely never
+    // committed one.
     case "skip":
       return {
         check: "log-drift",
         status: "skip",
-        detail: `${outcome.reason}. \`approval log advance --dry-run\` shows what a first advance would carry`,
+        detail: oneLine(
+          `${outcome.reason}. \`approval log advance --dry-run\` shows what a first advance would carry`,
+        ),
       };
     case "pass":
       return {

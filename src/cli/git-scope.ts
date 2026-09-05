@@ -25,7 +25,7 @@ import {
   sep,
 } from "node:path";
 
-import { gh, git, type GitRun } from "../core/git-run.js";
+import { GIT_OUTPUT_LIMIT_BYTES, gh, git, type GitRun } from "../core/git-run.js";
 
 /**
  * The two runners moved to `core/git-run.ts` in APRV-245 and are re-exported
@@ -34,7 +34,7 @@ import { gh, git, type GitRun } from "../core/git-run.js";
  * `tests/layering.test.ts` keeps. Every existing caller of `git-scope.ts` is
  * untouched, and there is still one spelling of "run git" in the repository.
  */
-export { gh, git, type GitRun };
+export { GIT_OUTPUT_LIMIT_BYTES, gh, git, type GitRun };
 
 function absolute(value: string, cwd: string): string {
   return isAbsolute(value) ? value : resolvePathSegments(cwd, value);
@@ -156,15 +156,65 @@ export function currentBranch(root: string): string | null {
 }
 
 /**
- * The bytes of `<rev>:<relative>`, or `null` when git has no such blob.
+ * One attempt at reading `<rev>:<relative>` out of the object store.
+ *
+ * The failure half carries the command and what the runner said, because the
+ * two ways this can fail need telling apart and neither is visible in a `null`:
+ * git answering "no such path in that rev" (ordinary, and the reason most
+ * callers move on to the next rev), and the read itself breaking — git absent,
+ * the object store unreadable, or output past
+ * {@link GIT_OUTPUT_LIMIT_BYTES}. A caller that reports "no committed copy"
+ * for the second case is telling an operator something false.
+ */
+export type BlobRead =
+  | { ok: true; bytes: Buffer }
+  | { ok: false; command: string; status: number | null; detail: string };
+
+/**
+ * The bytes of `<rev>:<relative>`, with the reason when there are none.
  *
  * Read as a Buffer, never as text: callers hash and compare these bytes, and an
- * encoding round-trip would silently change what is being compared.
+ * encoding round-trip would silently change what is being compared. That is
+ * also why this is `spawnSync` directly rather than {@link git}, which decodes
+ * to a string — and why the buffer limit has to be repeated here rather than
+ * inherited from the runner.
+ */
+export function readBlob(root: string, rev: string, relative_: string): BlobRead {
+  const spec = `${rev}:${relative_}`;
+  const result = spawnSync("git", ["show", spec], { cwd: root, maxBuffer: GIT_OUTPUT_LIMIT_BYTES });
+  const command = `git show ${spec}`;
+  if (result.error !== undefined || result.status === null) {
+    return {
+      ok: false,
+      command,
+      status: null,
+      detail:
+        result.error === undefined
+          ? "git produced no exit status"
+          : `git did not complete: ${result.error.message}`,
+    };
+  }
+  if (result.status !== 0) {
+    const said = outputLines(result.stderr?.toString("utf8") ?? "").join(" | ");
+    return {
+      ok: false,
+      command,
+      status: result.status,
+      detail: `git exited ${String(result.status)}${said.length === 0 ? "" : `: ${said}`}`,
+    };
+  }
+  return { ok: true, bytes: result.stdout };
+}
+
+/**
+ * The bytes of `<rev>:<relative>`, or `null` when there are none.
+ *
+ * The shape every caller predating {@link readBlob} expects. Callers that owe
+ * an operator a diagnostic when the read fails should reach for `readBlob`.
  */
 export function showBlob(root: string, rev: string, relative_: string): Buffer | null {
-  const result = spawnSync("git", ["show", `${rev}:${relative_}`], { cwd: root });
-  if (result.error !== undefined || result.status !== 0) return null;
-  return result.stdout;
+  const read = readBlob(root, rev, relative_);
+  return read.ok ? read.bytes : null;
 }
 
 /** Everything git said about a run, as trimmed non-empty lines. */
