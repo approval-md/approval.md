@@ -74,6 +74,7 @@ import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK } from "./exit-codes.js";
 import { SETUP_CHECKPOINT_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import {
+  absolute,
   front,
   requireHuman,
   usageError,
@@ -226,8 +227,14 @@ export function commandSetupCheckpoint(
 
   const policyFlag = stringFlag(context.flags, "--policy");
   const dirFlag = stringFlag(context.flags, "--dir");
+  // Resolved against the verb's `cwd` and not the process's, the way every
+  // other path in this family is: a relative `--policy` that landed on a
+  // different file than `front()` loaded would answer questions about a policy
+  // nobody chose.
   const policyWhere =
-    policyFlag !== null ? { file: policyFlag } : { dir: dirFlag === null ? cwd : dirFlag };
+    policyFlag !== null
+      ? { file: absolute(policyFlag, cwd) }
+      : { dir: dirFlag === null ? cwd : absolute(dirFlag, cwd) };
   const configured = checkpointPolicyOf(policyWhere);
 
   const retire = stringFlag(context.flags, "--retire");
