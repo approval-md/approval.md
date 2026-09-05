@@ -31,3 +31,4 @@ private/*
 # hook processes that hold no sampling secret. Owner-only, derived, and gone the
 # moment the daemon stops. A socket is not a file a clone can inherit.
 .approval/daemon/
+.approval/env
