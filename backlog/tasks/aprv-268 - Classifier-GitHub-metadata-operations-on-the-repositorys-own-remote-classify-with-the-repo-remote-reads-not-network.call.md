@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-b'
 created_date: '2026-09-05 10:31'
-updated_date: '2026-09-05 11:11'
+updated_date: '2026-09-05 11:54'
 labels:
   - classifier
 dependencies: []
@@ -86,4 +86,22 @@ The first full run was 3521 tests, 3519 pass, 1 fail, exit 1. The single failure
 I missed it on the first pass because I ran cli-hook during the APRV-267-only phase of the branch, before restoring the gh changes. Worth noting for the next lane that splits one file across two commits.
 
 Also checked and unaffected: every other test touching gh uses 'gh pr create' (still vcs.pr.open), and no test outside command-class asserts files.delete.out_of_scope. conformance/run.mjs is 279/279 exit 0, so no policy-resolution vector moved and the conformance ritual is not needed.
+
+### Full-suite status at hand-off
+
+Run 1 (before the cli-hook fix) completed: 3521 tests, 3519 pass, 1 fail, exit 1 — the one failure being the stale gh api expectation, fixed in 3ac2319.
+
+Two confirming full runs after the fix did not finish and neither result is a regression:
+- Run 2 I killed myself, wrongly. cli-hook.test.js was taking 446s against its 124s solo time because I was running other suites in parallel with it; I read the plateau as a deadlock. The cascade of failed-file lines in that log is the kill, not the code.
+- Run 3 ran clean with nothing competing and wedged in dist/tests/daemon-advance-adopt.test.js for 1,328,493 ms (22 minutes) with no output. That file passed in run 1 on the same code, it touches nothing this branch changes, and it contends on the PRIMARY checkout's log and append lock, which other lanes moved from seq 20995 to 22412 during this session (I hit hook-gate-refused:append-failed and policy-not-attested twice from the same pressure). Environmental, not a regression from either task.
+
+Per-file evidence on the FINAL tree, every exit code read and 0:
+- command-class + cli-hook-scratch + dogfood + policy-explain + protected-path-guard + wysiwys + checkpoint-tap: 500 tests, 500 pass
+- cli-hook + cli-hook-cursor + cli-hook-rewrite: 108 tests, 108 pass
+- cli-amend: 84 pass (run before the last commit; that commit touches only tests/cli-hook.test.ts)
+- gate 88, policy-load 77, policy-match 23: all pass
+- conformance/run.mjs: 279/279 vectors, 134 controls, exit 0, run twice including on the final tree
+- npx oxlint: exit 0 on the final tree
+
+Someone with a quiet machine should re-run npm test whole before merge.
 <!-- SECTION:NOTES:END -->
