@@ -1,0 +1,45 @@
+# approval.md
+
+> Human approval for agent actions: a file-based convention and reference runtime that gates agent actions with real-world side effects (send, spend, delete, post) behind an attested markdown policy, an append-only hash-chained log, and single-use execution tokens.
+
+approval.md is a CLI, an MCP server and a set of harness hooks, published under MIT and running on Node 20 or newer. Policy lives in `APPROVAL.md` at the root of a repository, a human attests its bytes, and every gate decision and execution is appended to a hash-chained JSONL log that `approval log verify` answers for. Credentials sit in an encrypted vault and are reachable only inside a token window opened by a recorded human decision. Version 0.1.0 is not yet published to npm; install from source.
+
+## Start here
+
+- [README](https://raw.githubusercontent.com/approval-md/approval.md/main/README.md): the full product tour, from the policy file to the phone prompt, the vault and the credential boundary.
+- [Landing page as markdown](https://approval.md/llms-full.txt): this site's whole content, including the 66-entry feature index with claims and links.
+- [SPEC.md](https://raw.githubusercontent.com/approval-md/approval.md/main/SPEC.md): the specification and the source of truth for design decisions, including section 11 on the security posture and section 11.1 on the global invariants.
+
+## Reference
+
+- [CLI reference](https://raw.githubusercontent.com/approval-md/approval.md/main/docs/cli-reference.md): the reasoning behind each verb, its threat model, and the alternatives rejected.
+- [policy.schema.json](https://raw.githubusercontent.com/approval-md/approval.md/main/schema/policy.schema.json): the closed schema for the `approval-policy` block, including the five autonomy levels.
+- [event.schema.json](https://raw.githubusercontent.com/approval-md/approval.md/main/schema/event.schema.json): the schema every log record passes before it is appended.
+- [envelope.schema.json](https://raw.githubusercontent.com/approval-md/approval.md/main/schema/envelope.schema.json): the schema for the action envelope an agent registers.
+
+## Harness integration
+
+- [Claude Code hook](https://raw.githubusercontent.com/approval-md/approval.md/main/docs/claude-code-hook.md): `approval hook claude-code` as a PreToolUse hook, classifying the commands a coding agent runs on its own.
+- [Cursor hook](https://raw.githubusercontent.com/approval-md/approval.md/main/docs/cursor-hook.md): the same deterministic core answering Cursor's native permission JSON, with `failClosed: true` required.
+- [Git evidence](https://raw.githubusercontent.com/approval-md/approval.md/main/docs/git-evidence.md): the optional second record the daemon commits per tick.
+
+## Examples
+
+- [Telegram, end to end](https://raw.githubusercontent.com/approval-md/approval.md/main/examples/telegram-demo.md): request, a tap on a phone, an executed run, with a scripted twin in CI.
+- [Real mail over SMTP](https://raw.githubusercontent.com/approval-md/approval.md/main/examples/email-demo.md): an agent's chaser sent through the vault and the token window.
+- [An AgentMail draft](https://raw.githubusercontent.com/approval-md/approval.md/main/examples/agentmail-demo.md): the two-key split, where the send key waits in the vault.
+- [An MCP client asks](https://raw.githubusercontent.com/approval-md/approval.md/main/examples/mcp-demo.md): Claude Code over MCP on one side, a phone on the other.
+- [A Backlog.md board](https://raw.githubusercontent.com/approval-md/approval.md/main/examples/backlog-md-project/README.md): one envelope on one task file, then register, request, wait and run.
+- [Web agent demo day](https://raw.githubusercontent.com/approval-md/approval.md/main/examples/web-agent-demo/runbook.md): a runbook for showing the gate to a room.
+- [Grok Bot connector](https://raw.githubusercontent.com/approval-md/approval.md/main/examples/grok-bot-connector/runbook.md): a guest-mode MCP session for an agent in someone else's cloud.
+
+## Verification
+
+- [Conformance suite](https://raw.githubusercontent.com/approval-md/approval.md/main/conformance/README.md): six language-neutral vector files under a SHA-256 manifest, for a second implementation.
+- [Integrations considered](https://raw.githubusercontent.com/approval-md/approval.md/main/docs/integrations-considered.md): every integration weighed, with the reasoning for each verdict.
+- [Dogfood cutover](https://raw.githubusercontent.com/approval-md/approval.md/main/docs/dogfood-cutover.md): how this repository runs its own work behind its own gate.
+
+## Optional
+
+- [CLAUDE.md](https://raw.githubusercontent.com/approval-md/approval.md/main/CLAUDE.md): the working rules for agents in this repository.
+- [Source repository](https://github.com/approval-md/approval.md): issues, pull requests and the commit history.
