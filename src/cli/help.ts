@@ -1232,22 +1232,22 @@ ${why("execution")}`;
 export const RESOLVE_HELP = `approval execution resolve — record what a human observed
 
 Usage:
-  approval execution resolve <action-key> --outcome completed|failed
-                            --note "<text>" [--as human:<id>] [--log <path>]
-                            [--json]
+  approval execution resolve <action-key> --outcome completed|failed --note "…"
+  approval execution resolve --dangling [--class <class>] [--yes] [--json]
 
 Flags:
   --outcome <o>    completed or failed. REQUIRED, and nothing is inferred
   --note <text>    what you observed and how you know. MANDATORY and non-empty
   --as human:<id>  the person recording it; else APPROVAL_HUMAN. HUMAN-ONLY
   --log <path>     log file to read and append to
+  --dangling       the BULK form; --class narrows it, --yes skips the prompt
   --json / -h, --help   machine-readable output / this text
 
-Appends execution.completed or execution.failed with payload
-{"note":…,"attested_by_human":true,"exit_code":null}. exit_code is NULL because
-nobody ran anything. NO ATTESTATION IS REQUIRED: resolve records a fact a human
-observed and exercises no policy authority. Refuses (exit 1) when there is
-nothing to close: not-started, already-finished.
+Appends execution.completed or execution.failed with payload {"note":…,
+"attested_by_human":true,"exit_code":null}: nobody ran anything, so exit_code is
+NULL. NO ATTESTATION IS REQUIRED: resolve exercises no policy authority.
+Refuses (exit 1): not-started, already-finished. --dangling lists every dangling
+execution with what this checkout can PROVE, asks ONCE, closes the provable.
 
 JSON shape: docs/cli-reference.md#execution-resolve
 ${EXIT_CODES_POINTER}

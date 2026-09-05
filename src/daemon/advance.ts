@@ -68,14 +68,16 @@ import { tick, type Clock } from "../core/clock.js";
 import {
   ADVANCE_ACTOR,
   ADVANCE_CLASS,
-  ADVANCE_KEY_PREFIX,
+  RESOLVE_DANGLING_COMMAND,
   advanceActionKey,
   advanceTaskId,
+  danglingAdvances,
   openAdvanceRequest,
+  proveDanglingAdvances,
+  type DanglingAdvance,
 } from "../core/advance-cycle.js";
 import { childEnvironment } from "../core/child-env.js";
 import {
-  danglingExecutions,
   finishExecution,
   startExecution,
   type FailureReason,
@@ -431,29 +433,56 @@ export function settleAdvanceFinish(
 }
 
 /**
- * The advance cycle whose execution is open, if one is (APRV-233).
+ * Every open advance cycle, with what this checkout's refs prove (APRV-264).
+ *
+ * One `publishedState` for the whole list rather than one per key: it is the
+ * git read on the tick's hot path, and the answer it gives is the same for
+ * every key — the highest published seq, and the ref that carries it.
  *
  * Read from the log rather than from this process's memory, so a daemon that
  * restarted still sees that an advance HAPPENED. It is the fact the cadence was
  * missing on 2026-09-02: with no outcome record, nothing but an in-process
  * clock said the branch had just been pushed.
  */
-export function danglingAdvanceExecution(records: readonly EventRecord[]): string | null {
-  const open = danglingExecutions([...records]).filter((entry) =>
-    entry.actionKey.startsWith(`${ADVANCE_KEY_PREFIX}-`),
-  );
-  return open[open.length - 1]?.actionKey ?? null;
+export function proveDanglingAdvancesFor(
+  input: AdvanceInput,
+  records: readonly EventRecord[],
+): DanglingAdvance[] {
+  const open = danglingAdvances(records);
+  if (open.length === 0) return [];
+  const root = repoRoot(input.cwd) ?? input.cwd;
+  const today = input.today ?? tick(input.clock === undefined ? {} : { clock: input.clock });
+  const state = publishedState(root, input.logPath, records, input.cadence, today);
+  return proveDanglingAdvances(records, state);
 }
 
-/** The seq the span named by `daemon-log-advance-<from>-<to>` ends at, or null. */
-function spanEndOf(actionKey: string): number | null {
-  const parsed = Number.parseInt(actionKey.split("-").pop() ?? "", 10);
-  return Number.isInteger(parsed) ? parsed : null;
+/** One key the sweep closed, or could not. */
+export interface SweptAdvance {
+  actionKey: string;
+  /** The ref that proved it, on a settled entry. */
+  provenBy: string | null;
+  message: string;
+}
+
+/** What one sweep did, and what it left for a person (APRV-264). */
+export interface AdvanceSweep {
+  /** Cycles this sweep closed, in log order, each with the ref that proved it. */
+  settled: SweptAdvance[];
+  /**
+   * Cycles nothing in this checkout can prove, plus the ones whose append was
+   * refused. Both are a person's now, and both block a new advance.
+   */
+  outstanding: SweptAdvance[];
+}
+
+/** Is this sweep's work done — nothing open, nothing owed to a person? */
+export function sweepIsClear(sweep: AdvanceSweep): boolean {
+  return sweep.settled.length === 0 && sweep.outstanding.length === 0;
 }
 
 /**
- * Close a dangling advance cycle whose outcome the git refs still show
- * (APRV-233).
+ * Close EVERY dangling advance cycle whose outcome the git refs still show
+ * (APRV-233, widened by APRV-264).
  *
  * ## The loop this breaks
  *
@@ -467,75 +496,115 @@ function spanEndOf(actionKey: string): number | null {
  * pushed again, and again, every ninety seconds under a fifteen-minute
  * interval.
  *
+ * ## Why it sweeps rather than reconciles one
+ *
+ * APRV-233's version closed the LAST open cycle and returned. On 2026-09-05
+ * that was not enough: `approval status` listed FIVE, left by the 2026-09-02
+ * loop and by the restarts after it, the daemon refused one advance per tick
+ * naming one key each, and Carter closed all five by hand with five
+ * near-identical commands. One key per tick is a repair rate of one every
+ * thirty seconds behind a refusal that stops the cadence entirely, so the sweep
+ * takes every key it can prove in one pass and reports the rest together.
+ *
  * ## What is and is not a guess here
  *
  * {@link settleAdvanceFinish} covers the case this process still holds the
- * outcome for. This covers the other one — a cycle left open by an earlier
- * process, or by a tick whose memory of it is gone — and it closes it only on
- * EVIDENCE: the records the cycle was authorized to publish are demonstrably on
- * a records branch, read from git's own object store through the same
+ * outcome for. This covers the other one — cycles left open by an earlier
+ * process, or by ticks whose memory of them is gone — and it closes each only
+ * on EVIDENCE: the records the cycle was authorized to publish are demonstrably
+ * on a records branch, read from git's own object store through the same
  * `publishedState` the cadence and the doctor row read. When the evidence is
  * there the outcome is recorded as the completion it was, with a note saying
- * which ref proved it. When it is NOT there, nothing is written: the execution
- * stays open for a person, the daemon warns, and no new advance is started over
- * work nobody has accounted for. A false `execution.failed` for an advance that
- * actually published would be worse than the dangling record.
+ * which ref proved it and that the RUNTIME observed it. When it is NOT there,
+ * nothing is written: the execution stays open for a person, the daemon warns
+ * once, and no new advance is started over work nobody has accounted for. A
+ * false `execution.failed` for an advance that actually published would be
+ * worse than the dangling record.
+ *
+ * The actor is {@link ADVANCE_ACTOR} and the record carries no
+ * `attested_by_human`: human attestation is for what a person went and looked
+ * at, and this is the runtime reading its own refs. The note says so in as many
+ * words, so no reader has to infer it from the actor field alone.
  *
  * This is a deliberate, narrow carve-out to `core/execute.ts`'s rule that
  * nothing closes a dangling execution automatically. Narrow because it closes
- * only an execution THIS runtime started, for its own `log.advance` cycle,
- * whose entire effect is a git ref this runtime can look at and did.
+ * only executions THIS runtime started, for its own `log.advance` cycles, whose
+ * entire effect is a git ref this runtime can look at and did.
  */
-export function reconcileDanglingAdvance(
+export function sweepDanglingAdvances(
   input: AdvanceInput,
   records: readonly EventRecord[],
-): { actionKey: string; settled: boolean; message: string } | null {
-  const actionKey = danglingAdvanceExecution(records);
-  if (actionKey === null) return null;
+): AdvanceSweep {
+  const sweep: AdvanceSweep = { settled: [], outstanding: [] };
+  // One git read for the whole sweep. Appending an outcome below cannot change
+  // the answer: `publishedState` counts only a committed copy that is a PREFIX
+  // of the working log, so a record appended after it was read leaves both the
+  // published seq and the ref that carries it exactly where they were.
+  for (const entry of proveDanglingAdvancesFor(input, records)) {
+    if (entry.provenBy === null) {
+      sweep.outstanding.push({
+        actionKey: entry.actionKey,
+        provenBy: null,
+        message: `${entry.actionKey} is an advance execution nobody closed, and no ref in this checkout carries seq ${
+          entry.toSeq === null ? "the span it named" : String(entry.toSeq)
+        }. Nothing is recorded for it: an outcome this runtime cannot observe is a human's to establish.`,
+      });
+      continue;
+    }
 
-  const root = repoRoot(input.cwd) ?? input.cwd;
-  const today = input.today ?? tick(input.clock === undefined ? {} : { clock: input.clock });
-  const state = publishedState(root, input.logPath, records, input.cadence, today);
-  const to = spanEndOf(actionKey);
-  if (to === null || state.publishedSeq < to) {
-    return {
-      actionKey,
-      settled: false,
-      message: `${actionKey} is an advance execution nobody closed, and no records branch in this checkout carries seq ${
-        to === null ? "the span it named" : String(to)
-      } (the highest published seq is ${String(
-        state.publishedSeq,
-      )}). Nothing is recorded for it: an outcome this runtime cannot observe is a human's to establish (\`approval status\`, then \`approval execution resolve\`). No further advance is started while it stands.`,
-    };
+    const finished = finishWithHeadMovedRetry(input.logPath, entry.actionKey, 0, {
+      policy: input.policy,
+      ...(input.schemaDir === undefined ? {} : { schemaDir: input.schemaDir }),
+      ...(input.clock === undefined ? {} : { clock: input.clock }),
+      ...(input.retryOnHeadMoved === undefined ? {} : { retryOnHeadMoved: input.retryOnHeadMoved }),
+      ...(input.afterFinishRead === undefined ? {} : { afterRead: input.afterFinishRead }),
+      note: {
+        code: "advance-reconciled",
+        message: `the outcome record was lost when this cycle ran; ${entry.provenBy} carries seq ${String(
+          entry.toSeq,
+        )} in this checkout, so the advance completed. Observed by the runtime (${ADVANCE_ACTOR}) from that ref, not attested by a human`,
+      },
+    });
+    if (finished.ok) {
+      sweep.settled.push({
+        actionKey: entry.actionKey,
+        provenBy: entry.provenBy,
+        message: `${entry.actionKey} was left open by an earlier advance; ${entry.provenBy} carries seq ${String(
+          entry.toSeq,
+        )}, so its completion is now recorded`,
+      });
+      continue;
+    }
+    // `already-finished` is somebody else closing the books between the read
+    // and the append, which is the outcome this wanted and not a failure.
+    if (finished.code === "already-finished") {
+      sweep.settled.push({
+        actionKey: entry.actionKey,
+        provenBy: entry.provenBy,
+        message: `${entry.actionKey} was closed by another writer before this sweep reached it; nothing was appended`,
+      });
+      continue;
+    }
+    sweep.outstanding.push({
+      actionKey: entry.actionKey,
+      provenBy: entry.provenBy,
+      message: `${entry.actionKey} could not be closed: ${finished.message}`,
+    });
   }
+  return sweep;
+}
 
-  const finished = finishWithHeadMovedRetry(input.logPath, actionKey, 0, {
-    policy: input.policy,
-    ...(input.schemaDir === undefined ? {} : { schemaDir: input.schemaDir }),
-    ...(input.clock === undefined ? {} : { clock: input.clock }),
-    ...(input.retryOnHeadMoved === undefined ? {} : { retryOnHeadMoved: input.retryOnHeadMoved }),
-    ...(input.afterFinishRead === undefined ? {} : { afterRead: input.afterFinishRead }),
-    note: {
-      code: "advance-reconciled",
-      message: `the outcome record was lost when this cycle ran; seq ${String(
-        to,
-      )} is on a records branch in this checkout, so the advance completed`,
-    },
-  });
-  if (finished.ok) {
-    return {
-      actionKey,
-      settled: true,
-      message: `${actionKey} was left open by an earlier advance; seq ${String(
-        to,
-      )} is on a records branch, so its completion is now recorded`,
-    };
-  }
-  return {
-    actionKey,
-    settled: false,
-    message: `${actionKey} could not be closed: ${finished.message}`,
-  };
+/**
+ * The refusal that stands while any advance cycle is open, naming all of them.
+ *
+ * One sentence for every outstanding key rather than one refusal per key per
+ * tick: the operator's next act is the same command whichever key they read
+ * first, so the command is on the line and every key it will close is under it.
+ */
+export function unreconciledRefusal(keys: readonly string[]): string {
+  return `${String(keys.length)} advance execution(s) were started and their outcomes were never recorded; nothing new is authorized until they are closed (${keys.join(
+    ", ",
+  )}). \`approval status\` shows them; \`${RESOLVE_DANGLING_COMMAND}\` closes every one this checkout can prove and lists the rest.`;
 }
 
 /**
@@ -592,15 +661,19 @@ export function authorizeAdvance(
   // `startExecution` from here produced the bare `already-executed` Carter saw
   // on 2026-09-02 — the gate saying, correctly, that an idempotency key is
   // single-use and nothing there reconciles or reruns it — after which the span
-  // moved and the branch was pushed all over again. The reconciliation belongs
-  // to {@link reconcileDanglingAdvance}, which the caller runs first; if it is
-  // still here, it is still a human's, and nothing is authorized over it.
-  const unreconciled = danglingAdvanceExecution(records);
-  if (unreconciled !== null) {
+  // moved and the branch was pushed all over again. The sweep belongs to
+  // {@link sweepDanglingAdvances}, which the caller runs first; whatever is
+  // still here is still a human's, and nothing is authorized over it.
+  //
+  // APRV-264: EVERY outstanding key, and the one command that clears them. The
+  // refusal used to name the last one only, so an operator holding five of them
+  // learned about the second after they had closed the first.
+  const unreconciled = danglingAdvances(records).map((entry) => entry.actionKey);
+  if (unreconciled.length > 0) {
     return no({
       outcome: "refused",
       code: "advance-unreconciled",
-      message: `the advance ${unreconciled} was started and its outcome was never recorded; nothing new is authorized until that cycle is closed (\`approval status\` shows it; \`approval execution resolve\` closes it).`,
+      message: unreconciledRefusal(unreconciled),
     });
   }
 

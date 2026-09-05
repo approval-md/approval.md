@@ -110,7 +110,11 @@ import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { policyWebPort } from "./channel-web.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
-import { lastAdvance } from "../core/advance-cycle.js";
+import {
+  RESOLVE_DANGLING_COMMAND,
+  lastAdvance,
+  proveDanglingAdvances,
+} from "../core/advance-cycle.js";
 import {
   DEFAULT_DARK_WINDOW_MS,
   reportDarkSessions,
@@ -1747,13 +1751,49 @@ function checkAdvanceCadence(logPath: string, records: readonly EventRecord[]): 
       ? `no rev this checkout can see carries a copy of this chain (tried ${state.revs.join(", ")})`
       : `read from ${state.publishedRev}`;
 
+  // APRV-264. The advance cycles nobody closed, and what this checkout can
+  // prove about each. They belong on THIS row rather than only in `status`'s
+  // dangling list, because their effect is on the cadence: while one stands the
+  // daemon authorizes no further advance, so a row reporting how far behind the
+  // records branch is without saying that the thing that publishes it is
+  // blocked reports the symptom and hides the cause. Provable ones are named as
+  // the daemon's to close on its next tick; the rest are a person's, with the
+  // one command that takes them all.
+  const open = proveDanglingAdvances(records, state);
+  const outstanding = open.filter((entry) => entry.provenBy === null);
+  const provable = open.filter((entry) => entry.provenBy !== null);
+  const blocked =
+    open.length === 0
+      ? ""
+      : ` ${String(open.length)} advance execution(s) are open and no further advance is authorized while they stand: ${open
+          .map(
+            (entry) =>
+              `${entry.actionKey} (${
+                entry.provenBy === null
+                  ? "nothing in this checkout carries the seq it named"
+                  : `proved by ${entry.provenBy}`
+              })`,
+          )
+          .join(", ")}.${
+          provable.length === 0
+            ? ""
+            : ` A running daemon closes ${String(provable.length)} of them on its next tick.`
+        }`;
+  const sweepFix =
+    outstanding.length === 0
+      ? null
+      : `${RESOLVE_DANGLING_COMMAND} — close the advance executions this checkout can prove and list the ${String(
+          outstanding.length,
+        )} it cannot`;
+
   if (state.pending === 0) {
     return {
       check,
       status: "pass",
       detail: `every record through seq ${String(
         state.publishedSeq,
-      )} is on a records branch or the trunk (${from}); ${attempt}`,
+      )} is on a records branch or the trunk (${from}); ${attempt}${blocked}`,
+      ...(sweepFix === null ? {} : { fix: sweepFix }),
     };
   }
   return {
@@ -1763,8 +1803,10 @@ function checkAdvanceCadence(logPath: string, records: readonly EventRecord[]): 
       state.substantive,
     )} of them are not the daemon's own advance bookkeeping); published through seq ${String(
       state.publishedSeq,
-    )} (${from}), working head seq ${String(state.workingSeq)}. ${attempt}`,
-    fix: "approval log advance --pr — publish them now, or run the daemon with --advance",
+    )} (${from}), working head seq ${String(state.workingSeq)}. ${attempt}${blocked}`,
+    fix:
+      sweepFix ??
+      "approval log advance --pr — publish them now, or run the daemon with --advance",
   };
 }
 
