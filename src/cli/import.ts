@@ -14,6 +14,15 @@
  * an importer that could clobber a policy file would be the most attractive
  * thing in the repository for an agent to point at `APPROVAL.md`.
  *
+ * ## Two drafts, when the source carries both
+ *
+ * Since APRV-240 a source that also names one of the four values headings gets
+ * a DRAFT values block printed after the policy draft, and `--json` carries it
+ * as `values_draft`. It is the same kind of object: printed, applying nothing.
+ * A source with no such heading gets `values_draft: null` and no fence at all,
+ * because an absent values block is a declaration of its own (SPEC.md §5.3) and
+ * drafting one would be this verb making it.
+ *
  * ## Exit codes
  *
  * 0 for every successful read, including a source with no permissions section:
@@ -29,6 +38,7 @@ import {
   importAgentsMd,
   renderDraftPolicy,
   renderFencedDraft,
+  valuesDraftOf,
   type AgentsMdImport,
 } from "../core/agents-md.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
@@ -73,6 +83,7 @@ function jsonShape(
   result: AgentsMdImport,
   source: string,
   out: string | null,
+  valuesDraft: string | null,
 ): Record<string, unknown> {
   return {
     ok: true,
@@ -87,6 +98,11 @@ function jsonShape(
     unmapped: result.unmapped.map((bullet) => ({ text: bullet.text, section: bullet.section })),
     ignored: result.ignored,
     warnings: result.warnings,
+    // APRV-240. The fenced values draft, or null when the source named none of
+    // the four values headings. Null is the honest answer there, and not an
+    // empty draft: a file with no values block is an operator who declared no
+    // values, and a draft of one would be this verb making the declaration.
+    values_draft: valuesDraft,
   };
 }
 
@@ -122,6 +138,7 @@ function commandImportAgentsMd(argv: string[], streams: Streams, cwd: string): n
   }
 
   const result = importAgentsMd(markdown);
+  const valuesDraft = valuesDraftOf(result, source);
 
   // The source label is the path AS GIVEN, so the draft's provenance line is a
   // property of the invocation rather than of the machine it ran on. No date is
@@ -130,7 +147,10 @@ function commandImportAgentsMd(argv: string[], streams: Streams, cwd: string): n
   if (outFlag !== null) {
     const outPath = absolute(outFlag, cwd);
     try {
-      writeFileSync(outPath, renderDraftPolicy(result, source), { encoding: "utf8", flag: "wx" });
+      writeFileSync(outPath, renderDraftPolicy(result, source, result.values), {
+        encoding: "utf8",
+        flag: "wx",
+      });
     } catch (cause) {
       const exists = (cause as NodeJS.ErrnoException).code === "EEXIST";
       return ioError(
@@ -144,12 +164,13 @@ function commandImportAgentsMd(argv: string[], streams: Streams, cwd: string): n
   }
 
   if (json) {
-    streams.out(`${JSON.stringify(jsonShape(result, source, outFlag))}\n`);
+    streams.out(`${JSON.stringify(jsonShape(result, source, outFlag, valuesDraft))}\n`);
     return EXIT_OK;
   }
 
-  if (outFlag === null) streams.out(renderFencedDraft(result, source));
-  else streams.out(`wrote draft policy YAML to ${outFlag}\n`);
+  if (outFlag === null) streams.out(renderFencedDraft(result, source, result.values));
+  else if (valuesDraft === null) streams.out(`wrote draft policy YAML to ${outFlag}\n`);
+  else streams.out(`wrote draft policy and values blocks to ${outFlag}\n`);
 
   for (const heading of result.ignored) {
     streams.err(
@@ -157,6 +178,11 @@ function commandImportAgentsMd(argv: string[], streams: Streams, cwd: string): n
     );
   }
   for (const warning of result.warnings) streams.err(`approval: ${warning}\n`);
+  if (valuesDraft !== null) {
+    streams.err(
+      "approval: a DRAFT values block is included. Every bullet is in `wants:` and nothing is graded: love/like/dislike are yours to fill in, and this verb will not guess a grade for you. The values block lives inside APPROVAL.md, so pasting it invalidates the standing attestation until you renew it\n",
+    );
+  }
   streams.err(
     "approval: this is a DRAFT and authorizes nothing. Nothing was written to APPROVAL.md, nothing was logged, nothing was attested. Review it, then paste it into APPROVAL.md and run `approval policy amend`\n",
   );

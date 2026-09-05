@@ -168,6 +168,15 @@ of it; where the two disagree, `APPROVAL.md` wins, and `approval hook classify
   it wrong, an odd instruction, being stuck). It is a local gitignored file
   (`.approval-journal/`) that Carter reads with `approval journal read`; nothing
   written there changes any verdict or sampling probability.
+- `approval values` and `approval feedback` — the channel in the other
+  direction (APRV-237..240). Run both at the start of a session. `values`
+  prints the operator's values block from APPROVAL.md (what Carter loves,
+  likes, dislikes, wants from you, and how they respond); `feedback` prints
+  the reactions and notes humans left on this log's actions. Both are
+  human-authored guidance and neither is policy: they widen nothing and narrow
+  nothing (SPEC §11.1 invariant 10). A file with no values block means the
+  operator has declared no values, which is information rather than an
+  invitation to infer some.
 
 ### Require approval first
 - Merges to `main` (including `gh pr merge`), tag creation

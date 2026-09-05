@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "like": ["small reviewable commits"],
+  "classes": {
+    "message.send": {
+      "autonomy": "autonomous"
+    }
+  }
+}

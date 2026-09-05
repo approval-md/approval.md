@@ -135,6 +135,22 @@ export interface AdapterConformanceHarness {
   credentials?: Readonly<Record<string, string>>;
   /** A declared class this adapter must refuse. Defaults to a synthetic one. */
   foreignClass?: string;
+  /**
+   * What the optional `observe` check needs (APRV-245). Ignored by an adapter
+   * that implements no `observe`.
+   *
+   * `writes` is how the fixture reports the number of WRITE requests its far
+   * side has received; the check reads it before and after and requires the
+   * number not to move. Without it the check still runs and still proves the
+   * log was untouched, but the "did not POST" claim rests on the log alone, so
+   * an adapter with a reachable fixture should supply it.
+   */
+  observeProbe?: {
+    /** The window to ask about. Defaults to one wide enough to include anything. */
+    window?: { since: string; until: string };
+    /** Write requests the far side has received so far. */
+    writes?(): number;
+  };
 }
 
 /** An adapter wrapped so the suite can see whether `act` ran, and with what. */
@@ -155,9 +171,13 @@ function spyOn(adapter: Adapter, before?: (input: ActInput) => void): Spy {
   const calls: ActInput[] = [];
   return {
     calls,
+    // SPREAD, never a fresh `{name, classes, act}` literal (APRV-245). The
+    // contract gained optional members — `requiredCredentials`, `observe` — and
+    // a wrapper that rebuilt the object from three fields would quietly test an
+    // adapter the caller never wrote: the one under test minus everything
+    // optional it declares.
     adapter: {
-      name: adapter.name,
-      classes: adapter.classes,
+      ...adapter,
       async act(input: ActInput): Promise<ActOutcome> {
         calls.push(input);
         before?.(input);
@@ -220,6 +240,83 @@ export async function runAdapterConformance(
   await checkSingleUse(t, makeAdapter, harness);
   await checkCredentialScope(t, makeAdapter, harness);
   await checkReportedFailure(t, makeAdapter, harness);
+  await checkObserve(t, makeAdapter, harness);
+}
+
+// ---------------------------------------------------------------------------
+// (8) observe, when the adapter offers one, reads and does not write (APRV-245)
+// ---------------------------------------------------------------------------
+
+/**
+ * The optional `observe` (SPEC.md §10.4, APRV-245).
+ *
+ * SKIPPED for an adapter that declares none — it is optional, and an adapter
+ * without it is conformant. For one that declares it, three properties, and
+ * each is the failure somebody would otherwise ship:
+ *
+ * - **It does not write.** A coverage read that sent something would be the
+ *   worst defect this contract could carry. The harness's `writes()` counts the
+ *   far side's write requests where the fixture can see them (the AgentMail mock
+ *   counts POSTs), and the log is counted on both sides regardless: no record is
+ *   appended by a read.
+ * - **It does not throw.** A reporting verb calls this, and an adapter whose
+ *   far side is quiet must answer "nothing" rather than take the report down.
+ *   A configured harness reaching a live fixture has no excuse to throw.
+ * - **Every effect carries a class the adapter serves.** An effect of a class
+ *   this adapter does not handle is an effect it cannot have observed, and
+ *   admitting one would let a source contribute rows nothing could ever cover.
+ */
+async function checkObserve(
+  t: ConformanceContext,
+  makeAdapter: () => Adapter,
+  harness: AdapterConformanceHarness,
+): Promise<void> {
+  const adapter = makeAdapter();
+  if (adapter.observe === undefined) {
+    say(t, "observe() is not implemented; the optional read is skipped");
+    return;
+  }
+  say(t, "observe() reads: no write to the far side, no throw, and only its own classes");
+  const unit = await harness.setup();
+  try {
+    const probe = harness.observeProbe;
+    const writesBefore = probe?.writes?.() ?? 0;
+    const recordsBefore = recordsOf(unit.logPath).length;
+    const window = probe?.window ?? {
+      since: "1970-01-01T00:00:00Z",
+      until: "2999-12-31T23:59:59Z",
+    };
+
+    const effects = await adapter.observe(
+      window,
+      inMemoryCredentials({
+        ...harness.credentials,
+        [harness.credential.name]: harness.credential.value,
+      }),
+    );
+
+    assert.equal(
+      probe?.writes?.() ?? 0,
+      writesBefore,
+      "observe() made a write request against the far side; it is a READ, called outside any grant window and with no token (SPEC.md §10.4)",
+    );
+    assert.equal(
+      recordsOf(unit.logPath).length,
+      recordsBefore,
+      "observe() appended to the log; a coverage read records nothing",
+    );
+    for (const effect of effects) {
+      assert.ok(
+        adapter.classes.includes(effect.class),
+        `observe() returned an effect of class ${JSON.stringify(effect.class)}, which this adapter does not serve`,
+      );
+      assert.ok(effect.id.length > 0, "an observed effect must carry the provider's own id");
+      assert.ok(effect.source.length > 0, "an observed effect must name its source");
+    }
+    assertClean(unit.logPath);
+  } finally {
+    unit.cleanup?.();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +412,7 @@ async function checkWrongClass(
   try {
     const base = makeAdapter();
     const foreign: Adapter = {
-      name: base.name,
+      ...base,
       classes: [harness.foreignClass ?? "conformance.class.this-adapter-does-not-serve"],
       act: base.act.bind(base),
     };
@@ -475,8 +572,7 @@ async function checkCredentialScope(
     let escaped: unknown = null;
     let stashed: CredentialProvider | null = null;
     const leaky: Adapter = {
-      name: base.name,
-      classes: base.classes,
+      ...base,
       async act(input: ActInput): Promise<ActOutcome> {
         stashed = input.credentials;
         const got = input.credentials.get(name);
@@ -553,8 +649,7 @@ async function checkReportedFailure(
   try {
     const base = makeAdapter();
     const failing: Adapter = {
-      name: base.name,
-      classes: base.classes,
+      ...base,
       act(): ActOutcome {
         return { ok: false, code: "upstream-rejected", message: "the far side said no" };
       },

@@ -337,14 +337,45 @@ async function checkTerminalNotArmed(
         `a second decision must refuse already-decided, got ${second.code}`,
       );
     }
-    assert.equal(
-      recordsOf(unit.logPath).length,
-      before,
-      "the refused second decision appended something",
-    );
+    assertNoDecisionRecorded(unit.logPath, before, "the refused second decision");
   } finally {
     unit.cleanup?.();
   }
+}
+
+/**
+ * A refused gesture recorded no DECISION (APRV-113, amended APRV-235).
+ *
+ * This used to be a byte count: nothing at all was appended, so "no decision"
+ * and "no record" were one assertion. They were never one requirement, and
+ * APRV-235 separated them — a refused HUMAN decision now appends one
+ * `audit.decision_refused`, because a person's answer is a fact even when the
+ * gate cannot honour it, and a `policy-drift` refusal appends the
+ * `approval.withdrawn` that takes the void request out of every queue.
+ *
+ * What conformance asks of a channel is unchanged, and is what this checks: the
+ * gesture produced no `approval.granted`, `approval.rejected` or
+ * `approval.revoked`, so an affordance left on a screen collected nothing. A
+ * second implementation that writes only the audit trail passes; one that
+ * records a decision does not, and one that writes some third thing does not
+ * either.
+ */
+function assertNoDecisionRecorded(logPath: string, before: number, what: string): void {
+  const written = recordsOf(logPath).slice(before);
+  const decisions = written
+    .map((record) => record.event)
+    .filter((event) =>
+      event === "approval.granted" || event === "approval.rejected" || event === "approval.revoked",
+    );
+  assert.deepEqual(decisions, [], `${what} recorded a decision`);
+  const unexpected = written
+    .map((record) => record.event)
+    .filter((event) => event !== "audit.decision_refused" && event !== "approval.withdrawn");
+  assert.deepEqual(
+    unexpected,
+    [],
+    `${what} appended something that is neither a refusal's audit trail nor the withdrawal of a void request`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -450,11 +481,7 @@ async function checkWithdrawal(
         `a decision on a withdrawn request must refuse request-withdrawn, got ${outcome.code}`,
       );
     }
-    assert.equal(
-      recordsOf(unit.logPath).length,
-      before,
-      "the refused decision appended something",
-    );
+    assertNoDecisionRecorded(unit.logPath, before, "the refused decision");
   } finally {
     unit.cleanup?.();
   }

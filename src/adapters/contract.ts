@@ -101,6 +101,7 @@ import {
   type ExecuteOptions,
   type ExecuteRefusal,
 } from "../core/execute.js";
+import type { ObservationWindow, ObservedEffect } from "../core/coverage.js";
 import { payloadHash } from "../core/payload.js";
 import type { Autonomy } from "../core/policy-load.js";
 import type { EventRecord } from "../core/log.js";
@@ -475,6 +476,41 @@ export interface Adapter {
    */
   requiredCredentials?: readonly string[];
   act(input: ActInput): Promise<ActOutcome> | ActOutcome;
+  /**
+   * What this adapter's PROVIDER recorded happening in `window` (APRV-245).
+   *
+   * Optional, and an adapter that omits it behaves exactly as it always did.
+   * It exists because MCP use is voluntary: an agent can route an action through
+   * the gate, or it can act. What keeps the arrangement honest is that a side
+   * effect leaves a witness this project does not write, and for an adapter-
+   * backed class the witness is the provider's own record of what it did.
+   * `approval coverage` reads that record back and joins it against the verified
+   * log, so an effect with no matching record is visible as a gap.
+   *
+   * Four rules bind an implementation, and they are the mirror of {@link grant}'s:
+   *
+   * - **Read-only.** It performs no write of any kind against the far side. A
+   *   coverage report that could send is a report nobody dares to run.
+   * - **No token.** It is called OUTSIDE any grant window, by a reporting verb,
+   *   with a provider the caller built for the purpose. There is no
+   *   {@link ExecutionGrant} in scope and none is needed: reading what already
+   *   happened authorizes nothing.
+   * - **The caller redacts.** Whatever the far side says may be quoted back, so
+   *   the caller runs every returned `detail` through {@link redactSecrets} with
+   *   the secrets the adapter's own configuration reader reported. An
+   *   implementation scrubs its strings as well; two passes are cheap and a leak
+   *   is not (SPEC.md §11.1 invariant 3).
+   * - **No message content.** A detail line names an effect for a person to
+   *   recognize (a subject, a recipient count, an id) and never a body: the
+   *   report is read by somebody who did not approve the message.
+   *
+   * Every returned effect carries a class this adapter serves, so a class the
+   * adapter never handles cannot arrive dressed as an effect it observed.
+   */
+  observe?(
+    window: ObservationWindow,
+    credentials: CredentialProvider,
+  ): Promise<readonly ObservedEffect[]>;
 }
 
 // ---------------------------------------------------------------------------

@@ -107,6 +107,11 @@ import { isAdvanceBookkeeping } from "../core/advance-cycle.js";
 import { repoRoot } from "../cli/git-scope.js";
 import { checkLogAnchor, resolveAnchor, type AnchorCheck } from "../cli/log-anchor.js";
 import {
+  checkLogCheckpoints,
+  checkpointPolicyOf,
+  type CheckpointCheck,
+} from "../core/checkpoint.js";
+import {
   authorizeAdvance,
   reconcileDanglingAdvance,
   runAdvanceAsync,
@@ -124,6 +129,7 @@ import {
   type DarkSessionSweepOptions,
   type DarkSessionWatch,
 } from "./dark-session.js";
+import type { DrawServeResult } from "./draw.js";
 import type { GitEvidenceRecorder } from "./git-evidence.js";
 import { prunePayloads, type PruneReason } from "./prune.js";
 import {
@@ -186,6 +192,15 @@ export type DaemonEvent =
        * about. `rev: null` is an honest "none was found", never a silent pass.
        */
       anchor: { rev: string | null; seq: number | null; reason: string | null };
+      /**
+       * Where this run is answering live draws, or `null` when it is not
+       * (APRV-208). Additive, and on the first line for the reason `read_proof`
+       * is: whether `supervised-live` is actually live on this machine is a
+       * configuration an operator must be able to see without asking the process
+       * anything, and the difference between "sampled at 10%" and "gated at
+       * 100%" is exactly this field being a path rather than `null`.
+       */
+      draw?: string | null;
     }
   | {
       event: "drift";
@@ -367,6 +382,13 @@ export type DaemonEvent =
        * a committed copy that cannot have changed since the last look.
        */
       anchor?: { status: "pass" | "behind" | "skip"; rev: string | null; seq: number | null };
+      /**
+       * The checkpoint check this tick made, or `null` when it made none
+       * (APRV-220). Additive, and on the same full re-proof cadence as the
+       * anchor for the same reason: a tick that re-proved nothing about the
+       * prefix has learned nothing new about the records inside it.
+       */
+      checkpoints?: { status: "pass" | "skip"; verified: number; keys: number };
       /** Per-phase duration in milliseconds, in the order the tick runs them. */
       phases: {
         drift: number;
@@ -447,6 +469,22 @@ export const DAEMON_WARNING_CODES = [
    * repair, and the next tick asks again.
    */
   "anchor-behind",
+  /**
+   * `audit.checkpoint_every` says a human-signed checkpoint is due and the log
+   * carries none that recent (APRV-220). A WARNING and never a stop, at every
+   * layer: a human who has been away is not a forger, and a daemon that stopped
+   * for want of a tap is a daemon whose operator turns the check off.
+   */
+  "checkpoint-due",
+  /**
+   * The live-draw socket could not be served (APRV-208). Nothing is degraded:
+   * every asker fails closed to a human decision, which is exactly what happens
+   * on a machine where no daemon runs at all. It is a warning rather than a
+   * silence because the operator's `supervised-live` classes are gating at 100%
+   * while it stands, and that is a thing to know rather than to discover from a
+   * month of taps.
+   */
+  "draw-unavailable",
 ] as const;
 
 export type DaemonWarningCode = (typeof DAEMON_WARNING_CODES)[number];
@@ -550,6 +588,26 @@ export interface DaemonOptions {
    * divergence both want.
    */
   anchor?: { enabled?: boolean; rev?: string; remote?: string; base?: string | null };
+  /**
+   * The human-signed checkpoint check (APRV-220). On unless explicitly
+   * disabled, for the reason the anchor is: it reads the log this loop has
+   * already verified plus the policy, and writes nothing anywhere.
+   */
+  checkpoints?: { enabled?: boolean };
+  /**
+   * The live-draw server (APRV-208), or absent when this run answers no draws.
+   *
+   * Constructed by the CALLER, not here, and the reason is the sampling secret:
+   * the CLI resolves it from the environment the operator established (the one
+   * `eval "$(approval env)"` writes) and hands down a server that has closed
+   * over it. `DaemonOptions` therefore never carries a secret, this loop never
+   * sees one, and a daemon started in a shell where the secret does not resolve
+   * simply gets no server and every supervised-live action keeps gating, which
+   * is the behaviour of every release before this one.
+   *
+   * Typed structurally rather than as `DrawServer` so a test can inject one.
+   */
+  draw?: { start(): DrawServeResult; close(): void };
   sink: DaemonSink;
 }
 
@@ -568,13 +626,20 @@ export interface DaemonOptions {
  * flavour of `log-corrupt` because the two say different things to whoever
  * reads the stopped line — one means the file contradicts itself, the other
  * means the file contradicts the record of it.
+ *
+ * `checkpoint-invalid` (APRV-220) is the fifth, and it is distinct from both
+ * for the same kind of reason: it means the file contradicts a signature a
+ * human made over it. The three failures name three different witnesses, and
+ * flattening them would leave the operator's first question — which witness
+ * disagrees? — answerable only by reading a message.
  */
 export type DaemonOutcome =
   | { kind: "stopped"; reason: string }
   | { kind: "log-unreadable"; message: string }
   | { kind: "log-torn-tail"; message: string }
   | { kind: "log-corrupt"; message: string }
-  | { kind: "anchor-diverged"; message: string };
+  | { kind: "anchor-diverged"; message: string }
+  | { kind: "checkpoint-invalid"; message: string };
 
 // ---------------------------------------------------------------------------
 // The loop
@@ -677,12 +742,20 @@ export class Daemon {
     rev: string | null;
     seq: number | null;
   } | null = null;
+  /** This tick's checkpoint check (APRV-220), or `null` when it made none. */
+  private checkpointsThisTick: {
+    status: "pass" | "skip";
+    verified: number;
+    keys: number;
+  } | null = null;
   /** Basenames {@link writeBack} placed this tick, so the watcher can ignore them. */
   private selfWrites = new Set<string>();
   /** The previous tick's, kept one generation: watch events arrive after the write. */
   private previousSelfWrites = new Set<string>();
   private settle: ((outcome: DaemonOutcome) => void) | null = null;
   private finished = false;
+  /** Whether {@link DaemonOptions.draw} actually bound (APRV-208). */
+  private drawServing = false;
 
   constructor(options: DaemonOptions) {
     this.options = options;
@@ -701,6 +774,23 @@ export class Daemon {
       this.lastAdvanceAt = Number.isNaN(started) ? 0 : started;
 
       if (!this.options.once) this.attachWatchers();
+      // APRV-208. Before the `started` line, so that line can say truthfully
+      // whether this run is answering draws. A refusal is reported and the loop
+      // continues: askers fail closed to a human, which is where they were
+      // going with no daemon at all.
+      let drawPath: string | null = null;
+      if (this.options.draw !== undefined) {
+        const served = this.options.draw.start();
+        if (served.ok) {
+          drawPath = served.path;
+          this.drawServing = true;
+        } else {
+          this.warn(
+            "draw-unavailable",
+            `live draws are not being served (${served.reason}): ${served.detail}. Every supervised-live action gates to a human until this is fixed.`,
+          );
+        }
+      }
       this.emit({
         event: "started",
         log: this.display(this.options.logPath),
@@ -715,6 +805,7 @@ export class Daemon {
         // name the witness this run holds itself to, and resolving it costs two
         // git reads and no log read at all.
         anchor: this.resolveAnchorForReport(),
+        draw: drawPath,
       });
 
       const outcome = this.tick();
@@ -760,6 +851,19 @@ export class Daemon {
       }
     }
     this.watchers.length = 0;
+
+    // APRV-208. The socket goes with the process that served it: a socket file
+    // outliving its server is a hook connecting to nothing, which is a slower
+    // road to the same gated verdict but a confusing one. Closed before the
+    // shutdown flush, because nothing in the flush answers draws.
+    if (this.drawServing && this.options.draw !== undefined) {
+      this.drawServing = false;
+      try {
+        this.options.draw.close();
+      } catch {
+        // A server that will not close cannot stop the daemon from stopping.
+      }
+    }
 
     // The shutdown flush (APRV-204). A clean stop with unpublished records
     // publishes them before it goes: the daemon is the log's writer, and a
@@ -939,6 +1043,7 @@ export class Daemon {
       this.reads = 0;
       this.fullReproofThisTick = false;
       this.anchorThisTick = null;
+      this.checkpointsThisTick = null;
       // One generation of the daemon's own task-file writes is kept, because a
       // watch event arrives after the write that caused it and often after the
       // tick that made it has ended.
@@ -975,6 +1080,28 @@ export class Daemon {
             anchor.status === "skip"
               ? { status: "skip", rev: null, seq: null }
               : { status: anchor.status, rev: anchor.anchor.rev, seq: anchor.anchor.head.seq };
+        }
+
+        // The second witness (APRV-220), on the same cadence and immediately
+        // after the first. A log whose own signed checkpoints contradict it is
+        // no more fit to append to than one whose committed copy does, and the
+        // sweeps below all append. Independent of the anchor in both
+        // directions: a skip on one never excuses the other.
+        const checkpoints = this.checkCheckpoints(opening.records);
+        if (checkpoints !== null) {
+          if (checkpoints.status === "refused") {
+            return { kind: "checkpoint-invalid", message: checkpoints.message };
+          }
+          if (checkpoints.status === "skip") {
+            this.checkpointsThisTick = { status: "skip", verified: 0, keys: 0 };
+          } else {
+            if (checkpoints.warning !== null) this.warn("checkpoint-due", checkpoints.warning);
+            this.checkpointsThisTick = {
+              status: "pass",
+              verified: checkpoints.checkpoints.length,
+              keys: checkpoints.keys,
+            };
+          }
         }
       }
 
@@ -1064,6 +1191,7 @@ export class Daemon {
         reads: this.reads,
         reproof: this.fullReproofThisTick ? "full" : "incremental",
         ...(this.anchorThisTick === null ? {} : { anchor: this.anchorThisTick }),
+        ...(this.checkpointsThisTick === null ? {} : { checkpoints: this.checkpointsThisTick }),
         phases: {
           drift: Math.round(phases.drift * 10) / 10,
           ttl: Math.round(phases.ttl * 10) / 10,
@@ -1476,6 +1604,40 @@ export class Daemon {
       records,
       ...this.anchorWhere(),
       ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Human-signed checkpoints (APRV-220)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Demand every checkpoint inside the verified records.
+   *
+   * `null` when the check is off. Everything else — including "no key is
+   * configured" — comes back as a {@link CheckpointCheck} the caller reports,
+   * because a check that could not look must never be read as a check that
+   * looked and was satisfied.
+   *
+   * The policy is read here, once per comparison rather than once per run: the
+   * keys are the human's and the human may add one while this loop is running,
+   * and a daemon holding a key list from startup would keep refusing a
+   * checkpoint the operator had already authorized by editing the policy.
+   */
+  private checkCheckpoints(records: readonly EventRecord[]): CheckpointCheck | null {
+    if (this.options.checkpoints?.enabled === false) return null;
+    const configured = checkpointPolicyOf(
+      this.options.policy,
+      this.options.schemaDir,
+    );
+    return checkLogCheckpoints({
+      records,
+      publicKeys: configured.publicKeys,
+      checkpointEveryMs: configured.checkpointEveryMs,
+      keysUnavailable: configured.unloadable,
+      ...(this.options.clock === undefined
+        ? {}
+        : { now: Date.parse(this.options.clock()) }),
     });
   }
 

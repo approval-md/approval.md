@@ -1,0 +1,6 @@
+{
+  "version": "0.1",
+  "audit": {
+    "checkpoint_keys": ["not a key, and not base64 either"]
+  }
+}

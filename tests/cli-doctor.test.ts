@@ -382,6 +382,16 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // log last saw a record from it, appended for the same reason. The only
       // row that asks anything about a program outside this repository.
       "harness-version-unverified",
+      // APRV-208: whether a daemon is answering live draws for this log,
+      // appended for the same reason. It is the one row that reports whether
+      // `supervised-live` is actually live on this machine rather than gating
+      // at 100%, a difference invisible from inside the policy file.
+      "live-draw",
+      // APRV-238: whether the optional values block parses, appended for the
+      // same reason. It is the only row that would ever report a broken one:
+      // `policy check` says nothing about it on purpose, because guidance is
+      // not enforcement and its answer is the enforcement trace.
+      "values-block",
     ],
   );
   assert.deepEqual(
@@ -454,6 +464,16 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // path, which is also why this suite never reaches a real `claude`
       // (APRV-227).
       "skip",
+      // live-draw skips: the healthy fixture's policy declares no
+      // supervised-live class, so no draw is ever made and a missing socket is
+      // not a fault. The row only ever fails where a live class is declared and
+      // nothing is answering, which is the state it exists to name (APRV-208).
+      "skip",
+      // values-block passes: the fixture policy carries no approval-values
+      // block, and an operator who declared no values has declared something.
+      // The question was asked and the answer is "none", which is a pass rather
+      // than a skip (APRV-238).
+      "pass",
     ],
   );
   for (const entry of parsed.checks) {
@@ -492,7 +512,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 22);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 24);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
@@ -951,9 +971,10 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  // 22 since APRV-227 appended `harness-version-unverified`, the row that asks
-  // whether the binary hosting the hook changed under it.
-  assert.equal(parsed.checks.length, 22);
+  // 23: APRV-227 appended `harness-version-unverified` (whether the binary
+  // hosting the hook changed under it) and APRV-208 appended `live-draw`
+  // (whether a daemon is answering supervised-live draws for this log).
+  assert.equal(parsed.checks.length, 24);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);

@@ -503,6 +503,8 @@ believed was in force. Full semantics: SPEC.md section 5.
 | `audit.supervised_sample_rate` | Fraction of `supervised` actions escalated for retrospective review, in [0, 1] (§5.2). |
 | `audit.sampling_secret_env` | Name of the variable holding the operator's HMAC sampling secret. Unnamed means sampling is off and says so (§5.2, §11). |
 | `audit.skew_tolerance` | How far a gate-typed event's timestamp may step back before verification reports an anomaly. Report-only; default 2 seconds (§8). |
+| `audit.checkpoint_keys` | Public halves of the Ed25519 keys permitted to sign a `log.checkpoint`, base64 DER SPKI. The private halves live in the vault and never in this file. A list, so a retired key stays listed: a checkpoint signed by a key the list does not carry is refused (§9, APRV-220). |
+| `audit.checkpoint_every` | How long the log may go without a human-signed checkpoint before verification says one is due. Report-only at every layer: a due checkpoint is a warning and never a refusal (§9, APRV-220). |
 | `daemon.read_proof` | Which prefix proof a long-lived reader runs before reusing a cached prefix: `full` (the default, re-hash the whole prefix on every read) or `incremental` (hash only the appended bytes, re-proving in full on a cadence). One-shot processes, the Claude Code hook and `approval log verify` prove in full regardless (§5.2, APRV-217). |
 | `daemon.full_reproof_every` | Reads one full re-proof may cover under `incremental`, the anchoring read included. Default 50 (§5.2). |
 | `daemon.full_reproof_after` | Wall clock one full re-proof may cover under `incremental`. Duration string, default `60s` (§5.2). |
@@ -725,6 +727,16 @@ for integration has an entry in
 [docs/integrations-considered.md](docs/integrations-considered.md): what it
 exposes, how it fits, the verdict, and the next step, so the question is
 answered once.
+
+One of those entries has a runbook of its own.
+[examples/grok-bot-connector/runbook.md](examples/grok-bot-connector/runbook.md)
+puts a Grok Bot agent on the far end of `approval mcp serve --http --guest`,
+behind a tunnel that is itself gated, and rehearses both halves of the story: the
+agent asking for a branch push and an email and a human deciding them on a phone,
+then the agent skipping the gate entirely. What holds when it does is the point.
+Credentials answer only to single-use tokens, so the send it was never granted
+stays impossible, and `approval coverage` reports every observed effect with its
+evidence seq or `none`.
 
 ## License
 

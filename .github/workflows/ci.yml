@@ -187,6 +187,16 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - name: fetch the records branches the guard may read
+        # The log at this head is main's log at branch time and trails the
+        # primary checkout's live log, so a grant tapped during the session
+        # reaches a committed log only when an advance lands (APRV-260). The
+        # guard therefore reads the freshest committed copy that carries THIS
+        # head's own chain, and those copies live on `records-*` branches.
+        # `fetch-depth: 0` already brings them; this makes the dependency
+        # explicit rather than resting on checkout's default refspec, and it
+        # names no untrusted context value at all.
+        run: git fetch --no-tags origin '+refs/heads/records-*:refs/remotes/origin/records-*'
       - name: cross-check protected paths against the committed log
         # Context values reach the script as environment variables and are never
         # interpolated into its text, for the reason the classify job states: a
@@ -203,7 +213,14 @@ jobs:
           fi
           base="$(git merge-base "$target" HEAD)"
           echo "base=$base head=$(git rev-parse HEAD)"
-          node scripts/protected-path-guard.mjs --base "$base" --head HEAD
+          # The guard's first line says which committed copy of the log it read
+          # and how far past head that copy reaches; it is repeated into the job
+          # summary so a reader can tell a stale log from a missing grant
+          # without opening the log.
+          node scripts/protected-path-guard.mjs --base "$base" --head HEAD | tee "$RUNNER_TEMP/guard.txt"
+          # The summary line is informational: the guard's exit status above is
+          # the verdict, and a missing line must not turn a required check red.
+          grep '^log from ' "$RUNNER_TEMP/guard.txt" >> "$GITHUB_STEP_SUMMARY" || true
 
   full:
     # The full gate's bulk, sharded (APRV-149). Three jobs run a third of the

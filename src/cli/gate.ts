@@ -49,6 +49,10 @@ import { readFileSync } from "node:fs";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
+// The graded reaction a grant may carry (APRV-239). Defined in `core/audit.ts`
+// beside the projection that reads it back, so there is one vocabulary and one
+// spelling of it across both surfaces that write it.
+import { isReaction, REACTIONS } from "../core/audit.js";
 import {
   decide,
   expire,
@@ -61,6 +65,7 @@ import {
   type GateOptions,
   type GateRefusal,
 } from "../core/gate.js";
+import { recordRefusedDecision } from "../core/decision-refusal.js";
 import { isWithdrawReason, WITHDRAW_REASONS } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
@@ -464,7 +469,7 @@ export function commandDecide(
   const helpText = DECISION_HELP[decision];
   const outcome = front(
     argv,
-    { ...COMMON_FLAGS, ...POLICY_FLAGS, "--as": "string", "--note": "string" },
+    { ...COMMON_FLAGS, ...POLICY_FLAGS, "--as": "string", "--note": "string", "--reaction": "string" },
     helpText,
     streams,
     cwd,
@@ -501,11 +506,57 @@ export function commandDecide(
   }
 
   const note = stringFlag(flags, "--note");
-  const result = decide(logPath, actionKey, decision, actor, {
+
+  // APRV-239. `--reaction` is a GRANT flag. A rejection or a revocation already
+  // has one field for the human's reason and that field is `--note`; a grade
+  // beside a refusal would be a second answer to a question that has one, and
+  // SPEC.md §5.2 says those two decisions carry no reaction at all. Refused at
+  // exit 2 rather than ignored, so a caller that meant something by it finds out.
+  const reactionFlag = stringFlag(flags, "--reaction");
+  if (reactionFlag !== null && decision !== "grant") {
+    return usageError(
+      streams,
+      json,
+      `--reaction is a grant flag; ${decision} carries no reaction. Its reason IS its note, so put what you want to say in --note "<text>"`,
+      helpText,
+    );
+  }
+  if (reactionFlag !== null && !isReaction(reactionFlag)) {
+    return usageError(
+      streams,
+      json,
+      `--reaction expects one of ${REACTIONS.join(" | ")}, got ${JSON.stringify(reactionFlag)}`,
+      helpText,
+    );
+  }
+
+  const decideOptions = {
     ...gateOptions(flags, cwd),
     ...(note === null ? {} : { note }),
-  });
-  if (!result.ok) return emitRefusal(streams, json, result);
+    ...(reactionFlag === null ? {} : { reaction: reactionFlag }),
+  };
+  const result = decide(logPath, actionKey, decision, actor, decideOptions);
+  if (!result.ok) {
+    // APRV-235, and the same append the channels make through
+    // `recordChannelDecision`: a person ran this verb, the gate would not take
+    // their answer, and the log used to say nothing about it at all. `decide`
+    // appends nothing on a refusal by design; the surface that collected the
+    // gesture is what knows a HUMAN produced it. On `policy-drift` this also
+    // withdraws the request the gate has just declared void, so it stops being
+    // offered on every other surface. Best effort: the refusal below is printed
+    // and the exit code is unchanged whatever this write does.
+    recordRefusedDecision(
+      logPath,
+      { actionKey, decision, actor, channel: "cli" },
+      {
+        code: result.code,
+        message: result.message,
+        ...(result.drift === undefined ? {} : { drift: result.drift }),
+      },
+      decideOptions,
+    );
+    return emitRefusal(streams, json, result);
+  }
 
   // APRV-17: a grant mints the single-use token and this is the ONLY place it is
   // ever printed. The log holds sha256(token) alone, so once this output is gone

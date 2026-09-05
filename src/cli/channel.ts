@@ -72,6 +72,7 @@ import { isAbsolute, join, resolve as resolvePathSegments } from "node:path";
 import { CliChannel } from "../channels/cli.js";
 import {
   recordChannelDecision,
+  refusedDecisionLine,
   type ChannelRequest,
   type DecisionOutcome,
 } from "../channels/contract.js";
@@ -176,12 +177,22 @@ function refusalExit(code: string): number {
   }
 }
 
-/** One line of human-readable outcome per decision. */
+/**
+ * One line of human-readable outcome per decision.
+ *
+ * A refusal since APRV-235 leads with the sentence the Telegram message edit
+ * shows, from the one helper both surfaces share, and keeps the gate's own
+ * message after it. The person at this terminal and the person holding the
+ * phone are usually the same person, and they were reading two different
+ * accounts of one refused tap. The gate's message stays because a terminal can
+ * afford the detail a chat bubble cannot, and because it is the text that names
+ * the hashes.
+ */
 function describeOutcome(outcome: DecisionOutcome): string {
   if (outcome.ok) {
     return `${outcome.decision === "grant" ? "granted" : "rejected"} ${outcome.action_key} -> ${outcome.state} at seq ${outcome.record.seq}`;
   }
-  return `refused: ${outcome.code}: ${outcome.message}`;
+  return `refused: ${outcome.code}: ${refusedDecisionLine(outcome.code)}\n  ${outcome.message}`;
 }
 
 export function commandChannelCli(argv: string[], streams: Streams, cwd: string): number {

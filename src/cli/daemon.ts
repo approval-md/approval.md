@@ -41,6 +41,7 @@ import {
   type DaemonOutcome,
 } from "../daemon/daemon.js";
 import { defaultCadence, type AdvanceCadence } from "../daemon/advance.js";
+import { drawServerFor } from "../daemon/draw.js";
 import { enableGitEvidence, type GitEvidenceEvent } from "../daemon/git-evidence.js";
 import {
   DEFAULT_DARK_INTERVAL_MS,
@@ -95,6 +96,12 @@ const RUN_FLAGS: Record<string, FlagKind> = {
   // The dark-session sweep (APRV-192). Opt-in for the reason above, in a milder
   // form: it runs `git log` over every worktree of the checkout on a cadence.
   "--dark-sessions": "boolean",
+  // The live draw (APRV-208). A way OUT only: serving draws needs the sampling
+  // secret in this process's environment, which is already an operator's
+  // deliberate act, so there is nothing to opt into. This is here so an operator
+  // can take the control back without unsetting a variable their shell profile
+  // exports.
+  "--no-draw": "boolean",
   "--dark-window": "string",
   "--dark-interval": "string",
   // The prefix proof (APRV-217). A flag here beats the `daemon` policy block
@@ -432,6 +439,11 @@ export function exitForDaemonOutcome(outcome: DaemonOutcome): number {
     // a supervisor that restarts on 4 and stops on 1 must stop on this.
     case "anchor-diverged":
       return EXIT_INTEGRITY;
+    // APRV-220. The same place again, for the third witness: a log that
+    // contradicts a signature a human made over it is an integrity failure,
+    // whatever the chain walk and the committed copy say about it.
+    case "checkpoint-invalid":
+      return EXIT_INTEGRITY;
   }
 }
 
@@ -635,6 +647,28 @@ export function commandDaemonRun(
         : EXIT_USAGE;
     }
     options.gitEvidence = enabled.recorder;
+  }
+
+  // APRV-208. The live draw, served over an owner-only socket under the
+  // approval home so a hook that holds no sampling secret can ask the process
+  // that does. Attempted whenever the secret resolves in THIS process's
+  // environment — the operator's own act, `eval "$(approval env)"` in the
+  // terminal they start the daemon from — and skipped, with a line saying so,
+  // when it does not. `--no-draw` is the way out; there is no way in other than
+  // holding the secret, which is the point.
+  if (!boolFlag(flags, "--no-draw")) {
+    const draw = drawServerFor({ logPath, policy });
+    if (draw.ok) options.draw = draw.server;
+    // `no-live-class` is silent: the policy declares nothing live, so nothing is
+    // gating that would not have gated anyway and there is no operator decision
+    // to inform. Every other refusal names a class this policy declared live and
+    // is now gating at 100%, which is a thing to be told once at startup rather
+    // than to infer from a month of taps.
+    else if (draw.reason !== "no-live-class") {
+      streams.err(
+        `approval: live draws will not be served (${draw.reason}): ${draw.message} Every supervised-live action gates to a human until the sampling secret resolves in this daemon's own environment.\n`,
+      );
+    }
   }
 
   const daemon = new Daemon(options);
