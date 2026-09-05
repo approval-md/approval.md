@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-b'
 created_date: '2026-09-05 10:31'
-updated_date: '2026-09-05 11:00'
+updated_date: '2026-09-05 14:58'
 labels:
   - classifier
 dependencies: []
@@ -80,4 +80,39 @@ Two sentences, to sit under the files.delete.* group:
   substitute for it: a delete that fails any one of those tests keeps the
   out-of-scope class, and a runtime that cannot resolve the roots emits the
   class for nothing at all.
+
+## Platform finding: the depth floor refused the Linux temp root (CI fix)
+
+CI (ubuntu) failed two of the APRV-267 hook tests that pass on macOS: "the
+system temp root is a scratch root, resolved through its symlinks" and
+"approval hook classify reports files.delete.scratch for a temp-root delete".
+Cause: the anti-poisoning depth floor. On macOS os.tmpdir() is
+/var/folders/... and /tmp resolves through its symlink to /private/tmp, both
+two segments or more, so the floor was never felt. On Linux os.tmpdir() IS
+/tmp, one segment, so resolveScratchRoots dropped it, no scratch root existed
+at all, and files.delete.scratch could never fire on the platform CI runs.
+The rule was accidentally macOS-only.
+
+Fix, in resolveScratchRoots via a new exported predicate
+scratchRootDepthAccepted(resolved): the three compiled-in temp roots (/tmp,
+/private/tmp, /var/tmp) are accepted at depth one; every other resolved
+candidate keeps the two-segment rule. The exemption is keyed on the RESOLVED
+value being one of those three literals, so SPEC 11.1 invariant 8 is unmoved:
+a poisoned TMPDIR still has to realpath to a directory that is already a
+compiled-in root to get in, / is not among them and is still refused, one
+segment directories like /etc and /home are still refused, and the cwd
+containment guard is untouched. The other two guards (must realpath to a real
+directory, must not contain the hook cwd) are unchanged.
+
+Tests are now platform-independent: the temp-root case builds its expectation
+from realpath(os.tmpdir()) on the running machine instead of assuming the
+symlinked layout; the poisoned-root case asserts every root is either two
+segments deep or one of the well-known three; a new darwin-guarded case keeps
+proving the /tmp to /private/tmp symlink resolution; a new predicate case
+covers the Linux shape (/tmp accepted at depth one, / and /etc refused) on
+either platform, since no depth-one path can exist on macOS to exercise it
+directly; and a new end-to-end case classifies a delete under the machine's
+own resolved temp root using the roots resolveScratchRoots returns rather than
+a hand-written list. cli-hook-scratch 15/15, command-class 360/360, cli-hook
+91/91, all exit 0; oxlint clean.
 <!-- SECTION:NOTES:END -->

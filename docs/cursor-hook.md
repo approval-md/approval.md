@@ -338,9 +338,15 @@ The roots are `CLAUDE_SCRATCHPAD_DIR` and `CLAUDE_CODE_SCRATCHPAD_DIR` when a
 harness exports them (none does today), plus `os.tmpdir()` and the fixed temp
 roots `/tmp`, `/private/tmp` and `/var/tmp`. Each is realpath'd, and three
 guards mean no value an agent could reach can widen the class: a root must
-resolve to a real directory, must be at least two path segments deep (so `/` can
-never be a scratch root even from a poisoned `TMPDIR`), and must not contain the
-directory the hook runs in.
+resolve to a real directory, must clear the depth floor, and must not contain
+the directory the hook runs in.
+
+The depth floor is two path segments, so `/` can never be a scratch root even
+from a poisoned `TMPDIR`. The three fixed temp roots are exempt from it, because
+on Linux `os.tmpdir()` IS `/tmp`, one segment, while on macOS the same directory
+resolves through the `/tmp` symlink to `/private/tmp`. The exemption is keyed on
+the resolved value being one of those three compiled-in names, so a reported
+value still has to resolve to a directory that is already a root.
 
 `approval hook classify` runs both halves in the same directory, so what it
 prints is what the hook decides.

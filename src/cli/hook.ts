@@ -737,9 +737,14 @@ export function refineRewrite(result: CommandClassification, cwd: string): Refin
  * reads `TMPDIR`, so a poisoned value could in principle nominate `/` and turn
  * every absolute delete into a scratch delete. Three guards close that, and
  * none of them trusts the value: a root must resolve to a real directory, must
- * be at least two path segments deep (so `/` and every one-segment directory
- * are out), and must not contain the directory the hook was invoked in. A
- * checkout is never inside its own scratch root.
+ * clear the depth floor, and must not contain the directory the hook was
+ * invoked in. A checkout is never inside its own scratch root.
+ *
+ * The depth floor is two path segments, so `/` and one-segment directories like
+ * `/etc` are out, with the three compiled-in temp roots (`/tmp`, `/private/tmp`,
+ * `/var/tmp`) exempt from it because on Linux `os.tmpdir()` IS `/tmp`, a single
+ * segment. See {@link scratchRootDepthAccepted} for why that exemption cannot
+ * be reached by a poisoned value.
  *
  * ## Why the second pass exists at all
  *
@@ -766,16 +771,54 @@ const SCRATCH_REJECTED_RULE = "rm-scratch-rejected";
  *
  * None is set by any harness this runtime has seen; they are read so the rule
  * narrows the day one starts exporting it, rather than staying pinned to the
- * whole temp root forever. A value that is not an absolute path to a real
- * directory two segments deep is ignored like any other candidate.
+ * whole temp root forever. A value that fails any of the guards (absolute, a
+ * real directory, deep enough, clear of the cwd) is ignored like any other
+ * candidate.
  */
 const SCRATCHPAD_ENV_NAMES: readonly string[] = [
   "CLAUDE_SCRATCHPAD_DIR",
   "CLAUDE_CODE_SCRATCHPAD_DIR",
 ];
 
-/** Fixed temp roots, beyond whatever `os.tmpdir()` reports. */
+/**
+ * Fixed temp roots, beyond whatever `os.tmpdir()` reports.
+ *
+ * These are the well-known system temp directories, and the depth rule below
+ * exempts them: they are compiled-in constants, not anything a caller reports.
+ */
 const FIXED_TEMP_ROOTS: readonly string[] = ["/tmp", "/private/tmp", "/var/tmp"];
+
+/** Segments a root must have when it is not one of {@link FIXED_TEMP_ROOTS}. */
+const MIN_ROOT_SEGMENTS = 2;
+
+/** Non-empty path segments in `path`. */
+function segmentDepth(path: string): number {
+  return path.split(sep).filter((segment) => segment.length > 0).length;
+}
+
+/**
+ * Is a candidate deep enough, once resolved, to stand as a scratch root?
+ *
+ * The depth floor is the anti-poisoning guard (SPEC.md §11.1: self-reported
+ * fields never reduce scrutiny). A `TMPDIR` naming `/` resolves and exists, and
+ * a root of `/` would turn every absolute delete into a scratch delete, so a
+ * resolved root is refused below {@link MIN_ROOT_SEGMENTS}.
+ *
+ * The well-known system temp roots are the one exception, and they are one on
+ * every platform: on Linux `os.tmpdir()` is `/tmp`, a single segment, and
+ * refusing it would mean `files.delete.scratch` could never fire there, while
+ * on macOS the same directory resolves through the `/tmp` symlink to
+ * `/private/tmp` and clears the floor by accident of layout. The exemption is
+ * keyed on the RESOLVED value being one of the three compiled-in names, so
+ * nothing a caller reports widens it: a poisoned `TMPDIR` still has to resolve
+ * to `/tmp`, `/private/tmp` or `/var/tmp` to get in, and those are roots
+ * already. `/` is not among them, and every other one-segment directory
+ * (`/etc`, `/home`, `/usr`) stays refused.
+ */
+export function scratchRootDepthAccepted(resolved: string): boolean {
+  if (FIXED_TEMP_ROOTS.includes(resolved)) return true;
+  return segmentDepth(resolved) >= MIN_ROOT_SEGMENTS;
+}
 
 /** `realpathSync`, or `null` for anything that does not resolve. */
 function resolvedPath(candidate: string): string | null {
@@ -816,7 +859,7 @@ export function resolveScratchRoots(
     if (!isAbsolute(candidate)) continue;
     const resolved = resolvedPath(candidate);
     if (resolved === null) continue;
-    if (resolved.split(sep).filter((segment) => segment.length > 0).length < 2) continue;
+    if (!scratchRootDepthAccepted(resolved)) continue;
     if (resolved === resolvedCwd || isBelow(resolvedCwd, resolved)) continue;
     if (!roots.includes(resolved)) roots.push(resolved);
   }

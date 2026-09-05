@@ -23,7 +23,14 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { classifyCommand } from "../src/core/command-class.js";
-import { refineScratchDelete, resolveScratchRoots } from "../src/cli/hook.js";
+import {
+  refineScratchDelete,
+  resolveScratchRoots,
+  scratchRootDepthAccepted,
+} from "../src/cli/hook.js";
+
+/** The temp roots the hook compiles in, and the only ones exempt from depth. */
+const WELL_KNOWN_TEMP_ROOTS: readonly string[] = ["/tmp", "/private/tmp", "/var/tmp"];
 
 /** dist/tests/cli-hook-scratch.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -53,13 +60,59 @@ function decide(command: string, roots: readonly string[]): { cls: string; rule:
 // ---------------------------------------------------------------------------
 
 test("the system temp root is a scratch root, resolved through its symlinks", () => {
-  // The cwd is the repository checkout, which no temp root contains.
+  // The cwd is the repository checkout, which no temp root contains. The
+  // expectation is built from `realpath(os.tmpdir())` on THIS machine, so it
+  // holds wherever the temp root lives and however deep it is: `/tmp` on Linux,
+  // `/private/tmp` (or `/var/folders/...`) once macOS resolves its symlinks.
   const roots = resolveScratchRoots(process.cwd(), {});
   assert.ok(roots.includes(REAL_TMP), `${REAL_TMP} is not among ${roots.join(", ")}`);
-  // Every root came back realpath'd, so `/tmp` never appears as itself on a Mac.
+  // Every root came back realpath'd, so no root is a symlink to another place.
   for (const root of roots) {
     assert.equal(root, realpathSync(root));
   }
+});
+
+test(
+  "on macOS the temp root arrives through the /tmp symlink, not as /tmp",
+  { skip: process.platform !== "darwin" ? "darwin-only symlink layout" : false },
+  () => {
+    // Kept as the proof that resolution happens at all: `/tmp` is a symlink to
+    // `/private/tmp` here, and the resolved name is the one that lands.
+    assert.equal(realpathSync("/tmp"), "/private/tmp");
+    const roots = resolveScratchRoots(process.cwd(), {});
+    assert.ok(!roots.includes("/tmp"), `/tmp appeared unresolved among ${roots.join(", ")}`);
+    assert.ok(roots.includes("/private/tmp"), `/private/tmp is not among ${roots.join(", ")}`);
+  },
+);
+
+test("a one-segment system temp root is accepted, which is the Linux shape", () => {
+  // On Linux `os.tmpdir()` IS `/tmp`: one segment, and the depth floor used to
+  // refuse it, so `files.delete.scratch` could never fire in CI. The exemption
+  // is a property of the resolved name, so it is testable on either platform.
+  assert.equal(scratchRootDepthAccepted("/tmp"), true);
+  assert.equal(scratchRootDepthAccepted("/var/tmp"), true);
+  assert.equal(scratchRootDepthAccepted("/private/tmp"), true);
+  // Everything else keeps the two-segment rule, `/` included.
+  assert.equal(scratchRootDepthAccepted("/"), false);
+  assert.equal(scratchRootDepthAccepted("/etc"), false);
+  assert.equal(scratchRootDepthAccepted("/home"), false);
+  assert.equal(scratchRootDepthAccepted("/tmpfoo"), false);
+  assert.equal(scratchRootDepthAccepted("/home/runner"), true);
+  assert.equal(scratchRootDepthAccepted("/tmp/pad"), true);
+});
+
+test("a delete under the machine's own temp root is scratch, whatever its depth", () => {
+  // The end of the same thread, through the roots this machine actually
+  // resolves rather than a hand-written list: the mkdtemp directory sits one
+  // level under `realpath(os.tmpdir())` on Linux and macOS alike.
+  const roots = resolveScratchRoots(process.cwd(), {});
+  const file = join(scratch, "machine-root", "probe.json");
+  mkdirSync(join(scratch, "machine-root"), { recursive: true });
+  writeFileSync(file, "{}", "utf8");
+  const decision = decide(`rm -rf ${file}`, roots);
+  assert.equal(decision.cls, "files.delete.scratch");
+  assert.equal(decision.rule, "rm-scratch");
+  assert.equal(decision.note, "");
 });
 
 test("a harness-exported scratchpad directory joins the roots", () => {
@@ -84,8 +137,11 @@ test("a root shallower than two segments is refused, so a poisoned TMPDIR cannot
   // exists, and is still not anyone's scratchpad.
   const roots = resolveScratchRoots(process.cwd(), { CLAUDE_SCRATCHPAD_DIR: "/" });
   assert.ok(!roots.includes("/"));
+  // A one-segment root survives only by being one of the three compiled-in temp
+  // directories, which a reported value cannot become by reporting it.
   for (const root of roots) {
-    assert.ok(root.split("/").filter((segment) => segment.length > 0).length >= 2, root);
+    const deep = root.split("/").filter((segment) => segment.length > 0).length >= 2;
+    assert.ok(deep || WELL_KNOWN_TEMP_ROOTS.includes(root), root);
   }
 });
 
