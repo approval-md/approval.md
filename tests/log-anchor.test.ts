@@ -24,6 +24,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -372,6 +373,12 @@ test("anchor: a repository that has never committed the log skips, and never pas
   // The reason names the revs that were tried: a skip that says nothing is a
   // pass with extra steps.
   assert.match(outcome.reason, /tried .*HEAD/u);
+  // And when NOTHING resolved, it names the command that was run and what git
+  // said back. A skip that lists revs without saying how the lookup failed
+  // reads identically whether the blob is absent or the lookup itself broke,
+  // and those are the two answers an operator has to tell apart.
+  assert.match(outcome.reason, /git rev-parse --verify --quiet/u);
+  assert.match(outcome.reason, new RegExp(`HEAD:${LOG_RELATIVE.replace(/\./gu, "\\.")}`, "u"));
 });
 
 test("anchor: an explicit rev with no such blob skips rather than passing", () => {
@@ -635,4 +642,137 @@ test("doctor: neither git-backed row builds a HEAD:<absolute path> spec", () => 
       `${relative} builds a rev spec from an unresolved path`,
     );
   }
+});
+
+// ===========================================================================
+// A committed log larger than one megabyte
+// ===========================================================================
+
+/**
+ * Every fixture above this line carries a handful of records, which is why
+ * every fixture above this line passed while the real checkout failed.
+ *
+ * `spawnSync` caps a child's captured output at `maxBuffer`, one mebibyte by
+ * default, and a child that exceeds it is killed with `error` set to `ENOBUFS`
+ * and `status` left null. `git show <rev>:<log>` on a log of a few hundred
+ * bytes never comes near that ceiling; the same command on a twelve-megabyte
+ * log never gets under it. So the fixtures were not small by accident, they
+ * were small on the ONE axis the defect lives on, and the suite reported
+ * health about a code path that had already stopped working in production.
+ *
+ * These cases grow the log past the ceiling through the real append path and
+ * then ask the same questions the earlier ones ask.
+ */
+const OVER_BUFFER_BYTES = 1200 * 1024;
+
+/** Append real records until the log is bigger than `targetBytes`. */
+function growLog(dir: string, logPath: string, targetBytes: number): void {
+  let index = 0;
+  while (statSync(logPath).size <= targetBytes) {
+    appendRecord(dir, `bulk-${String(index)}`);
+    index += 1;
+  }
+}
+
+/**
+ * The primary checkout's ref layout, at the primary checkout's log size.
+ *
+ * A bare origin whose `main` carries the log, a `refs/remotes/origin/main`
+ * remote-tracking ref pointing at it, and a `refs/approval/advance/*` ref of
+ * the kind `approval log advance` leaves behind. All three are candidate
+ * anchors, and the defect makes all three fail identically.
+ */
+function bigRepo(): Repo & { advanceRef: string } {
+  const repo = newRepo(2);
+  growLog(repo.dir, repo.logPath, OVER_BUFFER_BYTES);
+  assert.equal(git(["add", "-A"], repo.dir).code, 0);
+  assert.equal(git(["commit", "-qm", "a log past the buffer ceiling"], repo.dir).code, 0);
+  assert.equal(git(["push", "-q", "origin", "main"], repo.dir).code, 0);
+  const advanceRef = "refs/approval/advance/records-log-fixture";
+  assert.equal(git(["update-ref", advanceRef, "HEAD"], repo.dir).code, 0);
+  forgetAnchorBlobs();
+  return { ...repo, advanceRef };
+}
+
+/** The premise every case here rests on, stated the way a shell states it. */
+function assertGitCanSeeTheLog(dir: string, rev: string): void {
+  const oid = git(["rev-parse", "--verify", "--quiet", `${rev}:${LOG_RELATIVE}`], dir);
+  assert.equal(oid.code, 0, `${rev} has no blob: ${oid.stderr}`);
+  assert.ok(oid.stdout.trim().length > 0, `${rev} named no blob`);
+  const shown = git(["show", `${rev}:${LOG_RELATIVE}`], dir);
+  assert.equal(shown.code, 0, shown.stderr);
+  assert.ok(shown.stdout.length > 1024 * 1024, "the fixture log is under the buffer ceiling");
+}
+
+test("anchor: a committed log over a megabyte resolves in the main worktree", () => {
+  const repo = bigRepo();
+  assertGitCanSeeTheLog(repo.dir, "refs/remotes/origin/main");
+
+  const resolved = resolveAnchor(repo.dir, repo.logPath);
+  assert.equal(resolved.ok, true, resolved.ok ? "" : resolved.reason);
+  if (!resolved.ok) throw new Error("unreachable");
+  assert.ok(resolved.anchor.byteLength > 1024 * 1024);
+  assert.ok(anchorRevs(repo.dir).includes(repo.advanceRef));
+
+  const outcome = check(repo);
+  assert.equal(outcome.status, "pass", JSON.stringify(outcome));
+  if (outcome.status !== "pass") throw new Error("unreachable");
+  assert.equal(outcome.ahead, 0);
+});
+
+test("anchor: the same log resolves from a linked worktree", () => {
+  // A linked worktree's `git rev-parse --show-toplevel` is the WORKTREE, not
+  // the primary checkout, so the repo-relative spelling of the log has to be
+  // taken against that root. The refs are shared, so every candidate anchor
+  // the primary can see this one can see too.
+  const repo = bigRepo();
+  counter += 1;
+  const linked = join(scratch, `linked-${counter}`);
+  const added = git(["worktree", "add", "-q", "-b", `probe-${counter}`, linked, "HEAD"], repo.dir);
+  assert.equal(added.code, 0, added.stderr);
+  forgetAnchorBlobs();
+
+  assertGitCanSeeTheLog(linked, "refs/remotes/origin/main");
+  const root = repoRoot(linked);
+  assert.ok(root !== null);
+  assert.equal(realpathSync(root), realpathSync(linked), "the worktree is its own toplevel");
+  assert.ok(anchorRevs(root).includes(repo.advanceRef));
+
+  const logPath = join(linked, LOG_RELATIVE);
+  const outcome = checkLogAnchor({ logPath, records: records(logPath) });
+  assert.equal(outcome.status, "pass", JSON.stringify(outcome));
+});
+
+test("anchor: publishedState counts owed records against origin/main on a large log", () => {
+  // The cadence's consequence of the same defect: every rev's blob read comes
+  // back null, so the highest published seq is 0, the row claims the whole log
+  // is owed, and the advance refuses because "no records branch carries" a seq
+  // that origin/main has carried for days.
+  const repo = bigRepo();
+  appendRecord(repo.dir, "owed-1");
+  appendRecord(repo.dir, "owed-2");
+  forgetAnchorBlobs();
+
+  const root = repoRoot(repo.dir);
+  assert.ok(root !== null);
+  const walked = records(repo.logPath);
+  const state = publishedState(
+    root,
+    repo.logPath,
+    walked,
+    { remote: "origin", base: null },
+    new Date().toISOString(),
+  );
+  const workingSeq = walked[walked.length - 1]?.seq ?? 0;
+  assert.notEqual(state.publishedSeq, 0, "a committed log was reported as published through seq 0");
+  assert.equal(state.publishedSeq, workingSeq - 2);
+  assert.equal(state.pending, 2);
+  assert.notEqual(state.publishedRev, null);
+});
+
+test("doctor: the log-drift row reads a large committed log rather than skipping", () => {
+  const repo = bigRepo();
+  const row = rowNamed(repo.dir, "log-drift");
+  assert.equal(row.status, "pass", row.detail);
+  assert.equal(/no rev this checkout can see/u.test(row.detail), false, row.detail);
 });
