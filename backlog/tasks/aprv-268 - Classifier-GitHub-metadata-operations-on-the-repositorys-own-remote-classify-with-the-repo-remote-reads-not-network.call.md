@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-b'
 created_date: '2026-09-05 10:31'
-updated_date: '2026-09-05 11:54'
+updated_date: '2026-09-05 12:12'
 labels:
   - classifier
 dependencies: []
@@ -104,4 +104,46 @@ Per-file evidence on the FINAL tree, every exit code read and 0:
 - npx oxlint: exit 0 on the final tree
 
 Someone with a quiet machine should re-run npm test whole before merge.
+
+## Narrowing, on the orchestrator's decision (commit 6b0affa)
+
+The rule as first written (74f7733) moved `gh pr view/list/checks`, `gh run view/list`, `gh issue view/list` and a plain `gh api` GET off `read.vcs.remote` and onto `vcs.remote.meta`. That was the acceptance criteria's list, and it was the wrong trade: those forms were already `read.vcs.remote`, which this repository's policy makes AUTONOMOUS through its `read.*` rule, while `vcs.remote.meta` is undeclared and therefore falls to the manual default. On main before the ceremony the commit would have made `gh pr view` MORE expensive, which is the opposite of the task's stated Why. The previous notes flagged this and named the two ways out; the orchestrator chose the second.
+
+The class now covers exactly the three forms the log actually showed as `network.call`, all still conditioned on the checkout's own origin repository (`isOwnRepoInvocation` unchanged, so any `-R`/`--repo`/`--hostname`, `$VAR` or `$(…)` is foreign and keeps the class it had):
+
+- `gh pr update-branch`
+- `gh run rerun`
+- `gh api graphql` whose document carries no `mutation` (word-matched) and is not read from a file (`-f query=@doc`, `--input`)
+
+`GH_META_ACTIONS` is `{ pr: ["update-branch"], run: ["rerun"] }`, with no `issue` entry at all. `refineGhApi` now runs the APRV-114 GET test FIRST and returns `read.vcs.remote` / `gh-api-read` unchanged for a bodyless, methodless call whatever repository it names; the graphql carve-out sits after it, so it can only ever promote out of `network.call`, never out of the read class. The `gh-api-read-foreign` rule is gone with the own/foreign split it existed for.
+
+Property that holds by construction and is pinned by fixtures: every command that classified `read.vcs.remote` before this branch classifies `read.vcs.remote` again, same rule id; every command that classified `network.call` other than the three forms above still classifies `network.call`. That is what makes landing this ahead of the ceremony free rather than a friction increase, and the policy-expectations pin now says so.
+
+### Final tables
+
+POSITIVE (`vcs.remote.meta`), verified through the built CLI with `approval hook classify --json`:
+
+- `gh pr update-branch 51` -> vcs.remote.meta / gh-remote-meta
+- `gh run rerun 12345 --failed` -> vcs.remote.meta / gh-remote-meta
+- `gh api graphql -f query='query{viewer{login}}'` -> vcs.remote.meta / gh-api-graphql-query
+
+NEGATIVE, same verb:
+
+- `gh pr view 51`, `gh pr list --state open`, `gh pr checks`, `gh run view 12345`, `gh run list --limit 5`, `gh issue view 12`, `gh issue list`, `gh pr diff 51`, `gh pr status`, `gh repo view`, `gh run watch 1` -> read.vcs.remote / gh-read
+- `gh api repos/x/y/pulls`, `gh api -X GET repos/x/y`, `gh api --method GET repos/x/y`, `gh api repos/x/y --paginate --jq .[].name`, `gh api -R other/repo repos/x/y`, `gh api --hostname ghe.example.com repos/x/y` -> read.vcs.remote / gh-api-read
+- `gh api graphql -f query='mutation{...}'`, `-f query=@doc.graphql`, `--input doc.json`, `-f query=$Q`, `gh api graphql -R other/repo -f query='query{...}'` -> network.call / gh-api-write
+- `gh pr update-branch -R other/repo 1`, `gh run rerun --repo other/repo 1`, `gh pr update-branch $NUMBER` -> network.call / gh-write
+- `curl -X POST https://hooks.example.com/notify`, `curl -d payload https://api.example.com/send` -> network.call / web-write
+
+### Merge with main (commit dc9e417)
+
+main gained APRV-266's protected_paths routing, which widened `protectedPaths` from `readonly string[]` to `readonly ProtectedPathEntry[]` on the same two signatures APRV-267 had extended with `context`. Resolved keeping both on `classifySegment` and `classifyCommand`, and applied the same widening to `classifyForHook` in src/cli/hook.ts, which git merged textually but could not retype. The two backlog task files conflicted add/add (main's To Do stubs against this branch's In Progress state); this branch's superset was kept.
+
+### Verification on the merged tree, every exit code read and 0
+
+build, `npx oxlint src tests`, command-class 360, command-class-routing 16 (main's, untouched), cli-hook 91, cli-hook-scratch 12, cli-hook-cursor 8, cli-hook-rewrite 10, dogfood 36, policy-explain 16.
+
+### Still for Carter
+
+`vcs.remote.meta` remains undeclared, and nothing regresses while it is. The ceremony that declares it (supervised is the intent) is what turns the three forms from manual into something cheaper; the SPEC 7 draft above stands, with the noun/action set now read as the three forms rather than the wider list.
 <!-- SECTION:NOTES:END -->
