@@ -328,10 +328,16 @@ export function glossAuthor(result: GlossResult): string {
  * the deployment that renamed it out from under the prefixes. Omitted, the
  * default (`APPROVAL_VAULT_PASSPHRASE`) is removed by the prefix rule anyway.
  */
-export function spawnGloss(prompt: string, passphraseEnv: string | null = null): GlossResult | null {
+export function spawnGloss(
+  prompt: string,
+  passphraseEnv: string | null = null,
+  model: string = GLOSS_MODEL,
+): GlossResult | null {
+  const requestedModel = normalizeGlossModelId(model);
+  if (requestedModel === null) return null;
   let result;
   try {
-    result = spawnSync("claude", ["-p", "--model", GLOSS_MODEL, prompt], {
+    result = spawnSync("claude", ["-p", "--model", requestedModel, prompt], {
       encoding: "utf8",
       env: childEnvironment({ passphraseEnv }).env,
       timeout: GLOSS_TIMEOUT_MS,
@@ -347,7 +353,7 @@ export function spawnGloss(prompt: string, passphraseEnv: string | null = null):
   return typeof result.stdout === "string"
     ? {
         text: result.stdout,
-        provenance: { provider: "claude", requestedModel: GLOSS_MODEL },
+        provenance: { provider: "claude", requestedModel },
       }
     : null;
 }
@@ -360,8 +366,11 @@ export function spawnGloss(prompt: string, passphraseEnv: string | null = null):
  * needs from it. A runner is still a `(prompt) => string | null`, so nothing
  * downstream learns that a policy exists.
  */
-export function glossRunnerFor(passphraseEnv: string | null): GlossRunner {
-  return (prompt: string) => spawnGloss(prompt, passphraseEnv);
+export function glossRunnerFor(
+  passphraseEnv: string | null,
+  model: string = GLOSS_MODEL,
+): GlossRunner {
+  return (prompt: string) => spawnGloss(prompt, passphraseEnv, model);
 }
 
 /**

@@ -146,8 +146,14 @@ import {
 } from "../core/policy-proposal.js";
 import { payloadOf, readVerifiedRecords, requestState } from "../core/state.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind, type ParsedFlags } from "./args.js";
-import { glossRunnerFor, GLOSS_TIMEOUT_MS, type GlossRunner } from "./gloss.js";
+import { GLOSS_TIMEOUT_MS, type GlossRunner } from "./gloss.js";
 import { attachGloss, glossAbsenceLine } from "./gloss-attach.js";
+import {
+  glossRunnerFromOptions,
+  parseGlossOptions,
+  type GlossOptions,
+  type GlossRunnerFactoryOptions,
+} from "./gloss-options.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import {
   TELEGRAM_HEALTH_HELP,
@@ -170,6 +176,8 @@ const LISTEN_FLAGS: Record<string, FlagKind> = {
   "--once": "boolean",
   "--gloss": "boolean",
   "--no-gloss": "boolean",
+  "--gloss-provider": "string",
+  "--gloss-model": "string",
   "--json": "boolean",
   "--help": "boolean",
   "-h": "boolean",
@@ -196,9 +204,20 @@ const LISTEN_FLAGS: Record<string, FlagKind> = {
 export function glossWiring(
   flags: ParsedFlags,
   passphraseEnv: string | null = null,
+  factories: Omit<GlossRunnerFactoryOptions, "passphraseEnv"> = {},
 ): { gloss?: GlossRunner } {
-  if (boolFlag(flags, "--no-gloss")) return {};
-  return { gloss: glossRunnerFor(passphraseEnv) };
+  const selected = parseGlossOptions(flags, true);
+  if (!selected.ok) return {};
+  return glossWiringFor(selected.options, passphraseEnv, factories);
+}
+
+function glossWiringFor(
+  selection: GlossOptions,
+  passphraseEnv: string | null,
+  factories: Omit<GlossRunnerFactoryOptions, "passphraseEnv"> = {},
+): { gloss?: GlossRunner } {
+  const gloss = glossRunnerFromOptions(selection, { ...factories, passphraseEnv });
+  return gloss === undefined ? {} : { gloss };
 }
 
 function usageError(streams: Streams, json: boolean, message: string, helpText: string): number {
@@ -537,6 +556,13 @@ function setUp(
   }
 
   const flags = parsed.flags;
+  const selectedGloss = parseGlossOptions(flags, true);
+  if (!selectedGloss.ok) {
+    return {
+      kind: "handled",
+      code: usageError(streams, json, selectedGloss.message, TELEGRAM_LISTEN_HELP),
+    };
+  }
 
   // Resolved here rather than after the log preflight because the policy is
   // what NAMES the credential variables, and a message about a missing
@@ -573,7 +599,10 @@ function setUp(
     // defaults to none, so no programmatic driver spawns a subprocess by
     // importing it. Tests that drive THIS function pass `--no-gloss` or set a
     // stub, which is what {@link listenGlossRunner} is for.
-    ...glossWiring(flags, passphraseEnvFor(loadPolicy(policy))),
+    ...glossWiringFor(selectedGloss.options, passphraseEnvFor(loadPolicy(policy)), {
+      diagnostic: (reason) =>
+        streams.err(`approval: Codex gloss unavailable (${reason}); continuing without it\n`),
+    }),
   });
 
   if (!prepared.ok) {

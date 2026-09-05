@@ -1310,7 +1310,7 @@ export const CHANNEL_CLI_HELP = `approval channel cli — the zero-config channe
 Usage:
   approval channel cli [--log <path>] [--policy-dir <path>] [--policy <path>]
                        [--payload-dir <path>] [--as human:<id>] [--interactive]
-                       [--gloss] [--json]
+                       [--gloss] [--gloss-provider <claude|codex>] [--gloss-model <id>] [--json]
 
 Flags:
   --log <path>         log file to read, and to append decisions to
@@ -1318,10 +1318,10 @@ Flags:
   --payload-dir <path> OPTIONAL OVERRIDE for material held outside the store
   --as human:<id>      the person deciding; else APPROVAL_HUMAN
   --interactive        prompt even though stdin is not a terminal
-  --gloss              add a labelled model gloss per payload (~10-15s each)
+  --gloss / --gloss-provider <p>   enable gloss / choose claude|codex (default claude)
+  --gloss-model <id>   model to request; required with Codex; no fallback
   --json               machine-readable output; never interactive
   -h, --help           this text
-
 Renders every pending manual request with [computed]/[claimed] markers and the
 full payload verbatim between "--- BEGIN FULL PAYLOAD" delimiters. With a TTY (or
 --interactive) each is answered g) grant, r) reject, s) skip. WITHOUT a TTY, and
@@ -1688,20 +1688,19 @@ export const TELEGRAM_LISTEN_HELP = `approval channel telegram listen — delive
 Usage:
   approval channel telegram listen [--once] [--as human:<id>] [--payloads <f>]
                                    [--policy <p>] [--dir <p>] [--log <p>] [--no-gloss]
-                                   [--api-base <url>] [--poll-timeout <s>] [--json]
+                                   [--gloss-provider <claude|codex>] [--gloss-model <id>] [--api-base <url>] [--poll-timeout <s>] [--json]
 
 Flags:
   --once / --json  one getUpdates batch then exit / ONE JSON OBJECT PER LINE
-  --no-gloss       drop the labelled model gloss (ON by default, ~10-15s each)
+  --no-gloss / --gloss-provider <p>   drop gloss (ON by default) / choose claude|codex (default claude)
+  --gloss-model <id>   model to request; required with Codex; no fallback
   --as human:<id>  the approver every decision is recorded against. REQUIRED
   --payloads <f>   OPTIONAL OVERRIDE: JSON file of action key -> payload
   --policy <p> / --dir <p> / --log <p>   the policy, its dir, the log written to
   --api-base <url> / --poll-timeout <s>   Bot API base / long-poll seconds (25)
   -h, --help       this text
-
-Config is ENVIRONMENT-ONLY and the policy names the variables. Delivery is per
-cycle, so a request appended while it runs reaches the phone without a restart.
-THE EXECUTION TOKEN IS PRINTED ON THIS TERMINAL AND NEVER SENT TO TELEGRAM.
+Config is ENVIRONMENT-ONLY and the policy names the variables. Delivery is per cycle;
+a new request reaches the phone without restart. THE TOKEN IS PRINTED HERE, NEVER SENT TO TELEGRAM.
 
 JSON shape: docs/cli-reference.md#channel-telegram-listen
 ${EXIT_CODES_POINTER}
@@ -1784,8 +1783,8 @@ export const UP_HELP = `approval up — the daemon and every configured channel,
 
 Usage:
   approval up [every "daemon run" flag] [--as human:<id>] [--port <n>]
-              [--payloads <f>] [--payload-dir <d>] [--api-base <url>] [--no-gloss]
-              [--poll-timeout <s>] [--no-telegram] [--no-web] [--no-preflight]
+              [--payloads <f>] [--payload-dir <d>] [--api-base <url>] [--poll-timeout <s>] [--no-gloss]
+              [--gloss-provider <claude|codex>] [--gloss-model <id>] [--no-telegram] [--no-web] [--no-preflight]
 
 Flags (every "daemon run" flag, unchanged, plus):
   --as human:<id>  the approver every decision is recorded against
@@ -1793,11 +1792,11 @@ Flags (every "daemon run" flag, unchanged, plus):
   --api-base <url> / --poll-timeout <s>   Bot API base / long-poll seconds
   --port <n>       queue-page port. Precedence: --port, channels.web.port
   --no-telegram / --no-web   leave that channel out of this process
-  --no-gloss / --restart-backoff <d>   drop the model gloss / first retry wait
+  --no-gloss / --restart-backoff <d>   drop gloss / first retry wait
+  --gloss-provider <p> / --gloss-model <id>   choose claude|codex (default claude); Codex requires model; no fallback
   -h, --help       this text
-
-BEFORE ANYTHING STARTS the preflight ("daemon run" runs it too) fetches, then
-fast-forwards and rebuilds when that is safe, else refuses and TOUCHES NOTHING;
+BEFORE START the preflight ("daemon run" runs it too) fetches, then fast-forwards
+and rebuilds when safe, else refuses and TOUCHES NOTHING;
 opt out with --no-preflight. Credentials come from THE LAUNCH ENVIRONMENT and
 nowhere else: a channel whose credential is unset is skipped in doctor's words.
 

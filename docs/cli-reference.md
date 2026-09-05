@@ -2462,12 +2462,22 @@ missing from a queue is a request nobody will approve.
 **Two reading aids, and they are not the same kind of thing (APRV-197).** The
 first is `command_breakdown`: for a multi-segment command the classifier's own
 parse of the bound bytes, rendered `[computed] … (classifier)`, always present
-and costing nothing. The second is the model gloss, one sentence from a local
-`claude -p --model haiku`, rendered in the CLAIMED block and labelled `(model,
-unverified)` on the line itself. On THIS verb it is OPT-IN, behind `--gloss`,
-because it was measured at 10 to 15 seconds per request on the machine it was
-built on and here that is spent while a person waits at a prompt. Ask for it
-deliberately or do not get it.
+and costing nothing. The second is the model gloss, one sentence from an
+operator-selected local CLI, rendered in the CLAIMED block and labelled with
+its provider and requested model as unverified. Claude with model `haiku` is
+the compatible default. Select Codex with an explicit model; the runtime never
+falls back to another provider or model:
+
+```sh
+approval channel cli --gloss --gloss-provider codex --gloss-model gpt-5.4-mini
+approval channel telegram listen --gloss-provider codex --gloss-model gpt-5.4-mini
+approval up --gloss-provider codex --gloss-model gpt-5.4-mini
+```
+
+On `channel cli` the gloss remains opt-in behind `--gloss`, because inference
+was measured at 10 to 15 seconds per request on the machine it was built on
+and here that is spent while a person waits at a prompt. Provider and model
+selection alone does not enable it on this surface.
 
 The push channel makes the opposite choice, and for the same reason read the
 other way: on `channel telegram listen` and `up` the gloss is ON by default,
@@ -2475,10 +2485,35 @@ with `--no-gloss` to drop it. The phone is where an approver meets a request
 they did not watch being made, and the seconds are spent inside a dispatch cycle
 that is already waiting on the network, blocking nobody.
 
-The subprocess is spawned starved (APRV-207): it gets the same scrubbed
-environment a granted child gets, so no `APPROVAL_*`, `TELEGRAM_*` or `VAULT_*`
-variable and no vault passphrase reaches it, while its own auth (`ANTHROPIC_*`,
-`CLAUDE_CODE_OAUTH_TOKEN`), `PATH`, `HOME` and the locale pass through.
+Every provider subprocess receives the APRV-207 scrubbed environment, removing
+credential-bearing `APPROVAL_*`, `TELEGRAM_*` and `VAULT_*` variables and the
+vault passphrase. Nonsecret runtime variables and each CLI's authentication
+remain.
+
+The Codex runner invokes `codex exec` with the active saved CLI authentication;
+it does not choose or enforce a billing method. A ChatGPT login uses the Codex
+allowance included with that ChatGPT plan. An API-key login is billed through
+the OpenAI Platform account at standard API rates. See the official Codex
+[authentication](https://learn.chatgpt.com/docs/auth) and
+[non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode)
+documentation. `codex login status` reports the active authentication method.
+
+The Codex runner uses verified controls in the installed CLI: an empty temporary
+working directory, read-only workspace permissions, command network disabled,
+ephemeral history, ignored user configuration and project rules, version-specific
+host skill-discovery suppression, and selected known tool and integration
+features disabled. Codex does not expose a universal empty-tool switch.
+Host-managed tools and global base instructions may still exist, and the CLI
+may maintain its saved authentication state. This Codex path is unavailable on
+Windows because its bounded process-group termination cannot be guaranteed
+there. The integration targets Codex CLI 0.152.1; later CLIs must continue to
+accept these isolation controls.
+
+All providers share a 20-second timeout, an 8,192-character input cap and a
+200-character rendered-output cap. The Codex supervisor also drops stdout above
+64 KiB. It suppresses the known startup warning caused by the version-specific
+host skill control, while an emitted error event, unsafe or malformed output,
+non-zero exit or timeout still drops the gloss.
 
 The gloss is never load-bearing: it is attached at render time to a request the
 tagger has finished building, the payload hash does not cover it, the log never
