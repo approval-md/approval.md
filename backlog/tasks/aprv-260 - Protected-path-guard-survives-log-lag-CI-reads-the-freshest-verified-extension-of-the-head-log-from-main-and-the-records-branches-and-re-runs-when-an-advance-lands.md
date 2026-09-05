@@ -4,11 +4,11 @@ title: >-
   Protected-path guard survives log lag: CI reads the freshest verified
   extension of the head log from main and the records branches, and re-runs when
   an advance lands
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-05 02:22'
-updated_date: '2026-09-05 02:54'
+updated_date: '2026-09-05 08:10'
 labels: []
 dependencies: []
 references:
@@ -27,11 +27,11 @@ PR #270 failed the protected paths (grant cross-check) job on AGENTS.md although
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 scripts/protected-path-guard.mjs accepts the head log and any verified extension of it found at origin/main or origin/records-log-*, chooses the longest, reports which ref supplied the log in its output and in --json, and refuses a candidate whose prefix does not anchor to the head log (tests cover: head only, main longer, records branch longer than main, a diverging candidate rejected, an unverifiable candidate skipped)
-- [ ] #2 The guard message for an uncovered path names the records branches as a carrier of the missing advance, and the CI job fetches the records refs it needs
-- [ ] #3 A workflow triggered by a push to main that changes .approval/log/events.jsonl re-runs the failed protected-paths job on every open pull request (only that job, only when it failed), with a test or a dry-run script asserting the selection
-- [ ] #4 docs/claude-code-hook.md backstop section explains the log-lag rule: a grant in the live log becomes evidence once any advance carrying it is pushed to a records branch or merged, and what a session does when the guard still fails
-- [ ] #5 npm test, lint, typecheck pass; the guard run on this repository over origin/main~20..origin/main still passes
+- [x] #1 scripts/protected-path-guard.mjs accepts the head log and any verified extension of it found at origin/main or origin/records-log-*, chooses the longest, reports which ref supplied the log in its output and in --json, and refuses a candidate whose prefix does not anchor to the head log (tests cover: head only, main longer, records branch longer than main, a diverging candidate rejected, an unverifiable candidate skipped)
+- [x] #2 The guard message for an uncovered path names the records branches as a carrier of the missing advance, and the CI job fetches the records refs it needs
+- [x] #3 A workflow triggered by a push to main that changes .approval/log/events.jsonl re-runs the failed protected-paths job on every open pull request (only that job, only when it failed), with a test or a dry-run script asserting the selection
+- [x] #4 docs/claude-code-hook.md backstop section explains the log-lag rule: a grant in the live log becomes evidence once any advance carrying it is pushed to a records branch or merged, and what a session does when the guard still fails
+- [x] #5 npm test, lint, typecheck pass; the guard run on this repository over origin/main~20..origin/main still passes
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -45,3 +45,9 @@ PR #270 failed the protected paths (grant cross-check) job on AGENTS.md although
 <!-- SECTION:NOTES:BEGIN -->
 Built by an Opus lane on branch aprv-260-guard-log-lag. Decisions: anchoring is head-defined and fail-closed (a shorter or forked candidate is diverged; a missing, unverified or empty head log admits nothing); payload store read at the chosen ref then head; human output summarises diverged candidates (main carries 45 stale records branches), --json lists every candidate; blobs deduped by oid before verification; guard-rerun.yml holds actions:write and pull-requests:read only, concurrency guard-rerun, selects by the job name and cross-checks it against ci.yml in a test. Orchestrator change: the provenance grep in the CI step tolerates a missing line, since the guard's exit status is the verdict. Verified in the lane: npm test 3214 pass, 0 fail, 1 skipped; lint and typecheck clean; the guard over origin/main~20..origin/main exits 0 and reports origin/main chosen with records-log-2026-09-05 admitted. Both workflow writes passed the policy.edit gate without a wait.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The guard reads the freshest committed log that anchors to the head chain (head, origin/main, origin/records-*), prints and carries its choice, and a guard-rerun workflow re-runs the failed guard job on open PRs when an advance lands on main. Verified by 13 new tests inside the full suite (3214 pass) and a live guard run over main's last twenty commits.
+<!-- SECTION:FINAL_SUMMARY:END -->
