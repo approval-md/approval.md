@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-i'
 created_date: '2026-09-02 16:26'
-updated_date: '2026-09-05 00:19'
+updated_date: '2026-09-05 00:29'
 labels:
   - core
   - log
@@ -33,8 +33,8 @@ Second layer against a same-user forger (see docs/proposals/incremental-prefix-p
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 A design section states the signing key, the record schema, the delivery path, the cadence semantics, and the verify rule; Carter signs it off before implementation
-- [ ] #2 log.checkpoint records are appended only through the gate with the human's signature over (seq, hash) and validate against the attested public key
-- [ ] #3 approval log verify and the daemon's full re-proof refuse a range whose checkpoint signature does not validate or whose named hash is not at that seq, with a distinct machine-readable code; a due-but-missing checkpoint is a warning
+- [x] #2 log.checkpoint records are appended only through the gate with the human's signature over (seq, hash) and validate against the attested public key
+- [x] #3 approval log verify and the daemon's full re-proof refuse a range whose checkpoint signature does not validate or whose named hash is not at that seq, with a distinct machine-readable code; a due-but-missing checkpoint is a warning
 - [ ] #4 A checkpoint can be requested from the terminal and answered from a channel prompt; tests through the real append path and the mock Telegram bot
 - [ ] #5 Schema change (event payload) is its own subtask; SPEC.md §9 gains the checkpoint sentence via a gated edit; docs updated; npm test passes; lint clean
 <!-- AC:END -->
@@ -113,4 +113,10 @@ SPEC.md is protected and this agent did not edit it. Two changes.
 === NOT DONE, DELIBERATELY ===
 
 AC #4 (the channel tap) is APRV-257. approval doctor gains no checkpoint row here; that is APRV-257 too, and log verify --checkpoints plus the daemon cover AC #3's two named surfaces. approval setup mints no key yet: an operator generates one with mintCheckpointKeypair and stores it, which is APRV-257's ceremony. The verb's key-file path is what makes this half testable and usable in the meantime.
+
+VALIDATION. Full npm test on the final tree: 3202 tests, 3201 pass, 0 fail, 1 pre-existing skip, exit 0 (326s). npx oxlint over the whole repo, exit 0. tests/log-checkpoint.test.ts 32/32; conformance 25/25; fixtures 154/154; event-schema 21/21; cli 49/49; cli-help 11/11; cli-long-help 21/21; command-class 330/330; dogfood 32/32; policy-load 97/97.
+
+ONE REGRESSION, CAUGHT BY THE SUITE AND FIXED (commit 025128b). Fitting the checkpoint subcommand into LOG_HELP under APRV-91's 25-line cap dropped the only occurrence of the word JSON, which tests/cli.test.ts requires of every per-verb help. The tail and export subcommand rows are merged onto one line instead and the JSON-shapes pointer is back.
+
+AC STATUS. #2 and #3 checked. #1 is drafted above and is Carter's to sign off. #4 moved to APRV-257. #5 is HALF met and left unchecked on purpose: the schema change is its own subtask (APRV-220.1, Done), docs are updated (docs/cli-reference.md gains two sections, README gains the two policy rows), npm test passes and lint is clean, but the SPEC.md sentence is protected and is drafted above for the orchestrator to apply under a grant.
 <!-- SECTION:NOTES:END -->
