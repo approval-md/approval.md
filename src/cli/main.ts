@@ -1027,6 +1027,14 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
       const { commandStatus } = await import("./execute.js");
       return commandStatus(rest, streams, cwd);
     }
+    // The witness verb (APRV-245). `status` reports what this runtime knows
+    // about itself; `coverage` asks git, `gh` and a provider what happened
+    // whether or not anybody routed it through the gate, and joins the answer
+    // to the verified log. Informational: gaps are questions, not verdicts.
+    case "coverage": {
+      const { commandCoverage } = await import("./coverage.js");
+      return commandCoverage(rest, streams, cwd);
+    }
     // The diagnostic verb (APRV-31). `doctor` answers for the MACHINE what
     // `status` answers for the system, and it is asynchronous for the same
     // reason `channel` is: two of its checks touch the network stack (a Bot API

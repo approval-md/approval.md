@@ -437,6 +437,10 @@ const AGENT_FACING: readonly string[] = [
   "token",
   "queue",
   "status",
+  // APRV-245. It reads witnesses and the verified log and writes nothing, so it
+  // establishes no authority; an agent that can see its own coverage gaps is an
+  // agent that can close them by declaring the next action.
+  "coverage",
   "log verify",
   "log tail",
   "log export",

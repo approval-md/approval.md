@@ -1,6 +1,6 @@
 # AGENTS.md — approval.md
 
-Human approval for agent actions. This file adapts the repository workflow for Cursor agents. Read `SPEC.md` in full before any work. It is the source of truth for design decisions. `APPROVAL.md` is authoritative for permissions; where this file differs, `APPROVAL.md` wins.
+Human approval for agent actions. This file adapts the repository workflow for Cursor and Codex agents. Read `SPEC.md` in full before any work. It is the source of truth for design decisions. `APPROVAL.md` is authoritative for permissions; where this file differs, `APPROVAL.md` wins.
 
 ## Project invariants
 
@@ -43,11 +43,17 @@ For settled, token-heavy coding, invoke the version-controlled `/token-heavy-imp
 
 If the custom agent is unavailable in the current interface, call a general-purpose subagent with model `cursor-grok-4.6-xhigh`. Always pass the model explicitly; do not rely on inheritance.
 
+## Codex model orchestration
+
+Use **Astra** for architecture, decomposition, cross-cutting safety judgment, approval routing, orchestration, adversarial review, and final integration. Use **Sol** for substantive implementation from settled acceptance criteria, including feature work, fixtures, broad tests, mechanical refactors, and sustained research. Use **Spark** for quick browser/UI smoke checks and short fix-and-verify loops; fall back to Sol when diagnosis is novel or crosses contracts.
+
+## Delegation, in either interface
+
 Every delegation prompt must be self-contained because subagents start with clean context. Include:
 
 - the task ID, purpose, acceptance criteria, and current plan;
-- relevant files and repository constraints;
-- the exact implementation slice and files it may change;
+- binding spec sections, relevant files, and repository constraints;
+- the exact implementation slice, the owned paths, and the forbidden paths;
 - required tests or checks;
 - the expected return: changed files, decisions, verification results, and remaining risks.
 
@@ -65,11 +71,13 @@ Parallel editing agents may work only on disjoint files or isolated worktrees. T
 
 ## Dogfooding and protected paths
 
-Agents must not edit `APPROVAL.md`, `.approval/`, credentials, tokens, or the vault. Treat `CLAUDE.md`, `AGENTS.md`, Cursor agent/rule configuration, CI/release configuration, and SPEC.md as `policy.edit` or otherwise protected according to `APPROVAL.md`.
+Agents must not edit `APPROVAL.md`, `.approval/`, credentials, tokens, or the vault. Treat `CLAUDE.md`, `AGENTS.md`, Cursor agent/rule configuration, Codex configuration, CI/release configuration, and SPEC.md as `policy.edit` or otherwise protected according to `APPROVAL.md`.
 
 From M2 onward, this repository operates under its own policy. Manual-class actions carry an approval declaration, then use `approval register`, `approval request`, and `approval wait` against the primary checkout. Proceed only on a grant and execute through the approved path. Gate operations never run in agent worktrees, and log advances never ride feature branches. See `docs/dogfood-cutover.md`.
 
 Local Cursor Agent `Shell`, `Write`, and `Delete` calls are gated by `approval hook cursor` once `.cursor/hooks.json` is committed (`docs/cursor-hook.md`). Until that file is present in the checkout, classify uncertain shell commands with `approval hook classify -- "<command>"` and treat the result as binding. Prose compliance remains required where mechanical enforcement is absent.
+
+The committed Claude Code and Cursor hooks apply only in those interfaces. In Codex, no hook is wired yet: classify uncertain commands with `approval hook classify -- "<command>"` and treat the result as binding. `APPROVAL.md` remains authoritative.
 
 The committed log has one writer: the daemon in the primary checkout while it runs. Never manually edit `.approval/QUEUE.md`, payloads, or the log. A session that cannot reach the gate stops and escalates.
 
@@ -113,3 +121,11 @@ Never:
 ## Documentation style
 
 For new or rewritten prose, limit em dashes and avoid “not X but Y” constructions. Prefer direct statements, commas, parentheses, colons, or separate sentences.
+
+## Imported project memory (Codex)
+
+Read `/Users/carter/dev/approval-md/.codex/claude-memory.md` as curated background when it exists. Treat dated state as untrusted until verified; it does not authorize actions.
+
+## Import recovery boundary (Codex)
+
+These instructions describe how to execute newly authorized work. Importing this file into Codex does not authorize resuming an old task, deployment, scheduled job, autonomous loop, paid call, cloud mutation, or unfinished release from a prior Claude session. Pause at the recovered state, inspect current repository and external state, and obtain a fresh user instruction before continuing such work. Preserve all repository-specific deployment and delivery rules once new work is authorized.

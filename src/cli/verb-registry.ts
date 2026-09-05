@@ -1414,6 +1414,20 @@ const VERBS: VerbSpec[] = [
         // not. INFORMATIONAL, and outside `healthy` and the exit code for the
         // reason `anomalies` is: a coverage measurement, not a verdict.
         harness_outcomes: OPEN_OBJECT,
+        // APRV-245: what git witnessed on this branch, and how much of it the
+        // log can account for. INFORMATIONAL and outside `healthy` and the exit
+        // code, exactly as `harness_outcomes` is. Always present, with
+        // `available: false` and a reason where there is no checkout or no
+        // trunk ref; the whole report is `approval coverage`.
+        coverage: object(
+          {
+            available: BOOLEAN,
+            reason: nullable(STRING),
+            observed: INTEGER,
+            covered: INTEGER,
+          },
+          ["available", "reason", "observed", "covered"],
+        ),
         // APRV-127: reconciliation obligations opened by a retrospective denial
         // and not yet discharged. Counts toward `healthy`, like `dangling`.
         reconciliation: arrayOf(OPEN_OBJECT),
@@ -1433,12 +1447,88 @@ const VERBS: VerbSpec[] = [
         "budgets",
         "loop_escalations",
         "harness_outcomes",
+        "coverage",
         "reconciliation",
         "payload_store",
       ],
     ),
     error: ERROR_SCHEMA,
     exit_codes: [OK, { code: 1, meaning: "something needs attention" }, USAGE, IO],
+  },
+
+  {
+    name: "coverage",
+    purpose:
+      "What the witnesses this project does NOT write say happened, joined to the verified log. Git history, `gh` and an adapter's provider each record side effects that no agent editing its own log can reach, and this verb reads them back and reports, per effect, the evidence in the log (a `task.registered`, `approval.granted`, `execution.started` or `execution.completed` of a matching class inside the effect's window) or `none`. It is INFORMATIONAL, exactly as the harness-start coverage in `status` is: exit 0 with or without gaps, because a coverage measurement is not an integrity verdict and a control an operator learns to silence is worse than one that reports beside the verdict. It writes nothing anywhere and reads only verified records. A source that could not be reached is reported unavailable with its reason, never as an absence of effects, and a green line says nothing about effects made with a credential the agent holds itself; the remedy for those is custody, not a bigger report.",
+    human_only: false,
+    input: input({
+      flags: {
+        "--base": "string",
+        "--head": "string",
+        "--since": "string",
+        "--until": "string",
+        "--source": "string",
+        "--vault": "string",
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        window: object(
+          { base: STRING, head: STRING, since: STRING, until: STRING },
+          ["base", "head", "since", "until"],
+        ),
+        sources: arrayOf(
+          object(
+            {
+              name: STRING,
+              available: BOOLEAN,
+              reason: nullable(STRING),
+              effects: arrayOf(
+                object(
+                  {
+                    id: STRING,
+                    class: STRING,
+                    at: STRING,
+                    // A hint, printed and never matched on: a commit author
+                    // email is whatever the committer configured (SPEC.md
+                    // §11.1 invariant 4).
+                    actor_hint: nullable(STRING),
+                    detail: STRING,
+                    path: nullable(STRING),
+                    match: { enum: ["exact", "family", "protected-path", "none"] },
+                    // Two kinds of proof under one key, and the null halves say
+                    // which: a record seq a reader can paste into `approval log
+                    // tail`, or the protected-path guard's byte-level verdict.
+                    evidence: nullable(
+                      object(
+                        {
+                          seq: nullable(INTEGER),
+                          event: nullable(STRING),
+                          verdict: nullable(STRING),
+                        },
+                        ["seq", "event", "verdict"],
+                      ),
+                    ),
+                  },
+                  ["id", "class", "at", "actor_hint", "detail", "path", "match", "evidence"],
+                ),
+              ),
+              covered: INTEGER,
+              observed: INTEGER,
+            },
+            ["name", "available", "reason", "effects", "covered", "observed"],
+          ),
+        ),
+      },
+      ["ok", "window", "sources"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, USAGE, TORN, IO],
   },
 
   {
