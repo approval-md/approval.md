@@ -281,6 +281,11 @@
   .theme button:hover{background:var(--hover);color:var(--fg)}
   .theme button[aria-checked="true"]{background:var(--btn-bg);color:var(--btn-fg)}
   .theme svg{width:13px;height:13px;display:block}
+  /* narrow screens: keep the toggle off the ragged-left text and clear of the last line */
+  @media (max-width:899px){
+    .theme{left:auto;right:14px}
+    body{padding-bottom:72px}
+  }
 
   /* ---- wide screens: the top row becomes a left rail ---- */
   @media (min-width:900px){
