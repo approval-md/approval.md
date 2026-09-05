@@ -3,11 +3,11 @@ id: APRV-266
 title: >-
   protected_paths route to named policy.edit sub-classes, so each protected path
   family gets its own autonomy and live rate
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-c'
 created_date: '2026-09-05 10:30'
-updated_date: '2026-09-05 11:21'
+updated_date: '2026-09-05 11:40'
 labels:
   - policy
   - classifier
@@ -29,7 +29,7 @@ Carter, 2026-09-05, from the log: policy.edit produced 250 of 351 phone question
 - [x] #2 A routing that would resolve a built-in protected path below the floor refuses at policy load with a distinct machine-readable code and the policy is inoperative until fixed; a bare string entry behaves exactly as today
 - [x] #3 The protected-path guard, dark-session evaluator and doctor rows honour the routed class, and the dogfood pins cover the repo policy's routings; conformance vectors regenerated per the ritual
 - [x] #4 Schema amended for the object form (own subtask if non-trivial); SPEC 5.2 and 7 sentences drafted in the notes; docs updated
-- [ ] #5 npm test passes; lint clean
+- [x] #5 npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -135,4 +135,14 @@ The routing passes the floor: `.github/workflows/` is built-in and `manual` is s
 ## One thing AC3 does not yet claim
 
 "The dogfood pins cover the repo policy's routings" is vacuously true today: the live APPROVAL.md carries no routed entry, because agents do not edit it. What is in place is the machinery and the demand — the reachability check asks `emittableClass` with the live policy's own `protected_paths`, and `checkPolicyExpectations` will report `unpinned` for `policy.edit.design` and `policy.edit.ci` the moment the routing lands, which `approval policy amend` runs before it pushes. The routed branch that the live policy cannot yet reach is exercised by a fixture test instead, so the check is not passing for the wrong reason. The two pins are written out above, ready to land in the same commit as the policy edit.
+
+**AC5** — full `npm test` on the frozen tree at c6fb098: **3510 tests, 3509 pass, 0 fail, 1 skipped, exit 0**. The single skip is the pre-existing opt-in external-network probe (`demonstration: curl https://example.com fails inside the sandbox`, gated behind `SANDBOX_PROBE_EXTERNAL=1`), unrelated to this change. `npx oxlint src tests` exit 0. `node conformance/run.mjs` exit 0.
+
+Two earlier full runs were discarded rather than reported: each had a `tsc` rebuild land mid-run, and a suite reading from `dist` while it is being rewritten is not a result worth quoting. The number above is from a run with no edits to the tree from start to finish.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+protected_paths entries may route to named policy.edit sub-classes ({path, class}); routed classes inherit the policy.edit line when undeclared; the routed tier sits below policy.core and log.mutate and above built-in policy.edit; a load-time floor refuses routing a runtime-protected path below the policy.edit line; the guard accepts routed or policy.edit grants; dark-session, doctor and dogfood read the routed class; conformance policy-resolution and schema-validation both to 2.0.0 with reasoning recorded. Verified by 35 new cases across three suites plus the classifier, policy, guard, dogfood and conformance suites, full run 3509 pass, lint clean; merged in PR #290. Carter's ceremony lines and the two pins are in the notes.
+<!-- SECTION:FINAL_SUMMARY:END -->

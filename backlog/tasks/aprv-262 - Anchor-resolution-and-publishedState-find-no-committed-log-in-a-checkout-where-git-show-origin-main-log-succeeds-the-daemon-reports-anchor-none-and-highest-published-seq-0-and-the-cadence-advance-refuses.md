@@ -4,11 +4,11 @@ title: >-
   Anchor resolution and publishedState find no committed log in a checkout where
   git show origin/main:<log> succeeds: the daemon reports anchor none and
   highest published seq 0, and the cadence advance refuses
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-e'
 created_date: '2026-09-05 09:59'
-updated_date: '2026-09-05 10:32'
+updated_date: '2026-09-05 11:40'
 labels:
   - core
   - daemon
@@ -168,3 +168,9 @@ limit; their commands (`rev-parse`, `diff --cached --numstat`, `merge-base
 --is-ancestor`) produce a line or two, so they are not at risk today, and
 they were left alone rather than swept into a regression fix.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Root cause: spawnSync's 1 MiB maxBuffer killed every git show of the 12.5 MB committed log and showBlob returned null as if no rev carried it, so the anchor, doctor log-drift, publishedState and the cadence advance all read nothing. Fixed with GIT_OUTPUT_LIMIT_BYTES (512 MiB) in the git runner, readBlob reporting the command, status and stderr, log-anchor distinguishing no blob from unreadable blob and listing every attempt in the skip reason, and the same limit on amend's policy read. Verified by log-anchor 29/29 with five cases at the primary's ref layout and log size from a main and a linked worktree, cli-amend 84/84, full run 3447 pass, and against the real log (anchor behind, doctor rows pass); merged in PR #284.
+<!-- SECTION:FINAL_SUMMARY:END -->
