@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-g'
 created_date: '2026-09-04 23:57'
-updated_date: '2026-09-05 09:14'
+updated_date: '2026-09-05 09:18'
 labels:
   - channels
   - log
@@ -42,7 +42,7 @@ Also here: approval doctor gains a checkpoint row (newest checkpoint, its age ag
 - [x] #2 Key rotation appends to audit.checkpoint_keys and refuses to remove a key that signed any checkpoint in the log, naming the seqs that would stop verifying
 - [x] #3 A checkpoint can be requested and answered from a channel prompt (Telegram and CLI), signed by the listener from the head the human was shown, proved against the mock bot and through the real append path
 - [x] #4 The daemon enqueues a checkpoint prompt when audit.checkpoint_every says one is due, at most one outstanding, and never escalates a missing one past a warning
-- [ ] #5 approval doctor gains a checkpoint row; docs/cli-reference.md and a runbook paragraph on a lost key; npm test passes; lint clean
+- [x] #5 approval doctor gains a checkpoint row; docs/cli-reference.md and a runbook paragraph on a lost key; npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -103,4 +103,14 @@ SPEC.md is protected and this agent did not edit it. Two sentences, both for §9
 'A runtime that lets a human rotate a checkpoint key MUST add rather than replace, and MUST refuse to remove a declared key that signed any checkpoint inside a log it can read, naming the records that would stop verifying: the declared list retains every key that has ever signed, because removing one turns every checkpoint it signed into a refusal of a log nobody has touched. (Added APRV-257.)'
 
 Nothing in §11.1's invariant list needs a new entry: the tap touches inv. 1, 2, 3, 5, 6, 7 and 9 and weakens none of them (see the invariant paragraph above).
+
+VALIDATION. Full npm test on the final tree: 3434 tests, 3433 pass, 0 fail, 1 pre-existing skip, exit 0 (276s). npx oxlint over the whole repo, exit 0. Per-file after the last change: tests/checkpoint-tap.test.ts 32/32 exit 0; log-checkpoint 32/32 exit 0; cli-doctor exit 0; cli-instructions exit 0; channels-telegram exit 0; cli-setup exit 0; cli-help / cli-long-help / command-class / cli exit 0.
+
+TWO FAILURES THE SUITE CAUGHT AND THIS TASK FIXED. (1) appendCheckpointAt reported the LOG's head in its result rather than the head it SIGNED, so a tap's own report and the message it edited named the wrong (seq, hash); the record itself was always right. (2) The verb registry's completeness test requires every verb to sit in exactly one of the human-only and agent-facing lists, and setup checkpoint was in neither.
+
+ONE DEVIATION FROM THE TASK TEXT, DELIBERATE. The task says 'the button carries the (seq, hash) the human is signing'. The button's callback_data carries a NONCE; the (seq, hash) is in the message the human reads and in the issuing process's own map. Same reasoning as APRV-115's digest 'all' button: bytes that travel over the network must not name what gets acted on, or something that can reach the bot chooses it. What the human is shown and what is signed are still identical, which is the property the sentence was after.
+
+COST NOTE. With a cadence configured, each dispatch cycle now pays one extra policy load and one verified read (served by the process read cache) plus checkLogCheckpoints. With no cadence and no key it stops at the policy load.
+
+LEFT FOR CARTER: two commands, once. `approval setup checkpoint --as human:carter` at a terminal in the primary checkout with the vault passphrase in the shell, then paste the printed audit.checkpoint_keys block plus checkpoint_every into APPROVAL.md and run `approval policy amend`. Until that second step lands the key is inert and the doctor row skips. docs/dogfood-cutover.md carries the runbook.
 <!-- SECTION:NOTES:END -->
