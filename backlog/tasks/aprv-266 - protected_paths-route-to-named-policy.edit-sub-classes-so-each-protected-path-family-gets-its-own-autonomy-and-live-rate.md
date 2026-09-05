@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-c'
 created_date: '2026-09-05 10:30'
-updated_date: '2026-09-05 11:15'
+updated_date: '2026-09-05 11:20'
 labels:
   - policy
   - classifier
@@ -104,4 +104,31 @@ No other invariant is touched. Enforcement paths still read only verified record
 **AC3** — tests/protected-path-guard-routed.test.ts (6 tests), logs built through the real append path: a grant of the routed sub-class is `granted-file` evidence, a grant of `policy.edit` itself still is, a routed grant naming another file is `no-evidence`, and a routed grant that did not bind the hunk is `uncovered-hunk`. The dark-session evaluator and the doctor rows read the guard's own `isGuardedPath` / `isGrantingClass`, so they honour routing by construction; both had their `protected_paths` parameters widened. The dogfood suite's reachability test now asks `emittableClass` with the live policy's own entries, plus a routed-fixture case that exercises the branch the live policy cannot yet reach. Conformance regenerated per the ritual; `node conformance/run.mjs` exits 0, tests/conformance.test.ts 25/25, tests/conformance-regen.test.ts 7/7.
 
 **AC4** — schema/policy.schema.json amended (a `oneOf` over the bare string and the routed object, with the path grammar hoisted to `$defs/protectedPath` so both shapes are held to one rule); two fixtures added, valid and invalid. SPEC 5.2 and 7 sentences drafted above. docs/claude-code-hook.md and docs/cli-reference.md updated.
+
+## For Carter: the APPROVAL.md amendment this unlocks
+
+Not applied. Agents do not edit APPROVAL.md; these are the lines for the ceremony, verified against a scratch copy of the live policy (loads clean, resolves as stated, and the expectations check reports exactly the two missing pins below and nothing else).
+
+Replace the `protected_paths` block:
+
+    protected_paths:            # widens policy.edit; the built-ins hold regardless
+      - { path: SPEC.md, class: policy.edit.spec }
+      - { path: design/, class: policy.edit.design }
+      - { path: .github/workflows/, class: policy.edit.ci }
+
+Add two lines to `classes`, beside the existing `policy.edit`:
+
+      policy.edit.design:        { autonomy: supervised }
+      policy.edit.ci:            { autonomy: manual }
+
+What that buys, verified: `design/` resolves supervised-retro (executes, sampled afterwards at audit.supervised_sample_rate, never on the phone); `.github/workflows/` resolves manual (every CI edit gates); `SPEC.md` resolves policy.edit.spec at provenance `inherited`, which is the `policy.edit` line's own supervised-live 0.1, so nothing about the specification changes until a `policy.edit.spec` line is written; `CLAUDE.md` and `AGENTS.md` stay plain `policy.edit` at 0.1; `APPROVAL.md` and the log are untouched by the routing and answer `policy.core` / `log.mutate` as before.
+
+The routing passes the floor: `.github/workflows/` is built-in and `manual` is stricter than `supervised-live 0.1`; `design/` is not a built-in protected path, so it is unfloored and may be looser. Routing `.github/workflows/` to anything looser than the `policy.edit` line refuses the whole policy at load.
+
+**The pins must land in the SAME commit.** `checkPolicyExpectations` reports `unpinned` for both new classes, and `approval policy amend` runs it before it pushes, so the ceremony refuses on the laptop without them. Add to `REPO_POLICY_EXPECTATIONS` in src/core/policy-expectations.ts:
+
+    { actionClass: "policy.edit.design", autonomy: "supervised", provenance: "rule" },
+    { actionClass: "policy.edit.ci", autonomy: "manual", provenance: "rule" },
+
+(`policy.edit.spec` takes no pin: it is not declared in `classes`, so nothing flags it, and pinning an inherited class would pin the parent's line twice.)
 <!-- SECTION:NOTES:END -->
