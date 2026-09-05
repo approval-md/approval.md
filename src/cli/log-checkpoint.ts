@@ -6,45 +6,24 @@
  * may come from, maps the result onto the frozen exit table, and decides what a
  * terminal sees.
  *
- * ## Where the key may come from, and why that decision is here
+ * ## Where the key may come from, and why that decision is NOT here any more
  *
  * `core/checkpoint.ts` takes the private key as a value and reads it from
  * nowhere. That is deliberate: custody is a policy question, and answering it in
  * one place means there is one file to read to learn every way a checkpoint key
- * can reach a signature.
- *
- * Two sources, in this order:
- *
- * 1. `--key-file <path>`, for a key an operator keeps outside the vault (an
- *    offline machine, a hardware-backed export, a paper backup being restored).
- *    The path is one a human typed.
- * 2. The credential vault, under `approval.checkpoint.key`. Encrypted at rest
- *    under a passphrase `core/child-env.ts` strips from every spawned child,
- *    behind a file whose reading classifies `account.credential` (human-only).
- *
- * There is no environment variable holding the key itself and no `--key` flag:
- * a key on a command line is a key in the shell history, and a key in the
- * session environment is a key every child the session launches inherits — the
- * exact failure APRV-205 exists to have fixed.
- *
- * This verb reads a credential, which makes it the second sanctioned caller of
- * `getCredential` after `adapters/vault-provider.ts`. It is the same shape as
- * the first: the value travels from the vault file into a signature and is
- * never printed, returned, or logged. There is still no verb that PRINTS a
- * credential, which is the rule `core/vault.ts` is actually keeping.
+ * can reach a signature. Until APRV-257 that file was this one, because a
+ * terminal was the only place a checkpoint could be signed. The channel tap
+ * added two more callers, so the decision MOVED to `cli/checkpoint-tap.ts`
+ * rather than being copied into them, and this verb resolves its key with
+ * everyone else's function. The property is unchanged; the file holding it is
+ * not.
  */
 
-import { readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
-import {
-  appendCheckpoint,
-  CHECKPOINT_KEY_CREDENTIAL,
-  type CheckpointAppendResult,
-} from "../core/checkpoint.js";
+import { appendCheckpoint, type CheckpointAppendResult } from "../core/checkpoint.js";
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
-import { loadPolicy } from "../core/policy-load.js";
-import { getCredential, passphraseEnvFor, passphraseFrom, vaultPathFor } from "../core/vault.js";
+import { resolveCheckpointKey } from "./checkpoint-tap.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { LOG_CHECKPOINT_HELP } from "./help.js";
@@ -88,59 +67,6 @@ function refusalExit(code: string): number {
   return code === "log-corrupt" || code === "log-torn-tail" ? EXIT_INTEGRITY : EXIT_IO;
 }
 
-/** The private key, or a refusal naming which source failed and how to fix it. */
-function resolveSigningKey(
-  keyFile: string | null,
-  logPath: string,
-  vaultFlag: string | null,
-  policyWhere: { file?: string; dir?: string },
-  cwd: string,
-): { ok: true; privateKey: string } | { ok: false; code: string; message: string } {
-  if (keyFile !== null) {
-    const path = absolute(keyFile, cwd);
-    let text: string;
-    try {
-      text = readFileSync(path, "utf8").trim();
-    } catch (cause) {
-      return {
-        ok: false,
-        code: "checkpoint-key-unreadable",
-        message: `--key-file ${path} could not be read (${
-          cause instanceof Error ? cause.message : String(cause)
-        }); nothing was appended`,
-      };
-    }
-    if (text.length === 0) {
-      return {
-        ok: false,
-        code: "checkpoint-key-unreadable",
-        message: `--key-file ${path} is empty; a checkpoint key is a base64 PKCS#8 Ed25519 private key on one line. Nothing was appended`,
-      };
-    }
-    return { ok: true, privateKey: text };
-  }
-
-  const vaultPath = vaultFlag === null ? vaultPathFor(logPath) : absolute(vaultFlag, cwd);
-  const passphraseEnv = passphraseEnvFor(loadPolicy(policyWhere));
-  const passphrase = passphraseFrom(passphraseEnv);
-  if (passphrase === null) {
-    return {
-      ok: false,
-      code: "checkpoint-key-unreadable",
-      message: `${passphraseEnv} is unset or empty, so the vault holding ${CHECKPOINT_KEY_CREDENTIAL} could not be opened. The passphrase is read from that variable and from nowhere else; there is no --passphrase flag. Nothing was appended`,
-    };
-  }
-  const credential = getCredential(vaultPath, passphrase, CHECKPOINT_KEY_CREDENTIAL);
-  if (!credential.ok) {
-    return {
-      ok: false,
-      code: "checkpoint-key-unreadable",
-      message: `the checkpoint signing key could not be read from ${vaultPath} (${credential.code}: ${credential.message}). Store one with \`approval vault set ${CHECKPOINT_KEY_CREDENTIAL}\`, or pass --key-file. Nothing was appended`,
-    };
-  }
-  return { ok: true, privateKey: credential.value };
-}
-
 export function commandLogCheckpoint(argv: string[], streams: Streams, cwd: string): number {
   const json = argv.includes("--json");
   const parsed = parseFlags(argv, CHECKPOINT_FLAGS);
@@ -179,7 +105,7 @@ export function commandLogCheckpoint(argv: string[], streams: Streams, cwd: stri
       ? { file: absolute(policyFlag, cwd) }
       : { dir: dirFlag === null ? cwd : absolute(dirFlag, cwd) };
 
-  const key = resolveSigningKey(
+  const key = resolveCheckpointKey(
     stringFlag(parsed.flags, "--key-file"),
     logPath,
     stringFlag(parsed.flags, "--vault"),
