@@ -2833,6 +2833,17 @@ function setupFor(
     delivery,
     gateOptions: world.unit.options,
     tagOptions: world.tagOptions,
+    // APRV-257. Present because `ListenSetup` requires it, and inert in this
+    // suite: these fixtures declare no `audit.checkpoint_every` and no
+    // `audit.checkpoint_keys`, so `checkpointOfferFor` gives up on the policy
+    // read and no dispatch cycle below ever offers one. The tap's own cases are
+    // `tests/checkpoint-tap.test.ts`.
+    checkpoint: {
+      logPath: world.unit.logPath,
+      policy: world.tagOptions.policy ?? {},
+      keyFile: null,
+      vault: null,
+    },
     // Absent unless a test hands one over. No suite in this repository may
     // invoke a model, so the production runner is never the default here.
     ...(gloss === undefined ? {} : { gloss }),

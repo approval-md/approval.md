@@ -244,7 +244,7 @@ export type CheckpointTapResult =
  */
 export function signCheckpointOffer(
   tap: CheckpointTap,
-  offer: CheckpointOffer,
+  head: { seq: number; hash: string },
   actor: string,
   channel: string,
   cwd: string,
@@ -252,7 +252,7 @@ export function signCheckpointOffer(
   const key = resolveCheckpointKey(tap.keyFile, tap.logPath, tap.vault, tap.policy, cwd);
   if (!key.ok) return key;
 
-  const appended = appendCheckpointAt(tap.logPath, key.privateKey, actor, offer.head, {
+  const appended = appendCheckpointAt(tap.logPath, key.privateKey, actor, head, {
     channel,
     ...(tap.schemaDir === undefined ? {} : { schemaDir: tap.schemaDir }),
   });
