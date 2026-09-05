@@ -1542,6 +1542,17 @@ store is the normal state of a repo that has never made a request carrying
 **anomalies** are informational for the same reason `approval log verify`
 declined to refuse on them: status does not get to overrule that.
 
+**coverage** is one line of `approval coverage` (APRV-245): the commits git
+recorded on THIS branch, counted against the verified log. The range is the
+merge base with `origin/main` to `HEAD`, so what it measures is what this branch
+added. Two states replace the numbers rather than faking them, because in
+neither would a count mean anything: `not a git checkout`, and `origin/main
+absent`, which is a checkout with no trunk ref to take a merge base from.
+Informational, exactly as `harness_outcomes` is: it moves neither `healthy` nor
+the exit code, because a coverage measurement is not an integrity verdict and a
+gap is a question for a person rather than a failure. The whole report, `gh` and
+the adapters included, is the `coverage` verb below.
+
 **`--verbose`** prints the rationale sentences under the rows they explain — at
 v0.1 that is the payload-store paragraph above, which is the one row whose three
 numbers a first-time reader cannot interpret unaided. It adds lines and moves
@@ -1561,6 +1572,8 @@ does not know the flag exists.
   each was recorded under.
 - `budgets` — headroom per configured GLOBAL limit, from a zero-cost probe.
 - `loop_escalations` — tasks with three consecutive `execution.failed` events.
+- `coverage` — `{available, reason, observed, covered}` for this branch's own
+  commits, as git recorded them. Informational.
 - `reconciliation` — obligations opened by a retrospective denial and not yet
   discharged by a person. Counts toward `healthy`, exactly as `dangling` does: an
   unreconciled denial is a "no" that has so far changed nothing, and a "no"
@@ -1582,6 +1595,7 @@ does not know the flag exists.
    "pass":true}],
  "loop_escalations":[{"task":"task-042","consecutive_failures":3,
    "escalated":true}],
+ "coverage":{"available":true,"reason":null,"observed":4,"covered":3},
  "reconciliation":[{"seq":18,"ts":"...","action_key":"...","task":"...",
    "class":"records.write","obligation":"gated-revert","review_seq":17}],
  "payload_store":{"present":true,"files":2,"pruned":0,"orphans":0,
@@ -1591,6 +1605,134 @@ does not know the flag exists.
 `ok` is true whenever status ran; `healthy` is the verdict. `attestation.seq` is
 null for not-attested and unreadable. `note` carries the unrebuildable warning
 verbatim.
+
+## coverage
+
+MCP use is voluntary. An agent connected to `approval mcp serve --http` can call
+`request`, `wait` and `run`, or it can simply act, and nothing in this runtime
+observes the act, because the runtime is not in the path. A gate an agent may
+route around reports only on the actions routed through it, and a report that
+counts only its own inputs is a report that cannot go down.
+
+What makes the arrangement honest is that side effects leave witnesses THIS
+PROJECT DOES NOT WRITE. Git history records commits, merges and tags. `gh`
+records pull requests. AgentMail records the messages an inbox actually sent.
+None of those is appended by approval.md, none is reachable by an agent editing
+its own log, and each can be read back and joined against the verified records
+to ask one question per effect: does the log say a human, or a policy, ever saw
+this? That join is what this verb reports, and nothing else.
+
+**What it reports.** Per effect: the source that witnessed it, the witness's own
+id (a commit sha, a PR number, a message id), the class it would have been
+declared under, and the evidence in the log, or `none`. Then a coverage line per
+source, and the reason for any source that could not be reached. `gh is not on
+PATH` and `gh saw no pull requests` are different facts, and a source that could
+not be asked reports itself unavailable rather than contributing an empty list:
+collapsing the two would let a broken tool read as a clean bill of health.
+
+**It is informational, and exits 0 with gaps.** The rule is SPEC.md §10.1's, the
+same one the APRV-145 harness-start coverage in `status` follows: a coverage
+measurement is not an integrity verdict, and a control an operator learns to
+silence is worse than one that reports beside the verdict. A gap is a question
+("was this effect ever declared?"), and questions with legitimate answers must
+not fail a build. The codes it can still emit are the filesystem's: 2 for a usage
+error, 3 for a torn tail and 4 for a log it could not read, because a log it
+could not read is a report it did not make. It reads only verified records
+(SPEC.md §11.1 invariant 1) and writes nothing anywhere.
+
+### The window rule, stated exactly
+
+For one observed effect, evidence is the EARLIEST record that is all three of:
+
+1. one of `task.registered`, `approval.granted`, `execution.started`,
+   `execution.completed` — the four records that mean "this runtime was told
+   about an action of this class", from the declaration through the human's
+   decision to the spend;
+2. of a matching class: EXACT first, and only if nothing matches exactly, a
+   FAMILY match on the first two dotted segments, reported distinctly as
+   `family` so a reader is never shown a weaker match dressed as a strong one;
+3. inside the window `[at - 24h, at + 5m]`.
+
+The window is asymmetric on purpose and both halves are arguable, so both are
+written down. **24 hours back**, because the ordinary shape is register →
+request → grant → act, and the gap between the human's tap and the effect is a
+working day at worst; a week back would let one grant carry every later effect
+of its class, which is the laundering hole APRV-202 closed in the protected-path
+guard. **5 minutes forward**, because that is clock skew between git's author
+date (or a provider's timestamp) and this log, and not an ordering allowance: a
+record appended an hour after an effect is a record about some other action,
+whatever its class.
+
+The one place the rule is not used is a protected FILE path. Those already have
+a stronger answer: the protected-path guard matches a change's BYTES against the
+material a grant bound, and its `attested` and `granted-file` verdicts are
+content-level rather than time-level. An effect carrying a `path` takes the
+guard's verdict when the caller supplies a report covering it, reported as
+`match: "protected-path"`; the class-and-window rule is what everything else
+gets. The guard's third verdict, `granted-command`, is deliberately not
+surfaced: it is a run attributed by time rather than by bytes, and printing it
+beside `attested` would flatten the distinction the guard exists to draw.
+
+**The AgentMail join is by class and window, not by message id.** The adapter
+reports the provider's own `message_id` and the report prints it, but the id is
+not matched against anything: `execution.completed` records an `exit_code`, and
+the provider's id reaches only the CLI result, so an id-level binding needs an
+event-schema amendment. Putting the reference on-chain is APRV-251. Until that
+lands, a sent message is covered by a record of its class inside its window,
+exactly like a commit, and the id in the report is there for a person to paste
+into the provider's own console rather than for this verb to match on.
+
+### The three tiers
+
+A green coverage line is a statement about the middle row and nothing else.
+
+| Tier | What holds | What this verb says |
+| --- | --- | --- |
+| Prevented by custody | Adapter-held credentials answer only to a token (SPEC.md §10.4). An agent holding the connector and not the key cannot act around the gate at all, because it has nothing to act with. | Nothing. There is no effect to witness, which is the point. |
+| Witnessed by a log we do not write | Git, `gh` and a provider's own records. The effect happened whether or not anyone routed it through the gate, and the witness is outside this runtime's reach. | This verb: per effect, the evidence seq or `none`. |
+| Not covered | Effects made with credentials the AGENT itself holds — an API key pasted into Grok Bot, a token in a shell profile. No witness this verb can read is guaranteed to exist. | Nothing, and it cannot say so. The remedy is custody, not a bigger report. |
+
+The third row is why the second is never over-read. Moving an effect out of it
+means moving the credential into an adapter, so that the key answers to a token
+and the first row applies. A report cannot be made to cover what a report cannot
+see.
+
+**`--json`** (one object on stdout):
+
+```
+{"ok":true,
+ "window":{"base":"origin/main","head":"HEAD",
+   "since":"2026-08-28T00:00:00.000Z","until":"2026-09-04T00:00:00.000Z"},
+ "sources":[
+  {"name":"git","available":true,"reason":null,
+   "effects":[{"id":"3f2a466ad9cc...","class":"vcs.push.main",
+     "at":"2026-09-02T18:04:11Z","actor_hint":"carter@example.com",
+     "detail":"merge commit 3f2a466ad9cc Merge pull request #245",
+     "path":null,"match":"exact",
+     "evidence":{"seq":7094,"event":"task.registered","verdict":null}}],
+   "covered":1,"observed":1},
+  {"name":"gh","available":false,"reason":"gh is not on PATH",
+   "effects":[],"covered":0,"observed":0}]}
+```
+
+`evidence` is null for a gap, and its three keys carry two kinds of proof: a
+record `seq` a reader can paste into `approval log tail`, or the protected-path
+guard's `verdict` about bytes, with the unused half null. `match` says which rule
+found it: `exact`, `family`, `protected-path`, or `none`.
+
+**Flags.** `--base` / `--head` bound the commit range, defaulting to the merge
+base with `origin/main` through `HEAD`; a checkout where that ref does not
+resolve falls back to the last twenty commits and SAYS SO in the source's
+reason, because a reader has to be able to see that the answer came from a guess.
+`--since` (default `7d`) and `--until` bound the window the adapter and `gh`
+sources are asked about. `--source` picks from `git`, `gh` and `agentmail`,
+defaulting to `git,gh`; `agentmail` is opt-in because it opens a vault. That
+source builds its credential provider the way `approval setup adapter agentmail`
+builds its probe's — the passphrase comes from the shell environment under the
+policy's name, and NEVER from the `.approval/env` fallback, which is defensible
+only inside a consumed-token window. A vault that will not open makes the source
+unavailable with the reason; it is never an exit code, because the other sources
+still have answers.
 
 ## doctor
 
@@ -3197,6 +3339,19 @@ no `exit_code`, the token and the idempotency key stay burned, a retry is refuse
 and `approval execution reconcile` is how a person resolves it. Recording an
 unknown outcome as a failure is what makes a retry look safe, and a retry against
 a send that did happen is a second email.
+
+**`observe`, the optional read** (APRV-245). An adapter may also publish what its
+PROVIDER recorded happening in a window, which is what lets `approval coverage`
+witness an adapter-backed class. It is the mirror of the rule above: read-only,
+called with NO token and outside any grant window, because reading what already
+happened authorizes nothing. The caller redacts every returned detail a second
+time, and a detail line names an effect for a person to recognize (a subject, a
+recipient count, an id) and never a message body: the report is read by somebody
+who did not approve the message. Every returned effect carries a class the
+adapter serves, and the conformance suite checks all of it — no write to the far
+side, no throw, no record appended — for any adapter that implements it. An
+adapter that omits `observe` is conformant and is reported as offering no
+observation, which is a gap a reader can see rather than a pass.
 
 ## adapter email
 

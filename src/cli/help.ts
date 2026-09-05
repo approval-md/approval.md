@@ -74,6 +74,8 @@ Usage:
   approval withdraw   <task> --action <key> [--reason <r>] [--note "<text>"]
                       [--as <id>] [--json]
   approval queue      [--policy <path>] [--dir <path>] [--json]
+  approval coverage   [--base <ref>] [--head <ref>] [--since <duration>]
+                      [--source git,gh,agentmail] [--json]
   approval channel cli [--policy-dir <path>] [--payload-dir <path>]
                       [--as human:<id>] [--interactive] [--json]
   approval channel web [--port <n>] [--payload-dir <path>] [--as human:<id>]
@@ -256,6 +258,10 @@ Inspect — what the log says, and whether anything needs repair:
             the latest chain verdict, loop escalations. Exit 1 when any of
             those needs attention. queue is what a human must answer; status is
             what an operator must fix, and neither carries the other's content
+  coverage  what the witnesses this project does NOT write (git, gh, a
+            provider's own record) say happened, joined to the verified log:
+            per effect, the evidence seq or none. INFORMATIONAL — exit 0 with
+            or without gaps, because a coverage measurement is not a verdict
   doctor    is this ENVIRONMENT sane? build freshness, declared identity, policy
             attestation, chain health, the Telegram token, the web port — each
             with a concrete repair. status asks whether the SYSTEM needs
@@ -970,12 +976,38 @@ Flags:
 THIS IS NOT "approval queue": queue is what a human must answer, status is what
 an operator must fix. Writes nothing, and reports in one object: attestation,
 verification, dangling executions, budget headroom per global limit,
-loop_escalations, payload_store, and anomalies when there are any.
+loop_escalations, harness_outcomes, git coverage, payload_store, and anomalies
+when there are any. The coverage numbers move neither health nor the exit code.
 
 JSON shape: docs/cli-reference.md#status
 ${EXIT_CODES_POINTER} (1 when anything needs attention, including a torn tail)
 ${JSON_ERRORS}
 ${why("status")}`;
+
+export const COVERAGE_HELP = `approval coverage — observed side effects, joined to the log
+
+Usage:
+  approval coverage [--base <ref>] [--head <ref>] [--since <d>] [--until <ts>]
+                    [--source git,gh,agentmail] [--vault <p>] [--policy <p>]
+                    [--dir <p>] [--log <p>] [--json]
+
+Flags:
+  --base <ref> / --head <ref>   the commit range (default: since the trunk)
+  --since <d> / --until <ts>    the adapter window (default 7d, ending now)
+  --source <list>   the witnesses to ask: git, gh, agentmail (default git,gh)
+  --policy <p> / --dir <p> / --log <p> / --vault <p>   policy, its dir, the log
+  --json            machine-readable output;  -h, --help   this text
+
+Asks the witnesses this project does NOT write — git, gh, a provider's own
+record — what happened, and prints what the verified log says about each: an
+evidence seq, or none. INFORMATIONAL, and writes nothing: exit 0 with or
+without gaps. Three tiers: custody PREVENTS, this verb WITNESSES, and an effect
+made with a credential the agent itself holds is covered by neither.
+
+JSON shape: docs/cli-reference.md#coverage
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("coverage")}`;
 
 export const DOCTOR_HELP = `approval doctor — environment sanity in one verb
 

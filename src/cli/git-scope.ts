@@ -25,47 +25,19 @@ import {
   sep,
 } from "node:path";
 
-/** One git invocation's result. `ok` is "exit status 0", nothing more. */
-export interface GitRun {
-  ok: boolean;
-  stdout: string;
-  stderr: string;
-}
+import { gh, git, type GitRun } from "../core/git-run.js";
 
-function detail(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
-}
+/**
+ * The two runners moved to `core/git-run.ts` in APRV-245 and are re-exported
+ * here unchanged. The coverage sources are core code and shell out to git, and
+ * core reaching into `src/cli/` for the runner would invert the direction
+ * `tests/layering.test.ts` keeps. Every existing caller of `git-scope.ts` is
+ * untouched, and there is still one spelling of "run git" in the repository.
+ */
+export { gh, git, type GitRun };
 
 function absolute(value: string, cwd: string): string {
   return isAbsolute(value) ? value : resolvePathSegments(cwd, value);
-}
-
-/**
- * Run git in `cwd`. Never throws: a git that did not run is `ok: false`.
- *
- * `env` is merged over `process.env`, and exists for exactly one caller:
- * {@link commitOnBase} points `GIT_INDEX_FILE` at a scratch index so that a
- * commit can be assembled without going anywhere near the operator's own.
- */
-export function git(args: string[], cwd: string, env: Record<string, string> = {}): GitRun {
-  const result = spawnSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    ...(Object.keys(env).length === 0 ? {} : { env: { ...process.env, ...env } }),
-  });
-  if (result.error !== undefined || result.status === null) {
-    return { ok: false, stdout: "", stderr: detail(result.error ?? "git did not run") };
-  }
-  return { ok: result.status === 0, stdout: result.stdout, stderr: result.stderr };
-}
-
-/** `gh`, run the way {@link git} runs git: never throws, always answers. */
-export function gh(args: string[], cwd: string): GitRun {
-  const result = spawnSync("gh", args, { cwd, encoding: "utf8" });
-  if (result.error !== undefined || result.status === null) {
-    return { ok: false, stdout: "", stderr: detail(result.error ?? "gh did not run") };
-  }
-  return { ok: result.status === 0, stdout: result.stdout, stderr: result.stderr };
 }
 
 /** The repository root containing `dir`, or `null` when there is none. */

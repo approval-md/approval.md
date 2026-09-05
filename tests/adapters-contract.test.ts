@@ -713,6 +713,12 @@ const AGENTMAIL_CONFORMANCE: AdapterConformanceHarness = {
     return { [DEFAULT_AGENTMAIL_CREDENTIAL_NAMES.inboxId]: AGENTMAIL_INBOX };
   },
   foreignClass: "financial.spend",
+  // APRV-245. The optional `observe` check counts the far side's writes on both
+  // sides of the call, so "it did not POST" rests on the fixture's own tally
+  // rather than only on the log being unchanged.
+  observeProbe: {
+    writes: () => agentmailMock.posts().length,
+  },
 };
 
 test("the agentmail adapter conforms to the adapter contract", async (t) => {
