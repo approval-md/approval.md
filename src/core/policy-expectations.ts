@@ -155,6 +155,12 @@ export const REPO_POLICY_EXPECTATIONS: readonly PolicyExpectation[] = [
     note: "undeclared, so the manual default holds; APRV-267 taught the classifier to emit it for an rm confined to the session scratchpad or the system temp root, and until a ceremony declares it (autonomous is the intent) it gates exactly as files.delete.out_of_scope always did, which is why landing the rule ahead of the ceremony costs nothing",
   },
   {
+    actionClass: "vcs.remote.meta",
+    autonomy: "manual",
+    provenance: "default",
+    note: "undeclared, so the manual default holds; APRV-268 taught the classifier to emit it for gh reads and metadata mutations on the checkout's own origin, and until a ceremony declares it (supervised is the intent) `gh pr update-branch`, `gh run rerun` and `gh api graphql` queries gate exactly as network.call did — the forms that were already read.vcs.remote (`gh pr view`, a `gh api` GET) move from autonomous to the manual default, which is a FRICTION INCREASE this pin makes visible and the ceremony reverses",
+  },
+  {
     actionClass: "read",
     autonomy: "manual",
     provenance: "default",

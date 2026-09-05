@@ -103,9 +103,9 @@ an addition).
 | `git-remote-read` | git | fetch \| ls-remote \| remote | read.vcs.remote |
 | `git-read` | git | blame \| describe \| diff \| grep \| log \| ls-files \| reflog \| rev-list \| rev-parse \| shortlog \| show \| status | read.shell |
 | `gh-release` | gh | release | release.publish |
-| `gh-api` | gh | api \| auth \| gist \| secret \| workflow | read.vcs.remote for a `gh api` with no method flag (or `GET`) and no `-f`/`-F`/`--field`/`--raw-field`/`--input`; every other call, and every other subcommand on the row, network.call |
+| `gh-api` | gh | api \| auth \| gist \| secret \| workflow | vcs.remote.meta § for a `gh api` on the checkout's own repository with no method flag (or `GET`) and no `-f`/`-F`/`--field`/`--raw-field`/`--input`, and for `gh api graphql` whose document carries no `mutation`; read.vcs.remote for the same GET aimed elsewhere; every other call, and every other subcommand on the row, network.call |
 | `gh-simple-read` | gh | browse \| search \| status | read.vcs.remote |
-| `gh` | gh | pr \| issue \| repo \| run \| cache | read.vcs.remote for view/list/status/checks/diff; `gh pr create` vcs.pr.open, `gh pr edit/comment/review/ready/close/reopen` vcs.pr.update, `gh pr merge` vcs.push.main, `gh pr checkout` vcs.commit.branch; every other write network.call |
+| `gh` | gh | pr \| issue \| repo \| run \| cache | vcs.remote.meta § for `pr view/list/checks/update-branch`, `run view/rerun/list` and `issue view/list` on the checkout's own repository; read.vcs.remote for the other view/list/status/checks/diff forms; `gh pr create` vcs.pr.open, `gh pr edit/comment/review/ready/close/reopen` vcs.pr.update, `gh pr merge` vcs.push.main, `gh pr checkout` vcs.commit.branch; every other write network.call |
 | `npm-publish` | npm, pnpm, yarn, bun | publish \| version \| deprecate \| dist-tag \| unpublish | release.publish |
 | `npm-install` | npm, bun | install \| i \| add | deps.add, deps.install |
 | `yarn-add` | yarn, pnpm | add | deps.add |
@@ -137,6 +137,9 @@ runs in: see [Rewriting unpublished history](#rewriting-unpublished-history).
 
 ‡ `files.delete.scratch` needs roots the classifier cannot know and checks it
 cannot make from text: see [Deleting scratch](#deleting-scratch).
+
+§ `vcs.remote.meta` is reserved for the checkout's OWN repository: see
+[GitHub metadata on your own remote](#github-metadata-on-your-own-remote).
 
 Five overrides sit on top of the table:
 
@@ -258,6 +261,45 @@ one of them failing, or answering ambiguously, leaves the class alone.
 it prints is what the hook decides, and a refined segment shows the rule name
 `rewrite-unpublished`. When the hook refines, its
 `agent_message` says so.
+
+### GitHub metadata on your own remote
+
+`network.call` exists for the calls whose whole purpose is that something
+leaves: a webhook, an email, an arbitrary POST. Asking GitHub about a pull
+request on the repository the checkout already tracks is not that act, and it
+had no class of its own to be granted through. APRV-268 gives it one,
+`vcs.remote.meta`, beside `read.vcs.remote` and `vcs.pr.open`.
+
+Two conditions, both required.
+
+**The target is the checkout's own repository.** That means gh's DEFAULT
+repository resolution, which reads the repository off this checkout's git
+remotes. The classifier is pure and cannot resolve a remote, so it cannot tell
+a `-R` naming this repository from one naming another: **any** `-R`, `--repo`
+or `--hostname` makes the invocation foreign and it keeps the class it had
+before. So does any `$VAR` or `$(…)` in the argv, because one of the words the
+classifier cannot see could be a `--repo`.
+
+**The verb reads, or edits the forge's own bookkeeping.** Exactly this set, and
+no wider:
+
+| noun | actions that are `vcs.remote.meta` |
+|---|---|
+| `pr` | `view`, `list`, `checks`, `update-branch` |
+| `run` | `view`, `rerun`, `list` |
+| `issue` | `view`, `list` |
+| `api` | a GET (no method flag or `GET`, and no `-f`/`-F`/`--field`/`--raw-field`/`--input`) |
+| `api graphql` | a document carrying no `mutation` anywhere, and not read from a file (`-f query=@doc`, `--input`) |
+
+`pr update-branch` and `run rerun` are mutations, and are included because what
+they change is GitHub's bookkeeping about work already pushed, with no content
+of the operator's authorship leaving the machine.
+
+Everything else is untouched. `gh pr diff`, `gh pr status`, `gh repo view` and
+`gh run watch` stay `read.vcs.remote`; `gh pr create` stays `vcs.pr.open`,
+`gh pr merge` stays `vcs.push.main`; `gh release`, `gh gist`, `gh secret`,
+`gh auth`, `gh workflow`, a `gh api` with a method or a body, and every `curl`
+that is not a plain GET stay where they were.
 
 ### Deleting scratch
 
