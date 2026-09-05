@@ -187,7 +187,11 @@ Walkthrough: [examples/mcp-demo.md](examples/mcp-demo.md).
 
 A harness that can simply run commands needs neither surface: `request`, `wait`,
 `run` is how sessions in this repository take manual-class actions
-([docs/dogfood-cutover.md](docs/dogfood-cutover.md)).
+([docs/dogfood-cutover.md](docs/dogfood-cutover.md)). The task-file side of that
+flow, on a Backlog.md board with a policy of its own, is the worked example in
+[examples/backlog-md-project/README.md](examples/backlog-md-project/README.md):
+one envelope on one task file, then `register`, `request`, `wait`, `run`, with
+what each prints. There is no Backlog.md adapter, and the example says why.
 
 ## Put approvals on your phone
 
@@ -507,7 +511,10 @@ believed was in force. Full semantics: SPEC.md section 5.
 | `channels.telegram.chat_id_env` | Name of the variable holding the approver chat id. Default `APPROVAL_TG_CHAT` (§5.1). |
 | `channels.telegram.delivery` | `paced` (the default) shows one summary line and the oldest pending request, then the next one after a decision, `/skip` or `/next`; `burst` sends every pending request the listener has not sent yet (§10.3). |
 | `channels.web.port` | TCP port for the local approval UI, bound on loopback only (§5.1). |
-| `channels.<other>` | An unknown channel name is accepted as an object, so a third-party transport does not fail the whole policy closed (§10.3). |
+| `channels.<name>.prompt.rows` | Order only, for `telegram`, `web` and `cli`: the rows named here render in this order ahead of the rest, which keep their default relative order behind them. Never a whitelist, so a field added later cannot be lost to a list written before it existed (§5.2, §10.3). |
+| `channels.<name>.prompt.always` | Rows this channel renders only when abnormal, or not at all, render on every prompt instead. The anomaly mark stays a statement about the value, so a forced-on row shouts only when the value is in fact the reason to look (§5.2, §10.3). |
+| `channels.<name>.prompt.hide` | Rows this channel never renders. Refused for the rows required for a decision (`action_key`, `class`, `command_breakdown`, `protected_path`, `policy_diff`, `policy_load`), and refused for a row `always` also names (§5.2, §10.3). |
+| `channels.<other>` | An unknown channel name is accepted as an object, so a third-party transport does not fail the whole policy closed (§10.3). A `prompt` block written under such a name is still validated: a layout is checked wherever it appears. |
 
 Every key ending in `_env` carries a variable's *name* and never its value:
 agents may read `APPROVAL.md`, so a secret it carried would be a secret they

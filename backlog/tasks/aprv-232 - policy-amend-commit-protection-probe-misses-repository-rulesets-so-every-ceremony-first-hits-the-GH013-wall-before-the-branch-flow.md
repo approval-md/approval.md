@@ -3,11 +3,11 @@ id: APRV-232
 title: >-
   policy amend --commit: protection probe misses repository rulesets, so every
   ceremony first hits the GH013 wall before the branch flow
-status: In Progress
+status: Done
 assignee:
   - 'agent:fable-lane-q'
 created_date: '2026-09-02 20:12'
-updated_date: '2026-09-02 21:03'
+updated_date: '2026-09-02 22:20'
 labels:
   - cli
   - ceremony
@@ -27,7 +27,7 @@ Seen 2026-09-02 at the seq 13704 ceremony: approval policy amend --commit probed
 - [x] #1 On a repository whose default branch is governed by a ruleset requiring the merge queue, approval policy amend --commit prints no push rejection and goes directly to the branch flow (test with a stubbed gh answering 404 on branches/{branch}/protection and a ruleset on rules/branches/{branch})
 - [x] #2 A classic-protected repository, an unprotected one, and an unreachable gh each still resolve as before (protected, unprotected, UNKNOWN), covered by tests
 - [x] #3 docs/cli-reference.md policy amend section describes both probes
-- [ ] #4 npm test passes; lint clean
+- [x] #4 npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -64,3 +64,9 @@ Full npm test did NOT finish inside the session's 10 minute ceiling on the loade
 
 Correction: the full npm test run DID complete after the note above was written. 3020 tests, 3018 pass, 1 skipped, 1 fail, npm test exit 1. The single failure is the same ci-guard engines.node case (this agent worktree has no node_modules; it passes in the primary checkout and in CI). No test touched by this task failed. AC4 is left unchecked because the run exited non-zero here; the orchestrator can check it from a green run in the primary checkout.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+policy amend --commit probes repository rulesets (rules/branches/<default>) when the classic protection endpoint cannot prove protection, so a ruleset-governed main goes straight to the branch flow with no GH013 rejection; both reads are read-only and never fail the command; UNKNOWN when neither answers. Verified by cli-amend 84/84 (six new cases) and CI's full run on PR #244; merged.
+<!-- SECTION:FINAL_SUMMARY:END -->

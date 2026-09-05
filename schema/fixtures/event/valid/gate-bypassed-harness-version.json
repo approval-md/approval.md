@@ -1,0 +1,18 @@
+{
+  "seq": 43,
+  "ts": "2026-09-04T10:24:02Z",
+  "event": "gate.bypassed",
+  "actor": "agent:cursor",
+  "payload": {
+    "opened_seq": 41,
+    "tool": "Shell",
+    "summary": "npm install --save-dev oxlint",
+    "classes": ["deps.add"],
+    "payload_hash": "4d0a9c2b7e5f13860ad4c9b217e3f508cc61a7d2394b8e05f7ca61d3b8092e4f",
+    "harness": "cursor",
+    "harness_version": "cursor-agent 2026.08.19"
+  },
+  "alg": "sha256/jcs",
+  "prev": "1b4f8e2c9a7d05613fbc84a2e0d97c31556a08bf4e2913d7ca60b85f9d3e7042",
+  "hash": "5e2b06c9147adf38b0e75c3a19d6482f0cb3d97e15a48f602bd7ce319a04f8b6"
+}

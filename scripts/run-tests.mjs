@@ -26,7 +26,7 @@
  * without spawning the suite it is part of.
  */
 
-import { readdirSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { join, relative } from "node:path";
@@ -35,6 +35,81 @@ const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const TEST_DIR = join(REPO_ROOT, "dist", "tests");
 
 const USAGE = "run-tests.mjs [--only <name>...] [--shard <k>/<n>]";
+
+// ---------------------------------------------------------------------------
+// Harness binaries are stubbed for the whole suite (APRV-227)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where the stub `claude` and `cursor-agent` are written, in front of PATH.
+ *
+ * Under `dist/`, which is build output and already ignored, so the suite
+ * leaves nothing in the working tree and nothing to clean up.
+ */
+const STUB_BIN_DIR = join(REPO_ROOT, "dist", "test-bin");
+
+/** What every stub answers `--version` with. Fixed, so records are identical everywhere. */
+export const STUB_HARNESS_VERSION = "0.0.0-approval-md-test-stub";
+
+/** The harness binaries this runtime knows how to spawn (`core/harness-version.ts`). */
+const STUBBED_BINARIES = ["claude", "cursor-agent"];
+
+/**
+ * Put a stub in front of every harness binary the runtime can spawn, for the
+ * whole suite, and return the PATH the test process gets.
+ *
+ * ## Why this exists
+ *
+ * Two places in the runtime spawn a harness binary by name off PATH, and
+ * neither is configurable, deliberately: `cli/gloss.ts` runs `claude -p` to
+ * render a sentence, and `core/harness-version.ts` runs `<binary> --version` to
+ * stamp the record a hook is about to write. "PATH is the only seam" is the
+ * right design and it has one consequence for a test suite — on a developer's
+ * own machine, where the real CLI is installed, a test that forgets to stub it
+ * silently runs somebody's actual harness. `tests/fake-claude.ts` documents
+ * what that already cost once: the suite had been making real model calls on
+ * every listener case for several tasks, and nobody could see it.
+ *
+ * So the guarantee is made HERE, once, for every file rather than per file: no
+ * test run through this runner reaches a real harness binary. A file that wants
+ * particular behaviour still prepends its own stub (`tests/fake-claude.ts`, and
+ * `tests/harness-version.test.ts`'s per-case stubs) and wins, because it goes
+ * in front of this one.
+ *
+ * The stub answers `--version` and refuses everything else. Refusing is the
+ * useful default: a `spawnGloss` that reaches this gets a fast `null`, which is
+ * exactly what it gets from a machine with no CLI installed, instead of ten
+ * seconds and a real model call.
+ *
+ * **This covers `npm test` and CI, not a bare `node --test dist/tests/x.js`.**
+ * A single-file run during development still inherits the developer's own PATH.
+ * That is a real gap and it is stated rather than papered over: closing it in
+ * the runtime would mean a test-only switch inside the code that decides what
+ * to execute, which is a worse thing to own than a documented gap.
+ */
+function stubHarnessBinaries() {
+  mkdirSync(STUB_BIN_DIR, { recursive: true });
+  for (const name of STUBBED_BINARIES) {
+    const path = join(STUB_BIN_DIR, name);
+    writeFileSync(
+      path,
+      [
+        "#!/bin/sh",
+        `# Written by scripts/run-tests.mjs (APRV-227). Not a real ${name}.`,
+        'if [ "$1" = "--version" ]; then',
+        `  echo "${STUB_HARNESS_VERSION}"`,
+        "  exit 0",
+        "fi",
+        `echo "approval.md test stub: refusing to act as a real ${name}" >&2`,
+        "exit 1",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    chmodSync(path, 0o755);
+  }
+  return `${STUB_BIN_DIR}:${process.env.PATH ?? ""}`;
+}
 
 /** Recursively collect *.test.js files under a directory. */
 function collectTestFiles(dir) {
@@ -213,6 +288,8 @@ function main(argv) {
   const result = spawnSync(process.execPath, ["--test", ...files], {
     cwd: REPO_ROOT,
     stdio: "inherit",
+    // APRV-227: no test run through this runner reaches a real harness binary.
+    env: { ...process.env, PATH: stubHarnessBinaries() },
   });
 
   return result.status ?? 1;

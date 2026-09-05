@@ -86,12 +86,14 @@
  * record landed in between, `appendEvent` refuses `head-moved` under its lock
  * and nothing is written.
  *
- * Most of this module then stops there and reports the refusal: re-deriving a
- * decision against a log that changed is the caller's judgment call. The two
- * harness writers are the exception (APRV-150, {@link withHeadMovedRetry}), and
- * the exception is bounded and re-derives everything: see that helper for why a
- * lost race is not a verdict and why the retry is a new read plus new checks
- * plus a new compare-and-append rather than a second attempt at the same write.
+ * Every writer of this module then re-derives and tries again, bounded
+ * (APRV-150 for the two harness writers, APRV-236 for {@link register},
+ * {@link request}, {@link decide}, {@link withdraw} and
+ * {@link finishHarnessExecution}): see {@link withHeadMovedRetry} and
+ * `core/head-retry.ts` for why a lost race is not a verdict, and why the retry
+ * is a new read plus new checks plus a new compare-and-append rather than a
+ * second attempt at the same write. {@link expire} is the one exception, and it
+ * needs none: it is materialisation the daemon's next tick performs again.
  *
  * It does not define execution tokens — `core/token.ts` does. {@link decide}'s
  * grant path calls that module's `mintToken` at the seam APRV-17 documented,
@@ -128,6 +130,8 @@ import {
 } from "./intake-limits.js";
 import { tick, type ClockOptions } from "./clock.js";
 import { readTaskFile } from "./frontmatter.js";
+import { type HarnessProvenance } from "./harness-version.js";
+import { attemptsOf, withHeadRetry } from "./head-retry.js";
 import {
   appendEvent,
   type AppendError,
@@ -543,7 +547,11 @@ export const GATE_REFUSAL_CODES = [
    * The append itself failed; `append` carries the underlying error. Its
    * `code` is `head-moved` when the log grew between this module's read and its
    * append: every check that authorized the write was made against an older log,
-   * so nothing was written and nothing is retried here.
+   * so nothing was written. Since APRV-236 this code reaches a caller only after
+   * the bounded read-check-append retry is spent (`core/head-retry.ts`), and its
+   * message says how many attempts were made. A single lost race is no longer
+   * reported at all: it is re-derived, and the answer the fresh log supports is
+   * what the caller receives.
    */
   "append-failed",
   /**
@@ -619,8 +627,9 @@ export interface GateOptions extends ClockOptions {
   /** Lock tuning for the append path. */
   append?: AppendOptions;
   /**
-   * How many times a harness writer re-derives its verdict after a `head-moved`
-   * refusal, at most `HEAD_MOVED_ATTEMPTS` (APRV-150, {@link withHeadMovedRetry}).
+   * How many times a writer of this module re-derives its verdict after a
+   * `head-moved` refusal, at most `head-retry.ts`'s `HEAD_MOVED_ATTEMPTS`
+   * (APRV-150, APRV-236, {@link withHeadMovedRetry}).
    *
    * Only ever lowers the bound. `1` is the pre-APRV-150 behaviour — one read,
    * one set of checks, one append, and a lost race is reported as a refusal —
@@ -857,96 +866,29 @@ function append(
 }
 
 // ---------------------------------------------------------------------------
-// The bounded head-moved retry (APRV-150)
+// The bounded head-moved retry (APRV-150, APRV-236)
 // ---------------------------------------------------------------------------
 
 /**
- * How many times a harness writer re-derives its verdict against a moved head
- * before it gives up. Small, fixed, and not configurable upward.
- */
-const HEAD_MOVED_ATTEMPTS = 3;
-
-/** Did this refusal come from the compare-and-append precondition alone? */
-function isHeadMoved(result: { ok: true } | GateRefusal): boolean {
-  return !result.ok && result.code === "append-failed" && result.append?.code === "head-moved";
-}
-
-/**
- * Run one whole gate operation, and re-run it from the top on `head-moved`
- * (APRV-150).
+ * Run one whole gate operation, and re-run it from the top on `head-moved`.
  *
- * ## What went wrong without it
- *
- * The hook reads the log head, computes a verdict, and appends its own
- * `execution.started` against that head. Under a parallel fleet another writer
- * (a second session's hook, the daemon) lands a record in the window, the
- * compare-and-append refuses `head-moved` exactly as SPEC.md §11.1 invariant 5
- * requires, and the hook printed a DENY. Observed 2026-08-29: a session's first
- * `git status` — class `read.shell`, autonomous, no human anywhere near it — was
- * refused because an unrelated record had been appended a few milliseconds
- * earlier. Nothing about that record bore on the verdict. Two concurrent
- * sessions deny each other probabilistically, which makes the gate a lottery
- * rather than a policy.
- *
- * The defect was never in the precondition. It was in reading "your read is
- * stale" as "the answer is no". A moved head says the verdict must be computed
- * again; it does not say what the verdict is.
- *
- * ## What this does, and what it refuses to do
+ * The mechanism, the bound and the reasoning all live in `core/head-retry.ts`
+ * and are shared with `core/execute.ts` and `core/gate-window.ts`. There is one
+ * implementation of this in the runtime; this is the adapter that reads the
+ * ceiling a caller asked for out of {@link GateOptions}.
  *
  * `attempt` is the ENTIRE operation, from `readGateRecords` to the append: a new
  * read of the verified log, a new read of the policy, a fresh attestation check,
- * a fresh resolution, fresh escalation, single-use and budget checks, and a new
- * append against the head that the new read observed. Nothing is carried across
- * an attempt except the caller's inputs, so nothing stale can authorize a write.
- *
- * Three consequences worth stating, because they are the properties that make
- * this safe:
- *
- *  - **compare-and-append is untouched.** Every attempt still passes the head it
- *    read, and a stale write is still refused under the lock. §11.1 invariant 5
- *    holds per attempt, which is where it has to hold: this is a loop over
- *    check-then-append operations, not a retry of an append.
- *  - **A changed verdict is the new verdict.** If the record that moved the head
- *    exhausted the budget, spent the key, or a human re-attested a different
- *    policy in the window, the next attempt derives that and refuses it, with
- *    the refusal the fresh facts produce. The retry cannot launder a denial into
- *    an allow, because it never replays the earlier conclusion.
- *  - **Only `head-moved` retries.** Every other refusal — a real verdict, a lock
- *    timeout, a corrupt log, an I/O failure — is returned on the first attempt.
- *    Retrying those would be either pointless or a second write.
- *
- * The bound is what keeps a busy log from turning one tool call into an
- * unbounded write loop: after {@link HEAD_MOVED_ATTEMPTS} attempts the last
- * `head-moved` refusal is returned unchanged, and the caller fails closed on it
- * as it always did.
+ * a fresh derivation, fresh escalation, single-use, intake and budget checks, and
+ * a new append against the head that the new read observed. Nothing is carried
+ * across an attempt except the caller's inputs, so nothing stale can authorize a
+ * write, and a verdict the interleaved record changed is the verdict enforced.
  */
 function withHeadMovedRetry<T extends { ok: true } | GateRefusal>(
   options: GateOptions,
   attempt: () => T,
 ): T {
-  const attempts = attemptsOf(options);
-  let result = attempt();
-  for (let n = 1; n < attempts && isHeadMoved(result); n += 1) {
-    result = attempt();
-  }
-  return result;
-}
-
-/**
- * The attempt budget for this operation: {@link HEAD_MOVED_ATTEMPTS} unless the
- * caller asked for fewer.
- *
- * Clamped rather than trusted, and clamped in one direction that matters: a
- * caller may ask for LESS tolerance of a moved head (a test pinning the
- * unretried behaviour, a caller that would rather fail fast), never for more.
- * Ambiguity — a non-integer, a zero, a negative — resolves to the value the
- * runtime chose, not the caller's.
- */
-function attemptsOf(options: GateOptions): number {
-  const asked = options.retryOnHeadMoved;
-  if (asked === undefined || !Number.isInteger(asked) || asked < 1) return HEAD_MOVED_ATTEMPTS;
-  return Math.min(asked, HEAD_MOVED_ATTEMPTS);
+  return withHeadRetry(attemptsOf(options.retryOnHeadMoved), attempt);
 }
 
 // ---------------------------------------------------------------------------
@@ -1174,7 +1116,42 @@ export function register(
   logPath: string,
   source: RegisterSource,
   actor: string,
-  options: GateOptions = {},
+  options: RegisterOptions = {},
+): RegisterResult {
+  return withHeadMovedRetry(options, () => attemptRegister(logPath, source, actor, options));
+}
+
+/**
+ * {@link register}'s options, plus the one field only a harness hook passes.
+ *
+ * `harness` is APRV-227's provenance pair, and where it comes from is the whole
+ * of its safety. It is a CALL option: the hook process derives it from its own
+ * event and its own PATH and hands it in. It is NOT read from the envelope, the
+ * task file, or anything else on disk — an envelope field would be a value an
+ * agent authors about the binary that is supposed to be watching it, and a task
+ * file is a file an agent edits. Copied into the payload verbatim when present
+ * and omitted entirely when absent; nothing downstream reads it back (SPEC.md
+ * §11.1 invariant 4 — see `core/harness-version.ts`).
+ */
+export interface RegisterOptions extends GateOptions {
+  harness?: HarnessProvenance;
+}
+
+/**
+ * One whole registration: resolve the source, validate the envelope, read the
+ * log, check for a prior registration and a cross-task key collision, append.
+ *
+ * The body is APRV-236's only change to it: every line was here before, and the
+ * retry re-enters at the top, so the double-registration and key-collision scans
+ * are re-run against the fresh head rather than replayed from the stale one. A
+ * task someone else registered in the window is refused `task-already-registered`
+ * by the fresh read, which is the answer the log now supports.
+ */
+function attemptRegister(
+  logPath: string,
+  source: RegisterSource,
+  actor: string,
+  options: RegisterOptions,
 ): RegisterResult {
   if (!PRINCIPAL_ACTOR.test(actor)) {
     return refuse(
@@ -1247,6 +1224,13 @@ export function register(
   if (typeof envelope.state === "string") payload["state"] = envelope.state;
   const budget = budgetOf(resolved.envelope);
   if (budget !== null) payload["budget"] = budget;
+  // APRV-227. Both halves or neither, and only from the caller's option — see
+  // {@link RegisterOptions.harness}. A CLI registration passes none and the
+  // record looks exactly as it did before the field existed.
+  if (options.harness !== undefined) {
+    payload["harness"] = options.harness.harness;
+    payload["harness_version"] = options.harness.harness_version;
+  }
 
   const appended = append(
     logPath,
@@ -1685,6 +1669,32 @@ export function request(
   input: RequestInput,
   actor: string,
   options: GateOptions = {},
+): RequestResult {
+  return withHeadMovedRetry(options, () => attemptRequest(logPath, input, actor, options));
+}
+
+/**
+ * One whole intake, from the clock read to the append.
+ *
+ * Re-entered from the top on a moved head (APRV-236), which re-runs every check
+ * above against the fresh log: attestation, the human-only class test, the §7
+ * declaration, the live draw, the duplicate-request and single-use scans, the
+ * §5.2 intake limits and the budgets. A key someone else requested or started in
+ * the window is refused `duplicate-request` or `already-executed` rather than
+ * `append-failed`, and the live draw is re-run over the same registered hash, so
+ * it selects identically and no attempt can shop for a different answer.
+ *
+ * Two side effects sit inside the retried cycle and are safe there. The payload
+ * store is content-addressed, so a second write of the same bytes is the same
+ * file. The recipient keypair is minted per attempt and overwrites the previous
+ * attempt's private half at the same path, so the key that survives is always
+ * the one whose public half the appended record carries.
+ */
+function attemptRequest(
+  logPath: string,
+  input: RequestInput,
+  actor: string,
+  options: GateOptions,
 ): RequestResult {
   const ts = tick(options);
   if (!PRINCIPAL_ACTOR.test(actor)) {
@@ -2213,6 +2223,37 @@ export function decide(
   actor: string,
   options: DecideOptions = {},
 ): DecideResult {
+  return withHeadMovedRetry(options, () =>
+    attemptDecide(logPath, actionKey, decision, actor, options),
+  );
+}
+
+/**
+ * One whole decision, from the clock read to the append.
+ *
+ * APRV-236 put this under the bounded retry, and this verb is the reason the
+ * task exists: on 2026-09-02 `approval grant` refused a human's tap with
+ * `head moved: expected seq 14218, found 14219` while two lanes and the daemon
+ * were appending, and the person had to type it again. Three times.
+ *
+ * The re-entry re-derives everything a decision rests on: the fresh
+ * `requestState`, the human-only class test, the TTL lapse, the policy
+ * attestation and the §6.2 drift check, the approver roster, and the budgets at
+ * the moment of commitment. So a request that stopped being decidable in the
+ * window is refused for THAT, in the gate's own vocabulary — `already-decided`
+ * when someone answered it, `request-withdrawn` when its asker took it back,
+ * `expired` when the TTL lapsed, `policy-drift` when a human re-attested — and
+ * never as a lost race. A token is minted per attempt and only the appended
+ * attempt's digest reaches the log, so no attempt leaves a live credential
+ * behind.
+ */
+function attemptDecide(
+  logPath: string,
+  actionKey: string,
+  decision: Decision,
+  actor: string,
+  options: DecideOptions,
+): DecideResult {
   const ts = tick(options);
   if (!HUMAN_ACTOR.test(actor)) {
     return refuse(
@@ -2624,8 +2665,11 @@ export type WithdrawResult =
  *    is the strict direction pointing the wrong way.
  * 4. **Compare-and-append, like everything else here.** The legality check and
  *    the write are made against the same head (SPEC.md §11.1(5)), so a grant
- *    that lands in between wins and this withdrawal is refused `head-moved`
- *    rather than overwriting it. `tests/concurrency.test.ts` races the two.
+ *    that lands in between wins and this withdrawal never overwrites it. Since
+ *    APRV-236 the loser of that race re-reads and re-checks rather than
+ *    reporting the lost race: the human's answer is on the fresh head, so the
+ *    refusal the requester receives is `already-decided`, which is the fact they
+ *    need. `tests/concurrency.test.ts` races the two.
  *
  * `ts` is assigned at the write boundary from the injected clock, like every
  * other gate-typed event (SPEC.md §8, A2): there is no parameter to pass one.
@@ -2635,6 +2679,16 @@ export function withdraw(
   actionKey: string,
   actor: string,
   options: WithdrawOptions = {},
+): WithdrawResult {
+  return withHeadMovedRetry(options, () => attemptWithdraw(logPath, actionKey, actor, options));
+}
+
+/** One whole withdrawal, re-entered from the top on a moved head (APRV-236). */
+function attemptWithdraw(
+  logPath: string,
+  actionKey: string,
+  actor: string,
+  options: WithdrawOptions,
 ): WithdrawResult {
   const ts = tick(options);
   if (!PRINCIPAL_ACTOR.test(actor)) {
@@ -3638,60 +3692,23 @@ export function finishHarnessExecution(
   const appended: EventRecord[] = [];
   for (const actionKey of open) {
     // One read per append, and the append carries the head that read observed:
-    // the delegated-and-open judgment above is re-made against exactly the log
-    // this record chains onto (§11.1 invariant 5). The first append moves the
-    // head, so a single head reused across the loop would refuse every record
-    // after the first.
-    const read = readGateRecords(logPath);
-    if (!read.ok) return read;
-    let harness = false;
-    let stillOpen = false;
-    for (const record of read.records) {
-      if (record.action_key !== actionKey) continue;
-      if (record.event === "execution.started") {
-        harness = record.task === task && payloadOf(record)["execution"] === "harness";
-        stillOpen = harness;
-        continue;
-      }
-      if (
-        record.event === "execution.completed" ||
-        record.event === "execution.failed" ||
-        record.event === "execution.indeterminate" ||
-        record.event === "execution.reconciled"
-      ) {
-        stillOpen = false;
-      }
-    }
-    if (!harness) {
-      return refuse(
-        "not-delegated",
-        `action ${actionKey} is no longer a delegated start of task ${task}; the log moved under this report. ${String(appended.length)} counterpart(s) were appended before it and stand.`,
-      );
-    }
-    if (!stillOpen) continue;
-
-    const result = append(
-      logPath,
-      {
-        ts: tick(options),
-        event,
-        actor,
-        task,
-        action_key: actionKey,
-        payload: {
-          // The same marker the start carries: this record is about a command
-          // the harness ran, and says so on its face.
-          execution: "harness",
-          // WHO asserted it. A closed code, and nothing of what the tool printed.
-          reported_by: input.reportedBy,
-          exit_code: exitCode,
-        },
-      },
-      options,
-      read.head,
+    // the delegated-and-open judgment is re-made against exactly the log this
+    // record chains onto (§11.1 invariant 5). The first append moves the head,
+    // so a single head reused across the loop would refuse every record after
+    // the first.
+    //
+    // APRV-236's bounded retry is applied HERE, per key, rather than around the
+    // whole verb. This loop appends one record per open delegated execution, and
+    // re-entering the verb after some of them landed would find those keys
+    // already closed and could report `already-finished` for a call that in fact
+    // wrote records. The per-key read-check-append IS the cycle, so retrying it
+    // is exactly the unit the helper is for, and every counterpart already
+    // appended stands untouched.
+    const step = withHeadMovedRetry<FinishStep>(options, () =>
+      attemptFinishOne(logPath, task, actionKey, event, exitCode, actor, input, appended.length, options),
     );
-    if (!result.ok) return result;
-    appended.push(result.record);
+    if (!step.ok) return step;
+    if (step.record !== undefined) appended.push(step.record);
   }
 
   if (appended.length === 0) {
@@ -3701,6 +3718,80 @@ export function finishHarnessExecution(
     );
   }
   return { ok: true, task, records: appended };
+}
+
+/**
+ * One outcome record: the fresh read, the delegated-and-open judgment made on
+ * it, and the append against the head that read observed.
+ *
+ * `{ ok: true }` with no `record` is the skip the loop above used to spell as
+ * `continue`: this key acquired an outcome since the survey, which is not a
+ * refusal of the report as a whole. A refusal is returned as-is and ends the
+ * verb, with whatever counterparts already landed still standing.
+ */
+type FinishStep = { ok: true; record?: EventRecord } | GateRefusal;
+
+function attemptFinishOne(
+  logPath: string,
+  task: string,
+  actionKey: string,
+  event: "execution.completed" | "execution.failed",
+  exitCode: number | null,
+  actor: string,
+  input: HarnessFinishInput,
+  alreadyAppended: number,
+  options: GateOptions,
+): FinishStep {
+  const read = readGateRecords(logPath);
+  if (!read.ok) return read;
+  let harness = false;
+  let stillOpen = false;
+  for (const record of read.records) {
+    if (record.action_key !== actionKey) continue;
+    if (record.event === "execution.started") {
+      harness = record.task === task && payloadOf(record)["execution"] === "harness";
+      stillOpen = harness;
+      continue;
+    }
+    if (
+      record.event === "execution.completed" ||
+      record.event === "execution.failed" ||
+      record.event === "execution.indeterminate" ||
+      record.event === "execution.reconciled"
+    ) {
+      stillOpen = false;
+    }
+  }
+  if (!harness) {
+    return refuse(
+      "not-delegated",
+      `action ${actionKey} is no longer a delegated start of task ${task}; the log moved under this report. ${String(alreadyAppended)} counterpart(s) were appended before it and stand.`,
+    );
+  }
+  if (!stillOpen) return { ok: true };
+
+  const result = append(
+    logPath,
+    {
+      ts: tick(options),
+      event,
+      actor,
+      task,
+      action_key: actionKey,
+      payload: {
+        // The same marker the start carries: this record is about a command the
+        // harness ran, and says so on its face.
+        execution: "harness",
+        // WHO asserted it. A closed code, and nothing of what the tool printed.
+        reported_by: input.reportedBy,
+        exit_code: exitCode,
+      },
+    },
+    options,
+    read.head,
+  );
+  if (!result.ok) return result;
+  return { ok: true, record: result.record };
 }
 
 // ---------------------------------------------------------------------------

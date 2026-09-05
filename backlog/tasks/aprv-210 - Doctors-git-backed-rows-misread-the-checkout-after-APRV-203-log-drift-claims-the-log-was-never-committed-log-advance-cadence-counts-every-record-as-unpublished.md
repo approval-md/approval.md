@@ -4,11 +4,11 @@ title: >-
   Doctor's git-backed rows misread the checkout after APRV-203: log-drift claims
   the log was never committed, log-advance-cadence counts every record as
   unpublished
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-v'
 created_date: '2026-09-02 08:44'
-updated_date: '2026-09-02 20:00'
+updated_date: '2026-09-02 22:18'
 labels:
   - doctor
   - bug
@@ -59,3 +59,9 @@ One behaviour note. log-drift's skip no longer carries a fix field (a fix belong
 
 VALIDATION. Full npm test on the final tree: 3011 tests, 3010 pass, 0 fail, 1 pre-existing skip. npx oxlint exit 0. tests/cli-doctor.test.ts 55/55 with its row names, order and count unchanged; the three new reproduction tests live in tests/log-anchor.test.ts and pass.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Both doctor misreads shared one root cause: git-scope.repoPath() built relative paths without realpath while git prints the physical toplevel, so a symlinked checkout spelling climbed out of the repo and git show found no blob; the same call inside publishedHeadAt made the cadence row count every record unpublished. Fixed once; log-drift is now the anchor check's result and the cadence row names the ref it read. Verified by cli-doctor 55/55 and the log-anchor suite; merged in PR #241.
+<!-- SECTION:FINAL_SUMMARY:END -->

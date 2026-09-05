@@ -54,6 +54,8 @@
  */
 
 import { tick, type ClockOptions } from "./clock.js";
+import { type HarnessProvenance } from "./harness-version.js";
+import { attemptsOf, withHeadRetry } from "./head-retry.js";
 import {
   appendEvent,
   type AppendError,
@@ -82,9 +84,15 @@ export const MAX_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
 /**
  * How many times a bypass append re-derives its window after a `head-moved`
- * refusal. The same bound and the same reasoning as `core/gate.ts`'s: a moved
- * head says the read was stale, never that the answer is no, and re-deriving
- * from a fresh verified read cannot launder a refusal into an allow.
+ * refusal. The same reasoning as `core/head-retry.ts`'s, whose helper performs
+ * the loop: a moved head says the read was stale, never that the answer is no,
+ * and re-deriving from a fresh verified read cannot launder a refusal into an
+ * allow.
+ *
+ * One attempt more than the gate writers' three, and deliberately so: a bypass
+ * record is what lets a session run a command at all while the gate is being
+ * repaired, and the log it is contending with is the busy one that made the
+ * repair necessary.
  */
 const HEAD_MOVED_ATTEMPTS = 4;
 
@@ -344,16 +352,6 @@ function appendOptionsOf(
   };
 }
 
-function attemptsOf(options: GateWindowOptions): number {
-  const asked = options.retryOnHeadMoved;
-  if (asked === undefined || !Number.isInteger(asked) || asked < 1) return HEAD_MOVED_ATTEMPTS;
-  return Math.min(asked, HEAD_MOVED_ATTEMPTS);
-}
-
-function isHeadMoved(result: { ok: true } | GateWindowRefusal): boolean {
-  return !result.ok && result.code === "append-failed" && result.append?.code === "head-moved";
-}
-
 // ---------------------------------------------------------------------------
 // open
 // ---------------------------------------------------------------------------
@@ -538,6 +536,18 @@ export interface GateBypassInput {
   sessionId?: string;
   toolUseId?: string;
   cwd?: string;
+  /**
+   * Which harness binary is printing the allow, and at what version (APRV-227).
+   *
+   * Derived by the hook process from its own event and its own PATH and handed
+   * in here; copied into the payload verbatim when present, omitted entirely
+   * when absent. Nothing reads it back — the window was authorized by a human's
+   * `gate.opened` and this pair moves no part of that (SPEC.md §11.1 invariant
+   * 4, and `core/harness-version.ts`'s header). What it does is let a reviewer
+   * of a bypass see which binary was standing in front of the gate at the time,
+   * which on this path is the record a human actually goes back and reads.
+   */
+  harness?: HarnessProvenance;
 }
 
 /**
@@ -572,12 +582,14 @@ export function recordGateBypass(
     );
   }
 
-  const attempts = attemptsOf(options);
-  let result = attemptBypass(logPath, input, actor, options);
-  for (let n = 1; n < attempts && isHeadMoved(result); n += 1) {
-    result = attemptBypass(logPath, input, actor, options);
-  }
-  return result;
+  // The one implementation, shared with `core/gate.ts` and `core/execute.ts`
+  // since APRV-236. The ceiling stays this module's own — a bypass append is
+  // the record that lets a debugging session run at all, so it is worth one
+  // more attempt than the gate's writers get — and the mechanism is no longer
+  // a second copy of the loop.
+  return withHeadRetry(attemptsOf(options.retryOnHeadMoved, HEAD_MOVED_ATTEMPTS), () =>
+    attemptBypass(logPath, input, actor, options),
+  );
 }
 
 function attemptBypass(
@@ -613,6 +625,13 @@ function attemptBypass(
         ...(input.sessionId === undefined ? {} : { session_id: input.sessionId }),
         ...(input.toolUseId === undefined ? {} : { tool_use_id: input.toolUseId }),
         ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+        // APRV-227: both halves or neither.
+        ...(input.harness === undefined
+          ? {}
+          : {
+              harness: input.harness.harness,
+              harness_version: input.harness.harness_version,
+            }),
       },
     },
     appendOptionsOf(options, read.head),
