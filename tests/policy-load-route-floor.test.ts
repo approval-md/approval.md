@@ -135,6 +135,26 @@ test("a built-in policy.edit path routed to a LOOSER level is refused", () => {
   assert.match(result.message, /additive/u);
 });
 
+test("plain supervised under a supervised-live line is a weakening, caught by the LEVEL", () => {
+  // The realistic mistake, and the one that shows the rate tie-break is not
+  // load-bearing for it: `supervised` (retrospective) and `supervised-live` are
+  // different levels in `policy-match`'s own table, 3 and 2, so the comparison
+  // that catches this is the first one and no rate is consulted. The tie-break
+  // below therefore only ever runs between two `supervised-live` rules, where
+  // both rates exist — which is why its null guards are defensiveness rather
+  // than a branch some policy reaches.
+  const result = loadYaml(
+    withRoutes(
+      "  - { path: .github/workflows/, class: policy.edit.ci }",
+      "  policy.edit.ci: { autonomy: supervised }",
+    ),
+  );
+  assert.equal(result.ok, false, "retrospective sampling is looser than live gating");
+  if (result.ok) return;
+  assert.equal(result.code, "protected-route-floor");
+  assert.match(result.message, /supervised — weaker/u);
+});
+
 test("a tie on the level compares the live rate", () => {
   // `supervised-live 0.01` under a `policy.edit` of `supervised-live 0.1` gates
   // one tenth as often as the line it replaces. The level says they are equal
