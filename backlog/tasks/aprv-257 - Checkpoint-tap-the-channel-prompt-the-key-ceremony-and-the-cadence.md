@@ -1,9 +1,11 @@
 ---
 id: APRV-257
 title: 'Checkpoint tap: the channel prompt, the key ceremony and the cadence'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - 'agent:opus-lane-g'
 created_date: '2026-09-04 23:57'
+updated_date: '2026-09-05 08:38'
 labels:
   - channels
   - log
@@ -42,3 +44,17 @@ Also here: approval doctor gains a checkpoint row (newest checkpoint, its age ag
 - [ ] #4 The daemon enqueues a checkpoint prompt when audit.checkpoint_every says one is due, at most one outstanding, and never escalates a missing one past a warning
 - [ ] #5 approval doctor gains a checkpoint row; docs/cli-reference.md and a runbook paragraph on a lost key; npm test passes; lint clean
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. core/checkpoint.ts gains the tap primitives. checkpointDue({records, publicKeys, checkpointEveryMs, now}) -> CheckpointOffer|null, ONE due-ness rule that cadenceWarning, the daemon and the dispatch cycle all read. appendCheckpointAt(logPath, key, actor, head, {channel}) signs a CALLER-NAMED head (the one the human was shown), refuses checkpoint-head-unknown when the log does not carry that hash at that seq, and appends under withHeadRetry with the CURRENT head as expectedHead. appendCheckpoint keeps its signature and becomes a thin wrapper (sign the head just read).
+2. cli/checkpoint-tap.ts: custody in ONE place. resolveCheckpointKey moves out of cli/log-checkpoint.ts (--key-file, else the vault under approval.checkpoint.key); checkpointOfferFor(logPath, policy, now); checkpointPromptLines(offer); signOffer(...) -> one sentence. Both channels and the CLI verb call this file and nothing else reads a key.
+3. cli/setup-checkpoint.ts: approval setup checkpoint [--rotate] [--retire <fp>]. front()+requireHuman, TTY-only like every other setup subcommand, mints the Ed25519 pair, writes the private half to the vault, prints the public half and the exact audit.checkpoint_keys line plus `approval policy amend`. Never writes APPROVAL.md. --rotate appends; --retire refuses to drop a key that signed any checkpoint, naming the seqs. Classified policy.core in core/command-class.ts (existing class, no minting).
+4. The tap. channels/telegram.ts: offerCheckpoint(offer) sends its own unit with two buttons (k=sign, n=not now) on a nonce map of its own, onCheckpoint(handler) routes the tap, the message is edited with what the log recorded. New callback verbs parse through a separate parser so nothing can read them as a grant. channels/cli.ts: offerCheckpoint renders the same lines and reads one keystroke. cli/channel-telegram.ts dispatch enqueues at most one outstanding prompt from checkpointDue; cli/channel.ts offers it after the queue.
+5. Cadence. The daemon already warns checkpoint-due; it now warns from the same checkpointDue, and its tick event carries checkpoints.due. Nothing anywhere turns due into a refusal.
+6. doctor row 'checkpoint' (skip with no key, pass inside cadence, pass+fix when due, fail on a verification refusal); pins 24 -> 25.
+7. Docs: cli-reference (setup checkpoint, the tap), dogfood-cutover (the ceremony, the lost key), git-evidence (checkpoints beside anchoring).
+8. Tests: tests/checkpoint-tap.test.ts through the real append path, the mock bot, scratch vaults with per-test passphrases, keys minted per test; plus the no-route-to-the-key proof (classification human-only both verbs, child-env strips the passphrase, the hook module's import graph never reaches the custody file).
+9. Decide the core/vault.ts caller-list question and record it.
+<!-- SECTION:PLAN:END -->

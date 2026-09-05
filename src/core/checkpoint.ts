@@ -104,6 +104,7 @@ import {
 } from "node:crypto";
 
 import { tick, type ClockOptions } from "./clock.js";
+import { attemptsOf, withHeadRetry } from "./head-retry.js";
 import { canonicalize } from "./jcs.js";
 import {
   appendEvent,
@@ -390,6 +391,19 @@ export const CHECKPOINT_APPEND_REFUSAL_CODES = [
   "checkpoint-key-unusable",
   /** The log has no records yet: an empty chain has no head to sign. */
   "log-empty",
+  /**
+   * A caller named a head this log does not carry (APRV-257).
+   *
+   * Only {@link appendCheckpointAt} can reach it, and only from the tap: the
+   * human is shown a `(seq, hash)`, the head moves while the phone is in a
+   * pocket, and the record they sign still names the head they SAW. That is
+   * allowed — a checkpoint signs any seq below its own — but only while the
+   * log actually carries that hash at that seq. When it does not, the thing in
+   * front of the human was derived from a different chain than the one being
+   * written to, and signing it would mint a checkpoint that
+   * `checkpoint-hash-mismatch` refuses forever after.
+   */
+  "checkpoint-head-unknown",
   /** The log could not be opened. */
   "log-unreadable",
   /** The log's last line is truncated. Nothing may chain onto it. */
@@ -422,6 +436,26 @@ export interface CheckpointAppendResult {
 export interface CheckpointAppendOptions extends ClockOptions {
   schemaDir?: string;
   append?: AppendOptions;
+  /**
+   * The channel the record names (APRV-257). `cli` by default, which is what
+   * the terminal verb is; the tap passes the channel the human tapped on.
+   *
+   * Descriptive and never authoritative: the schema constrains the ACTOR of a
+   * `log.checkpoint` and the signature constrains the head, and neither of
+   * those reads this field. It is here so a reader of the log can tell a
+   * checkpoint taken at a terminal from one taken on a phone.
+   */
+  channel?: string;
+  /**
+   * How many whole read-sign-append cycles a moved head may cost (APRV-257).
+   *
+   * The tap needs it and the terminal verb inherits it: a listener signing on a
+   * busy log races the daemon's own appends, and handing `head-moved` back to
+   * someone who has just tapped a button on their phone is precisely the party
+   * `core/head-retry.ts` exists to stop handing it to. Each attempt re-reads
+   * and re-signs; nothing crosses an attempt.
+   */
+  attempts?: number;
 }
 
 /**
@@ -451,6 +485,65 @@ export function appendCheckpoint(
   actor: string,
   options: CheckpointAppendOptions = {},
 ): CheckpointAppendResult | CheckpointAppendRefusal {
+  return signAndAppend(logPath, privateKey, actor, null, options);
+}
+
+/**
+ * Append one `log.checkpoint` signing a head the CALLER names (APRV-257).
+ *
+ * The tap's entry point, and the reason APRV-220's verify rule asks only that a
+ * checkpoint signs a seq BELOW its own rather than its immediate predecessor.
+ * A human is shown `(seq, hash)` on a phone; by the time they tap, the daemon
+ * has appended three records. The honest thing to sign is the head they SAW,
+ * because that is what they looked at, and a runtime that quietly re-read the
+ * head and signed something else would be putting a human's key over bytes
+ * nobody inspected.
+ *
+ * The named head is checked against the log before anything is signed: it must
+ * be a `(seq, hash)` this chain actually carries ({@link
+ * CHECKPOINT_APPEND_REFUSAL_CODES}'s `checkpoint-head-unknown`). So a stale
+ * prompt from a chain that has since been rewritten cannot be turned into a
+ * signature, and the checkpoint that lands is one `checkLogCheckpoints` will
+ * accept rather than one it will refuse forever.
+ */
+export function appendCheckpointAt(
+  logPath: string,
+  privateKey: string,
+  actor: string,
+  head: CheckpointHead,
+  options: CheckpointAppendOptions = {},
+): CheckpointAppendResult | CheckpointAppendRefusal {
+  return signAndAppend(logPath, privateKey, actor, { seq: head.seq, hash: head.hash }, options);
+}
+
+/**
+ * The one body behind both entry points.
+ *
+ * `want` is `null` for "whatever the head is when this runs" and a `(seq,
+ * hash)` for "the head the human was shown". Everything else — the human-only
+ * rule, the verified read, the compare-and-append, the runtime-stamped `ts` —
+ * is identical, because the two verbs differ in exactly one decision and
+ * writing them twice would be two chances to get the rest of it wrong.
+ */
+function signAndAppend(
+  logPath: string,
+  privateKey: string,
+  actor: string,
+  want: { seq: number; hash: string } | null,
+  options: CheckpointAppendOptions,
+): CheckpointAppendResult | CheckpointAppendRefusal {
+  return withHeadRetry(attemptsOf(options.attempts), () =>
+    signAndAppendOnce(logPath, privateKey, actor, want, options),
+  );
+}
+
+function signAndAppendOnce(
+  logPath: string,
+  privateKey: string,
+  actor: string,
+  want: { seq: number; hash: string } | null,
+  options: CheckpointAppendOptions,
+): CheckpointAppendResult | CheckpointAppendRefusal {
   if (!HUMAN_ACTOR.test(actor)) {
     return {
       ok: false,
@@ -474,7 +567,29 @@ export function appendCheckpoint(
     };
   }
 
-  const head: CheckpointHead = { seq: read.head.seq, hash: read.head.hash };
+  // The head the record will name: the current one, or the one the human was
+  // shown — and in the second case only after this log is asked whether it
+  // carries those bytes at that seq. A signature over a head this chain does
+  // not have is a checkpoint that refuses for the life of the log.
+  let head: CheckpointHead;
+  if (want === null) {
+    head = { seq: read.head.seq, hash: read.head.hash };
+  } else {
+    const carried = read.records.find((record) => record.seq === want.seq);
+    if (carried === undefined || carried.hash !== want.hash) {
+      return {
+        ok: false,
+        code: "checkpoint-head-unknown",
+        message: `this log does not carry ${want.hash} at seq ${String(want.seq)} (${
+          carried === undefined
+            ? `it has no record at that seq; its head is seq ${String(read.head.seq)}`
+            : `it carries ${carried.hash} there`
+        }). The head you were shown belongs to a different chain than the one being written to, so nothing was signed and nothing was appended`,
+      };
+    }
+    head = { seq: want.seq, hash: want.hash };
+  }
+
   const signature = signCheckpoint(head, privateKey);
   if (signature === null) {
     return {
@@ -501,7 +616,7 @@ export function appendCheckpoint(
       ts: tick(options),
       event: CHECKPOINT_EVENT,
       actor,
-      channel: "cli",
+      channel: options.channel ?? "cli",
       payload: {
         seq: head.seq,
         hash: head.hash,
@@ -768,6 +883,59 @@ function cadenceWarning(
   verified: readonly VerifiedCheckpoint[],
   options: CheckpointCheckOptions,
 ): string | null {
+  const offer = offerFrom(verified, options);
+  return offer === null ? null : offer.warning;
+}
+
+// ---------------------------------------------------------------------------
+// The cadence, as something to ASK rather than only to report (APRV-257)
+// ---------------------------------------------------------------------------
+
+/** Milliseconds as a rounded hour count, for every cadence sentence. */
+function hours(ms: number): string {
+  return `${(ms / 3_600_000).toFixed(1)}h`;
+}
+
+/**
+ * A checkpoint the runtime would like a human to sign, and the head to show
+ * them (APRV-257).
+ *
+ * `head` is the log's CURRENT head at the moment the offer was made, and it is
+ * carried through the prompt into {@link appendCheckpointAt} unchanged. What
+ * the human is shown is what gets signed, however long the phone stays in the
+ * pocket.
+ */
+export interface CheckpointOffer {
+  /** The head a prompt asks the human to sign. */
+  head: { seq: number; hash: string };
+  /** The seq of the newest checkpoint RECORD, or `null` when there is none. */
+  since: number | null;
+  /** How long since that checkpoint (or since the log's oldest record), in ms. */
+  ageMs: number;
+  /** `audit.checkpoint_every`, in ms. */
+  everyMs: number;
+  /** The sentence every reporting surface prints. Never a refusal. */
+  warning: string;
+}
+
+/**
+ * The due-ness rule, over an already-computed set of verified checkpoints.
+ *
+ * ONE rule, and that is the point of extracting it: the verify verdict's
+ * warning, the daemon's `checkpoint-due`, `approval doctor`'s row and the
+ * channel prompt all read this, so there is no arrangement in which the daemon
+ * says a checkpoint is due and the listener declines to ask for one, or the
+ * other way around.
+ *
+ * Returns `null` — never due — when the cadence is off, when the log is empty,
+ * or when nothing has aged past the interval. Report-only in every direction:
+ * the return type carries a sentence and a head, and there is no code path in
+ * this runtime from an offer to a refusal.
+ */
+function offerFrom(
+  verified: readonly VerifiedCheckpoint[],
+  options: CheckpointCheckOptions,
+): CheckpointOffer | null {
   const every = options.checkpointEveryMs;
   if (every === undefined || every === null || every <= 0) return null;
   const now = options.now ?? Date.now();
@@ -778,10 +946,37 @@ function cadenceWarning(
   const age = now - since;
   if (age <= every) return null;
 
-  const hours = (ms: number): string => `${(ms / 3_600_000).toFixed(1)}h`;
-  return newest === undefined
-    ? `audit.checkpoint_every is ${hours(every)} and this log has never been checkpointed (its oldest record is ${hours(age)} old). A missing checkpoint is not tampering and nothing is refused; sign one with \`approval log checkpoint\``
-    : `audit.checkpoint_every is ${hours(every)} and the newest checkpoint (seq ${String(newest.at)}, signing seq ${String(newest.seq)}) is ${hours(age)} old. A checkpoint that is due is not a checkpoint that is missing on purpose; nothing is refused`;
+  // The head to sign is this log's last record. An empty range has none, and a
+  // prompt naming nothing is not a prompt.
+  const last = options.records[options.records.length - 1];
+  if (last === undefined) return null;
+
+  return {
+    head: { seq: last.seq, hash: last.hash },
+    since: newest?.at ?? null,
+    ageMs: age,
+    everyMs: every,
+    warning:
+      newest === undefined
+        ? `audit.checkpoint_every is ${hours(every)} and this log has never been checkpointed (its oldest record is ${hours(age)} old). A missing checkpoint is not tampering and nothing is refused; sign one with \`approval log checkpoint\``
+        : `audit.checkpoint_every is ${hours(every)} and the newest checkpoint (seq ${String(newest.at)}, signing seq ${String(newest.seq)}) is ${hours(age)} old. A checkpoint that is due is not a checkpoint that is missing on purpose; nothing is refused`,
+  };
+}
+
+/**
+ * Is a checkpoint due, and over which head? `null` when it is not.
+ *
+ * The whole question in one call, over already-verified records: it runs
+ * {@link checkLogCheckpoints} and offers only from a PASS. A refused range is
+ * not a range to ask for another signature over — the thing to do with a
+ * checkpoint that does not verify is look at it, not sign a new one on top —
+ * and a skipped one has no key configured, so there is nothing to sign with and
+ * nobody to ask.
+ */
+export function checkpointDue(options: CheckpointCheckOptions): CheckpointOffer | null {
+  const check = checkLogCheckpoints(options);
+  if (check.status !== "pass") return null;
+  return offerFrom(check.checkpoints, options);
 }
 
 // ---------------------------------------------------------------------------
