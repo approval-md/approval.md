@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@codex'
 created_date: '2026-09-04 22:00'
-updated_date: '2026-09-05 09:48'
+updated_date: '2026-09-05 09:55'
 labels: []
 dependencies:
   - APRV-253
@@ -47,6 +47,8 @@ Handoff checkpoint: implementation worktree /private/tmp/approval-codex-gloss, b
 Current handoff: /private/tmp/approval-gloss-delivery, branch codex/gloss-provider-stack, HEAD 94f7e14c9e1beaa509e60634734ba23e8f14acd1. C source and CLI-authored task from implementation commit f804936 are staged here without final commit; the original implementation branch is preserved. Assembled A-C build, focused 25/25, typecheck, owned-file lint and both staged/whole-stack diff checks exit 0 after the live runner fix. B synthetic smoke now succeeds in 4296 ms and is pushed in PR 262; no new model call is pending. README/docs/cli-reference/src/cli/help patch remains unapplied because Claude coverage changes are committed on aprv-245-coverage but not delivered to main. Explicit earlier coordination question remains unresolved. Next: once that constraint clears, apply/reconcile the prepared documentation patch, finish the C commit, update final AC evidence, and verify/arm PR 262. No other sessions or live services modified.
 
 Final integration completed in /private/tmp/approval-gloss-delivery on codex/gloss-provider-stack after the overlapping Claude commits landed. Applied README, CLI reference and all three help updates; clarified selector versus enablement, preserved default enablement and terminal-token guidance, and documented saved authentication and conditional billing. Final npm test passed with exit 0: 3426 passed, 1 skipped, zero failures or cancellations. The first sandboxed full attempt failed localhost listen permission and was stopped; the host-permitted retry passed with fake model binaries. Focused A-C 25/25 and docs/help 43/43 passed; build, lint, typecheck and diff checks passed. Independent final review approved the integrated behavior and documentation. No policy/schema/dependency additions, live listener configuration or service restart. Final task-scoped source commit and PR262 merge follow this completed verification.
+
+Final main refresh added upstream checkpoint prompts. Resolved the sole channel.ts conflict by retaining both glossRunner(selectedGloss.options, policy, streams) and the checkpoint argument; no upstream behavior was removed. Post-merge build, 91 targeted provider/checkpoint/help/documentation tests, lint, typecheck and diff checks all exit 0. The prior full npm test result remains the local full-suite evidence; final PR and merge-queue CI validate the refreshed head.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
