@@ -63,6 +63,18 @@ export const REPO_POLICY_EXPECTATIONS: readonly PolicyExpectation[] = [
     provenance: "rule",
     note: "supervised-live 0.1 since the seq 5147 ceremony (APRV-184): one edit in ten blocks on the gate, the rest execute and stay in the retrospective pool; with no usable sampling secret live selection fails closed and every edit gates",
   },
+  {
+    actionClass: "policy.edit.design",
+    autonomy: "supervised",
+    provenance: "rule",
+    note: "routed from design/ at the 2026-09-06 ceremony (APRV-266): design documents and decision records are read in the pull request and sampled after the fact",
+  },
+  {
+    actionClass: "policy.edit.ci",
+    autonomy: "manual",
+    provenance: "rule",
+    note: "routed from .github/workflows/ at the 2026-09-06 ceremony (APRV-266): every CI and release-configuration edit is a tap",
+  },
   { actionClass: "files.delete.out_of_scope", autonomy: "manual", provenance: "rule" },
 
   // human-only — a person acts; no verb mints or withdraws authority (APRV-185); declared at the seq 7355 ceremony
@@ -150,15 +162,15 @@ export const REPO_POLICY_EXPECTATIONS: readonly PolicyExpectation[] = [
   },
   {
     actionClass: "files.delete.scratch",
-    autonomy: "manual",
-    provenance: "default",
-    note: "undeclared, so the manual default holds; APRV-267 taught the classifier to emit it for an rm confined to the session scratchpad or the system temp root, and until a ceremony declares it (autonomous is the intent) it gates exactly as files.delete.out_of_scope always did, which is why landing the rule ahead of the ceremony costs nothing",
+    autonomy: "autonomous",
+    provenance: "rule",
+    note: "declared autonomous at the 2026-09-06 ceremony: an rm confined to the system temp root is the agent's own housekeeping (APRV-267)",
   },
   {
     actionClass: "vcs.remote.meta",
-    autonomy: "manual",
-    provenance: "default",
-    note: "undeclared, so the manual default holds until Carter declares it (supervised is the intent); APRV-268 taught the classifier to emit it for exactly three forms on the checkout's own origin (`gh pr update-branch`, `gh run rerun`, `gh api graphql` without a mutation), each of which classified network.call before, so every one of them gates exactly as it did and landing the rule ahead of the ceremony costs nothing. The task's wider first draft also moved `gh pr view`, `gh run list`, `gh issue view` and a plain `gh api` GET, which were read.vcs.remote and therefore autonomous here; on an undeclared class those would have become MORE gated, so the rule was narrowed instead and every read keeps read.vcs.remote",
+    autonomy: "supervised",
+    provenance: "rule",
+    note: "declared supervised at the 2026-09-06 ceremony: gh graphql queries, pr update-branch and run rerun on this repo's own origin are bookkeeping on work already pushed (APRV-268)",
   },
   {
     actionClass: "read",

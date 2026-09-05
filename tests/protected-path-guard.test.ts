@@ -16,9 +16,12 @@
  */
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 
-import { appendAttestation } from "../src/core/attest.js";
+import { appendAttestation, appendOrganAttestation } from "../src/core/attest.js";
 import { consumeHarnessGrant, decide, register, request } from "../src/core/gate.js";
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
@@ -379,6 +382,151 @@ test("the policy file passes on its attestation record, with no policy.edit gran
     assert.equal(report.ok, true, JSON.stringify(report.findings));
     assert.equal(report.findings[0]?.evidence, "attested");
     assert.equal(report.findings[0]?.seq, attestation.seq);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// the gate organs (APRV-272)
+// ---------------------------------------------------------------------------
+
+const ORGAN = ".claude/settings.json";
+
+/** Attest one organ's bytes through the real append path, writing them first. */
+function attestOrgan(
+  unit: World,
+  organPath: string,
+  bytes: string,
+  minute: number,
+): EventRecord {
+  const onDisk = join(unit.unit.dir, ...organPath.split("/"));
+  mkdirSync(join(onDisk, ".."), { recursive: true });
+  writeFileSync(onDisk, bytes, "utf8");
+  const result = appendOrganAttestation(
+    unit.unit.logPath,
+    { path: organPath, root: unit.unit.dir },
+    HUMAN,
+    { clock: fixedClock(at(minute)) },
+  );
+  assert.equal(result.ok, true, JSON.stringify(result));
+  if (!result.ok) throw new Error("unreachable");
+  return result.record;
+}
+
+function shaOf(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+test("a gate organ passes on an attestation of THAT path's bytes at head", () => {
+  const { root, cleanup } = scratchRoot("guard-organ");
+  try {
+    const unit = world(root);
+    const bytes = '{"hooks":{"PreToolUse":[]}}\n';
+    const record = attestOrgan(unit, ORGAN, bytes, 1);
+
+    const report = evaluateProtectedPaths(
+      inputFor(unit, [ORGAN], { organSha256AtHead: () => shaOf(bytes) }),
+    );
+    assert.equal(report.ok, true, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.evidence, "attested");
+    assert.equal(report.findings[0]?.seq, record.seq);
+    // The reason matters as much as the verdict: this path can have no grant.
+    assert.match(report.findings[0]?.detail ?? "", /human-only/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a digest attested for ANOTHER organ is not evidence for this one", () => {
+  const { root, cleanup } = scratchRoot("guard-organ-crosspath");
+  try {
+    const unit = world(root);
+    const bytes = '{"hooks":{"PreToolUse":[]}}\n';
+    // The human attested the CURSOR file. The settings file at head happens to
+    // hash to exactly the same digest, and that is not evidence about it.
+    attestOrgan(unit, ".cursor/hooks.json", bytes, 1);
+
+    const report = evaluateProtectedPaths(
+      inputFor(unit, [ORGAN], { organSha256AtHead: () => shaOf(bytes) }),
+    );
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "no-evidence");
+    assert.match(report.findings[0]?.detail ?? "", /attested for some OTHER path/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("an organ edited after its attestation fails: the digest at head is not signed", () => {
+  const { root, cleanup } = scratchRoot("guard-organ-stale");
+  try {
+    const unit = world(root);
+    attestOrgan(unit, ORGAN, '{"hooks":{"PreToolUse":[]}}\n', 1);
+    // The pull request carries LATER bytes than the ones the human signed.
+    const edited = '{"hooks":{"PreToolUse":[],"PostToolUse":[]}}\n';
+
+    const report = evaluateProtectedPaths(
+      inputFor(unit, [ORGAN], { organSha256AtHead: () => shaOf(edited) }),
+    );
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "no-evidence");
+    assert.match(report.findings[0]?.detail ?? "", /no gate\.organ\.attested record attests/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("an unevidenced organ names the human route in its failure text", () => {
+  const { root, cleanup } = scratchRoot("guard-organ-route");
+  try {
+    const unit = world(root);
+    const report = evaluateProtectedPaths(
+      inputFor(unit, [ORGAN], { organSha256AtHead: () => "a".repeat(64) }),
+    );
+    assert.equal(report.ok, false);
+    assert.equal(report.findings[0]?.code, "no-evidence");
+    assert.match(
+      report.findings[0]?.detail ?? "",
+      /approval policy attest --organ \.claude\/settings\.json/u,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("a caller that supplies no organ digest gets no organ verdict — fail closed", () => {
+  const { root, cleanup } = scratchRoot("guard-organ-nodigest");
+  try {
+    const unit = world(root);
+    attestOrgan(unit, ORGAN, '{"hooks":{"PreToolUse":[]}}\n', 1);
+
+    // `organSha256AtHead` omitted entirely: the attestation is in the log and
+    // the guard still refuses, because nothing told it what the bytes at head
+    // hash to.
+    const report = evaluateProtectedPaths(inputFor(unit, [ORGAN]));
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "no-evidence");
+    assert.match(report.findings[0]?.detail ?? "", /no bytes for it could be hashed/u);
+  } finally {
+    cleanup();
+  }
+});
+
+test("an organ attestation is not evidence for the POLICY file", () => {
+  const { root, cleanup } = scratchRoot("guard-organ-not-policy");
+  try {
+    const unit = world(root);
+    const bytes = '{"hooks":{"PreToolUse":[]}}\n';
+    attestOrgan(unit, ORGAN, bytes, 1);
+
+    // Same digest, asked about APPROVAL.md. The policy index is fed by
+    // `policy.updated` alone, so the organ record cannot answer for it.
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["APPROVAL.md"], { policySha256AtHead: shaOf(bytes) }),
+    );
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "no-evidence");
   } finally {
     cleanup();
   }

@@ -598,17 +598,31 @@ const VERBS: VerbSpec[] = [
     name: "policy",
     subcommand: "attest",
     purpose:
-      "Record a human's sign-off on the policy file's exact bytes, as one policy.updated event carrying their SHA-256. Gate operations refuse while the live file is unattested or has changed since the last attestation, so an edited policy is inoperative until a human re-attests it.",
+      "Record a human's sign-off on the policy file's exact bytes, as one policy.updated event carrying their SHA-256. Gate operations refuse while the live file is unattested or has changed since the last attestation, so an edited policy is inoperative until a human re-attests it. With --organ <path> it attests one of the gate's ORGANS instead — the harness files that install the hook — as one gate.organ.attested event no gate operation reads: those paths are human-only, so no grant for a hand edit to one can exist and this record is the only evidence the protected-path guard can accept (APRV-272).",
     human_only: true,
     input: input({
-      flags: { ...POLICY_FLAGS, ...AS_FLAG, ...LOG_FLAG, ...JSON_FLAG, ...HELP_FLAGS },
+      flags: {
+        ...POLICY_FLAGS,
+        "--organ": "string",
+        ...AS_FLAG,
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
     }),
-    output: object({ ok: { const: true }, seq: INTEGER, sha256: SHA256, path: STRING }, [
-      "ok",
-      "seq",
-      "sha256",
-      "path",
-    ]),
+    output: object(
+      {
+        ok: { const: true },
+        seq: INTEGER,
+        sha256: SHA256,
+        path: STRING,
+        // Present on an --organ attestation and absent otherwise: the
+        // repository-relative spelling the record carries, which is the
+        // identity the guard matches on and is not derivable from `path`.
+        organ_path: STRING,
+      },
+      ["ok", "seq", "sha256", "path"],
+    ),
     error: ERROR_SCHEMA,
     exit_codes: BASE_EXIT_CODES,
   },

@@ -52,6 +52,7 @@ const EVENT_TYPES = [
   "gate.closed",
   "gate.bypassed",
   "audit.decision_refused",
+  "gate.organ.attested",
 ] as const;
 
 /** Fields each event type requires beyond the base record shape. */
@@ -105,6 +106,9 @@ const EXTRA_REQUIRED: Record<string, readonly string[]> = {
   // required here though it is optional in the base shape: a refused decision a
   // reader cannot attribute to a surface is one they cannot go and reproduce.
   "audit.decision_refused": ["action_key", "channel", "payload"],
+  // APRV-272. The whole content of an organ attestation is which file and which
+  // bytes, so a record with no payload asserts nothing and must not validate.
+  "gate.organ.attested": ["payload"],
 };
 
 /**
@@ -194,6 +198,45 @@ test("audit review must come from a human actor (SPEC.md §5.2)", () => {
       validate("event", { ...record, actor }).ok,
       false,
       `audit.reviewed accepted a non-human actor "${actor}"`,
+    );
+  }
+});
+
+test("an organ attestation names a relative path, a digest, and a human (APRV-272)", () => {
+  const record = fixture("gate.organ.attested");
+  assert.equal(validate("event", record).ok, true);
+
+  // The actor rule, for the reason `gate.opened` carries the same one: the
+  // organs are the files that install the hook, so an agent able to author this
+  // record could vouch for its own way out of the gate.
+  for (const actor of ["agent:claude-code", "system:daemon"]) {
+    assert.equal(
+      validate("event", { ...record, actor }).ok,
+      false,
+      `gate.organ.attested accepted a non-human actor "${actor}"`,
+    );
+  }
+
+  const payload = record["payload"] as Record<string, unknown>;
+  // Both halves are required: a digest with no path could be read as evidence
+  // for any organ, and a path with no digest asserts nothing about bytes.
+  for (const field of ["organ_path", "sha256"]) {
+    const copy = { ...payload };
+    delete copy[field];
+    assert.equal(
+      validate("event", { ...record, payload: copy }).ok,
+      false,
+      `gate.organ.attested validated without payload.${field}`,
+    );
+  }
+
+  // Repository-relative and never absolute: an exported log must not carry the
+  // writer's home directory, and the path has to name the same file elsewhere.
+  for (const organPath of ["/Users/carter/dev/x/.claude/settings.json", ".claude\\settings.json"]) {
+    assert.equal(
+      validate("event", { ...record, payload: { ...payload, organ_path: organPath } }).ok,
+      false,
+      `gate.organ.attested accepted organ_path ${JSON.stringify(organPath)}`,
     );
   }
 });

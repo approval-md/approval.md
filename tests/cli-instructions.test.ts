@@ -520,6 +520,19 @@ test("registry: the human-only verbs are marked, and only those", () => {
   assert.equal(decided.size, VERB_REGISTRY.length);
 });
 
+test("registry: `policy attest` declares --organ, and stays human-only with it", () => {
+  const spec = findVerb("policy attest");
+  const flags = (
+    spec.input as { properties?: { flags?: { properties?: Record<string, unknown> } } }
+  ).properties?.flags?.properties;
+  assert.ok(flags !== undefined, "policy attest declares no flags");
+  assert.ok("--organ" in flags, "policy attest does not declare --organ (APRV-272)");
+  // The organ route writes an attestation like any other, so the human-only
+  // marking is the same marking on the same verb, not a second decision.
+  assert.equal(spec.human_only, true);
+  assert.match(spec.purpose, /gate\.organ\.attested/u);
+});
+
 test("registry: a human_only decision that needed an argument carries its note", () => {
   for (const label of ["expire", "daemon run", "env", "vault list", "channel cli"]) {
     const spec = findVerb(label);

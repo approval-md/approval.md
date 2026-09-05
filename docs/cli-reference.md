@@ -592,6 +592,61 @@ refusal  {"ok":false,"error":{"code":"...","message":"..."}}  on stderr
 so an exported log leaks no home directory. The event's payload is
 `{"policy_path":"APPROVAL.md","sha256":"<64 hex>"}`.
 
+### `--organ <path>`: the gate's organs (APRV-272)
+
+The ORGANS are the harness files that install the hook: `.claude/settings*`,
+`.cursor/hooks.json`, `.cursor/hooks/` and `.cursor/agents/`. They classify
+`policy.core`, and `policy.core` is human-only in this repository's policy, so
+the gate mints **no** record for a change to one: no request, no grant, no
+token. That is deliberate, and it left a hole. The CI-side protected-path guard
+requires evidence in the committed log for every protected path a pull request
+touches, and for an organ there was no evidence it could ever accept, so a human
+who hand-edited the settings file could not get the change through review. This
+flag closes it.
+
+```
+approval policy attest --organ .claude/settings.json --as human:<id>
+```
+
+One path per call, repository-relative (an absolute path under `--dir` is
+accepted and recorded relative). The runtime hashes the bytes on disk; there is
+no flag for the digest. The record is a **`gate.organ.attested`** event, never a
+`policy.updated`:
+
+```
+{"event":"gate.organ.attested","actor":"human:<id>",
+ "payload":{"organ_path":".claude/settings.json","sha256":"<64 hex>"}}
+```
+
+Nothing in the gate reads it. An organ attestation does not make an unattested
+policy operative and does not change the `policy_sha256` a request or a grant is
+decided under; a separate event type is what makes that true by construction
+rather than by a filter every reader has to remember. What reads it is the
+guard, which passes a guarded organ when the blob at the head commit hashes to a
+digest a human attested **for that same path**. A digest attested for another
+path is not evidence, and bytes edited after the attestation are not attested.
+
+Two refusals are specific to this flag, both exit 2:
+
+```
+path-is-policy   the policy file: use `approval policy attest` with no --organ
+path-not-organ   not one of the gate's organs (an ordinary file, or the
+                 approval home, which is the human's own ceremony surface)
+```
+
+`--policy` and `--organ` together are a usage error rather than a precedence
+puzzle. `--json` adds `organ_path` to the success object:
+
+```
+success  {"ok":true,"seq":7,"sha256":"<64 hex>","path":"/abs/.claude/settings.json",
+          "organ_path":".claude/settings.json"}
+```
+
+`approval doctor`'s `gate-organs` row lists the organ files in a checkout whose
+current bytes carry no attestation. It never moves doctor's exit code: an
+unattested organ breaks nothing on this machine, and the enforcement for one is
+the guard in CI.
+
 ## policy amend
 
 **Progress, on stderr.** The verb re-verifies the whole chain and recovers the

@@ -38,9 +38,14 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 
 import { tick, type ClockOptions } from "./clock.js";
+import {
+  builtinProtectedPathClass,
+  isGateOrganPath,
+  normalizePathSpelling,
+} from "./command-class.js";
 import {
   APPEND_ERROR_CODES,
   appendEvent,
@@ -410,5 +415,297 @@ export function resolveHumanActor(options: { actor?: string } = {}): string | nu
   }
   const fromEnv = process.env[HUMAN_ACTOR_ENV];
   if (fromEnv !== undefined && HUMAN_ACTOR.test(fromEnv)) return fromEnv;
+  return null;
+}
+
+// ===========================================================================
+// Organ attestation (APRV-272, amended SPEC.md §5.2 and §8)
+// ===========================================================================
+
+/**
+ * The event an ORGAN attestation is: a human's sign-off on the exact bytes of
+ * one of the gate's own organ files.
+ *
+ * ## Why the organs need this at all
+ *
+ * `.claude/settings.json` and Cursor's hook files classify `policy.core`, and
+ * `policy.core` is human-only in this repository's policy and inert to agents
+ * by §11.1 invariant 9. So the gate mints NOTHING for them: `core/gate.ts`
+ * refuses a human-only class before any record is appended, which means the
+ * protected-path guard's `granted-file` and `granted-command` verdicts cannot
+ * exist for an organ, however correctly a human edited it. PR #300 is that hole,
+ * exactly: a human hand-committed hook entries and CI failed the change because
+ * the only evidence the guard could accept was evidence the gate is designed
+ * never to produce.
+ *
+ * Attestation is the primitive that already fits. It records "a human saw these
+ * exact bytes", it needs no grant, and it matches CONTENT rather than a path, so
+ * the guard can hash the blob at head and ask the log about it.
+ *
+ * ## Why a separate event type
+ *
+ * `core/log.ts`'s `EventType` note carries the argument in full. In one line:
+ * every reader of the POLICY attestation selects on `event === "policy.updated"`,
+ * so a distinct type is invisible to all of them by construction, and
+ * {@link checkAttestationOfBytes} returns at the first `sha256`-bearing record
+ * it meets scanning backwards — an organ record wearing `policy.updated` would
+ * have made a correctly attested policy read as `hash-mismatch`.
+ */
+export const ORGAN_ATTESTATION_EVENT = "gate.organ.attested" as const;
+
+/**
+ * The payload field naming which organ was attested.
+ *
+ * Repository-relative and `/`-separated, never absolute: the log is meant to be
+ * copied and read on other machines, and an absolute path would leak the
+ * writer's home directory into a permanent record. Unlike the policy
+ * attestation, which records a BASENAME because v0.1 has exactly one policy file
+ * per approval home, an organ record has to carry the whole relative path —
+ * there are several organs, they live in different directories, and the guard's
+ * rule is that a digest attested for one path is not evidence for another.
+ */
+export const ORGAN_PATH_FIELD = "organ_path";
+
+/**
+ * Why an organ attestation was refused: the policy attestation's codes, plus
+ * the two rules this verb has of its own.
+ *
+ * Two codes and not one, because the repairs are different and a caller must be
+ * able to tell them apart. `path-is-policy` means the caller aimed the organ
+ * verb at the policy file, whose attestation is `approval policy attest` with no
+ * `--organ` and which the gate reads on every operation. `path-not-organ` covers
+ * everything else the runtime will not attest this way: the approval home, whose
+ * contents are the human's own ceremony surface, and any ordinary file, which is
+ * not part of the gate and needs no attestation to be edited.
+ */
+export const ORGAN_ATTEST_ERROR_CODES = [
+  ...ATTEST_ERROR_CODES,
+  "path-not-organ",
+  "path-is-policy",
+] as const;
+
+export type OrganAttestErrorCode = (typeof ORGAN_ATTEST_ERROR_CODES)[number];
+
+export interface OrganAttestError {
+  code: OrganAttestErrorCode;
+  message: string;
+  /** Schema errors, present when `code` is "validation". */
+  errors?: ValidationError[];
+}
+
+/** {@link appendOrganAttestation}'s result: the append's, widened by two codes. */
+export type OrganAttestationAppendResult =
+  | { ok: true; record: EventRecord; line: string }
+  | { ok: false; error: OrganAttestError };
+
+/**
+ * Which file to attest, in the two spellings that are not the same fact.
+ *
+ * `path` is the identity the record carries and the guard matches on, so it is
+ * repository-relative. `root` is where that path is rooted on THIS machine, and
+ * it never reaches the log. Splitting them is what keeps an absolute path out
+ * of a permanent record without making the record ambiguous about which of
+ * several organs it names.
+ */
+export interface OrganTarget {
+  /** Repository-relative, e.g. `.claude/settings.json`. */
+  path: string;
+  /** The checkout `path` is relative to; `join(root, path)` is hashed. */
+  root: string;
+}
+
+/** The identity and digest an organ attestation carries, or `null`. */
+export interface OrganAttestationFields {
+  organPath: string;
+  sha256: string;
+}
+
+/** An organ attestation found in the log, with the record it came from. */
+export interface OrganAttestation extends OrganAttestationFields {
+  record: EventRecord;
+}
+
+/**
+ * Append a `gate.organ.attested` record for `target` to `logPath`.
+ *
+ * The rules, all of them refused as structured results and never as throws, in
+ * the order they are checked:
+ *
+ * 1. `actor` MUST match `^human:.+`. Attestation is the verb an agent must not
+ *    perform, and it is refused here in code and again at the CLI, exactly as
+ *    {@link appendAttestation} is.
+ * 2. The path must be repository-relative: absolute paths and `..` are refused,
+ *    because the recorded identity has to mean the same file on the machine
+ *    that later reads the log.
+ * 3. The policy file is refused with its own code. It has its own attestation
+ *    and the gate reads it on every operation; letting the organ verb write a
+ *    record about it would create a second thing that looks like a policy
+ *    attestation and is not one.
+ * 4. The path must be a gate organ ({@link isGateOrganPath}). Nothing else is
+ *    attestable this way, so the verb cannot be turned into a general
+ *    "bless these bytes" primitive for any file at all.
+ *
+ * The digest is computed by the runtime from the file's exact bytes. There is
+ * no parameter for it, which is the same reason there is no `ts` parameter: a
+ * caller who could supply the hash could attest bytes nobody read, and a caller
+ * who could supply the moment could backdate what was operative when.
+ *
+ * Like {@link appendAttestation} this append carries no `expectedHead`. It reads
+ * nothing from the log, so it has no check-then-act window to close; a
+ * concurrent appender only means this record lands after theirs.
+ */
+export function appendOrganAttestation(
+  logPath: string,
+  target: OrganTarget,
+  actor: string,
+  options: AttestOptions = {},
+): OrganAttestationAppendResult {
+  if (!HUMAN_ACTOR.test(actor)) {
+    return {
+      ok: false,
+      error: {
+        code: "actor-not-human",
+        message: `attesting a gate organ requires a human actor matching ^human:.+, got ${JSON.stringify(actor)}; the organs are the files that install the hook, so an agent that could attest one could vouch for its own way out of the gate, and the log was left unchanged`,
+      },
+    };
+  }
+
+  const refusal = organPathRefusal(target.path);
+  if (refusal !== null) return { ok: false, error: refusal };
+  const organPath = normalizePathSpelling(target.path);
+
+  let sha256: string;
+  try {
+    sha256 = policyFileHash(join(target.root, organPath));
+  } catch (cause) {
+    return {
+      ok: false,
+      error: {
+        code: "io",
+        message: `gate organ ${organPath} could not be read under ${target.root} for attestation: ${detail(cause)}`,
+      },
+    };
+  }
+
+  return appendEvent(
+    logPath,
+    {
+      ts: tick(options),
+      event: ORGAN_ATTESTATION_EVENT,
+      actor,
+      payload: { [ORGAN_PATH_FIELD]: organPath, sha256 },
+    },
+    options,
+  );
+}
+
+/** Rules 2 to 4 of {@link appendOrganAttestation}, or `null` when the path passes. */
+function organPathRefusal(candidate: string): OrganAttestError | null {
+  const normalized = normalizePathSpelling(candidate);
+  if (normalized.length === 0 || isAbsolute(candidate) || normalized.split("/").includes("..")) {
+    return {
+      code: "path-not-organ",
+      message: `${JSON.stringify(candidate)} is not a repository-relative path; an organ attestation records the path itself, so it must name the same file on every machine that later reads the log`,
+    };
+  }
+  if (isGateOrganPath(normalized)) return null;
+  if (builtinProtectedPathClass(normalized) === "policy.core") {
+    const last = normalized.split("/").pop() ?? normalized;
+    if (POLICY_FILE_NAMES.includes(last)) {
+      return {
+        code: "path-is-policy",
+        message: `${normalized} is the policy file, not a gate organ; its attestation is \`approval policy attest\` with no --organ, and the gate reads that one on every operation`,
+      };
+    }
+    return {
+      code: "path-not-organ",
+      message: `${normalized} is inside the approval home, which is the human's own ceremony surface and is not attested this way; the gate organs are the harness files that install the hook`,
+    };
+  }
+  return {
+    code: "path-not-organ",
+    message: `${normalized} does not classify policy.core, so it is not one of the gate's organs; only the harness files that install the hook are attested by content, and an ordinary protected path is edited through the gate and evidenced by the grant`,
+  };
+}
+
+/**
+ * The policy filenames, for the one refusal that has to name them.
+ *
+ * Spelled here rather than imported from `core/policy-load.ts`: this module is
+ * below the policy loader and stays there, and the two candidate names are a
+ * SPEC.md §5 constant rather than a loader detail.
+ */
+const POLICY_FILE_NAMES: readonly string[] = ["APPROVAL.md", "APPROVALS.md"];
+
+/**
+ * Is this record an organ attestation, and which bytes of which file does it
+ * vouch for?
+ *
+ * A record missing either field is ignored, for the reason a `policy.updated`
+ * with no `sha256` is ignored: a record that asserts nothing about bytes must
+ * never be able to SATISFY a check about bytes. Fail closed.
+ */
+export function organAttestationOf(record: EventRecord): OrganAttestationFields | null {
+  if (record.event !== ORGAN_ATTESTATION_EVENT) return null;
+  const payload = record.payload;
+  if (payload === undefined) return null;
+  const organPath = payload[ORGAN_PATH_FIELD];
+  const sha256 = payload["sha256"];
+  if (typeof organPath !== "string" || typeof sha256 !== "string") return null;
+  const normalized = normalizePathSpelling(organPath);
+  if (normalized.length === 0) return null;
+  return { organPath: normalized, sha256 };
+}
+
+/**
+ * The record in which a human attested THIS digest FOR THIS path, latest first,
+ * or `null`.
+ *
+ * Both halves are required and that is the whole rule: a digest attested for
+ * some other organ is not evidence for this one. Two organ files with identical
+ * bytes (two checkouts of the same hook entry, say) are still two files, and a
+ * human who signed one has said nothing about the other.
+ *
+ * Unlike the policy attestation there is no "latest wins" supersession here.
+ * Every organ attestation stands for the bytes it names: the guard asks about a
+ * blob at a commit that may be months old, and the newest attestation of a file
+ * says nothing about whether an older set of bytes was once signed off. The
+ * gate reads none of these records, so a stale one authorizes nothing on its
+ * own — it is evidence about a change, and evidence does not expire the way an
+ * operative policy does.
+ */
+export function findOrganAttestation(
+  records: readonly EventRecord[],
+  organPath: string,
+  sha256: string,
+): EventRecord | null {
+  const want = normalizePathSpelling(organPath);
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index] as EventRecord;
+    const fields = organAttestationOf(record);
+    if (fields === null) continue;
+    if (fields.organPath === want && fields.sha256 === sha256) return record;
+  }
+  return null;
+}
+
+/**
+ * The most recent attestation of `organPath` at ANY digest, or `null`.
+ *
+ * What a status surface needs to tell "this file has never been attested" from
+ * "this file was attested and has been edited since". Nothing enforcing reads
+ * it: {@link findOrganAttestation} is the question the guard asks.
+ */
+export function latestOrganAttestation(
+  records: readonly EventRecord[],
+  organPath: string,
+): OrganAttestation | null {
+  const want = normalizePathSpelling(organPath);
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index] as EventRecord;
+    const fields = organAttestationOf(record);
+    if (fields === null) continue;
+    if (fields.organPath === want) return { ...fields, record };
+  }
   return null;
 }

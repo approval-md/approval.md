@@ -105,18 +105,25 @@ export const DOCTOR_ROW_ORDER = [
   // beside log-drift's report of the first, running the same check
   // `log verify --checkpoints` and the daemon's full re-proof run.
   "checkpoint",
+  // APRV-272: which gate organs in this checkout carry no attestation of
+  // their current bytes, appended for the same reason. Informational and
+  // never a fail: an unattested organ breaks nothing on this machine, and
+  // its enforcement is the CI-side protected-path guard. The row exists so a
+  // hand edit is visible at the terminal before a pull request fails on it.
+  "gate-organs",
 ] as const;
 
 /**
  * The rows that report `not applicable` when doctor runs in a directory `init`
  * has just scaffolded: no bot variables, no vault, no `.approval/env`, no
  * `daemon` block, no `supervised-live` class, no checkpoint key, no harness
- * settings file, no daemon snapshot, and no git repository.
+ * settings file, no gate organ files, no daemon snapshot, and no git
+ * repository.
  *
  * A subset of {@link DOCTOR_ROW_ORDER} and asserted to be one, so a renamed row
  * cannot leave a name here that doctor no longer emits. The README names these
- * so a reader meeting fifteen dashes on their first run can tell a configuration
- * from a fault.
+ * so a reader meeting sixteen dashes on their first run can tell a
+ * configuration from a fault.
  */
 export const DOCTOR_FRESH_SKIPS: readonly string[] = [
   "telegram",
@@ -134,4 +141,5 @@ export const DOCTOR_FRESH_SKIPS: readonly string[] = [
   "harness-version-unverified",
   "live-draw",
   "checkpoint",
+  "gate-organs",
 ];

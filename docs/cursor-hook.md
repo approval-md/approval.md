@@ -24,6 +24,12 @@ The hook lives in `.cursor/hooks.json`. **A human commits this file.** It is
 classifier treats `.cursor/hooks.json`, `.cursor/hooks/`, and `.cursor/agents/`
 as `policy.core` for the same reason.
 
+All four are gate ORGANS, so after editing one, attest it (APRV-272):
+`approval policy attest --organ .cursor/hooks.json --as human:<id>`. The class is
+human-only, so the gate mints no grant for a hand edit to one, and that
+attestation is the only evidence the CI-side protected-path guard can accept for
+it. See `docs/claude-code-hook.md`'s "Installing it" for the whole argument.
+
 ```json
 {
   "version": 1,
