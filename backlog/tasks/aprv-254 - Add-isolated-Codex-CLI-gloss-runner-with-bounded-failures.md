@@ -1,11 +1,11 @@
 ---
 id: APRV-254
 title: Add isolated Codex CLI gloss runner with bounded failures
-status: In Progress
+status: Done
 assignee:
   - '@codex'
 created_date: '2026-09-04 22:00'
-updated_date: '2026-09-05 02:11'
+updated_date: '2026-09-05 09:47'
 labels: []
 dependencies:
   - APRV-253
@@ -23,8 +23,8 @@ Task B of the approved summarizer stack, binding SPEC 3,9,10.3,11 and APRV-207. 
 <!-- AC:BEGIN -->
 - [x] #1 Codex runner uses saved CLI auth without reading or copying credentials, passes synthetic or bounded untrusted payload via stdin, and extracts only a successful final assistant response.
 - [x] #2 Environment scrub, 20-second total bound and output bounds have fake-process tests; attribution states provider and requested model honestly.
-- [ ] #3 Gated synthetic smoke test verifies model availability, auth reuse, response extraction and latency; npm test, lint and typecheck pass.
-- [ ] #4 Use verified available Codex controls: minimal read-only filesystem in an empty cwd, command network disabled, project docs suppressed, integrations and known tools disabled; document inherited global/managed instructions and lack of deny-all tool guarantee. Unsupported controls and model/process/output failures yield absence with no fallback.
+- [x] #3 Gated synthetic smoke test verifies model availability, auth reuse, response extraction and latency; npm test, lint and typecheck pass.
+- [x] #4 Use verified available Codex controls: minimal read-only filesystem in an empty cwd, command network disabled, project docs suppressed, integrations and known tools disabled; document inherited global/managed instructions and lack of deny-all tool guarantee. Unsupported controls and model/process/output failures yield absence with no fallback.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -53,4 +53,12 @@ Corrected smoke v2 was granted and executed through approval run: exit 1, latenc
 Content-free diagnostic exit 1, latency 3893 ms: thread.started, pre-turn item.completed error (closed category other), turn.started, nonempty completed assistant message, turn.completed. No unknown events, malformed JSON or terminal-order issue. The parser correctly rejected the error event. Sol verified the installed CLI startup-warning text and config key locally without inference or credential access.
 
 Verified live success on 2026-09-05: exact granted frozen v3 smoke exited 0 in 4296 ms, returned the correct summary of printf hello-world and provenance provider codex/requestedModel gpt-5.4-mini, with no diagnostic reasons. No credentials were read or copied by approval.md; Codex reused its saved authentication. Suppressing the known under-development-feature startup notice resolved the observed pre-turn error while the strict parser remained unchanged. The returned requested model is not a claim that the response independently confirms a model ID or billing method. Build, focused B 5/5, full lint, typecheck and diff check exit 0 after the correction. AC3 remains pending final updated CI; AC4 remains pending APRV-255 operator documentation. Commit this separately reviewed correction without rewriting the already-pushed implementation history.
+
+Final completion evidence: operator docs now integrated after Claude shared changes landed. They document saved CLI authentication, conditional subscription/API billing, practical isolation limitations, CLI0.152.1 compatibility, Windows unavailability, bounds and strict failure behavior. Gated frozen v3 smoke passed in4296ms for requested gpt-5.4-mini. Final assembled npm test exit0 (3426 passed,1 skipped,no failures/cancellations), focused25/25, docs/help43/43, build/lint/typecheck/diff checks pass. Independent critical review approves the unchanged error rejection and claimed-only provenance. PR262 merge remains a separately verified delivery step; no credentials copied, policy schema/dependencies added, or live services reconfigured.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added a bounded codex exec runner using saved CLI authentication, explicit requested-model provenance, practical isolation controls and strict final-response extraction. Fake-process failure/cleanup tests and the full suite pass; gated synthetic live smoke returned the correct summary in4.296seconds. Documented remaining global/managed instruction and tool-inventory limits; no provider fallback.
+<!-- SECTION:FINAL_SUMMARY:END -->
