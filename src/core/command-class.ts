@@ -1213,6 +1213,21 @@ function refineApprovalVerb(positionals: readonly string[]): Refinement | null {
     if (sub === "close") return { class: "policy.core", rule: "approval-gate-close" };
     return null;
   }
+  // APRV-257. `setup checkpoint` MINTS the key `log checkpoint` signs with, so
+  // an agent that could run it could mint a key, store it, and vouch for a
+  // chain it had just written — the mechanism defeated at its source rather
+  // than at its use. Classified where the use already is (`policy.core`,
+  // human-only in the reference policy), so the hook denies it with
+  // `hook-class-human-only`, behind the terminal check and the `--as` gate the
+  // setup family already carries. It mints no new class (SPEC.md §11.1
+  // invariant 9).
+  //
+  // The other `setup` subcommands stay pass-through. They write `.approval/env`
+  // lines and OS keystore items, which the family's terminal check already
+  // reserves to a human at a machine, and none of them mints a witness.
+  if (verb === "setup" && sub === "checkpoint") {
+    return { class: "policy.core", rule: "approval-setup-checkpoint" };
+  }
   return null;
 }
 

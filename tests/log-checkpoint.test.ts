@@ -781,7 +781,10 @@ test("daemon: the tick reports the checkpoint check it made on the full re-proof
   assert.equal(run.kind, "stopped");
   const tick = run.events.find((event) => event.event === "tick");
   assert.ok(tick !== undefined && tick.event === "tick");
-  assert.deepEqual(tick.checkpoints, { status: "pass", verified: 1, keys: 1 });
+  // APRV-257 added `due`: the daemon's half of the cadence, read from the same
+  // rule the channel prompt is enqueued from. This fixture declares no
+  // `audit.checkpoint_every`, so nothing is owed and nothing would be offered.
+  assert.deepEqual(tick.checkpoints, { status: "pass", verified: 1, keys: 1, due: false });
 });
 
 test("daemon: a forged chain stops the loop with checkpoint-invalid", async () => {

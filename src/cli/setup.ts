@@ -17,6 +17,7 @@
  * setup identity                 # APPROVAL_HUMAN, in this file
  * setup vault                    # the vault passphrase, in this file
  * setup sampling                 # the audit sampling secret, in this file
+ * setup checkpoint               # cli/setup-checkpoint.ts (the vault + a print)
  * setup channel <name>           # cli/setup-channel.ts  (keystore + .approval/env)
  * setup adapter <name>           # cli/setup-adapter.ts  (the vault)
  * setup service                  # cli/setup-service.ts  (a launchd/systemd unit)
@@ -174,6 +175,7 @@ import {
   SETUP_VAULT_HELP,
 } from "./help.js";
 import { commandSetupAdapter } from "./setup-adapter.js";
+import { commandSetupCheckpoint } from "./setup-checkpoint.js";
 import { RENAMED_NOTICE, commandSetupChannel } from "./setup-channel.js";
 import { commandSetupService } from "./setup-service.js";
 import {
@@ -606,6 +608,12 @@ export function commandSetup(
   if (sub === "identity") return commandSetupIdentity(rest, streams, cwd, deps);
   if (sub === "vault") return commandSetupVault(rest, streams, cwd, deps);
   if (sub === "sampling") return commandSetupSampling(rest, streams, cwd, deps);
+  // APRV-257. The fourth subcommand whose subject is a value this runtime
+  // MINTS, and the first whose public half belongs in APPROVAL.md rather than
+  // in `.approval/env`. It prints that half and the amendment ceremony and
+  // edits no policy file, exactly as `setup sampling` does with its variable
+  // name — the private half goes to the vault, like an adapter's credentials.
+  if (sub === "checkpoint") return commandSetupCheckpoint(rest, streams, cwd, deps);
   // `channel` and `adapter` are the two subcommands with a subject of their
   // own: the name selects the entry, so it is a positional and not a flag.
   if (sub === "channel") return commandSetupChannel(rest, streams, cwd, deps);

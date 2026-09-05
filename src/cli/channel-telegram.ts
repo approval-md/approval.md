@@ -122,6 +122,13 @@ import {
   type TagOptions,
 } from "../channels/tagging.js";
 import {
+  checkpointOfferFor,
+  checkpointPromptLines,
+  checkpointSignedLines,
+  signCheckpointOffer,
+  type CheckpointTap,
+} from "./checkpoint-tap.js";
+import {
   actionRefOf,
   decidedLine,
   groupForDigest,
@@ -131,6 +138,7 @@ import {
   telegramTokenEnvFor,
   TELEGRAM_TERMINAL_HEADLINES,
   utcClock,
+  type CheckpointTapResponse,
   type TelegramCommand,
   type TelegramConfig,
   type TelegramTerminalState,
@@ -266,6 +274,18 @@ export interface ListenSetup {
    * a stub.
    */
   gloss?: GlossRunner;
+  /**
+   * Where a checkpoint key may come from, and where the cadence is read
+   * (APRV-257).
+   *
+   * Present at every construction site, because every one of them knows a log
+   * path and a policy. Whether a checkpoint is ever OFFERED is the policy's
+   * answer — `audit.checkpoint_every` plus `audit.checkpoint_keys` — and
+   * {@link checkpointOfferFor} gives up before it walks a log when the policy
+   * names neither, so a gate that has not turned checkpoints on pays a policy
+   * load per cycle and nothing else.
+   */
+  checkpoint: CheckpointTap;
 }
 
 function payloadSource(
@@ -454,6 +474,17 @@ export function prepareListen(request: ListenRequest): ListenPreparation {
         ...(payloads.source === undefined ? {} : { payload: payloads.source }),
       },
       ...(request.gloss === undefined ? {} : { gloss: request.gloss }),
+      // APRV-257. The tap's whole configuration: the log to sign, the policy to
+      // read the cadence and the keys from, and where the private half may come
+      // from — which is the vault beside this log unless an operator said
+      // otherwise. No key is read here: custody is resolved at TAP time, so a
+      // prompt sitting on a phone holds no key material anywhere.
+      checkpoint: {
+        logPath: request.logPath,
+        policy: request.policy,
+        keyFile: null,
+        vault: null,
+      },
     },
   };
 }
@@ -842,6 +873,23 @@ export interface DispatchState {
    * needs no different bookkeeping.
    */
   readonly paced: PacedState;
+  /**
+   * The checkpoint prompt this process has outstanding (APRV-257). **In memory
+   * only**, like everything else here.
+   *
+   * `offeredSince` is the newest checkpoint's seq at the moment a prompt went
+   * out (`null` for a log that had never been checkpointed), and it is what
+   * makes "at most one outstanding, and never a nag" a single condition: a
+   * cadence that has lapsed keeps producing an offer on every cycle, and this
+   * process asks once per lapse. The value changes only when a checkpoint
+   * actually lands, which is also the moment due-ness goes false — so the next
+   * prompt comes from the next lapse and never from this one repeating.
+   *
+   * `offered: false` means nothing is outstanding. Losing the box to a restart
+   * costs one duplicate prompt for a checkpoint that is genuinely owed, which
+   * is the same direction every other piece of this bookkeeping degrades in.
+   */
+  readonly checkpoint: { offered: boolean; offeredSince: number | null };
 }
 
 export function newDispatchState(): DispatchState {
@@ -853,6 +901,7 @@ export function newDispatchState(): DispatchState {
     warned: new Set(),
     annotated: new Set(),
     paced: { order: [], current: null, summarySent: false, announced: 0 },
+    checkpoint: { offered: false, offeredSince: null },
   };
 }
 
@@ -902,6 +951,11 @@ export interface DispatchResult {
    * answer, and a dropped key that is still pending is simply re-delivered.
    */
   pruned: { action_key: string; reason: "settled" | "stale" }[];
+  /**
+   * The `CHECKPOINT DUE` prompt this cycle sent, when it sent one (APRV-257):
+   * the message it is on and the head it asks about. At most one per lapse.
+   */
+  checkpoint?: { delivery_id: DeliveryId; seq: number; hash: string };
 }
 
 /** A delivery whose request the log now says is settled (APRV-106, APRV-113). */
@@ -1172,6 +1226,19 @@ export async function dispatchPending(
     );
   }
 
+  // APRV-257. The checkpoint tap, offered before the requests. Everything about
+  // WHETHER to offer is `checkpointOfferFor`, which reads the policy and the
+  // verified log; this cycle's only jobs are "has this process already asked"
+  // and "is the approver already looking at something".
+  //
+  // Under `paced` a prompt that went out ends the cycle, because the approver
+  // is now looking at a question and sending a request underneath it would be
+  // two. Under `burst` it does NOT: burst sends everything pending on every
+  // cycle, and `--once` is one cycle, so returning here would leave a startup
+  // batch undelivered for the sake of a prompt that blocks nothing.
+  const offered = await offerCheckpoint(setup, streams, state, result);
+  if (offered && setup.delivery === "paced") return result;
+
   // Everything the log calls pending that this process has not put on the
   // phone. Both modes start here and differ only in how much of it they send.
   const undecided = queue.requests.filter(
@@ -1323,6 +1390,85 @@ export async function dispatchPending(
   }
 
   return result;
+}
+
+/**
+ * The checkpoint prompt, at most one outstanding and never a nag (APRV-257).
+ *
+ * Returns `true` when this cycle sent one; the caller decides what that means,
+ * and under `paced` it means the cycle is over. It costs the queue one cycle
+ * and never more, because a checkpoint prompt is never `paced.current` —
+ * nothing releases it, so nothing could be left waiting on it.
+ *
+ * Three conditions, and each one is a different failure it avoids:
+ *
+ * 1. **Nothing already in front of the approver** (`paced` only). The whole
+ *    content of APRV-216 is one question at a time, and a checkpoint is a
+ *    question.
+ * 2. **Not already asked for this lapse.** `state.checkpoint.offeredSince`
+ *    holds the newest checkpoint's seq at the moment the last prompt went out.
+ *    A lapsed cadence produces an offer on every cycle for as long as it lasts,
+ *    and a listener that sent one every cycle would be the nag APRV-220 refused
+ *    to build. The value moves only when a checkpoint actually LANDS, which is
+ *    also when due-ness goes false — so the next prompt comes from the next
+ *    lapse.
+ * 3. **The policy asked for it.** No cadence, or no key, and there is no offer
+ *    at all; `checkpointOfferFor` decides that and this function never second-
+ *    guesses it.
+ *
+ * A send that fails leaves `offered` false, so the next cycle tries again — the
+ * same direction a failed request send takes, and for the same reason.
+ */
+async function offerCheckpoint(
+  setup: ListenSetup,
+  streams: Streams,
+  state: DispatchState,
+  result: DispatchResult,
+): Promise<boolean> {
+  if (setup.delivery === "paced" && state.paced.current !== null) return false;
+
+  const offer = checkpointOfferFor(setup.checkpoint);
+  if (offer === null) return false;
+  if (state.checkpoint.offered && state.checkpoint.offeredSince === offer.since) return false;
+
+  try {
+    const deliveryId = await setup.channel.offerCheckpoint({
+      head: offer.head,
+      lines: checkpointPromptLines(offer),
+    });
+    state.checkpoint.offered = true;
+    state.checkpoint.offeredSince = offer.since;
+    result.checkpoint = {
+      delivery_id: deliveryId,
+      seq: offer.head.seq,
+      hash: offer.head.hash,
+    };
+    if (setup.json) {
+      streams.out(
+        `${JSON.stringify({
+          event: "checkpoint_offered",
+          delivery_id: deliveryId,
+          seq: offer.head.seq,
+          hash: offer.head.hash,
+        })}\n`,
+      );
+    } else {
+      streams.out(
+        `offered a checkpoint of seq ${String(offer.head.seq)} (message ${deliveryId})\n`,
+      );
+    }
+    return true;
+  } catch (cause) {
+    // Never fatal, not even at startup. A checkpoint that is due is a warning
+    // at every layer, so a listener that refused to start because it could not
+    // ASK for one would have turned a warning into an outage.
+    streams.err(
+      `approval: telegram could not offer a checkpoint of seq ${String(offer.head.seq)}: ${
+        cause instanceof Error ? cause.message : String(cause)
+      } — nothing was signed and the next cycle tries again\n`,
+    );
+    return false;
+  }
 }
 
 /**
@@ -1540,6 +1686,79 @@ function handlerFor(setup: ListenSetup, streams: Streams): (d: ChannelDecision) 
 }
 
 /**
+ * What a checkpoint tap does, on the machine the listener runs on (APRV-257).
+ *
+ * The signing happens HERE, in the listener's process, and that is the whole
+ * point of the tap: this process holds the vault passphrase because a HUMAN
+ * exported it into the shell they started it from, and `core/child-env.ts`
+ * strips that variable from every child an agent's session spawns. No agent can
+ * arrange for a process that reaches this function with a key.
+ *
+ * Nothing about the head is re-derived. The `(seq, hash)` comes back from the
+ * channel exactly as it was put on the screen, and
+ * {@link ../core/checkpoint.js appendCheckpointAt} signs that and checks the
+ * log still carries it. A handler that quietly re-read the head would be
+ * putting a human's key over bytes nobody looked at.
+ *
+ * `Not now` appends nothing and says so. It is not a rejection: there is no
+ * request here to reject, and a checkpoint that is owed is a warning at every
+ * layer and a refusal at none.
+ */
+export function checkpointHandlerFor(
+  setup: ListenSetup,
+  streams: Streams,
+): (tap: { sign: boolean; head: { seq: number; hash: string } }) => CheckpointTapResponse {
+  return (tap) => {
+    if (!tap.sign) {
+      return {
+        ok: true,
+        headline: "NOT SIGNED",
+        detail: [
+          `The checkpoint of seq ${String(tap.head.seq)} was declined. Nothing was appended.`,
+          "A checkpoint that is owed is a warning and never a refusal; you will be asked again when the next one is due.",
+        ],
+        toast: "Not now.",
+      };
+    }
+
+    const result = signCheckpointOffer(
+      setup.checkpoint,
+      tap.head,
+      setup.actor,
+      "telegram",
+      process.cwd(),
+    );
+    const lines = checkpointSignedLines(result);
+    const [headline, ...detail] = lines;
+
+    if (setup.json) {
+      streams.out(
+        `${JSON.stringify({
+          event: "checkpoint",
+          ok: result.ok,
+          seq: result.ok ? result.seq : null,
+          signed: tap.head,
+          ...(result.ok ? {} : { code: result.code }),
+        })}\n`,
+      );
+    } else if (result.ok) {
+      streams.out(
+        `checkpoint ${String(result.seq)}: signed head seq ${String(result.signed.seq)} ${result.signed.hash} by ${setup.actor} via telegram\n`,
+      );
+    } else {
+      streams.err(`approval: telegram checkpoint refused (${result.code}): ${result.message}\n`);
+    }
+
+    return {
+      ok: result.ok,
+      headline: headline ?? "NOT CHECKPOINTED",
+      detail,
+      toast: result.ok ? "Signed." : "Not signed — the message says why.",
+    };
+  };
+}
+
+/**
  * `/queue`, `/skip`, `/next` — the paced walkthrough's three verbs (APRV-216).
  *
  * **None of them appends anything**, and the reason is structural rather than
@@ -1671,6 +1890,12 @@ export interface RunningListener {
 export function startListener(setup: ListenSetup, streams: Streams): RunningListener {
   const { channel } = setup;
   channel.onDecision(handlerFor(setup, streams));
+  // APRV-257. Registered unconditionally, because whether a checkpoint is ever
+  // OFFERED is the policy's answer and a handler that exists for a prompt
+  // nobody sends costs nothing. Registering it here is also what makes the
+  // channel's `offerCheckpoint` legal at all: it refuses to send a button
+  // nothing is listening for.
+  channel.onCheckpoint(checkpointHandlerFor(setup, streams));
 
   // Delivery bookkeeping is in memory only — channels hold no state (SPEC.md
   // §10.3). A restarted listener therefore re-sends everything still pending.

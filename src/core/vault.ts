@@ -705,13 +705,33 @@ export interface VaultCredential {
  * The value stored under `name`.
  *
  * **The only function here that returns a credential**, which is the module's
- * structural rule and is pinned by `tests/vault.test.ts`. Nothing in the CLI
- * calls it: there is no `approval vault get`, because a verb that printed a
- * credential would put it in a terminal, a scrollback buffer, a CI log, and a
- * shell history, and would do so on a machine where the whole point is that the
- * value only ever travels from this file into an adapter's request. The one
- * sanctioned caller is `adapters/vault-provider.ts`, whose provider
- * `executeThroughAdapter` scopes to the verified-token window.
+ * structural rule and is pinned by `tests/vault.test.ts`. There is no
+ * `approval vault get`, because a verb that printed a credential would put it
+ * in a terminal, a scrollback buffer, a CI log, and a shell history, and would
+ * do so on a machine where the whole point is that the value only ever travels
+ * from this file into the use it was stored for.
+ *
+ * **Two sanctioned callers** (flagged by APRV-220, decided by APRV-257):
+ *
+ * 1. `adapters/vault-provider.ts`, whose provider `executeThroughAdapter`
+ *    scopes to the verified-token window.
+ * 2. `cli/checkpoint-tap.ts`, which reads `approval.checkpoint.key` and hands
+ *    it to `core/checkpoint.ts`'s signer — the one custody decision for every
+ *    surface that can take a checkpoint.
+ *
+ * The rule this list keeps is not "one caller". It is that a credential's value
+ * goes from this file into a USE and never onto a SURFACE, and both callers
+ * obey it: the second takes a private key into an Ed25519 signature and hands
+ * back a signature and a fingerprint of the PUBLIC half.
+ *
+ * The alternative — move the checkpoint key somewhere else and keep this list
+ * at one name — was considered and rejected, because it would have made the key
+ * weaker rather than the module cleaner. The OS keystore has no equivalent of
+ * the passphrase variable `core/child-env.ts` strips from every child
+ * (APRV-205), and a file beside the log has no encryption at all. A checkpoint
+ * key is the one secret whose entire value is that a process an agent launched
+ * cannot reach it, so it belongs in the strictest store this runtime has. What
+ * that costs is a second name in this comment.
  */
 export function getCredential(
   vaultPath: string,
