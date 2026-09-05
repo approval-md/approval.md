@@ -39,6 +39,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { listSchemaNames } from "../src/core/validate.js";
 import { cleanup } from "./conformance-harness.js";
 
 /** The repository root, from `dist/tests/` at runtime. */
@@ -144,11 +145,16 @@ function parseSuite(contents: string): SuiteBody | null {
   }
 }
 
-/** The body with its human-chosen version removed, for comparison. */
+/**
+ * The body with its human-chosen version removed, for comparison.
+ *
+ * Both sides of every comparison come from `JSON.parse`, so key order is the
+ * order the bytes carry and stringifying the result compares the whole document.
+ */
 function withoutVersion(body: SuiteBody): Record<string, unknown> {
   const copy: Record<string, unknown> = { ...body };
   delete copy["vectors_version"];
-  return JSON.parse(JSON.stringify(copy)) as Record<string, unknown>;
+  return copy;
 }
 
 /** Which vectors were added, dropped, or moved, so a failure names names. */
@@ -241,7 +247,9 @@ function drift(generated: Generated, committed: Committed, regenCommand: string)
   }
 
   // A vector file nobody generates is a surface with no source: the runner will
-  // execute it, and a regeneration will never update it.
+  // execute it, and a regeneration will never update it. The listing is the
+  // working tree's, since a snapshot overrides what files hold and not which
+  // files there are.
   const generatedNames = new Set(generated.files.map((file) => file.file));
   let present: string[] = [];
   try {
@@ -318,23 +326,45 @@ test("regenerating the conformance vectors from the current fixtures changes not
   );
 });
 
-test("the generator writes nothing: importing it leaves the conformance directory alone", async () => {
-  const before = new Map(
-    readdirSync(join(REPO_ROOT, "conformance", "vectors"))
-      .filter((entry) => entry.endsWith(".json"))
-      .map((entry) => [entry, sha256(readFileSync(join(REPO_ROOT, "conformance", "vectors", entry), "utf8"))]),
+test("every schema in schema/ is a schema the vectors cover", async () => {
+  // The regeneration names its schemas by hand, deliberately, so adding one is
+  // a reviewable diff. The cost of that choice is a second way for the vectors
+  // to lag the fixtures: a new schema ships with fixtures, `fixtures.test.ts`
+  // covers them, and the conformance suite never hears the name. Comparing the
+  // generated inputs with the schemas on disk closes it.
+  const { generateConformance } = await generator();
+  const schema = generateConformance().files.find((file) => file.suite === "schema-validation");
+  assert.ok(schema !== undefined, "the schema-validation suite is missing");
+  const body = JSON.parse(schema.contents) as SuiteBody;
+  const covered = new Set(
+    body.vectors.map((vector) => String((vector["input"] as Record<string, unknown>)["schema"])),
   );
+  assert.deepEqual(
+    [...covered].sort(),
+    [...listSchemaNames()].sort(),
+    "a schema in schema/ has no vectors, or the suite names one that no longer exists: add it to the schema list in scripts/regen-conformance-vectors.mjs and regenerate",
+  );
+});
+
+/** Every committed vector file, by name and digest. */
+function conformanceDirectory(): [string, string][] {
+  const dir = join(REPO_ROOT, "conformance", "vectors");
+  return readdirSync(dir)
+    .filter((entry) => entry.endsWith(".json"))
+    .sort()
+    .map((entry) => [entry, sha256(readFileSync(join(dir, entry), "utf8"))]);
+}
+
+test("the generator writes nothing: generating leaves the conformance directory alone", async () => {
+  // The property the whole check rests on. If generating wrote, this file would
+  // be comparing the vectors with themselves and would pass forever.
+  const before = conformanceDirectory();
   const { generateConformance, DEFAULT_FIXTURES_ROOT } = await generator();
   generateConformance();
   generateConformance({ fixturesRoot: DEFAULT_FIXTURES_ROOT });
-  const after_ = new Map(
-    readdirSync(join(REPO_ROOT, "conformance", "vectors"))
-      .filter((entry) => entry.endsWith(".json"))
-      .map((entry) => [entry, sha256(readFileSync(join(REPO_ROOT, "conformance", "vectors", entry), "utf8"))]),
-  );
   assert.deepEqual(
-    [...after_.entries()],
-    [...before.entries()],
+    conformanceDirectory(),
+    before,
     "generating touched the working tree; only the CLI entry may write",
   );
 });
