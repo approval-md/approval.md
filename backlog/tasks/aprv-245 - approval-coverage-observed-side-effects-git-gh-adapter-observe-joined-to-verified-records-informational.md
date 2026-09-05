@@ -3,11 +3,11 @@ id: APRV-245
 title: >-
   approval coverage: observed side effects (git, gh, adapter observe) joined to
   verified records, informational
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-02 21:33'
-updated_date: '2026-09-04 23:44'
+updated_date: '2026-09-05 02:02'
 labels: []
 dependencies: []
 references:
@@ -27,13 +27,13 @@ MCP use is voluntary: an agent connected through `approval mcp serve --http` (a 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 src/core/coverage.ts is a pure, deterministic join from observed effects {source,id,class,at,actorHint,detail} plus verified records to per-effect evidence (seq and event type) or none, with totals per source and class; tests cover evidence found, none, class mismatch, window miss, protected-path guard verdicts, and an agent: author with no records; test logs are built through the real append path
-- [ ] #2 Sources under src/core/coverage-sources/: git (commits, merges into main, tags between --base and --head via git log/show/for-each-ref, commit author as actorHint), gh (PRs opened or merged in the window when gh is on PATH, reported absent otherwise), adapter (calls observe on adapters that implement it); each has fixture tests
-- [ ] #3 The adapter contract gains optional observe(window) returning observed effects with provider ids; the conformance suite covers it; the AgentMail adapter implements it by listing sent messages for the configured inbox (endpoint verified against docs.agentmail.to and cited in the notes), read-only, no token
-- [ ] #4 `approval coverage [--base <ref>] [--head <ref>] [--since <duration>] [--source git,gh,agentmail] [--json]` prints a table (source, effect, class, evidence seq or none) and a coverage line per source, exits 0 with or without gaps; registered in the verb registry, help, and docs/cli-reference.md with the three tiers written under the verb
-- [ ] #5 `approval status` quotes the git coverage line for the current branch range, informational
-- [ ] #6 SPEC.md 10.1 gains a coverage paragraph beside the APRV-145 text and 10.4 a sentence for observe, both marked pending sign-off and called out in the PR
-- [ ] #7 npm test, lint, and npm run check:changed pass; `approval coverage --base origin/main~20 --head origin/main` runs on this repository and exits 0
+- [x] #1 src/core/coverage.ts is a pure, deterministic join from observed effects {source,id,class,at,actorHint,detail} plus verified records to per-effect evidence (seq and event type) or none, with totals per source and class; tests cover evidence found, none, class mismatch, window miss, protected-path guard verdicts, and an agent: author with no records; test logs are built through the real append path
+- [x] #2 Sources under src/core/coverage-sources/: git (commits, merges into main, tags between --base and --head via git log/show/for-each-ref, commit author as actorHint), gh (PRs opened or merged in the window when gh is on PATH, reported absent otherwise), adapter (calls observe on adapters that implement it); each has fixture tests
+- [x] #3 The adapter contract gains optional observe(window) returning observed effects with provider ids; the conformance suite covers it; the AgentMail adapter implements it by listing sent messages for the configured inbox (endpoint verified against docs.agentmail.to and cited in the notes), read-only, no token
+- [x] #4 `approval coverage [--base <ref>] [--head <ref>] [--since <duration>] [--source git,gh,agentmail] [--json]` prints a table (source, effect, class, evidence seq or none) and a coverage line per source, exits 0 with or without gaps; registered in the verb registry, help, and docs/cli-reference.md with the three tiers written under the verb
+- [x] #5 `approval status` quotes the git coverage line for the current branch range, informational
+- [x] #6 SPEC.md 10.1 gains a coverage paragraph beside the APRV-145 text and 10.4 a sentence for observe, both marked pending sign-off and called out in the PR
+- [x] #7 npm test, lint, and npm run check:changed pass; `approval coverage --base origin/main~20 --head origin/main` runs on this repository and exits 0
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -58,4 +58,12 @@ SPEC GATE. Section 10.1 gained its coverage paragraph, marked (APRV-245, pending
 FOLLOW-UP. The AgentMail join is by class and window, not by provider message id: execution.completed records an exit_code and the provider's id reaches only the CLI result, so an id-level binding needs an event-schema amendment. That is APRV-251, and docs/cli-reference.md and the adapter's own comment both name it so a reader is never left thinking the id in the report was matched on.
 
 VERIFICATION. npm run build clean; npm test 3110 tests, 3109 pass, 1 skipped, 0 fail, exit 0; npm run lint clean; npm run typecheck clean; npm run check:changed classified 'full' and passed the same 3110 with lint and typecheck, exit 0. approval coverage --base origin/main~20 --head origin/main exits 0 (git: 104 of 161 effects carry evidence with --source git; with the default git,gh over origin/main~5 it is git 3 of 32 and gh 166 of 192). approval status in the worktree prints 'git coverage  0 of 0 effects carry evidence', which is correct: this branch has committed nothing yet.
+
+Orchestrator review: git source now reports a commit reachable from a remote-tracking ref as vcs.push.branch (the classifier's class for git push origin <branch>, and the class the demo registers), the trunk as vcs.push.main, a local-only commit as vcs.commit.branch; test added. SPEC 10.4 observe sentence landed after the live gate was answered (commit d2ac720). Merged origin/main (APRV-219/236/227 and kin) with one register conflict resolved by keeping both entries. Verified on the merged tree: build, typecheck, lint clean; npm test 3208 pass, 0 fail, 1 skipped; coverage run over origin/main~20..origin/main exits 0. The verb reads verified records only and writes nothing (11.1 invariant 1); it touches no other invariant. Provider-id binding for AgentMail is APRV-251.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+approval coverage: a pure join (src/core/coverage.ts) of observed effects from git, gh and adapter observe (AgentMail first) against verified records, per-effect evidence or none, informational exit 0; approval status gains a git coverage row; adapter contract gains optional observe; SPEC 10.1 and 10.4 amended pending sign-off; docs/cli-reference.md carries the three tiers. Verified by 40 new tests inside the full suite (3208 pass) and a live run on main's last twenty commits.
+<!-- SECTION:FINAL_SUMMARY:END -->
