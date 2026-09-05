@@ -670,7 +670,16 @@ function signAndAppendOnce(
     };
   }
 
-  return { ok: true, record: appended.record, head: read.head, fingerprint };
+  // The head this checkpoint SIGNED, which is the head the human was shown and
+  // not the head the append landed on. The two are the same only for
+  // `appendCheckpoint`; reporting the log's head here would tell the tap's
+  // caller that a different `(seq, hash)` was covered than the signature covers.
+  return {
+    ok: true,
+    record: appended.record,
+    head: { seq: head.seq, hash: head.hash },
+    fingerprint,
+  };
 }
 
 /** The fingerprint of the public half of a private key, or `null`. */

@@ -115,6 +115,16 @@ export function resolveCheckpointKey(
   vaultFlag: string | null,
   policyWhere: PolicyWhere,
   cwd: string,
+  /**
+   * Where the passphrase is read from. `process.env` in production.
+   *
+   * A seam and not a back door, and the same one `setup adapter` carries: it
+   * goes through {@link passphraseFrom}, which is the function `approval vault
+   * set` uses, and it never resolves `.approval/env` (SPEC.md §11.1 invariant
+   * 7). Injectable so a suite can prove the vault path without mutating an
+   * environment every other test in the process shares.
+   */
+  env?: NodeJS.ProcessEnv,
 ): KeyResolution {
   if (keyFile !== null) {
     const path = absolute(keyFile, cwd);
@@ -142,7 +152,7 @@ export function resolveCheckpointKey(
 
   const vaultPath = vaultFlag === null ? vaultPathFor(logPath) : absolute(vaultFlag, cwd);
   const passphraseEnv = passphraseEnvFor(loadPolicy(policyWhere));
-  const passphrase = passphraseFrom(passphraseEnv);
+  const passphrase = passphraseFrom(passphraseEnv, env ?? process.env);
   if (passphrase === null) {
     return {
       ok: false,
