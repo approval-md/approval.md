@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-c'
 created_date: '2026-09-05 10:30'
-updated_date: '2026-09-05 11:11'
+updated_date: '2026-09-05 11:15'
 labels:
   - policy
   - classifier
@@ -25,10 +25,10 @@ Carter, 2026-09-05, from the log: policy.edit produced 250 of 351 phone question
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A policy with {path: design/, class: policy.edit.design} and classes policy.edit.design supervised routes an edit under design/ to supervised (test through approval hook classify and the hook), while SPEC.md still resolves policy.edit.spec at the policy.edit line's autonomy when no policy.edit.spec line exists
-- [ ] #2 A routing that would resolve a built-in protected path below the floor refuses at policy load with a distinct machine-readable code and the policy is inoperative until fixed; a bare string entry behaves exactly as today
-- [ ] #3 The protected-path guard, dark-session evaluator and doctor rows honour the routed class, and the dogfood pins cover the repo policy's routings; conformance vectors regenerated per the ritual
-- [ ] #4 Schema amended for the object form (own subtask if non-trivial); SPEC 5.2 and 7 sentences drafted in the notes; docs updated
+- [x] #1 A policy with {path: design/, class: policy.edit.design} and classes policy.edit.design supervised routes an edit under design/ to supervised (test through approval hook classify and the hook), while SPEC.md still resolves policy.edit.spec at the policy.edit line's autonomy when no policy.edit.spec line exists
+- [x] #2 A routing that would resolve a built-in protected path below the floor refuses at policy load with a distinct machine-readable code and the policy is inoperative until fixed; a bare string entry behaves exactly as today
+- [x] #3 The protected-path guard, dark-session evaluator and doctor rows honour the routed class, and the dogfood pins cover the repo policy's routings; conformance vectors regenerated per the ritual
+- [x] #4 Schema amended for the object form (own subtask if non-trivial); SPEC 5.2 and 7 sentences drafted in the notes; docs updated
 - [ ] #5 npm test passes; lint clean
 <!-- AC:END -->
 
@@ -94,4 +94,14 @@ Not applied: agents do not edit SPEC.md. These are the two amendments this chang
 **§11.1 invariant 9** (human-only classes are inert to agents; no verb minting authority for them) is the invariant this change runs closest to, and it is upheld in two independent places rather than one: the classifier's tier order answers `policy.core` and `log.mutate` before any policy entry is read, AND the loader refuses a policy that tries. Either alone would hold; both are present because the first is silent and the second is legible.
 
 No other invariant is touched. Enforcement paths still read only verified records; no gate-typed event gained a caller timestamp; no secret reaches the log; nothing self-reported reduces scrutiny; no check-then-append was added.
+
+## Verification evidence
+
+**AC1** — `node cli.js hook classify --json --policy schema/fixtures/policy-md/valid/routed-protected-paths.md -- sed -i '' s/a/b/ design/notes.md` returns `{"class":"policy.edit.design","rule":"protected-path","path":"design/notes.md"}`; the same verb over `.github/workflows/ci.yml` returns `policy.edit.ci`, over `CLAUDE.md` returns `policy.edit` (unrouted, unchanged), over `APPROVAL.md` returns `policy.core` (the routed tier cannot reach it), and over `docs/constitution.md` — routed to `policy.edit.spec` with no `policy.edit.spec` line in the fixture — returns `policy.edit.spec`. `node cli.js policy check --json --policy <that> policy.edit.spec` then answers `autonomy supervised, declaredAutonomy supervised-live, liveRate 0.1, provenance inherited, matched policy.edit`: the sub-class resolves at the `policy.edit` line's own autonomy, which is the AC's second half. The file-tool half of the hook goes through the same `protectedPathClass` call in `fileToolGate` and carries the result out as the action class.
+
+**AC2** — `node cli.js policy check --json --policy <a routed policy whose policy.edit.ci is autonomous> read.shell` answers `manualBecause: "load-failure"`, `loadFailure.code: "protected-route-floor"`, with a message naming the entry and both resolutions; the class asked about is unrelated to the routing, which shows the whole policy is inoperative rather than the one entry. tests/policy-load-route-floor.test.ts (12 tests) covers the stricter-passes, unfloored-path-passes, looser-level-refuses, live-rate-tie-break, route-at-the-log-or-the-organs cases and the bare-string no-op. Byte-identity for a bare string entry is asserted in tests/command-class-routing.test.ts by classifying one corpus through both shapes and comparing the whole classification structurally.
+
+**AC3** — tests/protected-path-guard-routed.test.ts (6 tests), logs built through the real append path: a grant of the routed sub-class is `granted-file` evidence, a grant of `policy.edit` itself still is, a routed grant naming another file is `no-evidence`, and a routed grant that did not bind the hunk is `uncovered-hunk`. The dark-session evaluator and the doctor rows read the guard's own `isGuardedPath` / `isGrantingClass`, so they honour routing by construction; both had their `protected_paths` parameters widened. The dogfood suite's reachability test now asks `emittableClass` with the live policy's own entries, plus a routed-fixture case that exercises the branch the live policy cannot yet reach. Conformance regenerated per the ritual; `node conformance/run.mjs` exits 0, tests/conformance.test.ts 25/25, tests/conformance-regen.test.ts 7/7.
+
+**AC4** — schema/policy.schema.json amended (a `oneOf` over the bare string and the routed object, with the path grammar hoisted to `$defs/protectedPath` so both shapes are held to one rule); two fixtures added, valid and invalid. SPEC 5.2 and 7 sentences drafted above. docs/claude-code-hook.md and docs/cli-reference.md updated.
 <!-- SECTION:NOTES:END -->
