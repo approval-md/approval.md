@@ -10,6 +10,7 @@
  * which records are an advance's own.
  */
 
+import { danglingExecutions } from "./execute.js";
 import type { EventRecord } from "./log.js";
 import { payloadOf, requestState, type RequestState } from "./state.js";
 
@@ -185,4 +186,94 @@ export function lastAdvance(records: readonly EventRecord[]): LastAdvance | null
     code,
     message,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Dangling advance cycles, and what the trunk can prove about them (APRV-264)
+// ---------------------------------------------------------------------------
+
+/**
+ * The one-line repair for a pile of dangling executions, spelled once.
+ *
+ * Every surface that reports an advance nobody closed ends with this command:
+ * the daemon's refusal, its warning line, and the `log-advance-cadence` doctor
+ * row. Spelled here because a repair an operator has to reconstruct from three
+ * slightly different sentences is a repair they retype by hand five times,
+ * which is exactly what was observed on 2026-09-05 and exactly what this task
+ * removes.
+ */
+export const RESOLVE_DANGLING_COMMAND = "approval execution resolve --dangling";
+
+/**
+ * The seq the span named by `daemon-log-advance-<from>-<to>` ends at, or `null`.
+ *
+ * `null` for a key this runtime did not mint the shape of. A key whose tail is
+ * not an integer names no span, so nothing about it can be proved from the
+ * refs, and it is reported as unprovable rather than guessed at.
+ */
+export function advanceSpanEnd(actionKey: string): number | null {
+  if (!actionKey.startsWith(`${ADVANCE_KEY_PREFIX}-`)) return null;
+  const parsed = Number.parseInt(actionKey.split("-").pop() ?? "", 10);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+/**
+ * One dangling execution, and what this checkout's git refs can prove about it.
+ *
+ * `provenBy` is the whole point: a ref name, or `null`. A sweep may close only
+ * the first kind, and every surface that reports the second kind reports it as
+ * a human's to establish rather than as a failure — an `execution.failed`
+ * written over an advance that actually published would be worse than the
+ * dangling record it replaced.
+ */
+export interface DanglingAdvance {
+  actionKey: string;
+  task: string | null;
+  /** The `execution.started` record's position. */
+  seq: number;
+  /** The seq the key names, or `null` when the key names no span. */
+  toSeq: number | null;
+  /** The ref that carries `toSeq`, or `null` when nothing in this checkout does. */
+  provenBy: string | null;
+}
+
+/** Every dangling execution whose key is one this daemon mints, in log order. */
+export function danglingAdvances(records: readonly EventRecord[]): DanglingAdvance[] {
+  return danglingExecutions([...records])
+    .filter((entry) => entry.actionKey.startsWith(`${ADVANCE_KEY_PREFIX}-`))
+    .map((entry) => ({
+      actionKey: entry.actionKey,
+      task: entry.task,
+      seq: entry.seq,
+      toSeq: advanceSpanEnd(entry.actionKey),
+      provenBy: null,
+    }));
+}
+
+/**
+ * The same list, with each entry's proof filled in from a published state.
+ *
+ * PURE, and the published state is an argument rather than something read here:
+ * `publishedState` lives in `cli/log-advance.ts` because it reads git, a CLI
+ * module may not import the daemon, and the daemon, the doctor row and
+ * `execution resolve --dangling` must not disagree about which key counts as
+ * proved. So the git read happens once in each caller and the RULE lives here.
+ *
+ * The rule is one comparison: the ref that carries the highest published seq
+ * carries every seq below it, because `publishedState` only ever counts a copy
+ * of this chain that is a PREFIX of the working log. So a span ending at or
+ * below `publishedSeq` is on that ref, and a span above it is on nothing this
+ * checkout can see.
+ */
+export function proveDanglingAdvances(
+  records: readonly EventRecord[],
+  published: { publishedSeq: number; publishedRev: string | null },
+): DanglingAdvance[] {
+  return danglingAdvances(records).map((entry) => ({
+    ...entry,
+    provenBy:
+      entry.toSeq !== null && published.publishedRev !== null && entry.toSeq <= published.publishedSeq
+        ? published.publishedRev
+        : null,
+  }));
 }

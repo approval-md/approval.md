@@ -132,6 +132,8 @@
           "execution-indeterminate",
           "not-indeterminate",
           "already-reconciled",
+          "dangling-stdin-not-tty",
+          "dangling-declined",
           "log-unreadable",
           "log-torn-tail",
           "log-corrupt",

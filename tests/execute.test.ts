@@ -301,6 +301,13 @@ test("the execution refusal-code union is frozen public API", () => {
     "execution-indeterminate",
     "not-indeterminate",
     "already-reconciled",
+    // APRV-264: the bulk form of `execution resolve` attests, and both of these
+    // are about the attestation rather than about the log. Distinct from each
+    // other because "nobody could be asked" and "the person said no" call for
+    // different next acts, and distinct from `actor-not-human`, which is about
+    // WHO would be attesting rather than whether anybody was asked at all.
+    "dangling-stdin-not-tty",
+    "dangling-declined",
     "log-unreadable",
     "log-torn-tail",
     // APRV-20 finding S1, shared verbatim with the gate and the token module.

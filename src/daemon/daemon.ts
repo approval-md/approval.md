@@ -113,10 +113,13 @@ import {
 } from "../core/checkpoint.js";
 import {
   authorizeAdvance,
-  reconcileDanglingAdvance,
+  proveDanglingAdvancesFor,
   runAdvanceAsync,
   runAdvanceSync,
   settleAdvanceFinish,
+  sweepDanglingAdvances,
+  sweepIsClear,
+  unreconciledRefusal,
   type AdvanceAttempt,
   type AdvanceCadence,
   type AdvanceInput,
@@ -201,6 +204,19 @@ export type DaemonEvent =
        * 100%" is exactly this field being a path rather than `null`.
        */
       draw?: string | null;
+      /**
+       * Advance cycles nobody closed that this checkout's refs cannot prove
+       * (APRV-264). Additive, like every other growth of this union.
+       *
+       * On the FIRST line because it is the one thing that will stop the
+       * cadence for the whole of this run and the one thing this process cannot
+       * fix: an operator who reads it here does not have to wait out a tick to
+       * find out that the advance is blocked, and they get the command that
+       * clears it. Empty on a healthy start, and empty when the startup sweep
+       * closed everything it found — what is here is precisely what is owed to
+       * a person.
+       */
+      dangling_advances?: string[];
     }
   | {
       event: "drift";
@@ -748,8 +764,17 @@ export class Daemon {
    * is looked at. Nothing else may advance while it stands.
    */
   private pendingAdvanceFinish: PendingAdvanceFinish | null = null;
-  /** The dangling advance cycle this process has already warned about once. */
-  private reportedDangling: string | null = null;
+  /**
+   * The dangling advance cycles this process has already reported (APRV-264).
+   *
+   * A SET rather than one key: on 2026-09-05 five of them stood at once, and a
+   * single slot meant the operator was told about one, then about the next only
+   * after they had closed the first by hand. Reported once per key — the
+   * started line counts as the report for anything the startup listing found,
+   * so the first tick does not say it a second time — and never once per tick,
+   * because a warning printed every thirty seconds forever stops being read.
+   */
+  private reportedDangling = new Set<string>();
   /** Epoch ms of the last dark-session sweep (APRV-192); `null` before the first. */
   private lastDarkSweepAt: number | null = null;
   private reportedEscalations = new Set<string>();
@@ -828,6 +853,13 @@ export class Daemon {
         // git reads and no log read at all.
         anchor: this.resolveAnchorForReport(),
         draw: drawPath,
+        // APRV-264. LISTED here, SWEPT by the first tick, which runs a line
+        // below: the started line's job is to name what is blocking the
+        // cadence, and listing costs one verified read and one git read where
+        // appending five outcome records before the process has said hello
+        // would be a write nobody asked for yet. Seeded into `reportedDangling`
+        // so the tick that immediately follows does not repeat it.
+        dangling_advances: this.listDanglingAdvancesAtStartup(),
       });
 
       const outcome = this.tick();
@@ -1351,6 +1383,48 @@ export class Daemon {
    * count: it still asks the gate, and it still does nothing when nothing is
    * owed.
    */
+  /**
+   * The advance cycles the started line names, and nothing else (APRV-264).
+   *
+   * Reads and proves; appends nothing. The first tick runs a moment later and
+   * sweeps for real, so anything provable here is closed before an operator has
+   * finished reading the line — which is why the line carries only what is NOT
+   * provable, the part that needs a person. Every key it names is marked
+   * reported, so the sweep that follows does not warn about it again.
+   */
+  private listDanglingAdvancesAtStartup(): string[] {
+    const cadence = this.options.advance;
+    if (cadence === undefined) return [];
+    const read = this.read();
+    if (!read.ok) return [];
+    let outstanding: string[];
+    try {
+      outstanding = proveDanglingAdvancesFor(this.advanceInputFor(cadence), read.records)
+        .filter((entry) => entry.provenBy === null)
+        .map((entry) => entry.actionKey);
+    } catch {
+      // A git read that throws (no repository, an unreadable object store) is
+      // not a reason for the daemon to fail to start. The tick reports it.
+      return [];
+    }
+    for (const key of outstanding) this.reportedDangling.add(key);
+    return outstanding;
+  }
+
+  /** Everything `daemon/advance.ts` needs, built from this daemon's options. */
+  private advanceInputFor(cadence: AdvanceCadence): AdvanceInput {
+    return {
+      logPath: this.options.logPath,
+      cwd: this.options.cwd,
+      policy: this.options.policy,
+      cadence,
+      ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
+      ...(this.options.clock === undefined ? {} : { clock: this.options.clock }),
+      ...(this.options.today === undefined ? {} : { today: this.options.today }),
+      ...(this.options.advanceRunner === undefined ? {} : { runner: this.options.advanceRunner }),
+    };
+  }
+
   private advanceIfDue(flush: boolean): void {
     const cadence = this.options.advance;
     if (cadence === undefined) return;
@@ -1363,16 +1437,7 @@ export class Daemon {
     if (!read.ok) return;
     const root = this.options.cwd;
     const today = this.options.today ?? readClock(this.clockOptions());
-    const input: AdvanceInput = {
-      logPath: this.options.logPath,
-      cwd: root,
-      policy: this.options.policy,
-      cadence,
-      ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
-      ...(this.options.clock === undefined ? {} : { clock: this.options.clock }),
-      ...(this.options.today === undefined ? {} : { today: this.options.today }),
-      ...(this.options.advanceRunner === undefined ? {} : { runner: this.options.advanceRunner }),
-    };
+    const input = this.advanceInputFor(cadence);
 
     // APRV-233, first: an outcome this process observed and could not record.
     // It is settled BEFORE any trigger is evaluated, on the head as it stands
@@ -1404,15 +1469,19 @@ export class Daemon {
       return;
     }
 
-    // APRV-233, and the same rule for a cycle this process does not remember:
+    // APRV-233, and the same rule for cycles this process does not remember:
     // an advance whose outcome nobody recorded is reconciled from the git
     // evidence before anything else is attempted, and refused (never re-run)
     // when the evidence is not there. On 2026-09-02 the absence of this made
     // the next tick's authorization reach `startExecution` on the open key and
     // come back `already-executed`, which reported a failure and fixed nothing.
-    const reconciled = reconcileDanglingAdvance(input, read.records);
-    if (reconciled !== null) {
-      if (reconciled.settled) {
+    //
+    // APRV-264 widened it from one cycle to all of them. On 2026-09-05 five
+    // stood at once and this closed one per tick behind a refusal that stopped
+    // the cadence, so the operator repaired the pile by hand instead.
+    const sweep = sweepDanglingAdvances(input, read.records);
+    if (!sweepIsClear(sweep)) {
+      for (const closed of sweep.settled) {
         this.emit({
           event: "advance",
           outcome: "nothing-owed",
@@ -1425,19 +1494,32 @@ export class Daemon {
           rebuilt: false,
           rebuilt_on: null,
           code: "advance-reconciled",
-          message: reconciled.message,
+          message: closed.message,
           flush,
         });
-      } else if (this.reportedDangling !== reconciled.actionKey) {
-        // Once per cycle, not once per tick: an operator needs to be told, and
-        // being told every thirty seconds forever is how a warning stops being
-        // read.
-        this.reportedDangling = reconciled.actionKey;
-        this.warn("advance-refused", reconciled.message);
+      }
+      if (sweep.outstanding.length > 0) {
+        // Once per key, not once per tick, and one line for all of them: the
+        // repair is the same command whichever key an operator reads first, so
+        // they are named together under it. The set is what makes it once —
+        // a key already named on the started line or by an earlier tick is not
+        // named again until it goes away and comes back.
+        const unreported = sweep.outstanding.filter(
+          (entry) => !this.reportedDangling.has(entry.actionKey),
+        );
+        if (unreported.length > 0) {
+          for (const entry of sweep.outstanding) this.reportedDangling.add(entry.actionKey);
+          this.warn(
+            "advance-refused",
+            `${unreconciledRefusal(sweep.outstanding.map((entry) => entry.actionKey))} ${sweep.outstanding
+              .map((entry) => entry.message)
+              .join(" ")}`,
+          );
+        }
       }
       return;
     }
-    this.reportedDangling = null;
+    this.reportedDangling.clear();
 
     const state = publishedState(root, this.options.logPath, read.records, cadence, today);
     if (state.substantive === 0) return;
