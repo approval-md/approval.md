@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-c'
 created_date: '2026-09-05 10:30'
-updated_date: '2026-09-05 11:08'
+updated_date: '2026-09-05 11:11'
 labels:
   - policy
   - classifier
@@ -44,3 +44,54 @@ Carter, 2026-09-05, from the log: policy.edit produced 250 of 351 phone question
 7. Schema: items becomes a oneOf over the bare string and the routed object; the path grammar becomes a $def so both shapes are held to one rule.
 8. Tests, conformance regeneration with the bumps the ritual requires, docs.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## What was built (Lane C, branch aprv-266-path-routing)
+
+A `protected_paths` entry may now be written `{path, class}`, routing that path family to a named sub-class under `policy.edit`. A bare string keeps its APRV-107 meaning exactly, and a string-only policy classifies byte for byte as before (asserted, not asserted-by-inspection: the same corpus is classified through both shapes and compared structurally).
+
+### The tier stack, and why the routed tier sits where it does
+
+`protectedPathClass` answers a path by the strictest surface it names. The routed tier was inserted BELOW the built-in log and gate-organ tiers and ABOVE the built-in `policy.edit` tier, and that one position is the whole routing rule:
+
+- Below the first two, so a routing can never reach the record of what happened or the gate's own organs. SPEC §11.1 invariant 9 says a verb mints no authority over human-only classes; `protected_paths` is the one place a policy could otherwise have reached past it, and the tier order is where that holds. The loader additionally refuses such an entry outright rather than letting it sit inert, because a policy whose author believes a rule is in force that the runtime will never consult is the misreading this project exists to prevent.
+- Above built-in `policy.edit`, so a routing CAN re-label a path the runtime protects on its own. That is the feature: `.github/workflows/` to `policy.edit.ci` is the sentence a project wants to write. What stops it being a demotion is the floor, not the classifier — the classifier stays pure and resolves no autonomy at all.
+
+### The floor is load-time and general
+
+`checkProtectedRouteFloor` runs LAST in `loadPolicyText`, because it is the only check there that needs the RESOLVED policy rather than the parsed one. For each entry routing a path the runtime protects on its own, the sub-class must resolve at least as strictly as the `policy.edit` line: level first (through `policy-match`'s own STRICTNESS table, so the floor and the resolver cannot disagree), live rate on a tie (`supervised-live 0.01` under a `supervised-live 0.1` line gates one tenth as often, which is a weakening whatever the level says). It is stated over `builtinProtectedPathClass` rather than over a list of paths, so a built-in surface added later is floored the day it is added. Paths the runtime does not protect on its own are unfloored: their author is choosing the autonomy of a surface they invented, and a loose choice narrows nothing.
+
+A breach fails the LOAD, with the distinct code `protected-route-floor`. A policy that does not load resolves every class to `manual`, which is the strictest available answer and the one this loader has always given.
+
+### Inheritance, and why it is not generalized
+
+A routed class with no line of its own inherits the `policy.edit` RULE, with the new provenance `inherited`. Without it, a repository whose `policy.edit` is supervised-live and whose default is manual would find every routed path GATED the moment it adopted routing — which reads as the feature being broken and invites the author to fix it by loosening something. `inherited` is distinct from `rule` because the winning pattern does not match the class being explained, and distinct from `default` because `defaults.autonomy` did not decide it. Deliberately NOT generalized to a universal parent walk: §5.2 already gives an author `policy.edit.*`, and a parent walk would silently change every class in the taxonomy — `read` is manual in this repository BECAUSE `read.*` does not cover it, and a parent walk would make that pin unstatable.
+
+### The guard's grant cross-check
+
+`isGrantingClass` accepts a grant of the routed sub-class OR of `policy.edit` itself. Both directions are real: the first is the ordinary case once a policy adopts routing; the second because a routing is itself a policy edit and the two are never synchronized, so a grant taken before the routing existed was correct evidence for the edit it authorized and adopting a routing must not retroactively invalidate it. The class only opens the door — the naming test and APRV-202's hunk coverage are untouched, and there is still no class-level pass.
+
+### Reachability
+
+The `unreachable` check in `policy-expectations.ts` moved from `CLASSIFIER_CLASSES.includes` to `emittableClass(cls, protected_paths)`. A routed class is not in the fixed table and never will be: it exists because one policy wrote it beside one path. The negative is the point — a `policy.edit.ci` rule whose routing was deleted looks like protection and is not, and now fails at the ceremony.
+
+## SPEC.md sentence drafts (AC4)
+
+Not applied: agents do not edit SPEC.md. These are the two amendments this change needs, for the human's own ceremony. Neither names a protected path; both state the rule.
+
+**§5.2, after the existing `protected_paths` paragraph:**
+
+> A `protected_paths` entry MAY instead be an object carrying a path and a class, where the class is a name under `policy.edit` with exactly one further lowercase segment. The path family then classifies as that sub-class, which is an ordinary §7 class resolved by an ordinary rule; a sub-class with no rule of its own resolves as the `policy.edit` rule does, with provenance `inherited`. The namespace is closed: an entry MUST NOT route a path to a class outside it. A routing that would resolve a path the runtime protects on its own more loosely than the `policy.edit` rule resolves — comparing the autonomy level first and the live rate on a tie — MUST be refused at load with a distinct machine-readable code, and the policy is inoperative until it is fixed. `protected_paths` remains additive: it widens the protected surface and never narrows it, and routing is a way of describing that surface, never of shrinking it.
+
+**§7, in the class taxonomy, beside `policy.edit`:**
+
+> `policy.edit` admits author-named sub-classes of one further segment, minted by a `protected_paths` routing rather than by the runtime. They carry no authority the parent does not: a grant of one authorizes exactly the protected write it names, and the enforcement paths that accept a `policy.edit` grant accept a sub-class grant on the same terms and on no looser ones. Four names are reserved with fixed meanings so that two policies mean the same thing by them: `policy.edit.spec` for the governing specification, `policy.edit.harness` for agent instruction files and harness configuration that is not the hook itself, `policy.edit.ci` for continuous-integration and release configuration, `policy.edit.design` for design documents and decision records.
+
+## Global invariants touched (CLAUDE.md requires saying so)
+
+**§11.1 invariant 9** (human-only classes are inert to agents; no verb minting authority for them) is the invariant this change runs closest to, and it is upheld in two independent places rather than one: the classifier's tier order answers `policy.core` and `log.mutate` before any policy entry is read, AND the loader refuses a policy that tries. Either alone would hold; both are present because the first is silent and the second is legible.
+
+No other invariant is touched. Enforcement paths still read only verified records; no gate-typed event gained a caller timestamp; no secret reaches the log; nothing self-reported reduces scrutiny; no check-then-append was added.
+<!-- SECTION:NOTES:END -->
