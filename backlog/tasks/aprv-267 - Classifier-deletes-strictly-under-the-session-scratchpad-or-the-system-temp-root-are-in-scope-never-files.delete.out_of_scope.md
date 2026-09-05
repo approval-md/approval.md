@@ -3,11 +3,11 @@ id: APRV-267
 title: >-
   Classifier: deletes strictly under the session scratchpad or the system temp
   root are in scope, never files.delete.out_of_scope
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-b'
 created_date: '2026-09-05 10:31'
-updated_date: '2026-09-05 14:58'
+updated_date: '2026-09-05 16:00'
 labels:
   - classifier
 dependencies: []
@@ -116,3 +116,9 @@ own resolved temp root using the roots resolveScratchRoots returns rather than
 a hand-written list. cli-hook-scratch 15/15, command-class 360/360, cli-hook
 91/91, all exit 0; oxlint clean.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+An rm confined to the system temp root (os.tmpdir, /tmp, /private/tmp, /var/tmp; no .., no symlink escape, no checkout path) classifies files.delete.scratch through an optional ClassifierContext resolved in the hook, which can only tighten back to out-of-scope; the TMPDIR-poisoning guard keeps a two-segment floor except for the three well-known roots so the rule holds on Linux CI as well as macOS. Verified by cli-hook-scratch 15, command-class 360, the hook suites and the full suite (3566 pass); merged in PR #293. The class pins to the default until Carter declares it autonomous.
+<!-- SECTION:FINAL_SUMMARY:END -->
