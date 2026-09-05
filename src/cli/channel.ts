@@ -77,6 +77,14 @@ import {
   type DecisionOutcome,
 } from "../channels/contract.js";
 import { buildPendingQueue, type TagOptions } from "../channels/tagging.js";
+import type { CheckpointOffer } from "../core/checkpoint.js";
+import {
+  checkpointOfferFor,
+  checkpointPromptLines,
+  checkpointSignedLines,
+  signCheckpointOffer,
+  type CheckpointTap,
+} from "./checkpoint-tap.js";
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
 import { loadPolicy } from "../core/policy-load.js";
 import { promptLayoutFor, type PromptLayout } from "../core/prompt-layout.js";
@@ -283,7 +291,14 @@ export function commandChannelCli(argv: string[], streams: Streams, cwd: string)
     );
   }
 
-  if (queue.requests.length === 0) {
+  // APRV-257. Resolved BEFORE the empty-queue exit, because an empty queue is
+  // exactly when a checkpoint is the only thing owed: the operator who opens
+  // this verb on a quiet gate is the one who should be asked, and a verb that
+  // had already returned could not ask them.
+  const tap: CheckpointTap = { logPath, policy, keyFile: null, vault: null };
+  const checkpoint = checkpointOfferFor(tap);
+
+  if (queue.requests.length === 0 && checkpoint === null) {
     reportSkipped(queue.skipped, streams);
     streams.out("queue: empty — no requests awaiting a decision\n");
     return EXIT_OK;
@@ -298,6 +313,7 @@ export function commandChannelCli(argv: string[], streams: Streams, cwd: string)
     actor,
     streams,
     glossRunner(selectedGloss.options, policy, streams),
+    checkpoint === null ? null : { tap, offer: checkpoint },
   ).then(
     (code) => {
       process.exitCode = code;
@@ -412,7 +428,14 @@ async function interactiveLoop(
   policy: { dir?: string; file?: string },
   actor: string,
   streams: Streams,
-  gloss?: GlossRunner,
+  gloss: GlossRunner | undefined,
+  /**
+   * The checkpoint this log is owed, when one is (APRV-257). Asked FIRST, and
+   * once: it is a question about the whole log rather than about any request in
+   * the queue, so leaving it until the end would be asking it of whoever
+   * happened to still be at the terminal.
+   */
+  checkpoint: { tap: CheckpointTap; offer: CheckpointOffer } | null,
 ): Promise<number> {
   // APRV-218: which rows this walk shows, from `channels.cli.prompt`. Resolved
   // HERE, at the verb, because the channel neither reads a policy file nor holds
@@ -438,6 +461,25 @@ async function interactiveLoop(
   let refused = false;
   const tally = { asked: 0, absent: 0 };
   try {
+    // APRV-257, first and once. Declining costs nothing and refuses nothing, so
+    // a `false` here is not an outcome the exit code reads; a signature that
+    // was ATTEMPTED and failed is reported and does set `refused`, because the
+    // operator asked for a record and did not get one.
+    if (checkpoint !== null) {
+      const sign = await channel.collectCheckpoint(checkpointPromptLines(checkpoint.offer));
+      if (sign === true) {
+        const result = signCheckpointOffer(
+          checkpoint.tap,
+          checkpoint.offer.head,
+          actor,
+          channel.name,
+          process.cwd(),
+        );
+        for (const line of checkpointSignedLines(result)) streams.out(`${line}\n`);
+        if (!result.ok) refused = true;
+      }
+    }
+
     for (const original of requests) {
       // APRV-197. Attached per request, immediately before it is rendered, and
       // by the same function the Telegram listener uses. Per request rather

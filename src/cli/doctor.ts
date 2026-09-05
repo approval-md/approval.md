@@ -85,6 +85,7 @@ import { readTaskFile } from "../core/frontmatter.js";
 import { instanceFindings, instanceHomeFor, instanceIdFor } from "../core/instance.js";
 import type { EventRecord } from "../core/log.js";
 import { checkLogAnchor } from "./log-anchor.js";
+import { checkLogCheckpoints, checkpointPolicyOf } from "../core/checkpoint.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
 import { DEFAULT_TASKS_DIR, latestRegistration } from "../core/registration.js";
@@ -1597,6 +1598,84 @@ function checkLogDrift(logPath: string, records: readonly EventRecord[]): Doctor
 }
 
 // ---------------------------------------------------------------------------
+// 25. checkpoint (APRV-257)
+// ---------------------------------------------------------------------------
+
+/**
+ * The second witness, as a row: how many checkpoints verify, how old the newest
+ * one is against the cadence, and how many keys the policy declares.
+ *
+ * The row IS `core/checkpoint.ts`'s check, exactly as `log-drift` IS the anchor
+ * check — the argument APRV-219 made and APRV-210 proved the hard way. Two
+ * implementations of "does this log's own signature contradict it" would be two
+ * chances to disagree about the one question where disagreement is intolerable.
+ *
+ * Three verdicts and no fourth:
+ *
+ * - **skip** when the policy declares no readable key. Nothing was verified,
+ *   and a check that could not look must never report a pass. A skip carries no
+ *   `fix` — the rule every non-git fixture in `tests/cli-doctor.test.ts` pins —
+ *   so what to run is said in the detail.
+ * - **fail** on any refusal. A checkpoint whose signature does not verify, or
+ *   whose named hash is not the hash at that seq, is a human's key vouching for
+ *   a chain this file does not carry. That is the finding this whole mechanism
+ *   exists to produce, and doctor exits 1 on it.
+ * - **pass** otherwise, INCLUDING when a checkpoint is due. The cadence carries
+ *   a `fix` rather than a status: a person who has not signed recently is not
+ *   evidence of tampering, and a doctor that went red because somebody was on
+ *   holiday is a doctor whose red people stop reading.
+ */
+function checkCheckpoints(
+  records: readonly EventRecord[],
+  policy: { dir?: string; file?: string },
+): DoctorCheck {
+  const configured = checkpointPolicyOf(policy);
+  const outcome = checkLogCheckpoints({
+    records,
+    publicKeys: configured.publicKeys,
+    checkpointEveryMs: configured.checkpointEveryMs,
+    keysUnavailable: configured.unloadable,
+  });
+
+  if (outcome.status === "skip") {
+    return {
+      check: "checkpoint",
+      status: "skip",
+      detail: `${outcome.reason}. \`approval setup checkpoint\` mints a key and prints the audit.checkpoint_keys block to add`,
+    };
+  }
+  if (outcome.status === "refused") {
+    return {
+      check: "checkpoint",
+      status: "fail",
+      detail: `${oneLine(
+        outcome.message,
+      )} A key no agent process holds signed a head this chain does not carry: the chain was rewritten after the checkpoint was taken`,
+      fix: "approval log verify --checkpoints — then `git log -- .approval/log/events.jsonl` for who wrote the other chain",
+    };
+  }
+
+  const newest = outcome.checkpoints[outcome.checkpoints.length - 1];
+  const detail =
+    `${outcome.detail}, ${String(configured.publicKeys.length)} key(s) declared` +
+    (newest === undefined ? "" : ` (newest at seq ${String(newest.at)}, ${newest.ts})`) +
+    (outcome.unchecked === 0
+      ? ""
+      : `; ${String(outcome.unchecked)} signed a seq below this range`);
+
+  return {
+    check: "checkpoint",
+    status: "pass",
+    detail: outcome.warning === null ? detail : `${detail} — ${oneLine(outcome.warning)}`,
+    ...(outcome.warning === null
+      ? {}
+      : {
+          fix: "approval log checkpoint --as human:<id> — or answer the CHECKPOINT DUE prompt on your channel",
+        }),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 13. log-advance-cadence (APRV-204)
 // ---------------------------------------------------------------------------
 
@@ -2382,6 +2461,12 @@ export function commandDoctor(
       // `policy check` deliberately says nothing about it, because guidance has
       // no place in an enforcement trace.
       checkValuesBlock(policyPath, policyFlag !== null, dir),
+      // APRV-257: appended, sixteenth time, same reason. The status surface the
+      // second witness needed. It runs the SAME check `approval log verify
+      // --checkpoints` and the daemon's full re-proof run, over the same single
+      // walk of the log every other row here reads, so three instruments cannot
+      // disagree about one file.
+      checkCheckpoints(verified.records, policyFlag === null ? { dir } : { file: policyPath }),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

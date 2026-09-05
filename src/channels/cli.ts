@@ -403,6 +403,40 @@ export class CliChannel implements TestableChannel {
     }
   }
 
+  /**
+   * The checkpoint prompt, in a terminal (APRV-257).
+   *
+   * The same question the Telegram tap asks, in the channel that has no
+   * buttons: the lines the runtime composed, then `s` to sign and `n` to
+   * decline. The text is the runtime's and identical on both surfaces, because
+   * the thing being consented to is identical and two phrasings of one gesture
+   * would be two claims about it.
+   *
+   * It collects a gesture and nothing else. What signing MEANS — the key, the
+   * head, the append — is the runtime's, exactly as a decision is: this channel
+   * can no more sign a checkpoint than it can grant a request.
+   *
+   * End of input is `null`, never a default. A closed pipe has not declined,
+   * and it certainly has not signed.
+   */
+  async collectCheckpoint(lines: readonly string[]): Promise<boolean | null> {
+    for (const line of lines) this.output.write(`${line}\n`);
+    for (;;) {
+      this.output.write(`  s) sign   n) not now  > `);
+      const answer = (await this.readLine())?.trim().toLowerCase();
+      if (answer === undefined) {
+        this.output.write("\n(input ended; nothing was signed)\n");
+        return null;
+      }
+      if (answer === "n" || answer === "not now" || answer === "") {
+        this.output.write("not signed; nothing was appended and nothing is refused\n");
+        return false;
+      }
+      if (answer === "s" || answer === "sign") return true;
+      this.output.write(`unrecognized answer ${JSON.stringify(answer)}; expected s or n\n`);
+    }
+  }
+
   // -------------------------------------------------------------------------
   // internals
   // -------------------------------------------------------------------------

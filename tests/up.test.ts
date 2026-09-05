@@ -132,8 +132,19 @@ function policy(ttl: string, extra: string[] = []): string {
 
 const POLICY = policy("1h");
 
-/** Short enough to lapse inside a test, long enough not to race the setup. */
-const POLICY_SHORT_TTL = policy("2s");
+/**
+ * The TTL a lapse is caused with, rather than waited for (APRV-248).
+ *
+ * The expiry case used to run under a 2s TTL, which had to outlast the whole
+ * launch of `approval up` — the spawn, the first verified read, the channel
+ * coming up and the prompt reaching the mock. On a busy machine it did not: the
+ * request lapsed before it was ever delivered, nothing arrived to annotate, and
+ * the case sat in its 20s ceiling and then failed for the machine. The daemon
+ * re-reads `defaults.approval_ttl` on every pass by design, so the case now runs
+ * under the ordinary 1h TTL and calls {@link lapse} once it has watched the
+ * prompt arrive.
+ */
+const POLICY_LAPSED_TTL = policy("1ms");
 
 function taskFile(key: string): string {
   const binding = payloadHash(PAYLOAD);
@@ -280,6 +291,22 @@ function ready(policyText: string = POLICY): Case {
   const requested = runCli(["request", TASK, "--action", key, "--as", ACTOR], dir);
   assert.equal(requested.code, 0, requested.stderr);
   return { dir, key };
+}
+
+/**
+ * Make every still-live request in `dir` lapse, now (APRV-248).
+ *
+ * The human's own ceremony, used as the test's clock: the policy file is
+ * rewritten with a 1ms `defaults.approval_ttl` and re-attested through the real
+ * CLI verb, exactly as an operator shortening a deadline would do it. The
+ * request was made before the runtime even started, so from the daemon's next
+ * pass onwards it is lapsed by the policy in force. Only the TTL differs from
+ * the policy the case started under.
+ */
+function lapse(dir: string): void {
+  writeFileSync(join(dir, "APPROVAL.md"), POLICY_LAPSED_TTL, "utf8");
+  const attested = runCli(["policy", "attest", "--as", HUMAN], dir);
+  assert.equal(attested.code, 0, attested.stderr);
 }
 
 /** The channel environment a configured case is launched with. */
@@ -725,14 +752,18 @@ test("a channel that falls over is restarted with backoff, re-sends, and the dae
 // ===========================================================================
 
 test("the daemon expires a lapsed request and the channel annotates it, in one process", async () => {
-  const { dir, key } = ready(POLICY_SHORT_TTL);
+  const { dir, key } = ready();
   const process_ = new LiveUp(
     dir,
     ["--interval", "300ms", ...channelArgs()],
     configured(),
   );
 
-  await untilDelivered(key, "the prompt to be delivered before the TTL lapses");
+  // The prompt reaches the phone first: that is the ordering the case needs, and
+  // it is now a fact rather than a race, because nothing can lapse until the
+  // next line makes it lapse.
+  await untilDelivered(key, "the prompt to be delivered");
+  lapse(dir);
 
   // Nobody taps. The DAEMON's sweep is what ends this request, and the CHANNEL
   // in the same process is what tells the human it ended.

@@ -25,16 +25,31 @@
  *   them verbatim.
  * - the refusal-code unions are SPEC.md §11.1 invariant 6, read from the
  *   runtime constants that define them.
+ *
+ * ## Two entry points, one generator (APRV-231)
+ *
+ * Generating and writing are separated, because a committed vector file that
+ * has fallen behind the fixtures it is generated from is drift nobody sees:
+ *
+ * - `generateConformance()` is exported and returns the bytes of every vector
+ *   file and of the manifest. It writes nothing and prints nothing, so
+ *   `tests/conformance-regen.test.ts` can regenerate in memory and fail when
+ *   what is committed is not what the current fixtures produce;
+ * - running this file as a command writes those same bytes to disk, which is
+ *   the only effect anything in this file has.
  */
 
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const VECTORS_DIR = join(REPO_ROOT, "conformance", "vectors");
 const MANIFEST_PATH = join(REPO_ROOT, "conformance", "conformance-manifest.json");
+
+/** Where the committed schema fixtures live. A test may generate from a copy. */
+export const DEFAULT_FIXTURES_ROOT = join(REPO_ROOT, "schema", "fixtures");
 
 const { execute } = await import(join(REPO_ROOT, "dist", "tests", "conformance-harness.js"));
 const { canonicalize } = await import(join(REPO_ROOT, "dist", "src", "core", "jcs.js"));
@@ -494,9 +509,8 @@ const chainVectors = [
 // ---------------------------------------------------------------------------
 
 /** Every committed schema fixture, with the class its refusal must carry. */
-function schemaFixtureVectors() {
+function schemaFixtureVectors(root) {
   const vectors = [];
-  const root = join(REPO_ROOT, "schema", "fixtures");
   // Every schema in `schema/`, named rather than discovered, so adding one is a
   // reviewable diff. `values` joined in APRV-237 (SPEC.md §5.3): the block is
   // guidance and never enforcement, but the SHAPE it must have to be shown to a
@@ -527,24 +541,32 @@ function schemaFixtureVectors() {
   return vectors;
 }
 
-const schemaVectors = [
-  ...schemaFixtureVectors(),
-  {
-    id: "event-historical-numeric-amount",
-    description:
-      "APRV-121 read boundary: a record written before the decimal-string change carries a JSON amount and MUST still validate in historical mode. The log is append-only, so this is permanent",
-    input: {
-      schema: "event",
-      mode: "historical",
-      document: JSON.parse(
-        readFileSync(
-          join(REPO_ROOT, "schema", "fixtures", "event", "invalid", "est-cost-bare-number.json"),
-          "utf8",
+/**
+ * The schema suite's authored inputs, read from `fixturesRoot`.
+ *
+ * A function rather than a constant, and parameterised rather than fixed on
+ * `schema/fixtures`, for two reasons: the fixtures are read when the suite is
+ * generated instead of when this module is imported, and a test can generate
+ * from a scratch copy of the fixtures to prove that a fixture added without a
+ * regeneration is caught (APRV-231).
+ */
+function schemaVectors(fixturesRoot) {
+  return [
+    ...schemaFixtureVectors(fixturesRoot),
+    {
+      id: "event-historical-numeric-amount",
+      description:
+        "APRV-121 read boundary: a record written before the decimal-string change carries a JSON amount and MUST still validate in historical mode. The log is append-only, so this is permanent",
+      input: {
+        schema: "event",
+        mode: "historical",
+        document: JSON.parse(
+          readFileSync(join(fixturesRoot, "event", "invalid", "est-cost-bare-number.json"), "utf8"),
         ),
-      ),
+      },
     },
-  },
-];
+  ];
+}
 
 // ---------------------------------------------------------------------------
 // Suite 6 — gate verdicts
@@ -1080,6 +1102,9 @@ const SUITES = [
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",
+    // A function of the fixtures root, not a fixed array: this suite is
+    // generated FROM the committed fixtures, which is exactly the pair that
+    // APRV-231 pins against drift.
     vectors: schemaVectors,
   },
   {
@@ -1099,52 +1124,112 @@ const SUITES = [
   },
 ];
 
-mkdirSync(VECTORS_DIR, { recursive: true });
+/** The non-vector files the manifest pins alongside the suites. */
+const MANIFEST_EXTRA_FILES = ["conformance/run.mjs", "tests/conformance-harness.ts"];
 
-const manifestFiles = {};
-for (const definition of SUITES) {
-  const vectors = definition.vectors.map((vector) => {
-    const input = JSON.parse(JSON.stringify(vector.input ?? {}));
-    const expect = execute(definition.suite, input);
-    const entry = { id: vector.id, description: vector.description };
-    if (vector.control === true) entry.control = true;
-    entry.input = input;
-    entry.expect = expect;
-    return entry;
-  });
-  const body = {
-    suite: definition.suite,
-    // A suite file carries its own version: a new vector is a minor bump and a
-    // changed expectation a major one (conformance/README.md).
-    vectors_version: definition.vectors_version ?? "1.0.0",
-    algorithm: definition.algorithm,
-    description: definition.description,
-    provenance:
-      "Generated by scripts/regen-conformance-vectors.mjs from this repository's own implementation. Inputs are authored by hand; every expectation is computed, never transcribed. See conformance/README.md for the runner contract.",
-    count: vectors.length,
-    vectors,
+const MANIFEST_DESCRIPTION =
+  "SHA-256 of every conformance vector file and of the reference runner, so a suite cannot change without the change being visible in one place. `npm test` fails on drift (tests/conformance.test.ts). Regenerate with scripts/regen-conformance-vectors.mjs, and review the diff: an expectation that moved is a behaviour change.";
+
+/** The command that turns a generated result into the committed files. */
+export const REGEN_COMMAND = "node scripts/regen-conformance-vectors.mjs";
+
+/**
+ * Generate every vector file and the manifest, in memory.
+ *
+ * Reads the authored inputs, the schema fixtures, and the built harness, and
+ * returns the exact bytes the CLI entry would write. It creates nothing, writes
+ * nothing, and prints nothing, so a test can call it and compare the result
+ * against what is committed (`tests/conformance-regen.test.ts`).
+ *
+ * @param {{ fixturesRoot?: string }} [options]
+ *   `fixturesRoot` defaults to `schema/fixtures`. A test passes a scratch copy
+ *   to show that a fixture added there changes the generated suite.
+ */
+export function generateConformance(options = {}) {
+  const fixturesRoot = options.fixturesRoot ?? DEFAULT_FIXTURES_ROOT;
+  const files = [];
+  const digests = {};
+  for (const definition of SUITES) {
+    const authored =
+      typeof definition.vectors === "function"
+        ? definition.vectors(fixturesRoot)
+        : definition.vectors;
+    const vectors = authored.map((vector) => {
+      const input = JSON.parse(JSON.stringify(vector.input ?? {}));
+      const expect = execute(definition.suite, input);
+      const entry = { id: vector.id, description: vector.description };
+      if (vector.control === true) entry.control = true;
+      entry.input = input;
+      entry.expect = expect;
+      return entry;
+    });
+    const body = {
+      suite: definition.suite,
+      // A suite file carries its own version: a new vector is a minor bump and a
+      // changed expectation a major one (conformance/README.md).
+      vectors_version: definition.vectors_version ?? "1.0.0",
+      algorithm: definition.algorithm,
+      description: definition.description,
+      provenance:
+        "Generated by scripts/regen-conformance-vectors.mjs from this repository's own implementation. Inputs are authored by hand; every expectation is computed, never transcribed. See conformance/README.md for the runner contract.",
+      count: vectors.length,
+      vectors,
+    };
+    const contents = `${JSON.stringify(body, null, 2)}\n`;
+    // Built with "/" rather than `path.join`, because a manifest key is a
+    // portable repository path and not a path on the machine that generated it.
+    const relative = `conformance/vectors/${definition.file}`;
+    files.push({
+      file: definition.file,
+      relative,
+      path: join(VECTORS_DIR, definition.file),
+      contents,
+      suite: definition.suite,
+      vectors_version: body.vectors_version,
+      count: vectors.length,
+      controls: vectors.filter((vector) => vector.control === true).length,
+    });
+    digests[relative] = createHash("sha256").update(contents).digest("hex");
+  }
+
+  for (const relative of MANIFEST_EXTRA_FILES) {
+    digests[relative] = createHash("sha256")
+      .update(readFileSync(join(REPO_ROOT, relative)))
+      .digest("hex");
+  }
+
+  const manifest = {
+    manifest_version: "1.0.0",
+    description: MANIFEST_DESCRIPTION,
+    files: Object.fromEntries(Object.keys(digests).sort().map((key) => [key, digests[key]])),
   };
-  const path = join(VECTORS_DIR, definition.file);
-  writeFileSync(path, `${JSON.stringify(body, null, 2)}\n`);
-  const relative = path.slice(REPO_ROOT.length);
-  manifestFiles[relative] = createHash("sha256").update(readFileSync(path)).digest("hex");
-  const controls = vectors.filter((vector) => vector.control === true).length;
+  return {
+    files,
+    manifest: {
+      relative: "conformance/conformance-manifest.json",
+      path: MANIFEST_PATH,
+      contents: `${JSON.stringify(manifest, null, 2)}\n`,
+      value: manifest,
+    },
+  };
+}
+
+/** The CLI entry: generate, then write. Everything above it is side-effect free. */
+function main() {
+  const generated = generateConformance();
+  mkdirSync(VECTORS_DIR, { recursive: true });
+  for (const file of generated.files) {
+    writeFileSync(file.path, file.contents);
+    console.log(
+      `${file.file}: ${String(file.count)} vectors (${String(file.controls)} negative controls)`,
+    );
+  }
+  writeFileSync(generated.manifest.path, generated.manifest.contents);
   console.log(
-    `${definition.file}: ${String(vectors.length)} vectors (${String(controls)} negative controls)`,
+    `conformance-manifest.json: ${String(Object.keys(generated.manifest.value.files).length)} files pinned`,
   );
 }
 
-for (const relative of ["conformance/run.mjs", "tests/conformance-harness.ts"]) {
-  manifestFiles[relative] = createHash("sha256")
-    .update(readFileSync(join(REPO_ROOT, relative)))
-    .digest("hex");
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
 }
-
-const manifest = {
-  manifest_version: "1.0.0",
-  description:
-    "SHA-256 of every conformance vector file and of the reference runner, so a suite cannot change without the change being visible in one place. `npm test` fails on drift (tests/conformance.test.ts). Regenerate with scripts/regen-conformance-vectors.mjs, and review the diff: an expectation that moved is a behaviour change.",
-  files: Object.fromEntries(Object.keys(manifestFiles).sort().map((key) => [key, manifestFiles[key]])),
-};
-writeFileSync(MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`);
-console.log(`conformance-manifest.json: ${String(Object.keys(manifest.files).length)} files pinned`);

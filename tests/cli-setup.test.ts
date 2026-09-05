@@ -1187,9 +1187,21 @@ test("setup channel telegram: a message sent AFTER the first poll came back empt
     // The field case, exactly: the human is slow. The update is queued only
     // once the verb has already polled and found nothing, so the run can only
     // succeed by polling again on its own — which is the whole change.
-    const timer = setTimeout(() => {
+    //
+    // APRV-248: released by the mock's own poll sequence rather than by a timer.
+    // This used to queue the message 120 ms in, which on a loaded machine could
+    // land BEFORE the first poll was answered — the verb then found it on poll
+    // one, `polls.length > 1` failed, and the file was red for a reason that had
+    // nothing to do with the verb. Here the update does not exist until poll one
+    // has been answered empty, so "the human was late" is a fact of the fixture
+    // at any load rather than a race the test hopes to win.
+    let released = 0;
+    mock.onGetUpdatesAnswered((poll) => {
+      if (poll.ordinal !== 1) return;
+      assert.equal(poll.delivered, 0, "the first poll was supposed to expire empty");
+      released += 1;
       mock.queueUpdate(messageUpdate({ chatId: CHAT, username: "carter" }));
-    }, 120);
+    });
 
     const prompter = scriptedPrompter([true, false]);
     const result = await run(["channel", "telegram", "--as", HUMAN], home, {
@@ -1201,9 +1213,10 @@ test("setup channel telegram: a message sent AFTER the first poll came back empt
       pollTimeoutSeconds: 0,
       discoveryDeadlineMs: 10_000,
     });
-    clearTimeout(timer);
+    mock.onGetUpdatesAnswered(null);
 
     assert.equal(result.code, EXIT_OK, result.err);
+    assert.equal(released, 1, "the message was never released after an empty poll");
     assert.ok(readEnvLines(home).includes(`APPROVAL_TG_CHAT=${CHAT}`));
     const polls = getUpdatesBodies(mock.requests);
     assert.ok(polls.length > 1, "it polled once and gave up on the human's timing");

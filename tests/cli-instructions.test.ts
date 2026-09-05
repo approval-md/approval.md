@@ -405,6 +405,11 @@ const HUMAN_ONLY: readonly string[] = [
   "setup identity",
   "setup vault",
   "setup sampling",
+  // APRV-257. It mints the key that makes a checkpoint mean anything, so an
+  // agent that could run it could mint one, store it, and then vouch for a
+  // chain it had just written. Human-only in the registry, and classified
+  // policy.core so the harness hook denies it before a process starts.
+  "setup checkpoint",
   "setup channel",
   "setup adapter",
   // APRV-110. It installs a standing capability: a login service holding a

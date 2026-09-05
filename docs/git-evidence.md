@@ -175,6 +175,47 @@ evidence-free: a project repository whose humans commit `.approval/` gives the
 check a witness at every one of those commits, and on the trunk behind whatever
 branch protection the remote enforces.
 
+## The second witness: human-signed checkpoints (APRV-220, APRV-257)
+
+Anchoring answers "does somebody else hold a copy of these bytes?", and it
+answers from git, so it is exactly as fresh as the last push and says nothing at
+all on a machine with no remote. A checkpoint answers a different question with
+a different witness: **did a key no agent process holds sign this head?**
+
+```sh
+approval setup checkpoint --as human:<id>   # mint the key (human-only ceremony)
+approval log verify --checkpoints           # demand every checkpoint in range
+approval doctor                             # the `checkpoint` row is this same check
+```
+
+Against the §3 forger the two fail in different directions, which is the point
+of having both. The anchor catches a truncation whose records somebody else
+already holds. A checkpoint catches one inside the window nobody has pushed yet:
+every checkpoint in the rewritten range names a `(seq, hash)` the rewritten
+chain does not carry, and the forger cannot re-sign the hashes they recomputed.
+`--anchor` and `--checkpoints` are separate flags, the daemon runs both on the
+same full re-proof, and **a skip on one never excuses the other**.
+
+What each needs is different too, which is worth reading before choosing to run
+only one:
+
+| | anchor (APRV-219) | checkpoint (APRV-220/257) |
+| --- | --- | --- |
+| witness | a git object somebody else holds | an Ed25519 key the runtime has no copy of |
+| freshness | the last push or commit | the last human tap |
+| offline | skips: nothing to compare | works |
+| needs a human | no | yes, on a cadence |
+| absent | skip, never a pass | skip, never a pass |
+
+The human half is a cadence rather than a chore. With `audit.checkpoint_every`
+set, the listener puts one `CHECKPOINT DUE` prompt on the phone when one is
+owed, and the signature happens on the machine the listener runs on, with the
+vault passphrase a human exported into the shell that started it. A checkpoint
+that is due and unsigned is a warning at every layer and a refusal at none: a
+person who has been away is not evidence of tampering. The ceremony, the
+rotation rule and what to do about a lost key are in
+[cli-reference](cli-reference.md#setup-checkpoint).
+
 ## Demonstrating both layers
 
 `tests/daemon-git-evidence.test.ts` runs the demonstration: commit a log,

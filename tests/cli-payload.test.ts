@@ -66,7 +66,17 @@ function caseDir(): string {
   return dir;
 }
 
-/** The payload of `examples/telegram-demo.md`, and the hash that doc claims. */
+/**
+ * An email-shaped payload and its hash, frozen here as this suite's fixture.
+ *
+ * It used to be the payload `examples/telegram-demo.md` showed, and the comment
+ * said so. APRV-247 ended that: `approval run`'s payload is `{argv, cwd}`
+ * (SPEC.md section 6.2, APRV-140), so the walkthrough that ends in `run` cannot
+ * bind to an email object, and its payload is now the command it spawns. The
+ * bytes below stay because what this file tests is `approval payload hash`
+ * itself — same input, same digest, from a file and from stdin and under
+ * `--json` — and that claim wants a fixed input, not a documented one.
+ */
 const DEMO_PAYLOAD = [
   "{",
   '  "to": ["agency@example.co.uk"],',

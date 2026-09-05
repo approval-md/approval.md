@@ -13,8 +13,12 @@
  * is appended on purpose to prove the daemon refuses to keep running on a chain
  * that does not verify. `approval log verify` runs at the end of every scenario.
  *
- * Timing: the TTL cases use a short but real TTL and poll until the condition
- * holds, with a generous ceiling. No test sleeps a fixed amount and hopes.
+ * Timing: no test sleeps a fixed amount and hopes. Where a case waits for a live
+ * daemon to do something it polls until the condition holds, with a generous
+ * ceiling. Where a case needs a request to have LAPSED it shortens the policy's
+ * TTL and re-attests ({@link lapse}, APRV-248) rather than running under a short
+ * real TTL and hoping the setup beat it — that shape passed alone and failed
+ * beside another lane's build, which is a suite reporting on the machine.
  *
  * The write-back cases (APRV-62) assert on bytes and on mtimes rather than on
  * parsed frontmatter: the claim is that one value changed and nothing else did,
@@ -127,8 +131,18 @@ const POLICY_SAMPLING = POLICY.replace(
   ),
 );
 
-/** Short enough to lapse inside a test, long enough not to race the setup. */
-const POLICY_SHORT_TTL = policy("2s");
+/**
+ * The TTL a lapse is caused with, rather than waited for (APRV-248).
+ *
+ * These cases used to run under a 2s TTL and hope every CLI call in the setup
+ * finished inside it. On a machine running other lanes that is a coin toss —
+ * APRV-236's notes record it landing tails — and what it bought was ordering the
+ * test could state instead: the daemon re-reads `defaults.approval_ttl` on every
+ * pass by design (`daemon/daemon.ts`, "policy files change"), so a case sets
+ * itself up under the ordinary 1h TTL and then makes the lapse happen with
+ * {@link lapse} once whatever had to come first has been observed.
+ */
+const POLICY_LAPSED_TTL = policy("1ms");
 
 function taskFile(state: string, dir: string): string {
   const binding = runPayloadHash(CHILD, dir);
@@ -256,6 +270,26 @@ function ready(policyText: string = POLICY, state = "proposed"): string {
 function request(dir: string, actionKey: string): void {
   const run = runCli(["request", "task-042", "--action", actionKey, "--as", "agent:claude"], dir);
   assert.equal(run.code, 0, run.stderr);
+}
+
+/**
+ * Make every still-live request in `dir` lapse, now (APRV-248).
+ *
+ * The human's own ceremony, used as the test's clock: the policy file is
+ * rewritten with a 1ms `defaults.approval_ttl` and re-attested through the real
+ * CLI verb, exactly as an operator shortening a deadline would do it. Every
+ * request in the directory was made at least one process spawn ago, so from the
+ * next read onwards each is lapsed by the policy in force — no sleep, no
+ * deadline to beat, and the lapse happens when the case says it does instead of
+ * when the machine gets round to it.
+ *
+ * Only the TTL changes; the rest of the policy text is the one the case started
+ * from, so nothing else about the run is different afterwards.
+ */
+function lapse(dir: string): void {
+  writeFileSync(join(dir, "APPROVAL.md"), POLICY_LAPSED_TTL, "utf8");
+  const attested = runCli(["policy", "attest", "--as", "human:carter"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
 }
 
 /** One `--once` daemon pass, as JSON lines. */
@@ -678,16 +712,23 @@ test("write-back: the file follows the log through registered, requested, grante
 // ===========================================================================
 
 test("sweep: a live daemon expires a lapsed request exactly once and leaves a decided one alone", async () => {
-  const dir = ready(POLICY_SHORT_TTL, "proposed");
+  const dir = ready(POLICY, "proposed");
   request(dir, "task-042:chaser");
   request(dir, "task-042:followup");
 
-  // The follow-up is decided before it can lapse; the chaser is left to lapse.
+  // The follow-up is decided BEFORE anything can lapse, which is the ordering
+  // the case is about. It used to be arranged by racing a 2s TTL against three
+  // CLI spawns; here the requests simply cannot lapse until the next line says
+  // so, so a slow machine changes how long this takes and not what it proves.
   const granted = runCli(
     ["grant", "task-042:followup", "--as", "human:carter", "--json"],
     dir,
   );
   assert.equal(granted.code, 0, granted.stderr);
+
+  // Now the chaser is lapsed, and the follow-up is a decided request the sweep
+  // must leave alone.
+  lapse(dir);
 
   const daemon = new LiveDaemon(dir, ["--interval", "200ms"]);
   await until(
@@ -717,13 +758,14 @@ test("sweep: a live daemon expires a lapsed request exactly once and leaves a de
 });
 
 test("sweep: a request the gate already expired lazily is not expired a second time", async () => {
-  const dir = ready(POLICY_SHORT_TTL, "proposed");
+  const dir = ready(POLICY, "proposed");
   request(dir, "task-042:chaser");
 
-  // Wait out the 2s TTL — polled, never a fixed sleep — and only then attempt
-  // the grant, so the refusal under test is the lapse and not a race with it.
-  const requestedAt = Date.now();
-  await until(() => Date.now() - requestedAt > 3_000, "the 2s TTL to lapse");
+  // The request lapses because the policy says so, not because three seconds of
+  // wall clock went by while the test watched (APRV-248). The refusal under test
+  // is the lapse either way, and this way there is no race with it to lose and
+  // no three seconds to spend.
+  lapse(dir);
 
   const late = runCli(["grant", "task-042:chaser", "--as", "human:carter", "--json"], dir);
   assert.equal(late.code, 1, `a late grant was accepted: ${late.stdout}`);

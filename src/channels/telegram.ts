@@ -602,6 +602,40 @@ export interface TelegramStats {
  * must name the request it decides and a typed command names nothing the
  * runtime could bind a payload hash to. Buttons decide; commands navigate.
  */
+/**
+ * The prompt a checkpoint tap is drawn on (APRV-257).
+ *
+ * `head` is the `(seq, hash)` the human is being asked to sign and `lines` is
+ * what they read. They are separate fields because the head must survive into
+ * the signature unchanged while the text is free to be reworded, and because
+ * the runtime — not this channel — decides both.
+ */
+export interface CheckpointPrompt {
+  head: { seq: number; hash: string };
+  lines: string[];
+}
+
+/** What the runtime did with a tap, as this channel reports it back. */
+export interface CheckpointTapResponse {
+  /** Whether a `log.checkpoint` landed. */
+  ok: boolean;
+  /** The headline for the edited message. */
+  headline: string;
+  /** The lines under it. */
+  detail: string[];
+  /** The toast on the button, which Telegram caps at a short sentence. */
+  toast: string;
+}
+
+/**
+ * What the runtime does with a checkpoint tap. `sign` is false for "Not now",
+ * which appends nothing and is not a refusal of anything.
+ */
+export type CheckpointTapHandler = (tap: {
+  sign: boolean;
+  head: { seq: number; hash: string };
+}) => CheckpointTapResponse | Promise<CheckpointTapResponse>;
+
 export const TELEGRAM_COMMANDS = ["queue", "skip", "next"] as const;
 
 export type TelegramCommand = (typeof TELEGRAM_COMMANDS)[number];
@@ -1416,6 +1450,38 @@ export function digestCallbackData(verb: "G" | "R", nonce: string): string {
   return `${verb}:${nonce}`;
 }
 
+/**
+ * `callback_data` for the checkpoint prompt's two buttons (APRV-257).
+ *
+ * `k:<nonce>` signs, `x:<nonce>` declines. Verbs of their own rather than a
+ * reuse of `g`/`r`, and the separation is load-bearing: {@link CALLBACK_VERBS}
+ * maps every decision verb onto a grant or a reject, so a checkpoint button
+ * spelled `g` would be a button {@link parseCallbackData} hands to the decision
+ * path — where an unknown nonce becomes an action-reference lookup, and a
+ * signature gesture starts hunting for a request to approve. Two vocabularies,
+ * two parsers, and neither can be read as the other.
+ *
+ * No action key and no reference in the bytes: a checkpoint names no request,
+ * and the head it covers is held by the process that issued the nonce, exactly
+ * as a digest's member set is. Nothing that can reach the bot chooses what gets
+ * signed.
+ */
+export function checkpointCallbackData(verb: "k" | "x", nonce: string): string {
+  return `${verb}:${nonce}`;
+}
+
+/** `k:<nonce>` / `x:<nonce>`, or `null` for anything else. Never throws. */
+export function parseCheckpointCallback(
+  data: unknown,
+): { sign: boolean; nonce: string } | null {
+  if (typeof data !== "string") return null;
+  const verb = data.slice(0, 1);
+  if ((verb !== "k" && verb !== "x") || data.slice(1, 2) !== ":") return null;
+  const nonce = data.slice(2);
+  if (nonce.length === 0 || nonce.includes(":")) return null;
+  return { sign: verb === "k", nonce };
+}
+
 interface ParsedCallback {
   decision: "grant" | "reject";
   /** `all` for a digest's "all" button; `one` for every per-request button. */
@@ -1565,6 +1631,27 @@ export class TelegramChannel implements TestableChannel {
    * `allowed_updates` — see {@link onCommand}.
    */
   private commandHandler: ((command: TelegramCommand) => Promise<void> | void) | null = null;
+  /**
+   * What to do with a checkpoint tap (APRV-257). Absent unless the runtime
+   * registered one, and its absence makes {@link offerCheckpoint} refuse: a
+   * button nobody is listening for is a button that spins on a phone.
+   */
+  private checkpointHandler: CheckpointTapHandler | null = null;
+  /**
+   * Checkpoint nonce -> the head that prompt asked about, and the message it is
+   * on. **In memory only**, like every other map in this class and for the same
+   * reason (SPEC.md §10.3: channels hold no state that is a source of truth).
+   *
+   * The head lives HERE and not in the callback bytes, so what is signed is
+   * what this process put on the screen. Losing the map to a restart costs a
+   * tap its meaning — the button answers `unknown-callback` and the listener
+   * offers again on its next lapse — and can never cost a signature over
+   * something nobody was shown.
+   */
+  private readonly checkpointNonces = new Map<
+    string,
+    { deliveryId: DeliveryId; head: { seq: number; hash: string } }
+  >();
   private readonly deliveries = new Map<string, Delivery>();
   /** Digest message id -> what is on it. Delivery bookkeeping, never truth. */
   private readonly digests = new Map<DeliveryId, DigestState>();
@@ -1625,6 +1712,58 @@ export class TelegramChannel implements TestableChannel {
 
   onDecision(handler: (decision: ChannelDecision) => DecisionOutcome): void {
     this.handler = handler;
+  }
+
+  /**
+   * Register what to do with a checkpoint tap (APRV-257).
+   *
+   * The handler is the runtime's, on the runtime's side of the boundary, and it
+   * is where the vault passphrase and the signing live. This channel holds a
+   * nonce, a message id and a `(seq, hash)`, and hands the head back when the
+   * button is pressed — the same shape as {@link onDecision}, for the same
+   * reason: a channel that signed anything would be a channel with authority.
+   */
+  onCheckpoint(handler: CheckpointTapHandler): void {
+    this.checkpointHandler = handler;
+  }
+
+  /**
+   * Put one `CHECKPOINT DUE` prompt in the chat, with a Sign and a Not now
+   * button (APRV-257).
+   *
+   * A unit like any other: the paced walkthrough sends it as one thing to read,
+   * and it is never grouped into a digest, because a digest is a set of
+   * SIMILAR REQUESTS decided together and a checkpoint is neither a request nor
+   * similar to one.
+   *
+   * Refuses when no handler is registered, rather than sending a dead button.
+   */
+  async offerCheckpoint(prompt: CheckpointPrompt): Promise<DeliveryId> {
+    if (this.checkpointHandler === null) {
+      throw new Error(
+        "no checkpoint handler is registered on the telegram channel; the runtime registers one before offerCheckpoint(), and a channel that signed its own checkpoint would be deciding rather than transporting (SPEC.md §10.3)",
+      );
+    }
+    const nonce = this.makeNonce();
+    const result = await this.call<{ message_id: number }>("sendMessage", {
+      chat_id: this.chatId,
+      text: prompt.lines
+        .map((entry, index) => (index === 0 ? `<b>${escapeHtml(entry)}</b>` : escapeHtml(entry)))
+        .join("\n"),
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "Sign", callback_data: checkpointCallbackData("k", nonce) },
+            { text: "Not now", callback_data: checkpointCallbackData("x", nonce) },
+          ],
+        ],
+      },
+    });
+    const deliveryId = String(result.message_id);
+    this.checkpointNonces.set(nonce, { deliveryId, head: prompt.head });
+    return deliveryId;
   }
 
   /**
@@ -2388,6 +2527,16 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
+    // APRV-257, before the decision vocabulary and in a parser of its own. A
+    // checkpoint button decides no request, so it must never reach the ladder
+    // below — where an unresolved nonce falls back to an action reference, and
+    // a signature gesture would start looking for something to approve.
+    const checkpoint = parseCheckpointCallback(query["data"]);
+    if (checkpoint !== null) {
+      await this.handleCheckpointTap(checkpoint, callbackId, result);
+      return;
+    }
+
     const parsed = parseCallbackData(query["data"]);
     if (parsed === null) {
       await this.ignore(
@@ -2711,6 +2860,79 @@ export class TelegramChannel implements TestableChannel {
    */
   private answerFor(outcome: GateRefusal): string {
     return refusedDecisionLine(outcome.code);
+  }
+
+  /**
+   * A tap on `Sign` or `Not now` (APRV-257).
+   *
+   * The nonce is authoritative and there is no fallback ladder underneath it:
+   * a checkpoint names no request, so there is no action reference to rescue a
+   * stale copy with, and a tap this process cannot resolve is answered as
+   * `unknown-callback` rather than guessed at. The cost is one dead button
+   * after a restart, and the listener offers again on its next lapse.
+   *
+   * The nonce is consumed BEFORE the handler runs, so a double tap cannot
+   * produce two records: the second tap finds nothing and says so. Even if it
+   * did, `appendCheckpointAt` is a compare-and-append and the log would carry
+   * two honest checkpoints over the same head, which is harmless — but a human
+   * who taps twice should be told what happened rather than shown two
+   * successes.
+   *
+   * The ack goes out FIRST (APRV-206's rule), because signing reads a vault
+   * and appends to a log, and a spinner that lasted a decision long is what
+   * that task removed.
+   */
+  private async handleCheckpointTap(
+    tap: { sign: boolean; nonce: string },
+    callbackId: string,
+    result: TelegramPollResult,
+  ): Promise<void> {
+    const held = this.checkpointNonces.get(tap.nonce);
+    if (held === undefined) {
+      await this.ignore(
+        result,
+        callbackId,
+        "unknown-callback",
+        `checkpoint nonce ${JSON.stringify(tap.nonce)} was not issued by this process`,
+        "This checkpoint prompt is from an earlier run. A fresh one is offered when the next is due.",
+      );
+      return;
+    }
+    this.checkpointNonces.delete(tap.nonce);
+
+    const handler = this.checkpointHandler;
+    if (handler === null) {
+      await this.ignore(
+        result,
+        callbackId,
+        "unknown-callback",
+        "a checkpoint tap arrived with no handler registered",
+        TELEGRAM_ACK_FALLBACK,
+      );
+      return;
+    }
+
+    await this.safeAnswer(
+      callbackId,
+      tap.sign ? "Heard — signing. The message will say what the log recorded." : "Not now.",
+    );
+
+    const response = await handler({ sign: tap.sign, head: held.head });
+    // Edited here rather than through `annotate`, which renders an action key
+    // under its headline. A checkpoint has none, and an empty `<code></code>`
+    // where a request's key belongs would be this channel implying a request.
+    // Sending no `reply_markup` is what takes the buttons away.
+    await this.call("editMessageText", {
+      chat_id: this.chatId,
+      message_id: Number(held.deliveryId),
+      text: [
+        `<b>${escapeHtml(response.headline)}</b>`,
+        "",
+        ...response.detail.map((entry) => escapeHtml(entry)),
+      ].join("\n"),
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    });
   }
 
   private async ignore(
