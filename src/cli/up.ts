@@ -85,6 +85,7 @@ import {
   type DaemonOptions,
   type DaemonOutcome,
 } from "../daemon/daemon.js";
+import { drawServerFor } from "../daemon/draw.js";
 import { enableGitEvidence, type GitEvidenceEvent } from "../daemon/git-evidence.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
@@ -265,6 +266,8 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--advance-remote": "string",
   "--advance-base": "string",
   "--no-advance-pr": "boolean",
+  // The live draw (APRV-208), spelled identically to `daemon run`'s.
+  "--no-draw": "boolean",
   // The dark-session sweep (APRV-192), spelled identically to `daemon run`'s.
   "--dark-sessions": "boolean",
   "--dark-window": "string",
@@ -679,6 +682,22 @@ export function commandUp(
         : EXIT_USAGE;
     }
     options.gitEvidence = enabled.recorder;
+  }
+
+  // APRV-208. `approval up` is the ambient runtime an operator actually leaves
+  // running, so in practice it is the process that serves live draws. Same rule
+  // as `approval daemon run`: attempted when the sampling secret resolves in
+  // this process's environment, skipped with a line when it does not.
+  if (!boolFlag(flags, "--no-draw")) {
+    const draw = drawServerFor({ logPath, policy });
+    if (draw.ok) options.draw = draw.server;
+    // Silent on `no-live-class`, for the reason `approval daemon run` states:
+    // a policy that declares nothing live has nothing to be told about.
+    else if (draw.reason !== "no-live-class") {
+      streams.err(
+        `approval: live draws will not be served (${draw.reason}): ${draw.message} Every supervised-live action gates to a human until the sampling secret resolves in this process's own environment.\n`,
+      );
+    }
   }
 
   emit({ event: "up_started", parts, log: logPath });

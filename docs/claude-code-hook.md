@@ -642,6 +642,95 @@ payload binding are all recorded. `approval token <key>` on such a grant reports
 `none minted: harness-executed`, and `approval run` refuses with the same code,
 so nobody hunts for a token that was deliberately never created.
 
+## Harness version provenance (APRV-227)
+
+A harness upgrade (`claude update`, a global npm install, an unattended updater
+on a launchd timer) swaps the binary that hosts this hook, on a human's own
+machine, at whatever hour the updater runs. A release can change the hook
+envelope semantics, and the gate then answers a protocol nobody is speaking any
+more. The gate cannot stop the upgrade and should not try. What it can do is
+notice the effect.
+
+**The records the hook writes name the binary that wrote them.** Two optional
+payload fields, on the two records the hook authors:
+
+| record | when the hook writes it | fields |
+|---|---|---|
+| `task.registered` | a supervised or manual class, at registration | `harness`, `harness_version` |
+| `gate.bypassed` | a gated call allowed by an open window | `harness`, `harness_version` |
+
+```json
+{
+  "event": "task.registered",
+  "payload": {
+    "actions": [{ "class": "vcs.push.main", "…": "…" }],
+    "harness": "claude-code",
+    "harness_version": "2.0.14 (Claude Code)"
+  }
+}
+```
+
+Where the version comes from, in order: the hook event's own `version` field
+where the harness supplies one, then `claude --version` read at most once per
+process, then absent. A hook that can establish nothing writes nothing, and
+there is no placeholder. Both fields travel together or not at all, because a
+version with no binary named beside it is a string nobody can compare against
+anything: one log holds the records of every harness that ever wrote to it.
+
+The write boundary constrains the SHAPE: one line, printable ASCII, at most 64
+characters. The value is the output of a third-party process going into an
+append-only log, and SPEC.md §11.1 invariant 3 has no exception for provenance,
+so a banner (and whatever a banner quotes) is cut at the first newline.
+
+Both fields are OPTIONAL and additive. Every record written before they existed
+still validates and still verifies, and the `execution.started` an autonomous
+class charges is not stamped at all: the version is read only where a record
+carrying it is about to be written, so the busiest path pays nothing for this.
+
+**It reduces nothing.** The version is self-reported, and SPEC.md §11.1
+invariant 4 holds here by construction rather than by care: no verdict, no
+irreversibility floor, no budget, no loop streak and no sampling draw reads the
+field. Its single reader is the doctor row below, which can only ADD a red line.
+A harness that states a false version defeats a check that would have asked a
+human to look, and buys itself no permission it did not already have.
+
+### `approval doctor`'s `harness-version-unverified` row
+
+The row compares the two facts it can establish: what `claude --version` says
+now, and what the last hook-written record says the binary was.
+
+| verdict | when |
+|---|---|
+| pass | they match |
+| fail | they differ, and no record has been written under the new binary yet |
+| skip | this checkout registers no `approval hook` command; or no hook record names a version yet; or `claude` is not on `PATH` |
+
+It fails rather than warns for the reason `dark-sessions` does: an unverified
+change is exactly the state in which nobody has checked, and a row in the pass
+column would be saying that the gate may or may not still fire and that this is
+fine. Read the pass wording carefully too. A match is NOT proof the hook fired;
+it is the absence of the one thing this row can see.
+
+### The self-test
+
+Clearing the row costs nobody a prompt. Run one **supervised-class** tool call
+through the upgraded hook: a supervised class registers the task and allows,
+with no approval lifecycle and no question on anybody's phone (amended SPEC.md
+§6.3). The `task.registered` it writes carries the new version, and the row is
+green on the next look.
+
+```sh
+printf '%s' '{"session_id":"selftest","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git push origin main"},"tool_use_id":"selftest-1"}' \
+  | approval hook claude-code --dir <primary checkout>
+# {"hookSpecificOutput":{"permissionDecision":"allow", …}}
+approval doctor --json | jq '.checks[] | select(.check == "harness-version-unverified")'
+```
+
+Substitute a command your own policy resolves to `supervised`. `approval hook
+classify -- <command…>` says which class a command falls under, and the verdict
+line reports how it resolved. A manual class re-records just as well and costs
+one prompt, which is why the supervised one is the ritual.
+
 ## Limits, stated plainly
 
 - **The classifier is best effort.** It reads shell text without being a shell.
@@ -730,6 +819,47 @@ keep that sentence true under a loose umask.
 
 The file is local, derived, gitignored, and never evidence. Deleting it costs
 latency and nothing else.
+
+## The one decision the hook cannot make: the live draw (APRV-208)
+
+`supervised-live` is the autonomy level this repository's own `policy.edit`
+class runs at: one in ten edits blocks on the gate, the rest are sampled after
+the fact. Which tenth is an HMAC under the operator's sampling secret, and the
+hook holds no such secret. It cannot: the hook is a child of an agent session,
+so a secret it could read is a secret the agent could read, and an agent that
+can compute its own luck can grind its payload until the draw comes up
+unsampled. That is why nothing sources the secret into a hook process, and why
+nothing may.
+
+For a fortnight the consequence was that the draw failed closed on every call
+and `supervised-live` was, in practice, `manual`: 15 of 15 actions gated
+(APRV-184). The hook now asks the daemon instead. One JSON line over an
+owner-only Unix socket at `.approval/daemon/draw.sock`, one line back, and the
+answer carries an HMAC over the question and the verdict that the hook cannot
+check and therefore records, for an operator holding the secret to recompute
+later from the request's own `action_key`, `payload_hash` and `policy_sha256`.
+
+Three properties matter to anyone reading a hook decision:
+
+- **Failure is always toward the human.** No socket, a socket nothing answers,
+  or an answer that does not match the question asked each gate the action,
+  under their own names (`draw-daemon-absent`, `draw-daemon-stale`,
+  `draw-answer-invalid`). The worst a broken, absent, or hostile daemon can do
+  is ask you to tap.
+- **The daemon derives the rate itself.** It does not take the asking process's
+  word for the class or the rate: it resolves both from its own policy and
+  echoes what it derived, and the asker refuses an answer that does not echo the
+  question it asked. A hook and a daemon reading different policy files fail
+  closed rather than agreeing on the wrong rate.
+- **The socket is not a private oracle.** It answers only for an action already
+  registered in the verified log with exactly the payload hash being asked
+  about, so every candidate a grinding agent could try is permanently in the
+  append-only log, in order, and countable by anyone.
+
+If `approval doctor`'s `live-draw` row is failing, `supervised-live` is gating at
+100% on this machine, and the fix is to start the runtime in a shell where the
+secret resolves. See "supervised-live needs this process up" in
+`docs/dogfood-cutover.md`.
 
 ## The backstop outside the session: `scripts/protected-path-guard.mjs`
 

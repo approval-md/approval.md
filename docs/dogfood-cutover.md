@@ -141,6 +141,49 @@ above are the same behaviour, reached on a timer instead of by your hand.
 every page load, so a refresh shows what is pending now. `approval channel cli`
 is one-shot by design; running the verb again is its refresh.
 
+### `supervised-live` needs this process up (APRV-208)
+
+A `supervised-live` class puts a declared fraction of its actions through the
+phone and lets the rest run. Which fraction an action falls in is an HMAC under
+the operator's sampling secret, and that secret must never be readable by an
+agent: an agent that can compute its own luck can grind its payload until the
+draw comes up unsampled. So the process that decides is almost never the process
+that holds the secret. The harness hook is a child of an agent session, nothing
+sources the secret there, and nothing may.
+
+Before APRV-208 that combination meant the draw failed closed on every action,
+correctly and permanently: 15 of 15 supervised-live actions on this repository's
+own log gated to a human (APRV-184). A class declared live at 0.1 was gated at
+100%, which is safe and is also the setting never once having been live.
+
+The draw now lives in the daemon, which holds the secret legitimately because a
+human exported it in the terminal they started it from. A gate process asks over
+an owner-only Unix socket at `.approval/daemon/draw.sock` and records the MAC'd
+answer it gets back. Three consequences at the terminal:
+
+- **The secret has to resolve in this process's environment.** `eval "$(approval
+  env)"` before `approval up`, the same line the identity and the bot token
+  already need. Started without it, `approval up` says on stderr that it will
+  serve no draws, and every supervised-live action keeps gating.
+- **No daemon means no sampling.** With `approval up` stopped the socket goes
+  with it, and every supervised-live action gates to a human: the behaviour of
+  every release before this one, reached now by a route that names itself. The
+  three refusals are distinct on the request (`draw-daemon-absent`, nothing is
+  listening, start it; `draw-daemon-stale`, something is there and will not
+  answer, so it is wedged or was killed; `draw-answer-invalid`, something
+  answered and it was not this daemon).
+- **`approval doctor` has the row.** `live-draw` skips when the policy declares
+  no live class, passes when the socket is present and owner-only, and fails
+  when a live class is declared and no usable socket is there. That failure is
+  the only place the difference shows: "every policy edit asks for a tap" and
+  "one in ten policy edits asks for a tap" look identical from inside the policy
+  file, and one of them is the operator's control not being in force.
+
+`--no-draw`, on either spelling of the runtime, turns the server off without
+unsetting a variable a shell profile exports. There is no flag that turns it on:
+holding the secret is the opt-in, and amending the policy to declare a class live
+is the other half. Both are deliberate acts by the human.
+
 ### What a restart looks like on the phone (APRV-216, and APRV-196 before it)
 
 **There is no wall any more.** The default since APRV-216 is

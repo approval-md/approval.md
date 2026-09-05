@@ -185,7 +185,7 @@
 
 import { createHash } from "node:crypto";
 
-import { GLOSS_UNVERIFIED_SUFFIX } from "./contract.js";
+import { GLOSS_UNVERIFIED_SUFFIX, refusedDecisionLine } from "./contract.js";
 import type {
   ChannelBatch,
   ChannelDecision,
@@ -199,6 +199,11 @@ import type {
   TestableChannel,
 } from "./contract.js";
 import type { GateRefusal } from "../core/gate.js";
+import {
+  TELEGRAM_PROMPT_LAYOUT,
+  type PromptLayout,
+  type PromptRow,
+} from "../core/prompt-layout.js";
 import { commandPayloadView, payloadRegionText } from "./payload-view.js";
 
 // ---------------------------------------------------------------------------
@@ -505,6 +510,17 @@ export interface TelegramConfig {
    * a channel with no probe falls back to a toast that names no outcome.
    */
   describeAction?: (actionRef: string) => string | null;
+  /**
+   * Which rows the prompt shows (APRV-218), from `channels.telegram.prompt`.
+   *
+   * Passed in by the verb, which has already loaded the policy, for the reason
+   * {@link TelegramConfig.approvalTtlMs} is: this channel neither reads a
+   * policy file nor holds an opinion about what an operator should see.
+   * Defaults to {@link TELEGRAM_PROMPT_LAYOUT}, the layout APRV-143 and
+   * APRV-163 left behind, so a channel constructed without one renders exactly
+   * what it rendered before the key existed.
+   */
+  layout?: PromptLayout;
 }
 
 // ---------------------------------------------------------------------------
@@ -737,6 +753,194 @@ function attestationSummary(request: ChannelRequest): string {
   }
 }
 
+/** How a row would render, and whether its value is the reason to look. */
+interface RowCandidate {
+  line: Line;
+  /**
+   * True when the value is abnormal in the APRV-163 sense: an autonomy that is
+   * not `manual`, a budget that does not pass, a policy that is not attested.
+   *
+   * It drives two things that must not be conflated. It decides whether an
+   * `abnormal` row renders at all, and it decides whether ANY row carries
+   * {@link TELEGRAM_ANOMALY_MARK}. A row an operator forced on with
+   * `channels.telegram.prompt.always` therefore carries the mark only when the
+   * value is in fact abnormal: the mark is a statement about the value, never
+   * about why the line is on the screen.
+   */
+  abnormal: boolean;
+}
+
+function formatTelegramTtl(ms: number | null): string {
+  if (ms === null) return "no expiry declared";
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  if (hours > 0) return `${String(hours)}h ${String(minutes % 60)}m left`;
+  if (minutes > 0) return `${String(minutes)}m ${String(seconds % 60)}s left`;
+  return `${String(seconds)}s left`;
+}
+
+/**
+ * One row's line, or `null` when this request does not carry it and when the
+ * channel renders it structurally rather than as a bullet.
+ *
+ * Every row in {@link PROMPT_ROWS} has a case, including the eight APRV-143 and
+ * APRV-163 dropped from the default layout. Those fields never left the
+ * `ChannelRequest` — the tasks slimmed the phone rendering and nothing else —
+ * so an operator turning one back on with `always` is asking for a line this
+ * channel can already build, not for a new fact about the log.
+ */
+function telegramRow(request: ChannelRequest, row: PromptRow): RowCandidate | null {
+  const normal = (line_: Line): RowCandidate => ({ line: line_, abnormal: false });
+  switch (row) {
+    // Structural, not a bullet: the action key is the message's second line, in
+    // its own `<code>` span. It is a required row, so no policy can hide it,
+    // and it is not a bullet, so forcing it on adds nothing.
+    case "action_key":
+      return null;
+    case "task":
+      return normal(line("task", request.task, "task", request.task.value ?? "(none)"));
+    case "class":
+      return normal(line("class", request.class, "class", request.class.value));
+    case "command_breakdown":
+      return request.command_breakdown === undefined
+        ? null
+        : normal(
+            line(
+              "command_breakdown",
+              request.command_breakdown,
+              "commands",
+              request.command_breakdown.value,
+            ),
+          );
+    case "protected_path":
+      return request.protected_path === undefined
+        ? null
+        : normal(
+            line(
+              "protected_path",
+              request.protected_path,
+              "protected path",
+              request.protected_path.value,
+            ),
+          );
+    case "policy_diff":
+      return request.policy_diff === undefined
+        ? null
+        : normal(line("policy_diff", request.policy_diff, "policy diff", request.policy_diff.value));
+    case "policy_load":
+      return request.policy_load === undefined
+        ? null
+        : normal(
+            line("policy_load", request.policy_load, "policy loads", request.policy_load.value),
+          );
+    case "autonomy":
+      return {
+        line: line("autonomy", request.autonomy, "autonomy", request.autonomy.value),
+        abnormal: request.autonomy.value !== "manual",
+      };
+    case "budgets":
+      return {
+        line: line("budgets", request.budgets, "budgets", budgetSummary(request)),
+        abnormal: !request.budgets.value.every((verdict) => verdict.pass),
+      };
+    case "attestation":
+      return {
+        line: line("attestation", request.attestation, "policy", attestationSummary(request)),
+        abnormal: request.attestation.value.status !== "attested",
+      };
+    case "provenance":
+      return normal(
+        line("provenance", request.provenance, "resolved by", request.provenance.value),
+      );
+    case "state":
+      return normal(line("state", request.state, "state", request.state.value));
+    case "requested_ts":
+      return normal(line("requested_ts", request.requested_ts, "requested", request.requested_ts.value));
+    case "waiting":
+      return normal(line("waiting", request.waiting, "waiting", request.waiting.value));
+    case "ttl_remaining_ms":
+      return normal(
+        line(
+          "ttl_remaining_ms",
+          request.ttl_remaining_ms,
+          "ttl",
+          formatTelegramTtl(request.ttl_remaining_ms.value),
+        ),
+      );
+    case "payload_hash":
+      return normal(
+        line("payload_hash", request.payload_hash, "payload sha256", request.payload_hash.value),
+      );
+    case "chain": {
+      const chain = request.chain.value;
+      return normal(
+        line(
+          "chain",
+          request.chain,
+          "chain",
+          `seq ${String(chain.seq)} hash ${chain.hash} (log head seq ${String(chain.head_seq)})`,
+        ),
+      );
+    }
+    case "token_delivery":
+      return request.token_delivery === undefined
+        ? null
+        : normal(
+            line(
+              "token_delivery",
+              request.token_delivery,
+              "token delivery",
+              request.token_delivery.value,
+            ),
+          );
+    case "est_cost_usd":
+      return normal(
+        line(
+          "est_cost_usd",
+          request.est_cost_usd,
+          "est. cost",
+          `$${request.est_cost_usd.value.toFixed(2)}`,
+        ),
+      );
+    // APRV-144. Under the CLAIMED heading, because a model's sentence is not
+    // something the runtime derived, and labelled on the line as well: the
+    // `(author)` parenthetical every claimed line already carries is small,
+    // uniform and easy to stop seeing, and this is the one line in the message
+    // that NO party — not the runtime, not even the requesting agent — stands
+    // behind. Nothing here or anywhere else branches on what it says, and a
+    // layout cannot move it out from under that heading: the region a line
+    // lands in comes from the field's `kind`, applied after the ordering.
+    case "gloss":
+      return request.gloss === undefined
+        ? null
+        : normal(
+            line("gloss", request.gloss, "gloss", `${request.gloss.value} ${TELEGRAM_GLOSS_SUFFIX}`),
+          );
+    case "summary":
+      return normal(
+        line("summary", request.summary, "summary", request.summary.value ?? "(none given)"),
+      );
+    case "rationale":
+      return request.rationale === undefined
+        ? null
+        : normal(line("rationale", request.rationale, "rationale", request.rationale.value));
+    case "confidence":
+      return request.confidence === undefined
+        ? null
+        : normal(
+            line(
+              "confidence",
+              request.confidence,
+              "confidence",
+              `${String(request.confidence.value)} (never a gate)`,
+            ),
+          );
+    default:
+      return null;
+  }
+}
+
 /**
  * Build the two regions and the line list. Pure: no I/O, no clock.
  *
@@ -745,134 +949,42 @@ function attestationSummary(request: ChannelRequest): string {
  * a reader "APPROVAL REQUIRED" above a message they cannot answer on is the
  * kind of small lie that costs a channel its legibility. Everything below the
  * first line is identical either way, computed/claimed split included.
+ *
+ * `layout` is the policy's answer to which rows this channel shows (APRV-218).
+ * It defaults to {@link TELEGRAM_PROMPT_LAYOUT}, which is the slimmed prompt
+ * APRV-143 and APRV-163 left behind, so a policy that declares no
+ * `channels.telegram.prompt` renders byte for byte what it rendered before the
+ * key existed. Rendering stays a pure function of (request, layout): the layout
+ * chooses among facts the request already carries and teaches this channel
+ * nothing about the log.
+ *
+ * The computed/claimed split survives ANY ordering, and that is a property
+ * rather than a convention. `layout.order` decides the sequence rows are
+ * considered in; the partition below is by `Line.kind`, which comes from the
+ * `TaggedField` the row was built from. A `rows` list that puts `summary`
+ * first therefore puts it first among the CLAIMED lines, and never above the
+ * computed heading.
  */
 export function renderTelegram(
   request: ChannelRequest,
   heading: string = TELEGRAM_PROMPT_HEADING,
+  layout: PromptLayout = TELEGRAM_PROMPT_LAYOUT,
 ): TelegramRendering {
   const payload = request.fullPayload.value;
 
-  const computedLines: Line[] = [
-    line("class", request.class, "class", request.class.value),
-    // APRV-144, then APRV-143: what the command actually does, and which
-    // protected path earned the class. Both sit immediately under the class
-    // they explain, because `class: policy.edit` over a truncated path prefix
-    // is the state this pair of tasks exists to end. Both are derived from the
-    // bound bytes by the same classifier the hook decided with.
-    ...(request.command_breakdown === undefined
-      ? []
-      : [
-          line(
-            "command_breakdown",
-            request.command_breakdown,
-            "commands",
-            request.command_breakdown.value,
-          ),
-        ]),
-    ...(request.protected_path === undefined
-      ? []
-      : [
-          line(
-            "protected_path",
-            request.protected_path,
-            "protected path",
-            request.protected_path.value,
-          ),
-        ]),
-    // APRV-109. On an attestation prompt these two are the decision: a hash
-    // alone would ask a human to sign for sixty-four characters. They sit above
-    // the health rows because they are what the approver reads, and they are
-    // absent on every ordinary request rather than rendered empty.
-    ...(request.policy_diff === undefined
-      ? []
-      : [line("policy_diff", request.policy_diff, "policy diff", request.policy_diff.value)]),
-    ...(request.policy_load === undefined
-      ? []
-      : [line("policy_load", request.policy_load, "policy loads", request.policy_load.value)]),
-    // APRV-163. Three health rows, rendered only when they are abnormal and
-    // shouted when they are. A row that says "everything is fine" on every
-    // ordinary request is a row a reader learns to skip, and the skipping does
-    // not stop on the one request where it says something else; the mark is the
-    // whole reason the line is worth spending at all.
-    ...(request.autonomy.value === "manual"
-      ? []
-      : [
-          line(
-            "autonomy",
-            request.autonomy,
-            `${TELEGRAM_ANOMALY_MARK}autonomy`,
-            request.autonomy.value,
-          ),
-        ]),
-    ...(request.budgets.value.every((verdict) => verdict.pass)
-      ? []
-      : [
-          line(
-            "budgets",
-            request.budgets,
-            `${TELEGRAM_ANOMALY_MARK}budgets`,
-            budgetSummary(request),
-          ),
-        ]),
-    ...(request.attestation.value.status === "attested"
-      ? []
-      : [
-          line(
-            "attestation",
-            request.attestation,
-            `${TELEGRAM_ANOMALY_MARK}policy`,
-            attestationSummary(request),
-          ),
-        ]),
-    // APRV-106. The one time row: the human-readable form of the request
-    // instant, plus the one thing the raw timestamp does not say, whether an
-    // answer now still reaches anyone.
-    line("waiting", request.waiting, "waiting", request.waiting.value),
-    // No `ttl` line (APRV-143). `expires 13:09 UTC` on the line above IS the
-    // TTL, stated as the instant a reader acts on rather than as a duration
-    // they would have to add to a timestamp; two renderings of one fact cost a
-    // metadata row on a phone screen and buy nothing. `ttl_remaining_ms` stays
-    // on the request, so `--json` and every other channel still carry it.
-    //
-    // No `resolved by`, `payload sha256`, `requested`, `chain`, `task` or
-    // `state` line either (APRV-163). Six bookkeeping rows on a phone screen
-    // push the class, the command and the deadline off it, and none of them
-    // changes an answer: `provenance`, `requested_ts`, `chain`, `task` and
-    // `state` all stay on the ChannelRequest, so `--json`, `approval queue` and
-    // the web page still show every one, and `payload_hash` is stated where it
-    // binds, on the `payload sha256:` line inside the canonical block below.
-  ];
-
-  const claimedLines: Line[] = [
-    // APRV-144. Under the CLAIMED heading, because a model's sentence is not
-    // something the runtime derived, and labelled on the line as well: the
-    // `(author)` parenthetical every claimed line already carries is small,
-    // uniform and easy to stop seeing, and this is the one line in the message
-    // that NO party — not the runtime, not even the requesting agent — stands
-    // behind. Nothing here or anywhere else branches on what it says.
-    ...(request.gloss === undefined
-      ? []
-      : [line("gloss", request.gloss, "gloss", `${request.gloss.value} ${TELEGRAM_GLOSS_SUFFIX}`)]),
-    line("summary", request.summary, "summary", request.summary.value ?? "(none given)"),
-    line(
-      "est_cost_usd",
-      request.est_cost_usd,
-      "est. cost",
-      `$${request.est_cost_usd.value.toFixed(2)}`,
-    ),
-  ];
-  if (request.rationale !== undefined) {
-    claimedLines.push(line("rationale", request.rationale, "rationale", request.rationale.value));
-  }
-  if (request.confidence !== undefined) {
-    claimedLines.push(
-      line(
-        "confidence",
-        request.confidence,
-        "confidence",
-        `${request.confidence.value} (never a gate)`,
-      ),
-    );
+  const computedLines: Line[] = [];
+  const claimedLines: Line[] = [];
+  for (const row of layout.order) {
+    const visibility = layout.visibility[row];
+    if (visibility === "off") continue;
+    const candidate = telegramRow(request, row);
+    if (candidate === null) continue;
+    if (visibility === "abnormal" && !candidate.abnormal) continue;
+    const entry: Line = candidate.abnormal
+      ? { ...candidate.line, label: `${TELEGRAM_ANOMALY_MARK}${candidate.line.label}` }
+      : candidate.line;
+    if (entry.kind === "computed") computedLines.push(entry);
+    else claimedLines.push(entry);
   }
 
   const author =
@@ -905,7 +1017,8 @@ export function renderTelegram(
     // renderer, class, kind and `payload sha256` in its first lines, and a
     // second sha256 above it is one more line between the reader and the
     // action. A TRUNCATED rendering has no canonical block to say any of that,
-    // so it gets a prefix worded as what it is: a refusal.
+    // so it gets a prefix worded as what it is: a refusal. Neither is reachable
+    // from a layout: the block is not a row (APRV-218).
     payloadText:
       payload === null
         ? null
@@ -1433,6 +1546,8 @@ export class TelegramChannel implements TestableChannel {
   private readonly now: () => number;
   /** The listener's verified-log probe for a stale tap (APRV-196), or null. */
   private readonly describeAction: ((actionRef: string) => string | null) | null;
+  /** The policy's row layout for this channel (APRV-218). Read-only, and pure input to the renderer. */
+  private readonly layout: PromptLayout;
   /** When {@link sweep} last ran, so the poll loop can call it every cycle. */
   private lastSweepMs = Number.NEGATIVE_INFINITY;
 
@@ -1495,6 +1610,7 @@ export class TelegramChannel implements TestableChannel {
     this.approvalTtlMs = config.approvalTtlMs ?? null;
     this.now = config.now ?? (() => Date.now());
     this.describeAction = config.describeAction ?? null;
+    this.layout = config.layout ?? TELEGRAM_PROMPT_LAYOUT;
     this.makeNonce =
       config.nonce ??
       (() => {
@@ -1716,7 +1832,7 @@ export class TelegramChannel implements TestableChannel {
     heading: string,
     keyboard: { inline_keyboard: InlineButton[][] } | null,
   ): Promise<{ deliveryId: DeliveryId; rendered: RenderedRequest }> {
-    const rendering = renderTelegram(request, heading);
+    const rendering = renderTelegram(request, heading, this.layout);
 
     const segments: string[] = [rendering.header];
     if (rendering.payloadText !== null) {
@@ -2585,20 +2701,16 @@ export class TelegramChannel implements TestableChannel {
    * gate has already decided produces `already-decided`, no second event, and
    * this text. Telegram redelivers callbacks on its own, so this path is
    * ordinary traffic, not an error.
+   *
+   * The sentences themselves moved to `channels/contract.ts` in APRV-235, so
+   * that this message edit and the line the terminal channel prints are the
+   * same words and cannot drift apart: a human who taps on their phone and
+   * then reads the operator's terminal should not have to decide which of two
+   * wordings to believe. The edit puts {@link TELEGRAM_NOT_RECORDED} above it
+   * and clears the buttons, in `annotate`'s single call.
    */
   private answerFor(outcome: GateRefusal): string {
-    if (outcome.code === "already-decided") {
-      return "Already decided — the first answer stands; nothing was recorded.";
-    }
-    // APRV-106. The tap that races the withdrawal, or lands on a message whose
-    // edit did not go through. Nothing is appended and the human is told why
-    // in the terms that matter to them: the asker is gone, so there is nothing
-    // their answer could do.
-    if (outcome.code === "request-withdrawn") {
-      return "Withdrawn — the requester took this back and is no longer waiting; nothing was recorded.";
-    }
-    if (outcome.code === "expired") return "Expired — the approval window has closed.";
-    return `Refused by the runtime: ${outcome.code}.`;
+    return refusedDecisionLine(outcome.code);
   }
 
   private async ignore(

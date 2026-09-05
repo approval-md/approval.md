@@ -63,6 +63,7 @@ import { basename, join } from "node:path";
 import { isNode, parseDocument, visit } from "yaml";
 
 import { scanFences, type FenceScan } from "./md-fence.js";
+import { promptBlockErrors } from "./prompt-layout.js";
 import { validate, type ValidationError } from "./validate.js";
 
 /**
@@ -271,6 +272,20 @@ export interface Policy {
      * log that already verified, and no verdict reads it.
      */
     skew_tolerance?: string;
+    /**
+     * Amended SPEC.md §9 (APRV-220): the PUBLIC halves of the keys permitted to
+     * sign a `log.checkpoint`, base64 DER SPKI. The one key-shaped field in
+     * this file holding material rather than the NAME of a variable, because a
+     * public key is not a secret and the value of writing it here is that this
+     * file is committed and attested.
+     */
+    checkpoint_keys?: string[];
+    /**
+     * Amended SPEC.md §9 (APRV-220): how long a log may go without a signed
+     * checkpoint before verification says one is due. Report-only in every
+     * direction; there is no path from due to refused.
+     */
+    checkpoint_every?: string;
   };
   /**
    * Amended SPEC.md §5.2 (APRV-217): how the long-lived readers of this log
@@ -310,6 +325,12 @@ export interface PolicyDurations {
    * allowance would report every healthy fleet's ordinary clock disagreement.
    */
   skewToleranceMs: number | null;
+  /**
+   * `audit.checkpoint_every` in milliseconds, or `null` when unset (APRV-220).
+   * `null` means the cadence is off: nothing is ever reported as due, which is
+   * the behaviour of every policy written before the key existed.
+   */
+  checkpointEveryMs: number | null;
 }
 
 /**
@@ -665,6 +686,22 @@ export function loadPolicyText(
 
   const policy = parsed.value as Policy;
 
+  // `channels.<name>.prompt` (APRV-218), checked once here for every channel
+  // name including the untyped ones the schema admits as free-form objects.
+  // Same fail direction as every other semantic check on this path: the WHOLE
+  // policy fails closed to all-`manual` rather than one channel quietly
+  // rendering a layout its author did not write. See `core/prompt-layout.ts`
+  // for why both nets exist.
+  const promptErrors = promptBlockErrors(policy);
+  if (promptErrors.length > 0) {
+    return failure(
+      "schema-invalid",
+      `${resolved.path}: channel prompt layout is not usable`,
+      promptErrors,
+      parsed.value,
+    );
+  }
+
   const ttlText = policy.defaults?.approval_ttl;
   let approvalTtlMs: number | null = null;
   if (ttlText !== undefined) {
@@ -710,6 +747,30 @@ export function loadPolicyText(
     }
   }
 
+  // And once more for the checkpoint cadence (APRV-220). Report-only like the
+  // skew tolerance, and parsed the same strict way for the same reason: an
+  // operator who wrote `1 day` should be told, not quietly given no cadence at
+  // all and left believing one is in force.
+  const checkpointText = policy.audit?.checkpoint_every;
+  let checkpointEveryMs: number | null = null;
+  if (checkpointText !== undefined) {
+    checkpointEveryMs = parseDuration(checkpointText);
+    if (checkpointEveryMs === null) {
+      return failure(
+        "schema-invalid",
+        `${resolved.path}: audit.checkpoint_every "${checkpointText}" is not a valid duration`,
+        [
+          {
+            path: "/audit/checkpoint_every",
+            keyword: "duration",
+            message: "expected <positive integer><unit> with unit in ms|s|m|h|d|w",
+          },
+        ],
+        parsed.value,
+      );
+    }
+  }
+
   // The `daemon` block (APRV-217), read the same way: one parse here, defaults
   // applied once, and an unparseable duration fails the WHOLE policy rather
   // than leaving a key the author believed was in force quietly unread.
@@ -745,7 +806,7 @@ export function loadPolicyText(
     ok: true,
     policy,
     source: { path: resolved.path, filename: basename(resolved.path) },
-    durations: { approvalTtlMs, skewToleranceMs },
+    durations: { approvalTtlMs, skewToleranceMs, checkpointEveryMs },
     daemon: daemonRead,
     notes: aliasNotes(policy),
   };

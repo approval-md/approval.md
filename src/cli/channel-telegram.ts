@@ -137,6 +137,7 @@ import {
 } from "../channels/telegram.js";
 import { telegramDeliveryFor, type TelegramDelivery } from "../core/telegram-config.js";
 import { loadPolicy } from "../core/policy-load.js";
+import { promptLayoutFor } from "../core/prompt-layout.js";
 import { passphraseEnvFor } from "../core/vault.js";
 import {
   isAttestationActionKey,
@@ -425,6 +426,13 @@ export function prepareListen(request: ListenRequest): ListenPreparation {
     // asking what the LOG says, which is the only thing that knows. Wired here
     // because the log path lives here and nothing under `channels/` reads one.
     describeAction: describeActionFor(request.logPath),
+    // APRV-218. Which rows the prompt shows, from `channels.telegram.prompt`,
+    // off the same load the credential NAMES and the TTL came from: one read of
+    // the policy file answers every question this preparation asks of it. A
+    // policy that failed to load declares no layout and gets the slimmed
+    // default, because a layout is not a permission and an unrelated typo in a
+    // class rule must not silently redecorate a phone screen.
+    layout: promptLayoutFor(policyLoad, "telegram"),
   };
 
   return {

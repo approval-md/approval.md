@@ -72,12 +72,14 @@ import { isAbsolute, join, resolve as resolvePathSegments } from "node:path";
 import { CliChannel } from "../channels/cli.js";
 import {
   recordChannelDecision,
+  refusedDecisionLine,
   type ChannelRequest,
   type DecisionOutcome,
 } from "../channels/contract.js";
 import { buildPendingQueue, type TagOptions } from "../channels/tagging.js";
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
 import { loadPolicy } from "../core/policy-load.js";
+import { promptLayoutFor, type PromptLayout } from "../core/prompt-layout.js";
 import { passphraseEnvFor } from "../core/vault.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind, type ParsedFlags } from "./args.js";
 import { glossRunnerFor, GLOSS_TIMEOUT_MS, type GlossRunner } from "./gloss.js";
@@ -175,12 +177,22 @@ function refusalExit(code: string): number {
   }
 }
 
-/** One line of human-readable outcome per decision. */
+/**
+ * One line of human-readable outcome per decision.
+ *
+ * A refusal since APRV-235 leads with the sentence the Telegram message edit
+ * shows, from the one helper both surfaces share, and keeps the gate's own
+ * message after it. The person at this terminal and the person holding the
+ * phone are usually the same person, and they were reading two different
+ * accounts of one refused tap. The gate's message stays because a terminal can
+ * afford the detail a chat bubble cannot, and because it is the text that names
+ * the hashes.
+ */
 function describeOutcome(outcome: DecisionOutcome): string {
   if (outcome.ok) {
     return `${outcome.decision === "grant" ? "granted" : "rejected"} ${outcome.action_key} -> ${outcome.state} at seq ${outcome.record.seq}`;
   }
-  return `refused: ${outcome.code}: ${outcome.message}`;
+  return `refused: ${outcome.code}: ${refusedDecisionLine(outcome.code)}\n  ${outcome.message}`;
 }
 
 export function commandChannelCli(argv: string[], streams: Streams, cwd: string): number {
@@ -241,7 +253,7 @@ export function commandChannelCli(argv: string[], streams: Streams, cwd: string)
     !json && (boolFlag(flags, "--interactive") || process.stdin.isTTY === true);
 
   if (!interactive) {
-    return listOnly(queue.requests, queue.skipped, streams, json);
+    return listOnly(queue.requests, queue.skipped, streams, json, promptLayoutFor(loadPolicy(policy), "cli"));
   }
 
   const asFlag = stringFlag(flags, "--as");
@@ -341,6 +353,7 @@ function listOnly(
   skipped: { action_key: string; code: string; message: string }[],
   streams: Streams,
   json: boolean,
+  layout: PromptLayout,
 ): number {
   if (json) {
     // FROZEN SHAPE: the tagged queue, verbatim. Every field keeps its
@@ -364,7 +377,7 @@ function listOnly(
     return EXIT_OK;
   }
 
-  const channel = new CliChannel({ output: { write: (text) => streams.out(text) } });
+  const channel = new CliChannel({ output: { write: (text) => streams.out(text) }, layout });
   channel.notify({ requests });
   streams.out(
     `\n${requests.length} request(s) awaiting a decision. stdin is not a terminal, so nothing was asked and nothing was recorded; re-run with a terminal (or --interactive) to decide.\n`,
@@ -386,7 +399,14 @@ async function interactiveLoop(
   streams: Streams,
   gloss?: GlossRunner,
 ): Promise<number> {
-  const channel = new CliChannel({ output: { write: (text) => streams.out(text) } });
+  // APRV-218: which rows this walk shows, from `channels.cli.prompt`. Resolved
+  // HERE, at the verb, because the channel neither reads a policy file nor holds
+  // an opinion about what an operator should see. A policy that did not load
+  // yields the default layout and nothing else: a layout is not a permission.
+  const channel = new CliChannel({
+    output: { write: (text) => streams.out(text) },
+    layout: promptLayoutFor(loadPolicy(policy), "cli"),
+  });
 
   let token: string | undefined;
   channel.onDecision((decision) => {

@@ -103,16 +103,25 @@ import {
 } from "../core/state.js";
 import { validate } from "../core/validate.js";
 import { publishedState } from "../cli/log-advance.js";
+import { isAdvanceBookkeeping } from "../core/advance-cycle.js";
 import { repoRoot } from "../cli/git-scope.js";
 import { checkLogAnchor, resolveAnchor, type AnchorCheck } from "../cli/log-anchor.js";
 import {
+  checkLogCheckpoints,
+  checkpointPolicyOf,
+  type CheckpointCheck,
+} from "../core/checkpoint.js";
+import {
   authorizeAdvance,
+  reconcileDanglingAdvance,
   runAdvanceAsync,
   runAdvanceSync,
+  settleAdvanceFinish,
   type AdvanceAttempt,
   type AdvanceCadence,
   type AdvanceInput,
   type AdvanceOutcome,
+  type PendingAdvanceFinish,
 } from "./advance.js";
 import { sweepAuditSampling } from "./audit.js";
 import {
@@ -120,6 +129,7 @@ import {
   type DarkSessionSweepOptions,
   type DarkSessionWatch,
 } from "./dark-session.js";
+import type { DrawServeResult } from "./draw.js";
 import type { GitEvidenceRecorder } from "./git-evidence.js";
 import { prunePayloads, type PruneReason } from "./prune.js";
 import {
@@ -182,6 +192,15 @@ export type DaemonEvent =
        * about. `rev: null` is an honest "none was found", never a silent pass.
        */
       anchor: { rev: string | null; seq: number | null; reason: string | null };
+      /**
+       * Where this run is answering live draws, or `null` when it is not
+       * (APRV-208). Additive, and on the first line for the reason `read_proof`
+       * is: whether `supervised-live` is actually live on this machine is a
+       * configuration an operator must be able to see without asking the process
+       * anything, and the difference between "sampled at 10%" and "gated at
+       * 100%" is exactly this field being a path rather than `null`.
+       */
+      draw?: string | null;
     }
   | {
       event: "drift";
@@ -283,6 +302,17 @@ export type DaemonEvent =
       pr_url: string | null;
       /** True when this attempt opened the day's pull request rather than updating it. */
       pr_created: boolean;
+      /**
+       * True when the day's records branch was REBUILT on the base rather than
+       * stacked on its own tip, and the ref it was rebuilt on (APRV-234).
+       *
+       * A branch the trunk has moved under cannot be fast-forwarded into it,
+       * and a daemon that kept stacking on it produced a pull request only a
+       * hand merge could land. Rebuilding is the repair, and an operator reading
+       * this stream should not have to infer that it happened from a sha.
+       */
+      rebuilt: boolean;
+      rebuilt_on: string | null;
       /** The refusal or failure code, when the outcome carries one. */
       code: string | null;
       message: string;
@@ -352,6 +382,13 @@ export type DaemonEvent =
        * a committed copy that cannot have changed since the last look.
        */
       anchor?: { status: "pass" | "behind" | "skip"; rev: string | null; seq: number | null };
+      /**
+       * The checkpoint check this tick made, or `null` when it made none
+       * (APRV-220). Additive, and on the same full re-proof cadence as the
+       * anchor for the same reason: a tick that re-proved nothing about the
+       * prefix has learned nothing new about the records inside it.
+       */
+      checkpoints?: { status: "pass" | "skip"; verified: number; keys: number };
       /** Per-phase duration in milliseconds, in the order the tick runs them. */
       phases: {
         drift: number;
@@ -432,6 +469,22 @@ export const DAEMON_WARNING_CODES = [
    * repair, and the next tick asks again.
    */
   "anchor-behind",
+  /**
+   * `audit.checkpoint_every` says a human-signed checkpoint is due and the log
+   * carries none that recent (APRV-220). A WARNING and never a stop, at every
+   * layer: a human who has been away is not a forger, and a daemon that stopped
+   * for want of a tap is a daemon whose operator turns the check off.
+   */
+  "checkpoint-due",
+  /**
+   * The live-draw socket could not be served (APRV-208). Nothing is degraded:
+   * every asker fails closed to a human decision, which is exactly what happens
+   * on a machine where no daemon runs at all. It is a warning rather than a
+   * silence because the operator's `supervised-live` classes are gating at 100%
+   * while it stands, and that is a thing to know rather than to discover from a
+   * month of taps.
+   */
+  "draw-unavailable",
 ] as const;
 
 export type DaemonWarningCode = (typeof DAEMON_WARNING_CODES)[number];
@@ -535,6 +588,26 @@ export interface DaemonOptions {
    * divergence both want.
    */
   anchor?: { enabled?: boolean; rev?: string; remote?: string; base?: string | null };
+  /**
+   * The human-signed checkpoint check (APRV-220). On unless explicitly
+   * disabled, for the reason the anchor is: it reads the log this loop has
+   * already verified plus the policy, and writes nothing anywhere.
+   */
+  checkpoints?: { enabled?: boolean };
+  /**
+   * The live-draw server (APRV-208), or absent when this run answers no draws.
+   *
+   * Constructed by the CALLER, not here, and the reason is the sampling secret:
+   * the CLI resolves it from the environment the operator established (the one
+   * `eval "$(approval env)"` writes) and hands down a server that has closed
+   * over it. `DaemonOptions` therefore never carries a secret, this loop never
+   * sees one, and a daemon started in a shell where the secret does not resolve
+   * simply gets no server and every supervised-live action keeps gating, which
+   * is the behaviour of every release before this one.
+   *
+   * Typed structurally rather than as `DrawServer` so a test can inject one.
+   */
+  draw?: { start(): DrawServeResult; close(): void };
   sink: DaemonSink;
 }
 
@@ -553,13 +626,20 @@ export interface DaemonOptions {
  * flavour of `log-corrupt` because the two say different things to whoever
  * reads the stopped line — one means the file contradicts itself, the other
  * means the file contradicts the record of it.
+ *
+ * `checkpoint-invalid` (APRV-220) is the fifth, and it is distinct from both
+ * for the same kind of reason: it means the file contradicts a signature a
+ * human made over it. The three failures name three different witnesses, and
+ * flattening them would leave the operator's first question — which witness
+ * disagrees? — answerable only by reading a message.
  */
 export type DaemonOutcome =
   | { kind: "stopped"; reason: string }
   | { kind: "log-unreadable"; message: string }
   | { kind: "log-torn-tail"; message: string }
   | { kind: "log-corrupt"; message: string }
-  | { kind: "anchor-diverged"; message: string };
+  | { kind: "anchor-diverged"; message: string }
+  | { kind: "checkpoint-invalid"; message: string };
 
 // ---------------------------------------------------------------------------
 // The loop
@@ -622,6 +702,14 @@ export class Daemon {
   /** How many substantive records were owed at the last attempt. */
   private lastAdvanceOwed: number | null = null;
   /**
+   * Where the owed span ENDED at the last attempt (APRV-233).
+   *
+   * The count trigger measures against this inside the interval, so records an
+   * attempt has already tried to publish are not counted a second time towards
+   * publishing them again.
+   */
+  private lastAdvanceSpanEnd: number | null = null;
+  /**
    * The advance whose git work is still running in a child (APRV-211).
    *
    * One slot, and a tick that finds it taken makes no attempt at all: two
@@ -629,6 +717,18 @@ export class Daemon {
    * branch, and the second would have nothing to publish anyway.
    */
   private advanceInFlight: Promise<void> | null = null;
+  /**
+   * An advance outcome this process observed and could not record (APRV-233).
+   *
+   * The 2026-09-02 residue: a hook's record landed between `recordFinish`'s
+   * read and its append, the bounded retry was spent, and the execution stayed
+   * open. The outcome is a fact this process holds and the log does not, so it
+   * is carried here and settled at the top of the next tick, before any trigger
+   * is looked at. Nothing else may advance while it stands.
+   */
+  private pendingAdvanceFinish: PendingAdvanceFinish | null = null;
+  /** The dangling advance cycle this process has already warned about once. */
+  private reportedDangling: string | null = null;
   /** Epoch ms of the last dark-session sweep (APRV-192); `null` before the first. */
   private lastDarkSweepAt: number | null = null;
   private reportedEscalations = new Set<string>();
@@ -642,12 +742,20 @@ export class Daemon {
     rev: string | null;
     seq: number | null;
   } | null = null;
+  /** This tick's checkpoint check (APRV-220), or `null` when it made none. */
+  private checkpointsThisTick: {
+    status: "pass" | "skip";
+    verified: number;
+    keys: number;
+  } | null = null;
   /** Basenames {@link writeBack} placed this tick, so the watcher can ignore them. */
   private selfWrites = new Set<string>();
   /** The previous tick's, kept one generation: watch events arrive after the write. */
   private previousSelfWrites = new Set<string>();
   private settle: ((outcome: DaemonOutcome) => void) | null = null;
   private finished = false;
+  /** Whether {@link DaemonOptions.draw} actually bound (APRV-208). */
+  private drawServing = false;
 
   constructor(options: DaemonOptions) {
     this.options = options;
@@ -666,6 +774,23 @@ export class Daemon {
       this.lastAdvanceAt = Number.isNaN(started) ? 0 : started;
 
       if (!this.options.once) this.attachWatchers();
+      // APRV-208. Before the `started` line, so that line can say truthfully
+      // whether this run is answering draws. A refusal is reported and the loop
+      // continues: askers fail closed to a human, which is where they were
+      // going with no daemon at all.
+      let drawPath: string | null = null;
+      if (this.options.draw !== undefined) {
+        const served = this.options.draw.start();
+        if (served.ok) {
+          drawPath = served.path;
+          this.drawServing = true;
+        } else {
+          this.warn(
+            "draw-unavailable",
+            `live draws are not being served (${served.reason}): ${served.detail}. Every supervised-live action gates to a human until this is fixed.`,
+          );
+        }
+      }
       this.emit({
         event: "started",
         log: this.display(this.options.logPath),
@@ -680,6 +805,7 @@ export class Daemon {
         // name the witness this run holds itself to, and resolving it costs two
         // git reads and no log read at all.
         anchor: this.resolveAnchorForReport(),
+        draw: drawPath,
       });
 
       const outcome = this.tick();
@@ -725,6 +851,19 @@ export class Daemon {
       }
     }
     this.watchers.length = 0;
+
+    // APRV-208. The socket goes with the process that served it: a socket file
+    // outliving its server is a hook connecting to nothing, which is a slower
+    // road to the same gated verdict but a confusing one. Closed before the
+    // shutdown flush, because nothing in the flush answers draws.
+    if (this.drawServing && this.options.draw !== undefined) {
+      this.drawServing = false;
+      try {
+        this.options.draw.close();
+      } catch {
+        // A server that will not close cannot stop the daemon from stopping.
+      }
+    }
 
     // The shutdown flush (APRV-204). A clean stop with unpublished records
     // publishes them before it goes: the daemon is the log's writer, and a
@@ -904,6 +1043,7 @@ export class Daemon {
       this.reads = 0;
       this.fullReproofThisTick = false;
       this.anchorThisTick = null;
+      this.checkpointsThisTick = null;
       // One generation of the daemon's own task-file writes is kept, because a
       // watch event arrives after the write that caused it and often after the
       // tick that made it has ended.
@@ -940,6 +1080,28 @@ export class Daemon {
             anchor.status === "skip"
               ? { status: "skip", rev: null, seq: null }
               : { status: anchor.status, rev: anchor.anchor.rev, seq: anchor.anchor.head.seq };
+        }
+
+        // The second witness (APRV-220), on the same cadence and immediately
+        // after the first. A log whose own signed checkpoints contradict it is
+        // no more fit to append to than one whose committed copy does, and the
+        // sweeps below all append. Independent of the anchor in both
+        // directions: a skip on one never excuses the other.
+        const checkpoints = this.checkCheckpoints(opening.records);
+        if (checkpoints !== null) {
+          if (checkpoints.status === "refused") {
+            return { kind: "checkpoint-invalid", message: checkpoints.message };
+          }
+          if (checkpoints.status === "skip") {
+            this.checkpointsThisTick = { status: "skip", verified: 0, keys: 0 };
+          } else {
+            if (checkpoints.warning !== null) this.warn("checkpoint-due", checkpoints.warning);
+            this.checkpointsThisTick = {
+              status: "pass",
+              verified: checkpoints.checkpoints.length,
+              keys: checkpoints.keys,
+            };
+          }
         }
       }
 
@@ -1029,6 +1191,7 @@ export class Daemon {
         reads: this.reads,
         reproof: this.fullReproofThisTick ? "full" : "incremental",
         ...(this.anchorThisTick === null ? {} : { anchor: this.anchorThisTick }),
+        ...(this.checkpointsThisTick === null ? {} : { checkpoints: this.checkpointsThisTick }),
         phases: {
           drift: Math.round(phases.drift * 10) / 10,
           ttl: Math.round(phases.ttl * 10) / 10,
@@ -1170,6 +1333,82 @@ export class Daemon {
     if (!read.ok) return;
     const root = this.options.cwd;
     const today = this.options.today ?? readClock(this.clockOptions());
+    const input: AdvanceInput = {
+      logPath: this.options.logPath,
+      cwd: root,
+      policy: this.options.policy,
+      cadence,
+      ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
+      ...(this.options.clock === undefined ? {} : { clock: this.options.clock }),
+      ...(this.options.today === undefined ? {} : { today: this.options.today }),
+      ...(this.options.advanceRunner === undefined ? {} : { runner: this.options.advanceRunner }),
+    };
+
+    // APRV-233, first: an outcome this process observed and could not record.
+    // It is settled BEFORE any trigger is evaluated, on the head as it stands
+    // now, and this tick does nothing else either way — a tick that both closed
+    // an old cycle and opened a new one would be reasoning about a log it read
+    // before it wrote to it.
+    if (this.pendingAdvanceFinish !== null) {
+      const settled = settleAdvanceFinish(input, this.pendingAdvanceFinish);
+      if (settled.ok) {
+        this.pendingAdvanceFinish = null;
+        this.emit({
+          event: "advance",
+          outcome: "nothing-owed",
+          records_pending: 0,
+          records_branch: null,
+          range: null,
+          commit: null,
+          pr_url: null,
+          pr_created: false,
+          rebuilt: false,
+          rebuilt_on: null,
+          code: "advance-settled",
+          message: settled.message,
+          flush,
+        });
+      } else {
+        this.warn("advance-refused", settled.message);
+      }
+      return;
+    }
+
+    // APRV-233, and the same rule for a cycle this process does not remember:
+    // an advance whose outcome nobody recorded is reconciled from the git
+    // evidence before anything else is attempted, and refused (never re-run)
+    // when the evidence is not there. On 2026-09-02 the absence of this made
+    // the next tick's authorization reach `startExecution` on the open key and
+    // come back `already-executed`, which reported a failure and fixed nothing.
+    const reconciled = reconcileDanglingAdvance(input, read.records);
+    if (reconciled !== null) {
+      if (reconciled.settled) {
+        this.emit({
+          event: "advance",
+          outcome: "nothing-owed",
+          records_pending: 0,
+          records_branch: null,
+          range: null,
+          commit: null,
+          pr_url: null,
+          pr_created: false,
+          rebuilt: false,
+          rebuilt_on: null,
+          code: "advance-reconciled",
+          message: reconciled.message,
+          flush,
+        });
+      } else if (this.reportedDangling !== reconciled.actionKey) {
+        // Once per cycle, not once per tick: an operator needs to be told, and
+        // being told every thirty seconds forever is how a warning stops being
+        // read.
+        this.reportedDangling = reconciled.actionKey;
+        this.warn("advance-refused", reconciled.message);
+      }
+      return;
+    }
+    this.reportedDangling = null;
+
     const state = publishedState(root, this.options.logPath, read.records, cadence, today);
     if (state.substantive === 0) return;
 
@@ -1192,20 +1431,39 @@ export class Daemon {
 
     const now = Date.parse(readClock(this.clockOptions()));
     const elapsed = this.lastAdvanceAt === null || Number.isNaN(now) || now - this.lastAdvanceAt >= cadence.intervalMs;
-    if (!flush && state.substantive < cadence.afterRecords && !elapsed) return;
+
+    // APRV-233, second: an advance that ALREADY HAPPENED does not get made
+    // again inside the interval, and the record-count trigger does not run
+    // around the interval for a span an earlier attempt already carried.
+    //
+    // The 2026-09-02 shape. The advance pushed `records-log-2026-09-02` and its
+    // `execution.completed` lost the append race, so the only thing left saying
+    // that a branch had just been pushed was an in-process clock — and the
+    // count trigger, alone among the two, never consulted it. Ticks two, five
+    // and eight each pushed the same branch again, ninety seconds apart, under
+    // a fifteen-minute interval (the three-tick spacing is the one in-flight
+    // slot: the two ticks in between found a child still running).
+    //
+    // An advance cycle still open in the log has already returned above, so
+    // what is left is the trigger itself: inside the interval, the count
+    // trigger fires only on records this process has not already attempted to
+    // publish. `afterRecords` is the busy-hour trigger and it keeps working;
+    // what it no longer does is count the same owed span over and over, which
+    // is how four fresh records re-pushed the branch every ninety seconds while
+    // the published head stood still.
+    const fresh =
+      this.lastAdvanceSpanEnd === null
+        ? state.substantive
+        : read.records.filter(
+            (record) =>
+              record.seq > Math.max(state.publishedSeq, this.lastAdvanceSpanEnd ?? 0) &&
+              !isAdvanceBookkeeping(record),
+          ).length;
+    if (!flush && fresh < cadence.afterRecords && !elapsed) return;
 
     this.lastAdvanceAt = Number.isNaN(now) ? 0 : now;
     this.lastAdvanceOwed = state.substantive;
-    const input: AdvanceInput = {
-      logPath: this.options.logPath,
-      cwd: root,
-      policy: this.options.policy,
-      cadence,
-      ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
-      ...(this.options.clock === undefined ? {} : { clock: this.options.clock }),
-      ...(this.options.today === undefined ? {} : { today: this.options.today }),
-      ...(this.options.advanceRunner === undefined ? {} : { runner: this.options.advanceRunner }),
-    };
+    this.lastAdvanceSpanEnd = state.substantiveSeq;
 
     // The gate, always here: the `supervised-live` draw reads a secret that
     // `core/child-env.ts` strips from every child, so authorization cannot
@@ -1242,7 +1500,10 @@ export class Daemon {
   /** Record and report one finished attempt, from either runner. */
   private reportAdvance(attempt: AdvanceAttempt, flush: boolean): void {
     this.lastAdvance = attempt;
-    if (attempt.outcome === "nothing-owed") return;
+    // APRV-233. Held whatever the outcome was, and before the early return: an
+    // outcome nobody recorded is the one thing this loop must not forget.
+    this.pendingAdvanceFinish = attempt.pendingFinish;
+    if (attempt.outcome === "nothing-owed" && attempt.pendingFinish === null) return;
 
     this.emit({
       event: "advance",
@@ -1253,6 +1514,8 @@ export class Daemon {
       commit: attempt.commit,
       pr_url: attempt.prUrl,
       pr_created: attempt.prCreated,
+      rebuilt: attempt.rebuilt,
+      rebuilt_on: attempt.rebuiltOn,
       code: attempt.code,
       message: attempt.message,
       flush,
@@ -1341,6 +1604,40 @@ export class Daemon {
       records,
       ...this.anchorWhere(),
       ...(this.options.schemaDir === undefined ? {} : { schemaDir: this.options.schemaDir }),
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Human-signed checkpoints (APRV-220)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Demand every checkpoint inside the verified records.
+   *
+   * `null` when the check is off. Everything else — including "no key is
+   * configured" — comes back as a {@link CheckpointCheck} the caller reports,
+   * because a check that could not look must never be read as a check that
+   * looked and was satisfied.
+   *
+   * The policy is read here, once per comparison rather than once per run: the
+   * keys are the human's and the human may add one while this loop is running,
+   * and a daemon holding a key list from startup would keep refusing a
+   * checkpoint the operator had already authorized by editing the policy.
+   */
+  private checkCheckpoints(records: readonly EventRecord[]): CheckpointCheck | null {
+    if (this.options.checkpoints?.enabled === false) return null;
+    const configured = checkpointPolicyOf(
+      this.options.policy,
+      this.options.schemaDir,
+    );
+    return checkLogCheckpoints({
+      records,
+      publicKeys: configured.publicKeys,
+      checkpointEveryMs: configured.checkpointEveryMs,
+      keysUnavailable: configured.unloadable,
+      ...(this.options.clock === undefined
+        ? {}
+        : { now: Date.parse(this.options.clock()) }),
     });
   }
 

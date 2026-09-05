@@ -1,0 +1,15 @@
+{
+  "seq": 62,
+  "ts": "2026-09-02T18:41:07Z",
+  "event": "approval.withdrawn",
+  "task": "task-042",
+  "action_key": "task-042:chaser:2026-08-04",
+  "actor": "agent:claude",
+  "payload": {
+    "action_key": "task-042:chaser:2026-08-04",
+    "reason": "policy-drift"
+  },
+  "alg": "sha256/jcs",
+  "prev": "2e9b7c1a4d6f08213b5c7e9a0d2f416385a7c9e1b3d5f70921a3c5e7092b4d6f",
+  "hash": "5c3a1f7e9b2d40618374a5c6e8f091a2b3c4d5e6f708192a3b4c5d6e7f809a1b"
+}

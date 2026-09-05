@@ -144,6 +144,109 @@ diverged   {"status":"anchor-diverged","records":9,"head":{...},
 run` makes it at startup and on every full prefix re-proof — see
 [git evidence](git-evidence.md).
 
+### `--checkpoints`: the second witness (APRV-220)
+
+The anchor asks whether anybody else holds a copy of these bytes, and answers
+from git, so it is exactly as fresh as the last push and says nothing at all on
+a machine with no remote. `--checkpoints` asks a different question: did a key
+that no agent process holds sign this head? It answers from the log plus the
+policy, so it works offline and covers the window nobody has pushed yet.
+
+The two are independent and neither may be weakened to let the other pass. A
+forger who truncates the log and recomputes the chain defeats neither: the
+anchor sees bytes nobody else has, and every checkpoint inside the rewritten
+range now names a hash the rewritten chain does not carry.
+
+Every `log.checkpoint` record in the walked range must clear four things:
+
+1. its payload reads (`seq`, `hash`, `alg: ed25519`, `key_sha256`, `signature`);
+2. the seq it signs is below its own (a checkpoint signs the past);
+3. its `key_sha256` names one of `audit.checkpoint_keys` in the policy;
+4. the signature verifies over `"approval.md/log-checkpoint/v1\n"` followed by
+   the RFC 8785 canonicalization of `{alg, hash, seq}`, AND the log's record at
+   that seq carries that hash.
+
+The first failure refuses, with its own frozen union
+(`conformance/vectors/refusal-unions.v1.json`, `checkpoint_refusal_codes`):
+`checkpoint-key-unknown`, `checkpoint-signature-invalid`,
+`checkpoint-hash-mismatch`, `checkpoint-out-of-order`, `checkpoint-malformed`.
+The third of those is the one this whole check exists for.
+
+`checkpoint-key-unknown` is a refusal rather than a shrug, deliberately. If a
+record naming an unlisted key were merely skipped, a forger could neutralize the
+whole mechanism by rewriting each checkpoint's `key_sha256`. The cost is that
+retiring a key out of `audit.checkpoint_keys` de-verifies every checkpoint it
+signed, which is why that field is a list and why retired keys stay in it.
+
+| outcome | exit | meaning |
+|---|---|---|
+| `pass` | 0 | every checkpoint in range validates (possibly none, which is not a failure) |
+| `skip` | 0 | no usable key is configured; the reason is printed on stderr |
+| `checkpoint-invalid` | 1 | a checkpoint in range does not validate |
+
+A log with no checkpoints at all is a pass, not a refusal: a human who has been
+away is not a forger. When `audit.checkpoint_every` is set and the newest
+checkpoint is older than it, the pass carries a `warning` — report-only, at
+every layer, with no path anywhere in this runtime from due to refused.
+
+A missing key is a skip and never a pass, the same rule the anchor follows.
+
+```
+pass    {"status":"clean",...,"checkpoints":{"status":"pass","verified":3,
+          "keys":1,"unchecked":0,"newest":{"at":41,"seq":40,"hash":"<64 hex>"}}}
+skip    {"status":"clean",...,"checkpoints":{"status":"skip","reason":"..."}}
+bad     {"status":"checkpoint-invalid","records":9,"head":{...},
+         "checkpoints":{"status":"refused","code":"checkpoint-hash-mismatch",
+                        "at":41,"verified":2,"message":"..."},"message":"..."}
+```
+
+## log checkpoint
+
+The human half of the mechanism `log verify --checkpoints` reads. It signs the
+log's CURRENT head with an Ed25519 key and appends one `log.checkpoint` record
+carrying `(seq, hash)` and the signature.
+
+```
+approval log checkpoint --as human:<id> [--key-file <path>] [--log <path>] [--json]
+```
+
+Human-only in three independent places, because this is the one record an agent
+must not be able to author: `core/checkpoint.ts` refuses a non-`human:` actor,
+`schema/event.schema.json` refuses one at the write boundary, and
+`core/command-class.ts` classifies the invocation `policy.core`, which the
+reference policy holds human-only, so the harness hook denies an agent that
+tries to run it.
+
+**Where the key comes from.** The private half lives in the credential vault
+under `approval.checkpoint.key`: encrypted at rest under the passphrase
+`vault.passphrase_env` names, which `core/child-env.ts` strips from every child
+this runtime spawns, in a file whose reading classifies `account.credential`.
+`--key-file <path>` reads it from a file instead, for a key kept outside the
+vault. There is no `--key` flag and no environment variable holding the key
+itself: a key on a command line is a key in the shell history, and a key in the
+session environment is a key every child inherits.
+
+**Where the public half goes.** `audit.checkpoint_keys` in `APPROVAL.md`, base64
+DER SPKI, which only the human may edit. It is written in the policy rather than
+carried by the record because a record that carried its own public key would
+invite a reader to verify the signature against it, which any forger could
+satisfy. The record names only a fingerprint; the policy is the authority.
+
+The head is read, then signed, then written with that head as the
+compare-and-append precondition, so a concurrent append is `head-moved` and the
+repair is to run the verb again. Nothing partial is left behind.
+
+```
+{"ok":true,"seq":41,"signed":{"seq":40,"hash":"<64 hex>"},
+ "key_sha256":"<64 hex>","actor":"human:carter","ts":"..."}
+{"ok":false,"error":{"code":"checkpoint-key-unreadable","message":"..."}}
+```
+
+Refusals: `actor-not-human`, `checkpoint-key-unreadable`,
+`checkpoint-key-unusable`, `log-empty`, `log-unreadable`, `log-torn-tail`,
+`log-corrupt`, `append-failed`. A torn or corrupt log is exit 1; everything else
+here is exit 4, because an operator without a key does not have a broken log.
+
 ## log tail
 
 The chain is verified first. On a torn tail the intact records are printed and the
@@ -1759,6 +1862,31 @@ The checks, at length:
   log sync` for a diverged log, `approval up` otherwise — never a `git` command:
   a repair line telling an operator to reset a branch would be doctor making the
   decision this project keeps human.
+- **harness-version-unverified** — whether the harness binary hosting the
+  PreToolUse hook changed since the log last saw a record from it (APRV-227).
+  The only row that asks anything about a program outside this repository, and
+  it asks the one way a log can: `<binary> --version` now, against the
+  `harness_version` on the newest hook-written `task.registered` or
+  `gate.bypassed`. Which harnesses to ask comes from the `approval hook <kind>`
+  commands this checkout's `.claude/settings.json` and `.cursor/hooks.json`
+  register. SKIP, named, for each of the three things that make a comparison
+  impossible: no hook registered here, no record naming a version yet, or no
+  such binary on `PATH`. FAIL when they differ, because an unverified change is
+  precisely the state in which nobody has checked whether the gate still fires;
+  the `fix` is the promptless self-test in `docs/claude-code-hook.md`, one
+  supervised-class tool call, after which the row is green. PASS says only that
+  the versions match — the field is self-reported (SPEC.md §11.1 invariant 4)
+  and reduces nothing anywhere, so a match is not proof the hook fired.
+- **live-draw** — whether a daemon is answering `supervised-live` draws for this
+  log (APRV-208). SKIP when the policy declares no live class: no draw is ever
+  made, and a missing socket is nothing. PASS when the socket is present and
+  owner-only, naming the classes it keeps live. The one FAIL is a live class
+  declared with no usable socket there, because that is the operator's control
+  not being in force: every action of that class gates to a human, at 100%
+  rather than the declared rate, and the two are indistinguishable from inside
+  the policy file. The fix starts the runtime in a shell where the sampling
+  secret resolves. It asks the daemon nothing — it looks at the socket exactly
+  as an asker does and reports what an asker would conclude.
 
 **`--json`** (one object on stdout):
 
@@ -2088,6 +2216,81 @@ recorded by the same human-only gate `approval grant` and `approval reject`
 call, with every rule — TTL, budgets, attestation, idempotency — applied
 unchanged.
 
+### Which rows a prompt shows is a policy decision (APRV-218)
+
+Each channel ships a default set of rows. Telegram's is deliberately slim: the
+`waiting … expires HH:MM UTC` line carries the TTL, so there is no separate
+`ttl` row (APRV-143), six bookkeeping rows are off (`task`, `state`,
+`provenance`, `requested_ts`, `payload_hash`, `chain`) and three health rows
+render only when abnormal (`autonomy`, `budgets`, `attestation`, APRV-163). The
+terminal and the page show everything, because they have the room.
+
+That default fits one operator. `channels.<name>.prompt` in `APPROVAL.md`
+replaces it, per channel, for `telegram`, `web` and `cli`:
+
+```yaml
+channels:
+  telegram:
+    prompt:
+      rows: [class, command_breakdown, task, waiting]
+      always: [budgets, task, chain]
+      hide: [provenance, requested_ts]
+```
+
+Three keys, each doing one thing. `rows` is ORDER ONLY: the rows it names
+render in that order ahead of every row it does not name, which keep their
+default relative order behind them. It is never a whitelist, so a field added
+by a later version cannot be lost to a list written before that field existed.
+`always` raises a row's visibility, so a row that is abnormal-only or off by
+default renders on every prompt. `hide` removes a row entirely.
+
+The row names are the `ChannelRequest` member names: `action_key`, `task`,
+`class`, `command_breakdown`, `protected_path`, `policy_diff`, `policy_load`,
+`autonomy`, `provenance`, `state`, `requested_ts`, `waiting`,
+`ttl_remaining_ms`, `payload_hash`, `attestation`, `budgets`, `chain`,
+`token_delivery`, `est_cost_usd`, `gloss`, `summary`, `rationale`,
+`confidence`.
+
+**A layout chooses among rows the approver READS; it cannot touch what the
+approver SIGNS.** Three things are out of its reach entirely. The canonical
+payload block (SPEC.md §9) is not a row: it is rendered verbatim, and it states
+the payload bytes, the renderer version, the class, the kind and the bound
+`payload sha256` whatever the layout says. The buttons are not a row, because a
+prompt with no way to answer it is not a prompt. And the computed/claimed split
+is a property of the field rather than of the layout: `rows` decides the order
+rows are considered in, a channel partitions by `TaggedField.kind` afterwards,
+so a claimed line reordered to the front is first among the CLAIMED lines and
+never above the computed heading.
+
+Six rows are required for a decision and may be reordered but not hidden:
+`action_key`, `class`, `command_breakdown`, `protected_path`, `policy_diff` and
+`policy_load`. `payload_hash` is not among them, because the bound hash is
+stated inside the canonical block on every channel, so hiding the row removes a
+duplicate rather than the binding — which is exactly what Telegram's default
+already does.
+
+The anomaly mark (`!! `) stays a statement about the VALUE. A row forced on
+with `always` carries it only when the value is in fact the reason to look, so
+`always: [budgets]` gets a quiet budget line on an ordinary request and a
+shouted one when a ceiling is in play.
+
+Fail soft on absence, closed on invalidity, the split every other policy key
+keeps. No `prompt` block — and a policy that failed to load at all — means the
+rows the channel ships, because a layout is not a permission and an unrelated
+typo in a class rule must not silently redecorate a phone screen. An unknown
+row name, a required row in `hide`, a row named by both `always` and `hide`, or
+a key the block does not define fails the WHOLE policy at load with a
+machine-readable keyword (`prompt-row-unknown`, `prompt-row-required`,
+`prompt-row-conflict`, `prompt-key-unknown`, `prompt-block-shape`), and every
+class resolves to `manual` until the file is repaired. The check runs for every
+channel name, including the unknown ones the schema admits as free-form
+objects, so a layout is validated wherever it is written.
+
+Nothing here teaches a channel anything about the log. Every row a layout can
+turn on was already on the `ChannelRequest`, and `--json`, `approval queue` and
+the web page carried it all along; rendering stays a pure function of
+(request, layout).
+
 ## channel cli
 
 **The rendering convention (SPEC.md §9).** Every displayed field carries a
@@ -2166,6 +2369,12 @@ percent-encoded name; unset, the bytes come from `.approval/payloads/`. Either w
 they are hashed and checked against the request's recorded `payload_hash`, and
 material that does not match is refused rather than rendered.
 
+**Which rows this walk shows** comes from `channels.cli.prompt` in the policy;
+absent, the terminal shows every row the request carries, computed identity and
+authority first, claimed persuasion last. See "Which rows a prompt shows is a
+policy decision" above. `--json` is unaffected: it holds the tagged queue
+verbatim whatever the layout says.
+
 **`--json`** (one object on stdout):
 
 ```
@@ -2214,6 +2423,11 @@ log (which holds only its SHA-256), never put in a URL, and never shown again.
 This differs from the Telegram channel, which refuses to put a token in a chat:
 that transcript lives on someone else's servers, this page is served over
 loopback to the person deciding, right now, and is persisted nowhere.
+
+**Which rows the page shows** comes from `channels.web.prompt` in the policy;
+absent, the page shows every row the request carries. See "Which rows a prompt
+shows is a policy decision" above. The canonical payload region and the
+CLAIMED/computed split are beyond a layout's reach here as everywhere.
 
 `--port` precedence is `--port`, then `channels.web.port` in the policy, then
 4680. `--as` is required at startup: this page exists to record decisions, so a
@@ -2288,6 +2502,17 @@ log whether or not it has been shown, `approval queue` and `/queue` list them
 all, and nothing expires sooner for having waited its turn. Digest grouping
 still applies to the request being shown, so a set of similar requests is one
 thing to read.
+
+**The prompt is slim on purpose, and `channels.telegram.prompt` changes it.**
+No `ttl` row (the `waiting … expires HH:MM UTC` line is the TTL, stated as the
+instant a reader acts on), no `resolved by`, `payload sha256`, `requested`,
+`chain`, `task` or `state` row, and `autonomy`, `budgets` and `policy` only
+when they are abnormal. An operator who wants the budget line on every prompt,
+or the task id always visible, writes `always: [budgets, task]` under
+`channels.telegram.prompt`; `hide` drops rows and `rows` reorders them. Every
+one of those fields stayed on the request all along, so `--json`, `approval
+queue` and the web page always showed them. See "Which rows a prompt shows is a
+policy decision" above for what a layout may not touch.
 
 `channels.telegram.delivery: burst` restores the pre-APRV-216 behaviour: every
 pending request this process has not sent yet, on every cycle, behind the
@@ -2981,6 +3206,23 @@ of the day opens it, every later one is parented on the branch and updates it in
 place. The daemon never merges; `gh pr merge` is `vcs.push.main` and stays a
 human's act or a session's.
 
+Two rules keep that from turning into a loop of its own (APRV-233, APRV-234).
+An advance whose outcome is not yet in the log has still HAPPENED: the daemon
+records that outcome again against a fresh head (a bounded re-derivation, the
+same one the harness writers have used since APRV-150), authorizes nothing new
+while such a cycle is open (`advance-unreconciled`), and closes a cycle it does
+not remember only where it can see the records on a records branch
+(`advance-reconciled`); where it cannot, the cycle stays open for a person.
+Inside `--advance-interval` the record-count trigger counts only records no
+earlier attempt tried to publish, so the same owed span is never re-pushed. And
+where the trunk has moved under the day's branch, the advance REBUILDS its
+commit on the current trunk rather than stacking on a branch that no longer
+contains it — `rebuilt` and `rebuilt_on` on the `advance` line, an
+`advance-rebuilt` note on the cycle's `execution.completed`, and the same words
+in the `log-advance-cadence` doctor row. A branch the remote will not let it
+update (a protected-branch ruleset, a pull request in the merge queue) gets a
+fresh `records-log-<date>-<n>`, named in the report.
+
 The count that drives the cadence excludes the advance cycle's OWN records
 (`task.registered`, `execution.started`, `execution.completed` under
 `daemon-advance-*`): each advance leaves its completion record unpublished, and a
@@ -3014,6 +3256,34 @@ so it proves the snapshot's digest in full whatever the policy says.
 
 The flag beats the policy's `daemon` block for that run, a bad value is a usage
 error before the first tick, and the `started` line prints the mode in force.
+
+**The live draw (`--no-draw`, a way out only).** A `supervised-live` class is
+sampled with an HMAC under the operator's sampling secret, and the process that
+decides is usually a harness hook: a child of an agent session, which must never
+be able to read that secret. So the draw is made here instead. When the secret
+resolves in THIS process's environment (the `eval "$(approval env)"` an operator
+runs in the terminal they start the daemon from), the daemon binds an owner-only
+Unix socket at `<log home>/daemon/draw.sock`, directory 0700 and socket 0600,
+and answers one question per connection: given an action key and a payload hash
+it has verified are already registered in this log, is this action in the live
+fraction? The answer carries an HMAC over the question and the verdict, which
+the asker records and cannot check, and an operator holding the secret
+recomputes later from the request's own fields. The daemon resolves the class
+and the rate from its own policy rather than taking the asker's word, and echoes
+what it derived. It answers nothing for bytes that are not registered, so a
+process fishing for a favourable payload has to leave every candidate in the
+append-only log first.
+
+There is no flag that turns this on: holding the secret is the opt-in, and
+declaring a class `supervised-live` is its other half. `--no-draw` is the way
+out, for taking the control back without unsetting a variable a shell profile
+exports. Without a server — no secret, `--no-draw`, or a socket that will not
+bind — every supervised-live action gates to a human, which is the behaviour of
+every release before APRV-208. The `started` line's `draw` field is the socket
+path or `null`, a failure to bind is a `draw-unavailable` warning and never
+fatal, and `approval doctor`'s `live-draw` row answers the same question from
+outside the process. A policy that declares no live class serves no socket and
+says nothing about it.
 
 **Each tick, in order.**
 
@@ -3091,6 +3361,7 @@ with the log idle is a bug: file it with the `tick` line's `phases`.
 {"event":"advance","outcome":"advanced","records_pending":7,
  "records_branch":"records-log-2026-09-01","range":{"from":4,"to":10},
  "commit":"<40hex>","pr_url":"https://github.com/…","pr_created":true,
+ "rebuilt":false,"rebuilt_on":null,
  "code":null,"message":"seq 4..10 is on records-log-2026-09-01","flush":false}
 {"event":"tick","n":1,"head":10,"drift":1,"expired":1,"escalated":0,
  "ms":41,"reads":8,"reproof":"full","phases":{"drift":9,"ttl":3,"audit":6,
@@ -3105,7 +3376,7 @@ Warnings go to stderr as `{"event":"warning","code":"...","message":"..."}`, wit
 `code` one of `task-unreadable`, `frontmatter-invalid`, `envelope-invalid`,
 `task-id-missing`, `tasks-dir-unreadable`, `append-refused`, `expire-refused`,
 `render-failed`, `watch-unavailable`, `prune-refused`, `write-back-refused`,
-`advance-refused`. A warning never stops the
+`advance-refused`, `draw-unavailable`. A warning never stops the
 loop, and neither does `{"event":"git_evidence_failed","step":"commit",…}`.
 
 Payload retention: with `payload_retention` set in policy, each tick appends

@@ -551,10 +551,15 @@ test("a second decision is idempotent: already-decided is surfaced, nothing is a
   ]);
   assert.equal(second.status, 409);
   assert.match(second.body, /already-decided/u);
-  assert.equal(
-    recordsOf(world.unit.logPath).length,
-    afterFirst,
-    "a duplicate click appended a second event",
+  // APRV-235: the second click appends no second DECISION, and one audit record
+  // saying a person clicked again and was told no. The first answer stands, and
+  // that is what "idempotent" means here.
+  assert.deepEqual(
+    recordsOf(world.unit.logPath)
+      .slice(afterFirst)
+      .map((record) => record.event),
+    ["audit.decision_refused"],
+    "a duplicate click appended a second decision",
   );
   assertClean(world.unit);
 });

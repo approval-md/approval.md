@@ -1,0 +1,16 @@
+{
+  "seq": 7,
+  "ts": "2026-09-04T10:22:14Z",
+  "event": "task.registered",
+  "task": "hook:sess-1:toolu-9",
+  "actor": "agent:claude-code",
+  "payload": {
+    "state": "proposed",
+    "actions": [],
+    "harness": "claude-code",
+    "harness_version": "2.0.14 (Claude Code)\nwarning: token sk-ant-oops expired"
+  },
+  "alg": "sha256/jcs",
+  "prev": "b1cbb27b12bd811a9d197f5fb1c494c191040271901214286f0c10bc84820173",
+  "hash": "129eaa2bad261af1367f963979287653173eba8adce9961f09f08970f38d838f"
+}

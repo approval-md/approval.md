@@ -23,6 +23,13 @@
  * - `body` runs under `/bin/sh` with the prompt as its single argument. Keep it
  *   to `echo`, `exit`, and at most a `touch`: this is a stub, and a stub that
  *   needs debugging is a test that is asserting the wrong thing.
+ *
+ * Since APRV-227 `scripts/run-tests.mjs` puts a REFUSING stub in front of every
+ * harness binary for the whole suite, so a file that forgets one of these gets a
+ * fast `null` under `npm test` instead of a real model call. That is a backstop
+ * and not a replacement: it makes forgetting cheap, it does not make a runner
+ * appear where a test asserts one, and a bare `node --test dist/tests/x.js`
+ * still inherits the developer's own PATH. Keep passing these.
  */
 
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";

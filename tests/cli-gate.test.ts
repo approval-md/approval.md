@@ -527,8 +527,16 @@ test("grant: loved or disliked with no note refuses reaction-note-required", () 
     assert.equal(run.code, 1, run.stderr);
     assert.equal(jsonErr(run)["code"], "reaction-note-required");
     assert.match(String(jsonErr(run)["message"]), /--note/u);
-    // Nothing appended, and the request is still there to answer.
-    assert.deepEqual(events(dir), ["policy.updated", "task.registered", "approval.requested"]);
+    // The gate appends nothing on this refusal; the one record that follows is
+    // the CLI's own APRV-235 note that a human's decision was refused, which
+    // is a fact about the surface and not a grant. The request is still there
+    // to answer.
+    assert.deepEqual(events(dir), [
+      "policy.updated",
+      "task.registered",
+      "approval.requested",
+      "audit.decision_refused",
+    ]);
 
     // A blank note is not a note.
     const blank = runCli(
@@ -547,7 +555,13 @@ test("grant: loved or disliked with no note refuses reaction-note-required", () 
     );
     assert.equal(blank.code, 1);
     assert.equal(jsonErr(blank)["code"], "reaction-note-required");
-    assert.deepEqual(events(dir), ["policy.updated", "task.registered", "approval.requested"]);
+    assert.deepEqual(events(dir), [
+      "policy.updated",
+      "task.registered",
+      "approval.requested",
+      "audit.decision_refused",
+      "audit.decision_refused",
+    ]);
     assertClean(dir);
   }
 });
@@ -656,8 +670,18 @@ test("revoke: refused on an undecided request, accepted on a grant", () => {
     decision: "revoke",
     state: "revoked",
     action_key: "task-042:chaser",
-    seq: 5,
+    // Six rather than five since APRV-235: the early revoke above was a human's
+    // decision the gate would not take, and the log now says so.
+    seq: 6,
   });
+  assert.deepEqual(events(dir), [
+    "policy.updated",
+    "task.registered",
+    "approval.requested",
+    "audit.decision_refused",
+    "approval.granted",
+    "approval.revoked",
+  ]);
   assertClean(dir);
 });
 
@@ -781,11 +805,17 @@ test("a late grant is refused and materialises approval.expired with a system: a
   assert.equal(error["code"], "expired");
   assert.equal(error["state"], "expired");
 
+  // Two records, in this order: the lapse the refusal materialised, and (since
+  // APRV-235) the audit trail of the human's late tap. The refusal's `seq`
+  // still names the expiry, which is the record the caller was told about.
   const records = logRecords(dir);
-  const last = records[records.length - 1] as Record<string, unknown>;
-  assert.equal(last["event"], "approval.expired");
-  assert.equal(last["actor"], "system:gate");
-  assert.equal(error["seq"], last["seq"]);
+  assert.deepEqual(
+    records.slice(-2).map((record) => record["event"]),
+    ["approval.expired", "audit.decision_refused"],
+  );
+  const expired = records[records.length - 2] as Record<string, unknown>;
+  assert.equal(expired["actor"], "system:gate");
+  assert.equal(error["seq"], expired["seq"]);
   assert.equal(events(dir).includes("approval.granted"), false);
   assertClean(dir);
 });

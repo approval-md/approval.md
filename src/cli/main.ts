@@ -44,6 +44,7 @@ import { pathToFileURL } from "node:url";
 import type { ChainAnomaly } from "../core/verify.js";
 import type { EventRecord } from "../core/log.js";
 import type { AnchorCheck } from "./log-anchor.js";
+import type { CheckpointCheck } from "../core/checkpoint.js";
 import { boolFlag, countFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import {
   EXIT_INTEGRITY,
@@ -315,6 +316,79 @@ function reportAnchor(outcome: AnchorCheck, streams: Streams): void {
   streams.out(`anchor ${outcome.anchor.rev}: ${outcome.detail}\n`);
 }
 
+/**
+ * The anchor block on the checkpoint-refusal path, where there may be none.
+ *
+ * A separate spelling rather than a nullable {@link anchorField}, so the field
+ * stays ADDITIVE in the strict sense the frozen `--json` shapes require: a
+ * consumer that never asked for `--anchor` sees no `anchor` key, on this path as
+ * on every other.
+ */
+function anchorField2(outcome: AnchorCheck | null): Record<string, unknown> {
+  return outcome === null ? {} : anchorField(outcome);
+}
+
+/**
+ * The checkpoint half of `approval log verify` (APRV-220).
+ *
+ * The keys come from the policy, which is where the human wrote them, and an
+ * unloadable policy is a SKIP naming that rather than a pass: the check has
+ * said nothing about this log, and a verb that reported silence as a verified
+ * chain would be a verb that stopped verifying.
+ */
+async function runCheckpointCheck(
+  records: EventRecord[],
+  cwd: string,
+): Promise<CheckpointCheck> {
+  const { checkLogCheckpoints, checkpointPolicyOf } = await import("../core/checkpoint.js");
+  const configured = checkpointPolicyOf({ dir: cwd });
+  return checkLogCheckpoints({
+    records,
+    publicKeys: configured.publicKeys,
+    checkpointEveryMs: configured.checkpointEveryMs,
+    keysUnavailable: configured.unloadable,
+  });
+}
+
+function checkpointField(outcome: CheckpointCheck): Record<string, unknown> {
+  if (outcome.status === "skip") {
+    return { checkpoints: { status: "skip", reason: outcome.reason } };
+  }
+  if (outcome.status === "refused") {
+    return {
+      checkpoints: {
+        status: "refused",
+        code: outcome.code,
+        at: outcome.at,
+        verified: outcome.checkpoints.length,
+        message: outcome.message,
+      },
+    };
+  }
+  const newest = outcome.checkpoints[outcome.checkpoints.length - 1] ?? null;
+  return {
+    checkpoints: {
+      status: "pass",
+      verified: outcome.checkpoints.length,
+      keys: outcome.keys,
+      unchecked: outcome.unchecked,
+      newest: newest === null ? null : { at: newest.at, seq: newest.seq, hash: newest.hash },
+      ...(outcome.warning === null ? {} : { warning: outcome.warning }),
+    },
+  };
+}
+
+/** The checkpoint line a human reads, after the chain verdict it qualifies. */
+function reportCheckpoints(outcome: CheckpointCheck, streams: Streams): void {
+  if (outcome.status === "skip") {
+    streams.err(`approval: checkpoints skipped — ${outcome.reason}\n`);
+    return;
+  }
+  if (outcome.status === "refused") return;
+  streams.out(`checkpoints: ${outcome.detail}\n`);
+  if (outcome.warning !== null) streams.err(`approval: ${outcome.warning}\n`);
+}
+
 async function commandVerify(argv: string[], streams: Streams, cwd: string): Promise<number> {
   const front = prelude(
     argv,
@@ -328,6 +402,13 @@ async function commandVerify(argv: string[], streams: Streams, cwd: string): Pro
       // would make every other flag's shape a special case.
       "--anchor": "boolean",
       "--anchor-rev": "string",
+      // APRV-220. The second witness, and a separate flag from `--anchor`
+      // because they answer different questions and fail in different
+      // directions: the anchor asks whether anybody else holds these bytes, a
+      // checkpoint asks whether a key no agent holds signed this head. Asking
+      // for one has never implied the other, and neither may be weakened to
+      // make the other pass.
+      "--checkpoints": "boolean",
     },
     VERIFY_HELP,
     streams,
@@ -338,6 +419,7 @@ async function commandVerify(argv: string[], streams: Streams, cwd: string): Pro
 
   const anchorRev = stringFlag(flags, "--anchor-rev");
   const wantsAnchor = boolFlag(flags, "--anchor") || anchorRev !== null;
+  const wantsCheckpoints = boolFlag(flags, "--checkpoints");
 
   const check = preflightLog(logPath);
   if (!check.ok) return ioError(streams, json, check.message);
@@ -350,9 +432,10 @@ async function commandVerify(argv: string[], streams: Streams, cwd: string): Pro
   // anchor check compares against records the caller has already verified, and
   // a plain run has no use for them.
   const { verify, verifyWithRecords } = await import("../core/verify.js");
-  const walked = wantsAnchor
-    ? verifyWithRecords(logPath, { policy: { dir: cwd } })
-    : { result: verify(logPath, { policy: { dir: cwd } }), records: [] as EventRecord[] };
+  const walked =
+    wantsAnchor || wantsCheckpoints
+      ? verifyWithRecords(logPath, { policy: { dir: cwd } })
+      : { result: verify(logPath, { policy: { dir: cwd } }), records: [] as EventRecord[] };
   const result = walked.result;
 
   if (result.status === "clean") {
@@ -385,6 +468,31 @@ async function commandVerify(argv: string[], streams: Streams, cwd: string): Pro
       return EXIT_INTEGRITY;
     }
 
+    // The second witness (APRV-220), run independently of the first and after
+    // it. Independently, because a checkpoint refusal and an anchor divergence
+    // are different facts with different repairs, and neither may be softened
+    // to let the other report a pass; after it, only so that a log failing both
+    // reports the older check's message first.
+    const checkpoints = wantsCheckpoints
+      ? await runCheckpointCheck(walked.records, cwd)
+      : null;
+
+    if (checkpoints !== null && checkpoints.status === "refused") {
+      if (json) {
+        emitJson(streams, {
+          status: "checkpoint-invalid",
+          records: result.records,
+          head: result.head,
+          ...anchorField2(anchor),
+          ...checkpointField(checkpoints),
+          message: checkpoints.message,
+        });
+      } else {
+        streams.err(`${renderRefusal(style({ json }), checkpoints.code, checkpoints.message)}\n`);
+      }
+      return EXIT_INTEGRITY;
+    }
+
     if (json) {
       emitJson(streams, {
         status: result.status,
@@ -392,6 +500,7 @@ async function commandVerify(argv: string[], streams: Streams, cwd: string): Pro
         head: result.head,
         ...anomalyField(result.anomalies),
         ...(anchor === null ? {} : anchorField(anchor)),
+        ...(checkpoints === null ? {} : checkpointField(checkpoints)),
       });
     } else {
       const head =
@@ -399,6 +508,7 @@ async function commandVerify(argv: string[], streams: Streams, cwd: string): Pro
       streams.out(`clean: ${result.records} record(s), ${head}\n`);
       reportAnomalies(streams, result.anomalies);
       if (anchor !== null) reportAnchor(anchor, streams);
+      if (checkpoints !== null) reportCheckpoints(checkpoints, streams);
     }
     return EXIT_OK;
   }
@@ -646,6 +756,14 @@ async function commandLog(argv: string[], streams: Streams, cwd: string): Promis
     case "advance": {
       const { commandLogAdvance } = await import("./log-verbs.js");
       return commandLogAdvance(rest, streams, cwd);
+    }
+    // APRV-220. The one verb here that APPENDS: a human signing the current
+    // head with a key no agent process holds. Loaded lazily like the two above,
+    // because it reaches the vault and the signing primitives and a plain
+    // `approval log tail` has no use for either.
+    case "checkpoint": {
+      const { commandLogCheckpoint } = await import("./log-checkpoint.js");
+      return commandLogCheckpoint(rest, streams, cwd);
     }
     default:
       return usageError(

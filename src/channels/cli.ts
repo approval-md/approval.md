@@ -69,6 +69,7 @@
 import { createInterface, type Interface } from "node:readline";
 
 import type { BudgetVerdict } from "../core/budgets.js";
+import { CLI_PROMPT_LAYOUT, isPromptRow, type PromptLayout } from "../core/prompt-layout.js";
 import { GLOSS_UNVERIFIED_SUFFIX } from "./contract.js";
 import type {
   ChannelBatch,
@@ -103,6 +104,15 @@ export interface CliChannelOptions {
   input?: InputSource;
   /** Channel name recorded for audit. Defaults to `cli`. */
   name?: string;
+  /**
+   * Which rows the rendering shows (APRV-218), from `channels.cli.prompt`.
+   *
+   * Resolved by the verb, which has already loaded the policy; this channel
+   * neither reads a policy file nor holds an opinion about what an operator
+   * should see. Defaults to {@link CLI_PROMPT_LAYOUT}, so a channel constructed
+   * without one renders exactly what it rendered before the key existed.
+   */
+  layout?: PromptLayout;
 }
 
 /** The marker prefixes. Exported because the help text and the tests pin them. */
@@ -185,46 +195,29 @@ function attribution(field: TaggedField<unknown>): string {
 }
 
 /**
- * The order fields are presented in.
+ * The order fields are presented in, and which of them render (APRV-218).
  *
- * Computed identity and authority first, claimed persuasion last: a reader who
- * stops halfway has read the runtime's answer and not the agent's pitch. Fields
- * absent from a request are skipped; fields present but not listed here are
- * appended, so a widened {@link ChannelRequest} cannot silently lose a member.
+ * The default is {@link CLI_PROMPT_LAYOUT}: computed identity and authority
+ * first, claimed persuasion last, every row on — a reader who stops halfway has
+ * read the runtime's answer and not the agent's pitch, and a terminal a human
+ * asked for by typing a verb is not the place to economise on lines the way a
+ * push notification is. `channels.cli.prompt` in APPROVAL.md replaces it.
+ *
+ * Two properties survive any layout. Fields absent from a request are skipped;
+ * and members the layout does not NAME are appended rather than dropped, so a
+ * widened {@link ChannelRequest} cannot silently lose one to a policy written
+ * before that field existed. `fullPayload` is one of those appended members: it
+ * is not a row, it has its own delimited region below, and no layout key
+ * reaches it.
  */
-const FIELD_ORDER: string[] = [
-  "action_key",
-  "task",
-  "class",
-  "command_breakdown",
-  "protected_path",
-  // APRV-109: on an attestation prompt these two ARE the decision, so they sit
-  // with the resolution lines rather than after the claimed block. Absent on
-  // every ordinary request, and `orderedFields` skips a name the request does
-  // not carry.
-  "policy_diff",
-  "policy_load",
-  "autonomy",
-  "provenance",
-  "state",
-  "requested_ts",
-  "waiting",
-  "ttl_remaining_ms",
-  "payload_hash",
-  "attestation",
-  "budgets",
-  "chain",
-  "est_cost_usd",
-  "gloss",
-  "summary",
-  "rationale",
-  "confidence",
-];
-
-function orderedFields(request: ChannelRequest): string[] {
+function orderedFields(request: ChannelRequest, layout: PromptLayout): string[] {
   const members = Object.keys(request as unknown as Record<string, unknown>);
-  const ordered = FIELD_ORDER.filter((name) => members.includes(name));
-  for (const name of members) if (!ordered.includes(name)) ordered.push(name);
+  const ordered: string[] = layout.order.filter(
+    (name) => layout.visibility[name] !== "off" && members.includes(name),
+  );
+  for (const name of members) {
+    if (!ordered.includes(name) && !isPromptRow(name)) ordered.push(name);
+  }
   return ordered;
 }
 
@@ -294,11 +287,14 @@ export class CliChannel implements TestableChannel {
   private rendered: RenderedRequest[] = [];
   private reader: LineReader | null = null;
   private counter = 0;
+  /** The policy's row layout for this channel (APRV-218). Pure input to the rendering. */
+  private readonly layout: PromptLayout;
 
   constructor(options: CliChannelOptions = {}) {
     this.name = options.name ?? "cli";
     this.output = options.output ?? process.stdout;
     this.input = options.input ?? process.stdin;
+    this.layout = options.layout ?? CLI_PROMPT_LAYOUT;
   }
 
   /**
@@ -464,7 +460,7 @@ export class CliChannel implements TestableChannel {
   private renderRequest(request: ChannelRequest, batchDeliveryId?: DeliveryId): RenderedRequest {
     const members = request as unknown as Record<string, TaggedField<unknown> | undefined>;
     const fields: RenderedField[] = [];
-    for (const name of orderedFields(request)) {
+    for (const name of orderedFields(request, this.layout)) {
       const field = members[name];
       if (field === undefined) continue;
       fields.push({ field: name, kind: field.kind, text: formatValue(name, field.value) });

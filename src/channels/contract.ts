@@ -51,6 +51,7 @@
 
 import type { AttestationStatus } from "../core/attest.js";
 import type { BudgetVerdict } from "../core/budgets.js";
+import { recordRefusedDecision } from "../core/decision-refusal.js";
 import { decide, type DecideOptions, type GateRefusal } from "../core/gate.js";
 import type { EventRecord } from "../core/log.js";
 import {
@@ -142,6 +143,47 @@ export type TaggedField<T> =
  * different labels is how one of them ends up looking authoritative.
  */
 export const GLOSS_UNVERIFIED_SUFFIX = "(model, unverified)";
+
+/**
+ * What a person is told, in one line, when the gate would not take their
+ * decision (APRV-235).
+ *
+ * One function, every surface. A Telegram message edit, a web page and a
+ * terminal are three renderings of one fact, and before this they were three
+ * sentences — or, on the terminal that watched a `policy-drift` refusal on
+ * 2026-09-02, one sentence in a place the person who had tapped could not see.
+ * A human who taps on their phone and then reads the operator's terminal should
+ * find the same words in both, because the alternative is deciding which one to
+ * believe.
+ *
+ * Written to the approver, not to the log: it says what happened to THEIR
+ * answer and what, if anything, they should do next. The machine-readable fact
+ * is `code`, which every caller has and none of them should be paraphrasing.
+ * The wording of the first three is APRV-206's, moved here unchanged.
+ */
+export function refusedDecisionLine(code: string): string {
+  if (code === "already-decided") {
+    return "Already decided — the first answer stands; nothing was recorded.";
+  }
+  // APRV-106. The tap that races the withdrawal, or lands on a message whose
+  // edit did not go through. Nothing is appended and the human is told why in
+  // the terms that matter to them: the asker is gone, so there is nothing their
+  // answer could do.
+  if (code === "request-withdrawn") {
+    return "Withdrawn — the requester took this back and is no longer waiting; nothing was recorded.";
+  }
+  if (code === "expired") return "Expired — the approval window has closed.";
+  // APRV-235, and the reason this helper exists. The distinction the line has to
+  // carry is that nothing is wrong with the ACTION: the policy was re-attested
+  // after the question was asked, so the rules on the approver's screen are not
+  // the rules in force, and the answer cannot be recorded under either. The
+  // request is void and has been withdrawn, so this is not a "try again" — the
+  // caller asks again, and a fresh question arrives under the current rules.
+  if (code === "policy-drift") {
+    return "Policy changed after this was asked — the rules you were shown are no longer in force, so your answer could not be recorded. The request has been withdrawn; the caller will ask again under the current policy.";
+  }
+  return `Refused by the runtime: ${code}.`;
+}
 
 /** Tag `value` as runtime-derived, naming the derivation that produced it. */
 export function computed<T>(value: T, source: ComputedSource | string): TaggedField<T> {
@@ -754,7 +796,19 @@ export function recordChannelDecision(
     options,
   );
 
-  if (!result.ok) return { outcome: result };
+  if (!result.ok) {
+    // APRV-235. A human tapped and the gate would not take it. The gate itself
+    // appends nothing on a refusal, by design; this surface knows something the
+    // gate does not, which is that a PERSON produced the gesture, and that is
+    // the fact the log was missing. `core/decision-refusal.ts` states the
+    // argument in full, including why an agent's refusal is not recorded.
+    //
+    // Best effort, deliberately last, and it changes nothing about what the
+    // channel is handed back: the decision has already been refused, and a
+    // failed audit append must not turn one refusal into two.
+    noteRefusedDecision(logPath, decision, actorOptions, gateOptions, result);
+    return { outcome: result };
+  }
 
   const outcome: DecisionOutcome = {
     ok: true,
@@ -765,6 +819,50 @@ export function recordChannelDecision(
     tokenIssued: result.token !== undefined,
   };
   return result.token === undefined ? { outcome } : { outcome, token: result.token };
+}
+
+/**
+ * Append the audit trail of a refused human decision, and swallow whatever goes
+ * wrong doing it (APRV-235).
+ *
+ * The swallowing is the point. Every caller of {@link recordChannelDecision} is
+ * on a path that has already produced its answer — a Telegram listener about to
+ * edit a message, a web handler about to render one, a terminal about to print
+ * one — and an unreadable log or a lost append race here must not take that
+ * answer away from the human who is waiting for it. What a failure costs is the
+ * record, which is exactly what the caller had before this existed.
+ */
+function noteRefusedDecision(
+  logPath: string,
+  decision: ChannelDecision,
+  actorOptions: ChannelActorOptions,
+  gateOptions: DecideOptions,
+  refusal: GateRefusal,
+): void {
+  try {
+    recordRefusedDecision(
+      logPath,
+      {
+        actionKey: decision.action_key,
+        decision: decision.decision,
+        actor: actorOptions.actor,
+        // Every surface in this repository names itself. The fallback is the
+        // local process, which is what a decision that reached the runtime
+        // through no channel at all came through.
+        channel: actorOptions.channel ?? "cli",
+      },
+      {
+        code: refusal.code,
+        message: refusal.message,
+        ...(refusal.drift === undefined ? {} : { drift: refusal.drift }),
+      },
+      gateOptions,
+    );
+  } catch {
+    // Nothing in `core/decision-refusal.ts` throws; this is the belt on the
+    // braces, so that a surprise from the append path cannot become an
+    // exception on a decision path that had already finished deciding.
+  }
 }
 
 /**

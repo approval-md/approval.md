@@ -129,6 +129,7 @@ import type { BudgetVerdict } from "../src/core/budgets.js";
 import { register as registerCore, request as requestCore } from "../src/core/gate.js";
 import { payloadHash } from "../src/core/payload.js";
 import { loadPolicy } from "../src/core/policy-load.js";
+import { applyPromptBlock, TELEGRAM_PROMPT_LAYOUT } from "../src/core/prompt-layout.js";
 import { readVerifiedRecords } from "../src/core/state.js";
 import { expire, register, request, withdraw } from "./clock-adapters.js";
 import { fakeClaudeEnv, FAKE_GLOSS_SENTENCE } from "./fake-claude.js";
@@ -193,6 +194,15 @@ const POLICY = [
  * a different subject entirely.
  */
 const POLICY_LONG_RUN = POLICY.replace("      daily_actions: 5", "      daily_actions: 500");
+
+/**
+ * The same policy with one class's ceiling raised (APRV-235).
+ *
+ * Attested after a request has already been routed, this is what
+ * `policy-drift` is about: nothing is unattested, nothing is unverified, and
+ * the rules on the approver's screen are a different set of rules.
+ */
+const POLICY_REATTESTED = POLICY.replace("      per_action_usd: 1", "      per_action_usd: 2");
 
 let mock: MockBotApi;
 
@@ -667,6 +677,49 @@ test("an attestation prompt still shows the diff and the loads it asks about", (
   assert.ok(rendered.header.includes("<b>policy diff:</b>"), rendered.header);
   assert.ok(rendered.header.includes("<b>policy loads:</b>"), rendered.header);
 });
+
+// ---------------------------------------------------------------------------
+// The layout the policy chose (APRV-218)
+// ---------------------------------------------------------------------------
+
+test("a policy layout reaches the messages the bot actually sends (APRV-218)", async () => {
+  const world = live(1);
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  // The operator who wants the task id and the chain position on every prompt,
+  // and does not want the "waiting" prose. Everything here was already on the
+  // request: the layout chooses among facts, and teaches the channel nothing
+  // new about the log.
+  const channel = channelFor({
+    layout: applyPromptBlock(TELEGRAM_PROMPT_LAYOUT, {
+      rows: ["task", "class"],
+      always: ["task", "chain"],
+      hide: ["waiting"],
+    }),
+  });
+  channel.onDecision(handlerFor(world, at(2)));
+  const before = mock.sentTexts().length;
+  await channel.notify(request_);
+  const whole = mock.sentTexts().slice(before).join("\n");
+
+  assert.ok(whole.includes("<b>task:</b>"), whole);
+  assert.ok(whole.includes("<b>chain:</b>"), whole);
+  assert.equal(whole.includes("<b>waiting:</b>"), false, whole);
+  assert.ok(whole.indexOf("<b>task:</b>") < whole.indexOf("<b>class:</b>"), whole);
+
+  // What a layout may not touch: the action key, the canonical block, and the
+  // claimed heading that keeps an agent's sentences off the runtime's side of
+  // the line.
+  assert.ok(whole.includes(`<code>${world.keys[0] as string}</code>`), whole);
+  assert.ok(whole.includes(PAYLOAD_CHUNK_LABEL_TAIL), whole);
+  assert.match(whole, CLAIMED_HEADING_ANYWHERE);
+
+  // And rendering under a layout wrote nothing: 3 records in, 3 records out.
+  assert.equal(recordsOf(world.unit.logPath).length, 3);
+});
+
+const CLAIMED_HEADING_ANYWHERE = /<b>WHAT THIS DOES — CLAIMED by [^<]+, NOT verified by the runtime<\/b>/u;
 
 // ---------------------------------------------------------------------------
 // The claimed block beside the buttons (APRV-165)
@@ -1734,10 +1787,17 @@ test("Approve all after a member was decided elsewhere records only the rest", a
     poll.outcomes.map((entry) => (entry.outcome.ok ? "ok" : entry.outcome.code)),
     ["already-decided", "ok", "ok"],
   );
-  assert.equal(
-    recordsOf(world.unit.logPath).length,
-    before + 2,
-    "a refused member must append nothing, and must not stop the others",
+  // Two grants and, since APRV-235, the audit trail of the refused member: the
+  // human tapped over it too, and a decision that could not be taken is still a
+  // decision that was made. What matters here is unchanged — the refused member
+  // produced no `approval.*` decision, and it did not stop the other two.
+  assert.deepEqual(
+    recordsOf(world.unit.logPath)
+      .slice(before)
+      .map((record) => record.event)
+      .sort(),
+    ["approval.granted", "approval.granted", "audit.decision_refused"],
+    "a refused member recorded a decision, or stopped the others",
   );
   // APRV-206: acked before the members were decided, so the tally is the
   // operator's line rather than the toast.
@@ -2141,7 +2201,16 @@ test("a tap on a withdrawn request is refused and appends nothing", async () => 
   const outcome = await press(channel, key, "grant");
   assert.equal(outcome?.ok, false, "a withdrawn request must not be grantable");
   if (outcome !== undefined && !outcome.ok) assert.equal(outcome.code, "request-withdrawn");
-  assert.equal(recordsOf(world.unit.logPath).length, before, "nothing was appended");
+  // APRV-235: one record, and it is the audit trail of the refusal rather than
+  // a decision. No `approval.*` event was written, nothing was granted, and the
+  // request is as withdrawn as it was — `tests/decision-refusal.test.ts` is
+  // where the state, budget and sampling comparison says so.
+  assert.deepEqual(
+    recordsOf(world.unit.logPath)
+      .slice(before)
+      .map((record) => record.event),
+    ["audit.decision_refused"],
+  );
   // APRV-206. The tap's one answer went out before the gate ran, so the refusal
   // is in the message edit — where it outlives the toast that used to carry it.
   assert.equal(mock.answerTexts().at(-1), TELEGRAM_ACK_HEARD);
@@ -2152,6 +2221,59 @@ test("a tap on a withdrawn request is refused and appends nothing", async () => 
     /Withdrawn — the requester took this back and is no longer waiting/u,
   );
   assert.equal(refused?.replyMarkup, undefined, "a refused tap must leave no live button");
+  assertClean(world.unit);
+});
+
+test("a tap refused for policy drift is told so on the message, and the request is withdrawn (APRV-235)", async () => {
+  // The 2026-09-02 scenario, end to end. Carter tapped approve on a request
+  // asked under the previous policy; the gate refused, correctly, and the
+  // reason went to the operator's terminal. The person holding the phone saw
+  // nothing at all, and the request stayed pending on Telegram and in QUEUE.md.
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  const channel = channelFor();
+  channel.onDecision(handlerFor(world, at(12)));
+  const messageId = await channel.notify(request_);
+
+  // A human re-attests between the routing and the tap.
+  writeFileSync(world.unit.policyPath, POLICY_REATTESTED, "utf8");
+  assert.equal(
+    appendAttestation(world.unit.logPath, world.unit.policyPath, HUMAN, {
+      clock: fixedClock(at(11)),
+    }).ok,
+    true,
+  );
+
+  const before = recordsOf(world.unit.logPath).length;
+  const outcome = await press(channel, key, "grant");
+  assert.equal(outcome?.ok, false, "a drifted request must not be grantable");
+  if (outcome !== undefined && !outcome.ok) assert.equal(outcome.code, "policy-drift");
+
+  // Two records, in this order: what happened to the human's answer, then the
+  // state change that follows from it.
+  const written = recordsOf(world.unit.logPath).slice(before);
+  assert.deepEqual(
+    written.map((record) => record.event),
+    ["audit.decision_refused", "approval.withdrawn"],
+  );
+
+  // The tapper is told, on the message, in one line, and the buttons go with
+  // it: a request the gate has declared void has no decision left to collect.
+  const edits = editsFor(messageId);
+  const refused = edits.at(-1);
+  assert.match(String(refused?.text), /NOT RECORDED/u);
+  assert.match(String(refused?.text), /Policy changed after this was asked/u);
+  assert.match(String(refused?.text), /has been withdrawn/u);
+  assert.equal(refused?.replyMarkup, undefined, "a refused tap must leave no live button");
+
+  // And the listener stops offering it: a fresh dispatch re-derives pending
+  // from the verified log, where the request is now settled.
+  const setup = setupFor(world, channelFor());
+  const next = await dispatchPending(setup, capture().streams, newDispatchState(), at(13));
+  assert.deepEqual(next.delivered, [], "the void request was sent again");
   assertClean(world.unit);
 });
 
