@@ -14,11 +14,46 @@
 
 import { spawnSync } from "node:child_process";
 
+/**
+ * How much of a child's output this runtime will hold, in bytes.
+ *
+ * `spawnSync` defaults `maxBuffer` to one mebibyte, and a child that writes
+ * more than that is KILLED: `error` is set to `ENOBUFS`, `status` comes back
+ * null, and `stdout` holds a truncated prefix. Nothing about that is loud. The
+ * caller sees a failed run with no exit code and, if it only checks whether it
+ * got bytes, sees nothing at all.
+ *
+ * That default cost this project a live regression. `git show <rev>:<log>` is
+ * how every committed copy of `events.jsonl` is read (the anchor check, the
+ * published-seq count, the sync's incoming blob), and the committed log passed
+ * a megabyte long ago. Every one of those reads had been failing, silently, for
+ * as long as the log had been over the ceiling: `approval log verify --anchor`
+ * reported no committed copy in a checkout where `git show` printed one, the
+ * daemon's started line said anchor none, the doctor's log-drift row misread,
+ * and the advance cadence put the highest published seq at 0.
+ *
+ * A cap is still a cap and this one can still be reached. Two things make that
+ * survivable rather than silent: it is not preallocated, so naming a large
+ * number costs nothing until a child actually produces that much; and every
+ * caller that reads a blob now reports the command it ran and what the runner
+ * said when it comes back empty-handed, so the next ceiling arrives as a
+ * sentence naming the command rather than as a wrong answer.
+ */
+export const GIT_OUTPUT_LIMIT_BYTES = 512 * 1024 * 1024;
+
 /** One process invocation's result. `ok` is "exit status 0", nothing more. */
 export interface GitRun {
   ok: boolean;
   stdout: string;
   stderr: string;
+  /**
+   * The child's exit status, or `null` when it never got one — it failed to
+   * start, was killed by a signal, or outran {@link GIT_OUTPUT_LIMIT_BYTES}.
+   *
+   * `ok` cannot carry that distinction and a diagnostic needs it: "exited 128"
+   * is a git that answered, and `null` is a git that was stopped mid-sentence.
+   */
+  status: number | null;
 }
 
 function detail(cause: unknown): string {
@@ -35,12 +70,23 @@ function run(
   const result = spawnSync(bin, args, {
     cwd,
     encoding: "utf8",
+    maxBuffer: GIT_OUTPUT_LIMIT_BYTES,
     ...(Object.keys(env).length === 0 ? {} : { env: { ...process.env, ...env } }),
   });
   if (result.error !== undefined || result.status === null) {
-    return { ok: false, stdout: "", stderr: detail(result.error ?? `${bin} did not run`) };
+    return {
+      ok: false,
+      stdout: "",
+      stderr: detail(result.error ?? `${bin} did not run`),
+      status: null,
+    };
   }
-  return { ok: result.status === 0, stdout: result.stdout, stderr: result.stderr };
+  return {
+    ok: result.status === 0,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    status: result.status,
+  };
 }
 
 /**
