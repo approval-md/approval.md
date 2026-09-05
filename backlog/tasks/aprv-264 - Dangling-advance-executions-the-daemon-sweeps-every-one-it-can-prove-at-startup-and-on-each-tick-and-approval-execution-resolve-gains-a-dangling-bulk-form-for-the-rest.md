@@ -4,11 +4,11 @@ title: >-
   Dangling advance executions: the daemon sweeps every one it can prove at
   startup and on each tick, and approval execution resolve gains a --dangling
   bulk form for the rest
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-a'
 created_date: '2026-09-05 10:04'
-updated_date: '2026-09-05 11:54'
+updated_date: '2026-09-05 14:53'
 labels:
   - daemon
   - cli
@@ -159,3 +159,9 @@ not a tuple under strict Ajv), and the short help had to come back under the
 25-line cap while keeping the clause `cli-resolve` pins, that resolve exercises
 no policy authority.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The daemon sweeps every provable dangling advance execution at startup and on each tick (one proof rule in core/advance-cycle.ts over the records plus publishedState, appended through compare-and-append with the head-retry helper under the runtime's actor), reports unprovable ones once, and its blocking refusal names every outstanding key plus the bulk command; approval execution resolve --dangling lists provable and unprovable keys, asks once on a TTY, and appends one human-attested outcome per provable key. Verified by 13 new tests and the full suite (3522 pass), lint and tsc clean; merged in PR #292.
+<!-- SECTION:FINAL_SUMMARY:END -->
