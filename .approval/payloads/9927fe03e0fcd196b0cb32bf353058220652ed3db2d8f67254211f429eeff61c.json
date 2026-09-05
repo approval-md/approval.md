@@ -1,0 +1,1 @@
+{"command":"gh run rerun 33940827419 --failed 2>&1 | tail -1","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/pre-launch-adapter-integration-beb12d"}
