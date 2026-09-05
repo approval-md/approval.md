@@ -242,6 +242,17 @@ export interface AdvanceInput {
    * own value rather than the caller's.
    */
   retryOnHeadMoved?: number;
+  /**
+   * The other half of that seam (APRV-261), forwarded to the finish path as
+   * `FinishOptions.afterRead`: a callback fired between one attempt's read and
+   * its append, which is where a test puts the record that moves the head.
+   *
+   * `retryOnHeadMoved` pins how hard the writer tries; this pins that it has to
+   * try at all. Together they let one harness drive both shapes with no
+   * sleeping anywhere: the pre-APRV-233 writer at `1`, and the retried writer
+   * at the default. Production sets neither.
+   */
+  afterFinishRead?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +405,7 @@ export function settleAdvanceFinish(
     ...(input.schemaDir === undefined ? {} : { schemaDir: input.schemaDir }),
     ...(input.clock === undefined ? {} : { clock: input.clock }),
     ...(input.retryOnHeadMoved === undefined ? {} : { retryOnHeadMoved: input.retryOnHeadMoved }),
+    ...(input.afterFinishRead === undefined ? {} : { afterRead: input.afterFinishRead }),
     ...(pending.reason === undefined ? {} : { reason: pending.reason }),
     ...(pending.note === undefined ? {} : { note: pending.note }),
   });
@@ -502,6 +514,7 @@ export function reconcileDanglingAdvance(
     ...(input.schemaDir === undefined ? {} : { schemaDir: input.schemaDir }),
     ...(input.clock === undefined ? {} : { clock: input.clock }),
     ...(input.retryOnHeadMoved === undefined ? {} : { retryOnHeadMoved: input.retryOnHeadMoved }),
+    ...(input.afterFinishRead === undefined ? {} : { afterRead: input.afterFinishRead }),
     note: {
       code: "advance-reconciled",
       message: `the outcome record was lost when this cycle ran; seq ${String(
@@ -829,6 +842,7 @@ function recordFinish(
     ...(input.schemaDir === undefined ? {} : { schemaDir: input.schemaDir }),
     ...(input.clock === undefined ? {} : { clock: input.clock }),
     ...(input.retryOnHeadMoved === undefined ? {} : { retryOnHeadMoved: input.retryOnHeadMoved }),
+    ...(input.afterFinishRead === undefined ? {} : { afterRead: input.afterFinishRead }),
     ...(reason === undefined ? {} : { reason }),
     ...(note === undefined ? {} : { note }),
   });

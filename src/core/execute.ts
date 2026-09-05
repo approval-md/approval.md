@@ -1024,6 +1024,32 @@ export interface FinishOptions extends ExecuteOptions {
    * log.
    */
   note?: FailureReason;
+  /**
+   * A test seam and nothing else (APRV-261): called once, between the read that
+   * authorizes this outcome and the append that records it.
+   *
+   * It exists because the interleaving APRV-233 is about — a record landing in
+   * exactly that window, so the compare-and-append meets a head that is no
+   * longer the one the checks were made against — cannot be produced by timing
+   * without producing a coin flip instead. The old harness held the append
+   * lockfile, slept a flat 300 ms hoping a child process had got past its read,
+   * released the lock and raced. A seam constructs the window rather than
+   * waiting for it, which is the difference between a test that proves the
+   * retry and a test that usually does.
+   *
+   * WHAT IT CANNOT DO, which is why it is safe to have on this path. It takes
+   * nothing and returns nothing, so no check can be relaxed, no field can be
+   * supplied and no verdict can be reported by it. The refusals above it have
+   * already run; the append below it still states `open.head`, the head THAT
+   * read observed, so anything the seam does to the log is caught by the
+   * compare-and-append exactly as an external writer's record would be. The
+   * strictest thing a seam can do is move the head and make the attempt fail
+   * closed, which is precisely what the test asks it for. Nothing in the
+   * runtime sets it: `grep -rn afterRead src/` finds this declaration, the one
+   * call below it, and the one line in `daemon/advance.ts` that forwards a
+   * caller's.
+   */
+  afterRead?: () => void;
 }
 
 export type FinishResult =
@@ -1060,6 +1086,11 @@ export function finishExecution(
 ): FinishResult {
   const open = openExecution(logPath, actionKey, options);
   if (!open.ok) return open;
+
+  // APRV-261. The read is done and the append has not started: the one instant
+  // in which a test can move the head under this attempt on purpose. See
+  // `FinishOptions.afterRead` for why it can only ever make the append fail.
+  options.afterRead?.();
 
   const event = exitCode === 0 ? "execution.completed" : "execution.failed";
   // APRV-211. A non-zero exit with no reason is not a report: the daemon's
