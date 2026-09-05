@@ -591,7 +591,7 @@
         <article class="card" id="f-fail-closed" tabindex="0" data-facet="gate" data-tags="shipped" data-href="https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval">
           <div class="tags"><span class="tag">shipped</span></div>
           <h3>Fail closed on every axis</h3>
-          <p>An unparseable policy resolves every class to <code>manual</code>, an unmatched action takes <code>defaults.autonomy</code>, and an unknown key fails validation.</p>
+          <p>An unparseable policy resolves every class to <code>manual</code>, an unmatched action takes <code>defaults.autonomy</code>, unknown keys fail validation.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval">README: define what needs approval →</a>
         </article>
 
@@ -647,7 +647,7 @@
         <article class="card" id="f-import-agents-md" tabindex="0" data-facet="gate hooks" data-tags="shipped" data-href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#import-agents-md">
           <div class="tags"><span class="tag">shipped</span></div>
           <h3>Import your AGENTS.md prose</h3>
-          <p><code>approval import agents-md</code> turns a permissions section into a draft policy block with a fixed keyword table, no model.</p>
+          <p><code>approval import agents-md</code> turns permissions prose into a draft policy block with a fixed keyword table, no model.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#import-agents-md">CLI reference: import agents-md →</a>
         </article>
 
@@ -733,7 +733,7 @@
         <article class="card" id="f-message-id" tabindex="0" data-facet="adapters verification" data-tags="shipped" data-href="https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential">
           <div class="tags"><span class="tag">shipped</span></div>
           <h3>The Message-ID ties the mail to the chain</h3>
-          <p>It is derived from the action key, the payload hash and the sender, so both identify each other later.</p>
+          <p>It is derived from the action key, the payload hash and the sender, so both match months later.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential">README: hand a grant to a real credential →</a>
         </article>
 
@@ -1019,14 +1019,14 @@
         <article class="card" id="f-web-agent-demo" tabindex="0" data-facet="examples" data-tags="example" data-href="https://github.com/approval-md/approval.md/blob/main/examples/web-agent-demo/runbook.md">
           <div class="tags"><span class="tag">example</span></div>
           <h3>Demo day: a web agent behind the gate</h3>
-          <p>One laptop, one phone, one projector, with the queue and the log on screen while an attendee sets a task.</p>
+          <p>One laptop, one phone, one projector, with the queue and the log on screen for the room.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/web-agent-demo/runbook.md">examples/web-agent-demo →</a>
         </article>
 
         <article class="card" id="f-grok-demo" tabindex="0" data-facet="examples mcp" data-tags="example" data-href="https://github.com/approval-md/approval.md/blob/main/examples/grok-bot-connector/runbook.md">
           <div class="tags"><span class="tag">example</span></div>
           <h3>A Grok Bot agent on the far end</h3>
-          <p>An agent in xAI's cloud asks for a branch push and an email, then is told to skip the gate.</p>
+          <p>An agent in xAI's cloud asks for a branch push and an email, then tries skipping the gate.</p>
           <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/grok-bot-connector/runbook.md">examples/grok-bot-connector →</a>
         </article>
 
@@ -1149,7 +1149,7 @@
 {"id":"attestation","title":"Attestation and hash-mismatch","facet":["gate"],"tags":["shipped"],"claim":"approval policy attest stores the file's SHA-256; a later edit refuses every gated operation with hash-mismatch.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
 {"id":"autonomy-levels","title":"Five autonomy levels","facet":["gate"],"tags":["shipped"],"claim":"human-only, manual, supervised-live, supervised-retro, autonomous; bare supervised is an alias of supervised-retro.","href":"https://github.com/approval-md/approval.md/blob/main/schema/policy.schema.json"},
 {"id":"irreversibility-floor","title":"The irreversibility floor","facet":["gate"],"tags":["shipped","spec"],"claim":"An action declared reversible: false resolves to manual whatever the policy says.","href":"https://github.com/approval-md/approval.md/blob/main/SPEC.md"},
-{"id":"fail-closed","title":"Fail closed on every axis","facet":["gate"],"tags":["shipped"],"claim":"An unparseable policy resolves every class to manual, an unmatched action takes defaults.autonomy, and an unknown key fails validation.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
+{"id":"fail-closed","title":"Fail closed on every axis","facet":["gate"],"tags":["shipped"],"claim":"An unparseable policy resolves every class to manual, an unmatched action takes defaults.autonomy, unknown keys fail validation.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
 {"id":"tokens","title":"Single-use execution tokens","facet":["gate"],"tags":["shipped"],"claim":"Minted only as a decision is recorded, printed once, logged as a SHA-256; a second spend refuses token-consumed.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone"},
 {"id":"payload-binding","title":"An approval binds bytes","facet":["gate"],"tags":["shipped"],"claim":"The envelope declares a payload_hash, and bytes that hash to anything else are refused payload-mismatch.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone"},
 {"id":"envelope-class","title":"Class comes from the envelope","facet":["gate"],"tags":["shipped"],"claim":"Class, cost and reversibility are read from the registered envelope, never from a flag at request time.","href":"https://github.com/approval-md/approval.md/blob/main/examples/backlog-md-project/README.md"},
@@ -1157,7 +1157,7 @@
 {"id":"protected-paths","title":"Protected paths widen, never narrow","facet":["gate"],"tags":["shipped"],"claim":"protected_paths adds repo-relative literals to a floor covering APPROVAL.md, .approval/, harness settings and release config.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval"},
 {"id":"policy-amend","title":"Amend a policy with the verb","facet":["gate"],"tags":["shipped"],"claim":"approval policy amend lands new policy bytes and their attestation together, printing a semantic diff of what changed.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#policy-amend"},
 {"id":"gate-open","title":"The open window","facet":["gate","hooks"],"tags":["human-only"],"claim":"approval gate open needs a terminal and a typed understood, and each bypassed call appends gate.bypassed.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#gate"},
-{"id":"import-agents-md","title":"Import your AGENTS.md prose","facet":["gate","hooks"],"tags":["shipped"],"claim":"approval import agents-md turns a permissions section into a draft policy block with a fixed keyword table, no model.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#import-agents-md"},
+{"id":"import-agents-md","title":"Import your AGENTS.md prose","facet":["gate","hooks"],"tags":["shipped"],"claim":"approval import agents-md turns permissions prose into a draft policy block with a fixed keyword table, no model.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#import-agents-md"},
 {"id":"telegram","title":"Telegram, the reference channel","facet":["channels"],"tags":["shipped"],"claim":"The prompt carries a COMPUTED block, a CLAIMED block marked unverified, the full payload, and two buttons.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone"},
 {"id":"delivery","title":"Paced or burst delivery","facet":["channels"],"tags":["behind-a-policy-key"],"claim":"channels.telegram.delivery is paced by default, showing one pending request at a time, or burst.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#the-approvalmd-dictionary"},
 {"id":"prompt-rows","title":"Prompt rows a policy orders","facet":["channels"],"tags":["behind-a-policy-key"],"claim":"channels.<name>.prompt.rows sets order only, never a whitelist, and .hide is refused for rows a decision needs.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#channel"},
@@ -1169,7 +1169,7 @@
 {"id":"email-adapter","title":"Email over SMTP, inside the token window","facet":["adapters"],"tags":["shipped"],"claim":"approval adapter email verifies the token, re-hashes the payload, opens the vault, sends over STARTTLS, closes it.","href":"https://github.com/approval-md/approval.md/blob/main/examples/email-demo.md"},
 {"id":"agentmail","title":"AgentMail, and the two-key split","facet":["adapters"],"tags":["shipped"],"claim":"The agent holds an AgentMail key without draft_send, and the key that can send waits in the vault.","href":"https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md"},
 {"id":"draft-drift","title":"A draft is mutable, so the grant binds its bytes","facet":["adapters"],"tags":["shipped"],"claim":"approval payload agentmail-draft snapshots the draft, and one edited after the grant refuses agentmail-draft-drifted.","href":"https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md"},
-{"id":"message-id","title":"The Message-ID ties the mail to the chain","facet":["adapters","verification"],"tags":["shipped"],"claim":"It is derived from the action key, the payload hash and the sender, so both identify each other later.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential"},
+{"id":"message-id","title":"The Message-ID ties the mail to the chain","facet":["adapters","verification"],"tags":["shipped"],"claim":"It is derived from the action key, the payload hash and the sender, so both match months later.","href":"https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential"},
 {"id":"setup-adapter","title":"Setup fills the vault and proves it","facet":["adapters"],"tags":["shipped"],"claim":"approval setup adapter email reads the adapter's credential manifest, then probes the server without sending anything.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#setup-adapter"},
 {"id":"claude-code-hook","title":"The Claude Code PreToolUse hook","facet":["hooks"],"tags":["shipped"],"claim":"approval hook claude-code classifies commands the harness runs itself and answers allow or deny, never ask.","href":"https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md"},
 {"id":"cursor-hook","title":"The Cursor hook","facet":["hooks"],"tags":["shipped"],"claim":"approval hook cursor classifies Shell, Write and Delete, and requires failClosed: true.","href":"https://github.com/approval-md/approval.md/blob/main/docs/cursor-hook.md"},
@@ -1209,8 +1209,8 @@
 {"id":"agentmail-demo","title":"The same grant, over AgentMail","facet":["examples","adapters"],"tags":["example"],"claim":"The mail is composed as a draft, and the key that can send it waits in the vault.","href":"https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md"},
 {"id":"mcp-demo","title":"An MCP client asks, the phone grants","facet":["examples","mcp"],"tags":["example"],"claim":"Claude Code on one side and a phone on the other, including the refused grant tool call.","href":"https://github.com/approval-md/approval.md/blob/main/examples/mcp-demo.md"},
 {"id":"backlog-demo","title":"A Backlog.md board behind the gate","facet":["examples","gate"],"tags":["example"],"claim":"One envelope on one task file, then register, request, wait and run, with what each prints.","href":"https://github.com/approval-md/approval.md/blob/main/examples/backlog-md-project/README.md"},
-{"id":"web-agent-demo","title":"Demo day: a web agent behind the gate","facet":["examples"],"tags":["example"],"claim":"One laptop, one phone, one projector, with the queue and the log on screen while an attendee sets a task.","href":"https://github.com/approval-md/approval.md/blob/main/examples/web-agent-demo/runbook.md"},
-{"id":"grok-demo","title":"A Grok Bot agent on the far end","facet":["examples","mcp"],"tags":["example"],"claim":"An agent in xAI's cloud asks for a branch push and an email, then is told to skip the gate.","href":"https://github.com/approval-md/approval.md/blob/main/examples/grok-bot-connector/runbook.md"}
+{"id":"web-agent-demo","title":"Demo day: a web agent behind the gate","facet":["examples"],"tags":["example"],"claim":"One laptop, one phone, one projector, with the queue and the log on screen for the room.","href":"https://github.com/approval-md/approval.md/blob/main/examples/web-agent-demo/runbook.md"},
+{"id":"grok-demo","title":"A Grok Bot agent on the far end","facet":["examples","mcp"],"tags":["example"],"claim":"An agent in xAI's cloud asks for a branch push and an email, then tries skipping the gate.","href":"https://github.com/approval-md/approval.md/blob/main/examples/grok-bot-connector/runbook.md"}
   ]
 }
 </script>
@@ -1276,11 +1276,21 @@
       if (!wide.matches && ev.target.closest && ev.target.closest('a')) { g.open = false; }
     });
   });
+  /* Which groups the document asked to stand open, so crossing 900px in either
+     direction lands on the state that width is meant to have. */
+  var defaultOpen = groups.filter(function (g) { return g.open; });
+  function syncToWidth() {
+    if (wide.matches) {
+      defaultOpen.forEach(function (g) { g.open = true; });
+    } else {
+      groups.forEach(function (g) { g.open = false; });
+    }
+  }
+  if (wide.addEventListener) { wide.addEventListener('change', syncToWidth); }
   function closeAllIfNarrow() {
     if (wide.matches) { return; }
     groups.forEach(function (g) { g.open = false; });
   }
-  if (wide.addEventListener) { wide.addEventListener('change', closeAllIfNarrow); }
   document.addEventListener('keydown', function (ev) {
     if (ev.key === 'Escape' && !wide.matches) { closeAllIfNarrow(); }
   });
