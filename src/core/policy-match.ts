@@ -94,6 +94,14 @@ export type Provenance =
   | "rule"
   /** No rule matched; `defaults.autonomy` (or its absent-means-manual form). */
   | "default"
+  /**
+   * Amended SPEC.md §5.2 (APRV-266): no rule matched a `policy.edit` sub-class,
+   * so the `policy.edit` line itself decided it. Distinct from `"rule"` because
+   * the pattern that decided does not MATCH this class — a reader of the trace
+   * has to be able to see that the class inherited rather than matched — and
+   * distinct from `"default"` because `defaults.autonomy` did not decide it.
+   */
+  | "inherited"
   /** The policy failed to load; everything is `manual`. */
   | "fail-closed"
   /** The §7 irreversibility floor overrode the resolved autonomy. */
@@ -382,8 +390,11 @@ const FAIL_CLOSED: Readonly<Resolution> = {
  *    take the most specific; among a full specificity tie the strictest
  *    autonomy wins, and among equally strict tied rules the lexicographically
  *    smallest pattern is chosen so the outcome is deterministic.
- * 3. With no matching rule the result is `defaults.autonomy` — or `manual` when
- *    `defaults` or `defaults.autonomy` is absent — with provenance `"default"`.
+ * 3. With no matching rule, a class in the `policy.edit.*` namespace (APRV-266)
+ *    inherits the `policy.edit` line when that line is a rule, with provenance
+ *    `"inherited"`; otherwise the result is `defaults.autonomy` — or `manual`
+ *    when `defaults` or `defaults.autonomy` is absent — with provenance
+ *    `"default"`.
  * 4. Finally, `options.reversible === false` engages the §7 floor: a resolved
  *    `autonomous` or `supervised` becomes `manual` with `floorApplied: true`
  *    and provenance `"floor"`. An already-`manual` outcome is untouched, and
@@ -410,10 +421,59 @@ export function resolve(
   candidates.sort(compareCandidates);
 
   const resolution = candidates.length === 0
-    ? fromDefaults(load, candidates)
+    ? fromParentOrDefaults(load, actionClass, candidates)
     : fromRules(candidates);
 
   return applyFloor(resolution, options);
+}
+
+/**
+ * The `policy.edit` sub-class namespace (APRV-266), as a resolution rule.
+ *
+ * A routed `protected_paths` entry names a class the policy MAY declare and
+ * need not: routing `design/` to `policy.edit.design` and then writing no
+ * `policy.edit.design` line is a reasonable first step, and the answer to it
+ * should be the `policy.edit` line — the line that governed that path before
+ * the routing existed — rather than `defaults.autonomy`.
+ *
+ * That is not just ergonomics. A repository whose `policy.edit` is
+ * `supervised-live 0.1` and whose default is `manual` would find every routed
+ * path GATED the moment it adopted routing, which reads as the feature being
+ * broken and invites the author to fix it by loosening something. Falling back
+ * to the line the path is a sub-class of makes the adoption a no-op until the
+ * author declares otherwise, which is what an additive key should be.
+ *
+ * Deliberately not generalized to "any dotted class falls back to its parent".
+ * §5.2's matching grammar already gives an author `policy.edit.*` for that, and
+ * a universal parent walk would silently change the resolution of every class
+ * in the taxonomy — `read` is `manual` in this repository BECAUSE `read.*` does
+ * not cover it, and a parent walk would make that pin unstatable. One
+ * namespace, because one namespace is what the runtime itself synthesizes
+ * classes in.
+ */
+const ROUTED_NAMESPACE = "policy.edit.";
+
+/** The line a routed class inherits from, or the ordinary default. */
+function fromParentOrDefaults(
+  load: Extract<PolicyLoadResult, { ok: true }>,
+  actionClass: string,
+  candidates: Candidate[],
+): Resolution {
+  if (!actionClass.startsWith(ROUTED_NAMESPACE)) return fromDefaults(load, candidates);
+  const parent = resolve(load, "policy.edit");
+  // Only a RULE is inherited. When the `policy.edit` line is itself absent the
+  // sub-class has nothing to inherit and falls to `defaults.autonomy`, which is
+  // the same answer by a shorter road and keeps `"inherited"` meaning "a
+  // `policy.edit` rule decided this".
+  if (parent.provenance !== "rule") return fromDefaults(load, candidates);
+  return {
+    ...parent,
+    provenance: "inherited",
+    // `candidates` is this class's own, which is empty: nothing matched it.
+    // The parent's matched rule stays in `matched`, so a trace can name the
+    // line that decided without claiming it matched.
+    candidates,
+  };
 }
 
 /** Build the no-rule-matched resolution. */
