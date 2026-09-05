@@ -17,11 +17,13 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 
 import { CLASSIFIER_CLASSES } from "../src/core/command-class.js";
-import { loadPolicy, type PolicyLoadResult } from "../src/core/policy-load.js";
+import { loadPolicy, loadPolicyText, type PolicyLoadResult } from "../src/core/policy-load.js";
+import { loadValuesText } from "../src/core/values.js";
 import { resolve } from "../src/core/policy-match.js";
 import {
   checkPolicyExpectations,
@@ -194,6 +196,38 @@ test("the classifier's read.* classes are covered by the policy's read.* rule", 
 // ---------------------------------------------------------------------------
 // 5. Read-only proof (the `after` hook above is the enforcement)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// The proposed values block (APRV-240)
+// ---------------------------------------------------------------------------
+
+/**
+ * docs/proposals/repo-values-block.md carries the `yaml approval-values`
+ * block Carter pastes into APPROVAL.md by hand (agents may not write that
+ * file). Prove, against a scratch copy and never the real file, that the paste
+ * changes nothing about the policy: the block loads as values, and the policy
+ * parsed from the combined bytes is the policy parsed from the live bytes.
+ */
+test("the proposed values block leaves the live policy byte-for-byte the same (APRV-240)", () => {
+  const proposal = readFileSync(join(REPO_ROOT, "docs", "proposals", "repo-values-block.md"), "utf8");
+  const open = proposal.indexOf("```yaml approval-values");
+  assert.ok(open >= 0, "the proposal names no approval-values fence");
+  const close = proposal.indexOf("\n```\n", open);
+  assert.ok(close > open, "the proposal's values fence is unterminated");
+  const block = proposal.slice(open, close + 4);
+
+  const live = readFileSync(APPROVAL_MD, "utf8");
+  const pasted = `${live.trimEnd()}\n\n${block}\n`;
+  const scratchPath = join(REPO_ROOT, "APPROVAL.md");
+
+  const values = loadValuesText(scratchPath, pasted);
+  assert.equal(values.ok, true, values.ok ? "" : `${values.code}: ${values.message}`);
+  assert.equal(values.ok && values.present, true);
+
+  const before = loadPolicyText(scratchPath, live);
+  const afterPaste = loadPolicyText(scratchPath, pasted);
+  assert.deepEqual(afterPaste, before);
+});
 
 test("APPROVAL.md is unchanged mid-suite", () => {
   assert.ok(

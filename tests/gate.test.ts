@@ -2135,6 +2135,13 @@ test("the refusal-code union is frozen public API", () => {
     "proposal-not-found",
     "proposal-stale",
     "policy-already-attested",
+    // APRV-239. A grant carrying `loved` or `disliked` and no non-blank note.
+    // Placed immediately before `append-failed` because it is the last of the
+    // checks that read nothing: like the actor and class checks above it, the
+    // answer is a property of the arguments alone, and nothing is appended.
+    // Its own code rather than the audit path's `note-required` because a
+    // caller branching on a gate refusal is branching on THIS union.
+    "reaction-note-required",
     "append-failed",
     // APRV-211, one addition. A request that declared self-delivery can only
     // reach its own grant through the sealed address the request publishes, so

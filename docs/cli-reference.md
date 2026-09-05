@@ -970,6 +970,25 @@ line is the 64-hex value alone and undressed (so a triple-click copies exactly
 the token), or as the `token` key with `--json`. Capture it, or revoke and
 request again. Spend it with `approval run`.
 
+`--reaction disliked|indifferent|liked|loved` records what the approver thought
+of the action, as `payload.reaction` on `approval.granted`. A human answering the
+gate is already forming an opinion; this is where they can say it in one word
+rather than in prose nothing can read back. It is GUIDANCE and never enforcement:
+the grant record itself is the authorization, it widens and narrows nothing, and
+a `disliked` grant is exactly as much of a grant as a `loved` one (SPEC.md §11.1
+invariant 10). Read them back with `approval feedback`.
+
+Written only when given, so an omitted reaction leaves no key and is never read
+as `indifferent`. `loved` and `disliked` with no non-blank note refuse
+`reaction-note-required`, evaluated with the other checks that read nothing and
+appending nothing; the request stays pending and the fix is `--note`.
+
+`reject` and `revoke` refuse `--reaction` as a usage error (exit 2) naming
+`--note`. Their reason IS their note, and a grade beside a refusal is a second
+answer to a question that has one. The core writes the field under the grant's
+own branch, so a value passed to either of them is structurally unable to reach a
+record whatever the CLI in front of it does.
+
 **`--json`** (one object on stdout):
 
 ```
@@ -1185,6 +1204,14 @@ to decide whether to fix itself, stop retrying, or ask a human.
   rules. Nothing is attested; propose the amendment again.
 - `policy-already-attested` — an attestation was proposed for a policy file that
   already matches its attestation. There is no amendment to sign.
+- `reaction-note-required` — a grant carrying `reaction: loved` or
+  `reaction: disliked` and no non-blank note. Grant only, evaluated with the
+  other checks that read nothing, and nothing is appended: the request is still
+  pending and `--note "<text>"` is the whole of the fix. Its own code rather than
+  the audit path's `note-required` because a caller branching on a gate refusal
+  is branching on this union, and the two verbs are answered by two different
+  modules. `reject` and `revoke` carry no reaction at all, which is a usage error
+  at the verb (exit 2) rather than a member of this union.
 - `log-unreadable` (exit 4) / `log-torn-tail` (exit 3) / `log-corrupt` (exit 1):
   nothing is authorized from a log that does not verify.
 - `append-failed` — the append itself failed; the exit code follows the cause.
@@ -1949,16 +1976,51 @@ spends no budget. A review blocked because a policy file was edited afterwards
 would be a supervision backlog held open by an unrelated fact.
 
 What it appends is `audit.reviewed`, naming the sample's action key and task, with
-payload `{"subject_seq":<seq of the audit.sampled>,"reviewed":true,"note"?:"..."}`.
+payload `{"subject_seq":<seq of the audit.sampled>,"reviewed":true,"note"?:"...",
+"reaction"?:"disliked"|"indifferent"|"liked"|"loved"}`.
 An action key with several open samples refuses `ambiguous-subject`.
 
 **`--json`** (one object on stdout):
 
 ```
 success  {"ok":true,"seq":11,"sample_seq":9,"action_key":"...","task":"...",
-          "verdict":"ok","obligation_seq":null,"actor":"human:alice"}
+          "verdict":"ok","reaction":null,"obligation_seq":null,
+          "actor":"human:alice"}
 refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
 ```
+
+`reaction` is always present in the JSON and is `null` when the reviewer gave
+none, so a consumer can tell "no reaction" from "this build predates the field".
+In the LOG the key is written only when it was given: an omitted reaction leaves
+no key at all, and no reader substitutes `indifferent` for a person who said
+nothing. `indifferent` is a thing somebody had to actually say.
+
+`--reaction` is GUIDANCE and `--deny` is enforcement. Nothing in the runtime
+reads a reaction: not routing, class matching, the sampler, budgets, token
+minting, the gate window or execution (SPEC.md §11.1 invariant 10, pinned by
+`tests/values-inert.test.ts`). It is recorded so a person's reading of an action
+survives past the moment they had it, and so an agent can read back what the
+operator thought with `approval feedback`.
+
+Two rules keep the pair honest, both settled after the actor check and BEFORE the
+log is read, and neither appends anything:
+
+- `reaction-conflicts-verdict` — `--deny` with `liked` or `loved`. The two fields
+  point opposite ways and only one of them is enforcement. A record carrying both
+  reads afterwards as evidence of whichever half suits the reader, and reads to
+  an agent as a denial being survivable when the operator is pleased. Say which
+  one you meant.
+- `note-required` — `loved` or `disliked` with a blank note. These are the grades
+  an agent is most likely to act on and least able to interpret alone: "disliked"
+  with no words says something happened and nothing about what. Blank is not a
+  note. `liked` and `indifferent` demand none, because a one-tap signal that
+  opens a form is a signal that gets switched off. The schema enforces the same
+  rule at the write boundary, which is what makes it true of every record
+  whatever surface wrote it; the verb refuses it too so the message names the fix.
+
+A misspelled word is a usage error (exit 2) rather than a refusal or a default: a
+`--reaction love` that silently became `indifferent` would put a word in the
+reviewer's mouth in an append-only log.
 
 `--deny` says the action should not have happened. It cannot undo it — the action
 already ran, and a runtime that pretended otherwise would be lying to the person
@@ -2717,6 +2779,21 @@ silently skipped; a file with no permissions section is exit 0 with an empty dra
 and a warning. `--out` writes the draft YAML without the fence and refuses to
 overwrite an existing file.
 
+**The values draft (APRV-240).** Some AGENTS.md files already carry what the
+operator wants beside what they permit, under headings like "What I value",
+"What good looks like", "How I like to work" or "What I want from you". The
+importer collects the bullets under those headings into a second draft fence,
+` ```yaml approval-values ` (SPEC.md §5.3), printed after the policy draft on
+stdout and written after it with `--out`; `--json` carries it as
+`values_draft`, or `null` when no such heading exists. Every bullet lands in
+`wants` and none in `love`, `like` or `dislike`: grading is the human's act,
+and an importer that guessed a grade would be putting words in their mouth. A
+bullet over the schema's 200 characters is truncated with a warning rather than
+dropped, and bullets past the twentieth are kept as comments inside the fence,
+which is the same stance the permissions half takes on unmapped bullets. The
+draft is guidance and never policy (§11.1 invariant 10): the file it is pasted
+into loads exactly as it did without it.
+
 ## journal
 
 The gate is built to be hard to route around. One consequence of building it
@@ -2831,6 +2908,148 @@ the channel, which is the failure the channel exists to prevent.
 
 `--limit` defaults to 20 and counts from the newest end while printing oldest
 first. `--since` filters by the UTC date in the filename.
+
+## values
+
+The mirror of `journal`, running the other way. `journal` exists because an
+agent behind this gate can comply, be refused, and report an exit code, and had
+no way to say anything else. `values` exists because APPROVAL.md carried control
+in one direction only: the policy block says what an agent may do, and nothing
+in the file said what the operator wanted the work to be like. The optional
+` ```yaml approval-values ` block (SPEC.md §5.3) is that, and this verb prints
+it.
+
+**It is guidance, and it is never policy.** Every output form opens with the
+banner saying so, `--json` carries the same sentence in `note`, and the reason
+is the same discipline `journal read` applies in the opposite direction: a
+reader must never have to work out what standing the words on their screen have.
+Nothing in the block grants anything, forbids anything, or changes a verdict. No
+routing, class match, sampling draw, budget, token, gate window or execution
+decision reads it. That is SPEC.md §11.1 invariant 10, and
+`tests/values-inert.test.ts` pins it both statically (no enforcement module may
+name the info string, and only three CLI surfaces may import the reader) and
+behaviourally (a policy resolves identically with the block absent, valid,
+malformed, or duplicated).
+
+**Why absence is a declaration.** A file with no values block prints exactly
+`the operator has declared no values here.` and exits 0. The alternative (say
+nothing, or print an empty result) collapses two different facts into one
+screen: "the operator considered this and wrote nothing" and "I never looked".
+An agent that cannot tell those apart will fill the gap by inferring what the
+operator probably wants, which is the one thing a block about a human's stated
+values must not be used for. Some operators will leave the slot empty, and
+naming the empty slot is worth more than hiding it.
+
+**Why it is out of the policy-check trace.** `approval policy check` prints the
+decision path: which rule matched, at what specificity, and what the answer
+resolves to. That trace is the enforcement story, and every line in it is a line
+something acted on. A values block is read by nobody in that path, so a line
+about it there would be a line asserting relevance it does not have, and the
+next reader would reasonably ask which of the two blocks the answer came from.
+A broken values block is reported by this verb (exit 1, with its load code) and
+by the `values-block` row of `approval doctor`, and by nothing else. It cannot
+make a policy unloadable: the two blocks are parsed on separate paths that share
+only the fence splitter, so guidance can neither widen nor narrow a class.
+
+**Why a broken block does not fail closed.** The policy loader fails closed
+because a half-understood permission document is one whose author believes
+constraints are in force that are not. That argument does not carry here.
+Failing closed on a malformed values block would turn a YAML typo into an
+all-manual repository, and would buy no safety in exchange, because nothing was
+being enforced from the block in the first place. So the verb says the block is
+present and unreadable, says to treat it as absent, and says it grants nothing
+either way.
+
+**It rides the attestation, and an agent cannot write it.** The block lives
+inside APPROVAL.md, the attestation of SPEC.md §5.2 digests the whole file, and
+edits under `.approval/` and to the policy file classify `policy.core`. So the
+operator's stated values are as tamper-evident as their policy, and cannot be
+quietly rewritten by the party they are addressed to. An edit to them invalidates
+the standing attestation until a human re-attests, exactly as a policy edit does.
+
+`--policy` wins over discovery and `--dir` chooses where `APPROVAL.md` then
+`APPROVALS.md` are looked for, with the same precedence `policy check` uses. The
+verb resolves no policy rule, reads no log, mints no token and appends nothing,
+and it takes no `--as`: there is no actor in a read of somebody else's words.
+## feedback
+
+The other direction of the same channel. `journal read` is the operator reading
+what the agents said; `approval feedback` is the agents reading what the operator
+said about their work: the graded reactions and free-text notes a person wrote on
+an `approval.granted` at the gate, or on an `audit.reviewed` afterwards, each
+joined to the action key, its class, its task and the agent whose work it was.
+
+**Top level, beside `values`, and not a subcommand of `audit`.** Which record a
+reaction happens to sit on is an implementation fact; that a human said something
+about an agent's work is the subject. Half of these live on grants, which are
+gate records and have nothing to do with the sampler, so filing the verb under
+`audit` would have told an agent to look for the operator's opinion in the place
+the runtime keeps its supervision backlog. `values` is what the operator declared
+in advance and `feedback` is what they said afterwards; the two read as a pair.
+
+**Symmetric with `journal` on purpose.** Same entry shape, same delimiters
+around the text, same `--since` and `--limit` (default 20, counted from the
+newest end, printed oldest first). One difference: no entry here is marked
+`[claimed]`. That marker exists to say the words were written by the party under
+oversight; these were appended under a `human:` actor to a hash-chained log,
+which is the thing `[claimed]` distinguishes journal text FROM.
+
+**The banner is on every output form**, human and `--json` (in the `note` field):
+HUMAN-AUTHORED GUIDANCE, not policy. It grants nothing, forbids nothing, and
+changes no verdict, sampling probability or budget. A surface that printed
+reactions unlabelled would be handing an agent a person's after-the-fact opinion
+in the same register as a policy rule, and the agent's correct reading of a
+policy rule is "this binds me". Nothing here binds anything (SPEC.md §11.1
+invariant 10). An agent that reads `disliked` has learned something about the
+operator and gained no permission; one that never reads this verb is under
+exactly the same rules.
+
+**An entry with neither a reaction nor a note is omitted.** A grant with no words
+is the ordinary case (most grants are), and listing thousands of blank rows
+would bury the handful where somebody actually said something. Absence of
+feedback is not feedback. Rejections and revocations are not a source at all:
+they carry no reaction, their reason IS their note, and the record already says
+what happened.
+
+**`agentActor` comes from the registration, never from a payload field.** It is
+the actor of the `task.registered` that declared the action key, and failing that
+the actor of the `execution.started` that ran it; a key with neither reports
+`null` rather than a guess. Registration first because it is the earliest and
+most specific statement of whose work this is. Not a payload field, because an
+actor is a property of who appended a record: a self-reported one would let the
+party under oversight choose whose feedback this reads as (SPEC.md §11.1
+invariant 4). `--actor` therefore filters on the AGENT the feedback is about, not
+on the human who wrote it, which is the question an agent reading this actually
+has.
+
+Reads `readVerifiedRecords` and writes nothing: no policy is resolved, no clock
+is read, nothing is appended. A log that does not verify refuses with the `log-*`
+exit codes rather than showing a partial list, because a reaction read out of an
+unverifiable log is a sentence attributed to a person who may not have written
+it. There is no write half and there will not be one: the two verbs that record a
+reaction are `approval grant` and `approval audit review`, both human-only, and a
+third path into the same field would be a way for the party under oversight to
+author the operator's opinion of it.
+
+`--reaction` and `--source` take closed vocabularies and a word outside them is a
+usage error (exit 2), not an empty list. `--since` compares the record's own
+ISO-8601 timestamp prefix against a UTC date; no timezone is invented for the
+caller. `_no feedback_` prints when nothing matches.
+
+**`--json`** (one object on stdout):
+
+```
+{"ok":true,"log":"...","note":"<the banner>","total":3,"entries":[
+  {"seq":12,"ts":"...","source":"review","event":"audit.reviewed",
+   "actor":"human:alice","reaction":"loved","note":"...","verdict":"ok",
+   "actionKey":"...","task":"...","class":"comms.send.external",
+   "agentActor":"agent:claude","sampleSeq":9}]}
+```
+
+`total` counts everything that matched the filters and `entries` holds at most
+`--limit` of them, so a reader can tell a short list from a truncated one.
+`verdict` is the enforcement field and is reported beside the reaction so the two
+are never confused; it is `null` on a grant, where there is no verdict to report.
 
 ## payload hash
 

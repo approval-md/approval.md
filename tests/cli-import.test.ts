@@ -27,11 +27,17 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+// The two real loaders, so a `--out` file is checked by what would actually
+// read it rather than by a regex over its bytes (APRV-240).
+import { loadPolicy } from "../src/core/policy-load.js";
+import { loadValuesText } from "../src/core/values.js";
+
 /** dist/tests/cli-import.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 /** The repository root, from `dist/tests/` at runtime. */
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const FIXTURE_DIR = join(REPO_ROOT, "tests", "fixtures", "agents-md");
+const SCHEMA_DIR = join(REPO_ROOT, "schema");
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-cli-import-")));
 let counter = 0;
@@ -117,6 +123,7 @@ test("--json prints exactly the documented shape", () => {
     "unmapped",
     "ignored",
     "warnings",
+    "values_draft",
   ]);
   assert.equal(value["ok"], true);
   assert.equal(value["source"], "tests/fixtures/agents-md/tolerant-variants.md");
@@ -152,6 +159,10 @@ test("--json prints exactly the documented shape", () => {
   ]);
   assert.deepEqual(value["ignored"], ["House style"]);
   assert.equal((value["warnings"] as string[]).length, 2);
+  // APRV-240: this source names none of the four values headings, so the
+  // answer is null. An empty draft would be the verb declaring values nobody
+  // wrote down.
+  assert.equal(value["values_draft"], null);
 });
 
 test("--json prints nothing to stdout on a usage error", () => {
@@ -252,4 +263,75 @@ test("a missing subcommand is a usage error", () => {
   const run = runCli(["import"], REPO_ROOT);
   assert.equal(run.code, 2);
   assert.match(run.stderr, /missing subcommand for `approval import`/u);
+});
+
+// ---------------------------------------------------------------------------
+// The values draft (APRV-240)
+
+test("stdout prints the values fence after the policy draft, byte for byte", () => {
+  const run = importFixture("values-headings.md");
+  assert.equal(run.code, 0);
+  assert.equal(run.stdout, fixture("values-headings.expected.md"));
+  // Order matters to a reader: the policy block first, the values block after.
+  const policyAt = run.stdout.indexOf("```yaml approval-policy");
+  const valuesAt = run.stdout.indexOf("```yaml approval-values");
+  assert.ok(policyAt >= 0 && valuesAt > policyAt, run.stdout.slice(0, 80));
+  assert.match(run.stderr, /nothing is graded/u);
+  assert.match(run.stderr, /invalidates the standing attestation/u);
+});
+
+test("a source with no values heading prints no values fence at all", () => {
+  const run = importFixture("claude-md-permissions.md");
+  assert.equal(run.code, 0);
+  assert.ok(!run.stdout.includes("approval-values"), run.stdout);
+  assert.ok(!run.stderr.includes("nothing is graded"), run.stderr);
+});
+
+test("--json carries the values draft, and it is the fence and nothing else", () => {
+  const run = importFixture("values-headings.md", ["--json"]);
+  assert.equal(run.code, 0);
+  const value = JSON.parse(run.stdout) as Record<string, unknown>;
+  const draft = value["values_draft"];
+  assert.equal(typeof draft, "string");
+  const text = draft as string;
+  assert.ok(text.startsWith("```yaml approval-values\n"), text.slice(0, 40));
+  assert.ok(text.endsWith("```\n"));
+  assert.ok(!text.includes("approval-policy"));
+  assert.ok(text.includes("wants:"));
+  // The negative property, on the wire: no grade was invented.
+  assert.ok(!/^\s*(love|like|dislike):/mu.test(text), text);
+  const warnings = value["warnings"] as string[];
+  assert.ok(warnings.some((warning) => warning.includes("repeated values")));
+  assert.ok(warnings.some((warning) => warning.includes("215 characters")));
+});
+
+test("--out writes both blocks, and the file loads as a policy and as values", () => {
+  const dir = caseDir();
+  const run = runCli(
+    ["import", "agents-md", join(FIXTURE_DIR, "values-headings.md"), "--out", "draft.md"],
+    dir,
+  );
+  assert.equal(run.code, 0);
+  assert.match(run.stdout, /^wrote draft policy and values blocks to draft\.md\n$/u);
+
+  const path = join(dir, "draft.md");
+  const written = readFileSync(path, "utf8");
+  assert.ok(written.startsWith("```yaml approval-policy\n"));
+  assert.ok(written.includes("```yaml approval-values\n"));
+
+  // The point of fencing the policy half once there are two blocks: the file
+  // the human is handed loads through the real loaders, unedited.
+  const policy = loadPolicy({ file: path, schemaDir: SCHEMA_DIR });
+  assert.ok(policy.ok, policy.ok ? "" : `${policy.code}: ${policy.message}`);
+  assert.equal(policy.policy.version, "0.1");
+  assert.equal(policy.policy.defaults?.autonomy, "manual");
+
+  const values = loadValuesText(path, written, { schemaDir: SCHEMA_DIR });
+  assert.ok(values.ok, values.ok ? "" : values.message);
+  assert.ok(values.present);
+  assert.equal(values.values.version, 1);
+  assert.equal(values.values.love, undefined);
+  assert.equal(values.values.like, undefined);
+  assert.equal(values.values.dislike, undefined);
+  assert.ok((values.values.wants ?? []).includes("The failing case lands first, then the fix"));
 });

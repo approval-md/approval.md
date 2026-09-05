@@ -73,6 +73,7 @@ import {
   telegramTokenEnvFor,
 } from "../channels/telegram.js";
 import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
+import { VALUES_INFO_STRING, loadValues } from "../core/values.js";
 import {
   KEYSTORE_DEFERRED,
   NON_RESOLVING_RUNNER,
@@ -780,6 +781,67 @@ function checkLiveDraw(logPath: string, load: PolicyLoadResult): DoctorCheck {
     check: "live-draw",
     status: "pass",
     detail: `${path} is present and owner-only, so a gate process with no sampling secret can have its draw answered and ${declared} is sampled at its declared rate rather than gated at 100%. A daemon that stops removes its socket, so this row falling to fail is the signal.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 7d. the values block (APRV-238)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the optional values block of `APPROVAL.md` can be read.
+ *
+ * The row exists because nothing else would ever report a broken one. A values
+ * block is guidance and not policy (SPEC.md §5.3, §11.1 invariant 10), so a
+ * malformed one changes nothing about what the policy says and deliberately
+ * does not appear in `approval policy check`, whose answer is the enforcement
+ * trace. Left there, a typo in the block would silently mean the operator's
+ * stated values reach no agent while every gate keeps working perfectly.
+ *
+ * Absence is a `pass` and says so in the words SPEC.md §5.3 fixes: a file with
+ * no block is an operator who declared no values, which is a state and not a
+ * fault. The only `fail` is a block that is present and unreadable, and its fix
+ * names the code rather than proposing a repair, because what the block should
+ * say is the human's to write.
+ */
+function checkValuesBlock(policyPath: string, policyFlagged: boolean, dir: string): DoctorCheck {
+  const result = loadValues(policyFlagged ? { file: policyPath } : { dir });
+  if (!result.ok) {
+    if (result.code === "file-missing") {
+      return {
+        check: "values-block",
+        status: "skip",
+        detail: oneLine(
+          `${result.message}, so there is no values block to read. The policy file's own absence is reported by the attestation row above.`,
+        ),
+      };
+    }
+    return {
+      check: "values-block",
+      status: "fail",
+      detail: oneLine(
+        `a \`\`\`${VALUES_INFO_STRING} block is present and could not be read (${result.code}): ${result.message}. Nothing about the policy changed — guidance is not enforcement — but the operator's stated values reach no agent until this parses.`,
+      ),
+      fix: `approval values --json — prints the same failure with its code (${result.code}); fix the block in ${result.source?.filename ?? "the policy file"} and re-attest, since the attestation digests the whole file`,
+    };
+  }
+  if (!result.present) {
+    return {
+      check: "values-block",
+      status: "pass",
+      detail: `${result.source.filename}: no approval-values block; the operator has declared no values here. That is a declaration rather than a gap, and \`approval values\` says so in those words.`,
+    };
+  }
+  const declared = (["love", "like", "dislike", "wants"] as const).filter(
+    (key) => result.values[key] !== undefined,
+  );
+  const responds = result.values.responds === undefined ? "" : ", responds";
+  return {
+    check: "values-block",
+    status: "pass",
+    detail: `${result.source.filename}: the values block parses and validates (version ${String(
+      result.values.version,
+    )}; ${declared.length === 0 ? "no list" : declared.join(", ")}${responds}). It is guidance, so nothing here is enforced; read it with \`approval values\`.`,
   };
 }
 
@@ -2315,6 +2377,11 @@ export function commandDoctor(
       // APRV-208: appended, fourteenth time, same reason. The one row that says
       // whether supervised-live is actually live on this machine.
       checkLiveDraw(logPath, policyLoad),
+      // APRV-238: appended, fifteenth time, same reason. The one surface
+      // besides `approval values` that would notice a broken values block:
+      // `policy check` deliberately says nothing about it, because guidance has
+      // no place in an enforcement trace.
+      checkValuesBlock(policyPath, policyFlag !== null, dir),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

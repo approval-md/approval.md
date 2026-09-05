@@ -113,8 +113,26 @@ export const AUDIT_REFUSAL_CODES = [
   "not-obliged",
   /** That obligation already has a `reconciliation.satisfied` (APRV-127). */
   "already-satisfied",
-  /** A satisfaction with no note: an assertion nobody can check (APRV-127). */
+  /**
+   * A verb that requires a reason was given none. Two shapes, one code: a
+   * reconciliation satisfied with a blank note (APRV-127), and a review whose
+   * `reaction` is `loved` or `disliked` with a blank note (APRV-239). Both are
+   * an assertion nobody can check, and both are evaluated after the actor check
+   * and before the log is read.
+   */
   "note-required",
+  /**
+   * A review that says the action should not have happened and that the human
+   * liked or loved it (APRV-239). Evaluated beside `note-required`, before the
+   * log is read; nothing is appended.
+   *
+   * The two fields point opposite ways and only one of them is enforcement, so
+   * the safe reading is not "believe the verdict and drop the grade": a record
+   * carrying both would be read by a person later as evidence of whichever half
+   * suited them, and by an agent as a signal that a denial is survivable if the
+   * operator is pleased. The reviewer is asked to say which they meant.
+   */
+  "reaction-conflicts-verdict",
   /**
    * A `gated-revert` obligation whose satisfaction names no completed revert
    * (APRV-127). The obligation is to undo the action THROUGH THE GATE, and the
@@ -513,6 +531,50 @@ export interface ReviewResult {
 /** What a reviewer concluded (amended SPEC.md §5.2, APRV-127). */
 export type ReviewVerdict = "ok" | "denied";
 
+/**
+ * The graded reaction a review or a grant MAY carry (amended SPEC.md §5.2,
+ * APRV-237/APRV-239), in the order the schema's enum lists them: worst to best.
+ *
+ * **This is not enforcement, and it lives here rather than in an enforcement
+ * module for that reason.** `verdict` is the field the runtime acts on;
+ * `reaction` is what the human thought, travelling human-to-agent, and SPEC.md
+ * §11.1 invariant 10 says no routing, class matching, sampling, budget, token,
+ * gate-window or execution decision may read it. `tests/values-inert.test.ts`
+ * enforces that as a static guard over the enforcement modules, which is why the
+ * tuple is exported from `core/audit.ts` (the projection's home) and imported by
+ * the surfaces that show it, and by nothing that decides.
+ *
+ * The vocabulary is closed on purpose. Four words are a grade a person can give
+ * in one tap and an agent can read back without interpretation; an open field
+ * would accumulate synonyms across surfaces until "meh" and "indifferent" were
+ * two different signals. The absence of the field is absence: it is never read
+ * as `indifferent`, which is a thing a person had to actually say.
+ */
+export const REACTIONS = ["disliked", "indifferent", "liked", "loved"] as const;
+
+export type Reaction = (typeof REACTIONS)[number];
+
+/** Whether a string is one of the four graded reactions. Used at the CLI boundary. */
+export function isReaction(value: string): value is Reaction {
+  return (REACTIONS as readonly string[]).includes(value);
+}
+
+/**
+ * The two grades that require the human's own words (amended SPEC.md §5.2).
+ *
+ * `loved` and `disliked` are the reactions an agent is most likely to act on and
+ * least able to interpret alone: "disliked" with no words says something went
+ * wrong and nothing about what, which is the shape of a signal that gets guessed
+ * at. `liked` and `indifferent` are the ordinary readings and demand nothing,
+ * because a one-tap signal that opens a form is a signal that gets switched off.
+ */
+const REACTIONS_REQUIRING_NOTE: ReadonlySet<string> = new Set(["disliked", "loved"]);
+
+/** A note that is present and is not only whitespace. Blank is not a note. */
+function hasNote(note: string | null | undefined): boolean {
+  return note !== null && note !== undefined && note.trim().length > 0;
+}
+
 /** The shape a denial's obligation takes. */
 export type Obligation = "gated-revert" | "policy-finding";
 
@@ -523,6 +585,12 @@ export interface ReviewOptions extends AuditOptions {
    * a verdict is never read as a denial.
    */
   verdict?: ReviewVerdict;
+  /**
+   * The graded reaction, recorded beside the verdict when the reviewer gave one
+   * (APRV-239). Omitted means omitted: nothing is written, and no reader may
+   * substitute `indifferent` for a person who said nothing.
+   */
+  reaction?: Reaction;
 }
 
 /**
@@ -590,6 +658,28 @@ export function reviewSample(
     );
   }
 
+  // APRV-239, and deliberately here: after the actor check and BEFORE the log is
+  // read. Both rules are properties of the two arguments in front of this
+  // function, so neither needs a log to decide, and a refusal that had already
+  // read (and verified) a log would report a log failure for an invocation that
+  // was malformed before it ever touched one. Nothing is appended on either
+  // path; the reviewer fixes the invocation and reviews again.
+  const reaction = options.reaction;
+  if (reaction !== undefined) {
+    if (verdict === "denied" && (reaction === "liked" || reaction === "loved")) {
+      return refuse(
+        "reaction-conflicts-verdict",
+        `a denied review cannot also be ${reaction}: \`verdict\` says the action should not have happened and \`reaction\` says the human was pleased by it, and only the first of those is enforcement. A record carrying both reads afterwards as evidence of whichever half suits the reader, and reads to an agent as a denial being survivable when the operator is pleased. Nothing was appended. Say which one you meant: drop --deny, or use --reaction disliked or indifferent and put the nuance in --note.`,
+      );
+    }
+    if (REACTIONS_REQUIRING_NOTE.has(reaction) && !hasNote(note)) {
+      return refuse(
+        "note-required",
+        `--reaction ${reaction} requires --note "<text>": it is the grade an agent is most likely to act on and least able to interpret alone, and "${reaction}" with no words says something happened and nothing about what. Blank is not a note. \`liked\` and \`indifferent\` need none. Nothing was appended.`,
+      );
+    }
+  }
+
   const read = readVerifiedRecords(
     logPath,
     options.schemaDir === undefined ? {} : { schemaDir: options.schemaDir },
@@ -609,6 +699,10 @@ export function reviewSample(
   };
   if (subject.subjectHash !== null) payload["sampled_subject_hash"] = subject.subjectHash;
   if (note !== null && note.trim().length > 0) payload["note"] = note;
+  // Written only when it was given. An omitted reaction leaves no key, which is
+  // the difference between "the human said nothing" and "the human said
+  // indifferent" — a distinction the read surfaces depend on.
+  if (reaction !== undefined) payload["reaction"] = reaction;
 
   const result = appendEvent(
     logPath,
@@ -1005,4 +1099,166 @@ function locate(
     );
   }
   return { ok: true, subject: open[0] as SampledSubject };
+}
+
+// ---------------------------------------------------------------------------
+// humanFeedback (pure projection)
+// ---------------------------------------------------------------------------
+
+/** Which human gesture an entry came from. */
+export type FeedbackSource = "review" | "decision";
+
+/**
+ * One thing a human said about an action, as `approval feedback` prints it.
+ *
+ * Everything here is derived from records the caller already verified. Nothing
+ * is looked up in a file, no policy is resolved, and no clock is read: two
+ * callers handed the same records get the same list in the same order.
+ */
+export interface FeedbackEntry {
+  /** `seq` of the record carrying the reaction or note. */
+  seq: number;
+  ts: string;
+  source: FeedbackSource;
+  /** `audit.reviewed` or `approval.granted`, spelled as the log spells it. */
+  event: string;
+  /** The human who said it: the actor on the record itself. */
+  actor: string;
+  /** The graded reaction, or `null` when the record carries none. */
+  reaction: Reaction | null;
+  /** The human's words, or `null` when there were none. */
+  note: string | null;
+  /** The enforcement field, on a review only. `null` on a grant. */
+  verdict: ReviewVerdict | null;
+  actionKey: string | null;
+  task: string | null;
+  /** The class from the `task.registered` declaration, never from a payload claim. */
+  class: string | null;
+  /**
+   * The agent whose work this is about, NOT the human who reacted.
+   *
+   * Sourced from the `task.registered` record that declared the action key, and
+   * failing that from the `execution.started` that ran it. Never from a payload
+   * field: an actor is a property of who appended a record, and a self-reported
+   * one would let the party under oversight choose whose feedback this reads as
+   * (SPEC.md §11.1 invariant 4).
+   */
+  agentActor: string | null;
+  /** `seq` of the `audit.sampled` a review closed, or `null` on a grant. */
+  sampleSeq: number | null;
+}
+
+/** The actor that appended a record, when it is a non-empty string. */
+function actorOf(record: EventRecord): string | null {
+  return typeof record.actor === "string" && record.actor.length > 0 ? record.actor : null;
+}
+
+/**
+ * Per action key, the actor of the `task.registered` that declared it, and
+ * failing that the actor of the `execution.started` that ran it.
+ *
+ * Registration first because it is the earliest and most specific statement of
+ * whose work this is: the party that put the action in a task envelope. The
+ * execution actor is the fallback for a log whose registration is missing (an
+ * imported or truncated log), and a key with neither is reported as `null`
+ * rather than guessed.
+ */
+function agentActorsByKey(records: readonly EventRecord[]): Map<string, string> {
+  const registered = new Map<string, string>();
+  const executed = new Map<string, string>();
+  for (const record of records) {
+    if (record.event === "task.registered") {
+      const actor = actorOf(record);
+      if (actor === null) continue;
+      const actions = payloadOf(record)["actions"];
+      if (!Array.isArray(actions)) continue;
+      for (const entry of actions) {
+        if (typeof entry !== "object" || entry === null) continue;
+        const key = (entry as Record<string, unknown>)["idempotency_key"];
+        if (typeof key === "string" && key.length > 0) registered.set(key, actor);
+      }
+      continue;
+    }
+    if (record.event !== "execution.started") continue;
+    const key = record.action_key;
+    const actor = actorOf(record);
+    if (typeof key === "string" && key.length > 0 && actor !== null && !executed.has(key)) {
+      executed.set(key, actor);
+    }
+  }
+  for (const [key, actor] of executed) {
+    if (!registered.has(key)) registered.set(key, actor);
+  }
+  return registered;
+}
+
+function reactionOf(payload: Record<string, unknown>): Reaction | null {
+  const value = payload["reaction"];
+  return typeof value === "string" && isReaction(value) ? value : null;
+}
+
+/**
+ * Every reaction and every note a human wrote about an action, oldest first.
+ *
+ * The HUMAN-TO-AGENT direction of the log (amended SPEC.md §5.2). Two sources,
+ * because a human says what they thought in two places: at the gate, answering a
+ * request (`approval.granted`), and afterwards, reviewing a sampled action
+ * (`audit.reviewed`). Rejections and revocations carry no reaction at all, so
+ * they are not a source: their reason IS their note, and the record already says
+ * what happened.
+ *
+ * **An entry with neither a reaction nor a note is omitted.** A grant with no
+ * words is the ordinary case, most grants are, and listing thousands of them as
+ * blank rows would bury the handful where somebody actually said something.
+ * Absence of feedback is not feedback.
+ *
+ * Reads only the records it is given, and callers pass VERIFIED records: this is
+ * a projection in the sense the rest of this module uses the word, it writes
+ * nothing, decides nothing, and no enforcement path reads it (SPEC.md §11.1
+ * invariant 10).
+ */
+export function humanFeedback(records: readonly EventRecord[]): FeedbackEntry[] {
+  const index = indexDeclarations(records);
+  const agents = agentActorsByKey(records);
+  const subjectBySeq = new Map<number, SampledSubject>();
+  for (const subject of sampledSubjects(records)) {
+    if (subject.reviewedSeq !== null) subjectBySeq.set(subject.reviewedSeq, subject);
+  }
+
+  const entries: FeedbackEntry[] = [];
+  for (const record of records) {
+    const isReview = record.event === "audit.reviewed";
+    if (!isReview && record.event !== "approval.granted") continue;
+
+    const payload = payloadOf(record);
+    const reaction = reactionOf(payload);
+    const note = stringOrNull(payload["note"]);
+    if (reaction === null && note === null) continue;
+
+    const subject = isReview ? (subjectBySeq.get(record.seq) ?? null) : null;
+    const actionKey =
+      stringOrNull(record.action_key) ??
+      stringOrNull(payload["action_key"]) ??
+      subject?.actionKey ??
+      null;
+    const declared = actionKey === null ? undefined : index.declarations.get(actionKey);
+    const rawVerdict = payload["verdict"];
+
+    entries.push({
+      seq: record.seq,
+      ts: record.ts,
+      source: isReview ? "review" : "decision",
+      event: record.event,
+      actor: actorOf(record) ?? "-",
+      reaction,
+      note,
+      verdict: isReview && (rawVerdict === "ok" || rawVerdict === "denied") ? rawVerdict : null,
+      actionKey,
+      task: stringOrNull(record.task) ?? subject?.task ?? declared?.task ?? null,
+      class: declared?.class ?? null,
+      agentActor: actionKey === null ? null : (agents.get(actionKey) ?? null),
+      sampleSeq: subject?.seq ?? null,
+    });
+  }
+  return entries;
 }

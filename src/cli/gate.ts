@@ -49,6 +49,10 @@ import { readFileSync } from "node:fs";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
+// The graded reaction a grant may carry (APRV-239). Defined in `core/audit.ts`
+// beside the projection that reads it back, so there is one vocabulary and one
+// spelling of it across both surfaces that write it.
+import { isReaction, REACTIONS } from "../core/audit.js";
 import {
   decide,
   expire,
@@ -465,7 +469,7 @@ export function commandDecide(
   const helpText = DECISION_HELP[decision];
   const outcome = front(
     argv,
-    { ...COMMON_FLAGS, ...POLICY_FLAGS, "--as": "string", "--note": "string" },
+    { ...COMMON_FLAGS, ...POLICY_FLAGS, "--as": "string", "--note": "string", "--reaction": "string" },
     helpText,
     streams,
     cwd,
@@ -502,9 +506,34 @@ export function commandDecide(
   }
 
   const note = stringFlag(flags, "--note");
+
+  // APRV-239. `--reaction` is a GRANT flag. A rejection or a revocation already
+  // has one field for the human's reason and that field is `--note`; a grade
+  // beside a refusal would be a second answer to a question that has one, and
+  // SPEC.md §5.2 says those two decisions carry no reaction at all. Refused at
+  // exit 2 rather than ignored, so a caller that meant something by it finds out.
+  const reactionFlag = stringFlag(flags, "--reaction");
+  if (reactionFlag !== null && decision !== "grant") {
+    return usageError(
+      streams,
+      json,
+      `--reaction is a grant flag; ${decision} carries no reaction. Its reason IS its note, so put what you want to say in --note "<text>"`,
+      helpText,
+    );
+  }
+  if (reactionFlag !== null && !isReaction(reactionFlag)) {
+    return usageError(
+      streams,
+      json,
+      `--reaction expects one of ${REACTIONS.join(" | ")}, got ${JSON.stringify(reactionFlag)}`,
+      helpText,
+    );
+  }
+
   const decideOptions = {
     ...gateOptions(flags, cwd),
     ...(note === null ? {} : { note }),
+    ...(reactionFlag === null ? {} : { reaction: reactionFlag }),
   };
   const result = decide(logPath, actionKey, decision, actor, decideOptions);
   if (!result.ok) {

@@ -58,6 +58,18 @@
  * Likewise a source with no permissions section produces an empty draft (all
  * classes manual by default) plus a warning, never a permissive one.
  *
+ * ## The values draft
+ *
+ * Since APRV-240 the same file is scanned a second time for four optional
+ * headings ("what I value", "what good looks like", "how I like to work",
+ * "what I want from you") and their bullets are drafted into a
+ * ` ```yaml approval-values ` block (SPEC.md §5.3). Every bullet lands in
+ * `wants:`, and nothing is ever placed in `love:`, `like:` or `dislike:`.
+ * Grading is the human's act. This importer can see that a line was written
+ * down; it cannot see how much its author meant it, and a guessed grade would
+ * put words in their mouth inside the one block of `APPROVAL.md` that exists to
+ * carry their own.
+ *
  * ## Namespaces
  *
  * SPEC.md §7 reserves top-level namespaces to the spec and lets implementations
@@ -410,6 +422,201 @@ export function parseAgentsMd(markdown: string): AgentsMdParse {
   return { sections, ignored, warnings };
 }
 
+// ---------------------------------------------------------------------------
+// The values headings (APRV-240)
+
+/**
+ * Headings whose bullets become a DRAFT values block (SPEC.md §5.3).
+ *
+ * Matched against a heading run through {@link normaliseHeading}, at ANY level,
+ * with the tolerance {@link sectionOf} already uses (equality, then prefix,
+ * then containment), so "## What I value most" and "**What I want from you:**"
+ * are recognised too. Four phrases and no more: this is a fixed vocabulary a
+ * human can be told about in one line of documentation, and a wider net would
+ * start collecting prose nobody offered as values.
+ */
+const VALUES_HEADING_PHRASES: readonly string[] = [
+  "what i value",
+  "what good looks like",
+  "how i like to work",
+  "what i want from you",
+];
+
+/**
+ * The caps of `values.schema.json` `$defs/valueList`, restated so the renderer
+ * can respect them without importing a validator. `tests/agents-md.test.ts`
+ * reads the schema and asserts these two numbers still match it, so the copy
+ * cannot drift.
+ */
+const VALUES_MAX_ITEMS = 20;
+const VALUES_MAX_LENGTH = 200;
+
+/** Result of {@link parseValuesHeadings}. Pure function of the input bytes. */
+export interface ValuesDraft {
+  /** The recognised headings, normalised, in source order. */
+  headings: string[];
+  /** Bullets destined for `wants:`: truncated, deduped, capped. */
+  wants: string[];
+  /** Bullets past {@link VALUES_MAX_ITEMS}, kept so none is dropped silently. */
+  overflow: string[];
+  /** Human-facing notes; never a reason to relax anything. */
+  warnings: string[];
+}
+
+/** True when this heading opens a values section. */
+function isValuesHeading(heading: string): boolean {
+  const text = normaliseHeading(heading);
+  if (text.length === 0) return false;
+  return VALUES_HEADING_PHRASES.some(
+    (phrase) => text === phrase || text.startsWith(`${phrase} `) || text.includes(phrase),
+  );
+}
+
+/**
+ * Bring one bullet under the schema's 200-character cap.
+ *
+ * Truncation with a visible marker, rather than refusing the draft or dropping
+ * the entry. The draft exists to be read and corrected by hand, so a line the
+ * human can see is over-long is a line they can repair in place; refusing would
+ * cost them the other nineteen bullets over one long sentence, and dropping is
+ * the one outcome ruled out everywhere in this module. Sliced by CODE POINT, so
+ * an astral character is never cut in half (Ajv measures `maxLength` the same
+ * way).
+ */
+function capLength(text: string): { text: string; truncated: boolean } {
+  const points = [...text];
+  if (points.length <= VALUES_MAX_LENGTH) return { text, truncated: false };
+  return { text: `${points.slice(0, VALUES_MAX_LENGTH - 1).join("")}…`, truncated: true };
+}
+
+/**
+ * Collect the bullets under the optional values headings of an AGENTS.md-style
+ * document (SPEC.md §5.3).
+ *
+ * ## Everything goes to `wants`, and nothing is graded
+ *
+ * The values block has three standing grades (`love`, `like`, `dislike`) and
+ * one behavioural list (`wants`). This function fills `wants` and leaves the
+ * three grades empty, always. A grade is a statement of taste, and it is the
+ * human's to make: the source shows that a line was written under a heading, it
+ * does not show how strongly it was meant, and an importer that inferred
+ * "love" from an exclamation mark or a heading's wording would be putting words
+ * in its reader's mouth in the one block of `APPROVAL.md` that exists to carry
+ * theirs. `wants` is the honest destination for a bullet whose grade is
+ * unknown: it says the operator asked for something, which is exactly what a
+ * bullet under "what I want from you" demonstrates.
+ *
+ * ## The scan
+ *
+ * A second line-based pass over the same primitives {@link parseAgentsMd} uses,
+ * with the same rules: fenced code blocks are skipped whole (a bullet in an
+ * example block is an example), headings are ATX at any level, a values heading
+ * opens a section, any other heading closes one, and a non-blank line that is
+ * not a bullet, heading or fence is a continuation joined to the previous
+ * bullet with a single space.
+ *
+ * Never throws. No clock, no filesystem, no network.
+ */
+export function parseValuesHeadings(markdown: string): ValuesDraft {
+  const headings: string[] = [];
+  const collected: Array<{ text: string }> = [];
+  const warnings: string[] = [];
+
+  const lines = markdown.split(/\r\n|\n|\r/u);
+
+  let fence: string | null = null;
+  let open = false;
+  let lastBullet: { text: string } | null = null;
+
+  for (const line of lines) {
+    if (fence !== null) {
+      const close = FENCE_OPEN.exec(line);
+      const marker = close === null ? "" : (close[1] ?? "");
+      if (marker.length >= fence.length && marker.startsWith(fence.slice(0, 1))) fence = null;
+      continue;
+    }
+
+    const opened = FENCE_OPEN.exec(line);
+    if (opened !== null) {
+      fence = opened[1] as string;
+      lastBullet = null;
+      continue;
+    }
+
+    const heading = HEADING.exec(line);
+    if (heading !== null) {
+      const raw = (heading[2] as string).replace(/\s+#+\s*$/u, "").trim();
+      lastBullet = null;
+      open = isValuesHeading(raw);
+      if (open) headings.push(normaliseHeading(raw));
+      continue;
+    }
+
+    if (!open) {
+      lastBullet = null;
+      continue;
+    }
+
+    const item = LIST_ITEM.exec(line);
+    if (item !== null) {
+      const text = (item[1] as string).trim();
+      if (text.length === 0) {
+        lastBullet = null;
+        continue;
+      }
+      const bullet = { text };
+      collected.push(bullet);
+      lastBullet = bullet;
+      continue;
+    }
+
+    if (line.trim().length === 0) {
+      lastBullet = null;
+      continue;
+    }
+
+    if (lastBullet !== null) lastBullet.text = `${lastBullet.text} ${line.trim()}`;
+  }
+
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  let duplicates = 0;
+
+  for (const bullet of collected) {
+    const capped = capLength(bullet.text);
+    if (capped.truncated) {
+      warnings.push(
+        `a values bullet is ${String([...bullet.text].length)} characters and values.schema.json caps an entry at ${String(VALUES_MAX_LENGTH)}; the draft carries it truncated rather than dropping it, so shorten it by hand before confirming: ${JSON.stringify(capped.text)}`,
+      );
+    }
+    // Deduped AFTER truncation, because `uniqueItems` is checked on the values
+    // the block actually carries: two long bullets that differ only past the
+    // cap become one entry, and a draft that emitted both would fail its schema.
+    if (seen.has(capped.text)) {
+      duplicates += 1;
+      continue;
+    }
+    seen.add(capped.text);
+    unique.push(capped.text);
+  }
+
+  if (duplicates > 0) {
+    warnings.push(
+      `${String(duplicates)} repeated values ${duplicates === 1 ? "bullet was" : "bullets were"} collapsed; values.schema.json requires the entries of a list to be unique`,
+    );
+  }
+
+  const wants = unique.slice(0, VALUES_MAX_ITEMS);
+  const overflow = unique.slice(VALUES_MAX_ITEMS);
+  if (overflow.length > 0) {
+    warnings.push(
+      `${String(overflow.length)} values ${overflow.length === 1 ? "bullet is" : "bullets are"} past the cap of ${String(VALUES_MAX_ITEMS)}; they are preserved as comments in the draft instead of in wants:, and a human promotes the ones they want`,
+    );
+  }
+
+  return { headings, wants, overflow, warnings };
+}
+
 /** One proposed class rule, with the bullets that produced it. */
 export interface DraftClass {
   cls: string;
@@ -432,6 +639,13 @@ export interface AgentsMdImport {
   unmapped: UnmappedBullet[];
   ignored: string[];
   warnings: string[];
+  /**
+   * The values headings the same source declared (APRV-240). Empty `headings`
+   * means the source declared none, and no values fence is rendered at all: an
+   * absent values block is a declaration in its own right (SPEC.md §5.3), and a
+   * draft of one would be this importer inventing the declaration.
+   */
+  values: ValuesDraft;
 }
 
 /** Ordered (section, bullet) pairs: allowed, then approval-first, then never. */
@@ -457,7 +671,11 @@ function orderedBullets(parse: AgentsMdParse): Array<{ bullet: Bullet; section: 
  */
 export function importAgentsMd(markdown: string): AgentsMdImport {
   const parse = parseAgentsMd(markdown);
-  const warnings = [...parse.warnings];
+  const values = parseValuesHeadings(markdown);
+  // The values notes join the one list every surface already prints. They are
+  // notes about a block that enforces nothing, so they change no verdict and
+  // never make the policy half of this import fail.
+  const warnings = [...parse.warnings, ...values.warnings];
   const unmapped: UnmappedBullet[] = [];
   const byClass = new Map<string, DraftClass>();
 
@@ -497,11 +715,25 @@ export function importAgentsMd(markdown: string): AgentsMdImport {
     }
   }
 
-  return { classes: [...byClass.values()], unmapped, ignored: parse.ignored, warnings };
+  return { classes: [...byClass.values()], unmapped, ignored: parse.ignored, warnings, values };
 }
 
 /** Info string of the machine-readable policy block (SPEC.md §5). */
 export const POLICY_INFO_STRING = "yaml approval-policy";
+
+/**
+ * Info string of the OPTIONAL values block (SPEC.md §5.3).
+ *
+ * Spelled here rather than imported from `core/values.ts`, exactly as
+ * {@link POLICY_INFO_STRING} is spelled rather than imported from
+ * `core/policy-load.ts`. `tests/values-inert.test.ts` (APRV-237) lets three CLI
+ * surfaces import the values reader and no module under `src/core/` at all,
+ * because a core module holding a reference to that reader is something review
+ * has to re-argue on every change. A label is not a reader, and this renderer
+ * needs only the label. The two spellings are pinned to each other by
+ * `tests/agents-md.test.ts`, so the copy cannot drift.
+ */
+const VALUES_INFO_STRING = "yaml approval-values";
 
 function draftHeader(source: string): string[] {
   return [
@@ -528,14 +760,102 @@ function draftHeader(source: string): string[] {
 }
 
 /**
- * Render the draft policy YAML (no fence). Deterministic: no clock, no cwd, no
+ * True when a values draft should be rendered at all: the source declared at
+ * least one of the four headings. One predicate, so "when is there a values
+ * draft" is answered in one place rather than at each surface.
+ */
+function hasValuesDraft(values: ValuesDraft | null | undefined): values is ValuesDraft {
+  return values !== null && values !== undefined && values.headings.length > 0;
+}
+
+/**
+ * Render the values draft, fenced (APRV-240).
+ *
+ * The argument is the whole {@link ValuesDraft} rather than its bullets alone,
+ * because the entries past the cap have to appear in the output as comments:
+ * the renderer needs to see what was left out in order to say so.
+ *
+ * Deterministic, like everything else here. Entries are emitted as
+ * double-quoted scalars via `JSON.stringify`, whose escapes are all valid YAML
+ * double-quoted escapes, so a bullet full of backticks, colons and `#` survives
+ * the round trip without the renderer having to reason about YAML quoting.
+ */
+export function renderFencedValuesDraft(draft: ValuesDraft, source: string): string {
+  const lines: string[] = [
+    `# DRAFT values block, imported from ${source} by \`approval import agents-md\`.`,
+    "#",
+    "# NOTHING HAS BEEN APPLIED, exactly as for the policy draft: this block was",
+    "# printed, not written. APPROVAL.md is untouched and nothing was attested.",
+    "# The values block lives INSIDE APPROVAL.md, so pasting it changes the file's",
+    "# bytes and invalidates the standing attestation; renew it immediately after.",
+    "#",
+    "# EVERY bullet is in `wants:`, and nothing is graded. `love:`, `like:` and",
+    "# `dislike:` are yours to fill in. A grade is a statement of taste and it is",
+    "# yours to make: this importer can see that you wrote a line down, and cannot",
+    "# see how much you meant it. Guessing would put words in your mouth.",
+    "#",
+    "# This block is guidance and never policy. Nothing here is enforced, counted",
+    "# or checked, and no routing, class match, sampling draw, budget or token",
+    "# reads it (SPEC.md §11.1 invariant 10).",
+    "",
+    "version: 1",
+  ];
+
+  if (draft.wants.length === 0) {
+    lines.push(
+      "# The headings were there and carried no bullets. An empty list is a real",
+      "# answer: it says the question was considered and left blank.",
+      "wants: []",
+    );
+  } else {
+    lines.push("wants:");
+    for (const want of draft.wants) lines.push(`  - ${JSON.stringify(want)}`);
+  }
+
+  if (draft.overflow.length > 0) {
+    lines.push(
+      "",
+      `# OVER THE CAP: values.schema.json admits ${String(VALUES_MAX_ITEMS)} entries and the source`,
+      "# offered more. These are preserved verbatim and are NOT in `wants:`. Promote",
+      "# the ones you want by hand, in place of ones above:",
+    );
+    for (const want of draft.overflow) lines.push(`#   ${want}`);
+  }
+
+  return `\`\`\`${VALUES_INFO_STRING}\n${lines.join("\n")}\n\`\`\`\n`;
+}
+
+/**
+ * The fenced values draft for an import, or `null` when the source declared no
+ * values headings. The `--json` surface's `values_draft` field, verbatim.
+ */
+export function valuesDraftOf(result: AgentsMdImport, source: string): string | null {
+  return hasValuesDraft(result.values) ? renderFencedValuesDraft(result.values, source) : null;
+}
+
+/**
+ * Render the draft policy YAML. Deterministic: no clock, no cwd, no
  * randomness — the only inputs are the import result and the source label, so
  * the same file always produces the same bytes.
  *
- * The output is a valid policy under `schema/policy.schema.json` and loads
- * through `loadPolicy` once wrapped in a ` ```yaml approval-policy ` fence.
+ * With `values` omitted (or from a source that declared no values headings) the
+ * output is bare YAML with no fence, a valid policy under
+ * `schema/policy.schema.json` that loads through `loadPolicy` once wrapped in a
+ * ` ```yaml approval-policy ` fence.
+ *
+ * With a values draft the shape changes, and it has to. A values fence appended
+ * to bare YAML could not be pasted into a policy fence, because the values
+ * block's own closing fence would close the policy block and leave a file that
+ * loads as neither. So a two-block draft is emitted already fenced: the policy
+ * inside its ` ```yaml approval-policy ` fence, then the values fence after it,
+ * which is the shape `APPROVAL.md` itself has and which the policy loader and
+ * the values reader each read straight off disk.
  */
-export function renderDraftPolicy(result: AgentsMdImport, source: string): string {
+export function renderDraftPolicy(
+  result: AgentsMdImport,
+  source: string,
+  values?: ValuesDraft | null,
+): string {
   const lines: string[] = [...draftHeader(source), ""];
 
   lines.push('version: "0.1"', "");
@@ -583,10 +903,21 @@ export function renderDraftPolicy(result: AgentsMdImport, source: string): strin
     }
   }
 
-  return `${lines.join("\n")}\n`;
+  const yaml = `${lines.join("\n")}\n`;
+  if (!hasValuesDraft(values)) return yaml;
+  return `\`\`\`${POLICY_INFO_STRING}\n${yaml}\`\`\`\n\n${renderFencedValuesDraft(values, source)}`;
 }
 
-/** The draft wrapped in its ` ```yaml approval-policy ` fence, for stdout. */
-export function renderFencedDraft(result: AgentsMdImport, source: string): string {
-  return `\`\`\`${POLICY_INFO_STRING}\n${renderDraftPolicy(result, source)}\`\`\`\n`;
+/**
+ * The draft wrapped in its ` ```yaml approval-policy ` fence, for stdout, with
+ * the values fence printed after it when the source declared values headings.
+ */
+export function renderFencedDraft(
+  result: AgentsMdImport,
+  source: string,
+  values?: ValuesDraft | null,
+): string {
+  const policy = `\`\`\`${POLICY_INFO_STRING}\n${renderDraftPolicy(result, source)}\`\`\`\n`;
+  if (!hasValuesDraft(values)) return policy;
+  return `${policy}\n${renderFencedValuesDraft(values, source)}`;
 }

@@ -121,6 +121,10 @@ import {
   unreadablePolicyStatus,
   type AttestationRefusalDetail,
 } from "./attest.js";
+// Type-only, deliberately: the vocabulary is defined once, in the module that
+// owns the projection over it, and importing it as a value here would put a
+// runtime edge from the gate to the audit module for four string literals.
+import type { Reaction } from "./audit.js";
 import { evaluateBudgetsWithTask, type BudgetScope, type BudgetVerdict } from "./budgets.js";
 import {
   evaluateIntakeLimits,
@@ -551,6 +555,21 @@ export const GATE_REFUSAL_CODES = [
    * would ask a human to re-attest bytes already in force.
    */
   "policy-already-attested",
+  /**
+   * A grant carrying `reaction: loved` or `reaction: disliked` and no non-blank
+   * note (APRV-239, amended SPEC.md §5.2).
+   *
+   * Grant only. Evaluated with the other checks that read nothing, and nothing
+   * is appended. `reject` and `revoke` accept no reaction at all, which is a
+   * usage error at the verb rather than a member of this union: their reason IS
+   * their note, and there is no second field for a grade to sit in.
+   *
+   * Its own code rather than the audit path's `note-required` because a caller
+   * branching on a gate refusal is branching on this union, and the two verbs
+   * are answered by two different modules. The message names `--note`, which is
+   * the whole of the fix.
+   */
+  "reaction-note-required",
   /**
    * The append itself failed; `append` carries the underlying error. Its
    * `code` is `head-moved` when the log grew between this module's read and its
@@ -2300,7 +2319,32 @@ export interface DecideOptions extends GateOptions {
    * since audit would read it as a grouping that never existed.
    */
   batchDeliveryId?: string;
+  /**
+   * The graded reaction the approver gave, on `grant` only (APRV-239, amended
+   * SPEC.md §5.2), recorded as `payload.reaction` on `approval.granted`.
+   *
+   * A human answering the gate is already saying what they think of the action;
+   * this is where they can say it in one word rather than in prose nothing can
+   * read back. It is GUIDANCE and never enforcement: the grant record itself is
+   * the authorization, and no routing, matching, sampling, budget, token or
+   * execution decision reads this field (SPEC.md §11.1 invariant 10). It cannot
+   * widen or narrow what the grant authorizes, and a `disliked` grant is exactly
+   * as much of a grant as a `loved` one.
+   *
+   * Ignored on `reject` and `revoke` — the CLI refuses the flag outright there,
+   * as a usage error naming `--note` — because their reason is their note and a
+   * grade beside a refusal is a second answer to a question with one.
+   */
+  reaction?: Reaction;
 }
+
+/**
+ * The two grades a grant may not carry without the approver's own words
+ * (amended SPEC.md §5.2). The same pair `core/audit.ts` enforces on a review,
+ * spelled here rather than imported as a value so this module's runtime imports
+ * stay where they are; `tests/gate.test.ts` pins the two lists together.
+ */
+const GRADES_REQUIRING_NOTE: ReadonlySet<string> = new Set(["disliked", "loved"]);
 
 export type DecideResult =
   | {
@@ -2415,6 +2459,24 @@ function attemptDecide(
     return refuse(
       "actor-not-human",
       `${decision} is a human-only verb; the actor must match human:<id>, got ${JSON.stringify(actor)}`,
+    );
+  }
+
+  // APRV-239, beside the actor check and before anything is read: whether a
+  // grade came with words is a property of these arguments alone, so it is
+  // settled before a log is opened and nothing is appended when it fails. The
+  // schema enforces the same rule at the write boundary, which is what makes it
+  // true of every record whatever surface wrote it; this refusal exists so the
+  // person holding the phone gets a message that names the fix.
+  if (
+    decision === "grant" &&
+    options.reaction !== undefined &&
+    GRADES_REQUIRING_NOTE.has(options.reaction) &&
+    (options.note === undefined || options.note.trim().length === 0)
+  ) {
+    return refuse(
+      "reaction-note-required",
+      `--reaction ${options.reaction} requires --note "<text>": it is the grade an agent is most likely to act on and least able to interpret alone, and "${options.reaction}" with no words says something about this action and nothing about what. Blank is not a note. \`liked\` and \`indifferent\` need none. Nothing was appended and the request is still pending.`,
     );
   }
 
@@ -2602,6 +2664,12 @@ function attemptDecide(
     // assumption this line may make. `DecideOptions` carries no field for it, so
     // a caller-supplied value is refused structurally.
     if (attestedSha256 !== null) payload[POLICY_HASH_FIELD] = attestedSha256;
+    // APRV-239. Grant only, and written only when it was given: an omitted
+    // reaction leaves no key, which is the difference between "the approver said
+    // nothing" and "the approver said indifferent". It sits under the grant's
+    // own branch so a value passed with `reject` or `revoke` is structurally
+    // unable to reach a record, whatever the CLI in front of it does.
+    if (options.reaction !== undefined) payload["reaction"] = options.reaction;
   }
   if (options.note !== undefined) payload["note"] = options.note;
   if (

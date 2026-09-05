@@ -1749,6 +1749,73 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    name: "feedback",
+    purpose:
+      "List what the OPERATOR said about work that already happened (APRV-239): the graded reactions and free-text notes a human wrote on an approval.granted or an audit.reviewed, each joined to the action key, its class, its task and the agent whose work it was. This is HUMAN-AUTHORED GUIDANCE and it is not policy: it grants nothing, forbids nothing, and changes no verdict, sampling probability or budget, and no enforcement path in this runtime reads a reaction (SPEC.md §11.1 invariant 10). Read it to learn what the operator values; do not read it as permission. `verdict` on a review is the enforcement field and is reported beside the reaction so the two are never confused. An entry with neither a reaction nor a note is omitted, because absence of feedback is not feedback. --actor filters on the AGENT the feedback is about, not on the human who wrote it. Reads VERIFIED records and writes nothing: no policy is resolved, no clock is read, nothing is appended.",
+    human_only: false,
+    human_only_note:
+      "Human-AUTHORED and agent-FACING, which is the whole point: the words are a person's and the reader is the agent they are about. Publishing it establishes no authority, because what it prints decides nothing — an agent that reads `disliked` has learned something about the operator and gained no permission, and one that never reads it is under exactly the same rules. It is the mirror of `journal read`, where the authorship and the audience swap.",
+    input: input({
+      flags: {
+        "--task": "string",
+        "--actor": "string",
+        "--reaction": "string",
+        "--source": "string",
+        "--since": "string",
+        "--limit": "string",
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        log: STRING,
+        note: STRING,
+        total: INTEGER,
+        entries: arrayOf(
+          object(
+            {
+              seq: INTEGER,
+              ts: STRING,
+              source: { enum: ["review", "decision"] },
+              event: STRING,
+              actor: STRING,
+              reaction: nullable({ enum: ["disliked", "indifferent", "liked", "loved"] }),
+              note: nullable(STRING),
+              verdict: nullable({ enum: ["ok", "denied"] }),
+              actionKey: nullable(STRING),
+              task: nullable(STRING),
+              class: nullable(STRING),
+              agentActor: nullable(STRING),
+              sampleSeq: nullable(INTEGER),
+            },
+            [
+              "seq",
+              "ts",
+              "source",
+              "event",
+              "actor",
+              "reaction",
+              "note",
+              "verdict",
+              "actionKey",
+              "task",
+              "class",
+              "agentActor",
+              "sampleSeq",
+            ],
+          ),
+        ),
+      },
+      ["ok", "log", "note", "total", "entries"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [OK, USAGE, IO, TORN, INTEGRITY],
+  },
+
+  {
     name: "journal",
     subcommand: "read",
     purpose:
@@ -1789,6 +1856,39 @@ const VERBS: VerbSpec[] = [
     ),
     error: ERROR_SCHEMA,
     exit_codes: [OK, USAGE, IO],
+  },
+
+  {
+    name: "values",
+    purpose:
+      "Print the OPTIONAL values block of APPROVAL.md: what the operator loves, likes and dislikes, what they want from an agent as behaviour, and how they read and answer. It is HUMAN-AUTHORED GUIDANCE and it is never policy: it grants nothing, forbids nothing and changes no verdict, and no routing, class match, sampling draw, budget, token or execution decision reads it. Read it at the start of a session and weigh it in HOW you work; what you MAY do is the policy block, answered by `policy check`. A file with no values block exits 0 and says in words that the operator declared no values, which keeps a declared absence distinguishable from not having looked. A block that is present and unreadable exits 1 with its load code and is to be treated as absent. Resolves no policy rule, reads no log, writes nothing.",
+    human_only: false,
+    human_only_note:
+      "Human-AUTHORED and agent-FACING, which is the whole point: the block is the operator writing to the agent, so a surface that withheld it from agents would leave the words with no reader. It carries no authority in either direction. Nothing in it can widen what an agent may do, because no enforcement path reads it (SPEC.md §11.1 invariant 10), and an agent cannot write it: the block lives inside APPROVAL.md, which is `policy.core` and rides the whole-file attestation.",
+    input: input({
+      flags: { ...POLICY_FLAGS, ...JSON_FLAG, ...HELP_FLAGS },
+    }),
+    output: object(
+      {
+        ok: { const: true },
+        path: STRING,
+        present: BOOLEAN,
+        note: STRING,
+        values: nullable(OPEN_OBJECT),
+      },
+      ["ok", "path", "present", "note", "values"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      OK,
+      {
+        code: 1,
+        meaning:
+          "a values block is present and could not be read; nothing about the policy changed, and the block grants nothing either way",
+      },
+      USAGE,
+      { code: 4, meaning: "a policy path that exists but cannot be read" },
+    ],
   },
 
   {
@@ -2235,8 +2335,12 @@ const VERBS: VerbSpec[] = [
         unmapped: arrayOf(object({ text: STRING, section: STRING }, ["text", "section"])),
         ignored: arrayOf(STRING),
         warnings: arrayOf(STRING),
+        // APRV-240: the fenced DRAFT values block, or null when the source
+        // named none of the four values headings. Null is a declaration and
+        // not a gap; the verb never drafts a values block nobody asked for.
+        values_draft: nullable(STRING),
       },
-      ["ok", "source", "out", "classes", "unmapped", "ignored", "warnings"],
+      ["ok", "source", "out", "classes", "unmapped", "ignored", "warnings", "values_draft"],
     ),
     error: ERROR_SCHEMA,
     exit_codes: BASE_EXIT_CODES,

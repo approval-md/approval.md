@@ -38,6 +38,7 @@ import { VERB_REGISTRY, verbLabel, type VerbSpec } from "../src/cli/verb-registr
 import { runPayloadHash } from "../src/core/payload.js";
 import {
   EXCLUDED_VERBS,
+  GUEST_VERBS,
   resolveAgentActor,
   serveApprovalMcp,
   toolName,
@@ -201,6 +202,16 @@ test("mcp: the tool list is the registry filtered by human_only, less the two ex
     assert.ok(listed.includes("payload_hash"));
     assert.ok(listed.includes("policy_test"));
     assert.ok(listed.includes("log_verify"));
+    // APRV-238. The human's own words, published to the agent they were
+    // written for. It is on this list for the same reason `journal_write` is:
+    // an ungated channel that only one party can reach is not a channel, and
+    // an MCP client is as much a session as a shell is.
+    assert.ok(listed.includes("values"), "the values tool is not published");
+    assert.ok(listed.includes("journal_write"));
+    // APRV-239. Human-AUTHORED, agent-FACING: publishing it establishes no
+    // authority, because what it prints decides nothing. `audit_review`, the
+    // verb that WRITES a reaction, stays withheld below.
+    assert.ok(listed.includes("feedback"));
 
     for (const withheld of [
       "grant",
@@ -231,6 +242,31 @@ test("mcp: the tool list is the registry filtered by human_only, less the two ex
   } finally {
     await close();
   }
+});
+
+test("mcp: `values` is published in full mode and withheld from guests (APRV-238)", async () => {
+  // Published, and its own instructions say what it is. The server-level
+  // instruction string is the only place a client learns that this tool's
+  // output is guidance and not permission, so it is asserted here rather than
+  // being left to the guide the client may never call.
+  const dir = newWorld("values-tool");
+  const { client, close } = await connect(dir);
+  try {
+    const tool = (await client.listTools()).tools.find((entry) => entry.name === "values");
+    assert.ok(tool !== undefined, "the values tool is not published");
+    const instructions = client.getInstructions() ?? "";
+    assert.match(instructions, /`values` prints the operator's stated preferences/u);
+    assert.match(instructions, /guidance rather than policy/u);
+  } finally {
+    await close();
+  }
+
+  // Withheld from guests, and that is a decision rather than an omission: a
+  // guest is somebody else's session on somebody else's queue, and the
+  // operator's own stated values are not theirs to read. `journal_write` is
+  // withheld for the mirrored reason, so the two are checked together.
+  assert.ok(!GUEST_VERBS.has("values"), "`values` must not be in GUEST_VERBS");
+  assert.ok(!GUEST_VERBS.has("journal write"), "`journal write` must not be in GUEST_VERBS");
 });
 
 test("mcp: the exclusions are agent-facing verbs, each with a stated reason", () => {

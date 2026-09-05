@@ -1,0 +1,17 @@
+{
+  "seq": 17,
+  "ts": "2026-08-04T09:27:11Z",
+  "event": "audit.reviewed",
+  "task": "task-049",
+  "action_key": "task-049:archive:2026-08-04",
+  "actor": "human:carter",
+  "channel": "cli",
+  "payload": {
+    "verdict": "ok",
+    "reaction": "loved",
+    "note": "exactly the archive I would have written by hand"
+  },
+  "alg": "sha256/jcs",
+  "prev": "6752e6617b2b810c1cc0cf09c51678c78891ff6fdfd8bb9399aecbdfca00dd5b",
+  "hash": "0f2b6ab3ee0a1f0e58a45f5a2e0bd1c6a5e2f7a1b47d9d0c3f8e6a1d5c4b2a90"
+}

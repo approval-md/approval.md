@@ -497,7 +497,11 @@ const chainVectors = [
 function schemaFixtureVectors() {
   const vectors = [];
   const root = join(REPO_ROOT, "schema", "fixtures");
-  for (const schema of ["envelope", "event", "policy", "sample-record"]) {
+  // Every schema in `schema/`, named rather than discovered, so adding one is a
+  // reviewable diff. `values` joined in APRV-237 (SPEC.md §5.3): the block is
+  // guidance and never enforcement, but the SHAPE it must have to be shown to a
+  // human at all is a write-boundary rule like any other.
+  for (const schema of ["envelope", "event", "policy", "sample-record", "values"]) {
     for (const kind of ["valid", "invalid"]) {
       const dir = join(root, schema, kind);
       let entries;

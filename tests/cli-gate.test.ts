@@ -468,6 +468,159 @@ test("grant --json emits the frozen shape and records the human decision", () =>
   assertClean(dir);
 });
 
+// ---------------------------------------------------------------------------
+// grant --reaction (APRV-239)
+// ---------------------------------------------------------------------------
+
+test("grant --reaction records payload.reaction beside the grant", () => {
+  const dir = readyForDecision();
+  const run = runCli(
+    [
+      "grant",
+      "task-042:chaser",
+      "--note",
+      "exactly the wording I would have used",
+      "--reaction",
+      "loved",
+      "--as",
+      "human:carter",
+      "--json",
+    ],
+    dir,
+  );
+  assert.equal(run.code, 0, run.stderr);
+  const token = String((JSON.parse(run.stdout) as Record<string, unknown>)["token"]);
+
+  const granted = logRecords(dir)[3] as Record<string, unknown>;
+  assert.deepEqual(granted["payload"], {
+    class: "communicate.email.external",
+    est_cost_usd: "0.02",
+    payload_hash: PAYLOAD_HASH,
+    reaction: "loved",
+    note: "exactly the wording I would have used",
+    token_sha256: createHash("sha256").update(token, "utf8").digest("hex"),
+    policy_sha256: policySha256(dir),
+  });
+  assertClean(dir);
+});
+
+test("an omitted reaction leaves no key on approval.granted", () => {
+  const dir = readyForDecision();
+  assert.equal(runCli(["grant", "task-042:chaser", "--as", "human:carter"], dir).code, 0);
+  const payload = (logRecords(dir)[3] as Record<string, unknown>)["payload"] as Record<
+    string,
+    unknown
+  >;
+  assert.ok(!("reaction" in payload), "an omitted reaction wrote a key anyway");
+  assertClean(dir);
+});
+
+test("grant: loved or disliked with no note refuses reaction-note-required", () => {
+  for (const reaction of ["loved", "disliked"]) {
+    const dir = readyForDecision();
+    const run = runCli(
+      ["grant", "task-042:chaser", "--reaction", reaction, "--as", "human:carter", "--json"],
+      dir,
+    );
+    // A gate refusal is exit 1: the command was well-formed and the runtime
+    // said no.
+    assert.equal(run.code, 1, run.stderr);
+    assert.equal(jsonErr(run)["code"], "reaction-note-required");
+    assert.match(String(jsonErr(run)["message"]), /--note/u);
+    // The gate appends nothing on this refusal; the one record that follows is
+    // the CLI's own APRV-235 note that a human's decision was refused, which
+    // is a fact about the surface and not a grant. The request is still there
+    // to answer.
+    assert.deepEqual(events(dir), [
+      "policy.updated",
+      "task.registered",
+      "approval.requested",
+      "audit.decision_refused",
+    ]);
+
+    // A blank note is not a note.
+    const blank = runCli(
+      [
+        "grant",
+        "task-042:chaser",
+        "--reaction",
+        reaction,
+        "--note",
+        "   ",
+        "--as",
+        "human:carter",
+        "--json",
+      ],
+      dir,
+    );
+    assert.equal(blank.code, 1);
+    assert.equal(jsonErr(blank)["code"], "reaction-note-required");
+    assert.deepEqual(events(dir), [
+      "policy.updated",
+      "task.registered",
+      "approval.requested",
+      "audit.decision_refused",
+      "audit.decision_refused",
+    ]);
+    assertClean(dir);
+  }
+});
+
+test("grant: liked and indifferent need no note", () => {
+  for (const reaction of ["liked", "indifferent"]) {
+    const dir = readyForDecision();
+    const run = runCli(
+      ["grant", "task-042:chaser", "--reaction", reaction, "--as", "human:carter", "--json"],
+      dir,
+    );
+    assert.equal(run.code, 0, run.stderr);
+    const payload = (logRecords(dir)[3] as Record<string, unknown>)["payload"] as Record<
+      string,
+      unknown
+    >;
+    assert.equal(payload["reaction"], reaction);
+    assertClean(dir);
+  }
+});
+
+test("reject and revoke refuse --reaction as a usage error naming --note", () => {
+  const dir = readyForDecision();
+  const rejected = runCli(
+    ["reject", "task-042:chaser", "--reaction", "disliked", "--as", "human:carter", "--json"],
+    dir,
+  );
+  // Exit 2, not 1: the flag does not exist for this verb, so nothing was
+  // decided and there is no refusal code to branch on.
+  assert.equal(rejected.code, 2);
+  assert.equal(jsonErr(rejected)["code"], "usage");
+  assert.match(String(jsonErr(rejected)["message"]), /--note/u);
+  assert.equal(events(dir).includes("approval.rejected"), false);
+
+  assert.equal(runCli(["grant", "task-042:chaser", "--as", "human:carter"], dir).code, 0);
+  const revoked = runCli(
+    ["revoke", "task-042:chaser", "--reaction", "disliked", "--as", "human:carter", "--json"],
+    dir,
+  );
+  assert.equal(revoked.code, 2);
+  assert.equal(jsonErr(revoked)["code"], "usage");
+  assert.match(String(jsonErr(revoked)["message"]), /--note/u);
+  assert.equal(events(dir).includes("approval.revoked"), false);
+  assertClean(dir);
+});
+
+test("a misspelled --reaction is a usage error, not a default", () => {
+  const dir = readyForDecision();
+  const run = runCli(
+    ["grant", "task-042:chaser", "--reaction", "love", "--as", "human:carter", "--json"],
+    dir,
+  );
+  assert.equal(run.code, 2);
+  assert.equal(jsonErr(run)["code"], "usage");
+  assert.match(String(jsonErr(run)["message"]), /disliked \| indifferent \| liked \| loved/u);
+  assert.equal(events(dir).includes("approval.granted"), false);
+  assertClean(dir);
+});
+
 test("grant is human-only: an agent actor is refused at exit 2 with nothing appended", () => {
   const dir = readyForDecision();
   const run = runCli(["grant", "task-042:chaser", "--as", "agent:claude", "--json"], dir);

@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "like": ["small reviewable commits"],
+  "priority": 3
+}

@@ -1083,6 +1083,27 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
       const { commandJournal } = await import("./journal.js");
       return commandJournal(rest, streams, cwd);
     }
+    // The human's half of the same pair (APRV-238). `values` prints the
+    // optional values block of APPROVAL.md — what the operator values, wants
+    // and how they answer — and it is guidance rather than policy: it grants
+    // nothing, and no path that computes a verdict, a class, a sample, a budget
+    // or a token reads it (SPEC.md §11.1 invariant 10). It resolves no policy
+    // rule, reads no log and appends nothing.
+    case "values": {
+      const { commandValues } = await import("./values.js");
+      return commandValues(rest, streams, cwd);
+    }
+    // The other direction of the same channel (APRV-239). `journal read` is the
+    // operator reading what the agents said; this is the agents reading what the
+    // operator said about their work. It reads a verified log and writes
+    // nothing, and every output form labels what it prints as human-authored
+    // GUIDANCE: no enforcement path anywhere in this dispatch reads a reaction
+    // (SPEC.md §11.1 invariant 10), so a surface that let one read as a rule
+    // would be the only place the invariant could break.
+    case "feedback": {
+      const { commandFeedback } = await import("./feedback.js");
+      return commandFeedback(rest, streams, cwd);
+    }
     // The environment verb (APRV-73). `env` resolves `.approval/env` — the
     // source map naming where each *_env variable's value lives — and prints an
     // export block for a shell to evaluate. IT IS THE ONLY COMMAND IN THIS
