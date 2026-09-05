@@ -3,156 +3,1176 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>approval.md — human approval for agent actions</title>
-<meta name="description" content="A file-based convention and runtime that gates AI agent actions with real-world side effects behind human sign-off. Your AGENTS.md says 'require approval first.' approval.md enforces it.">
+<title>approval.md: human approval for agent actions</title>
+<meta name="description" content="A file-based convention and reference runtime that gates agent actions with real-world side effects behind human sign-off: an attested policy file, an append-only hash-chained log, single-use execution tokens, harness hooks, an MCP server, and adapters that answer only to a grant.">
+<meta name="color-scheme" content="dark light">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script>
+  /* Applied before first paint so the page never flashes the wrong theme. */
+  (function () {
+    try {
+      var saved = localStorage.getItem('approval-theme');
+      if (saved === 'light' || saved === 'dark') {
+        document.documentElement.setAttribute('data-theme', saved);
+      }
+    } catch (e) { /* private mode, blocked storage: the system theme is the answer */ }
+  })();
+</script>
 <style>
+  /* ---- tokens: dark is the base, light overrides ---- */
   :root{
-    --paper:#F6F3EC; --ink:#17191D; --green:#17A15E; --mut:#8A857B;
-    --line:#E3DED2; --card:#FDFCF8;
-    --mono:"JetBrains Mono",ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace;
+    --wall:#050608;
+    --page:#050608;
+    --surface:#0b0d10;
+    --raised:#101318;
+    --fg:#f7f8f8;
+    --muted:#8a8a88;
+    --border:rgba(247,248,248,.10);
+    --border-strong:rgba(247,248,248,.20);
+    --hover:rgba(247,248,248,.045);
+    --green:#17A15E;
+    --btn-fg:#050608;
+    --btn-bg:#f7f8f8;
+    --btn-inset:inset 0 1px 0 rgba(255,255,255,.35);
+    --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace;
   }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --wall:#f3f3f2;
+      --page:#ececeb;
+      --surface:#f7f7f6;
+      --raised:#ffffff;
+      --fg:#121211;
+      --muted:#5c5c5a;
+      --border:rgba(28,28,26,.07);
+      --border-strong:rgba(28,28,26,.16);
+      --hover:rgba(28,28,26,.045);
+      --btn-fg:#f7f7f6;
+      --btn-bg:#121211;
+      --btn-inset:inset 0 1px 0 rgba(255,255,255,.18);
+    }
+  }
+  :root[data-theme="light"]{
+    --wall:#f3f3f2;
+    --page:#ececeb;
+    --surface:#f7f7f6;
+    --raised:#ffffff;
+    --fg:#121211;
+    --muted:#5c5c5a;
+    --border:rgba(28,28,26,.07);
+    --border-strong:rgba(28,28,26,.16);
+    --hover:rgba(28,28,26,.045);
+    --btn-fg:#f7f7f6;
+    --btn-bg:#121211;
+    --btn-inset:inset 0 1px 0 rgba(255,255,255,.18);
+  }
+
   *{box-sizing:border-box}
-  html,body{margin:0;padding:0;background:var(--paper);color:var(--ink);font-family:var(--mono)}
-  body{font-size:16px;line-height:1.65}
-  a{color:var(--ink);text-underline-offset:3px}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0;
+    background:var(--wall);
+    color:var(--fg);
+    font-family:var(--mono);
+    font-size:14px;
+    font-weight:400;
+    line-height:1.6;
+    overflow-x:hidden;
+  }
+  a{color:inherit;text-decoration:none}
   a:hover{color:var(--green)}
-  .wrap{max-width:760px;margin:0 auto;padding:56px 24px 96px}
+  :focus-visible{outline:2px solid var(--fg);outline-offset:2px;border-radius:4px}
+  code{font-family:var(--mono);font-size:.92em}
 
-  /* wordmark */
-  .mark{display:flex;align-items:center;gap:0;font-weight:700;font-size:clamp(34px,7vw,56px);letter-spacing:.5px;user-select:none}
-  .mark svg{height:.86em;width:auto;display:block;margin:0 .03em}
-  .mark .md{color:var(--mut)}
+  /* ---- shell ---- */
+  .shell{display:block;max-width:1180px;margin:0 auto}
 
-  .tag{margin:18px 0 0;font-size:clamp(17px,2.6vw,21px)}
-  .sub{margin:10px 0 0;color:var(--mut);max-width:56ch}
+  /* ---- sidebar: a top row on narrow screens ---- */
+  .side{
+    border-bottom:1px solid var(--border);
+    background:var(--wall);
+    position:sticky;top:0;z-index:20;
+  }
+  .side-inner{display:flex;gap:6px;overflow-x:auto;padding:10px 16px;scrollbar-width:thin}
+  .side-inner::-webkit-scrollbar{height:4px}
+  .side-inner::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:4px}
+  .grp{border:0;padding:0;margin:0;flex:0 0 auto}
+  .grp>summary{
+    list-style:none;cursor:pointer;white-space:nowrap;
+    font-size:11px;letter-spacing:.3px;text-transform:uppercase;font-weight:400;
+    color:var(--muted);border:1px solid var(--border);border-radius:7px;
+    padding:6px 11px;background:transparent;font-family:var(--mono);
+  }
+  .grp>summary::-webkit-details-marker{display:none}
+  .grp>summary:hover{background:var(--hover);color:var(--fg)}
+  .grp>summary:focus-visible{color:var(--fg)}
+  /* narrow: the open group drops down under the row */
+  .grp-links{display:none}
+  .grp[open]>summary{background:var(--btn-bg);color:var(--btn-fg);border-color:var(--btn-bg)}
+  .grp[open]>.grp-links{
+    display:flex;flex-wrap:wrap;gap:4px 6px;
+    position:absolute;left:0;right:0;top:100%;z-index:21;
+    margin:0;padding:10px 16px 14px;list-style:none;
+    background:var(--wall);border-bottom:1px solid var(--border);
+  }
+  .grp[open]>.grp-links li a{
+    display:block;font-size:12px;color:var(--muted);
+    border:1px solid var(--border);border-radius:5px;padding:4px 9px;
+  }
+  .grp[open]>.grp-links li a:hover{color:var(--fg);background:var(--hover)}
 
-  .install{margin:34px 0 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-  .install code{background:var(--ink);color:var(--paper);padding:12px 18px;border-radius:8px;font-size:15px}
-  .install .status{color:var(--mut);font-size:13px}
+  /* ---- main ---- */
+  main{padding:34px 16px 120px;min-width:0}
+  h1{
+    font-size:26px;font-weight:400;letter-spacing:-.75px;line-height:1.3;
+    margin:0 0 14px;display:flex;align-items:center;flex-wrap:wrap;
+  }
+  .mark{display:inline-flex;align-items:center;font-weight:700;letter-spacing:-.5px}
+  .mark svg{height:.82em;width:auto;display:block;margin:0 .02em}
+  .mark .md{color:var(--muted)}
+  h1 .claim{margin-left:.7em;color:var(--fg)}
+  .sub{margin:0;color:var(--muted);max-width:74ch}
+  .sub b{color:var(--fg);font-weight:400}
 
-  h2{margin:64px 0 12px;font-size:15px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut);font-weight:700}
-  p{margin:12px 0;max-width:62ch}
-  .rule{border:0;border-top:1px solid var(--line);margin:0}
+  .label{
+    font-size:11px;letter-spacing:.3px;text-transform:uppercase;font-weight:400;
+    color:var(--muted);margin:56px 0 14px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;
+  }
+  .label .count{opacity:.7;text-transform:none;letter-spacing:0}
 
-  /* the demo card */
-  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:22px 22px 18px;margin-top:18px;
-        box-shadow:0 1px 0 rgba(23,25,29,.04)}
-  .card .head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
-  .card .evt{font-size:13px;color:var(--mut)}
-  .card .evt b{color:var(--ink)}
-  .card .task{margin:10px 0 2px;font-weight:700}
-  .fx{margin:8px 0 0;padding:0;list-style:none;font-size:14px}
-  .fx li{margin:4px 0;color:var(--mut)}
-  .fx .k{color:var(--ink)}
-  .fx .warn{color:#B4552D}
-  .actions{display:flex;gap:10px;margin-top:16px;align-items:center;flex-wrap:wrap}
-  button{font:inherit;font-weight:700;border-radius:8px;padding:10px 20px;cursor:pointer;border:1px solid var(--ink)}
-  .approve{background:var(--ink);color:var(--paper)}
-  .approve:hover{background:var(--green);border-color:var(--green)}
-  .reject{background:transparent;color:var(--ink)}
-  .reject:hover{color:#B4552D;border-color:#B4552D}
+  /* ---- install ---- */
+  .install{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin-top:22px;max-width:82ch}
+  .install>code{
+    background:var(--surface);border:1px solid var(--border);border-radius:7px;
+    padding:9px 14px;color:var(--fg);
+  }
+  .install .note{color:var(--muted);font-size:12px}
+  .install .note code{color:var(--fg)}
 
-  /* bracket-tick that draws on approve */
-  .box{display:inline-flex;vertical-align:-2px;margin-right:8px}
-  .box svg{height:18px;width:auto}
+  /* ---- the loop card ---- */
+  .loop{
+    background:var(--surface);border:1px solid var(--border);border-radius:14px;
+    padding:20px;max-width:640px;
+  }
+  .loop .top{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+  .loop .top b{color:var(--fg);font-weight:400}
+  .loop .head{margin:14px 0 2px;display:flex;align-items:flex-start;gap:9px;line-height:1.45}
+  .box{flex:0 0 auto;display:inline-flex;padding-top:2px}
+  .box svg{height:17px;width:auto}
+  .bx{fill:var(--fg)}
   .tickpath{stroke-dasharray:340;stroke-dashoffset:340}
   .approved .tickpath{transition:stroke-dashoffset .5s ease .05s;stroke-dashoffset:0}
-  @media (prefers-reduced-motion: reduce){ .approved .tickpath{transition:none;stroke-dashoffset:0} }
+  @media (prefers-reduced-motion: reduce){.approved .tickpath{transition:none;stroke-dashoffset:0}}
+  .rows{margin:10px 0 0;padding:0;list-style:none;font-size:12.5px;display:grid;gap:3px}
+  .rows li{display:flex;gap:10px;color:var(--fg)}
+  .rows .k{color:var(--muted);flex:0 0 104px}
+  .rows .v{min-width:0;overflow-wrap:anywhere}
+  .blockhdr{font-size:11px;letter-spacing:.3px;text-transform:uppercase;color:var(--muted);margin:16px 0 4px}
+  .acts{display:flex;gap:9px;align-items:center;margin-top:18px;flex-wrap:wrap}
+  button{font:inherit;font-family:var(--mono);cursor:pointer}
+  .btn{
+    border:1px solid var(--border-strong);border-radius:7px;padding:8px 18px;
+    background:transparent;color:var(--fg);
+  }
+  .btn:hover{background:var(--hover)}
+  .btn.fill{background:var(--btn-bg);color:var(--btn-fg);border-color:var(--btn-bg);box-shadow:var(--btn-inset)}
+  .btn.fill:hover{background:var(--green);border-color:var(--green);color:#fff}
+  .btn[disabled]{opacity:.4;cursor:default}
+  .btn.fill[disabled]:hover{background:var(--btn-bg);border-color:var(--btn-bg);color:var(--btn-fg)}
+  .verdict{font-size:12px;color:var(--muted)}
+  .verdict.ok{color:var(--green)}
+  .tail{
+    margin-top:16px;background:var(--page);border:1px solid var(--border);border-radius:9px;
+    padding:12px 14px;font-size:11.5px;line-height:1.8;color:var(--muted);
+    overflow-x:auto;white-space:pre;
+  }
+  .tail .g{color:var(--green)}
+  .tail .f{color:var(--fg)}
 
-  .log{margin-top:16px;background:var(--ink);color:#C9C5BA;border-radius:8px;padding:14px 16px;font-size:12.5px;
-       overflow-x:auto;white-space:pre;line-height:1.7}
-  .log .g{color:#5FD69A}
-  .log .dim{color:#7E7A70}
+  /* ---- filters ---- */
+  .filters{display:flex;flex-direction:column;gap:12px}
+  .searchwrap{position:relative;max-width:420px}
+  .searchwrap input{
+    width:100%;font:inherit;font-family:var(--mono);font-size:13px;
+    background:var(--surface);border:1px solid var(--border);border-radius:7px;
+    padding:9px 62px 9px 12px;color:var(--fg);
+  }
+  .searchwrap input::placeholder{color:var(--muted)}
+  .kbd{
+    position:absolute;right:8px;top:50%;transform:translateY(-50%);
+    font-size:10.5px;color:var(--muted);border:1px solid var(--border);
+    border-radius:4px;padding:2px 6px;pointer-events:none;
+  }
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .chip{
+    border:1px solid var(--border);border-radius:5px;background:transparent;color:var(--muted);
+    padding:5px 11px;font-size:11px;letter-spacing:.3px;text-transform:uppercase;font-weight:400;
+  }
+  .chip:hover{background:var(--hover);color:var(--fg)}
+  .chip[aria-pressed="true"]{background:var(--btn-bg);color:var(--btn-fg);border-color:var(--btn-bg);box-shadow:var(--btn-inset)}
 
-  pre.snippet{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;
-       overflow-x:auto;font-size:13.5px;line-height:1.7;margin-top:14px}
-  .c{color:var(--mut)} .g{color:var(--green);font-weight:700}
+  /* ---- card grid ---- */
+  .grid{display:grid;gap:10px;grid-template-columns:1fr;margin-top:18px}
+  @media (min-width:620px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media (min-width:1080px){.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+  .card{
+    background:var(--surface);border:1px solid var(--border);border-radius:9px;
+    padding:15px 16px 13px;display:flex;flex-direction:column;gap:8px;min-width:0;
+  }
+  .card:hover{background:var(--raised);border-color:var(--border-strong)}
+  .card[hidden]{display:none}
+  .tags{display:flex;flex-wrap:wrap;gap:5px}
+  .tag{
+    font-size:10.5px;letter-spacing:.3px;color:var(--muted);
+    border:1px solid var(--border);border-radius:4px;padding:1px 6px;
+  }
+  .tag.key{border-color:var(--border-strong);color:var(--fg)}
+  .card h3{margin:0;font-size:13.5px;font-weight:500;letter-spacing:-.2px;line-height:1.4}
+  .card p{margin:0;color:var(--muted);font-size:12.5px;line-height:1.6;flex:1;overflow-wrap:anywhere}
+  .card p code{color:var(--fg)}
+  .card .go{
+    font-size:11px;letter-spacing:.3px;text-transform:uppercase;color:var(--muted);
+    border-top:1px solid var(--border);padding-top:9px;margin-top:2px;overflow-wrap:anywhere;
+  }
+  .card .go:hover{color:var(--green)}
+  .empty{color:var(--muted);font-size:13px;padding:22px 2px}
 
-  .links{margin-top:14px;display:flex;gap:22px;flex-wrap:wrap;font-size:15px}
-  footer{margin-top:80px;color:var(--mut);font-size:13px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  /* ---- prose blocks ---- */
+  .prose{max-width:74ch}
+  .prose p{margin:0 0 14px;color:var(--muted)}
+  .prose p b{color:var(--fg);font-weight:400}
+  .list{list-style:none;margin:0;padding:0;display:grid;gap:9px;max-width:82ch}
+  .list li{
+    display:flex;gap:12px;border:1px solid var(--border);border-radius:7px;
+    background:var(--surface);padding:11px 13px;color:var(--muted);font-size:12.5px;line-height:1.6;
+  }
+  .list li b{color:var(--fg);font-weight:400}
+  .list .n{color:var(--muted);opacity:.6;flex:0 0 20px;text-align:right}
+
+  table.exit{border-collapse:collapse;font-size:12.5px;width:100%;max-width:560px}
+  table.exit th,table.exit td{border-bottom:1px solid var(--border);padding:7px 12px 7px 0;text-align:left;vertical-align:top}
+  table.exit th{color:var(--muted);font-weight:400;font-size:11px;letter-spacing:.3px;text-transform:uppercase}
+  table.exit td{color:var(--muted)}
+  table.exit td:first-child{color:var(--fg);width:56px}
+
+  .readon{display:flex;flex-wrap:wrap;gap:8px}
+  .readon a{
+    border:1px solid var(--border);border-radius:7px;padding:8px 14px;
+    background:var(--surface);font-size:12.5px;
+  }
+  .readon a:hover{background:var(--raised);border-color:var(--border-strong)}
+
+  footer{
+    margin-top:70px;padding-top:18px;border-top:1px solid var(--border);
+    color:var(--muted);font-size:12px;display:flex;gap:14px;justify-content:space-between;flex-wrap:wrap;
+  }
+
+  /* ---- theme toggle ---- */
+  .theme{
+    position:fixed;left:14px;bottom:14px;z-index:40;display:flex;gap:2px;
+    background:var(--surface);border:1px solid var(--border-strong);border-radius:9px;padding:3px;
+  }
+  .theme button{
+    border:0;background:transparent;color:var(--muted);border-radius:7px;
+    padding:5px 9px;line-height:1;display:inline-flex;align-items:center;
+  }
+  .theme button:hover{background:var(--hover);color:var(--fg)}
+  .theme button[aria-checked="true"]{background:var(--btn-bg);color:var(--btn-fg)}
+  .theme svg{width:13px;height:13px;display:block}
+
+  /* ---- wide screens: the top row becomes a left rail ---- */
+  @media (min-width:900px){
+    .shell{display:grid;grid-template-columns:230px minmax(0,1fr);align-items:start}
+    .side{
+      border-bottom:0;border-right:1px solid var(--border);
+      position:sticky;top:0;height:100vh;overflow-y:auto;
+    }
+    .side-inner{display:block;overflow:visible;padding:30px 14px 96px}
+    .grp{margin-bottom:2px}
+    .grp>summary,.grp[open]>summary{
+      display:flex;align-items:center;gap:7px;border:0;border-radius:5px;padding:6px 8px;
+      width:100%;text-align:left;background:transparent;color:var(--muted);
+    }
+    .grp>summary::before{
+      content:"+";opacity:.5;font-size:12px;line-height:1;width:8px;flex:0 0 8px;
+    }
+    .grp[open]>summary::before{content:"\2013"}
+    .grp>summary:hover,.grp[open]>summary:hover{background:var(--hover);color:var(--fg)}
+    .grp[open]>.grp-links{
+      display:block;position:static;margin:2px 0 10px;padding:0 0 0 8px;
+      background:transparent;border:0;border-left:1px solid var(--border);
+    }
+    .grp[open]>.grp-links li a{
+      display:block;padding:4px 10px;font-size:12px;color:var(--muted);border:0;border-radius:5px;
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    }
+    .grp[open]>.grp-links li a:hover{background:var(--hover);color:var(--fg)}
+    main{padding:44px 40px 140px}
+  }
 </style>
 </head>
 <body>
-<main class="wrap">
 
-  <!-- wordmark: appr[✓]val.md -->
-  <h1 class="mark" aria-label="approval.md">appr<svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z" fill="#17191D"/><path d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z" fill="#17191D"/><path d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg>val<span class="md">.md</span></h1>
+<div class="shell">
 
-  <p class="tag"><b>Human approval for agent actions.</b></p>
-  <p class="sub">Agents now send emails, spend money, book things, and delete data. There is no diff to revert. approval.md is a file-based convention and runtime that gates side-effecting agent actions behind your sign-off — from a policy file you write, to your phone.</p>
+  <!-- ======================= sidebar ======================= -->
+  <nav class="side" aria-label="Sections">
+    <div class="side-inner">
 
-  <div class="install">
-    <code>npm i -g approval-md</code>
-    <span class="status">pre-release · spec first, runtime landing milestone by milestone</span>
-  </div>
+      <details class="grp" open>
+        <summary>Documentation</summary>
+        <ul class="grp-links">
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/SPEC.md">SPEC.md</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/README.md">README</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md">CLI reference</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md">Claude Code hook</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/docs/cursor-hook.md">Cursor hook</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/docs/git-evidence.md">Git evidence</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/docs/dogfood-cutover.md">Dogfood cutover</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/docs/integrations-considered.md">Integrations considered</a></li>
+        </ul>
+      </details>
 
-  <h2>Try the loop</h2>
-  <p>This is the whole product in one card. An agent declared what it wants to do; the policy says <code>communicate.email.external</code> is yours to decide.</p>
+      <details class="grp" open>
+        <summary>Product</summary>
+        <ul class="grp-links">
+          <li><a href="#loop">Try the loop</a></li>
+          <li><a href="#install">Install</a></li>
+          <li><a href="#features">The feature set</a></li>
+          <li><a href="#exit">Exit codes</a></li>
+          <li><a href="#posture">What it does not defend</a></li>
+        </ul>
+      </details>
 
-  <div class="card" id="card">
-    <div class="head">
-      <span class="evt"><b>approval.requested</b> · task-042 · agent:claude-admin</span>
-      <span class="evt">ttl 24h</span>
+      <details class="grp">
+        <summary>Examples</summary>
+        <ul class="grp-links">
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/examples/telegram-demo.md">Telegram, end to end</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/examples/email-demo.md">Real mail over SMTP</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md">An AgentMail draft</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/examples/mcp-demo.md">An MCP client asks</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/examples/backlog-md-project/README.md">A Backlog.md board</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/examples/web-agent-demo/runbook.md">Web agent demo day</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/examples/grok-bot-connector/runbook.md">Grok Bot connector</a></li>
+        </ul>
+      </details>
+
+      <details class="grp">
+        <summary>Compare</summary>
+        <ul class="grp-links">
+          <li><a href="#compare">The four neighbours</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/README.md#how-this-compares">README: how this compares</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/docs/integrations-considered.md">Every integration weighed</a></li>
+        </ul>
+      </details>
+
+      <details class="grp">
+        <summary>Invariants</summary>
+        <ul class="grp-links">
+          <li><a href="#invariants">The ten, in short</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/SPEC.md">SPEC.md section 11.1</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/conformance/README.md">Conformance suite</a></li>
+          <li><a href="https://github.com/approval-md/approval.md/blob/main/README.md#cant-the-agent-just-go-around-it">Can it go around?</a></li>
+        </ul>
+      </details>
+
     </div>
-    <p class="task"><span class="box"><svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z" fill="#17191D"/><path d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z" fill="#17191D"/><path class="tickpath" d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Send deposit chaser to agency@example.co.uk</p>
-    <ul class="fx">
-      <li><span class="k">class</span> communicate.email.external · <span class="warn">irreversible</span></li>
-      <li><span class="k">est. cost</span> $0.02 · <span class="k">idempotency</span> task-042:chaser</li>
+  </nav>
+
+  <!-- ======================= main ======================= -->
+  <main>
+
+    <header class="lede">
+      <h1>
+        <span class="mark" aria-label="approval.md">appr<svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path class="bx" d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z"/><path class="bx" d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z"/><path d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg>val<span class="md">.md</span></span>
+        <span class="claim">human approval for agent actions</span>
+      </h1>
+      <p class="sub">The permissions section of an AGENTS.md file is prose, and nothing checks it. <b>approval.md is the layer that checks:</b> a policy file a human signs for, an append-only hash-chained log, and a single-use token minted only as a decision is recorded.</p>
+    </header>
+
+    <div class="install" id="install">
+      <code>npm install -g approval-md</code>
+      <span class="note">v0.1.0 · MIT · Node 20 or newer. Publishing is imminent; until it lands, clone, <code>npm ci</code>, <code>npm run build</code>, <code>npm link</code>.</span>
+    </div>
+
+    <h2 class="label" id="loop">Try the loop</h2>
+    <p class="sub" style="margin-bottom:18px">The whole product in one card. An agent registered an envelope and asked; the policy resolved <code>communicate.email.external</code> to manual, and the irreversibility floor would have done it anyway.</p>
+
+    <section class="loop" id="card" aria-label="Interactive approval prompt">
+      <div class="top">
+        <span><b>approval.requested</b> · seq 41 · agent:claude-admin</span>
+        <span>expires 13:07 UTC</span>
+      </div>
+
+      <p class="head">
+        <span class="box"><svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path class="bx" d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z"/><path class="bx" d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z"/><path class="tickpath" d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+        <span>Send the deposit chaser to agency@example.co.uk</span>
+      </p>
+
+      <p class="blockhdr">Computed by the runtime</p>
+      <ul class="rows">
+        <li><span class="k">action_key</span><span class="v">aprv-042:chaser:2026-09-05</span></li>
+        <li><span class="k">class</span><span class="v">communicate.email.external</span></li>
+        <li><span class="k">reversible</span><span class="v">false, so the floor holds this at manual</span></li>
+        <li><span class="k">payload_hash</span><span class="v">6f9b042133d9b1f0a66e4566c901acc2…</span></li>
+        <li><span class="k">chain head</span><span class="v">seq 40, 3e539bd4c77d…</span></li>
+      </ul>
+
+      <p class="blockhdr">Claimed by the agent, unverified</p>
+      <ul class="rows">
+        <li><span class="k">est_cost_usd</span><span class="v">0</span></li>
+        <li><span class="k">summary</span><span class="v">Chase the outstanding deposit, one recipient, no attachment</span></li>
+      </ul>
+
+      <div class="acts">
+        <button class="btn fill" id="ok">Approve</button>
+        <button class="btn" id="no">Reject</button>
+        <span class="verdict" id="verdict" role="status" aria-live="polite"></span>
+      </div>
+
+      <div class="tail" id="tail"><span class="f">$ approval log tail</span>
+{"event":"task.registered","seq":39,"actor":"agent:claude-admin"}
+{"event":"approval.requested","seq":41,"actor":"agent:claude-admin"}</div>
+    </section>
+
+    <p class="sub" style="margin-top:14px">A real prompt reaches a phone over Telegram, carries the full payload bytes, and rewrites itself in place on the tap. The token is printed once at whichever surface recorded the decision, and never into the chat.</p>
+
+    <h2 class="label" id="features">The feature set <span class="count" id="count"></span></h2>
+
+    <div class="filters">
+      <div class="searchwrap">
+        <input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="Search the feature set" aria-label="Search the feature set">
+        <span class="kbd" id="kbd">⌘K</span>
+      </div>
+      <div class="chips" id="chips" role="group" aria-label="Filter features by area">
+        <button class="chip" data-chip="all" aria-pressed="true">all</button>
+        <button class="chip" data-chip="gate" aria-pressed="false">gate</button>
+        <button class="chip" data-chip="channels" aria-pressed="false">channels</button>
+        <button class="chip" data-chip="adapters" aria-pressed="false">adapters</button>
+        <button class="chip" data-chip="hooks" aria-pressed="false">hooks</button>
+        <button class="chip" data-chip="log" aria-pressed="false">log</button>
+        <button class="chip" data-chip="daemon" aria-pressed="false">daemon</button>
+        <button class="chip" data-chip="mcp" aria-pressed="false">mcp</button>
+        <button class="chip" data-chip="verification" aria-pressed="false">verification</button>
+        <button class="chip" data-chip="examples" aria-pressed="false">examples</button>
+      </div>
+    </div>
+
+    <div class="grid" id="grid">
+
+      <!-- ===== gate ===== -->
+      <article class="card" data-chips="gate">
+        <div class="tags"><span class="tag">shipped</span><span class="tag">spec</span></div>
+        <h3>APPROVAL.md, the file you sign for</h3>
+        <p>A fenced <code>yaml approval-policy</code> block inside markdown at your repo root. The prose around it is for you, the runtime parses the block and ignores the rest, so the thing you sign for is text you read.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval">README: define what needs approval →</a>
+      </article>
+
+      <article class="card" data-chips="gate">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Attestation, and hash-mismatch</h3>
+        <p><code>approval policy attest</code> records that a human saw these exact bytes, storing their SHA-256 rather than their text. Edit the file afterwards and every gated operation refuses <code>hash-mismatch</code> until you attest again.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval">README: define what needs approval →</a>
+      </article>
+
+      <article class="card" data-chips="gate">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Five autonomy levels, strictest first</h3>
+        <p><code>human-only</code>, <code>manual</code>, <code>supervised-live</code>, <code>supervised-retro</code>, <code>autonomous</code>. Bare <code>supervised</code> stays an alias of <code>supervised-retro</code>, so a policy written before the split keeps the meaning its author gave it.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/schema/policy.schema.json">schema/policy.schema.json →</a>
+      </article>
+
+      <article class="card" data-chips="gate">
+        <div class="tags"><span class="tag">shipped</span><span class="tag">spec</span></div>
+        <h3>The irreversibility floor</h3>
+        <p>An action declared <code>reversible: false</code> resolves to <code>manual</code> whatever the policy says. Retrospective sampling cannot un-send a message, so execute-then-review is no oversight at all for an irreversible class.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/SPEC.md">SPEC.md section 7 →</a>
+      </article>
+
+      <article class="card" data-chips="gate">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Fail closed on every axis</h3>
+        <p>A policy that does not parse resolves every class to <code>manual</code>. An action matching no rule takes <code>defaults.autonomy</code>. An unrecognised key fails validation, because a key the runtime did not understand is a rule its author believed was in force.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval">README: define what needs approval →</a>
+      </article>
+
+      <article class="card" data-chips="gate">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Single-use execution tokens</h3>
+        <p>Minted at one site in the codebase, inside the path that records a human decision, printed once, stored nowhere. The log holds only the SHA-256, and a second spend refuses <code>token-consumed</code> naming the seq that spent it.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone">README: put approvals on your phone →</a>
+      </article>
+
+      <article class="card" data-chips="gate">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>An approval binds bytes, never a description</h3>
+        <p>The envelope declares a <code>payload_hash</code> and <code>--payload</code> supplies the material at request time. Bytes that hash to anything else are refused <code>payload-mismatch</code>, with nothing stored and nothing appended.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone">README: put approvals on your phone →</a>
+      </article>
+
+      <article class="card" data-chips="gate">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Class comes from the envelope, never a flag</h3>
+        <p>Class, cost and reversibility are read from the registered envelope, so an agent cannot rename its own class between registering an action and asking for it.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/backlog-md-project/README.md">The envelope, worked through →</a>
+      </article>
+
+      <article class="card" data-chips="gate">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Budgets computed from the log</h3>
+        <p>Class <code>limits</code> and <code>budgets</code> scopes are conjunctive, so an action passes both or neither. Consumption is computed from the log over rolling windows rather than read from a mutable counter.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#the-approvalmd-dictionary">README: the dictionary →</a>
+      </article>
+
+      <article class="card" data-chips="gate">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Protected paths widen, never narrow</h3>
+        <p><code>APPROVAL.md</code>, the agent instruction files, <code>.approval/</code>, the harness settings and the release configuration are protected whatever a policy says. <code>protected_paths</code> adds repo-relative literals, and a glob is a schema violation.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#define-what-needs-approval">README: define what needs approval →</a>
+      </article>
+
+      <article class="card" data-chips="gate">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Amend a policy with the verb</h3>
+        <p><code>approval policy amend</code> lands the new bytes and their attestation together, printing a semantic diff of class resolutions, approvers, defaults and limits, then a load advisory saying whether the edited policy actually parses.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#policy-amend">CLI reference: policy amend →</a>
+      </article>
+
+      <article class="card" data-chips="gate hooks">
+        <div class="tags"><span class="tag key">human-only</span></div>
+        <h3>The open window, for repairing a broken gate</h3>
+        <p><code>approval gate open</code> needs a terminal and a typed <code>understood</code>. Its state lives in the log and nowhere else, each bypassed call appends <code>gate.bypassed</code> before the allow is printed, and the window suspends the policy while never suspending the log.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#gate">CLI reference: gate →</a>
+      </article>
+
+      <article class="card" data-chips="gate hooks">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Import your AGENTS.md prose</h3>
+        <p><code>approval import agents-md</code> turns a permissions section into a draft policy block using a fixed, ordered keyword table. No model is consulted, the same bytes always produce the same draft, and the draft authorizes nothing.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#import-agents-md">CLI reference: import agents-md →</a>
+      </article>
+
+      <!-- ===== channels ===== -->
+      <article class="card" data-chips="channels">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Telegram, the reference channel</h3>
+        <p>The prompt carries a COMPUTED block the runtime derived, a CLAIMED block marked unverified, the full payload, and two buttons. One edit call carries the outcome and the disarming together, so no window exists in which it reads approved and still offers a tap.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone">README: put approvals on your phone →</a>
+      </article>
+
+      <article class="card" data-chips="channels">
+        <div class="tags"><span class="tag key">behind a policy key</span></div>
+        <h3>Paced or burst delivery</h3>
+        <p><code>channels.telegram.delivery</code> chooses <code>paced</code>, the default, showing one summary line and the oldest pending request then the next after a decision, <code>/skip</code> or <code>/next</code>. <code>burst</code> sends every pending request the listener has not sent yet.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#the-approvalmd-dictionary">README: the dictionary →</a>
+      </article>
+
+      <article class="card" data-chips="channels">
+        <div class="tags"><span class="tag key">behind a policy key</span></div>
+        <h3>Prompt rows a policy orders</h3>
+        <p><code>channels.&lt;name&gt;.prompt.rows</code> is order only and never a whitelist, so a field added later cannot be lost to a list written before it existed. <code>.always</code> forces a conditional row on, and <code>.hide</code> is refused for the rows a decision needs.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#channel">CLI reference: channel →</a>
+      </article>
+
+      <article class="card" data-chips="channels">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Payloads rendered by shape</h3>
+        <p>An email-shaped payload is laid out field by field with real line breaks, with the canonical JSON and its bound hash underneath unchanged. Detection is structural and never reads a self-declared type, and agent-authored text is HTML-escaped.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#put-approvals-on-your-phone">README: put approvals on your phone →</a>
+      </article>
+
+      <article class="card" data-chips="channels">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>A local web queue on loopback</h3>
+        <p><code>approval channel web</code> binds <code>127.0.0.1</code> with the host hard-coded and no <code>--host</code> flag, shows the raw token once in the response page for the grant that minted it, and states on itself that it proves someone with access to this machine approved.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#cant-the-agent-just-go-around-it">README: can the agent go around it? →</a>
+      </article>
+
+      <article class="card" data-chips="channels">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>A terminal channel, and withdrawal</h3>
+        <p><code>approval channel cli</code> decides at a terminal. A request is not owed an answer forever either: <code>approval withdraw</code> takes a pending one back, and <code>approval wait --withdraw-on-timeout</code> does it when your own wait has elapsed.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#channel-cli">CLI reference: channel cli →</a>
+      </article>
+
+      <article class="card" data-chips="channels verification">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>A channel in the other direction</h3>
+        <p><code>approval journal write</code> is the ungated free-text channel for what an exit code cannot say. <code>approval values</code> and <code>approval feedback</code> carry the operator's guidance back. Guidance never reaches enforcement, by invariant.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#journal">CLI reference: journal →</a>
+      </article>
+
+      <!-- ===== adapters ===== -->
+      <article class="card" data-chips="adapters">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>A vault the policy names and never carries</h3>
+        <p><code>approval vault set</code> stores one credential in <code>.approval/vault.enc</code>, encrypted under a passphrase named by <code>vault.passphrase_env</code>. The value comes from stdin or <code>--value-env</code>, there is no <code>--value</code> flag, and there is no <code>approval vault get</code>.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential">README: hand a grant to a real credential →</a>
+      </article>
+
+      <article class="card" data-chips="adapters">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Email over SMTP, inside the token window</h3>
+        <p><code>approval adapter email</code> verifies the token, re-hashes the payload against the binding the grant recorded, appends <code>execution.started</code>, opens the vault, sends over STARTTLS, closes the window. The credential appears in no event, no output, no error message.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/email-demo.md">Example: real mail, end to end →</a>
+      </article>
+
+      <article class="card" data-chips="adapters">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>AgentMail, and the two-key split</h3>
+        <p>Give the agent a key holding <code>draft_create</code>, <code>draft_update</code> and <code>draft_read</code>, and put the key holding <code>draft_send</code> in the vault. An ungated send is refused by AgentMail itself, <code>agentmail-unauthorized</code>, before this runtime is involved.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md">Example: an AgentMail draft →</a>
+      </article>
+
+      <article class="card" data-chips="adapters">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>A draft is mutable, so the grant binds its bytes</h3>
+        <p><code>approval payload agentmail-draft</code> snapshots recipients, subject and text at request time. Before sending, the adapter re-fetches and compares: a draft edited after the grant refuses <code>agentmail-draft-drifted</code> and names which fields differ.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md">Example: an AgentMail draft →</a>
+      </article>
+
+      <article class="card" data-chips="adapters verification">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Two properties you can check in your own mailbox</h3>
+        <p>The bytes that left are the bytes you approved, because the hash the token spend verified is the hash your phone displayed. And the <code>Message-ID</code> is derived from the action key, the payload hash and the sender, so the header and the chain identify each other months later.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#hand-a-grant-to-a-real-credential">README: hand a grant to a real credential →</a>
+      </article>
+
+      <article class="card" data-chips="adapters">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Setup fills the vault and proves it</h3>
+        <p><code>approval setup adapter email</code> reads the credential manifest the adapter declares, then probes the server without sending anything. A partial re-run probes the merged configuration.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#setup-adapter">CLI reference: setup adapter →</a>
+      </article>
+
+      <!-- ===== hooks ===== -->
+      <article class="card" data-chips="hooks">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>The Claude Code PreToolUse hook</h3>
+        <p><code>approval hook claude-code</code> classifies the commands the harness runs on its own, the ones <code>approval run</code> never sees, resolves them against the attested policy, and answers allow or deny. There is no "ask" answer, by design.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md">docs: the Claude Code hook →</a>
+      </article>
+
+      <article class="card" data-chips="hooks">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>The Cursor hook</h3>
+        <p><code>approval hook cursor</code> classifies <code>Shell</code>, <code>Write</code> and <code>Delete</code> through the same deterministic core and answers Cursor's native permission JSON. <code>failClosed: true</code> is required, because Cursor otherwise lets the tool through on a crash.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cursor-hook.md">docs: the Cursor hook →</a>
+      </article>
+
+      <article class="card" data-chips="hooks">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>See how a command classifies first</h3>
+        <p><code>approval hook classify -- npm install left-pad</code> touches nothing and prints the class and the rule. Every segment of a command line is classified and the command takes the union, so <code>git status &amp;&amp; curl -d …</code> is gated as <code>network.call</code>.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#gate-your-coding-agent">README: gate your coding agent →</a>
+      </article>
+
+      <article class="card" data-chips="hooks">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>A human commits the hook entry</h3>
+        <p>The entry lives in <code>.claude/settings.json</code> or <code>.cursor/hooks.json</code>, and the classifier treats both as gate configuration. An agent that could write its own hook entry could write itself out of it.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md">docs: the Claude Code hook →</a>
+      </article>
+
+      <article class="card" data-chips="hooks">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Three sharp edges, stated up front</h3>
+        <p>The hook never creates a log, denying <code>hook-log-unreachable</code> rather than forking a second chain. A wait that runs out withdraws its request. And a hook grant mints no token: <code>approval token</code> reports <code>none minted: harness-executed</code>.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md">docs: the Claude Code hook →</a>
+      </article>
+
+      <article class="card" data-chips="hooks log">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>The harness path is budgeted and sampled</h3>
+        <p>An allow records <code>execution.started</code> marked <code>execution: "harness"</code>, binding the payload hash of the bytes about to run. That record is the one budgets charge and the one the retrospective sampler draws from.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/claude-code-hook.md">docs: the Claude Code hook →</a>
+      </article>
+
+      <!-- ===== mcp ===== -->
+      <article class="card" data-chips="mcp">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>An MCP server over stdio</h3>
+        <p><code>approval mcp serve</code> publishes the agent's verbs as tools, built from the same registry <code>approval instructions --schemas</code> prints, so the tool descriptions cannot drift from the CLI they wrap.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/mcp-demo.md">Example: an MCP client asks →</a>
+      </article>
+
+      <article class="card" data-chips="mcp">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Grant never travels over MCP</h3>
+        <p><code>grant</code>, <code>reject</code>, <code>revoke</code>, <code>policy attest</code> and <code>vault set</code> are absent from the tool list, and their absence is the design. An MCP client is the agent's harness, and a grant tool on it would hand the untrusted policy the overseer's pen.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#mcp-serve">CLI reference: mcp serve →</a>
+      </article>
+
+      <article class="card" data-chips="mcp">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>A tool call cannot name an actor</h3>
+        <p><code>--as</code> is deleted from every published input schema, and the server's own identity is appended last to every argv so it wins even if one arrives another way. A client name is a label; the actor is the server's.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#mcp-serve">CLI reference: mcp serve →</a>
+      </article>
+
+      <article class="card" data-chips="mcp">
+        <div class="tags"><span class="tag key">behind a flag</span></div>
+        <h3>Streamable HTTP, one session each</h3>
+        <p><code>--http</code> serves the MCP streamable-HTTP transport, one transport per session routed by <code>mcp-session-id</code>. It binds <code>127.0.0.1</code> unless <code>--listen</code> says otherwise, and caps sessions at 20 at once and 200 over the life of the process.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#mcp-serve">CLI reference: mcp serve →</a>
+      </article>
+
+      <article class="card" data-chips="mcp">
+        <div class="tags"><span class="tag key">behind a flag</span></div>
+        <h3>Guest mode: one stranger per connection</h3>
+        <p><code>--guest</code> mints a fresh <code>agent:guest-&lt;6 hex&gt;</code> per session, narrows the tools to a positive allowlist of nine that declare, ask and observe, and clamps <code>wait</code> to five seconds so no guest stalls the others.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/grok-bot-connector/runbook.md">Example: the Grok Bot connector →</a>
+      </article>
+
+      <!-- ===== log ===== -->
+      <article class="card" data-chips="log">
+        <div class="tags"><span class="tag">shipped</span><span class="tag">spec</span></div>
+        <h3>Append-only, hash-chained JSONL</h3>
+        <p>Every record chains to the previous one's hash under <code>sha256/jcs</code>. Appends go through compare-and-append against the head, and projections such as <code>QUEUE.md</code> and the SQLite index rebuild from the log and never write back to it.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#cant-the-agent-just-go-around-it">README: can the agent go around it? →</a>
+      </article>
+
+      <article class="card" data-chips="log verification">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>One command answers for the chain</h3>
+        <p><code>approval log verify</code> walks it end to end and reports clean, torn-tail or corrupt. Nothing is ever repaired automatically: truncating a torn line is a human decision, and a torn tail is the signature of a crashed write rather than of tampering.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log-verify">CLI reference: log verify →</a>
+      </article>
+
+      <article class="card" data-chips="log verification">
+        <div class="tags"><span class="tag key">behind a flag</span></div>
+        <h3>Anchoring: the check a file cannot make about itself</h3>
+        <p>An unkeyed chain recomputed from genesis walks clean, so <code>approval log verify --anchor</code> reads the newest committed copy this checkout can see and checks the working file's leading bytes and its record at the anchored head against it.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log-verify">CLI reference: log verify →</a>
+      </article>
+
+      <article class="card" data-chips="log verification">
+        <div class="tags"><span class="tag key">behind a policy key</span><span class="tag key">human-only</span></div>
+        <h3>Human-signed checkpoints</h3>
+        <p><code>approval log checkpoint</code> signs the current head with an Ed25519 key whose public half is listed in <code>audit.checkpoint_keys</code>. <code>audit.checkpoint_every</code> says how long the log may go without one, and a due checkpoint is a warning at every layer, never a refusal.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log-checkpoint">CLI reference: log checkpoint →</a>
+      </article>
+
+      <article class="card" data-chips="log">
+        <div class="tags"><span class="tag key">behind a flag</span></div>
+        <h3>Git evidence, a second independent record</h3>
+        <p><code>approval daemon run --git-evidence</code> commits per tick in the log's own repository. It never changes a verdict, never feeds a projection, and because it is redundancy a git failure at runtime is a warning while approvals keep running.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/git-evidence.md">docs: git evidence →</a>
+      </article>
+
+      <article class="card" data-chips="log">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Reading the log is three verbs</h3>
+        <p><code>tail</code> prints the last N records tab-separated for <code>cut</code> and aligned on a terminal, <code>export</code> streams every stored line byte for byte, and <code>verify</code> answers for the chain. All three open the log for reading only.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log">CLI reference: log →</a>
+      </article>
+
+      <article class="card" data-chips="log daemon">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Syncing a log two writers touched</h3>
+        <p>Hash chains do not survive a git merge, so <code>approval log sync</code> owns the case where a committed copy moved under a dirty working log. <code>git reset --hard</code> is printed on no path, ever, and a test asserts it.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#log-sync">CLI reference: log sync →</a>
+      </article>
+
+      <!-- ===== daemon ===== -->
+      <article class="card" data-chips="daemon">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>The whole gate in one foreground process</h3>
+        <p><code>approval up</code> runs the daemon loop and every channel the policy configures. A channel whose credential variable is unset is not started and says so, and one that falls over is restarted with a doubling backoff while the loop keeps ticking.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#up">CLI reference: up →</a>
+      </article>
+
+      <article class="card" data-chips="daemon">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>A preflight that fast-forwards, rebuilds and re-execs</h3>
+        <p>Before anything starts, <code>approval up</code> fetches, fast-forwards when it is safe, rebuilds a stale <code>dist/</code>, then spawns the freshly built binary, so the writer that ends up running is the code that was merged. A failed fetch is weather rather than a fault.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#up">CLI reference: up →</a>
+      </article>
+
+      <article class="card" data-chips="daemon">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>It refuses rather than choosing for you</h3>
+        <p>The preflight is allowed exactly two writes, a <code>--ff-only</code> merge and <code>npm run build</code>. A checkout ahead of the remote, a diverged log, or a dirty protected path each stop it with a named code and a next step.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#up">CLI reference: up →</a>
+      </article>
+
+      <article class="card" data-chips="daemon gate">
+        <div class="tags"><span class="tag key">behind a policy key</span></div>
+        <h3>Supervised-live draws</h3>
+        <p>A class declared <code>supervised-live</code> with a <code>live_rate</code> blocks that fraction of its actions on the human gate exactly as <code>manual</code> does. Selection is HMAC-SHA-256 over the action's <code>payload_hash</code>, so identical bytes always select identically and a retry cannot re-roll.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/SPEC.md">SPEC.md section 5.2 →</a>
+      </article>
+
+      <article class="card" data-chips="daemon">
+        <div class="tags"><span class="tag key">behind a policy key</span></div>
+        <h3>Retrospective sampling on a secret you hold</h3>
+        <p><code>audit.supervised_sample_rate</code>, with an optional per-class <code>retro_rate</code>, escalates a fraction of supervised actions for review under a secret the policy only names. An unconfigured sampler is disabled and states the reason in machine-readable form.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#the-approvalmd-dictionary">README: the dictionary →</a>
+      </article>
+
+      <article class="card" data-chips="daemon log">
+        <div class="tags"><span class="tag key">behind a policy key</span></div>
+        <h3>Incremental read proof</h3>
+        <p><code>daemon.read_proof: incremental</code> lets a long-lived reader hash only the appended bytes, re-proving in full on a cadence set by <code>full_reproof_every</code> and <code>full_reproof_after</code>. One-shot processes, the hook and <code>log verify</code> prove in full regardless.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#the-approvalmd-dictionary">README: the dictionary →</a>
+      </article>
+
+      <article class="card" data-chips="daemon">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Start it at login, having read the unit</h3>
+        <p><code>approval setup service</code> writes the launchd or systemd user unit, printing the whole unit for you to read first, naming variables and never copying a value.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#setup-service">CLI reference: setup service →</a>
+      </article>
+
+      <article class="card" data-chips="daemon channels">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Secrets live in the OS keystore</h3>
+        <p><code>approval setup channel telegram</code> puts the token in the macOS Keychain or <code>secret-tool</code>, and <code>.approval/env</code> records only where it lives. One verb reads that file, <code>approval env</code>, and evaluating its export block is a step a human takes.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#env">CLI reference: env →</a>
+      </article>
+
+      <!-- ===== verification ===== -->
+      <article class="card" data-chips="verification daemon">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>doctor: 25 rows, each with a command to paste</h3>
+        <p>Build freshness, identity, attestation, the chain, the channels, the payload store, sampling, envelope integrity, the vault, the keystore scope, the harness hooks, the live-draw socket, and more. It repairs nothing and appends nothing.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#doctor">CLI reference: doctor →</a>
+      </article>
+
+      <article class="card" data-chips="verification">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>status reports the system, doctor the machine</h3>
+        <p><code>approval status</code> answers from the log: attestation, dangling executions, budgets, escalations. <code>approval doctor</code> answers for this machine, and a stale binary is invisible to the first and is exactly what the second exists to name.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#status">CLI reference: status →</a>
+      </article>
+
+      <article class="card" data-chips="verification">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>coverage joins witnesses this project does not write</h3>
+        <p>Git history, <code>gh</code>, and a provider's own records witness effects nobody here appended. <code>approval coverage</code> reports each one with its evidence seq or <code>none</code>. It is informational, exits 0 with gaps, and moves no verdict.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md#coverage">CLI reference: coverage →</a>
+      </article>
+
+      <article class="card" data-chips="verification">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Conformance vectors for a second implementation</h3>
+        <p>Six language-neutral vector files cover policy resolution, chain verification, gate verdicts, JCS canonicalization, refusal unions and schema validation, with a manifest of SHA-256 digests so no runner can quietly skip one.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/conformance/README.md">The conformance suite →</a>
+      </article>
+
+      <article class="card" data-chips="verification">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Exit codes an agent branches on</h3>
+        <p>Seven frozen numbers. Adding one is a spec change and changing a meaning is breaking. A gate refusal is exit 1 and never 2, because the command was well-formed and the answer is no.</p>
+        <a class="go" href="#exit">The table, below →</a>
+      </article>
+
+      <article class="card" data-chips="verification">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Three check tiers, classified from the diff</h3>
+        <p><code>npm run check:changed</code> classifies the working tree and runs light, records or full. Classification is computed from the changed paths and never asserted by the author of the change, and anything ambiguous resolves to full.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/README.md#running-the-checks">README: running the checks →</a>
+      </article>
+
+      <article class="card" data-chips="verification gate">
+        <div class="tags"><span class="tag">shipped</span></div>
+        <h3>Validate at the write boundary</h3>
+        <p>Every event and envelope passes its JSON Schema before it is appended. The policy schema is closed at every level, and the event schema refuses a non-human actor on a checkpoint record.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/schema/event.schema.json">schema/event.schema.json →</a>
+      </article>
+
+      <!-- ===== examples ===== -->
+      <article class="card" data-chips="examples channels">
+        <div class="tags"><span class="tag">example</span></div>
+        <h3>Request, a tap on a phone, an executed run</h3>
+        <p>The walkthrough a human runs once against real Telegram. A scripted twin runs in CI against a mock Bot API, and that test proves the runtime while it cannot prove the network, the phone, or the bot.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/telegram-demo.md">examples/telegram-demo.md →</a>
+      </article>
+
+      <article class="card" data-chips="examples adapters">
+        <div class="tags"><span class="tag">example</span></div>
+        <h3>An agent's chaser, sent as real mail</h3>
+        <p>The gate, the binding, the vault, the token window, the wire format and the chain, against real Telegram and a real mail provider, so a message lands in somebody's inbox because a thumb tapped Approve.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/email-demo.md">examples/email-demo.md →</a>
+      </article>
+
+      <article class="card" data-chips="examples adapters">
+        <div class="tags"><span class="tag">example</span></div>
+        <h3>The same grant, over AgentMail</h3>
+        <p>The mail is composed as a Draft, the agent holds a key that cannot send it, and the key that can waits in the vault until a grant opens the window.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/agentmail-demo.md">examples/agentmail-demo.md →</a>
+      </article>
+
+      <article class="card" data-chips="examples mcp">
+        <div class="tags"><span class="tag">example</span></div>
+        <h3>An MCP client asks, the phone grants</h3>
+        <p>Claude Code on one side and a phone on the other, with the deliberate detour of provoking <code>unknown tool "grant"</code> once, so you have seen the boundary rather than read about it.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/mcp-demo.md">examples/mcp-demo.md →</a>
+      </article>
+
+      <article class="card" data-chips="examples gate">
+        <div class="tags"><span class="tag">example</span></div>
+        <h3>A Backlog.md board behind the gate</h3>
+        <p>One envelope on one task file, then <code>register</code>, <code>request</code>, <code>wait</code>, <code>run</code>, with what each prints. There is no Backlog.md adapter, because a task file holds no credential, and the example says so.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/backlog-md-project/README.md">examples/backlog-md-project →</a>
+      </article>
+
+      <article class="card" data-chips="examples">
+        <div class="tags"><span class="tag">example</span></div>
+        <h3>Demo day: a web agent behind the gate</h3>
+        <p>One laptop, one phone, one projector. The room watches the queue and the log while an attendee hands the agent a task, and a human on a phone decides it.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/web-agent-demo/runbook.md">examples/web-agent-demo →</a>
+      </article>
+
+      <article class="card" data-chips="examples mcp">
+        <div class="tags"><span class="tag">example</span></div>
+        <h3>A Grok Bot agent on the far end</h3>
+        <p>An agent in xAI's cloud asks for a branch push and an email, then is told to skip the gate entirely. What still holds when it does is the point: credentials answer only to single-use tokens.</p>
+        <a class="go" href="https://github.com/approval-md/approval.md/blob/main/examples/grok-bot-connector/runbook.md">examples/grok-bot-connector →</a>
+      </article>
+
+    </div>
+    <p class="empty" id="empty" hidden>Nothing matches that. Clear the search, or pick <code>all</code>.</p>
+
+    <!-- ======================= compare ======================= -->
+    <h2 class="label" id="compare">How this compares</h2>
+    <div class="prose">
+      <p>Three kinds of thing already exist here, and each solves a different part of the problem. The differentiation is the combination rather than any single feature.</p>
+    </div>
+    <ul class="list">
+      <li><span class="n">1</span><span><b>Harness-native permission prompts</b> (Claude Code rules and hooks, Cursor auto-run, Codex CLI approval modes) enforce inside the one harness they ship with, and that enforcement is real. Codex even backs its gate with an OS-level sandbox, a defense layer this project does not attempt. What they lack is a durable record and portability. This project's own Claude Code hook is built on that PreToolUse mechanism and adds the two missing pieces.</span></li>
+      <li><span class="n">2</span><span><b>AGENTS.md permissions prose</b> states the policy in English and trusts the agent to obey. approval.md is the enforcement layer that convention is missing, and treats it as an input: <code>approval import agents-md</code> reads one.</span></li>
+      <li><span class="n">3</span><span><b>Framework interrupts</b> (LangGraph <code>interrupt()</code>, CrewAI human input, AutoGen <code>UserProxyAgent</code>, the OpenAI Agents SDK's <code>needsApproval</code>, Temporal signals) give you a pause-and-resume primitive and leave policy, audit format, the human channel and the credential boundary to you. Temporal's event history deserves its credit as a genuine append-only record with crash recovery this project does not claim.</span></li>
+      <li><span class="n">4</span><span><b>Hosted approval platforms</b> (HumanLayer, gotoHuman, Permit.io) are the closest relatives, and they bring hosted infrastructure, escalation and team routing, and compliance certifications a file convention cannot. Their model puts a third-party service in the decision path, with the audit trail in the platform's backend.</span></li>
+      <li><span class="n">5</span><span><b>What is different here</b> is policy as a hash-attested markdown file in your repo, a hash-chained log you verify locally with one command, and an execution boundary where the credential is inert until a single-use token is minted at the moment a human decides. The thing the agent needs answers only to the thing it cannot make.</span></li>
     </ul>
-    <div class="actions">
-      <button class="approve" id="ok">Approve</button>
-      <button class="reject" id="no">Reject</button>
-      <span class="evt" id="verdict"></span>
+
+    <!-- ======================= invariants ======================= -->
+    <h2 class="label" id="invariants">Global invariants</h2>
+    <div class="prose">
+      <p>SPEC.md section 11.1 holds these across every surface of the runtime. They are implicit acceptance criteria for every task: a change that violates one is a defect regardless of what its own task asked for, and each is pinned by a named test file.</p>
     </div>
-    <div class="log" id="log"><span class="dim">$ approval log tail</span>
-{"seq":17,"event":"approval.requested","task":"task-042","actor":"agent:claude-admin"}</div>
-  </div>
+    <ul class="list">
+      <li><span class="n">1</span><span><b>Enforcement paths read only verified records.</b> Gate decisions are computed from log state that has passed chain verification, and a surface that cannot reach the log fails closed.</span></li>
+      <li><span class="n">2</span><span><b>Gate-typed events never accept caller timestamps.</b> <code>ts</code> is assigned by the runtime at the write boundary, and a caller-supplied value is refused.</span></li>
+      <li><span class="n">3</span><span><b>Raw secrets never appear in the log.</b> What appears is a hash, or ciphertext sealed to a recipient key the log does not hold.</span></li>
+      <li><span class="n">4</span><span><b>Self-reported fields never reduce scrutiny.</b> Values authored by the party under oversight may raise scrutiny and never lower it. Scrutiny ratchets one way.</span></li>
+      <li><span class="n">5</span><span><b>Every check-then-append passes through compare-and-append.</b> No path reads decision-relevant state and appends on it without the atomic head check.</span></li>
+      <li><span class="n">6</span><span><b>Refusals are machine-readable and distinct</b>, and every code union is pinned by a test. The unions are frozen public API.</span></li>
+      <li><span class="n">7</span><span><b>Configuration is never loaded implicitly from the working tree.</b> The environment a gate operation runs under is established by the human who launched the process.</span></li>
+      <li><span class="n">8</span><span><b>A gate verdict whose event cannot be appended is a refusal.</b> No surface returns proceed, prints an allow, or hands back a token before the record exists.</span></li>
+      <li><span class="n">9</span><span><b><code>human-only</code> classes are inert to agents.</b> Every gate verb refuses one with the same stable code, <code>class-human-only</code>, and none of them appends a record on the refused path.</span></li>
+      <li><span class="n">10</span><span><b>Guidance never reaches enforcement.</b> The values block and the feedback reactions are human-authored guidance, and no path computing a verdict, a draw, a budget or a token reads either.</span></li>
+    </ul>
 
-  <h2>How it works</h2>
-  <p>You write an <code>APPROVAL.md</code> — the enforced version of the permissions prose already living in AGENTS.md files everywhere. Agents declare side effects up front; deterministic policy decides what runs, what waits for you, and what gets sampled for review. Every decision lands in an append-only, hash-chained log.</p>
+    <!-- ======================= exit codes ======================= -->
+    <h2 class="label" id="exit">Exit codes</h2>
+    <div class="prose">
+      <p>An agent branches on the exit code before it ever reads stdout, so these numbers are frozen. Code 1 and code 4 are kept apart deliberately: "I could not read the file" and "the file has been tampered with" are different facts about the world.</p>
+    </div>
+    <table class="exit">
+      <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>success</td></tr>
+        <tr><td>1</td><td>integrity failure (a corrupt log), and every gate refusal</td></tr>
+        <tr><td>2</td><td>usage error</td></tr>
+        <tr><td>3</td><td>torn tail</td></tr>
+        <tr><td>4</td><td>I/O error</td></tr>
+        <tr><td>5</td><td>no valid execution token (<code>approval run</code> only)</td></tr>
+        <tr><td>6</td><td>timeout (<code>approval wait</code> only)</td></tr>
+      </tbody>
+    </table>
 
-<pre class="snippet"><span class="c"># APPROVAL.md</span>
-classes:
-  read.*:                     { autonomy: <span class="g">autonomous</span> }
-  calendar.write.own:         { autonomy: supervised }
-  communicate.email.external: { autonomy: <b>manual</b>, approvers: [you] }
-  financial.spend:            { autonomy: <b>manual</b>, limits: { per_action_usd: 25 } }
-  data.delete:                { autonomy: <b>manual</b> }</pre>
+    <!-- ======================= honest posture ======================= -->
+    <h2 class="label" id="posture">What this does not defend</h2>
+    <div class="prose">
+      <p>Stated plainly, from SPEC.md section 11. This is an oversight layer for broadly cooperative agents, with hard enforcement at the adapter boundaries that hold the credentials. Human identity in v0.1 is config-declared, so the trust boundary is the local machine, and anyone who can set that configuration and write to the log is inside it. Attestation proves that <b>someone with local control</b> signed off, and never who.</p>
+      <p>An agent with direct credential access outside the adapters, a compromised host, and collusion between an agent and a careless approver are all undefended. So is persuasion about whether bytes you did see should be approved. You also run the daemon and the listener yourself, there is no OS-level sandbox, and the reference phone channel is one app. What holds regardless of what a harness believes it is running: the vault, the adapter boundary, and the single-use token.</p>
+    </div>
 
-  <p>Files are the interface, the log is the truth, the database is a cache. Tasks stay plain markdown — <a href="https://github.com/MrLesk/Backlog.md">Backlog.md</a>-compatible, one preserved frontmatter key. Approvals reach you wherever you are; Telegram is the reference channel.</p>
+    <h2 class="label">Read on</h2>
+    <div class="readon">
+      <a href="https://github.com/approval-md/approval.md/blob/main/SPEC.md">SPEC.md</a>
+      <a href="https://github.com/approval-md/approval.md/blob/main/README.md">README</a>
+      <a href="https://github.com/approval-md/approval.md/blob/main/docs/cli-reference.md">CLI reference</a>
+      <a href="https://github.com/approval-md/approval.md/blob/main/CLAUDE.md">CLAUDE.md</a>
+      <a href="https://github.com/approval-md/approval.md/blob/main/conformance/README.md">Conformance suite</a>
+      <a href="https://github.com/approval-md/approval.md">GitHub</a>
+    </div>
 
-  <h2>Read on</h2>
-  <div class="links">
-    <a href="https://github.com/approval-md/approval.md/blob/main/SPEC.md">The spec</a>
-    <a href="https://github.com/approval-md">GitHub</a>
-    <a href="https://www.npmjs.com/package/approval-md">npm</a>
-  </div>
+    <footer>
+      <span>MIT. Built behind its own gate: releases of approval.md get approved via approval.md.</span>
+      <span>hello@approval.md</span>
+    </footer>
 
-  <footer>
-    <span>MIT · built under its own policy</span>
-    <span>hello@approval.md</span>
-  </footer>
-</main>
+  </main>
+</div>
+
+<!-- ======================= theme toggle ======================= -->
+<div class="theme" role="radiogroup" aria-label="Colour theme" id="theme">
+  <button type="button" role="radio" data-mode="light" aria-checked="false" aria-label="Light theme" title="Light">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></svg>
+  </button>
+  <button type="button" role="radio" data-mode="dark" aria-checked="false" aria-label="Dark theme" title="Dark">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+  </button>
+  <button type="button" role="radio" data-mode="system" aria-checked="true" aria-label="Match the system theme" title="System">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 20.5h8"/></svg>
+  </button>
+</div>
 
 <script>
-(function(){
-  var card=document.getElementById('card'),log=document.getElementById('log'),
-      v=document.getElementById('verdict'),ok=document.getElementById('ok'),no=document.getElementById('no'),
-      done=false;
-  function line(html){ log.innerHTML+='\n'+html; }
-  function finish(){ done=true; ok.disabled=no.disabled=true; ok.style.opacity=no.style.opacity=.45;
-                     ok.style.cursor=no.style.cursor='default'; }
-  ok.addEventListener('click',function(){ if(done)return;
-    card.classList.add('approved');
-    v.textContent='approved · token minted';
-    line('{"seq":18,"event":"<span class="g">approval.granted</span>","task":"task-042","actor":"human:you"}');
-    line('{"seq":19,"event":"execution.completed","task":"task-042"} <span class="dim">// chain verifies</span>');
-    finish();
+(function () {
+  'use strict';
+
+  /* ---------------- theme ---------------- */
+  var themeBar = document.getElementById('theme');
+  var modeButtons = themeBar.querySelectorAll('button[data-mode]');
+
+  function readMode() {
+    try {
+      var v = localStorage.getItem('approval-theme');
+      return (v === 'light' || v === 'dark') ? v : 'system';
+    } catch (e) { return 'system'; }
+  }
+  function applyMode(mode) {
+    if (mode === 'system') {
+      document.documentElement.removeAttribute('data-theme');
+    } else {
+      document.documentElement.setAttribute('data-theme', mode);
+    }
+    for (var i = 0; i < modeButtons.length; i++) {
+      modeButtons[i].setAttribute('aria-checked', String(modeButtons[i].getAttribute('data-mode') === mode));
+    }
+  }
+  function setMode(mode) {
+    try {
+      if (mode === 'system') { localStorage.removeItem('approval-theme'); }
+      else { localStorage.setItem('approval-theme', mode); }
+    } catch (e) { /* storage blocked: the choice lasts this page view */ }
+    applyMode(mode);
+  }
+  themeBar.addEventListener('click', function (ev) {
+    var b = ev.target.closest ? ev.target.closest('button[data-mode]') : null;
+    if (b) { setMode(b.getAttribute('data-mode')); }
   });
-  no.addEventListener('click',function(){ if(done)return;
-    v.textContent='rejected · nothing executed';
-    line('{"seq":18,"event":"approval.rejected","task":"task-042","actor":"human:you"}');
-    finish();
+  themeBar.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'ArrowRight' && ev.key !== 'ArrowLeft') { return; }
+    var list = Array.prototype.slice.call(modeButtons);
+    var at = list.indexOf(document.activeElement);
+    if (at < 0) { return; }
+    ev.preventDefault();
+    var next = list[(at + (ev.key === 'ArrowRight' ? 1 : list.length - 1)) % list.length];
+    next.focus();
+    setMode(next.getAttribute('data-mode'));
+  });
+  applyMode(readMode());
+
+  /* ---------------- sidebar ---------------- */
+  /* On a narrow screen an open group is a dropdown over the page, so only one
+     may stand open at a time. On a wide rail they are independent. */
+  var wide = window.matchMedia('(min-width: 900px)');
+  var groups = Array.prototype.slice.call(document.querySelectorAll('.grp'));
+  groups.forEach(function (g) {
+    g.addEventListener('toggle', function () {
+      if (!g.open || wide.matches) { return; }
+      groups.forEach(function (other) { if (other !== g) { other.open = false; } });
+    });
+    g.addEventListener('click', function (ev) {
+      if (!wide.matches && ev.target.closest && ev.target.closest('a')) { g.open = false; }
+    });
+  });
+  function closeAllIfNarrow() {
+    if (wide.matches) { return; }
+    groups.forEach(function (g) { g.open = false; });
+  }
+  if (wide.addEventListener) { wide.addEventListener('change', closeAllIfNarrow); }
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape' && !wide.matches) { closeAllIfNarrow(); }
+  });
+  closeAllIfNarrow();
+
+  /* ---------------- filtering ---------------- */
+  var grid = document.getElementById('grid');
+  var cards = Array.prototype.slice.call(grid.querySelectorAll('.card'));
+  var chips = Array.prototype.slice.call(document.querySelectorAll('.chip'));
+  var q = document.getElementById('q');
+  var count = document.getElementById('count');
+  var empty = document.getElementById('empty');
+  var active = 'all';
+
+  var haystack = cards.map(function (c) { return c.textContent.toLowerCase(); });
+
+  function render() {
+    var needle = q.value.trim().toLowerCase();
+    var shown = 0;
+    for (var i = 0; i < cards.length; i++) {
+      var chipOk = active === 'all' ||
+        (' ' + cards[i].getAttribute('data-chips') + ' ').indexOf(' ' + active + ' ') >= 0;
+      var textOk = needle === '' || haystack[i].indexOf(needle) >= 0;
+      var show = chipOk && textOk;
+      cards[i].hidden = !show;
+      if (show) { shown++; }
+    }
+    count.textContent = (shown === cards.length)
+      ? cards.length + ' cards'
+      : shown + ' of ' + cards.length;
+    empty.hidden = shown !== 0;
+  }
+
+  chips.forEach(function (chip) {
+    chip.addEventListener('click', function () {
+      active = chip.getAttribute('data-chip');
+      chips.forEach(function (c) { c.setAttribute('aria-pressed', String(c === chip)); });
+      render();
+    });
+  });
+  q.addEventListener('input', render);
+  q.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') { q.value = ''; render(); }
+  });
+  document.addEventListener('keydown', function (ev) {
+    if ((ev.metaKey || ev.ctrlKey) && (ev.key === 'k' || ev.key === 'K')) {
+      ev.preventDefault();
+      q.focus();
+      q.select();
+    }
+  });
+  if (!/Mac|iPhone|iPad/.test(navigator.platform || '')) {
+    document.getElementById('kbd').textContent = 'Ctrl K';
+  }
+  render();
+
+  /* ---------------- the loop card ---------------- */
+  var card = document.getElementById('card');
+  var tail = document.getElementById('tail');
+  var verdict = document.getElementById('verdict');
+  var ok = document.getElementById('ok');
+  var no = document.getElementById('no');
+  var settled = false;
+
+  function line(html) { tail.insertAdjacentHTML('beforeend', '\n' + html); }
+  function settle() { settled = true; ok.disabled = true; no.disabled = true; }
+
+  ok.addEventListener('click', function () {
+    if (settled) { return; }
+    card.classList.add('approved');
+    verdict.className = 'verdict ok';
+    verdict.textContent = 'granted, token minted at the terminal';
+    line('{"event":"<span class="g">approval.granted</span>","seq":42,"actor":"human:you","payload":{"token_sha256":"b9a0900adaed…"}}');
+    line('{"event":"execution.started","seq":43,"actor":"agent:claude-admin"}');
+    line('{"event":"execution.completed","seq":44,"payload":{"exit_code":0}}');
+    line('<span class="f">$ approval log verify</span>  clean: 44 record(s), head seq 44');
+    settle();
+  });
+  no.addEventListener('click', function () {
+    if (settled) { return; }
+    verdict.className = 'verdict';
+    verdict.textContent = 'rejected, no token exists, nothing ran';
+    line('{"event":"approval.rejected","seq":42,"actor":"human:you","payload":{}}');
+    settle();
   });
 })();
 </script>
