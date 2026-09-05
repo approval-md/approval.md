@@ -1,11 +1,11 @@
 ---
 id: APRV-252
 title: Make Codex planning and handoff visibly follow repository workflow
-status: In Progress
+status: Done
 assignee:
   - '@codex'
 created_date: '2026-09-04 21:58'
-updated_date: '2026-09-05 02:15'
+updated_date: '2026-09-05 09:36'
 labels: []
 dependencies: []
 type: docs
@@ -48,4 +48,12 @@ Delivery checkpoint: /private/tmp/approval-workflow-checkpoint, codex/workflow-c
 2026-09-05 resumed delivery: primary hook confirmed the existing log.advance grant. Ran the exact approved command approval log advance --pr, exit 0, publishing records commit 67eba0a800c4 in separate PR https://github.com/approval-md/approval.md/pull/269. PostToolUse recorded completion successfully. Armed its merge with gh pr merge 269 --merge; GitHub checks and merge remain pending. No primary checkout, daemon or listener changes. Next: once GitHub confirms records merged, refresh this isolated branch, push updated task notes and baseline, and re-arm PR 261. Summarizer draft PR 262 CI is fully successful, but live smoke still rejects output and remains incomplete.
 
 Records PR 269 passed its PR checks, then merge-group run 33938030791 failed the existing daemon-advance-finish test assertion that the concurrent record must land between read and append. The same candidate passed that shard on Node 20. GitHub removed the merge-queue entry; re-armed the records merge once after verifying this exact failure. No daemon source/test modifications and no gh run rerun performed. Workflow worktree HEAD 4010456 remains local ahead of PR 261; next step is still wait for records merge, refresh the baseline and push/re-arm the workflow PR. Feature runner correction 94f7e14 now has successful gated live evidence; shared docs coordination remains pending.
+
+Final validation after integration: worktree /private/tmp/approval-workflow-checkpoint, branch codex/workflow-checkpoint. Current main contains records PR269, delivered Claude instruction updates, and the upstream timing-test fixes. The protected-path guard passes with granted-file evidence at seq17411; build, lint, typecheck and diff check exit0. Refreshed PR261 CI run33958151201 passed all required checks. Independent final review approves all four workflow scenarios and preservation of Cursor/Codex instructions. Actual three-dot PR diff contains only AGENTS.md and this task; newer unrelated main changes are excluded. The user-authorized stable memory note was written previously. Final task metadata is being committed before merge-queue completion; actual merge will be verified separately.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added the observable Codex startup, planning, delegation, per-task review and delivery checkpoint while preserving existing policies and concurrent edits. Demonstrated Backlog-first task work, isolated branches, ownership checks and exact protected-edit approval; four-scenario review, protected-path guard, build/lint/typecheck and refreshed full CI passed. Authorized memory note points future sessions to current repository instructions.
+<!-- SECTION:FINAL_SUMMARY:END -->
