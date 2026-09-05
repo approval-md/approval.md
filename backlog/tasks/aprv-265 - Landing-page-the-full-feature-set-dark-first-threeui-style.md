@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-d'
 created_date: '2026-09-05 10:23'
-updated_date: '2026-09-05 10:52'
+updated_date: '2026-09-05 16:23'
 labels: []
 dependencies: []
 ordinal: 200000
@@ -43,6 +43,8 @@ The page at https://approval.md (GitHub Pages from index.html at the repo root) 
 4. Keep the wordmark: brand/wordmark.svg untouched, the inline appr[tick]val.md SVG carried over, the green reserved for the approve state and the tick.
 5. Verify in the browser: dark, light, and mobile at 360px. Screenshot each, fix layout and contrast faults, and paste the observations into the notes.
 6. Grep every href in the finished file against the tree to prove no link points at something that is not on main. No test run: no guard covers index.html (grep of tests/ and scripts/ finds no reference).
+
+7. Second pass (prose + agent surface). Rewrite every card claim to one sentence of at most 18 words, cap section intros at two sentences, cut the Try-the-loop copy to labels and event lines, and remove metaphor, rhetorical framing and marketing adjectives while keeping every fact. Add the 2026 agent-readability surface: llms.txt and llms-full.txt at the repo root, canonical/alternate/robots/OpenGraph/Twitter head metadata, JSON-LD SoftwareApplication and BreadcrumbList, semantic landmarks with a skip link and one H1, every card an article with id/data-facet/data-tags/data-href, a machine-readable feature-index JSON block, copy buttons on the command blocks with a select-text fallback, / and Cmd/Ctrl-K search focus, focusable cards, and a print stylesheet. Verify in the browser at desktop dark, desktop light and 360px, and run a DOM count check.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -92,4 +94,42 @@ Three faults found and fixed during the pass:
 3. Two dropdowns could stand open at once on mobile and stacked over the H1. A toggle handler now closes the others, a tap on a link closes the panel, and Escape closes it.
 
 Also fixed: the inline code spans in the install note were inheriting the boxed style meant for the install command (scoped to a direct child), and the H1 was wrapping to two lines because .lede capped at 70ch.
+
+## Second pass: prose and the agent surface (commits 20dfff7, eec5181, 66a012a)
+
+### Prose
+
+Visible page text went from 4337 words to 2941, a 32.2 percent cut, measured by stripping script, style, svg and tags from the body of the pre-pass file and the current one. Every one of the 66 card claims is now a single sentence of at most 18 words; a browser check counts zero card paragraphs and zero index claims over the cap, after five (fail-closed, import-agents-md, message-id, web-agent-demo, grok-demo) came back at 19 or 20 on the first measurement and were reworded. Section intros are at most two sentences. Cut and not replaced: the two paragraphs wrapped around the Try the loop card, 'the whole product in one card', the rhetorical framings, and the marketing adjectives. Where a sentence was the only home of a fact, the fact stayed and the manner went: protected_paths still names the floor it widens, the vault card still says there is no approval vault get, the hook card still says there is no ask answer.
+
+Three deliberate content decisions:
+- The loop card now shows five event lines rather than four. Dropping execution.started would have left a tail that no real approval produces, so the log verify flourish went instead and the events stayed.
+- A resolved row was added to the COMPUTED block (manual, by the irreversibility floor) because the intro paragraph that carried that fact was cut.
+- Two cards were retitled to match their trimmed claim: 'Two properties you can check in your own mailbox' is now 'The Message-ID ties the mail to the chain' (the other property is stated on the payload-binding card), and 'Three sharp edges' is 'Two edges' since the withdrawal edge is on the channel card.
+
+### Agent surface
+
+(a) llms.txt at the repo root follows llmstxt.org: H1 name, one-line blockquote summary, a context paragraph, then Start here, Reference, Harness integration, Examples, Verification and Optional, 22 bullet links each with a one-line description. Doc links use raw.githubusercontent.com so a fetch returns plain markdown. llms-full.txt (24318 bytes) carries the page content as markdown plus all 66 feature entries with facet, tags, claim and link, the comparison list, the ten invariants, the exit-code table and the posture section.
+(b) Head: canonical, alternate text/plain to llms.txt and text/markdown to llms-full.txt, robots index,follow, a rewritten description, and Open Graph plus Twitter summary metas with no image (no third-party image fetch).
+(c) JSON-LD graph with SoftwareApplication (name, description, DeveloperApplication, macOS and Linux, 0.1.0, Node 20, MIT, codeRepository, no installUrl while unpublished) and WebSite. No BreadcrumbList: this is one page with anchors and no hierarchy for a breadcrumb to describe, so the shape would have been decorative.
+(d) Landmarks: skip link, header, nav aria-label, main, seven sections with aria-labelledby, footer. One H1 and no heading-level jumps. Every card is an article with an id, data-facet, data-tags and data-href. script#feature-index carries the 66-entry list as JSON, hidden by CSS as well as by default, and a runtime check warns in the console if the cards and the index drift.
+(e) Both install commands are pre/code with a copy button. navigator.clipboard.writeText runs inside the click gesture (no permission prompt) and on rejection the code text is selected instead; the fallback was exercised and the button read Selected.
+(f) Keyboard: / and Cmd/Ctrl-K both focus the search box, / is suppressed while typing in a field, chips are buttons with aria-pressed, cards are tabbable with a focus ring and follow their data-href on Enter, the theme toggle is a radiogroup with arrow keys.
+(g) No analytics and no external request beyond the Google Fonts stylesheet; the network log for a page load shows the document only.
+(h) Print stylesheet: sidebar, theme toggle, chips, search and buttons hidden, single-column grid, and every http link prints its URL after the text.
+
+### Verification
+
+Served the worktree over 127.0.0.1 with a scratch node:http script and drove it in the browser.
+
+DOM check: 1 H1, 66 articles, 66 indexed features, ids match one for one in order, 0 links with empty text, 0 heading-level jumps, 0 articles missing an attribute, 0 claims over 18 words. Landmarks: 1 header, 1 nav with a label, 1 main, 7 aria-labelledby sections, 1 footer, skip link present, 1 JSON-LD block.
+
+Link check (script over index.html, llms.txt and llms-full.txt): 320 link checks, 20 distinct repo paths all present in the worktree, every markdown anchor resolved against a real heading, no broken in-page anchors. Zero em dashes and no not-X-but-Y construction in any of the three files.
+
+Dark at 1180: rail with Documentation and Product open, hero, two copy rows, loop card. Light at 1180: wall rgb(243,243,242), card rgb(247,247,246), muted text rgb(92,92,90), three-column grid, no overflow. Mobile at 375 and at 360: documentElement.scrollWidth equals innerWidth at both, so no horizontal page scroll; the only elements wider than the viewport are the sidebar row and the long clone command, each inside its own overflow-x container.
+
+Interaction: the mcp chip gives 7 of 66, mcp plus the search term vault gives 1, all plus vault gives 8, clearing returns 66, and only one chip carries aria-pressed true. / and Cmd-K both land focus on #q. Enter on a focused card follows its data-href. Approve draws the tick (stroke-dashoffset 0), turns the verdict green, appends approval.granted, execution.started and execution.completed, and disables both buttons. No console messages at all, which also means the feature-index drift check found nothing.
+
+One regression found and fixed in this pass: the sidebar only ever closed groups on a width change, so a page that had been narrow returned to the wide rail with every group collapsed. The groups the document marks open are recorded at load and restored on the transition to wide; verified by resizing 360 to 1180 and reading the open state.
+
+No test run: a grep of tests/, scripts/ and .github/ finds no reference to index.html, llms.txt or llms-full.txt, so no guard covers these files.
 <!-- SECTION:NOTES:END -->
