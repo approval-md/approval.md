@@ -3,11 +3,11 @@ id: APRV-227
 title: >-
   Harness version provenance: hook records carry the harness version, doctor
   fails on an unverified change
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-n'
 created_date: '2026-09-02 17:00'
-updated_date: '2026-09-04 22:42'
+updated_date: '2026-09-04 23:35'
 labels:
   - enhancement
 dependencies: []
@@ -119,4 +119,32 @@ Stated rather than papered over, in the code and here: this covers `npm test` an
 
 1. `tests/ci-guard.test.ts` — 'every production dependency's engines.node admits the Node floor': ENOENT on `<worktree>/node_modules/@modelcontextprotocol/sdk/package.json`. The test joins REPO_ROOT with `node_modules`, and a lane worktree has none — Node's own resolution walks up to the primary checkout, that one assertion does not. Environmental, reproduces without this branch's diff, fixed by `npm ci` in the worktree.
 2. `tests/e2e-web-agent-demo.test.ts` — 'timed out waiting for the demo server to listen' after 63s. A load-timing failure; the demo never invokes `approval hook <harness>`, so nothing on this branch can reach it.
+
+## Full suite after the stub landed
+
+`npm test` (second run, commit a8a418a in): exit 1, **3110 passing, 1 skipped, 1 failing**, and the one failure is the same environmental `tests/ci-guard.test.ts` row — ENOENT on `<worktree>/node_modules/@modelcontextprotocol/sdk/package.json`, because a lane worktree carries no `node_modules` of its own. Nothing in this branch's diff can reach it. The e2e web-agent demo, which timed out on the first run under load, passed.
+
+The suite also got **twice as fast**: 533s against the first run's 1119s, on the same machine, in the same session. That is the cost the stub removed — every hook test writing a supervised or manual registration had been spawning the real `claude --version`, and every gloss test that forgot a fake runner had been making a real model call. Worth stating because it is evidence the hazard was real rather than theoretical.
+
+## Unrequested merge on this branch — for the orchestrator to decide
+
+At 2026-09-04 15:46:29 -0700 a commit `d95ab0b` 'Merge remote-tracking branch origin/main into aprv-227-harness-version' appeared on this branch. **This session did not run it** (no `git merge` was issued here; the reflog records it as `merge origin/main: Merge made by the ort strategy` between two of this lane's commits). It landed mid-way through the second full-suite run.
+
+What it brought onto the feature branch: `.approval/log/events.jsonl` (+1540 lines), `.approval/QUEUE.md`, ten payload-store JSON files, and origin/main's source at `940c1d0` — which includes APRV-228's `deps.upgrade` classifier rules.
+
+CLAUDE.md's dogfood rule is flat about this: log-touching commits never ride feature branches, and hash chains do not survive git merges. The narrow hazard is absent here — this branch never writes the log, so the merged `events.jsonl` is exactly origin/main's and forks nothing — but the commit is still a log-touching commit on a feature branch, and the branch is no longer a clean stack off `03b260c`.
+
+**Left in place deliberately.** Something outside this session is operating on this branch, so an unattended history rewrite could race with it. The two clean options, for whoever decides: `git rebase --onto ca92a84 d95ab0b` on this branch drops the merge and replays `fe35a5ce` (the branch is unpublished, so nothing shared is rewritten); or keep it and let the merge queue collapse it.
+
+Nothing of this task's work was altered by the merge: both hook docs still carry the Harness version provenance section, the doctor row is intact, and a rebuild plus the ten most affected test files are green on the merged tree (708/708, exit 0).
+
+## Final full suite, on the merged tree
+
+`npm test` after the unrequested merge and a rebuild: **3128 passing, 1 skipped, 1 failing**, 502s. The single failure is the same environmental `tests/ci-guard.test.ts` row (ENOENT on `<worktree>/node_modules/@modelcontextprotocol/sdk/package.json`, because a lane worktree carries no `node_modules`). Every other file is green, APRV-228's newly merged classifier tests included. `npm run build` exit 0, `npx oxlint` exit 0.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Hook-written task.registered and gate.bypassed carry an optional harness and harness_version pair (from the hook event, else the binary's --version once per process, else absent); informational only (two tests pin that no verdict, budget, streak or sampling path reads it); doctor row harness-version-unverified fails on an unverified harness change and passes after the self-test; status coverage unchanged; conformance schema-validation 1.3.0 to 1.4.0; the test runner stubs harness binaries suite-wide so no test spawns a real claude. Verified by tests/harness-version.test.ts (22) and the hook, doctor, conformance and gate suites, full run 3128 pass with the known no-node_modules worktree failure only, lint clean; merged in PR #258.
+<!-- SECTION:FINAL_SUMMARY:END -->

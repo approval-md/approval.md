@@ -27,8 +27,14 @@ import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-/** The four routes the adapter uses, named so a test can fail exactly one. */
-export type MockRoute = "inbox" | "message-send" | "draft" | "draft-send";
+/**
+ * The routes the adapter uses, named so a test can fail exactly one.
+ *
+ * `messages-list` is APRV-245's read: `GET /v0/inboxes/{id}/messages`, which
+ * `observeAgentmail` uses to ask what the inbox actually sent. It is a GET and
+ * it is served here so that a test can prove the coverage read never POSTs.
+ */
+export type MockRoute = "inbox" | "message-send" | "messages-list" | "draft" | "draft-send";
 
 /** One request the mock received, recorded verbatim. */
 export interface MockAgentmailRequest {
@@ -67,6 +73,15 @@ export interface MockAgentmail {
   posts(): MockAgentmailRequest[];
   /** What `GET /v0/inboxes/{id}` answers with. */
   setInbox(inbox: Record<string, unknown>): void;
+  /**
+   * What `GET /v0/inboxes/{id}/messages` answers with (APRV-245).
+   *
+   * The list is served VERBATIM, labels included and with no filtering by the
+   * `after`/`before` query: the sent-only filter is the adapter's, so a mock
+   * that applied it would be testing the mock. A test that wants a received
+   * message in the answer puts one in with a label that is not `sent`.
+   */
+  setMessages(messages: Record<string, unknown>[]): void;
   /** Put a draft in the inbox, or replace one. */
   setDraft(draftId: string, draft: Record<string, unknown>): void;
   /** Remove a draft, so the next read 404s. */
@@ -111,6 +126,12 @@ function routeOf(
   if (segments.length === 5 && segments[3] === "messages" && segments[4] === "send" && method === "POST") {
     return { route: "message-send", inboxId };
   }
+  // `segmentsOf` has already dropped the query string, so the listing route
+  // matches whatever `after`/`before`/`limit`/`page_token` the caller sent; the
+  // recorded `request.path` keeps the query so a test can assert on it.
+  if (segments.length === 4 && segments[3] === "messages" && method === "GET") {
+    return { route: "messages-list", inboxId };
+  }
   if (segments.length === 5 && segments[3] === "drafts" && method === "GET") {
     return { route: "draft", inboxId, draftId: segments[4] as string };
   }
@@ -132,6 +153,7 @@ export async function startMockAgentmail(options: {
   const messages: Record<string, unknown>[] = [];
   const draftSends: string[] = [];
   const drafts = new Map<string, Record<string, unknown>>();
+  let listed: Record<string, unknown>[] = [];
   const failures = new Map<MockRoute | "any", MockAnswer>();
   let inbox: Record<string, unknown> = {
     inbox_id: options.inboxId,
@@ -200,6 +222,11 @@ export async function startMockAgentmail(options: {
       return;
     }
 
+    if (matched.route === "messages-list") {
+      json(response, 200, { messages: listed });
+      return;
+    }
+
     if (matched.route === "message-send") {
       messages.push(body);
       messageId += 1;
@@ -250,6 +277,9 @@ export async function startMockAgentmail(options: {
     posts: () => requests.filter((entry) => entry.method === "POST"),
     setInbox(next: Record<string, unknown>): void {
       inbox = next;
+    },
+    setMessages(next: Record<string, unknown>[]): void {
+      listed = next;
     },
     setDraft(draftId: string, draft: Record<string, unknown>): void {
       drafts.set(draftId, draft);

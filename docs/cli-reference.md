@@ -144,6 +144,109 @@ diverged   {"status":"anchor-diverged","records":9,"head":{...},
 run` makes it at startup and on every full prefix re-proof — see
 [git evidence](git-evidence.md).
 
+### `--checkpoints`: the second witness (APRV-220)
+
+The anchor asks whether anybody else holds a copy of these bytes, and answers
+from git, so it is exactly as fresh as the last push and says nothing at all on
+a machine with no remote. `--checkpoints` asks a different question: did a key
+that no agent process holds sign this head? It answers from the log plus the
+policy, so it works offline and covers the window nobody has pushed yet.
+
+The two are independent and neither may be weakened to let the other pass. A
+forger who truncates the log and recomputes the chain defeats neither: the
+anchor sees bytes nobody else has, and every checkpoint inside the rewritten
+range now names a hash the rewritten chain does not carry.
+
+Every `log.checkpoint` record in the walked range must clear four things:
+
+1. its payload reads (`seq`, `hash`, `alg: ed25519`, `key_sha256`, `signature`);
+2. the seq it signs is below its own (a checkpoint signs the past);
+3. its `key_sha256` names one of `audit.checkpoint_keys` in the policy;
+4. the signature verifies over `"approval.md/log-checkpoint/v1\n"` followed by
+   the RFC 8785 canonicalization of `{alg, hash, seq}`, AND the log's record at
+   that seq carries that hash.
+
+The first failure refuses, with its own frozen union
+(`conformance/vectors/refusal-unions.v1.json`, `checkpoint_refusal_codes`):
+`checkpoint-key-unknown`, `checkpoint-signature-invalid`,
+`checkpoint-hash-mismatch`, `checkpoint-out-of-order`, `checkpoint-malformed`.
+The third of those is the one this whole check exists for.
+
+`checkpoint-key-unknown` is a refusal rather than a shrug, deliberately. If a
+record naming an unlisted key were merely skipped, a forger could neutralize the
+whole mechanism by rewriting each checkpoint's `key_sha256`. The cost is that
+retiring a key out of `audit.checkpoint_keys` de-verifies every checkpoint it
+signed, which is why that field is a list and why retired keys stay in it.
+
+| outcome | exit | meaning |
+|---|---|---|
+| `pass` | 0 | every checkpoint in range validates (possibly none, which is not a failure) |
+| `skip` | 0 | no usable key is configured; the reason is printed on stderr |
+| `checkpoint-invalid` | 1 | a checkpoint in range does not validate |
+
+A log with no checkpoints at all is a pass, not a refusal: a human who has been
+away is not a forger. When `audit.checkpoint_every` is set and the newest
+checkpoint is older than it, the pass carries a `warning` — report-only, at
+every layer, with no path anywhere in this runtime from due to refused.
+
+A missing key is a skip and never a pass, the same rule the anchor follows.
+
+```
+pass    {"status":"clean",...,"checkpoints":{"status":"pass","verified":3,
+          "keys":1,"unchecked":0,"newest":{"at":41,"seq":40,"hash":"<64 hex>"}}}
+skip    {"status":"clean",...,"checkpoints":{"status":"skip","reason":"..."}}
+bad     {"status":"checkpoint-invalid","records":9,"head":{...},
+         "checkpoints":{"status":"refused","code":"checkpoint-hash-mismatch",
+                        "at":41,"verified":2,"message":"..."},"message":"..."}
+```
+
+## log checkpoint
+
+The human half of the mechanism `log verify --checkpoints` reads. It signs the
+log's CURRENT head with an Ed25519 key and appends one `log.checkpoint` record
+carrying `(seq, hash)` and the signature.
+
+```
+approval log checkpoint --as human:<id> [--key-file <path>] [--log <path>] [--json]
+```
+
+Human-only in three independent places, because this is the one record an agent
+must not be able to author: `core/checkpoint.ts` refuses a non-`human:` actor,
+`schema/event.schema.json` refuses one at the write boundary, and
+`core/command-class.ts` classifies the invocation `policy.core`, which the
+reference policy holds human-only, so the harness hook denies an agent that
+tries to run it.
+
+**Where the key comes from.** The private half lives in the credential vault
+under `approval.checkpoint.key`: encrypted at rest under the passphrase
+`vault.passphrase_env` names, which `core/child-env.ts` strips from every child
+this runtime spawns, in a file whose reading classifies `account.credential`.
+`--key-file <path>` reads it from a file instead, for a key kept outside the
+vault. There is no `--key` flag and no environment variable holding the key
+itself: a key on a command line is a key in the shell history, and a key in the
+session environment is a key every child inherits.
+
+**Where the public half goes.** `audit.checkpoint_keys` in `APPROVAL.md`, base64
+DER SPKI, which only the human may edit. It is written in the policy rather than
+carried by the record because a record that carried its own public key would
+invite a reader to verify the signature against it, which any forger could
+satisfy. The record names only a fingerprint; the policy is the authority.
+
+The head is read, then signed, then written with that head as the
+compare-and-append precondition, so a concurrent append is `head-moved` and the
+repair is to run the verb again. Nothing partial is left behind.
+
+```
+{"ok":true,"seq":41,"signed":{"seq":40,"hash":"<64 hex>"},
+ "key_sha256":"<64 hex>","actor":"human:carter","ts":"..."}
+{"ok":false,"error":{"code":"checkpoint-key-unreadable","message":"..."}}
+```
+
+Refusals: `actor-not-human`, `checkpoint-key-unreadable`,
+`checkpoint-key-unusable`, `log-empty`, `log-unreadable`, `log-torn-tail`,
+`log-corrupt`, `append-failed`. A torn or corrupt log is exit 1; everything else
+here is exit 4, because an operator without a key does not have a broken log.
+
 ## log tail
 
 The chain is verified first. On a torn tail the intact records are printed and the
@@ -867,6 +970,25 @@ line is the 64-hex value alone and undressed (so a triple-click copies exactly
 the token), or as the `token` key with `--json`. Capture it, or revoke and
 request again. Spend it with `approval run`.
 
+`--reaction disliked|indifferent|liked|loved` records what the approver thought
+of the action, as `payload.reaction` on `approval.granted`. A human answering the
+gate is already forming an opinion; this is where they can say it in one word
+rather than in prose nothing can read back. It is GUIDANCE and never enforcement:
+the grant record itself is the authorization, it widens and narrows nothing, and
+a `disliked` grant is exactly as much of a grant as a `loved` one (SPEC.md §11.1
+invariant 10). Read them back with `approval feedback`.
+
+Written only when given, so an omitted reaction leaves no key and is never read
+as `indifferent`. `loved` and `disliked` with no non-blank note refuse
+`reaction-note-required`, evaluated with the other checks that read nothing and
+appending nothing; the request stays pending and the fix is `--note`.
+
+`reject` and `revoke` refuse `--reaction` as a usage error (exit 2) naming
+`--note`. Their reason IS their note, and a grade beside a refusal is a second
+answer to a question that has one. The core writes the field under the grant's
+own branch, so a value passed to either of them is structurally unable to reach a
+record whatever the CLI in front of it does.
+
 **`--json`** (one object on stdout):
 
 ```
@@ -1082,6 +1204,14 @@ to decide whether to fix itself, stop retrying, or ask a human.
   rules. Nothing is attested; propose the amendment again.
 - `policy-already-attested` — an attestation was proposed for a policy file that
   already matches its attestation. There is no amendment to sign.
+- `reaction-note-required` — a grant carrying `reaction: loved` or
+  `reaction: disliked` and no non-blank note. Grant only, evaluated with the
+  other checks that read nothing, and nothing is appended: the request is still
+  pending and `--note "<text>"` is the whole of the fix. Its own code rather than
+  the audit path's `note-required` because a caller branching on a gate refusal
+  is branching on this union, and the two verbs are answered by two different
+  modules. `reject` and `revoke` carry no reaction at all, which is a usage error
+  at the verb (exit 2) rather than a member of this union.
 - `log-unreadable` (exit 4) / `log-torn-tail` (exit 3) / `log-corrupt` (exit 1):
   nothing is authorized from a log that does not verify.
 - `append-failed` — the append itself failed; the exit code follows the cause.
@@ -1547,6 +1677,17 @@ store is the normal state of a repo that has never made a request carrying
 **anomalies** are informational for the same reason `approval log verify`
 declined to refuse on them: status does not get to overrule that.
 
+**coverage** is one line of `approval coverage` (APRV-245): the commits git
+recorded on THIS branch, counted against the verified log. The range is the
+merge base with `origin/main` to `HEAD`, so what it measures is what this branch
+added. Two states replace the numbers rather than faking them, because in
+neither would a count mean anything: `not a git checkout`, and `origin/main
+absent`, which is a checkout with no trunk ref to take a merge base from.
+Informational, exactly as `harness_outcomes` is: it moves neither `healthy` nor
+the exit code, because a coverage measurement is not an integrity verdict and a
+gap is a question for a person rather than a failure. The whole report, `gh` and
+the adapters included, is the `coverage` verb below.
+
 **`--verbose`** prints the rationale sentences under the rows they explain — at
 v0.1 that is the payload-store paragraph above, which is the one row whose three
 numbers a first-time reader cannot interpret unaided. It adds lines and moves
@@ -1566,6 +1707,8 @@ does not know the flag exists.
   each was recorded under.
 - `budgets` — headroom per configured GLOBAL limit, from a zero-cost probe.
 - `loop_escalations` — tasks with three consecutive `execution.failed` events.
+- `coverage` — `{available, reason, observed, covered}` for this branch's own
+  commits, as git recorded them. Informational.
 - `reconciliation` — obligations opened by a retrospective denial and not yet
   discharged by a person. Counts toward `healthy`, exactly as `dangling` does: an
   unreconciled denial is a "no" that has so far changed nothing, and a "no"
@@ -1587,6 +1730,7 @@ does not know the flag exists.
    "pass":true}],
  "loop_escalations":[{"task":"task-042","consecutive_failures":3,
    "escalated":true}],
+ "coverage":{"available":true,"reason":null,"observed":4,"covered":3},
  "reconciliation":[{"seq":18,"ts":"...","action_key":"...","task":"...",
    "class":"records.write","obligation":"gated-revert","review_seq":17}],
  "payload_store":{"present":true,"files":2,"pruned":0,"orphans":0,
@@ -1596,6 +1740,134 @@ does not know the flag exists.
 `ok` is true whenever status ran; `healthy` is the verdict. `attestation.seq` is
 null for not-attested and unreadable. `note` carries the unrebuildable warning
 verbatim.
+
+## coverage
+
+MCP use is voluntary. An agent connected to `approval mcp serve --http` can call
+`request`, `wait` and `run`, or it can simply act, and nothing in this runtime
+observes the act, because the runtime is not in the path. A gate an agent may
+route around reports only on the actions routed through it, and a report that
+counts only its own inputs is a report that cannot go down.
+
+What makes the arrangement honest is that side effects leave witnesses THIS
+PROJECT DOES NOT WRITE. Git history records commits, merges and tags. `gh`
+records pull requests. AgentMail records the messages an inbox actually sent.
+None of those is appended by approval.md, none is reachable by an agent editing
+its own log, and each can be read back and joined against the verified records
+to ask one question per effect: does the log say a human, or a policy, ever saw
+this? That join is what this verb reports, and nothing else.
+
+**What it reports.** Per effect: the source that witnessed it, the witness's own
+id (a commit sha, a PR number, a message id), the class it would have been
+declared under, and the evidence in the log, or `none`. Then a coverage line per
+source, and the reason for any source that could not be reached. `gh is not on
+PATH` and `gh saw no pull requests` are different facts, and a source that could
+not be asked reports itself unavailable rather than contributing an empty list:
+collapsing the two would let a broken tool read as a clean bill of health.
+
+**It is informational, and exits 0 with gaps.** The rule is SPEC.md §10.1's, the
+same one the APRV-145 harness-start coverage in `status` follows: a coverage
+measurement is not an integrity verdict, and a control an operator learns to
+silence is worse than one that reports beside the verdict. A gap is a question
+("was this effect ever declared?"), and questions with legitimate answers must
+not fail a build. The codes it can still emit are the filesystem's: 2 for a usage
+error, 3 for a torn tail and 4 for a log it could not read, because a log it
+could not read is a report it did not make. It reads only verified records
+(SPEC.md §11.1 invariant 1) and writes nothing anywhere.
+
+### The window rule, stated exactly
+
+For one observed effect, evidence is the EARLIEST record that is all three of:
+
+1. one of `task.registered`, `approval.granted`, `execution.started`,
+   `execution.completed` — the four records that mean "this runtime was told
+   about an action of this class", from the declaration through the human's
+   decision to the spend;
+2. of a matching class: EXACT first, and only if nothing matches exactly, a
+   FAMILY match on the first two dotted segments, reported distinctly as
+   `family` so a reader is never shown a weaker match dressed as a strong one;
+3. inside the window `[at - 24h, at + 5m]`.
+
+The window is asymmetric on purpose and both halves are arguable, so both are
+written down. **24 hours back**, because the ordinary shape is register →
+request → grant → act, and the gap between the human's tap and the effect is a
+working day at worst; a week back would let one grant carry every later effect
+of its class, which is the laundering hole APRV-202 closed in the protected-path
+guard. **5 minutes forward**, because that is clock skew between git's author
+date (or a provider's timestamp) and this log, and not an ordering allowance: a
+record appended an hour after an effect is a record about some other action,
+whatever its class.
+
+The one place the rule is not used is a protected FILE path. Those already have
+a stronger answer: the protected-path guard matches a change's BYTES against the
+material a grant bound, and its `attested` and `granted-file` verdicts are
+content-level rather than time-level. An effect carrying a `path` takes the
+guard's verdict when the caller supplies a report covering it, reported as
+`match: "protected-path"`; the class-and-window rule is what everything else
+gets. The guard's third verdict, `granted-command`, is deliberately not
+surfaced: it is a run attributed by time rather than by bytes, and printing it
+beside `attested` would flatten the distinction the guard exists to draw.
+
+**The AgentMail join is by class and window, not by message id.** The adapter
+reports the provider's own `message_id` and the report prints it, but the id is
+not matched against anything: `execution.completed` records an `exit_code`, and
+the provider's id reaches only the CLI result, so an id-level binding needs an
+event-schema amendment. Putting the reference on-chain is APRV-251. Until that
+lands, a sent message is covered by a record of its class inside its window,
+exactly like a commit, and the id in the report is there for a person to paste
+into the provider's own console rather than for this verb to match on.
+
+### The three tiers
+
+A green coverage line is a statement about the middle row and nothing else.
+
+| Tier | What holds | What this verb says |
+| --- | --- | --- |
+| Prevented by custody | Adapter-held credentials answer only to a token (SPEC.md §10.4). An agent holding the connector and not the key cannot act around the gate at all, because it has nothing to act with. | Nothing. There is no effect to witness, which is the point. |
+| Witnessed by a log we do not write | Git, `gh` and a provider's own records. The effect happened whether or not anyone routed it through the gate, and the witness is outside this runtime's reach. | This verb: per effect, the evidence seq or `none`. |
+| Not covered | Effects made with credentials the AGENT itself holds — an API key pasted into Grok Bot, a token in a shell profile. No witness this verb can read is guaranteed to exist. | Nothing, and it cannot say so. The remedy is custody, not a bigger report. |
+
+The third row is why the second is never over-read. Moving an effect out of it
+means moving the credential into an adapter, so that the key answers to a token
+and the first row applies. A report cannot be made to cover what a report cannot
+see.
+
+**`--json`** (one object on stdout):
+
+```
+{"ok":true,
+ "window":{"base":"origin/main","head":"HEAD",
+   "since":"2026-08-28T00:00:00.000Z","until":"2026-09-04T00:00:00.000Z"},
+ "sources":[
+  {"name":"git","available":true,"reason":null,
+   "effects":[{"id":"3f2a466ad9cc...","class":"vcs.push.main",
+     "at":"2026-09-02T18:04:11Z","actor_hint":"carter@example.com",
+     "detail":"merge commit 3f2a466ad9cc Merge pull request #245",
+     "path":null,"match":"exact",
+     "evidence":{"seq":7094,"event":"task.registered","verdict":null}}],
+   "covered":1,"observed":1},
+  {"name":"gh","available":false,"reason":"gh is not on PATH",
+   "effects":[],"covered":0,"observed":0}]}
+```
+
+`evidence` is null for a gap, and its three keys carry two kinds of proof: a
+record `seq` a reader can paste into `approval log tail`, or the protected-path
+guard's `verdict` about bytes, with the unused half null. `match` says which rule
+found it: `exact`, `family`, `protected-path`, or `none`.
+
+**Flags.** `--base` / `--head` bound the commit range, defaulting to the merge
+base with `origin/main` through `HEAD`; a checkout where that ref does not
+resolve falls back to the last twenty commits and SAYS SO in the source's
+reason, because a reader has to be able to see that the answer came from a guess.
+`--since` (default `7d`) and `--until` bound the window the adapter and `gh`
+sources are asked about. `--source` picks from `git`, `gh` and `agentmail`,
+defaulting to `git,gh`; `agentmail` is opt-in because it opens a vault. That
+source builds its credential provider the way `approval setup adapter agentmail`
+builds its probe's — the passphrase comes from the shell environment under the
+policy's name, and NEVER from the `.approval/env` fallback, which is defensible
+only inside a consumed-token window. A vault that will not open makes the source
+unavailable with the reason; it is never an exit code, because the other sources
+still have answers.
 
 ## doctor
 
@@ -1747,6 +2019,16 @@ The checks, at length:
   supervised-class tool call, after which the row is green. PASS says only that
   the versions match — the field is self-reported (SPEC.md §11.1 invariant 4)
   and reduces nothing anywhere, so a match is not proof the hook fired.
+- **live-draw** — whether a daemon is answering `supervised-live` draws for this
+  log (APRV-208). SKIP when the policy declares no live class: no draw is ever
+  made, and a missing socket is nothing. PASS when the socket is present and
+  owner-only, naming the classes it keeps live. The one FAIL is a live class
+  declared with no usable socket there, because that is the operator's control
+  not being in force: every action of that class gates to a human, at 100%
+  rather than the declared rate, and the two are indistinguishable from inside
+  the policy file. The fix starts the runtime in a shell where the sampling
+  secret resolves. It asks the daemon nothing — it looks at the socket exactly
+  as an asker does and reports what an asker would conclude.
 
 **`--json`** (one object on stdout):
 
@@ -1836,16 +2118,51 @@ spends no budget. A review blocked because a policy file was edited afterwards
 would be a supervision backlog held open by an unrelated fact.
 
 What it appends is `audit.reviewed`, naming the sample's action key and task, with
-payload `{"subject_seq":<seq of the audit.sampled>,"reviewed":true,"note"?:"..."}`.
+payload `{"subject_seq":<seq of the audit.sampled>,"reviewed":true,"note"?:"...",
+"reaction"?:"disliked"|"indifferent"|"liked"|"loved"}`.
 An action key with several open samples refuses `ambiguous-subject`.
 
 **`--json`** (one object on stdout):
 
 ```
 success  {"ok":true,"seq":11,"sample_seq":9,"action_key":"...","task":"...",
-          "verdict":"ok","obligation_seq":null,"actor":"human:alice"}
+          "verdict":"ok","reaction":null,"obligation_seq":null,
+          "actor":"human:alice"}
 refusal  {"ok":false,"error":{"code":"...","message":"...","seq"?:N}}
 ```
+
+`reaction` is always present in the JSON and is `null` when the reviewer gave
+none, so a consumer can tell "no reaction" from "this build predates the field".
+In the LOG the key is written only when it was given: an omitted reaction leaves
+no key at all, and no reader substitutes `indifferent` for a person who said
+nothing. `indifferent` is a thing somebody had to actually say.
+
+`--reaction` is GUIDANCE and `--deny` is enforcement. Nothing in the runtime
+reads a reaction: not routing, class matching, the sampler, budgets, token
+minting, the gate window or execution (SPEC.md §11.1 invariant 10, pinned by
+`tests/values-inert.test.ts`). It is recorded so a person's reading of an action
+survives past the moment they had it, and so an agent can read back what the
+operator thought with `approval feedback`.
+
+Two rules keep the pair honest, both settled after the actor check and BEFORE the
+log is read, and neither appends anything:
+
+- `reaction-conflicts-verdict` — `--deny` with `liked` or `loved`. The two fields
+  point opposite ways and only one of them is enforcement. A record carrying both
+  reads afterwards as evidence of whichever half suits the reader, and reads to
+  an agent as a denial being survivable when the operator is pleased. Say which
+  one you meant.
+- `note-required` — `loved` or `disliked` with a blank note. These are the grades
+  an agent is most likely to act on and least able to interpret alone: "disliked"
+  with no words says something happened and nothing about what. Blank is not a
+  note. `liked` and `indifferent` demand none, because a one-tap signal that
+  opens a form is a signal that gets switched off. The schema enforces the same
+  rule at the write boundary, which is what makes it true of every record
+  whatever surface wrote it; the verb refuses it too so the message names the fix.
+
+A misspelled word is a usage error (exit 2) rather than a refusal or a default: a
+`--reaction love` that silently became `indifferent` would put a word in the
+reviewer's mouth in an append-only log.
 
 `--deny` says the action should not have happened. It cannot undo it — the action
 already ran, and a runtime that pretended otherwise would be lying to the person
@@ -2604,6 +2921,21 @@ silently skipped; a file with no permissions section is exit 0 with an empty dra
 and a warning. `--out` writes the draft YAML without the fence and refuses to
 overwrite an existing file.
 
+**The values draft (APRV-240).** Some AGENTS.md files already carry what the
+operator wants beside what they permit, under headings like "What I value",
+"What good looks like", "How I like to work" or "What I want from you". The
+importer collects the bullets under those headings into a second draft fence,
+` ```yaml approval-values ` (SPEC.md §5.3), printed after the policy draft on
+stdout and written after it with `--out`; `--json` carries it as
+`values_draft`, or `null` when no such heading exists. Every bullet lands in
+`wants` and none in `love`, `like` or `dislike`: grading is the human's act,
+and an importer that guessed a grade would be putting words in their mouth. A
+bullet over the schema's 200 characters is truncated with a warning rather than
+dropped, and bullets past the twentieth are kept as comments inside the fence,
+which is the same stance the permissions half takes on unmapped bullets. The
+draft is guidance and never policy (§11.1 invariant 10): the file it is pasted
+into loads exactly as it did without it.
+
 ## journal
 
 The gate is built to be hard to route around. One consequence of building it
@@ -2718,6 +3050,148 @@ the channel, which is the failure the channel exists to prevent.
 
 `--limit` defaults to 20 and counts from the newest end while printing oldest
 first. `--since` filters by the UTC date in the filename.
+
+## values
+
+The mirror of `journal`, running the other way. `journal` exists because an
+agent behind this gate can comply, be refused, and report an exit code, and had
+no way to say anything else. `values` exists because APPROVAL.md carried control
+in one direction only: the policy block says what an agent may do, and nothing
+in the file said what the operator wanted the work to be like. The optional
+` ```yaml approval-values ` block (SPEC.md §5.3) is that, and this verb prints
+it.
+
+**It is guidance, and it is never policy.** Every output form opens with the
+banner saying so, `--json` carries the same sentence in `note`, and the reason
+is the same discipline `journal read` applies in the opposite direction: a
+reader must never have to work out what standing the words on their screen have.
+Nothing in the block grants anything, forbids anything, or changes a verdict. No
+routing, class match, sampling draw, budget, token, gate window or execution
+decision reads it. That is SPEC.md §11.1 invariant 10, and
+`tests/values-inert.test.ts` pins it both statically (no enforcement module may
+name the info string, and only three CLI surfaces may import the reader) and
+behaviourally (a policy resolves identically with the block absent, valid,
+malformed, or duplicated).
+
+**Why absence is a declaration.** A file with no values block prints exactly
+`the operator has declared no values here.` and exits 0. The alternative (say
+nothing, or print an empty result) collapses two different facts into one
+screen: "the operator considered this and wrote nothing" and "I never looked".
+An agent that cannot tell those apart will fill the gap by inferring what the
+operator probably wants, which is the one thing a block about a human's stated
+values must not be used for. Some operators will leave the slot empty, and
+naming the empty slot is worth more than hiding it.
+
+**Why it is out of the policy-check trace.** `approval policy check` prints the
+decision path: which rule matched, at what specificity, and what the answer
+resolves to. That trace is the enforcement story, and every line in it is a line
+something acted on. A values block is read by nobody in that path, so a line
+about it there would be a line asserting relevance it does not have, and the
+next reader would reasonably ask which of the two blocks the answer came from.
+A broken values block is reported by this verb (exit 1, with its load code) and
+by the `values-block` row of `approval doctor`, and by nothing else. It cannot
+make a policy unloadable: the two blocks are parsed on separate paths that share
+only the fence splitter, so guidance can neither widen nor narrow a class.
+
+**Why a broken block does not fail closed.** The policy loader fails closed
+because a half-understood permission document is one whose author believes
+constraints are in force that are not. That argument does not carry here.
+Failing closed on a malformed values block would turn a YAML typo into an
+all-manual repository, and would buy no safety in exchange, because nothing was
+being enforced from the block in the first place. So the verb says the block is
+present and unreadable, says to treat it as absent, and says it grants nothing
+either way.
+
+**It rides the attestation, and an agent cannot write it.** The block lives
+inside APPROVAL.md, the attestation of SPEC.md §5.2 digests the whole file, and
+edits under `.approval/` and to the policy file classify `policy.core`. So the
+operator's stated values are as tamper-evident as their policy, and cannot be
+quietly rewritten by the party they are addressed to. An edit to them invalidates
+the standing attestation until a human re-attests, exactly as a policy edit does.
+
+`--policy` wins over discovery and `--dir` chooses where `APPROVAL.md` then
+`APPROVALS.md` are looked for, with the same precedence `policy check` uses. The
+verb resolves no policy rule, reads no log, mints no token and appends nothing,
+and it takes no `--as`: there is no actor in a read of somebody else's words.
+## feedback
+
+The other direction of the same channel. `journal read` is the operator reading
+what the agents said; `approval feedback` is the agents reading what the operator
+said about their work: the graded reactions and free-text notes a person wrote on
+an `approval.granted` at the gate, or on an `audit.reviewed` afterwards, each
+joined to the action key, its class, its task and the agent whose work it was.
+
+**Top level, beside `values`, and not a subcommand of `audit`.** Which record a
+reaction happens to sit on is an implementation fact; that a human said something
+about an agent's work is the subject. Half of these live on grants, which are
+gate records and have nothing to do with the sampler, so filing the verb under
+`audit` would have told an agent to look for the operator's opinion in the place
+the runtime keeps its supervision backlog. `values` is what the operator declared
+in advance and `feedback` is what they said afterwards; the two read as a pair.
+
+**Symmetric with `journal` on purpose.** Same entry shape, same delimiters
+around the text, same `--since` and `--limit` (default 20, counted from the
+newest end, printed oldest first). One difference: no entry here is marked
+`[claimed]`. That marker exists to say the words were written by the party under
+oversight; these were appended under a `human:` actor to a hash-chained log,
+which is the thing `[claimed]` distinguishes journal text FROM.
+
+**The banner is on every output form**, human and `--json` (in the `note` field):
+HUMAN-AUTHORED GUIDANCE, not policy. It grants nothing, forbids nothing, and
+changes no verdict, sampling probability or budget. A surface that printed
+reactions unlabelled would be handing an agent a person's after-the-fact opinion
+in the same register as a policy rule, and the agent's correct reading of a
+policy rule is "this binds me". Nothing here binds anything (SPEC.md §11.1
+invariant 10). An agent that reads `disliked` has learned something about the
+operator and gained no permission; one that never reads this verb is under
+exactly the same rules.
+
+**An entry with neither a reaction nor a note is omitted.** A grant with no words
+is the ordinary case (most grants are), and listing thousands of blank rows
+would bury the handful where somebody actually said something. Absence of
+feedback is not feedback. Rejections and revocations are not a source at all:
+they carry no reaction, their reason IS their note, and the record already says
+what happened.
+
+**`agentActor` comes from the registration, never from a payload field.** It is
+the actor of the `task.registered` that declared the action key, and failing that
+the actor of the `execution.started` that ran it; a key with neither reports
+`null` rather than a guess. Registration first because it is the earliest and
+most specific statement of whose work this is. Not a payload field, because an
+actor is a property of who appended a record: a self-reported one would let the
+party under oversight choose whose feedback this reads as (SPEC.md §11.1
+invariant 4). `--actor` therefore filters on the AGENT the feedback is about, not
+on the human who wrote it, which is the question an agent reading this actually
+has.
+
+Reads `readVerifiedRecords` and writes nothing: no policy is resolved, no clock
+is read, nothing is appended. A log that does not verify refuses with the `log-*`
+exit codes rather than showing a partial list, because a reaction read out of an
+unverifiable log is a sentence attributed to a person who may not have written
+it. There is no write half and there will not be one: the two verbs that record a
+reaction are `approval grant` and `approval audit review`, both human-only, and a
+third path into the same field would be a way for the party under oversight to
+author the operator's opinion of it.
+
+`--reaction` and `--source` take closed vocabularies and a word outside them is a
+usage error (exit 2), not an empty list. `--since` compares the record's own
+ISO-8601 timestamp prefix against a UTC date; no timezone is invented for the
+caller. `_no feedback_` prints when nothing matches.
+
+**`--json`** (one object on stdout):
+
+```
+{"ok":true,"log":"...","note":"<the banner>","total":3,"entries":[
+  {"seq":12,"ts":"...","source":"review","event":"audit.reviewed",
+   "actor":"human:alice","reaction":"loved","note":"...","verdict":"ok",
+   "actionKey":"...","task":"...","class":"comms.send.external",
+   "agentActor":"agent:claude","sampleSeq":9}]}
+```
+
+`total` counts everything that matched the filters and `entries` holds at most
+`--limit` of them, so a reader can tell a short list from a truncated one.
+`verdict` is the enforcement field and is reported beside the reaction so the two
+are never confused; it is `null` on a grant, where there is no verdict to report.
 
 ## payload hash
 
@@ -2925,6 +3399,34 @@ so it proves the snapshot's digest in full whatever the policy says.
 The flag beats the policy's `daemon` block for that run, a bad value is a usage
 error before the first tick, and the `started` line prints the mode in force.
 
+**The live draw (`--no-draw`, a way out only).** A `supervised-live` class is
+sampled with an HMAC under the operator's sampling secret, and the process that
+decides is usually a harness hook: a child of an agent session, which must never
+be able to read that secret. So the draw is made here instead. When the secret
+resolves in THIS process's environment (the `eval "$(approval env)"` an operator
+runs in the terminal they start the daemon from), the daemon binds an owner-only
+Unix socket at `<log home>/daemon/draw.sock`, directory 0700 and socket 0600,
+and answers one question per connection: given an action key and a payload hash
+it has verified are already registered in this log, is this action in the live
+fraction? The answer carries an HMAC over the question and the verdict, which
+the asker records and cannot check, and an operator holding the secret
+recomputes later from the request's own fields. The daemon resolves the class
+and the rate from its own policy rather than taking the asker's word, and echoes
+what it derived. It answers nothing for bytes that are not registered, so a
+process fishing for a favourable payload has to leave every candidate in the
+append-only log first.
+
+There is no flag that turns this on: holding the secret is the opt-in, and
+declaring a class `supervised-live` is its other half. `--no-draw` is the way
+out, for taking the control back without unsetting a variable a shell profile
+exports. Without a server — no secret, `--no-draw`, or a socket that will not
+bind — every supervised-live action gates to a human, which is the behaviour of
+every release before APRV-208. The `started` line's `draw` field is the socket
+path or `null`, a failure to bind is a `draw-unavailable` warning and never
+fatal, and `approval doctor`'s `live-draw` row answers the same question from
+outside the process. A policy that declares no live class serves no socket and
+says nothing about it.
+
 **Each tick, in order.**
 
 - ANCHOR (APRV-219) — on every tick whose reads re-proved the prefix in full,
@@ -3016,7 +3518,7 @@ Warnings go to stderr as `{"event":"warning","code":"...","message":"..."}`, wit
 `code` one of `task-unreadable`, `frontmatter-invalid`, `envelope-invalid`,
 `task-id-missing`, `tasks-dir-unreadable`, `append-refused`, `expire-refused`,
 `render-failed`, `watch-unavailable`, `prune-refused`, `write-back-refused`,
-`advance-refused`. A warning never stops the
+`advance-refused`, `draw-unavailable`. A warning never stops the
 loop, and neither does `{"event":"git_evidence_failed","step":"commit",…}`.
 
 Payload retention: with `payload_retention` set in policy, each tick appends
@@ -3332,6 +3834,19 @@ no `exit_code`, the token and the idempotency key stay burned, a retry is refuse
 and `approval execution reconcile` is how a person resolves it. Recording an
 unknown outcome as a failure is what makes a retry look safe, and a retry against
 a send that did happen is a second email.
+
+**`observe`, the optional read** (APRV-245). An adapter may also publish what its
+PROVIDER recorded happening in a window, which is what lets `approval coverage`
+witness an adapter-backed class. It is the mirror of the rule above: read-only,
+called with NO token and outside any grant window, because reading what already
+happened authorizes nothing. The caller redacts every returned detail a second
+time, and a detail line names an effect for a person to recognize (a subject, a
+recipient count, an id) and never a message body: the report is read by somebody
+who did not approve the message. Every returned effect carries a class the
+adapter serves, and the conformance suite checks all of it — no write to the far
+side, no throw, no record appended — for any adapter that implements it. An
+adapter that omits `observe` is conformant and is reported as offering no
+observation, which is a gap a reader can see rather than a pass.
 
 ## adapter email
 

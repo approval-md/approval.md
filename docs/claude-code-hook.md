@@ -820,6 +820,47 @@ keep that sentence true under a loose umask.
 The file is local, derived, gitignored, and never evidence. Deleting it costs
 latency and nothing else.
 
+## The one decision the hook cannot make: the live draw (APRV-208)
+
+`supervised-live` is the autonomy level this repository's own `policy.edit`
+class runs at: one in ten edits blocks on the gate, the rest are sampled after
+the fact. Which tenth is an HMAC under the operator's sampling secret, and the
+hook holds no such secret. It cannot: the hook is a child of an agent session,
+so a secret it could read is a secret the agent could read, and an agent that
+can compute its own luck can grind its payload until the draw comes up
+unsampled. That is why nothing sources the secret into a hook process, and why
+nothing may.
+
+For a fortnight the consequence was that the draw failed closed on every call
+and `supervised-live` was, in practice, `manual`: 15 of 15 actions gated
+(APRV-184). The hook now asks the daemon instead. One JSON line over an
+owner-only Unix socket at `.approval/daemon/draw.sock`, one line back, and the
+answer carries an HMAC over the question and the verdict that the hook cannot
+check and therefore records, for an operator holding the secret to recompute
+later from the request's own `action_key`, `payload_hash` and `policy_sha256`.
+
+Three properties matter to anyone reading a hook decision:
+
+- **Failure is always toward the human.** No socket, a socket nothing answers,
+  or an answer that does not match the question asked each gate the action,
+  under their own names (`draw-daemon-absent`, `draw-daemon-stale`,
+  `draw-answer-invalid`). The worst a broken, absent, or hostile daemon can do
+  is ask you to tap.
+- **The daemon derives the rate itself.** It does not take the asking process's
+  word for the class or the rate: it resolves both from its own policy and
+  echoes what it derived, and the asker refuses an answer that does not echo the
+  question it asked. A hook and a daemon reading different policy files fail
+  closed rather than agreeing on the wrong rate.
+- **The socket is not a private oracle.** It answers only for an action already
+  registered in the verified log with exactly the payload hash being asked
+  about, so every candidate a grinding agent could try is permanently in the
+  append-only log, in order, and countable by anyone.
+
+If `approval doctor`'s `live-draw` row is failing, `supervised-live` is gating at
+100% on this machine, and the fix is to start the runtime in a shell where the
+secret resolves. See "supervised-live needs this process up" in
+`docs/dogfood-cutover.md`.
+
 ## The backstop outside the session: `scripts/protected-path-guard.mjs`
 
 Everything above runs inside the agent's session, which is the right place for a
@@ -920,12 +961,40 @@ is as fine as a payload naming a script can get.
 
 The committed log on `main` trails the primary checkout's live log, because
 advances land periodically as records pull requests. A grant made this morning
-may not be on `main` yet, and the guard sees only the log the head commit
-carries. That is an ordering rule rather than a bug to paper over, and every
-failure states it: **the log advance carrying the grant must merge to `main`
-before or with the protected-path pull request.** Each failure also names the
-window it searched — the seq and timestamp range of the log at head — so a
-reader can tell "the grant is not there" from "the grant is newer than this log".
+may not be on `main` yet, and the guard reads committed trees only. That is an
+ordering rule rather than a bug to paper over, and every failure states it:
+**the log advance carrying the grant must be pushed to a records branch or
+merged to `main` before or with the protected-path pull request.** Each failure
+also names the window it searched, the seq and timestamp range of the log it
+read, so a reader can tell "the grant is not there" from "the grant is newer
+than this log".
+
+### When the log lags (APRV-260)
+
+A grant becomes evidence the moment ANY committed copy of the log carries it:
+a pushed `records-*` branch counts, and so does `main`. Both merges are no
+longer required, because the guard does not read head's log alone.
+
+- **What it reads.** Candidates, in order: the head ref, `origin/main`, and
+  every `origin/records-*` branch. Each is verified end to end, and a candidate
+  is admitted only when it carries HEAD's own last record (same seq, same hash,
+  at the same index), which is what makes it a longer stretch of the same chain
+  rather than a different history. The freshest admitted copy wins, payload
+  bytes are read from it and then from head, and the report leads with the line
+  `log from origin/records-log-2026-09-05, seq 1..19207 (head carried 1..16428)`,
+  in `--json` as `log_source`.
+- **Head still defines the chain.** A candidate that does not anchor is
+  `diverged` and is never read, whatever it contains and however long it is; one
+  that does not verify is `unverified` and is named in the output. A head log
+  that is missing, unverified, or empty admits no extension at all: the guard
+  falls back to head and fails closed, as it did before.
+- **If it still fails,** the grant is in no committed copy yet. Wait for the
+  next advance, or ask the operator to run `approval log advance` in the primary
+  checkout; the push to a records branch is enough, the merge can follow later.
+  `.github/workflows/guard-rerun.yml` re-runs the failed guard job of every open
+  pull request when an advance reaches `main`, so the stale red check clears
+  without anybody clicking it. Nothing re-decides on the pull request's behalf:
+  the guard runs again and reaches its own verdict against the newer log.
 
 ### The evidence surface is not a protected write surface
 

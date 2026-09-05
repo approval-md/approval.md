@@ -121,6 +121,10 @@ import {
   unreadablePolicyStatus,
   type AttestationRefusalDetail,
 } from "./attest.js";
+// Type-only, deliberately: the vocabulary is defined once, in the module that
+// owns the projection over it, and importing it as a value here would put a
+// runtime edge from the gate to the audit module for four string literals.
+import type { Reaction } from "./audit.js";
 import { evaluateBudgetsWithTask, type BudgetScope, type BudgetVerdict } from "./budgets.js";
 import {
   evaluateIntakeLimits,
@@ -153,6 +157,14 @@ import {
   type PolicyLoadResult,
 } from "./policy-load.js";
 import { humanOnlyRefusal, resolve, type Resolution } from "./policy-match.js";
+import {
+  DRAW_PROTOCOL_VERSION,
+  askDaemonDraw,
+  type DrawAsker,
+  type DrawQuestion,
+  type DrawRefusalReason,
+  type LiveDrawRecord,
+} from "./live-draw.js";
 import {
   LIVE_SELECTION,
   resolveLiveSelector,
@@ -544,6 +556,21 @@ export const GATE_REFUSAL_CODES = [
    */
   "policy-already-attested",
   /**
+   * A grant carrying `reaction: loved` or `reaction: disliked` and no non-blank
+   * note (APRV-239, amended SPEC.md §5.2).
+   *
+   * Grant only. Evaluated with the other checks that read nothing, and nothing
+   * is appended. `reject` and `revoke` accept no reaction at all, which is a
+   * usage error at the verb rather than a member of this union: their reason IS
+   * their note, and there is no second field for a grade to sit in.
+   *
+   * Its own code rather than the audit path's `note-required` because a caller
+   * branching on a gate refusal is branching on this union, and the two verbs
+   * are answered by two different modules. The message names `--note`, which is
+   * the whole of the fix.
+   */
+  "reaction-note-required",
+  /**
    * The append itself failed; `append` carries the underlying error. Its
    * `code` is `head-moved` when the log grew between this module's read and its
    * append: every check that authorized the write was made against an older log,
@@ -592,6 +619,18 @@ export interface GateRefusal {
   errors?: ValidationError[];
   /** The underlying append error, when `code` is `append-failed`. */
   append?: AppendError;
+  /**
+   * The two policy hashes actually compared, when `code` is `policy-drift`
+   * (APRV-235): the hash the request (or the grant) pinned, and the hash
+   * attested at the moment of the refusal.
+   *
+   * Carried on the refusal so that whatever RECORDS the refusal records the
+   * comparison that was made. Re-deriving the pair afterwards would be a second
+   * comparison, at a second instant, against a file that may have moved again,
+   * and a record describing a comparison nobody performed is worse than no
+   * record at all. `core/decision-refusal.ts` copies these verbatim.
+   */
+  drift?: { requested: string; attested: string };
   /**
    * An event appended *alongside* the refusal: the `budget.exceeded` record, or
    * the lazily-materialised `approval.expired` record. Never an authorization.
@@ -655,6 +694,21 @@ export interface GateOptions extends ClockOptions {
    * the policy file or from anywhere else inside the repository.
    */
   env?: NodeJS.ProcessEnv;
+  /**
+   * How a process with no sampling secret asks the daemon for a live draw
+   * (APRV-208). Defaults to `core/live-draw.ts`'s `askDaemonDraw`, which
+   * `spawnSync`s a relay against the owner-only socket under the approval home.
+   *
+   * A seam for tests, and stated plainly rather than defended: an in-process
+   * caller that supplies a lying asker can wave a live action through, and so
+   * can one that points `policy.file` at a policy of its own. Both are the same
+   * trust boundary, which is the process holding `GateOptions` — SPEC.md §11's
+   * "the trust boundary is the local machine". The property this seam does NOT
+   * weaken is the one that matters across processes: a HOOK never sets it, the
+   * default asker talks only to the socket under the approval home, and the
+   * verdict it brings back is recorded with the MAC an operator recomputes.
+   */
+  drawAsk?: DrawAsker;
 }
 
 // ---------------------------------------------------------------------------
@@ -1446,11 +1500,24 @@ export interface LiveVerdict {
    *   Gated. See `core/sampler.ts` on why live selection fails closed where
    *   retrospective sampling fails open.
    */
-  reason: "selected" | "not-selected" | "payload-hash-absent" | LiveSelectorUnavailableReason;
+  reason:
+    | "selected"
+    | "not-selected"
+    | "payload-hash-absent"
+    | LiveSelectorUnavailableReason
+    | DrawRefusalReason;
   /** The algorithm an operator holding the secret recomputes to check this. */
   selection: typeof LIVE_SELECTION;
   /** The NAME of the secret's environment variable. Never the secret. */
   secretEnv: string | null;
+  /**
+   * The delegation, when this verdict was not computed in this process
+   * (APRV-208). Absent for an in-process draw, which is why a sampled
+   * supervised-live request in an operator's own terminal is still byte-for-byte
+   * a manual one. See {@link LiveDrawRecord} for why a DELEGATED verdict is
+   * recorded and an in-process one is not.
+   */
+  draw?: LiveDrawRecord;
 }
 
 /**
@@ -1534,15 +1601,109 @@ export type RequestResult =
  * `payload_hash` plus the secret, which is strictly better evidence than a
  * self-reported field, because it cannot be forged by whoever wrote the record.
  */
+/**
+ * Ask the operator's daemon for the draw this process cannot make (APRV-208).
+ *
+ * ## Why this exists, in one paragraph
+ *
+ * `supervised-live` selects with a secret that must never be readable by an
+ * agent, and the process that decides is usually a child of an agent session.
+ * Before this, that combination meant the draw failed closed on every action —
+ * measured on this repository, 15 of 15 supervised-live actions gated after the
+ * amendment that turned sampling on (APRV-184). Safe, and the setting never once
+ * being live. The daemon holds the secret legitimately, so the draw moves there
+ * and this process asks over an owner-only socket under the approval home.
+ *
+ * ## What "asking" is allowed to buy
+ *
+ * Exactly one thing: the right to NOT gate, evidenced. Every failure — no
+ * socket, a socket that will not answer, an answer this process cannot match to
+ * its own question — gates the action with its own machine-readable reason, so
+ * the worst a broken, absent, or hostile daemon can do is put a human in the
+ * loop, which is where the action was going before APRV-208 existed.
+ *
+ * The answer is never believed on its own terms. It carries a MAC over the
+ * question and the verdict under the operator's secret; this process cannot
+ * check it (it holds no secret, which is the point) so it RECORDS it, and the
+ * operator recomputes it later from the request's own fields. That is what keeps
+ * SPEC.md §11's "self-reported fields never reduce scrutiny" true: the only
+ * self-report that reduces scrutiny here is one accompanied by a proof its
+ * author could not forge.
+ */
+function delegatedVerdict(
+  rate: number,
+  payloadHash: string,
+  secretEnv: string | null,
+  delegation: { logPath: string; policyHash: string; actionKey: string; ask: DrawAsker },
+): LiveVerdict {
+  const question: DrawQuestion = {
+    v: DRAW_PROTOCOL_VERSION,
+    action_key: delegation.actionKey,
+    payload_hash: payloadHash,
+    policy_hash: delegation.policyHash,
+    live_rate: rate,
+  };
+  const outcome = delegation.ask(delegation.logPath, question);
+  if (!outcome.ok) {
+    return {
+      rate,
+      gated: true,
+      reason: outcome.reason,
+      selection: LIVE_SELECTION,
+      secretEnv,
+      draw: { v: DRAW_PROTOCOL_VERSION, source: "unavailable", reason: outcome.reason, live_rate: rate },
+    };
+  }
+  const { answer } = outcome;
+  const verdict: LiveVerdict = {
+    rate,
+    gated: answer.selected,
+    reason: answer.selected ? "selected" : "not-selected",
+    selection: LIVE_SELECTION,
+    secretEnv,
+  };
+  // Carried only for a SELECTED action, because that is the only delegated
+  // verdict that ever reaches a record: an unsampled action appends no
+  // `approval.requested` at all (amended SPEC.md §6.3), so there is nothing for
+  // the field to ride on and a `live_draw` describing a "not-selected" outcome
+  // could only ever be a shape nobody reads. The unsampled delegation is
+  // evidenced the way every unsampled action already is: by its absence from
+  // the queue, and by an operator recomputing the draw from the registration's
+  // payload hash. Keeping the two in step here is what makes the schema's
+  // `reason: "selected"` an honest constant rather than an assumption.
+  if (!answer.selected) return verdict;
+  return {
+    ...verdict,
+    draw: {
+      v: DRAW_PROTOCOL_VERSION,
+      source: "daemon",
+      reason: "selected",
+      live_rate: rate,
+      selected: answer.selected,
+      mac: answer.mac,
+      daemon_pid: answer.daemon_pid,
+    },
+  };
+}
+
 function liveVerdict(
   load: PolicyLoadResult,
   resolution: Resolution,
   payloadHash: string | null,
   env: NodeJS.ProcessEnv | undefined,
+  delegation: { logPath: string; policyHash: string; actionKey: string; ask: DrawAsker },
 ): LiveVerdict {
   const rate = resolution.liveRate ?? 1;
   const selector = resolveLiveSelector(load, env ?? process.env);
   if (!selector.available) {
+    // APRV-208. `secret-unset` is not the end of the question any more: it says
+    // only that THIS process cannot draw, and the process that can is the
+    // operator's daemon. The other two reasons are unchanged, because there is
+    // nothing to delegate — a policy that cannot be loaded or that names no
+    // secret variable leaves no draw for anyone to make.
+    if (selector.reason === "secret-unset" && payloadHash !== null) {
+      return delegatedVerdict(rate, payloadHash, selector.secretEnv, delegation);
+    }
     return {
       rate,
       gated: true,
@@ -1826,7 +1987,12 @@ function attemptRequest(
     // proceed unsupervised, and asking whether an action is in the live
     // fraction only matters once it would otherwise have been allowed through.
     if (resolution.supervision === "live") {
-      live = liveVerdict(load, resolution, payloadHash, options.env);
+      live = liveVerdict(load, resolution, payloadHash, options.env, {
+        logPath,
+        policyHash: attested.sha256,
+        actionKey: input.actionKey,
+        ask: options.drawAsk ?? askDaemonDraw,
+      });
     }
     if (live === null || !live.gated) {
       // Amended SPEC.md §6.3: no approval.* event exists off the manual path.
@@ -2079,6 +2245,15 @@ function attemptRequest(
     }
     if (written.ok && selfDelivered) payload[SELF_DELIVERY_FIELD] = "self";
   }
+  // APRV-208. Present only when the live draw was DELEGATED to the daemon —
+  // never for an in-process draw, which is why a sampled request made in the
+  // operator's own terminal stays byte-for-byte a manual one (APRV-127's
+  // property, pinned by `tests/autonomy-split.test.ts`). A delegated verdict is
+  // an assertion by another process, and an assertion recorded without its proof
+  // is a self-reported field; this records the proof (the MAC) or, when there
+  // was no usable answer, the distinct reason the action gated instead. No
+  // secret, no selection value and no caller clock ever enters it.
+  if (live?.draw !== undefined) payload["live_draw"] = { ...live.draw };
   if (input.summary !== undefined) payload["summary"] = input.summary;
   if (input.reversible !== undefined) payload["reversible"] = input.reversible;
   // APRV-106. Both are recorded here rather than derived later because the log
@@ -2144,7 +2319,32 @@ export interface DecideOptions extends GateOptions {
    * since audit would read it as a grouping that never existed.
    */
   batchDeliveryId?: string;
+  /**
+   * The graded reaction the approver gave, on `grant` only (APRV-239, amended
+   * SPEC.md §5.2), recorded as `payload.reaction` on `approval.granted`.
+   *
+   * A human answering the gate is already saying what they think of the action;
+   * this is where they can say it in one word rather than in prose nothing can
+   * read back. It is GUIDANCE and never enforcement: the grant record itself is
+   * the authorization, and no routing, matching, sampling, budget, token or
+   * execution decision reads this field (SPEC.md §11.1 invariant 10). It cannot
+   * widen or narrow what the grant authorizes, and a `disliked` grant is exactly
+   * as much of a grant as a `loved` one.
+   *
+   * Ignored on `reject` and `revoke` — the CLI refuses the flag outright there,
+   * as a usage error naming `--note` — because their reason is their note and a
+   * grade beside a refusal is a second answer to a question with one.
+   */
+  reaction?: Reaction;
 }
+
+/**
+ * The two grades a grant may not carry without the approver's own words
+ * (amended SPEC.md §5.2). The same pair `core/audit.ts` enforces on a review,
+ * spelled here rather than imported as a value so this module's runtime imports
+ * stay where they are; `tests/gate.test.ts` pins the two lists together.
+ */
+const GRADES_REQUIRING_NOTE: ReadonlySet<string> = new Set(["disliked", "loved"]);
 
 export type DecideResult =
   | {
@@ -2259,6 +2459,24 @@ function attemptDecide(
     return refuse(
       "actor-not-human",
       `${decision} is a human-only verb; the actor must match human:<id>, got ${JSON.stringify(actor)}`,
+    );
+  }
+
+  // APRV-239, beside the actor check and before anything is read: whether a
+  // grade came with words is a property of these arguments alone, so it is
+  // settled before a log is opened and nothing is appended when it fails. The
+  // schema enforces the same rule at the write boundary, which is what makes it
+  // true of every record whatever surface wrote it; this refusal exists so the
+  // person holding the phone gets a message that names the fix.
+  if (
+    decision === "grant" &&
+    options.reaction !== undefined &&
+    GRADES_REQUIRING_NOTE.has(options.reaction) &&
+    (options.note === undefined || options.note.trim().length === 0)
+  ) {
+    return refuse(
+      "reaction-note-required",
+      `--reaction ${options.reaction} requires --note "<text>": it is the grade an agent is most likely to act on and least able to interpret alone, and "${options.reaction}" with no words says something about this action and nothing about what. Blank is not a note. \`liked\` and \`indifferent\` need none. Nothing was appended and the request is still pending.`,
     );
   }
 
@@ -2405,8 +2623,17 @@ function attemptDecide(
     ) {
       return refuse(
         "policy-drift",
-        `action ${actionKey} was requested under policy ${derivation.declared.policy_sha256} and the attested policy is now ${attestedSha256}; the rules that routed this request to a human are no longer the rules in force, so a grant recorded here would claim a decision under a policy the approver was never shown. Nothing was appended: the pending request is void and the action must be requested again, which re-resolves its autonomy, limits and TTL under the current policy.`,
-        { state: derivation.state },
+        `action ${actionKey} was requested under policy ${derivation.declared.policy_sha256} and the attested policy is now ${attestedSha256}; the rules that routed this request to a human are no longer the rules in force, so a grant recorded here would claim a decision under a policy the approver was never shown. Nothing was appended here: the pending request is void and the action must be requested again, which re-resolves its autonomy, limits and TTL under the current policy.`,
+        {
+          state: derivation.state,
+          // APRV-235. The comparison this refusal just made, handed to whoever
+          // records the refusal. `decide` itself still appends nothing — that
+          // contract is what lets a caller retry a refusal without wondering
+          // what it wrote — and the surface that collected the human's gesture
+          // is what appends the `audit.decision_refused` and withdraws the void
+          // request (`core/decision-refusal.ts`).
+          drift: { requested: derivation.declared.policy_sha256, attested: attestedSha256 },
+        },
       );
     }
     // A grant with no class is refused rather than recorded with an empty one.
@@ -2437,6 +2664,12 @@ function attemptDecide(
     // assumption this line may make. `DecideOptions` carries no field for it, so
     // a caller-supplied value is refused structurally.
     if (attestedSha256 !== null) payload[POLICY_HASH_FIELD] = attestedSha256;
+    // APRV-239. Grant only, and written only when it was given: an omitted
+    // reaction leaves no key, which is the difference between "the approver said
+    // nothing" and "the approver said indifferent". It sits under the grant's
+    // own branch so a value passed with `reject` or `revoke` is structurally
+    // unable to reach a record, whatever the CLI in front of it does.
+    if (options.reaction !== undefined) payload["reaction"] = options.reaction;
   }
   if (options.note !== undefined) payload["note"] = options.note;
   if (
@@ -3208,7 +3441,10 @@ function attemptHarnessConsume(
     return refuse(
       "policy-drift",
       `action ${actionKey} was approved under policy ${pinned} and the attested policy is now ${attested.sha256}; a human re-attested between the decision and this spend, so the rules the approver saw are not the rules this command would run under. Nothing was appended: the grant is void and the action must be requested again, which re-resolves its autonomy, limits and TTL under the current policy.`,
-      { state: derivation.state },
+      // The comparison, carried for the same reason `decide`'s is (APRV-235).
+      // Nothing records THIS one: the party refused here is an agent spending a
+      // carried grant, and agent-side refusals stay unlogged.
+      { state: derivation.state, drift: { requested: pinned, attested: attested.sha256 } },
     );
   }
 

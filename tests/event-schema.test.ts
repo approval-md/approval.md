@@ -51,6 +51,7 @@ const EVENT_TYPES = [
   "gate.opened",
   "gate.closed",
   "gate.bypassed",
+  "audit.decision_refused",
 ] as const;
 
 /** Fields each event type requires beyond the base record shape. */
@@ -99,10 +100,22 @@ const EXTRA_REQUIRED: Record<string, readonly string[]> = {
   "gate.opened": ["payload"],
   "gate.closed": ["payload"],
   "gate.bypassed": ["payload"],
+  // APRV-235. The action decided, the surface that collected the gesture, and
+  // the payload naming who decided and what the gate said. `channel` is
+  // required here though it is optional in the base shape: a refused decision a
+  // reader cannot attribute to a surface is one they cannot go and reproduce.
+  "audit.decision_refused": ["action_key", "channel", "payload"],
 };
 
+/**
+ * The fixture for an event type, by the filename convention the fixtures use:
+ * one file per type, with the separators spelled as dashes. Underscores join
+ * the dots since APRV-235, because `audit.decision_refused` is the first
+ * enumerated type that carries one and `audit-decision_refused.json` would be
+ * a filename nobody would guess.
+ */
 function fixture(event: string): Record<string, unknown> {
-  const file = join(VALID_DIR, `${event.replace(/\./g, "-")}.json`);
+  const file = join(VALID_DIR, `${event.replace(/[._]/gu, "-")}.json`);
   return JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
 }
 
@@ -215,6 +228,61 @@ test("a bypassed call records who ran it, human or agent (APRV-214)", () => {
   // its own: there is no `system:` bypass because nothing but a harness call
   // reaches this path.
   assert.equal(validate("event", { ...record, actor: "system:daemon" }).ok, false);
+});
+
+test("a refused decision is authored by the runtime, never by either party to it (APRV-235)", () => {
+  const record = fixture("audit.decision_refused");
+  assert.equal(validate("event", record).ok, true);
+  // The record states that the gate refused a human's decision. An approver
+  // able to author it would be writing the account of their own refusal, and an
+  // agent able to author it would be writing an account of a refusal it was not
+  // party to.
+  for (const actor of ["human:carter", "agent:claude-code"]) {
+    assert.equal(
+      validate("event", { ...record, actor }).ok,
+      false,
+      `audit.decision_refused accepted actor "${actor}"`,
+    );
+  }
+  // The subject of the observation is the other way round: the decision it
+  // records is human-only, so the payload's actor must be one.
+  const payload = record["payload"] as Record<string, unknown>;
+  for (const actor of ["agent:claude-code", "system:gate"]) {
+    assert.equal(
+      validate("event", { ...record, payload: { ...payload, actor } }).ok,
+      false,
+      `audit.decision_refused accepted a decider "${actor}"`,
+    );
+  }
+  // Three verbs, and only the three the gate reserves to human hands.
+  assert.equal(
+    validate("event", { ...record, payload: { ...payload, decision: "withdraw" } }).ok,
+    false,
+  );
+});
+
+test("policy-drift is the runtime's withdrawal reason and only the runtime's (APRV-235)", () => {
+  const record = fixture("approval.withdrawn.policy-drift");
+  assert.equal(validate("event", record).ok, true);
+  const payload = record["payload"] as Record<string, unknown>;
+  // A requester that could spell `policy-drift` would be dressing its own
+  // cancellation as the gate's verdict about the policy.
+  for (const actor of ["agent:claude-code", "human:carter"]) {
+    assert.equal(
+      validate("event", { ...record, actor }).ok,
+      false,
+      `a ${actor} withdrawal claimed the runtime's reason`,
+    );
+  }
+  // And the converse: the runtime withdraws for drift or not at all. The
+  // pre-APRV-235 ban on a `system:` withdrawal for a requester's reason stands.
+  for (const reason of ["timeout", "cancelled", "superseded"]) {
+    assert.equal(
+      validate("event", { ...record, payload: { ...payload, reason } }).ok,
+      false,
+      `the runtime withdrew a request for the requester's reason "${reason}"`,
+    );
+  }
 });
 
 test("gate.opened refuses a scope it was not given (APRV-214)", () => {
@@ -522,4 +590,109 @@ test("an attestation may name the prompt it answers, and need not", () => {
       `policy.updated accepted proposed_seq ${JSON.stringify(seq)}`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// The human-to-agent direction (APRV-237)
+// ---------------------------------------------------------------------------
+
+test("reaction is graded, optional, and never a fifth word (APRV-237)", () => {
+  const review = fixture("audit.reviewed");
+  const reviewPayload = (review["payload"] ?? {}) as Record<string, unknown>;
+
+  // The whole vocabulary, and a note alongside it so the two that require one
+  // are covered by the same loop as the two that do not.
+  for (const reaction of ["disliked", "indifferent", "liked", "loved"]) {
+    const result = validate("event", {
+      ...review,
+      payload: { ...reviewPayload, reaction, note: "said what I thought" },
+    });
+    assert.equal(
+      result.ok,
+      true,
+      `audit.reviewed rejected reaction "${reaction}": ${
+        result.ok ? "" : JSON.stringify(result.errors)
+      }`,
+    );
+  }
+
+  // A fifth word is refused at the write boundary rather than left to
+  // accumulate as a synonym one surface writes and another cannot read.
+  for (const reaction of ["meh", "hated", "OK", "", 1, null]) {
+    assert.equal(
+      validate("event", { ...review, payload: { ...reviewPayload, reaction } }).ok,
+      false,
+      `audit.reviewed accepted reaction ${JSON.stringify(reaction)}`,
+    );
+  }
+
+  // Absence is absence. A review with no reaction is the review this project
+  // has always written, and it must stay valid forever: the field is additive
+  // and its absence is never read as `indifferent`.
+  assert.equal(
+    validate("event", review).ok,
+    true,
+    "audit.reviewed must stay valid with no reaction at all",
+  );
+});
+
+test("the extreme reactions carry a note and the ordinary ones need none (APRV-237)", () => {
+  const review = fixture("audit.reviewed");
+  const reviewPayload = (review["payload"] ?? {}) as Record<string, unknown>;
+
+  // `loved` and `disliked` are the grades an agent is most likely to act on and
+  // least able to interpret alone, so the schema requires the words that say
+  // what happened — and a blank string is not those words.
+  for (const reaction of ["loved", "disliked"]) {
+    assert.equal(
+      validate("event", { ...review, payload: { ...reviewPayload, reaction } }).ok,
+      false,
+      `audit.reviewed accepted "${reaction}" with no note`,
+    );
+    assert.equal(
+      validate("event", { ...review, payload: { ...reviewPayload, reaction, note: "" } }).ok,
+      false,
+      `audit.reviewed accepted "${reaction}" with a blank note`,
+    );
+  }
+
+  // The ordinary readings stay one tap: demanding prose for them turns a signal
+  // into a form, and a form is a signal switched off.
+  for (const reaction of ["liked", "indifferent"]) {
+    assert.equal(
+      validate("event", { ...review, payload: { ...reviewPayload, reaction } }).ok,
+      true,
+      `audit.reviewed required a note for "${reaction}"`,
+    );
+  }
+});
+
+test("a grant may carry the same four-word reaction (APRV-237)", () => {
+  const grant = fixture("approval.granted");
+  const payload = (grant["payload"] ?? {}) as Record<string, unknown>;
+
+  assert.equal(
+    validate("event", {
+      ...grant,
+      payload: { ...payload, reaction: "loved", note: "the one I have been waiting for" },
+    }).ok,
+    true,
+    "approval.granted rejected a loved reaction carrying a note",
+  );
+  assert.equal(
+    validate("event", { ...grant, payload: { ...payload, reaction: "liked" } }).ok,
+    true,
+    "approval.granted rejected a liked reaction",
+  );
+  assert.equal(
+    validate("event", { ...grant, payload: { ...payload, reaction: "hated" } }).ok,
+    false,
+    "approval.granted accepted a fifth word",
+  );
+  // One field name, one enum, two surfaces: the note rule holds here too.
+  assert.equal(
+    validate("event", { ...grant, payload: { note: "", reaction: "disliked" } }).ok,
+    false,
+    "approval.granted accepted a disliked reaction with a blank note",
+  );
 });

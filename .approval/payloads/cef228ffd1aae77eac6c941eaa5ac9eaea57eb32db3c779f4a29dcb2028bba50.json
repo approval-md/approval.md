@@ -1,0 +1,1 @@
+{"command":"git add SPEC.md conformance src/cli/doctor.ts tests/cli-doctor.test.ts && git commit -q --no-edit && git log --oneline -1 && git status --short | grep -v \"^??\" | wc -l","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

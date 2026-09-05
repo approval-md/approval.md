@@ -34,6 +34,7 @@ import {
   agentmailMode,
   draftDrift,
   isAgentmailFailureCode,
+  observeAgentmail,
   probeAgentmail,
   readAgentmailConfig,
   requiredAgentmailCredentials,
@@ -812,6 +813,139 @@ test("probeAgentmail reads the inbox and sends nothing", async () => {
   record(wrong);
   assert.equal(wrong.ok, false);
   if (!wrong.ok) assert.equal(wrong.code, "agentmail-unauthorized");
+});
+
+// ---------------------------------------------------------------------------
+// 8b. observe() — the coverage read (APRV-245)
+// ---------------------------------------------------------------------------
+
+/** The window every observe case asks about: wide enough to hold the fixtures. */
+const OBSERVE_WINDOW = { since: "2026-01-01T00:00:00.000Z", until: "2026-12-31T00:00:00.000Z" };
+
+/** One listing row, in the provider's own field names. */
+function listed(
+  id: string,
+  labels: string[],
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    message_id: id,
+    labels,
+    timestamp: "2026-06-01T09:00:00.000Z",
+    subject: "Deposit chaser",
+    to: ["landlord@example.invalid"],
+    ...extra,
+  };
+}
+
+test("observeAgentmail lists the inbox and sends nothing", async () => {
+  const posts = postCount();
+  mock.setMessages([listed("msg-1", ["sent"])]);
+
+  const seen = await observeAgentmail(
+    { apiKey: API_KEY, inboxId: INBOX_ID },
+    OBSERVE_WINDOW,
+    { apiBase: assertLocal(mock.url), timeoutMs: 5_000 },
+  );
+  record(seen);
+  assert.equal(seen.ok, true, JSON.stringify(seen));
+  if (seen.ok) {
+    assert.equal(seen.messages.length, 1);
+    assert.equal(seen.messages[0]?.messageId, "msg-1");
+    assert.equal(seen.messages[0]?.recipients, 1);
+    assert.equal(seen.truncated, false);
+  }
+  // The whole reason this is safe to run on a timer: it is a READ.
+  assert.equal(postCount(), posts, "the coverage read POSTed something");
+
+  // The window reached the provider as a query rather than being applied here.
+  const asked = mock.requestsFor("messages-list").at(-1);
+  assert.ok(asked !== undefined, "no listing request reached the mock");
+  assert.match(asked.path, /after=2026-01-01/u);
+  assert.match(asked.path, /before=2026-12-31/u);
+});
+
+test("observeAgentmail keeps only the messages the provider labelled sent", async () => {
+  mock.setMessages([
+    listed("sent-1", ["sent"]),
+    listed("received-1", ["received"]),
+    listed("sent-2", ["SENT"], { to: ["a@example.invalid", "b@example.invalid"], cc: ["c@x.invalid"] }),
+    // No labels at all: the filter admits nothing it was not told about, which
+    // is the fail-closed direction for a report about sends.
+    listed("unlabelled", []),
+  ]);
+  const seen = await observeAgentmail(
+    { apiKey: API_KEY, inboxId: INBOX_ID },
+    OBSERVE_WINDOW,
+    { apiBase: assertLocal(mock.url), timeoutMs: 5_000 },
+  );
+  assert.equal(seen.ok, true, JSON.stringify(seen));
+  if (!seen.ok) return;
+  assert.deepEqual(
+    seen.messages.map((message) => message.messageId),
+    ["sent-1", "sent-2"],
+  );
+  // `to`, `cc` and `bcc` together: a blind recipient is still a recipient.
+  assert.equal(seen.messages[1]?.recipients, 3);
+});
+
+test("an unauthorized listing is a failure code, not an empty inbox", async () => {
+  mock.setMessages([listed("msg-1", ["sent"])]);
+  const seen = await observeAgentmail(
+    { apiKey: "not-the-key", inboxId: INBOX_ID },
+    OBSERVE_WINDOW,
+    { apiBase: assertLocal(mock.url), timeoutMs: 5_000 },
+  );
+  record(seen);
+  assert.equal(seen.ok, false);
+  if (!seen.ok) {
+    assert.equal(seen.code, "agentmail-unauthorized");
+    // "the provider refused us" and "this inbox sent nothing" are different
+    // facts, and a report that collapsed them would read a broken credential as
+    // a clean bill of health.
+    assert.match(seen.message, /Nothing was sent and nothing was changed/u);
+  }
+});
+
+test("the adapter's observe() returns effects of its own class and no others", async () => {
+  const posts = postCount();
+  mock.setMessages([listed("msg-9", ["sent"]), listed("msg-10", ["received"])]);
+
+  const adapter = adapterFor();
+  assert.notEqual(adapter.observe, undefined, "the agentmail adapter implements no observe()");
+  const effects = await (adapter.observe as NonNullable<Adapter["observe"]>)(
+    OBSERVE_WINDOW,
+    CREDENTIALS,
+  );
+  record(effects);
+
+  assert.equal(effects.length, 1);
+  const effect = effects[0];
+  assert.ok(effect !== undefined);
+  assert.equal(effect.source, "agentmail");
+  assert.equal(effect.id, "msg-9");
+  assert.equal(effect.class, AGENTMAIL_CLASS);
+  assert.equal(effect.actorHint, INBOX_ID);
+  // A subject and a COUNT. Never a body, and never the addresses: this line is
+  // read by somebody who did not approve the message.
+  assert.equal(effect.detail, 'sent "Deposit chaser" to 1 recipient(s)');
+  assert.equal(effect.detail.includes("landlord@example.invalid"), false);
+  assert.equal(postCount(), posts, "observe() POSTed something");
+});
+
+test("observe() with no credential throws rather than reporting a quiet inbox", async () => {
+  const adapter = adapterFor();
+  await assert.rejects(
+    async () =>
+      (adapter.observe as NonNullable<Adapter["observe"]>)(
+        OBSERVE_WINDOW,
+        inMemoryCredentials({}),
+      ),
+    // "the vault would not open" and "this inbox sent nothing" are different
+    // facts; the source layer turns this into an unavailable source with a
+    // reason, and never into zero effects.
+    /credential/iu,
+  );
 });
 
 // ---------------------------------------------------------------------------

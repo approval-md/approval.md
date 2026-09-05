@@ -1,0 +1,16 @@
+{
+  "seq": 41,
+  "ts": "2026-09-02T14:00:00Z",
+  "event": "log.checkpoint",
+  "actor": "human:carter",
+  "channel": "cli",
+  "payload": {
+    "seq": 40,
+    "hash": "7f625051c176f2f260a1f7e25c9a933717ebb49917a8788ac25ae7a4614ebb30",
+    "alg": "ed25519",
+    "key_sha256": "30332109f3a1088201be781b09ab0159440a1f26812ea2632d6e07130c02c0f8"
+  },
+  "alg": "sha256/jcs",
+  "prev": "7f625051c176f2f260a1f7e25c9a933717ebb49917a8788ac25ae7a4614ebb30",
+  "hash": "1b4f8e2c9a7d05613fbc84a2e0d97c31556a08bf4e2913d7ca60b85f9d3e7042"
+}

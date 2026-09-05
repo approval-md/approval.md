@@ -26,3 +26,8 @@ private/*
 # The ungated agent journal (APRV-195): local signal for the operator, not
 # truth and not evidence. The log is the record that gets committed.
 .approval-journal/
+
+# The live-draw socket (APRV-208): the daemon answers supervised-live draws for
+# hook processes that hold no sampling secret. Owner-only, derived, and gone the
+# moment the daemon stops. A socket is not a file a clone can inherit.
+.approval/daemon/

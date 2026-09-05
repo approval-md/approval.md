@@ -7,8 +7,8 @@
     "conformance/vectors/gate-verdicts.v1.json": "99c63b91b5f606c5ddab3538cd38b12808dda5d4db6ca35110b7e0e728deb757",
     "conformance/vectors/jcs-canonicalization.v1.json": "c077cfc2c7712e747dbff261a7e1f5f12d63323b943a9a898134215d4ffac37f",
     "conformance/vectors/policy-resolution.v1.json": "cc8e1448be4bd5dd28cfdcb78487e4db8f0ffc5f749bdbabc598f989b8a7aaa8",
-    "conformance/vectors/refusal-unions.v1.json": "1239c243db72a3a24c844d983b0dbe62a7e439593fdab69f2d650e0efc802f14",
-    "conformance/vectors/schema-validation.v1.json": "dd7006b823ce87890ecf526b280fce144c3638bc42df3a06643e481bf55d3671",
-    "tests/conformance-harness.ts": "57543774a3086c1941c46e2ab8a6977333f4b3f5bbc871db0fbff62cbb81e019"
+    "conformance/vectors/refusal-unions.v1.json": "08f92904d903e62bc11d44a819b7de7eb257fe5977b61803f5122ae20c40f324",
+    "conformance/vectors/schema-validation.v1.json": "11262e7e3db06871d7eaf2e762e8a30ead5bc3697684ec87c0f39639cba5ebc0",
+    "tests/conformance-harness.ts": "638a5007d79f017c00bcb88b4969cc844dd792d92cc0916da67dfa85bf925386"
   }
 }

@@ -880,7 +880,37 @@ test("a non-human actor cannot record a decision, and a duplicate is refused", (
   );
   assert.equal(again.outcome.ok, false);
   if (!again.outcome.ok) assert.equal(again.outcome.code, "already-decided");
-  assert.equal(recordsOf(world.unit.logPath).length, before, "a refused duplicate appends nothing");
+  // APRV-235: a refused duplicate appends no DECISION, and one audit record
+  // saying a person tapped again and was told no. The first human answer stands
+  // untouched, which is the property this test is about.
+  assert.deepEqual(
+    recordsOf(world.unit.logPath)
+      .slice(before)
+      .map((record) => record.event),
+    ["audit.decision_refused"],
+    "a refused duplicate recorded a decision",
+  );
+  assertClean(world.unit);
+});
+
+test("a refusal to a non-human actor records nothing at all (APRV-235)", () => {
+  // The other half of the case above, stated on its own. `actor-not-human` is
+  // the one gate refusal that says NOBODY decided: a misconfigured channel
+  // claimed an agent identity, no person's attention was spent, and there is
+  // nothing for an audit record to account for. It is also the refusal whose
+  // record could not be written honestly, since the event schema requires a
+  // `human:` decider in the payload.
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const before = recordsOf(world.unit.logPath).length;
+  const byAgent = recordChannelDecision(
+    world.unit.logPath,
+    { action_key: key, decision: "grant", deliveryId: "mock-1" },
+    { actor: ACTOR, channel: "telegram" },
+    { ...world.unit.options, clock: fixedClock(NOW) },
+  );
+  assert.equal(byAgent.outcome.ok, false);
+  assert.equal(recordsOf(world.unit.logPath).length, before, "a non-human refusal was recorded");
   assertClean(world.unit);
 });
 
@@ -935,7 +965,15 @@ test("a batch member that refuses does not stop the rest", () => {
   assert.equal(result.results[1]?.outcome.ok, true, "the second member still landed");
 
   const records = recordsOf(world.unit.logPath);
-  assert.equal(records.length, before + 1, "exactly the member that could be recorded was");
+  // Exactly one DECISION, from the member that could be recorded — and, since
+  // APRV-235, the audit trail of the member that could not. The human tapped
+  // over both, and an answer the gate would not take is still an answer that
+  // was given; what it is not is a decision in the log.
+  assert.deepEqual(
+    records.slice(before).map((record) => record.event),
+    ["audit.decision_refused", "approval.granted"],
+    "exactly the member that could be recorded was",
+  );
   assert.equal(batchDeliveryIdOf(records[records.length - 1] as never), "mock-batch-2");
   assertClean(world.unit);
 });

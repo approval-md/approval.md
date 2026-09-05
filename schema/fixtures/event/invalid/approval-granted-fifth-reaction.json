@@ -1,0 +1,16 @@
+{
+  "seq": 7,
+  "ts": "2026-08-04T09:17:22Z",
+  "event": "approval.granted",
+  "task": "task-042",
+  "action_key": "task-042:chaser:2026-08-04",
+  "actor": "human:carter",
+  "channel": "telegram",
+  "payload": {
+    "note": "fine",
+    "reaction": "hated"
+  },
+  "alg": "sha256/jcs",
+  "prev": "bcd21fd125d9c85cc4b4eb1ff519448989c72c0fd70305cbb06b821d04926686",
+  "hash": "3a1c8f7e5d2b4906c1e8a7f3b0d95c26e4a7f1b8d3c60592a8e4f7b1c0d63a54"
+}

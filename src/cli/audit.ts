@@ -24,6 +24,8 @@ import {
   openSamples,
   parseSubjectRef,
   reconciliationObligations,
+  isReaction,
+  REACTIONS,
   reviewSample,
   sampledSubjects,
   satisfyObligation,
@@ -303,6 +305,7 @@ export function commandAuditReview(argv: string[], streams: Streams, cwd: string
       ...COMMON_FLAGS,
       "--note": "string",
       "--deny": "boolean",
+      "--reaction": "string",
       "--as": "string",
       "--policy": "string",
       "--dir": "string",
@@ -336,6 +339,21 @@ export function commandAuditReview(argv: string[], streams: Streams, cwd: string
     );
   }
 
+  // Closed vocabulary, refused at exit 2 rather than defaulted or passed
+  // through, exactly as `withdraw --reason` is. A misspelling that silently
+  // became `indifferent` would put a word in the reviewer's mouth in an
+  // append-only log; one that reached the core would be answered as a refusal
+  // when what happened is that a person typed "love" for "loved".
+  const reactionFlag = stringFlag(flags, "--reaction");
+  if (reactionFlag !== null && !isReaction(reactionFlag)) {
+    return usageError(
+      streams,
+      json,
+      `--reaction expects one of ${REACTIONS.join(" | ")}, got ${JSON.stringify(reactionFlag)}`,
+      AUDIT_REVIEW_HELP,
+    );
+  }
+
   const check = preflightLog(logPath);
   if (!check.ok) return ioError(streams, json, check.message);
 
@@ -355,6 +373,9 @@ export function commandAuditReview(argv: string[], streams: Streams, cwd: string
       // Explicit rather than defaulted through: the ABSENCE of --deny is "ok",
       // and it must be this file that says so, once, where a reader can see it.
       verdict: deny ? "denied" : "ok",
+      // Absent means absent (APRV-239). No default is substituted here or
+      // downstream: `indifferent` is a thing a person had to actually say.
+      ...(reactionFlag === null ? {} : { reaction: reactionFlag }),
     },
   );
   if (!result.ok) return emitRefusal(streams, json, result);
@@ -368,6 +389,10 @@ export function commandAuditReview(argv: string[], streams: Streams, cwd: string
       action_key: result.subject.actionKey,
       task: result.subject.task,
       verdict: deny ? "denied" : "ok",
+      // Always present, `null` when the reviewer gave none: a consumer reading
+      // this shape must be able to tell "no reaction" from "the key is missing
+      // because this build predates the field".
+      reaction: reactionFlag,
       obligation_seq: obligation === null ? null : obligation.seq,
       actor,
     });
@@ -375,7 +400,9 @@ export function commandAuditReview(argv: string[], streams: Streams, cwd: string
     streams.out(
       `reviewed sample at seq ${String(result.subject.seq)} (action ${
         result.subject.actionKey ?? "-"
-      }) at seq ${String(result.record.seq)} by ${actor}${deny ? " — DENIED" : ""}\n`,
+      }) at seq ${String(result.record.seq)} by ${actor}${deny ? " — DENIED" : ""}${
+        reactionFlag === null ? "" : ` — reaction: ${reactionFlag} (guidance, not policy)`
+      }\n`,
     );
     if (obligation !== null) {
       const shape = String((obligation.payload as Record<string, unknown> | undefined)?.["obligation"] ?? "");

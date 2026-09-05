@@ -73,6 +73,7 @@ import {
   telegramTokenEnvFor,
 } from "../channels/telegram.js";
 import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
+import { VALUES_INFO_STRING, loadValues } from "../core/values.js";
 import {
   KEYSTORE_DEFERRED,
   NON_RESOLVING_RUNNER,
@@ -103,6 +104,7 @@ import {
   snapshotPathFor,
   snapshotSummary,
 } from "../core/verified-snapshot.js";
+import { drawSocketPathFor, liveClassesOf } from "../core/live-draw.js";
 import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { policyWebPort } from "./channel-web.js";
@@ -715,6 +717,131 @@ function checkVerifiedSnapshot(logPath: string): DoctorCheck {
     check: "verified-snapshot",
     status: "pass",
     detail: `${path} endorses ${currency}: ${String(read.snapshot.lines)} record(s) through seq ${String(read.snapshot.head.seq)}, published ${read.snapshot.verified_at}. A hook re-proves the digest rather than re-walking the chain.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 7d. the live draw (APRV-208)
+// ---------------------------------------------------------------------------
+
+/**
+ * Is a daemon answering live draws for this log?
+ *
+ * The row exists because the difference it reports is invisible everywhere else
+ * and expensive: with nothing answering, a class an operator declared
+ * `supervised-live` at 0.1 is gated at 100% — safely, silently, and for as long
+ * as nobody notices, which is the state APRV-184 found this repository in for a
+ * fortnight. "Every policy edit asks for a tap" and "one in ten policy edits
+ * asks for a tap" look identical from inside the policy file.
+ *
+ * `skip` when the policy declares no `supervised-live` class: there is nothing
+ * to draw, and a row announcing a missing socket for a feature nobody uses is
+ * noise. Otherwise `pass` with the socket, or `fail` — this row's one `fail` —
+ * when a live class is declared and no usable socket is there, because that IS
+ * the operator's control not being in force.
+ *
+ * It asks the daemon nothing. It looks at the socket exactly as an asker does
+ * and reports what an asker would conclude.
+ */
+function checkLiveDraw(logPath: string, load: PolicyLoadResult): DoctorCheck {
+  const path = drawSocketPathFor(logPath);
+  // The same helper the daemon's server asks, so this row and the process that
+  // serves draws can never disagree about whether the file declares one.
+  const liveClasses = load.ok ? liveClassesOf(load.policy) : [];
+  if (liveClasses.length === 0) {
+    return {
+      check: "live-draw",
+      status: "skip",
+      detail: `this policy declares no supervised-live class, so no draw is ever made and ${path} is not needed.`,
+    };
+  }
+
+  const declared = liveClasses.join(", ");
+  let stats;
+  try {
+    stats = statSync(path);
+  } catch {
+    return {
+      check: "live-draw",
+      status: "fail",
+      detail: `no draw socket at ${path}, so every action of ${declared} gates to a human instead of being sampled: a gate process holds no sampling secret, and there is no daemon to ask.`,
+      fix: 'eval "$(approval env)" && approval up — start the ambient runtime in a shell where the sampling secret resolves, so it can answer draws',
+    };
+  }
+  const euid = typeof process.geteuid === "function" ? process.geteuid() : null;
+  if (!stats.isSocket() || euid === null || stats.uid !== euid || (stats.mode & 0o077) !== 0) {
+    return {
+      check: "live-draw",
+      status: "fail",
+      detail: `${path} exists but every asker would refuse it (owner uid ${String(stats.uid)}, mode ${(stats.mode & 0o777).toString(8)}), so ${declared} gates to a human on every action.`,
+      fix: "stop the daemon, remove the socket, and start it again as the user who owns this approval home",
+    };
+  }
+  return {
+    check: "live-draw",
+    status: "pass",
+    detail: `${path} is present and owner-only, so a gate process with no sampling secret can have its draw answered and ${declared} is sampled at its declared rate rather than gated at 100%. A daemon that stops removes its socket, so this row falling to fail is the signal.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 7d. the values block (APRV-238)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the optional values block of `APPROVAL.md` can be read.
+ *
+ * The row exists because nothing else would ever report a broken one. A values
+ * block is guidance and not policy (SPEC.md §5.3, §11.1 invariant 10), so a
+ * malformed one changes nothing about what the policy says and deliberately
+ * does not appear in `approval policy check`, whose answer is the enforcement
+ * trace. Left there, a typo in the block would silently mean the operator's
+ * stated values reach no agent while every gate keeps working perfectly.
+ *
+ * Absence is a `pass` and says so in the words SPEC.md §5.3 fixes: a file with
+ * no block is an operator who declared no values, which is a state and not a
+ * fault. The only `fail` is a block that is present and unreadable, and its fix
+ * names the code rather than proposing a repair, because what the block should
+ * say is the human's to write.
+ */
+function checkValuesBlock(policyPath: string, policyFlagged: boolean, dir: string): DoctorCheck {
+  const result = loadValues(policyFlagged ? { file: policyPath } : { dir });
+  if (!result.ok) {
+    if (result.code === "file-missing") {
+      return {
+        check: "values-block",
+        status: "skip",
+        detail: oneLine(
+          `${result.message}, so there is no values block to read. The policy file's own absence is reported by the attestation row above.`,
+        ),
+      };
+    }
+    return {
+      check: "values-block",
+      status: "fail",
+      detail: oneLine(
+        `a \`\`\`${VALUES_INFO_STRING} block is present and could not be read (${result.code}): ${result.message}. Nothing about the policy changed — guidance is not enforcement — but the operator's stated values reach no agent until this parses.`,
+      ),
+      fix: `approval values --json — prints the same failure with its code (${result.code}); fix the block in ${result.source?.filename ?? "the policy file"} and re-attest, since the attestation digests the whole file`,
+    };
+  }
+  if (!result.present) {
+    return {
+      check: "values-block",
+      status: "pass",
+      detail: `${result.source.filename}: no approval-values block; the operator has declared no values here. That is a declaration rather than a gap, and \`approval values\` says so in those words.`,
+    };
+  }
+  const declared = (["love", "like", "dislike", "wants"] as const).filter(
+    (key) => result.values[key] !== undefined,
+  );
+  const responds = result.values.responds === undefined ? "" : ", responds";
+  return {
+    check: "values-block",
+    status: "pass",
+    detail: `${result.source.filename}: the values block parses and validates (version ${String(
+      result.values.version,
+    )}; ${declared.length === 0 ? "no list" : declared.join(", ")}${responds}). It is guidance, so nothing here is enforced; read it with \`approval values\`.`,
   };
 }
 
@@ -2247,6 +2374,14 @@ export function commandDoctor(
       // the one way a log can: what the last record said the harness was,
       // against what `<binary> --version` says it is now.
       checkHarnessVersion(dir, verified.records),
+      // APRV-208: appended, fourteenth time, same reason. The one row that says
+      // whether supervised-live is actually live on this machine.
+      checkLiveDraw(logPath, policyLoad),
+      // APRV-238: appended, fifteenth time, same reason. The one surface
+      // besides `approval values` that would notice a broken values block:
+      // `policy check` deliberately says nothing about it, because guidance has
+      // no place in an enforcement trace.
+      checkValuesBlock(policyPath, policyFlag !== null, dir),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");
