@@ -3,11 +3,11 @@ id: APRV-208
 title: >-
   The live draw moves to the daemon: supervised-live selection answered over
   local IPC, so the sampling secret never enters an agent-launched process
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-u'
 created_date: '2026-09-02 08:03'
-updated_date: '2026-09-04 22:55'
+updated_date: '2026-09-05 08:10'
 labels:
   - sampling
   - daemon
@@ -117,3 +117,9 @@ CORRECTION to the AC6 note above. The FULL2_EXIT:0 marker and a second summary b
 
 One loose end left for a human, harmless but unexplained: the whole-suite test count moved 3102, 3108, 3120 across three runs of the same tree (the first two differ because npm ci restored a missing dependency, the last two by twelve with no code change between them). Zero failures every time, so nothing here is a defect, but a suite whose size drifts is a suite where a silently-skipped file would not be noticed. Worth a look independent of this task.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The live draw is answered by the daemon over an owner-only Unix socket under the approval home through a spawnSync relay child with an empty environment; the question names action key, payload hash, policy digest and rate, the daemon echoes what it derived and answers with a MAC under the sampling secret that the asker records and any secret holder can recompute; absent, stale and invalid answers are three distinct fail-closed refusals; doctor row live-draw. Verified by tests/live-draw.test.ts (16, including 200 fixture actions in a binomial band with the secret only in the daemon and the relay isolation proof), autonomy-split, doctor, hook, schema and daemon suites, full run 3119 pass; merged in PR #260.
+<!-- SECTION:FINAL_SUMMARY:END -->

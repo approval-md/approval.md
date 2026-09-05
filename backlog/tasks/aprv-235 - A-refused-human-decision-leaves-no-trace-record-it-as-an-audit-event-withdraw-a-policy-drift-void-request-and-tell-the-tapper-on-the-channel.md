@@ -3,11 +3,11 @@ id: APRV-235
 title: >-
   A refused human decision leaves no trace: record it as an audit event,
   withdraw a policy-drift-void request, and tell the tapper on the channel
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-l'
 created_date: '2026-09-02 20:26'
-updated_date: '2026-09-04 23:48'
+updated_date: '2026-09-05 08:10'
 labels:
   - channels
   - log
@@ -245,3 +245,9 @@ it is load-sensitive rather than broken: it fails when the machine is busy
 4 of 4 on pristine main sources). Still worth a follow-up to make it
 deterministic; it is not this task's to fix.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A refused human decision appends audit.decision_refused (system:gate actor, human in the payload, refusal code, both policy hashes), which grants nothing and no verdict path reads; a policy-drift refusal also withdraws the void request under a new system-only reason bound bidirectionally in the schema; Telegram edits the tapped message to a terminal state and the CLI channel prints the same line; six appends-nothing assertions now assert no decision record. Conformance schema-validation regenerated (1.6.0 after the APRV-220 merge). Verified by tests/decision-refusal.test.ts and the schema, channel and gate suites, full run 3182 pass; merged in PR #266.
+<!-- SECTION:FINAL_SUMMARY:END -->
