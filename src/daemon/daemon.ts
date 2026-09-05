@@ -476,6 +476,7 @@ export const DAEMON_WARNING_CODES = [
    * for want of a tap is a daemon whose operator turns the check off.
    */
   "checkpoint-due",
+  /**
    * The live-draw socket could not be served (APRV-208). Nothing is degraded:
    * every asker fails closed to a human decision, which is exactly what happens
    * on a machine where no daemon runs at all. It is a warning rather than a
@@ -593,6 +594,7 @@ export interface DaemonOptions {
    * already verified plus the policy, and writes nothing anywhere.
    */
   checkpoints?: { enabled?: boolean };
+  /**
    * The live-draw server (APRV-208), or absent when this run answers no draws.
    *
    * Constructed by the CALLER, not here, and the reason is the sampling secret:
