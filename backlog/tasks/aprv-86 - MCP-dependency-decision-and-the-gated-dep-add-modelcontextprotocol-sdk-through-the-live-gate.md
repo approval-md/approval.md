@@ -15,6 +15,28 @@ dependencies:
 priority: high
 type: chore
 ordinal: 81000
+approval:
+  origin:
+    app: manual
+    created_by: 'agent:fable'
+  route:
+    assignee: human
+    rationale: >-
+      Envelope restored by hand from the log (task.registered at seq 18,
+      granted at seq 21, executed at seq 24), per docs/dogfood-cutover.md "If
+      an envelope goes missing"; a board edit had dropped it. The declared
+      action is copied from the registration record and nothing is added.
+  state: executed
+  actions:
+    - class: deps.add
+      summary: >-
+        npm install @modelcontextprotocol/sdk@1.30.0 --save-exact in
+        /Users/carter/dev/approval-md (MIT; 91 transitive packages, 24 MB,
+        zero native; engines >=18)
+      reversible: true
+      est_cost_usd: '0'
+      idempotency_key: 'aprv-86:mcp-sdk-add:2026-08-18'
+      payload_hash: '839892a187dea3e224834cc2ae996c1c2c8a36f323e22988d46d1b3194596da0'
 ---
 
 ## Description
