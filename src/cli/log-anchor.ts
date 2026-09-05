@@ -249,7 +249,7 @@ function anchoredCopy(
     // does — so it must not be reported as a rev with nothing to say.
     return {
       ok: false,
-      reason: `${rev} names a blob for ${relative} that could not be read (${read.detail})`,
+      reason: `${rev} names a blob for ${relative} that could not be read`,
       attempt: { command: read.command, detail: read.detail },
     };
   }

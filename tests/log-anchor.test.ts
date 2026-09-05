@@ -710,6 +710,24 @@ function assertGitCanSeeTheLog(dir: string, rev: string): void {
   assert.ok(shown.stdout.length > 1024 * 1024, "the fixture log is under the buffer ceiling");
 }
 
+test("anchor: the git output limit is above spawnSync's default, in code", () => {
+  // Structural, and pinned because the defect was invisible: the limit is a
+  // number nothing reads back, so a change that restored the default would
+  // break every committed-log read and no other assertion in this file with a
+  // log of ordinary fixture size would notice.
+  assert.ok(
+    GIT_OUTPUT_LIMIT_BYTES > 1024 * 1024,
+    `the git output limit is ${String(GIT_OUTPUT_LIMIT_BYTES)}, at or under spawnSync's default`,
+  );
+  const REPO_ROOT_DIR = fileURLToPath(new URL("../../", import.meta.url));
+  const scope = readFileSync(join(REPO_ROOT_DIR, "src/cli/git-scope.ts"), "utf8");
+  assert.match(
+    scope,
+    /spawnSync\("git", \["show", spec\], \{ cwd: root, maxBuffer: GIT_OUTPUT_LIMIT_BYTES \}\)/u,
+    "the blob read runs git show without an explicit output limit",
+  );
+});
+
 test("anchor: a committed log over a megabyte resolves in the main worktree", () => {
   const repo = bigRepo();
   assertGitCanSeeTheLog(repo.dir, "refs/remotes/origin/main");
