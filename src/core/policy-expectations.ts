@@ -26,7 +26,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { CLASSIFIER_CLASSES } from "./command-class.js";
+import { emittableClass } from "./command-class.js";
 import type { Autonomy, PolicyLoadResult } from "./policy-load.js";
 import { resolve, type Provenance } from "./policy-match.js";
 
@@ -238,13 +238,19 @@ export function checkPolicyExpectations(
         actual: "the policy declares this class and nothing pins what it resolves to",
       });
     }
-    if (!CLASSIFIER_CLASSES.includes(actionClass)) {
+    // APRV-266: reachability is asked WITH the policy's own `protected_paths`,
+    // because a `policy.edit` sub-class is emitted only where an entry routes a
+    // path family to it. The question is the one this check always asked —
+    // would this line ever fire? — and a routed class nothing routes to still
+    // answers no, which is the case worth catching: a `policy.edit.ci` rule
+    // whose routing was deleted looks like protection and is not.
+    if (!emittableClass(actionClass, load.policy.protected_paths ?? [])) {
       failures.push({
         kind: "unreachable",
         actionClass,
         expected: "a class the command classifier can emit",
         actual:
-          "no rule in src/core/command-class.ts emits it, so the policy line would never fire",
+          "no rule in src/core/command-class.ts emits it and no protected_paths entry routes to it, so the policy line would never fire",
       });
     }
   }
