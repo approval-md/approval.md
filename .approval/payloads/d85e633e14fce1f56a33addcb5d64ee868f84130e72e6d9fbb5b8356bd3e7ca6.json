@@ -1,0 +1,1 @@
+{"command":"gh api graphql -f query='mutation { dequeuePullRequest(input: {pullRequestId: \"PR_kwDOTuEw5c8AAAABCRWqNw\"}) { clientMutationId } }'","cwd":"/private/tmp/approval-workflow-checkpoint"}
