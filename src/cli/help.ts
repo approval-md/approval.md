@@ -1245,9 +1245,9 @@ Flags:
 
 Appends execution.completed or execution.failed with payload {"note":…,
 "attested_by_human":true,"exit_code":null}: nobody ran anything, so exit_code is
-NULL and NO ATTESTATION IS REQUIRED. Refuses (exit 1): not-started,
-already-finished. --dangling lists every dangling execution with what this
-checkout can PROVE, asks ONCE, and closes only the provable.
+NULL. NO ATTESTATION IS REQUIRED: resolve exercises no policy authority.
+Refuses (exit 1): not-started, already-finished. --dangling lists every dangling
+execution with what this checkout can PROVE, asks ONCE, closes the provable.
 
 JSON shape: docs/cli-reference.md#execution-resolve
 ${EXIT_CODES_POINTER}
