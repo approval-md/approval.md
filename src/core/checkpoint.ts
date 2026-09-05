@@ -814,7 +814,7 @@ export function checkpointPolicyOf(
     return {
       publicKeys: [],
       checkpointEveryMs: null,
-      unloadable: `the policy could not be loaded (${load.code}: ${load.message}), so no checkpoint key is configured`,
+      unloadable: `the policy could not be loaded (${load.code}: ${load.message}) and configures no checkpoint key`,
     };
   }
   const keys = load.policy.audit?.checkpoint_keys;
