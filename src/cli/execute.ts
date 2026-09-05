@@ -52,7 +52,7 @@
 import { spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { constants as osConstants } from "node:os";
-import { isAbsolute, resolve as resolvePathSegments } from "node:path";
+import { dirname, isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, checkAttestation, resolveHumanActor } from "../core/attest.js";
 import {
@@ -1599,7 +1599,11 @@ function resolveDangling(
 
   const classFilter = stringFlag(flags, "--class");
   const index = indexDeclarations(read.records);
-  const root = repoRoot(cwd);
+  // The LOG's repository, exactly as the `log-advance-cadence` doctor row asks
+  // it: the refs that can prove anything about an advance are the ones in the
+  // checkout the log lives in, which is not necessarily where the operator is
+  // standing when they run this.
+  const root = repoRoot(dirname(logPath)) ?? repoRoot(cwd);
   // The git read, once, for the whole list. `null` when this is not a git
   // checkout at all, in which case nothing is provable and every key is listed
   // as a person's — the fail-closed direction, and the honest one.

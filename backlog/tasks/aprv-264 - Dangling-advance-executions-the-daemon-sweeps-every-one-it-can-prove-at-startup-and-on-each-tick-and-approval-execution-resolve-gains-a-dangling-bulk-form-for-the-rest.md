@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-a'
 created_date: '2026-09-05 10:04'
-updated_date: '2026-09-05 11:01'
+updated_date: '2026-09-05 11:29'
 labels:
   - daemon
   - cli
@@ -42,3 +42,11 @@ Seen 2026-09-05 after the APRV-233 build went live: approval status listed five 
 5. cli/execute.ts: approval execution resolve --dangling [--class <class>] [--yes] [--json], with a Prompter seam like gate-window's. Lists provable and unprovable keys, asks once on a TTY (refuses dangling-stdin-not-tty without one unless --yes), appends one human-attested resolveExecution per provable key with the generated note naming the ref, leaves unprovable keys alone with their one-line manual command. help.ts, verb-registry.ts (output becomes anyOf of the single and bulk shapes) and docs/cli-reference.md follow.
 6. Tests: a sweep suite over the real git topology (three dangling advances the scratch trunk carries, closed on one tick, then advanced; one it does not carry, reported once and naming every key plus the bulk command in the refusal), and a CLI suite for --dangling (list, one confirmation, one outcome per provable key, --json, no TTY without --yes).
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Progress (lane A, branch aprv-264-dangling-sweep)
+
+Implementation and tests are in on commits 2115d9b, e9789c9, 10fb3fa, 3b2a1fe, 24b7150. Full `npm test` and the origin/main merge are still to run at the time of this note.
+<!-- SECTION:NOTES:END -->

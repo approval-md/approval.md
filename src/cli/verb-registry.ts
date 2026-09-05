@@ -992,10 +992,18 @@ const VERBS: VerbSpec[] = [
       "Record the outcome a HUMAN OBSERVED for a dangling execution — one that started and whose end nobody knows, the state a crash between execution.started and its outcome leaves. It demands a non-empty note, records exit_code null rather than inventing one, and marks attested_by_human so no reader mistakes an observation for a measurement. Nothing in this codebase closes a dangling execution automatically. --dangling is the BULK form: it lists every dangling execution with what this checkout can PROVE about each (the ref carrying the seq a daemon advance named, or nothing), asks once, and appends one human-attested completed per provable key with a note naming that ref. Keys nothing proves are listed with their own one-line command and left untouched.",
     human_only: true,
     input: input({
-      // No action key with `--dangling`, which acts on the whole list; exactly
-      // one without it. Which of the two forms was asked for is checked in the
-      // verb, where the refusal can say so in a sentence.
-      positionals: positionals([{ name: "action-key", description: "the action's idempotency_key" }], 0),
+      // Exactly one action key without `--dangling`, and none with it, which
+      // is a dependency between a positional and a flag that no positional
+      // TUPLE can state: a 1-tuple whose `minItems` is 0 is not a tuple at all
+      // under the strict Ajv this registry compiles with. So the arity is
+      // spelled as a bounded list and which of the two forms was asked for is
+      // checked in the verb, where the refusal can say so in a sentence.
+      positionals: {
+        type: "array",
+        items: { type: "string", title: "action-key", description: "the action's idempotency_key" },
+        maxItems: 1,
+        description: "the action key, for the single form; absent with --dangling",
+      },
       flags: {
         "--outcome": "string",
         "--note": "string",
