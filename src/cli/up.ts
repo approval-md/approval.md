@@ -115,7 +115,7 @@ import {
 } from "../daemon/dark-session.js";
 import { useReadProof } from "../core/state.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
-import { glossRunnerFor } from "./gloss.js";
+import { glossRunnerFromOptions, parseGlossOptions } from "./gloss-options.js";
 import { UP_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, preflightLog, resolvePath } from "./paths.js";
@@ -287,6 +287,8 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--no-web": "boolean",
   "--gloss": "boolean",
   "--no-gloss": "boolean",
+  "--gloss-provider": "string",
+  "--gloss-model": "string",
   // The supervisor's.
   "--restart-backoff": "string",
   // The startup preflight (APRV-215).
@@ -379,6 +381,8 @@ export function commandUp(
   }
 
   const flags = parsed.flags;
+  const selectedGloss = parseGlossOptions(flags, true);
+  if (!selectedGloss.ok) return usageError(streams, json, selectedGloss.message);
   const interval = durationFlag(flags, "--interval", DEFAULT_INTERVAL_MS);
   if (!interval.ok) return usageError(streams, json, interval.message);
   const debounce = durationFlag(flags, "--debounce", DEFAULT_DEBOUNCE_MS);
@@ -497,6 +501,11 @@ export function commandUp(
 
   let telegram: ListenSetup | null = null;
   if (wantTelegram) {
+    const gloss = glossRunnerFromOptions(selectedGloss.options, {
+      passphraseEnv: passphraseEnvFor(load),
+      diagnostic: (reason) =>
+        streams.err(`approval: Codex gloss unavailable (${reason}); continuing without it\n`),
+    });
     const prepared = prepareListen({
       logPath,
       policy,
@@ -514,9 +523,7 @@ export function commandUp(
       //
       // APRV-207: the subprocess is spawned starved, and the policy already
       // loaded above names the passphrase variable the scrub must remove.
-      ...(boolFlag(flags, "--no-gloss")
-        ? {}
-        : { gloss: glossRunnerFor(passphraseEnvFor(load)) }),
+      ...(gloss === undefined ? {} : { gloss }),
     });
     if (prepared.ok) {
       telegram = prepared.setup;

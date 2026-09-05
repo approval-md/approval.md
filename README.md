@@ -243,6 +243,16 @@ ticking. `approval daemon run` and `approval channel telegram listen` still run
 the halves separately and behave identically, and `approval setup service` writes
 the launchd or systemd user unit that starts the runtime at login (printing the
 whole unit for you to read first, naming variables and never copying a value).
+
+To use the signed-in Codex CLI for the optional unverified gloss, name both the
+provider and model:
+
+```sh
+approval up --gloss-provider codex --gloss-model gpt-5.4-mini
+```
+
+Claude with model `haiku` remains the default. The runtime never falls back
+between providers; a failed gloss is omitted and approval delivery continues.
 The message shows the action key, a **COMPUTED** block the runtime derived (class,
 task, state, binding, budget verdicts, chain head), a **CLAIMED** block naming the
 agent and marked unverified, the **FULL PAYLOAD**, and two buttons. It also says
