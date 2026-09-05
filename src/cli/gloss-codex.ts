@@ -59,6 +59,11 @@ const CODEX_CONFIG = [
   'project_doc_max_bytes=0',
   'project_doc_fallback_filenames=[]',
   'project_root_markers=[]',
+  // Enabling skip_host_skill_discovery otherwise emits Codex's known
+  // under-development-feature notice as an error item before the turn. This
+  // suppresses that startup notice only; every emitted JSONL error remains a
+  // hard failure in parseSuccessfulAnswer.
+  'suppress_unstable_features_warning=true',
   'approval_policy="never"',
   'default_permissions="gloss"',
   'permissions.gloss.filesystem={":minimal"="read",":workspace_roots"={"."="read"}}',
@@ -203,8 +208,8 @@ function parseSuccessfulAnswer(stdout: string, model: string): GlossResult | nul
  *
  * The invocation starts in a new empty directory with a named read-only
  * permission profile, command network disabled, project instructions
- * suppressed, host skill discovery skipped, and every currently known
- * tool/integration feature disabled.
+ * suppressed, host skill discovery skipped, and selected known
+ * tool/integration features disabled.
  * Codex 0.152.1 has no universal deny-all tool switch: host-managed and global
  * base instructions still apply, the under-development discovery switch is
  * version-specific, and the CLI owns any auth-state maintenance.

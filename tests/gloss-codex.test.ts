@@ -141,6 +141,7 @@ test("Codex runner uses saved-auth environment, stdin payload, and strongest ver
   assert.equal(capture.argv.includes('permissions.gloss.network.enabled=false'), true);
   assert.equal(capture.argv.includes('project_doc_max_bytes=0'), true);
   assert.equal(capture.argv.includes("skip_host_skill_discovery"), true);
+  assert.equal(capture.argv.includes("suppress_unstable_features_warning=true"), true);
   assert.equal(capture.argv.includes("skills.max_context_tokens=1"), false);
   assert.equal(capture.argv.includes("shell_tool"), true);
   assert.equal(capture.argv.includes("unified_exec"), true);
