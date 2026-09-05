@@ -154,6 +154,14 @@ import {
 } from "./policy-load.js";
 import { humanOnlyRefusal, resolve, type Resolution } from "./policy-match.js";
 import {
+  DRAW_PROTOCOL_VERSION,
+  askDaemonDraw,
+  type DrawAsker,
+  type DrawQuestion,
+  type DrawRefusalReason,
+  type LiveDrawRecord,
+} from "./live-draw.js";
+import {
   LIVE_SELECTION,
   resolveLiveSelector,
   type LiveSelectorUnavailableReason,
@@ -667,6 +675,21 @@ export interface GateOptions extends ClockOptions {
    * the policy file or from anywhere else inside the repository.
    */
   env?: NodeJS.ProcessEnv;
+  /**
+   * How a process with no sampling secret asks the daemon for a live draw
+   * (APRV-208). Defaults to `core/live-draw.ts`'s `askDaemonDraw`, which
+   * `spawnSync`s a relay against the owner-only socket under the approval home.
+   *
+   * A seam for tests, and stated plainly rather than defended: an in-process
+   * caller that supplies a lying asker can wave a live action through, and so
+   * can one that points `policy.file` at a policy of its own. Both are the same
+   * trust boundary, which is the process holding `GateOptions` — SPEC.md §11's
+   * "the trust boundary is the local machine". The property this seam does NOT
+   * weaken is the one that matters across processes: a HOOK never sets it, the
+   * default asker talks only to the socket under the approval home, and the
+   * verdict it brings back is recorded with the MAC an operator recomputes.
+   */
+  drawAsk?: DrawAsker;
 }
 
 // ---------------------------------------------------------------------------
@@ -1458,11 +1481,24 @@ export interface LiveVerdict {
    *   Gated. See `core/sampler.ts` on why live selection fails closed where
    *   retrospective sampling fails open.
    */
-  reason: "selected" | "not-selected" | "payload-hash-absent" | LiveSelectorUnavailableReason;
+  reason:
+    | "selected"
+    | "not-selected"
+    | "payload-hash-absent"
+    | LiveSelectorUnavailableReason
+    | DrawRefusalReason;
   /** The algorithm an operator holding the secret recomputes to check this. */
   selection: typeof LIVE_SELECTION;
   /** The NAME of the secret's environment variable. Never the secret. */
   secretEnv: string | null;
+  /**
+   * The delegation, when this verdict was not computed in this process
+   * (APRV-208). Absent for an in-process draw, which is why a sampled
+   * supervised-live request in an operator's own terminal is still byte-for-byte
+   * a manual one. See {@link LiveDrawRecord} for why a DELEGATED verdict is
+   * recorded and an in-process one is not.
+   */
+  draw?: LiveDrawRecord;
 }
 
 /**
@@ -1546,15 +1582,109 @@ export type RequestResult =
  * `payload_hash` plus the secret, which is strictly better evidence than a
  * self-reported field, because it cannot be forged by whoever wrote the record.
  */
+/**
+ * Ask the operator's daemon for the draw this process cannot make (APRV-208).
+ *
+ * ## Why this exists, in one paragraph
+ *
+ * `supervised-live` selects with a secret that must never be readable by an
+ * agent, and the process that decides is usually a child of an agent session.
+ * Before this, that combination meant the draw failed closed on every action —
+ * measured on this repository, 15 of 15 supervised-live actions gated after the
+ * amendment that turned sampling on (APRV-184). Safe, and the setting never once
+ * being live. The daemon holds the secret legitimately, so the draw moves there
+ * and this process asks over an owner-only socket under the approval home.
+ *
+ * ## What "asking" is allowed to buy
+ *
+ * Exactly one thing: the right to NOT gate, evidenced. Every failure — no
+ * socket, a socket that will not answer, an answer this process cannot match to
+ * its own question — gates the action with its own machine-readable reason, so
+ * the worst a broken, absent, or hostile daemon can do is put a human in the
+ * loop, which is where the action was going before APRV-208 existed.
+ *
+ * The answer is never believed on its own terms. It carries a MAC over the
+ * question and the verdict under the operator's secret; this process cannot
+ * check it (it holds no secret, which is the point) so it RECORDS it, and the
+ * operator recomputes it later from the request's own fields. That is what keeps
+ * SPEC.md §11's "self-reported fields never reduce scrutiny" true: the only
+ * self-report that reduces scrutiny here is one accompanied by a proof its
+ * author could not forge.
+ */
+function delegatedVerdict(
+  rate: number,
+  payloadHash: string,
+  secretEnv: string | null,
+  delegation: { logPath: string; policyHash: string; actionKey: string; ask: DrawAsker },
+): LiveVerdict {
+  const question: DrawQuestion = {
+    v: DRAW_PROTOCOL_VERSION,
+    action_key: delegation.actionKey,
+    payload_hash: payloadHash,
+    policy_hash: delegation.policyHash,
+    live_rate: rate,
+  };
+  const outcome = delegation.ask(delegation.logPath, question);
+  if (!outcome.ok) {
+    return {
+      rate,
+      gated: true,
+      reason: outcome.reason,
+      selection: LIVE_SELECTION,
+      secretEnv,
+      draw: { v: DRAW_PROTOCOL_VERSION, source: "unavailable", reason: outcome.reason, live_rate: rate },
+    };
+  }
+  const { answer } = outcome;
+  const verdict: LiveVerdict = {
+    rate,
+    gated: answer.selected,
+    reason: answer.selected ? "selected" : "not-selected",
+    selection: LIVE_SELECTION,
+    secretEnv,
+  };
+  // Carried only for a SELECTED action, because that is the only delegated
+  // verdict that ever reaches a record: an unsampled action appends no
+  // `approval.requested` at all (amended SPEC.md §6.3), so there is nothing for
+  // the field to ride on and a `live_draw` describing a "not-selected" outcome
+  // could only ever be a shape nobody reads. The unsampled delegation is
+  // evidenced the way every unsampled action already is: by its absence from
+  // the queue, and by an operator recomputing the draw from the registration's
+  // payload hash. Keeping the two in step here is what makes the schema's
+  // `reason: "selected"` an honest constant rather than an assumption.
+  if (!answer.selected) return verdict;
+  return {
+    ...verdict,
+    draw: {
+      v: DRAW_PROTOCOL_VERSION,
+      source: "daemon",
+      reason: "selected",
+      live_rate: rate,
+      selected: answer.selected,
+      mac: answer.mac,
+      daemon_pid: answer.daemon_pid,
+    },
+  };
+}
+
 function liveVerdict(
   load: PolicyLoadResult,
   resolution: Resolution,
   payloadHash: string | null,
   env: NodeJS.ProcessEnv | undefined,
+  delegation: { logPath: string; policyHash: string; actionKey: string; ask: DrawAsker },
 ): LiveVerdict {
   const rate = resolution.liveRate ?? 1;
   const selector = resolveLiveSelector(load, env ?? process.env);
   if (!selector.available) {
+    // APRV-208. `secret-unset` is not the end of the question any more: it says
+    // only that THIS process cannot draw, and the process that can is the
+    // operator's daemon. The other two reasons are unchanged, because there is
+    // nothing to delegate — a policy that cannot be loaded or that names no
+    // secret variable leaves no draw for anyone to make.
+    if (selector.reason === "secret-unset" && payloadHash !== null) {
+      return delegatedVerdict(rate, payloadHash, selector.secretEnv, delegation);
+    }
     return {
       rate,
       gated: true,
@@ -1838,7 +1968,12 @@ function attemptRequest(
     // proceed unsupervised, and asking whether an action is in the live
     // fraction only matters once it would otherwise have been allowed through.
     if (resolution.supervision === "live") {
-      live = liveVerdict(load, resolution, payloadHash, options.env);
+      live = liveVerdict(load, resolution, payloadHash, options.env, {
+        logPath,
+        policyHash: attested.sha256,
+        actionKey: input.actionKey,
+        ask: options.drawAsk ?? askDaemonDraw,
+      });
     }
     if (live === null || !live.gated) {
       // Amended SPEC.md §6.3: no approval.* event exists off the manual path.
@@ -2091,6 +2226,15 @@ function attemptRequest(
     }
     if (written.ok && selfDelivered) payload[SELF_DELIVERY_FIELD] = "self";
   }
+  // APRV-208. Present only when the live draw was DELEGATED to the daemon —
+  // never for an in-process draw, which is why a sampled request made in the
+  // operator's own terminal stays byte-for-byte a manual one (APRV-127's
+  // property, pinned by `tests/autonomy-split.test.ts`). A delegated verdict is
+  // an assertion by another process, and an assertion recorded without its proof
+  // is a self-reported field; this records the proof (the MAC) or, when there
+  // was no usable answer, the distinct reason the action gated instead. No
+  // secret, no selection value and no caller clock ever enters it.
+  if (live?.draw !== undefined) payload["live_draw"] = { ...live.draw };
   if (input.summary !== undefined) payload["summary"] = input.summary;
   if (input.reversible !== undefined) payload["reversible"] = input.reversible;
   // APRV-106. Both are recorded here rather than derived later because the log

@@ -1850,6 +1850,16 @@ The checks, at length:
   supervised-class tool call, after which the row is green. PASS says only that
   the versions match — the field is self-reported (SPEC.md §11.1 invariant 4)
   and reduces nothing anywhere, so a match is not proof the hook fired.
+- **live-draw** — whether a daemon is answering `supervised-live` draws for this
+  log (APRV-208). SKIP when the policy declares no live class: no draw is ever
+  made, and a missing socket is nothing. PASS when the socket is present and
+  owner-only, naming the classes it keeps live. The one FAIL is a live class
+  declared with no usable socket there, because that is the operator's control
+  not being in force: every action of that class gates to a human, at 100%
+  rather than the declared rate, and the two are indistinguishable from inside
+  the policy file. The fix starts the runtime in a shell where the sampling
+  secret resolves. It asks the daemon nothing — it looks at the socket exactly
+  as an asker does and reports what an asker would conclude.
 
 **`--json`** (one object on stdout):
 
@@ -3028,6 +3038,34 @@ so it proves the snapshot's digest in full whatever the policy says.
 The flag beats the policy's `daemon` block for that run, a bad value is a usage
 error before the first tick, and the `started` line prints the mode in force.
 
+**The live draw (`--no-draw`, a way out only).** A `supervised-live` class is
+sampled with an HMAC under the operator's sampling secret, and the process that
+decides is usually a harness hook: a child of an agent session, which must never
+be able to read that secret. So the draw is made here instead. When the secret
+resolves in THIS process's environment (the `eval "$(approval env)"` an operator
+runs in the terminal they start the daemon from), the daemon binds an owner-only
+Unix socket at `<log home>/daemon/draw.sock`, directory 0700 and socket 0600,
+and answers one question per connection: given an action key and a payload hash
+it has verified are already registered in this log, is this action in the live
+fraction? The answer carries an HMAC over the question and the verdict, which
+the asker records and cannot check, and an operator holding the secret
+recomputes later from the request's own fields. The daemon resolves the class
+and the rate from its own policy rather than taking the asker's word, and echoes
+what it derived. It answers nothing for bytes that are not registered, so a
+process fishing for a favourable payload has to leave every candidate in the
+append-only log first.
+
+There is no flag that turns this on: holding the secret is the opt-in, and
+declaring a class `supervised-live` is its other half. `--no-draw` is the way
+out, for taking the control back without unsetting a variable a shell profile
+exports. Without a server — no secret, `--no-draw`, or a socket that will not
+bind — every supervised-live action gates to a human, which is the behaviour of
+every release before APRV-208. The `started` line's `draw` field is the socket
+path or `null`, a failure to bind is a `draw-unavailable` warning and never
+fatal, and `approval doctor`'s `live-draw` row answers the same question from
+outside the process. A policy that declares no live class serves no socket and
+says nothing about it.
+
 **Each tick, in order.**
 
 - ANCHOR (APRV-219) — on every tick whose reads re-proved the prefix in full,
@@ -3119,7 +3157,7 @@ Warnings go to stderr as `{"event":"warning","code":"...","message":"..."}`, wit
 `code` one of `task-unreadable`, `frontmatter-invalid`, `envelope-invalid`,
 `task-id-missing`, `tasks-dir-unreadable`, `append-refused`, `expire-refused`,
 `render-failed`, `watch-unavailable`, `prune-refused`, `write-back-refused`,
-`advance-refused`. A warning never stops the
+`advance-refused`, `draw-unavailable`. A warning never stops the
 loop, and neither does `{"event":"git_evidence_failed","step":"commit",…}`.
 
 Payload retention: with `payload_retention` set in policy, each tick appends

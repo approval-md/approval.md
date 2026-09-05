@@ -820,6 +820,47 @@ keep that sentence true under a loose umask.
 The file is local, derived, gitignored, and never evidence. Deleting it costs
 latency and nothing else.
 
+## The one decision the hook cannot make: the live draw (APRV-208)
+
+`supervised-live` is the autonomy level this repository's own `policy.edit`
+class runs at: one in ten edits blocks on the gate, the rest are sampled after
+the fact. Which tenth is an HMAC under the operator's sampling secret, and the
+hook holds no such secret. It cannot: the hook is a child of an agent session,
+so a secret it could read is a secret the agent could read, and an agent that
+can compute its own luck can grind its payload until the draw comes up
+unsampled. That is why nothing sources the secret into a hook process, and why
+nothing may.
+
+For a fortnight the consequence was that the draw failed closed on every call
+and `supervised-live` was, in practice, `manual`: 15 of 15 actions gated
+(APRV-184). The hook now asks the daemon instead. One JSON line over an
+owner-only Unix socket at `.approval/daemon/draw.sock`, one line back, and the
+answer carries an HMAC over the question and the verdict that the hook cannot
+check and therefore records, for an operator holding the secret to recompute
+later from the request's own `action_key`, `payload_hash` and `policy_sha256`.
+
+Three properties matter to anyone reading a hook decision:
+
+- **Failure is always toward the human.** No socket, a socket nothing answers,
+  or an answer that does not match the question asked each gate the action,
+  under their own names (`draw-daemon-absent`, `draw-daemon-stale`,
+  `draw-answer-invalid`). The worst a broken, absent, or hostile daemon can do
+  is ask you to tap.
+- **The daemon derives the rate itself.** It does not take the asking process's
+  word for the class or the rate: it resolves both from its own policy and
+  echoes what it derived, and the asker refuses an answer that does not echo the
+  question it asked. A hook and a daemon reading different policy files fail
+  closed rather than agreeing on the wrong rate.
+- **The socket is not a private oracle.** It answers only for an action already
+  registered in the verified log with exactly the payload hash being asked
+  about, so every candidate a grinding agent could try is permanently in the
+  append-only log, in order, and countable by anyone.
+
+If `approval doctor`'s `live-draw` row is failing, `supervised-live` is gating at
+100% on this machine, and the fix is to start the runtime in a shell where the
+secret resolves. See "supervised-live needs this process up" in
+`docs/dogfood-cutover.md`.
+
 ## The backstop outside the session: `scripts/protected-path-guard.mjs`
 
 Everything above runs inside the agent's session, which is the right place for a
