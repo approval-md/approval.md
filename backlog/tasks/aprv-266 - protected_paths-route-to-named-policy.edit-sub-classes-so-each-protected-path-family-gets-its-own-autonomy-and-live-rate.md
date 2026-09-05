@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-c'
 created_date: '2026-09-05 10:30'
-updated_date: '2026-09-05 11:20'
+updated_date: '2026-09-05 11:21'
 labels:
   - policy
   - classifier
@@ -131,4 +131,8 @@ The routing passes the floor: `.github/workflows/` is built-in and `manual` is s
     { actionClass: "policy.edit.ci", autonomy: "manual", provenance: "rule" },
 
 (`policy.edit.spec` takes no pin: it is not declared in `classes`, so nothing flags it, and pinning an inherited class would pin the parent's line twice.)
+
+## One thing AC3 does not yet claim
+
+"The dogfood pins cover the repo policy's routings" is vacuously true today: the live APPROVAL.md carries no routed entry, because agents do not edit it. What is in place is the machinery and the demand — the reachability check asks `emittableClass` with the live policy's own `protected_paths`, and `checkPolicyExpectations` will report `unpinned` for `policy.edit.design` and `policy.edit.ci` the moment the routing lands, which `approval policy amend` runs before it pushes. The routed branch that the live policy cannot yet reach is exercised by a fixture test instead, so the check is not passing for the wrong reason. The two pins are written out above, ready to land in the same commit as the policy edit.
 <!-- SECTION:NOTES:END -->
