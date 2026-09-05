@@ -160,6 +160,17 @@ running the reference implementation. **Review the diff.** A regeneration that
 moves an expectation is a behaviour change in the runtime, and the vectors are
 what a second implementation is held to.
 
+Skipping the regeneration is a test failure since APRV-231. The script's
+generator is importable and writes nothing, and
+`tests/conformance-regen.test.ts` calls it and compares the result with what is
+committed. A schema fixture added without a regeneration, or a vector file
+edited by hand, fails `npm test` with the command above in the message. One
+field is deliberately not compared: `vectors_version` is the judgement this
+ritual reserves for a person, and a test that guessed it would either force a
+bump nobody reviewed or block one somebody made. What the test does say is when
+content moved while the version stood still, since that is the shape a
+regeneration without the ritual takes.
+
 `schema-validation` has no 1.5.0. Two branches minted that number without seeing
 each other (APRV-220's checkpoint fixtures on main, APRV-235's decision-refusal
 fixtures on its own branch), so the same version named two different vector sets
