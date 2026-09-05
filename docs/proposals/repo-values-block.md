@@ -34,8 +34,10 @@ between the two blocks is fine and is ignored by both parsers.
 
 The content below is a starting point drawn from what you have said in
 sessions. Edit freely; the shape is the deliverable, the words are yours.
+Copy from the sentence below through the closing fence, and nothing else: one
+paste of this page carried a wrapper fence with it, which hid the block from
+the loader (APRV-273).
 
-````markdown
 Below the policy is a second block the runtime never enforces. It is what I
 value, for agents that want to know; `approval values` prints it.
 
@@ -68,7 +70,6 @@ responds: >-
   Silence is not disapproval. A loved or disliked reaction always carries a
   note saying why; a bare ok means I looked and it was fine.
 ```
-````
 
 ## Why these words
 
