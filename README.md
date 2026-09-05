@@ -87,7 +87,7 @@ approval doctor                  # can this machine run the system at all?
 attested /tmp/approval-demo/APPROVAL.md at seq 1: sha256 cff55216c7be9bfbf35a7d980b6a0c75d250ebc039d7584cb9b3aa3bf25b2f91
 ```
 
-`doctor` prints one line per check and a tally. Three of the eleven lines from a
+`doctor` prints one line per check and a tally. Three of the 25 lines from a
 fresh directory, plus that tally:
 
 ```
@@ -95,19 +95,21 @@ fresh directory, plus that tally:
 ✓ log                 /tmp/approval-demo/.approval/log/events.jsonl verifies: 1 record(s), head seq 1 0f3c4a19187a…
 ✗ audit-sampling      disabled (secret-env-unnamed): APPROVAL.md sets audit.supervised_sample_rate to 0.1 but names no audit.sampling_secret_env. …
     fix: approval policy attest --as human:<id> — after setting audit.supervised_sample_rate and audit.sampling_secret_env in the policy; then export the named variable where the daemon runs
-6 ok · 4 not applicable · 1 failed
+9 ok · 15 not applicable · 1 failed
 ```
 
 The checks run in the order their failures cascade, from build freshness through
 identity, attestation, the log chain, the channels, the payload store, audit
 sampling, envelope integrity, the vault, and the environment source map behind
-`approval env`. Each carries a `fix:` line you run yourself, and that one failure
-is real and intended: the scaffolded policy samples supervised actions for audit,
-sampling needs an operator-held secret the policy only names, and a control that
-looks like it is running while the party under oversight can steer it is worse
-than one that is visibly off. What `init` scaffolds is the canonical example
-policy of SPEC.md section 5.1, which names an approver you are probably not. Read
-every class before you sign for it, then attest again.
+`approval env`, then the rows that ask git and the harness what happened. The
+full roster and what a fresh directory skips are under [Running the
+checks](#running-the-checks). Each carries a `fix:` line you run yourself, and
+that one failure is real and intended: the scaffolded policy samples supervised
+actions for audit, sampling needs an operator-held secret the policy only names,
+and a control that looks like it is running while the party under oversight can
+steer it is worse than one that is visibly off. What `init` scaffolds is the
+canonical example policy of SPEC.md section 5.1, which names an approver you are
+probably not. Read every class before you sign for it, then attest again.
 
 ## Gate your coding agent
 
@@ -130,6 +132,17 @@ classes: deps.add
 
 Every segment of a command line is classified and the command takes the union, so
 `git status && curl -d … ` is gated as `network.call`.
+
+The taxonomy grows where the log shows a class asking for a decision nobody was
+making. `files.delete.scratch` (APRV-267) is the sibling of
+`files.delete.out_of_scope` for a delete whose every target sits strictly under a
+scratch root the agent made itself; everything not provably scratch keeps the old
+class. `vcs.remote.meta` (APRV-268) is exactly three `gh` forms against the
+checkout's own origin, `gh api graphql`, `gh pr update-branch` and `gh run
+rerun`, split out of `network.call` because asking a forge about the repository
+it already tracks is not the send that `network.call` exists for. Any flag
+pointing `gh` at another repository or another host falls back to today's class,
+since the classifier is pure and cannot resolve `origin`.
 
 **2. Install the hook.** It lives in `.claude/settings.json`, and a human commits
 that file: an agent that could write its own hook entry could write itself out
@@ -350,12 +363,18 @@ of SPEC.md section 7 (`communicate.email.external`, `financial.spend`,
 a single-segment wildcard, a trailing `.*` matches any depth, and at equal
 specificity the strictest rule wins.
 
-**2. Pick an autonomy for each.** Three values, strictest first: `manual` (a
-human decides before execution), `supervised` (executes immediately, a sampled
-fraction escalated for retrospective review), `autonomous` (executes freely). An
-email is `reversible: false`, which engages section 7's irreversibility floor:
-the class resolves to `manual` even where the policy says `supervised`, because
-retrospective sampling cannot un-send a message.
+**2. Pick an autonomy for each.** Six values, strictest first: `human-only` (a
+person performs the action outside agent execution, and every gate verb refuses
+an agent with `class-human-only`), `manual` (a human decides before execution),
+`supervised-live` (a policy-declared fraction blocks on the gate exactly as
+`manual` does, and the rest proceed, so the rule carries a `live_rate`),
+`supervised-retro` (executes immediately, a sampled fraction escalated for
+retrospective review), `supervised` (the pre-split spelling, an alias of
+`supervised-retro`, and the runtime records a load-time note naming the alias),
+`autonomous` (executes freely). An email is `reversible: false`, which engages
+section 7's irreversibility floor: the class resolves to `manual` even where the
+policy says `supervised`, because retrospective sampling cannot un-send a
+message.
 
 **3. Set the budgets.** Class `limits` and the `budgets` scopes are conjunctive,
 so an action must pass both, and consumption is computed from the log over
@@ -369,6 +388,20 @@ the runtime whatever a policy says. `protected_paths` adds repo-relative literal
 (an exact file, `SPEC.md`, or a directory prefix, `design/`), so a project can put
 its own governing documents behind the gate that already stands in front of its
 policy. The key can only widen, and globs are a schema violation.
+
+An entry can also be an object, `{path, class}`, which routes that path family to
+a named `policy.edit` sub-class so it carries its own autonomy and its own live
+rate. Four names are reserved with fixed meanings, so two policies mean the same
+thing by them: `policy.edit.spec` (the governing specification),
+`policy.edit.harness` (agent instruction files and harness configuration that is
+not the hook itself), `policy.edit.ci` (continuous-integration and release
+configuration), `policy.edit.design` (design documents and decision records). Any
+other lowercase word may be minted beside them, and nothing outside `policy.edit`
+may be named: a route to `policy.core` or `log.mutate` is refused, since a policy
+that could widen its own protected surface mints no authority over the gate's own
+organs. A route aimed at a built-in protected path must land at least as strictly
+as the `policy.edit` line itself, and a policy that breaks that floor is refused
+at load with `protected-route-floor`.
 
 **5. Attest it.** `approval policy attest` is what makes a policy operative. An
 attestation records that a human saw these exact bytes, and it records their
@@ -496,36 +529,41 @@ believed was in force. Full semantics: SPEC.md section 5.
 | key | what it says |
 | --- | --- |
 | `version` | Policy format version, quoted (`"0.1"`). The only required key (§5.1). |
-| `defaults.autonomy` | Autonomy for an action matching no class rule. `manual` is the fail-closed choice (§5.2). |
-| `defaults.channel` | Channel name requests surface on by default; expected to name a key of `channels` (§5.1). |
-| `defaults.approval_ttl` | How long a pending request stays actionable. Duration string, `24h` (§5.1). |
-| `defaults.on_expiry` | What happens when the TTL lapses. `reject` is the only value (§5.1). |
+| `defaults.autonomy` | Autonomy for an action matching no class rule. Five of the six levels are admitted: `supervised-live` is not, since it needs a `live_rate` that `defaults` has nowhere to hold. `human-only` is, and reserves every unnamed class to human hands. No default of its own, and `manual` is the fail-closed choice (§5.2, APRV-185). |
+| `defaults.channel` | Channel name requests surface on by default; expected to name a key of `channels`, which is a runtime cross-check rather than a schema one. No default (§5.1, §10.3). |
+| `defaults.approval_ttl` | How long a pending request stays actionable. Duration string, `24h`. No default; the scaffolded policy writes one (§5.1). |
+| `defaults.token_delivery` | How a minted token reaches the process that will spend it. `manual` (the default, and what an absent key means): printed once on the granting surface and carried by a human. `sealed`: sealed to a per-request X25519 key so `approval wait` can hand it back, which addresses the token and never authorizes it (§10.4, APRV-105). |
+| `defaults.on_expiry` | What happens when the TTL lapses. `reject` is the only value, and absent means `reject` (§5.1). |
 | `payload_retention` | How long payload bytes are kept after their action is terminal. Absent means nothing is ever pruned (§5.2). |
-| `protected_paths` | Repo-relative files and directory prefixes whose edit is classified `policy.edit`. Additive only, no globs (§5.2). |
-| `approvers.<name>.channels` | The channels one approver can decide on. At least one: an approver reachable nowhere can never grant (§5.1). |
-| `classes.<pattern>.autonomy` | Required on every class rule: `manual`, `supervised`, or `autonomous` (§5.2). |
-| `classes.<pattern>.approvers` | Approver ids permitted to decide this class (§5.1). |
-| `classes.<pattern>.limits` | Per-class ceilings, every value a positive number: `per_action_usd`, `daily_usd`, and the request-volume counts `max_pending` and `requests_per_hour` (§5.1, §5.2). |
-| `budgets.global.daily_usd` | Repo-wide spend ceiling per rolling day, computed from the log (§5.1). |
-| `budgets.global.daily_actions` | Repo-wide count of side-effecting actions per rolling day (§5.1). |
-| `budgets.global.max_pending` | Simultaneously pending requests across the scope; excess is refused `queue-full` (§5.2). |
+| `protected_paths` | Repo-relative files and directory prefixes whose edit is classified `policy.edit`. A bare string is the whole entry. Additive only, no globs, and absent means the built-in protected set alone (§5.2, APRV-107). |
+| `protected_paths[].path` | The path half of the object form: the same grammar as the bare string, an exact file (`SPEC.md`) or a directory prefix (`design/`) (§5.2, APRV-266). |
+| `protected_paths[].class` | The class half: one lowercase segment under `policy.edit`. Four reserved names, `policy.edit.spec`, `policy.edit.harness`, `policy.edit.ci` and `policy.edit.design`, plus any word an author mints beside them. Nothing outside `policy.edit` may be named, and a route below the `policy.edit` line is refused `protected-route-floor`. No default: an entry that wants a sub-class states it (§5.2, APRV-266). |
+| `approvers.<name>.channels` | The channels one approver can decide on. At least one: an approver reachable nowhere can never grant. No default (§5.1). |
+| `classes.<pattern>.autonomy` | Required on every class rule, so it has no default. Six levels, strictest first: `human-only`, `manual`, `supervised-live`, `supervised-retro`, `autonomous`, and `supervised`, which is the pre-split spelling and an alias of `supervised-retro` (§5.2, APRV-127, APRV-185). |
+| `classes.<pattern>.live_rate` | The fraction of a `supervised-live` class that blocks on the gate, in (0, 1]. Required there and refused everywhere else, so it has no default: a live mode with no fraction declares a control without saying how much of it runs. Selection is HMAC-SHA-256 over the payload hash under the operator's secret (§5.2, APRV-127). |
+| `classes.<pattern>.retro_rate` | This class's retrospective sampling rate, in (0, 1], overriding `audit.supervised_sample_rate` for it alone. Optional on `supervised`, `supervised-retro` and `supervised-live`, refused on the rest. Absent means the global rate (§5.2, APRV-183). |
+| `classes.<pattern>.approvers` | Approver ids permitted to decide this class. Absent restricts nobody, since the list is a narrowing and a narrowing nobody wrote narrows nothing; a named list refuses everyone else with `actor-not-approver` (§5.1). |
+| `classes.<pattern>.limits` | Per-class ceilings, every value a positive number: `per_action_usd`, `daily_usd`, and the request-volume counts `max_pending` and `requests_per_hour`. Absent means this class carries no ceiling of its own (§5.1, §5.2). |
+| `budgets.global.daily_usd` | Repo-wide spend ceiling per rolling day, computed from the log. Absent means no spend ceiling (§5.1). |
+| `budgets.global.daily_actions` | Repo-wide count of side-effecting actions per rolling day. Absent means no count ceiling (§5.1). |
+| `budgets.global.max_pending` | Simultaneously pending requests across the scope; excess is refused `queue-full`. Absent means no ceiling (§5.2). |
 | `budgets.<scope>` | Any other named scope, same three keys. Budgets are conjunctive with class limits (§5.2). |
-| `audit.supervised_sample_rate` | Fraction of `supervised` actions escalated for retrospective review, in [0, 1] (§5.2). |
+| `audit.supervised_sample_rate` | The FALLBACK fraction of supervised actions escalated for retrospective review, in [0, 1], for classes declaring no `retro_rate`. Absent means no fallback rate is configured (§5.2, APRV-183). |
 | `audit.sampling_secret_env` | Name of the variable holding the operator's HMAC sampling secret. Unnamed means sampling is off and says so (§5.2, §11). |
 | `audit.skew_tolerance` | How far a gate-typed event's timestamp may step back before verification reports an anomaly. Report-only; default 2 seconds (§8). |
-| `audit.checkpoint_keys` | Public halves of the Ed25519 keys permitted to sign a `log.checkpoint`, base64 DER SPKI. The private halves live in the vault and never in this file. A list, so a retired key stays listed: a checkpoint signed by a key the list does not carry is refused (§9, APRV-220). |
-| `audit.checkpoint_every` | How long the log may go without a human-signed checkpoint before verification says one is due, and before the listener puts one `CHECKPOINT DUE` prompt on the approver's channel (`approval setup checkpoint` mints the key). Report-only at every layer: a due checkpoint is a warning and never a refusal (§9, APRV-220, APRV-257). |
+| `audit.checkpoint_keys` | Public halves of the Ed25519 keys permitted to sign a `log.checkpoint`, base64 DER SPKI. The private halves live in the vault and never in this file. A list, so a retired key stays listed: a checkpoint signed by a key the list does not carry is refused. Absent, empty or unreadable means verification skips the checkpoint check with a reason and never reports it as a pass (§9, APRV-220). |
+| `audit.checkpoint_every` | How long the log may go without a human-signed checkpoint before verification says one is due, and before the listener puts one `CHECKPOINT DUE` prompt on the approver's channel (`approval setup checkpoint` mints the key). Report-only at every layer: a due checkpoint is a warning and never a refusal. Absent means the cadence is off and nothing is ever reported as due (§9, APRV-220, APRV-257). |
 | `daemon.read_proof` | Which prefix proof a long-lived reader runs before reusing a cached prefix: `full` (the default, re-hash the whole prefix on every read) or `incremental` (hash only the appended bytes, re-proving in full on a cadence). One-shot processes, the Claude Code hook and `approval log verify` prove in full regardless (§5.2, APRV-217). |
 | `daemon.full_reproof_every` | Reads one full re-proof may cover under `incremental`, the anchoring read included. Default 50 (§5.2). |
 | `daemon.full_reproof_after` | Wall clock one full re-proof may cover under `incremental`. Duration string, default `60s` (§5.2). |
 | `vault.passphrase_env` | Name of the variable holding the vault passphrase. Absent means `APPROVAL_VAULT_PASSPHRASE` (§5.2, §10.4). |
 | `channels.telegram.token_env` | Name of the variable holding the bot token. Default `APPROVAL_TG_TOKEN` (§5.1). |
 | `channels.telegram.chat_id_env` | Name of the variable holding the approver chat id. Default `APPROVAL_TG_CHAT` (§5.1). |
-| `channels.telegram.delivery` | `paced` (the default) shows one summary line and the oldest pending request, then the next one after a decision, `/skip` or `/next`; `burst` sends every pending request the listener has not sent yet (§10.3). |
-| `channels.web.port` | TCP port for the local approval UI, bound on loopback only (§5.1). |
-| `channels.<name>.prompt.rows` | Order only, for `telegram`, `web` and `cli`: the rows named here render in this order ahead of the rest, which keep their default relative order behind them. Never a whitelist, so a field added later cannot be lost to a list written before it existed (§5.2, §10.3). |
-| `channels.<name>.prompt.always` | Rows this channel renders only when abnormal, or not at all, render on every prompt instead. The anomaly mark stays a statement about the value, so a forced-on row shouts only when the value is in fact the reason to look (§5.2, §10.3). |
-| `channels.<name>.prompt.hide` | Rows this channel never renders. Refused for the rows required for a decision (`action_key`, `class`, `command_breakdown`, `protected_path`, `policy_diff`, `policy_load`), and refused for a row `always` also names (§5.2, §10.3). |
+| `channels.telegram.delivery` | `paced` (the default) shows one summary line and the oldest pending request, then the next one after a decision, `/skip` or `/next`; `burst` sends every pending request the listener has not sent yet. Neither mode changes what is pending: that is re-derived from the verified log on every cycle (§10.3, APRV-216). |
+| `channels.web.port` | TCP port for the local approval UI, bound on loopback only. No default in the schema; the scaffolded policy names `4680`, and 0 is excluded because the policy must name a port a human can navigate to (§5.1). |
+| `channels.<name>.prompt.rows` | Order only, for `telegram`, `web` and `cli`: the rows named here render in this order ahead of the rest, which keep their default relative order behind them. Never a whitelist, so a field added later cannot be lost to a list written before it existed. Absent means the layout the channel ships (§5.2, §10.3, APRV-218). |
+| `channels.<name>.prompt.always` | Rows this channel renders only when abnormal, or not at all, render on every prompt instead. The anomaly mark stays a statement about the value, so a forced-on row shouts only when the value is in fact the reason to look. Absent means the channel's own visibility rules (§5.2, §10.3, APRV-218). |
+| `channels.<name>.prompt.hide` | Rows this channel never renders. Refused for the rows required for a decision (`action_key`, `class`, `command_breakdown`, `protected_path`, `policy_diff`, `policy_load`) with `prompt-row-required`, and refused for a row `always` also names. Absent means nothing is hidden, and the canonical payload block is out of reach either way (§5.2, §10.3, APRV-218). |
 | `channels.<other>` | An unknown channel name is accepted as an object, so a third-party transport does not fail the whole policy closed (§10.3). A `prompt` block written under such a name is still validated: a layout is checked wherever it appears. |
 
 Every key ending in `_env` carries a variable's *name* and never its value:
@@ -591,7 +629,11 @@ phone channel is one app, Telegram.
 and every gated operation refuses `hash-mismatch` when the live file disagrees
 with it. An unattested policy refuses too, and attesting is human-only. Under the
 harness hook the edit itself is classified `policy.edit` before it happens,
-because `APPROVAL.md` is in the built-in protected set no policy can narrow.
+because `APPROVAL.md` is in the built-in protected set no policy can narrow. A
+`protected_paths` entry may route a path family to a `policy.edit` sub-class
+(`policy.edit.spec`, `policy.edit.harness`, `policy.edit.ci`,
+`policy.edit.design`) so each carries its own autonomy, and the routing floor
+keeps a built-in path from landing anywhere looser than `policy.edit` itself.
 
 **Fabricate or rewrite the log?** Each record chains to the previous one's hash,
 so an edited or reordered record breaks the chain and `approval log verify` says
@@ -651,7 +693,28 @@ is running: the vault, the adapter boundary, and the single-use token. Keep
 ```
 npm run check:changed        # classify the working tree, then run that tier
 npm run check:tier -- <path> # classify the given paths and print the tier
+approval doctor              # the other check: this machine, not the code
 ```
+
+`approval doctor` prints **25 rows** and a tally, in the order their failures
+cascade: build freshness, identity, attestation, the log chain, the channels
+(`telegram`, `web-port`), the payload store, audit sampling, envelope integrity,
+the vault, the environment source map, then the rows that ask git and the harness
+what happened (`log-drift`, `reconciliation`, `harness-hook-outcomes`,
+`harness-hook-wiring`, `keychain-scope`, `log-advance-cadence`, `dark-sessions`,
+`verified-snapshot`, `read-proof`, `main-behind-origin`,
+`harness-version-unverified`, `live-draw`, `values-block`, `checkpoint`).
+
+**15 of the 25 report `not applicable` in a fresh directory**, and each names the
+absence it skipped on rather than passing quietly: `telegram` (no bot variables),
+`envelope-integrity` (no task folder), `vault` (no vault file), `environment` (no
+`.approval/env`), `read-proof` (no `daemon` block), `live-draw` (no
+`supervised-live` class), `checkpoint` (no `audit.checkpoint_keys`),
+`harness-hook-outcomes`, `harness-hook-wiring` and `harness-version-unverified`
+(no harness settings file), `verified-snapshot` (no daemon has run), and
+`log-drift`, `log-advance-cadence`, `dark-sessions` and `main-behind-origin` (not
+a git checkout). Doctor appends nothing, sends nothing and repairs nothing, and
+no credential value appears in its output.
 
 Checks come in three tiers.
 
