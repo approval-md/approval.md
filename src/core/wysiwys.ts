@@ -121,7 +121,12 @@
 
 import { createHash } from "node:crypto";
 
-import { classifyCommand, commandSegmentWords, isProtectedPath } from "./command-class.js";
+import {
+  classifyCommand,
+  commandSegmentWords,
+  isProtectedPath,
+  type ProtectedPathEntry,
+} from "./command-class.js";
 import { payloadHash } from "./payload.js";
 
 /**
@@ -614,7 +619,7 @@ export interface ProtectedPathView {
  */
 export function protectedPathView(
   value: unknown,
-  extra: readonly string[] = [],
+  extra: readonly ProtectedPathEntry[] = [],
 ): ProtectedPathView | null {
   const command = commandPayloadView(value);
   if (command !== null) {
