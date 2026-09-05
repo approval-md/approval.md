@@ -812,6 +812,37 @@ function skipHeredocBody(command: string, start: number, heredoc: PendingHeredoc
 // The rule table
 // ===========================================================================
 
+/**
+ * Facts about the machine the command will run on, resolved by the CALLER
+ * (APRV-267).
+ *
+ * The classifier is pure and stays pure. Some rules, though, turn on something
+ * no string can carry: whether a path names the agent's own scratch space. So
+ * the impure half is hoisted out of this file entirely — the caller resolves
+ * the roots, this file only compares path segments against them — and the
+ * shape is the one `protectedPaths` already established: an optional argument
+ * whose absence yields the strictly NARROWER answer. A caller that forgets it
+ * classifies every delete the way this file classified it before the field
+ * existed; it never invents an authorization.
+ *
+ * Every root must be ABSOLUTE and already resolved (symlinks followed) by the
+ * caller. This file does not touch the disk and cannot check either property,
+ * so a caller handing it a relative or unresolved root gets segment matching
+ * against exactly what it passed.
+ */
+export interface ClassifierContext {
+  /**
+   * Roots under which a delete is the agent tidying after itself: the session
+   * scratchpad the harness allots, and the system temp directory.
+   *
+   * `src/cli/hook.ts` resolves these (`resolveScratchRoots`) and tightens the
+   * answer afterwards with the checks that need the disk — a symlink escaping
+   * the root, a git checkout living inside it. Nothing here is a grant on its
+   * own: a path under a root still has to survive that second pass.
+   */
+  scratchRoots?: readonly string[];
+}
+
 /** Everything a refinement needs: the binary and the words that followed it. */
 interface RuleContext {
   bin: string;
@@ -827,6 +858,8 @@ interface RuleContext {
    * (APRV-114's fetch refinement) needs to know that one of them is a hole.
    */
   substituted: boolean;
+  /** What the caller knows about the machine (APRV-267). Never read from here. */
+  context: ClassifierContext;
 }
 
 /** A refinement's answer: a class and the rule id that chose it. */
@@ -927,10 +960,75 @@ function refineGitPush(ctx: RuleContext): Refinement {
     : { class: "vcs.push.branch", rule: "git-push-branch" };
 }
 
+/**
+ * The class of a delete that only removes the agent's own scratch (APRV-267).
+ *
+ * Every `files.delete.out_of_scope` question this repository's log held between
+ * 2026-08-17 and 2026-09-05 was a lane removing its own session scratchpad or a
+ * probe directory under the system temp root. Eleven were approved and two
+ * expired, which is thirteen human interruptions and zero decisions: an agent
+ * deleting the temp files it just made is not a decision, and pricing it at a
+ * person's attention spends the audit budget SPEC.md §11 asks to protect.
+ *
+ * It is a sibling of `files.delete.out_of_scope` and not a replacement for it.
+ * Everything that is not provably scratch keeps the old class.
+ */
+const SCRATCH_DELETE_CLASS = "files.delete.scratch";
+
+/**
+ * Is `candidate` a STRICT descendant of `root`? Both are compared by path
+ * segment, so `/private/tmpfoo` is not under `/private/tmp` and a root is never
+ * under itself: deleting the temp root wholesale is not tidying up.
+ *
+ * Pure segment matching, like every other path test in this file. The caller
+ * has already resolved both sides (see {@link ClassifierContext}).
+ */
+function isUnderRoot(candidate: string, root: string): boolean {
+  const want = pathSegments(root);
+  const have = pathSegments(candidate);
+  if (want.length === 0) return false;
+  if (have.length <= want.length) return false;
+  return want.every((segment, index) => segment === have[index]);
+}
+
+/**
+ * Does every one of these targets sit strictly under a scratch root?
+ *
+ * Four ways to say no, and each is a fail-closed branch rather than a filter:
+ * an empty target list (an `rm` with only flags is not a delete this rule can
+ * vouch for), a relative path (its meaning depends on a working directory the
+ * classifier does not have), a `..` segment or an unreadable value (either can
+ * leave the root after expansion), and a path under no root at all. ALL targets
+ * must pass, because the class describes the command and a command that removes
+ * one scratch file and one real one is not a scratch delete.
+ */
+function allTargetsAreScratch(
+  targets: readonly string[],
+  roots: readonly string[],
+): boolean {
+  if (targets.length === 0 || roots.length === 0) return false;
+  for (const target of targets) {
+    if (!target.startsWith("/")) return false;
+    if (isUnknownValue(target)) return false;
+    if (pathSegments(target).includes("..")) return false;
+    if (!roots.some((root) => isUnderRoot(target, root))) return false;
+  }
+  return true;
+}
+
 /** `rm` — everything outside the workspace, and every unreadable path, is manual. */
 function refineRm(ctx: RuleContext): Refinement {
   const recursive =
     hasFlag(ctx.args, ["--recursive"]) || hasShortFlag(ctx.args, ["r", "R"]);
+  // APRV-267, checked first because it is the narrowest branch: every target
+  // strictly under a root the CALLER resolved, with no `..` and nothing the
+  // text cannot read. The symlink and git-checkout halves of the rule need the
+  // disk and live in `src/cli/hook.ts`, which can only tighten this answer back
+  // to `files.delete.out_of_scope`; a caller that passes no roots never reaches
+  // this branch at all.
+  if (allTargetsAreScratch(ctx.positionals, ctx.context.scratchRoots ?? [])) {
+    return { class: SCRATCH_DELETE_CLASS, rule: "rm-scratch" };
+  }
   for (const path of ctx.positionals) {
     if (path.startsWith("/")) return { class: "files.delete.out_of_scope", rule: "rm-absolute" };
     if (pathSegments(path).includes("..")) {
@@ -1149,6 +1247,7 @@ function refineGhApi(ctx: RuleContext): Refinement {
   if (readMethodFlag(ctx.args, ["-X", "--method"], "-X") === "other") return write;
   return { class: "read.vcs.remote", rule: "gh-api-read" };
 }
+
 
 /** Does this path invoke the compiled `approval` CLI? */
 function isGateEntrypoint(path: string): boolean {
@@ -1428,7 +1527,13 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     bins: ["mkdir", "cp", "mv", "touch", "tee", "ln", "chmod", "truncate", "rmdir"],
     class: "files.write.workspace",
   },
-  { id: "rm", bins: ["rm"], class: "files.write.workspace", emits: ["files.delete.out_of_scope"], refine: refineRm },
+  {
+    id: "rm",
+    bins: ["rm"],
+    class: "files.write.workspace",
+    emits: ["files.delete.out_of_scope", SCRATCH_DELETE_CLASS],
+    refine: refineRm,
+  },
   { id: "sed", bins: ["sed"], class: "read.shell", emits: ["files.write.workspace"], refine: refineSed },
 
   // -- network -------------------------------------------------------------
@@ -1667,7 +1772,11 @@ type SegmentOutcome =
   | { ok: true; class: string; rule: string; path?: string }
   | { ok: false; code: ClassifierFailureCode; detail: string };
 
-function classifySegment(segment: LexSegment, protectedPaths: readonly string[]): SegmentOutcome {
+function classifySegment(
+  segment: LexSegment,
+  protectedPaths: readonly string[],
+  context: ClassifierContext,
+): SegmentOutcome {
   if (segment.opaque !== null) {
     return { ok: false, code: "opaque", detail: segment.opaque };
   }
@@ -1677,7 +1786,7 @@ function classifySegment(segment: LexSegment, protectedPaths: readonly string[])
   // outer command even starts and the outer class would not describe it.
   for (const word of segment.words) {
     for (const inner of word.substitutions) {
-      const nested = classifyCommand(inner, protectedPaths);
+      const nested = classifyCommand(inner, protectedPaths, context);
       if (!nested.ok) {
         return {
           ok: false,
@@ -1773,7 +1882,7 @@ function classifySegment(segment: LexSegment, protectedPaths: readonly string[])
   const substituted = segment.words
     .slice(cursor + 1)
     .some((word) => word.substitutions.length > 0);
-  const ctx: RuleContext = { bin: basename, args, positionals, sub, substituted };
+  const ctx: RuleContext = { bin: basename, args, positionals, sub, substituted, context };
   const refined = rule.refine === undefined ? null : rule.refine(ctx);
   if (rule.refine !== undefined && refined === null) {
     return { ok: false, code: "opaque", detail: `${basename} runs inline source` };
@@ -1816,10 +1925,17 @@ function classifySegment(segment: LexSegment, protectedPaths: readonly string[])
  * against the built-ins alone, which is the strictly narrower answer, so a
  * caller that forgets it under-reports the protected classes rather than inventing an
  * authorization; every enforcement path passes the loaded policy's list.
+ *
+ * `context` (APRV-267) carries the machine facts a caller has resolved: today
+ * only `scratchRoots`. It behaves exactly as `protectedPaths` does — omitting
+ * it yields the strictly narrower answer, because every rule that reads it can
+ * only ever LOOSEN a class, and no rule reads it to loosen a protected or
+ * credential one.
  */
 export function classifyCommand(
   command: string,
   protectedPaths: readonly string[] = [],
+  context: ClassifierContext = {},
 ): CommandClassification {
   const lexed = lex(command);
   if (!lexed.ok) {
@@ -1832,7 +1948,7 @@ export function classifyCommand(
   const segments: ClassifiedSegment[] = [];
   const classes: string[] = [];
   for (const segment of lexed.segments) {
-    const outcome = classifySegment(segment, protectedPaths);
+    const outcome = classifySegment(segment, protectedPaths, context);
     if (!outcome.ok) {
       return { ok: false, code: outcome.code, segment: segment.text, detail: outcome.detail };
     }

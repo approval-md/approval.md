@@ -26,6 +26,7 @@ import {
   NON_SECRET_ENV_NAMES,
   SECRET_ENV_PREFIXES,
   isSecretEnvName,
+  type ClassifierContext,
 } from "../src/core/command-class.js";
 
 interface Fixture {
@@ -38,7 +39,27 @@ interface Fixture {
   row?: string;
   /** Every class the whole command should produce, when there is more than one. */
   classes?: string[];
+  /**
+   * Machine facts the caller resolved (APRV-267). Omitted on every fixture but
+   * the scratch-delete ones, which is itself the assertion that the field is
+   * additive: with no context the table classifies exactly as it did before it
+   * existed.
+   */
+  context?: ClassifierContext;
 }
+
+/**
+ * Scratch roots for the APRV-267 fixtures.
+ *
+ * SYNTHETIC and never touched: the pure half compares path segments, so roots
+ * that existed would prove nothing the strings do not already say, and a
+ * fixture table that stat'd the disk would stop being a specification. The
+ * physical half of the rule (a symlink escaping the root, a git checkout inside
+ * it) is proved against real directories in `tests/cli-hook.test.ts`.
+ */
+const SCRATCH_ROOTS: ClassifierContext = {
+  scratchRoots: ["/private/tmp/claude-501/sess/scratchpad", "/private/tmp", "/var/folders/qy/T"],
+};
 
 const FIXTURES: readonly Fixture[] = [
   // -- git pushes: the three classes that differ only by flags and refspec ---
@@ -182,6 +203,124 @@ const FIXTURES: readonly Fixture[] = [
   { command: "rm -rf .", class: "files.delete.out_of_scope", rule: "rm-recursive-root", row: "rm" },
   { command: "rm -rf $TARGET", class: "files.delete.out_of_scope", rule: "rm-unreadable-path", row: "rm" },
   { command: "rm -rf node_modules", class: "files.write.workspace", rule: "rm-workspace", row: "rm" },
+
+  // -- scratch deletes (APRV-267) -------------------------------------------
+  // POSITIVE: every target strictly under a root the caller resolved. These are
+  // the shapes the log actually held — a lane removing its own session
+  // scratchpad, a probe file under the system temp root.
+  {
+    command: "rm -rf /private/tmp/claude-501/sess/scratchpad/build.log",
+    class: "files.delete.scratch",
+    rule: "rm-scratch",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  {
+    command: "rm -rf /private/tmp/claude-501/sess/scratchpad",
+    class: "files.delete.scratch",
+    rule: "rm-scratch",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  {
+    command: "rm /private/tmp/probe-267.json",
+    class: "files.delete.scratch",
+    rule: "rm-scratch",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  {
+    command: "rm -rf /var/folders/qy/T/approval-index-abc123",
+    class: "files.delete.scratch",
+    rule: "rm-scratch",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // Flags between the targets are still flags; both targets are under a root.
+  {
+    command: "rm -f -v /private/tmp/a.txt /private/tmp/b.txt",
+    class: "files.delete.scratch",
+    rule: "rm-scratch",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+
+  // NEGATIVE, one per way the rule declines. Each keeps today's class.
+  // Outside every root.
+  {
+    command: "rm -rf /Users/carter/dev/approval-md/dist",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // A `..` segment: the text says one place, the kernel goes to another.
+  {
+    command: "rm -rf /private/tmp/claude-501/sess/scratchpad/../../../etc",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // The root itself is not under the root: deleting the temp root is not tidying.
+  {
+    command: "rm -rf /private/tmp",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // A sibling whose name merely starts with a root's: segment matching, not
+  // string prefixes.
+  {
+    command: "rm -rf /private/tmpevil/x",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // Unreadable values: an unexpanded variable and a glob could name anything.
+  {
+    command: "rm -rf /private/tmp/$SESSION",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  {
+    command: "rm -rf /private/tmp/probe-*",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // A relative path has no meaning without a working directory this classifier
+  // does not have, so it keeps the class it had (a workspace delete here).
+  {
+    command: "rm -rf scratchpad/build.log",
+    class: "files.write.workspace",
+    rule: "rm-workspace",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // ALL targets or none: one scratch file beside one real one is not a scratch
+  // delete.
+  {
+    command: "rm -rf /private/tmp/probe.json /etc/hosts",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  // No context at all: the caller resolved no roots, so nothing is scratch.
+  // This is the pre-APRV-267 answer, unchanged.
+  {
+    command: "rm -rf /private/tmp/claude-501/sess/scratchpad/no-context",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+  },
+
   { command: "sed -n '1,20p' README.md", class: "read.shell", rule: "sed-read", row: "sed" },
   { command: "sed -i.bak s/a/b/ src/x.ts", class: "files.write.workspace", rule: "sed-in-place", row: "sed" },
 
@@ -266,7 +405,7 @@ const FIXTURES: readonly Fixture[] = [
 for (const fixture of FIXTURES) {
   if (fixture.rule === "") continue;
   test(`classify: ${fixture.command}`, () => {
-    const result = classifyCommand(fixture.command);
+    const result = classifyCommand(fixture.command, [], fixture.context ?? {});
     assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
     if (!result.ok) return;
     const first = result.segments[0];

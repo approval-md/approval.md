@@ -149,6 +149,12 @@ export const REPO_POLICY_EXPECTATIONS: readonly PolicyExpectation[] = [
     note: "undeclared, so the manual default holds; since APRV-228 the classifier emits it for the harness self-update verbs (claude/codex/gemini update, uca) as well as npm update, and a ceremony that declares it must move this pin",
   },
   {
+    actionClass: "files.delete.scratch",
+    autonomy: "manual",
+    provenance: "default",
+    note: "undeclared, so the manual default holds; APRV-267 taught the classifier to emit it for an rm confined to the session scratchpad or the system temp root, and until a ceremony declares it (autonomous is the intent) it gates exactly as files.delete.out_of_scope always did, which is why landing the rule ahead of the ceremony costs nothing",
+  },
+  {
     actionClass: "read",
     autonomy: "manual",
     provenance: "default",

@@ -206,7 +206,7 @@ an addition).
 | `approval` | approval | (any) | gate.self, log.sync, log.advance |
 | `workspace-tool` | npx, tsx, ts-node, tsc, oxlint, eslint, prettier, vitest, jest, backlog, make | (any) | files.write.workspace |
 | `workspace-write` | mkdir, cp, mv, touch, tee, ln, chmod, truncate, rmdir | (any) | files.write.workspace |
-| `rm` | rm | (any) | files.write.workspace, files.delete.out_of_scope |
+| `rm` | rm | (any) | files.write.workspace, files.delete.out_of_scope, files.delete.scratch ‡ |
 | `sed` | sed | (any) | read.shell, files.write.workspace |
 | `web-fetch` | curl, wget, http, httpie | (any) | read.web for a GET-shaped fetch; network.call for a body, an upload, a non-GET method, or anything ambiguous |
 | `network` | ssh, scp, sftp, rsync, nc, telnet, ftp | (any) | network.call |
@@ -217,6 +217,9 @@ an addition).
 † These rewrites are LOCAL, and the hook refines them against the checkout it
 runs in: see [Rewriting unpublished history](#rewriting-unpublished-history).
 `git push --force` is not marked, and never refines.
+
+‡ `files.delete.scratch` needs roots the classifier cannot know and checks it
+cannot make from text: see [Deleting scratch](#deleting-scratch).
 
 Five overrides sit on top of the table:
 
@@ -359,6 +362,49 @@ one of them failing, or answering ambiguously, leaves the class alone.
 it prints is what the hook decides, and a refined segment shows the rule name
 `rewrite-unpublished`. When the hook refines, its
 `permissionDecisionReason` says so.
+
+### Deleting scratch
+
+`files.delete.out_of_scope` exists to hold a delete that leaves the workspace.
+In this repository's own log every one of those questions between 2026-08-17 and
+2026-09-05 was an agent removing the temp directory it had just made: eleven
+approved, two expired, thirteen interruptions and no decisions. `rm` of the
+agent's own scratch is not a decision, so APRV-267 gives it a class of its own,
+`files.delete.scratch`, a sibling of `files.delete.out_of_scope` rather than a
+replacement for it.
+
+The rule has two halves, and both must say yes.
+
+**Text (pure, in the classifier).** Every target of the `rm` must be an absolute
+path, hold no `..` segment, hold nothing the classifier cannot read (`$VAR`, a
+glob, `~`), and be a STRICT descendant of a scratch root the caller supplied.
+All of them, not some: a command removing one scratch file beside one real one
+is not a scratch delete. A root is never under itself, so `rm -rf /tmp` does not
+qualify. With no roots supplied, nothing qualifies and the answer is exactly
+what it was before this rule existed.
+
+**Disk (impure, in the hook).** The hook resolves the roots and then re-checks
+each target, tightening back to `files.delete.out_of_scope` (rule
+`rm-scratch-rejected`) on any doubt at all:
+
+| the hook finds | class |
+|---|---|
+| the target's nearest existing ancestor resolves, stays under a root, and no `.git` sits at or above the target up to that root | `files.delete.scratch`, rule `rm-scratch` |
+| a symlink in the path resolves the target out of every root | `files.delete.out_of_scope`, rule `rm-scratch-rejected` |
+| a `.git` at or above the target: a checkout living inside the temp root | `files.delete.out_of_scope`, rule `rm-scratch-rejected` |
+| nothing on the path resolves, or the segment cannot be re-read | `files.delete.out_of_scope`, rule `rm-scratch-rejected` |
+
+The roots are `CLAUDE_SCRATCHPAD_DIR` and `CLAUDE_CODE_SCRATCHPAD_DIR` when a
+harness exports them (none does today: Claude Code names the session scratchpad
+in its system prompt and nowhere else), plus `os.tmpdir()` and the fixed temp
+roots `/tmp`, `/private/tmp` and `/var/tmp`. Each is realpath'd, and three
+guards mean no value an agent could reach can widen the class: a root must
+resolve to a real directory, must be at least two path segments deep (so `/` can
+never be a scratch root even from a poisoned `TMPDIR`), and must not contain the
+directory the hook runs in.
+
+`approval hook classify` runs both halves in the same directory, so what it
+prints is what the hook decides.
 
 ### What the approver reads (APRV-124)
 
