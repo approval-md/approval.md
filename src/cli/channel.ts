@@ -89,9 +89,14 @@ import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
 import { loadPolicy } from "../core/policy-load.js";
 import { promptLayoutFor, type PromptLayout } from "../core/prompt-layout.js";
 import { passphraseEnvFor } from "../core/vault.js";
-import { boolFlag, parseFlags, stringFlag, type FlagKind, type ParsedFlags } from "./args.js";
-import { glossRunnerFor, GLOSS_TIMEOUT_MS, type GlossRunner } from "./gloss.js";
+import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
+import { GLOSS_TIMEOUT_MS, type GlossRunner } from "./gloss.js";
 import { attachGloss, glossAbsenceLine } from "./gloss-attach.js";
+import {
+  glossRunnerFromOptions,
+  parseGlossOptions,
+  type GlossOptions,
+} from "./gloss-options.js";
 import {
   EXIT_INTEGRITY,
   EXIT_IO,
@@ -115,6 +120,8 @@ const FLAGS: Record<string, FlagKind> = {
   "--as": "string",
   "--interactive": "boolean",
   "--gloss": "boolean",
+  "--gloss-provider": "string",
+  "--gloss-model": "string",
   "--json": "boolean",
   "--help": "boolean",
   "-h": "boolean",
@@ -223,6 +230,10 @@ export function commandChannelCli(argv: string[], streams: Streams, cwd: string)
   }
 
   const flags = parsed.flags;
+  const selectedGloss = parseGlossOptions(flags, false);
+  if (!selectedGloss.ok) {
+    return usageError(streams, json, selectedGloss.message, CHANNEL_CLI_HELP);
+  }
   const logPath = resolvePath(stringFlag(flags, "--log"), DEFAULT_LOG_PATH, cwd);
 
   const policyFile = stringFlag(flags, "--policy");
@@ -301,7 +312,7 @@ export function commandChannelCli(argv: string[], streams: Streams, cwd: string)
     policy,
     actor,
     streams,
-    glossRunner(flags, policy),
+    glossRunner(selectedGloss.options, policy, streams),
     checkpoint === null ? null : { tap, offer: checkpoint },
   ).then(
     (code) => {
@@ -338,12 +349,16 @@ export function commandChannelCli(argv: string[], streams: Streams, cwd: string)
  * variable, so the scrub that starves the subprocess removes a renamed one too.
  */
 function glossRunner(
-  flags: ParsedFlags,
+  selection: GlossOptions,
   policy: { dir?: string; file?: string },
+  streams: Streams,
 ): GlossRunner | undefined {
-  return boolFlag(flags, "--gloss")
-    ? glossRunnerFor(passphraseEnvFor(loadPolicy(policy)))
-    : undefined;
+  if (!selection.enabled) return undefined;
+  return glossRunnerFromOptions(selection, {
+    passphraseEnv: passphraseEnvFor(loadPolicy(policy)),
+    diagnostic: (reason) =>
+      streams.err(`approval: Codex gloss unavailable (${reason}); continuing without it\n`),
+  });
 }
 
 function reportSkipped(

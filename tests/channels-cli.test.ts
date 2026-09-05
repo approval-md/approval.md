@@ -951,7 +951,7 @@ test("--gloss puts a labelled model sentence on the interactive prompt", () => {
 
   assert.equal(run.code, 0, run.stderr);
   assert.ok(
-    run.stdout.includes(`${marker} stages, commits and pushes. (model, unverified) (model:haiku)`),
+    run.stdout.includes(`${marker} stages, commits and pushes. (model, unverified) (model:claude/haiku (requested))`),
     run.stdout,
   );
   // The deterministic aid is there too, and it is the computed one.
