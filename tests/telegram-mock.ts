@@ -62,6 +62,14 @@ interface Waiter {
   timer: NodeJS.Timeout;
 }
 
+/** One answered `getUpdates`, as {@link MockBotApi.onGetUpdatesAnswered} sees it. */
+export interface PollAnswered {
+  /** 1 for the first `getUpdates` this mock answered, 2 for the next, … */
+  ordinal: number;
+  /** How many updates that answer carried. Zero is a poll that expired empty. */
+  delivered: number;
+}
+
 export interface MockBotApi {
   /** `http://127.0.0.1:<port>` — what to pass as `apiBase`. */
   readonly url: string;
@@ -81,6 +89,23 @@ export interface MockBotApi {
   pendingUpdateCount(): number;
   /** Inject a failure mode for every subsequent call, or `null` to behave. */
   fail(mode: MockFailure | null): void;
+  /**
+   * Called after every `getUpdates` has been answered (APRV-248).
+   *
+   * The deterministic replacement for "queue the human's message on a timer and
+   * hope the first poll got there first". A test that needs an update to arrive
+   * strictly AFTER some poll has come back empty queues it from here: the mock
+   * is the only participant that knows when a poll has actually been answered,
+   * so it is the only honest release point. The hook is handed the poll's
+   * 1-based ordinal and how many updates that answer carried, and runs after
+   * the response has been sent, so a `queueUpdate` inside it lands in the next
+   * poll and never in the one being answered.
+   *
+   * One hook at a time; `null` clears it. Only answered polls are counted: an
+   * injected failure mode never reaches this path, so a dropped or held request
+   * does not advance the ordinal.
+   */
+  onGetUpdatesAnswered(hook: ((poll: PollAnswered) => void) | null): void;
   /**
    * What `getWebhookInfo` answers (APRV-96).
    *
@@ -161,6 +186,8 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
   let messageId = 500;
   let failure: MockFailure | null = null;
   let webhook: { url?: string; pendingUpdateCount?: number } = {};
+  let pollsAnswered = 0;
+  let pollHook: ((poll: PollAnswered) => void) | null = null;
   let server: Server;
   let port = 0;
 
@@ -307,9 +334,16 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
         return ready.map((entry) => ({ update_id: entry.update_id, ...entry.update }));
       };
 
+      /** Answer one poll, then tell whoever is waiting on the sequence. */
+      const answer = (result: { update_id: number }[]): void => {
+        send(response, { ok: true, result });
+        pollsAnswered += 1;
+        pollHook?.({ ordinal: pollsAnswered, delivered: result.length });
+      };
+
       const first = take();
       if (first.length > 0) {
-        send(response, { ok: true, result: first });
+        answer(first);
         return;
       }
 
@@ -330,7 +364,7 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
         });
       });
       if (response.writableEnded || response.destroyed) return;
-      send(response, { ok: true, result: take() });
+      answer(take());
       return;
     }
 
@@ -388,6 +422,9 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
     },
     setWebhookInfo(info) {
       webhook = { ...info };
+    },
+    onGetUpdatesAnswered(hook) {
+      pollHook = hook;
     },
     fail(mode) {
       failure = mode;
@@ -490,6 +527,7 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
     },
     async close() {
       failure = null;
+      pollHook = null;
       for (const response of held) response.destroy();
       held.clear();
       wake();
