@@ -109,6 +109,14 @@ export const GENESIS_PREV = null;
  * recompute a self-consistent forgery; a checkpoint is a witness that survives
  * them, because a rewritten chain cannot reproduce a signature over the hashes
  * it replaced. Human actor, for the reason `gate.opened` carries one.
+ * `audit.decision_refused` (APRV-235) is the fourteenth: a human decided
+ * through a channel or the CLI and the gate refused to record the decision, so
+ * the log states that the answer was given and could not be taken (amended
+ * SPEC.md §5.2). Audit tier — it grants nothing, and no verdict, budget, streak
+ * or sampling path reads it. `system:` actor, like `audit.dark_session`: it is
+ * the runtime's statement about its own refusal, and the human whose decision
+ * it was is named in the payload. Refusals handed to AGENTS are not recorded;
+ * the asymmetry is deliberate, and `core/decision-refusal.ts` states why.
  */
 export type EventType =
   | "task.registered"
@@ -133,6 +141,7 @@ export type EventType =
   | "audit.sampled"
   | "audit.reviewed"
   | "audit.dark_session"
+  | "audit.decision_refused"
   | "reconciliation.required"
   | "reconciliation.satisfied"
   | "payload.pruned"

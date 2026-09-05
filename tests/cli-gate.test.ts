@@ -517,8 +517,18 @@ test("revoke: refused on an undecided request, accepted on a grant", () => {
     decision: "revoke",
     state: "revoked",
     action_key: "task-042:chaser",
-    seq: 5,
+    // Six rather than five since APRV-235: the early revoke above was a human's
+    // decision the gate would not take, and the log now says so.
+    seq: 6,
   });
+  assert.deepEqual(events(dir), [
+    "policy.updated",
+    "task.registered",
+    "approval.requested",
+    "audit.decision_refused",
+    "approval.granted",
+    "approval.revoked",
+  ]);
   assertClean(dir);
 });
 
@@ -642,11 +652,17 @@ test("a late grant is refused and materialises approval.expired with a system: a
   assert.equal(error["code"], "expired");
   assert.equal(error["state"], "expired");
 
+  // Two records, in this order: the lapse the refusal materialised, and (since
+  // APRV-235) the audit trail of the human's late tap. The refusal's `seq`
+  // still names the expiry, which is the record the caller was told about.
   const records = logRecords(dir);
-  const last = records[records.length - 1] as Record<string, unknown>;
-  assert.equal(last["event"], "approval.expired");
-  assert.equal(last["actor"], "system:gate");
-  assert.equal(error["seq"], last["seq"]);
+  assert.deepEqual(
+    records.slice(-2).map((record) => record["event"]),
+    ["approval.expired", "audit.decision_refused"],
+  );
+  const expired = records[records.length - 2] as Record<string, unknown>;
+  assert.equal(expired["actor"], "system:gate");
+  assert.equal(error["seq"], expired["seq"]);
   assert.equal(events(dir).includes("approval.granted"), false);
   assertClean(dir);
 });

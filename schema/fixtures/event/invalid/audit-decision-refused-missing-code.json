@@ -1,0 +1,16 @@
+{
+  "seq": 61,
+  "ts": "2026-09-02T18:41:07Z",
+  "event": "audit.decision_refused",
+  "task": "task-042",
+  "action_key": "task-042:chaser:2026-08-04",
+  "actor": "system:gate",
+  "channel": "telegram",
+  "payload": {
+    "actor": "human:carter",
+    "decision": "grant"
+  },
+  "alg": "sha256/jcs",
+  "prev": "7f625051c176f2f260a1f7e25c9a933717ebb49917a8788ac25ae7a4614ebb30",
+  "hash": "2e9b7c1a4d6f08213b5c7e9a0d2f416385a7c9e1b3d5f70921a3c5e7092b4d6f"
+}

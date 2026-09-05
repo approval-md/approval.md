@@ -1052,15 +1052,27 @@ const SUITES = [
     // harness kind — are new vectors. No existing expectation moved: the two
     // names are OPTIONAL and additive, so every record written before them
     // validates exactly as it did.
-    // 1.5.0 (APRV-220): another MINOR bump. The five `log.checkpoint` event
-    // fixtures — a well-formed checkpoint, an agent actor, a missing
-    // signature, a truncated signed hash, an unimplemented signature alg — and
-    // the two policy fixtures for `audit.checkpoint_keys` /
-    // `audit.checkpoint_every` are new vectors. No existing expectation moved:
-    // the event type is new, so no record written before it names it, and the
-    // two policy keys are OPTIONAL, so every policy written before them
-    // validates exactly as it did.
-    vectors_version: "1.5.0",
+    // 1.5.0 was claimed twice, on two branches that did not see each other:
+    // APRV-220 published it from main, APRV-235 from its own branch, and each
+    // carried a different vector set under the same number. Both claims are
+    // superseded here. 1.6.0 is the single version that contains both, and
+    // neither 1.5.0 is a version a second implementation should hold itself to.
+    // 1.6.0 (APRV-220 + APRV-235): a MINOR bump carrying eighteen new vectors,
+    // none of which moves an existing expectation. Seven are APRV-220's: the
+    // five `log.checkpoint` event fixtures (a well-formed checkpoint, an agent
+    // actor, a missing signature, a truncated signed hash, an unimplemented
+    // signature alg) and the two policy fixtures for `audit.checkpoint_keys` /
+    // `audit.checkpoint_every`. Five are APRV-235's: the
+    // `audit.decision_refused` fixture with the two refusals that pin its
+    // actor and its required code, and the `policy-drift` withdrawal with the
+    // agent-authored one that must not validate. The other six are APRV-214's
+    // `gate.opened` / `gate.closed` / `gate.bypassed` fixtures, committed
+    // without a regen exactly as the `env_stripped` pair was before 1.3.0.
+    // Nothing moved: both event types are new, so no record written before
+    // them names either, and the two policy keys are OPTIONAL, so every policy
+    // written before them validates exactly as it did. The only removed line
+    // in the fixture diff is `count`.
+    vectors_version: "1.6.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

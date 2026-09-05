@@ -159,3 +159,13 @@ Inputs are authored by hand in that script; every `expect` block is computed by
 running the reference implementation. **Review the diff.** A regeneration that
 moves an expectation is a behaviour change in the runtime, and the vectors are
 what a second implementation is held to.
+
+`schema-validation` has no 1.5.0. Two branches minted that number without seeing
+each other (APRV-220's checkpoint fixtures on main, APRV-235's decision-refusal
+fixtures on its own branch), so the same version named two different vector sets
+for as long as the branches were apart. Merging them produced **1.6.0**, which
+carries both, and both 1.5.0 claims are superseded: a second implementation
+holds itself to 1.6.0, and a run reporting 1.5.0 is reporting a set that was
+never the suite. The general rule the collision illustrates: a version number is
+claimed at merge, not at branch, and two additive changes to one file resolve to
+one minor bump above the highest version either side saw.
