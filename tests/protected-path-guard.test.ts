@@ -432,7 +432,12 @@ test("the failure states the ordering rule the log's lag implies, and the window
     assert.equal(report.ok, false);
     const detail = report.findings[0]?.detail ?? "";
     assert.match(detail, /\.github\/workflows\/ci\.yml/u);
-    assert.match(detail, /must merge to main before or with this pull request/u);
+    // A pushed records branch is evidence too since APRV-260: the script reads
+    // the freshest committed copy that carries head's own chain.
+    assert.match(
+      detail,
+      /must be pushed to a records branch or merged to main before or with this pull request/u,
+    );
     assert.match(detail, /seq 1\.\.9/u);
     assert.match(detail, /bbbbbbbbbbbb/u);
   } finally {

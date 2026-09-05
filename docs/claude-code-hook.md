@@ -961,12 +961,40 @@ is as fine as a payload naming a script can get.
 
 The committed log on `main` trails the primary checkout's live log, because
 advances land periodically as records pull requests. A grant made this morning
-may not be on `main` yet, and the guard sees only the log the head commit
-carries. That is an ordering rule rather than a bug to paper over, and every
-failure states it: **the log advance carrying the grant must merge to `main`
-before or with the protected-path pull request.** Each failure also names the
-window it searched — the seq and timestamp range of the log at head — so a
-reader can tell "the grant is not there" from "the grant is newer than this log".
+may not be on `main` yet, and the guard reads committed trees only. That is an
+ordering rule rather than a bug to paper over, and every failure states it:
+**the log advance carrying the grant must be pushed to a records branch or
+merged to `main` before or with the protected-path pull request.** Each failure
+also names the window it searched, the seq and timestamp range of the log it
+read, so a reader can tell "the grant is not there" from "the grant is newer
+than this log".
+
+### When the log lags (APRV-260)
+
+A grant becomes evidence the moment ANY committed copy of the log carries it:
+a pushed `records-*` branch counts, and so does `main`. Both merges are no
+longer required, because the guard does not read head's log alone.
+
+- **What it reads.** Candidates, in order: the head ref, `origin/main`, and
+  every `origin/records-*` branch. Each is verified end to end, and a candidate
+  is admitted only when it carries HEAD's own last record (same seq, same hash,
+  at the same index), which is what makes it a longer stretch of the same chain
+  rather than a different history. The freshest admitted copy wins, payload
+  bytes are read from it and then from head, and the report leads with the line
+  `log from origin/records-log-2026-09-05, seq 1..19207 (head carried 1..16428)`,
+  in `--json` as `log_source`.
+- **Head still defines the chain.** A candidate that does not anchor is
+  `diverged` and is never read, whatever it contains and however long it is; one
+  that does not verify is `unverified` and is named in the output. A head log
+  that is missing, unverified, or empty admits no extension at all: the guard
+  falls back to head and fails closed, as it did before.
+- **If it still fails,** the grant is in no committed copy yet. Wait for the
+  next advance, or ask the operator to run `approval log advance` in the primary
+  checkout; the push to a records branch is enough, the merge can follow later.
+  `.github/workflows/guard-rerun.yml` re-runs the failed guard job of every open
+  pull request when an advance reaches `main`, so the stale red check clears
+  without anybody clicking it. Nothing re-decides on the pull request's behalf:
+  the guard runs again and reaches its own verdict against the newer log.
 
 ### The evidence surface is not a protected write surface
 
