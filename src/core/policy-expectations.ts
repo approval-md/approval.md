@@ -158,7 +158,7 @@ export const REPO_POLICY_EXPECTATIONS: readonly PolicyExpectation[] = [
     actionClass: "vcs.remote.meta",
     autonomy: "manual",
     provenance: "default",
-    note: "undeclared, so the manual default holds; APRV-268 taught the classifier to emit it for gh reads and metadata mutations on the checkout's own origin, and until a ceremony declares it (supervised is the intent) `gh pr update-branch`, `gh run rerun` and `gh api graphql` queries gate exactly as network.call did — the forms that were already read.vcs.remote (`gh pr view`, a `gh api` GET) move from autonomous to the manual default, which is a FRICTION INCREASE this pin makes visible and the ceremony reverses",
+    note: "undeclared, so the manual default holds until Carter declares it (supervised is the intent); APRV-268 taught the classifier to emit it for exactly three forms on the checkout's own origin (`gh pr update-branch`, `gh run rerun`, `gh api graphql` without a mutation), each of which classified network.call before, so every one of them gates exactly as it did and landing the rule ahead of the ceremony costs nothing. The task's wider first draft also moved `gh pr view`, `gh run list`, `gh issue view` and a plain `gh api` GET, which were read.vcs.remote and therefore autonomous here; on an undeclared class those would have become MORE gated, so the rule was narrowed instead and every read keeps read.vcs.remote",
   },
   {
     actionClass: "read",

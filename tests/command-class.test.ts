@@ -96,15 +96,13 @@ const FIXTURES: readonly Fixture[] = [
 
   // -- gh -------------------------------------------------------------------
   { command: "gh release create v0.1.0", class: "release.publish", rule: "gh-release" },
-  // `gh api` splits on its method and field flags (APRV-114), and since
-  // APRV-268 also on whether the target is the checkout's OWN repository: a
-  // GET with default repo resolution is `vcs.remote.meta`, the same GET aimed
-  // at another repository keeps `read.vcs.remote`, and the other subcommands on
-  // the row are `network.call` whatever their flags say.
-  { command: "gh api repos/x/y/pulls", class: "vcs.remote.meta", rule: "gh-api-read", row: "gh-api" },
-  { command: "gh api -X GET repos/x/y", class: "vcs.remote.meta", rule: "gh-api-read", row: "gh-api" },
-  { command: "gh api --method GET repos/x/y", class: "vcs.remote.meta", rule: "gh-api-read", row: "gh-api" },
-  { command: "gh api repos/x/y --paginate --jq .[].name", class: "vcs.remote.meta", rule: "gh-api-read", row: "gh-api" },
+  // `gh api` splits on its method and field flags (APRV-114), and APRV-268 did
+  // not move that split: a GET reads, whatever repository it names, and the
+  // other subcommands on the row are `network.call` whatever their flags say.
+  { command: "gh api repos/x/y/pulls", class: "read.vcs.remote", rule: "gh-api-read", row: "gh-api" },
+  { command: "gh api -X GET repos/x/y", class: "read.vcs.remote", rule: "gh-api-read", row: "gh-api" },
+  { command: "gh api --method GET repos/x/y", class: "read.vcs.remote", rule: "gh-api-read", row: "gh-api" },
+  { command: "gh api repos/x/y --paginate --jq .[].name", class: "read.vcs.remote", rule: "gh-api-read", row: "gh-api" },
   { command: "gh api -X POST repos/x/y/issues", class: "network.call", rule: "gh-api-write", row: "gh-api" },
   { command: "gh api --method=PATCH repos/x/y", class: "network.call", rule: "gh-api-write", row: "gh-api" },
   { command: "gh api -XDELETE repos/x/y", class: "network.call", rule: "gh-api-write", row: "gh-api" },
@@ -117,26 +115,34 @@ const FIXTURES: readonly Fixture[] = [
   { command: "gh status", class: "read.vcs.remote", rule: "gh-simple-read" },
 
   // -- gh metadata on this checkout's own remote (APRV-268) ------------------
-  // Of 52 network.call questions in the repo log since 2026-08-17, 48 were
-  // approved, and the bulk were these forms against this repository's own
-  // origin. Each listed noun/action pair, with default repo resolution.
-  { command: "gh pr view 51", class: "vcs.remote.meta", rule: "gh-remote-meta", row: "gh" },
-  { command: "gh pr list --state open", class: "vcs.remote.meta", rule: "gh-remote-meta", row: "gh" },
-  { command: "gh pr checks 51", class: "vcs.remote.meta", rule: "gh-remote-meta", row: "gh" },
+  // POSITIVE, and the whole of it. Of 52 network.call questions in the repo log
+  // since 2026-08-17, 48 were approved, and three forms account for the bulk: a
+  // graphql query, `gh pr update-branch` and `gh run rerun`, on this
+  // repository's own origin. Those three move, with default repo resolution.
   { command: "gh pr update-branch 51", class: "vcs.remote.meta", rule: "gh-remote-meta", row: "gh" },
-  { command: "gh run view 12345", class: "vcs.remote.meta", rule: "gh-remote-meta", row: "gh" },
   { command: "gh run rerun 12345 --failed", class: "vcs.remote.meta", rule: "gh-remote-meta", row: "gh" },
-  { command: "gh run list --limit 5", class: "vcs.remote.meta", rule: "gh-remote-meta", row: "gh" },
-  { command: "gh issue view 12", class: "vcs.remote.meta", rule: "gh-remote-meta", row: "gh" },
-  { command: "gh issue list", class: "vcs.remote.meta", rule: "gh-remote-meta", row: "gh" },
   // A GraphQL document with no `mutation` in it is a query, whatever field flag
-  // carries it. This is the shape the APRV-114 field test could not read.
+  // carries it. This is the shape the APRV-114 field test could not read: the
+  // field that carries the document made a query look exactly like a POST.
   {
     command: "gh api graphql -f query='query { repository(owner: \"a\", name: \"b\") { id } }'",
     class: "vcs.remote.meta",
     rule: "gh-api-graphql-query",
     row: "gh-api",
   },
+
+  // NEGATIVE, and the reason the rule is only three forms wide. Every gh read
+  // below classified `read.vcs.remote` before APRV-268, which this repository's
+  // policy makes autonomous; an undeclared class falls to the manual default, so
+  // moving them onto `vcs.remote.meta` would have RAISED friction on the
+  // commonest reads in the repo. They do not move.
+  { command: "gh pr view 51", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh pr list --state open", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh pr checks", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh run view 12345", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh run list --limit 5", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh issue view 12", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh issue list", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
   // NEGATIVE. A mutation is a write, wherever the word appears.
   {
     command: "gh api graphql -f query='mutation { addComment(input: {}) { id } }'",
@@ -151,15 +157,22 @@ const FIXTURES: readonly Fixture[] = [
   // `-R`, `--repo` and `--hostname` all name a target the classifier cannot
   // resolve, so every one of them falls back to today's class — including a
   // `-R` that happens to name this very repository.
-  { command: "gh pr view -R other/repo 1", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
-  { command: "gh pr view --repo approval-md/approval-md 1", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  {
+    command: "gh api graphql -R other/repo -f query='query{viewer{login}}'",
+    class: "network.call",
+    rule: "gh-api-write",
+    row: "gh-api",
+  },
   { command: "gh pr update-branch -R other/repo 1", class: "network.call", rule: "gh-write", row: "gh" },
   { command: "gh run rerun --repo other/repo 1", class: "network.call", rule: "gh-write", row: "gh" },
-  { command: "gh api --hostname ghe.example.com repos/x/y", class: "read.vcs.remote", rule: "gh-api-read-foreign", row: "gh-api" },
-  { command: "gh api -R other/repo repos/x/y", class: "read.vcs.remote", rule: "gh-api-read-foreign", row: "gh-api" },
+  { command: "gh pr view -R other/repo 1", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh pr view --repo approval-md/approval-md 1", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
+  { command: "gh api --hostname ghe.example.com repos/x/y", class: "read.vcs.remote", rule: "gh-api-read", row: "gh-api" },
+  { command: "gh api -R other/repo repos/x/y", class: "read.vcs.remote", rule: "gh-api-read", row: "gh-api" },
   // An unexpanded expansion could BE a `--repo`, so it is foreign too.
+  { command: "gh pr update-branch $NUMBER", class: "network.call", rule: "gh-write", row: "gh" },
   { command: "gh pr view $NUMBER", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
-  // Actions the task did not list stay exactly where they were, on the nouns it
+  // Actions APRV-268 did not list stay exactly where they were, on the nouns it
   // did list. A rule that grew by analogy would be a rule nobody reviewed.
   { command: "gh pr diff 51", class: "read.vcs.remote", rule: "gh-read", row: "gh" },
   { command: "gh pr status", class: "read.vcs.remote", rule: "gh-read", row: "gh" },

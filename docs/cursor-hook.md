@@ -103,9 +103,9 @@ an addition).
 | `git-remote-read` | git | fetch \| ls-remote \| remote | read.vcs.remote |
 | `git-read` | git | blame \| describe \| diff \| grep \| log \| ls-files \| reflog \| rev-list \| rev-parse \| shortlog \| show \| status | read.shell |
 | `gh-release` | gh | release | release.publish |
-| `gh-api` | gh | api \| auth \| gist \| secret \| workflow | vcs.remote.meta § for a `gh api` on the checkout's own repository with no method flag (or `GET`) and no `-f`/`-F`/`--field`/`--raw-field`/`--input`, and for `gh api graphql` whose document carries no `mutation`; read.vcs.remote for the same GET aimed elsewhere; every other call, and every other subcommand on the row, network.call |
+| `gh-api` | gh | api \| auth \| gist \| secret \| workflow | read.vcs.remote for a `gh api` with no method flag (or `GET`) and no `-f`/`-F`/`--field`/`--raw-field`/`--input`; vcs.remote.meta § for `gh api graphql` on the checkout's own repository whose document carries no `mutation`; every other call, and every other subcommand on the row, network.call |
 | `gh-simple-read` | gh | browse \| search \| status | read.vcs.remote |
-| `gh` | gh | pr \| issue \| repo \| run \| cache | vcs.remote.meta § for `pr view/list/checks/update-branch`, `run view/rerun/list` and `issue view/list` on the checkout's own repository; read.vcs.remote for the other view/list/status/checks/diff forms; `gh pr create` vcs.pr.open, `gh pr edit/comment/review/ready/close/reopen` vcs.pr.update, `gh pr merge` vcs.push.main, `gh pr checkout` vcs.commit.branch; every other write network.call |
+| `gh` | gh | pr \| issue \| repo \| run \| cache | read.vcs.remote for view/list/status/checks/diff; vcs.remote.meta § for `pr update-branch` and `run rerun` on the checkout's own repository; `gh pr create` vcs.pr.open, `gh pr edit/comment/review/ready/close/reopen` vcs.pr.update, `gh pr merge` vcs.push.main, `gh pr checkout` vcs.commit.branch; every other write network.call |
 | `npm-publish` | npm, pnpm, yarn, bun | publish \| version \| deprecate \| dist-tag \| unpublish | release.publish |
 | `npm-install` | npm, bun | install \| i \| add | deps.add, deps.install |
 | `yarn-add` | yarn, pnpm | add | deps.add |
@@ -265,41 +265,45 @@ it prints is what the hook decides, and a refined segment shows the rule name
 ### GitHub metadata on your own remote
 
 `network.call` exists for the calls whose whole purpose is that something
-leaves: a webhook, an email, an arbitrary POST. Asking GitHub about a pull
-request on the repository the checkout already tracks is not that act, and it
-had no class of its own to be granted through. APRV-268 gives it one,
-`vcs.remote.meta`, beside `read.vcs.remote` and `vcs.pr.open`.
+leaves: a webhook, an email, an arbitrary POST. Asking GitHub a question about
+a pull request on the repository the checkout already tracks, or telling it to
+redo bookkeeping about work already pushed, is not that act, and it had no class
+of its own to be granted through. APRV-268 gives it one, `vcs.remote.meta`,
+beside `read.vcs.remote` and `vcs.pr.open`.
 
-Two conditions, both required.
+**Exactly three forms**, and no wider:
 
-**The target is the checkout's own repository.** That means gh's DEFAULT
-repository resolution, which reads the repository off this checkout's git
-remotes. The classifier is pure and cannot resolve a remote, so it cannot tell
-a `-R` naming this repository from one naming another: **any** `-R`, `--repo`
-or `--hostname` makes the invocation foreign and it keeps the class it had
-before. So does any `$VAR` or `$(…)` in the argv, because one of the words the
-classifier cannot see could be a `--repo`.
-
-**The verb reads, or edits the forge's own bookkeeping.** Exactly this set, and
-no wider:
-
-| noun | actions that are `vcs.remote.meta` |
+| form | condition |
 |---|---|
-| `pr` | `view`, `list`, `checks`, `update-branch` |
-| `run` | `view`, `rerun`, `list` |
-| `issue` | `view`, `list` |
-| `api` | a GET (no method flag or `GET`, and no `-f`/`-F`/`--field`/`--raw-field`/`--input`) |
-| `api graphql` | a document carrying no `mutation` anywhere, and not read from a file (`-f query=@doc`, `--input`) |
+| `gh pr update-branch` | the checkout's own repository |
+| `gh run rerun` | the checkout's own repository |
+| `gh api graphql` | the checkout's own repository, and a document carrying no `mutation` anywhere, not read from a file (`-f query=@doc`, `--input`) |
+
+Every one of those classified `network.call` before APRV-268. Nothing that
+already read moves: `gh pr view`, `gh pr list`, `gh pr checks`, `gh pr diff`,
+`gh pr status`, `gh run view`, `gh run list`, `gh run watch`, `gh issue
+view/list`, `gh repo view` and a plain `gh api` GET all stay `read.vcs.remote`.
+That restraint is deliberate. `vcs.remote.meta` is undeclared until a policy
+ceremony names it, and an undeclared class falls to the manual default, so
+moving a read onto it would RAISE the friction on the commonest commands in the
+repository rather than lower it.
+
+**The target must be the checkout's own repository**, which means gh's DEFAULT
+repository resolution, reading the repository off this checkout's git remotes.
+The classifier is pure and cannot resolve a remote, so it cannot tell a `-R`
+naming this repository from one naming another: **any** `-R`, `--repo` or
+`--hostname` makes the invocation foreign and it keeps the class it had before.
+So does any `$VAR` or `$(…)` in the argv, because one of the words the
+classifier cannot see could be a `--repo`.
 
 `pr update-branch` and `run rerun` are mutations, and are included because what
 they change is GitHub's bookkeeping about work already pushed, with no content
 of the operator's authorship leaving the machine.
 
-Everything else is untouched. `gh pr diff`, `gh pr status`, `gh repo view` and
-`gh run watch` stay `read.vcs.remote`; `gh pr create` stays `vcs.pr.open`,
-`gh pr merge` stays `vcs.push.main`; `gh release`, `gh gist`, `gh secret`,
-`gh auth`, `gh workflow`, a `gh api` with a method or a body, and every `curl`
-that is not a plain GET stay where they were.
+Everything else is untouched. `gh pr create` stays `vcs.pr.open`, `gh pr merge`
+stays `vcs.push.main`; `gh release`, `gh gist`, `gh secret`, `gh auth`,
+`gh workflow`, a `gh api` with a method or a body, a graphql document carrying a
+`mutation`, and every `curl` that is not a plain GET stay where they were.
 
 ### Deleting scratch
 

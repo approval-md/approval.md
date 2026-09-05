@@ -1232,23 +1232,31 @@ const GH_API_FIELD_FLAGS: readonly string[] = ["-f", "--field", "-F", "--raw-fie
 // ---------------------------------------------------------------------------
 
 /**
- * Reading and nudging the forge about THIS checkout's own repository.
+ * Nudging the forge about THIS checkout's own repository.
  *
  * From the log, 2026-09-05: of 52 `network.call` questions since 2026-08-17, 48
- * were approved, and the bulk of them were `gh api graphql` queries, `gh pr
- * update-branch`, `gh run rerun` and `gh pr view` against this repository's own
- * origin. Sending things is what `network.call` is FOR — a webhook, an email, an
- * arbitrary POST — and those stay manual. Asking GitHub about a pull request on
- * the repository the checkout already tracks is a different act, and it had no
- * class of its own to be granted through: a nine-minute hook wait and a question
- * on someone's phone for `gh pr view` is the friction that teaches people to
- * turn the gate off.
+ * were approved, and three forms account for the bulk of them: `gh api graphql`
+ * queries, `gh pr update-branch` and `gh run rerun`, all against this
+ * repository's own origin. Sending things is what `network.call` is FOR (a
+ * webhook, an email, an arbitrary POST), and those stay manual. Asking GitHub a
+ * question about the repository the checkout already tracks, or telling it to
+ * redo bookkeeping about work already pushed, is a different act, and it had no
+ * class of its own to be granted through.
+ *
+ * The class is exactly three forms wide, and that width is the point. APRV-268
+ * first drew it wider, over `gh pr view`, `gh run list`, `gh issue view` and a
+ * plain `gh api` GET as well. Those were already `read.vcs.remote`, which this
+ * repository's policy makes autonomous, and an undeclared class falls to the
+ * manual default: moving them would have RAISED friction on the commonest reads
+ * in the repo to buy a class none of them needed. So the rule covers only the
+ * forms the log showed as `network.call`, and every read keeps the class it had.
  *
  * The class sits beside `read.vcs.remote` and `vcs.pr.open`: same forge, same
  * repository, and no payload of the operator's authorship leaves the machine.
- * A metadata MUTATION is included (`pr update-branch`, `run rerun`) because what
- * it changes is the forge's own bookkeeping about work already pushed, not
- * content: the merge-base of a branch, a re-run of a workflow that already ran.
+ * Two of the three are metadata MUTATIONS (`pr update-branch`, `run rerun`), in
+ * because what they change is the forge's own bookkeeping about work already
+ * pushed, not content: the merge-base of a branch, a re-run of a workflow that
+ * already ran.
  */
 const REMOTE_META_CLASS = "vcs.remote.meta";
 
@@ -1283,15 +1291,16 @@ function isOwnRepoInvocation(ctx: RuleContext): boolean {
 /**
  * The gh noun/action pairs that are metadata on the repository's own remote.
  *
- * Exactly the set APRV-268 names, and no wider. Every other action on these
- * nouns keeps the class it had: `gh pr diff` and `gh pr status` stay
- * `read.vcs.remote`, `gh pr create` stays `vcs.pr.open`, `gh pr merge` stays
- * `vcs.push.main`. A rule that grew by analogy would be a rule nobody reviewed.
+ * Exactly the two the log showed as `network.call`, and no wider. Every other
+ * action on these nouns keeps the class it had: `gh pr view`, `gh pr list`,
+ * `gh pr checks`, `gh pr diff`, `gh pr status`, `gh run view`, `gh run list`
+ * and `gh issue view/list` stay `read.vcs.remote`, `gh pr create` stays
+ * `vcs.pr.open`, `gh pr merge` stays `vcs.push.main`. A rule that grew by
+ * analogy would be a rule nobody reviewed.
  */
 const GH_META_ACTIONS: Readonly<Record<string, readonly string[]>> = {
-  pr: ["view", "list", "checks", "update-branch"],
-  run: ["view", "rerun", "list"],
-  issue: ["view", "list"],
+  pr: ["update-branch"],
+  run: ["rerun"],
 };
 
 /**
@@ -1326,40 +1335,49 @@ function isGraphqlQueryOnly(args: readonly string[]): boolean {
 }
 
 /**
- * `gh api` — a GET or a GraphQL query on this checkout's own repository is
- * metadata (APRV-268); a call with a body or a method is still a call.
+ * `gh api` — a GET reads as it always has (APRV-114); a GraphQL query on this
+ * checkout's own repository is metadata (APRV-268); everything else is a call.
  *
  * gh defaults to GET, and to POST the moment a field appears, so those two flag
- * families were the whole test before this task and remain it for the REST
- * branch. GraphQL is the exception the field test could not read: a query is
- * carried in a field, so `gh api graphql -f query='query{…}'` looked exactly
- * like a POST, which is how 52 log questions came to be dominated by reads.
+ * families were the whole test before APRV-268 and remain it: a bodyless,
+ * methodless call is `read.vcs.remote`, whatever repository it names, exactly as
+ * it has classified since APRV-114.
+ *
+ * GraphQL is the one shape that test could not read, and the only thing APRV-268
+ * moves here. A query is carried in a field, so `gh api graphql -f query='query
+ * {…}'` looks exactly like a POST and classified `network.call`, which is how a
+ * run of approved read questions came to sit in the log. It is promoted only out
+ * of `network.call`, never out of the read class: the branch below runs after
+ * the GET test, so a form that read before still reads.
  *
  * The row this refines also matches `auth`, `gist`, `secret` and `workflow`,
  * which stay `network.call` unconditionally.
  */
 function refineGhApi(ctx: RuleContext): Refinement {
   if (ctx.sub !== "api") return { class: "network.call", rule: "gh-api" };
-  const write: Refinement = { class: "network.call", rule: "gh-api-write" };
-  const own = isOwnRepoInvocation(ctx);
-
-  // GraphQL first: it is the one shape where a field flag does NOT mean a write.
-  if (ctx.positionals[1] === "graphql") {
-    if (!own || !isGraphqlQueryOnly(ctx.args)) return write;
-    if (readMethodFlag(ctx.args, ["-X", "--method"], "-X") === "other") return write;
+  const bundles = ctx.args.filter((arg) => arg.startsWith("--") || !arg.startsWith("-X"));
+  const methodIsWrite = readMethodFlag(ctx.args, ["-X", "--method"], "-X") === "other";
+  const bodied =
+    hasFlag(ctx.args, GH_API_FIELD_FLAGS) ||
+    hasShortFlag(bundles, ["f", "F"]) ||
+    ctx.substituted ||
+    ctx.args.some((arg) => arg.startsWith("$")) ||
+    methodIsWrite;
+  // Unchanged by APRV-268: no body and no method is a GET, and a GET reads.
+  if (!bodied) return { class: "read.vcs.remote", rule: "gh-api-read" };
+  // The one carve-out: a GraphQL document carrying no `mutation`, on the
+  // repository gh resolves from this checkout's own remotes. Anything the
+  // classifier cannot read (a document from a file, a `$VAR`, an explicit
+  // `--repo`) fails closed to the class it had.
+  if (
+    ctx.positionals[1] === "graphql" &&
+    !methodIsWrite &&
+    isOwnRepoInvocation(ctx) &&
+    isGraphqlQueryOnly(ctx.args)
+  ) {
     return { class: REMOTE_META_CLASS, rule: "gh-api-graphql-query" };
   }
-
-  const bundles = ctx.args.filter((arg) => arg.startsWith("--") || !arg.startsWith("-X"));
-  if (hasFlag(ctx.args, GH_API_FIELD_FLAGS) || hasShortFlag(bundles, ["f", "F"])) return write;
-  if (ctx.substituted || ctx.args.some((arg) => arg.startsWith("$"))) return write;
-  if (readMethodFlag(ctx.args, ["-X", "--method"], "-X") === "other") return write;
-  // A GET against a repository this checkout does not track is somebody else's
-  // forge traffic; it keeps the read class it has held since APRV-114 rather
-  // than gaining this repository's own metadata class.
-  return own
-    ? { class: REMOTE_META_CLASS, rule: "gh-api-read" }
-    : { class: "read.vcs.remote", rule: "gh-api-read-foreign" };
+  return { class: "network.call", rule: "gh-api-write" };
 }
 
 /** Does this path invoke the compiled `approval` CLI? */
@@ -1768,9 +1786,11 @@ const GH_PR_UPDATE_ACTIONS: readonly string[] = [
 function refineGh(ctx: RuleContext): Refinement {
   const noun = ctx.positionals[0];
   const action = ctx.positionals[1];
-  // APRV-268, above the read branch because it is the narrower one: the listed
-  // noun/action pairs, on the repository gh would resolve from this checkout's
-  // own remotes. Everything else on these nouns falls through unchanged.
+  // APRV-268: the two listed noun/action pairs (`pr update-branch`, `run
+  // rerun`), on the repository gh would resolve from this checkout's own
+  // remotes. Neither is a read, so this sits above the read branch only for
+  // symmetry with the rest of the refinement; everything else on these nouns,
+  // reads included, falls through unchanged.
   if (
     noun !== undefined &&
     action !== undefined &&
