@@ -4165,6 +4165,49 @@ disables it whenever the policy names no variable, and this verb does not edit a
 attested policy file. It prints the block to add and the `approval policy amend`
 ceremony that attests it.
 
+## setup checkpoint
+
+Mints the Ed25519 keypair a human signs the log's head with (APRV-220's record,
+APRV-257's ceremony). The two halves go to two different places, and that split
+is the design.
+
+The **private half** goes into the vault under `approval.checkpoint.key`. It is
+encrypted at rest under the passphrase `vault.passphrase_env` names, which
+`core/child-env.ts` strips from every child this runtime spawns, behind a file
+whose reading classifies `account.credential`. It is never printed, and there is
+no verb in this CLI that prints it.
+
+The **public half** is printed, with the exact `audit.checkpoint_keys` block to
+paste. This verb does not edit `APPROVAL.md`, so **the key is inert when the
+verb finishes**: a checkpoint signed by a key the policy does not list is
+`checkpoint-key-unknown`, which is a refusal. Adding the block and running
+`approval policy amend` is the second half of the ceremony, and it is the
+human's. Nothing an agent runs writes that line.
+
+Set `audit.checkpoint_every` in the same amendment to be asked rather than to
+remember. With a cadence set, the listener puts one `CHECKPOINT DUE` prompt in
+front of you when one is owed (at most one outstanding, never a nag), and
+`approval doctor`'s `checkpoint` row says how old the newest one is.
+
+**Rotation appends; it never drops.** `--rotate` mints a new key, replaces the
+private half in the vault, and prints the list with both keys in it.
+`--retire <fingerprint>` prints the block that drops a key, and **refuses** any
+key that signed a checkpoint in the log, naming the seqs that would stop
+verifying: removing such a key turns every checkpoint it signed into
+`checkpoint-key-unknown` for the life of the log. Retired keys stay listed
+forever, which is why the field is a list.
+
+**If you lose the key**, mint another with `--rotate` and leave the old public
+key where it is. Every checkpoint the lost key signed verifies against that
+public half and against nothing else. A lost key costs you future signatures,
+never past ones, and a log with no recent checkpoint is a warning at every layer
+and a refusal at none, so nothing stops while you find a terminal.
+
+Human-only three times over: the terminal check this family carries, the
+`--as human:<id>` gate, and the classification. `approval setup checkpoint`
+classifies `policy.core`, which the reference policy holds human-only, so the
+Claude Code hook denies an agent running it before a process starts.
+
 ## setup adapter
 
 The manifest is the adapter's, so the names this verb writes are by construction

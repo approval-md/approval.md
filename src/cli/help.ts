@@ -2013,18 +2013,18 @@ ${why("env")}`;
 export const SETUP_HELP = `approval setup — interactive configuration (SPEC.md §5.2, §10.1)
 
 Usage:
-  approval setup identity|vault|sampling [--as human:<id>] [--log <path>]
-                                         [--dir <path>] [--policy <path>]
+  approval setup identity|vault|sampling|checkpoint [--as human:<id>] …
   approval setup channel|adapter <name> [--api-base <url>] [--as human:<id>] …
   approval setup service [--platform launchd|systemd] [--uninstall] …
 
 Subcommands:
-  identity  declare who the human is (APPROVAL_HUMAN); not human-only
-  vault     mint a vault passphrase, store it, and record where it lives
-  sampling  mint the audit sampling secret and print the policy line for it
-  channel   configure one CHANNEL's transport credential (OS keystore)
-  adapter   fill the VAULT with one ADAPTER's credentials, from its manifest
-  service   write the launchd or systemd unit that runs "approval up" at login
+  identity   declare who the human is (APPROVAL_HUMAN); not human-only
+  vault      mint a vault passphrase, store it, and record where it lives
+  sampling   mint the audit sampling secret and print the policy line for it
+  checkpoint mint the Ed25519 key you sign the log's head with (--rotate/--retire)
+  channel    configure one CHANNEL's transport credential (OS keystore)
+  adapter    fill the VAULT with one ADAPTER's credentials, from its manifest
+  service    write the launchd or systemd unit that runs "approval up" at login
 
 CHANNEL AND ADAPTER ARE TWO NOUNS (SPEC.md §4). EVERY SUBCOMMAND
 REFUSES WHEN STDIN IS NOT A TERMINAL, and --json, exiting 2 with what to run.
@@ -2096,6 +2096,31 @@ does not edit an attested policy file: it prints the block to add and the
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("setup-sampling")}`;
+
+export const SETUP_CHECKPOINT_HELP = `approval setup checkpoint — mint the log-checkpoint key (HUMAN-ONLY)
+
+Usage:
+  approval setup checkpoint [--rotate] [--retire <fingerprint>]
+                            [--as human:<id>] [--log <path>] [--dir <path>]
+                            [--policy <path>]
+
+Mints the Ed25519 keypair you sign the log's head with. The PRIVATE half goes
+into the vault under approval.checkpoint.key and is never printed; the PUBLIC
+half is printed with the exact audit.checkpoint_keys block to paste. THIS VERB
+DOES NOT EDIT APPROVAL.md: the key is inert until you add that block and run
+\`approval policy amend\`, because a checkpoint signed by a key the policy does
+not list is checkpoint-key-unknown, a refusal.
+
+  --rotate       mint a new key and ADD it; the vault's private half is replaced
+  --retire <fp>  print the block that drops a key — REFUSED for any key that
+                 signed a checkpoint, naming the seqs it would break
+
+INTERACTIVE ONLY, and classified policy.core, so an agent cannot run it.
+JSON: none; this verb prints for a human to read and paste.
+
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("setup-checkpoint")}`;
 
 export const SETUP_ADAPTER_HELP = `approval setup adapter — fill the vault for one adapter (HUMAN-ONLY)
 

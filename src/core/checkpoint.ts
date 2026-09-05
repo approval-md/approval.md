@@ -379,6 +379,36 @@ export function readCheckpointPayload(record: EventRecord): CheckpointPayload | 
   return { seq, hash, alg, keySha256, signature };
 }
 
+/**
+ * Which keys have signed checkpoints in this log, and at which seqs (APRV-257).
+ *
+ * The question rotation has to ask before it retires anything. Removing a key
+ * from `audit.checkpoint_keys` turns every checkpoint it signed into
+ * `checkpoint-key-unknown` — a REFUSAL, by the deliberate choice recorded in
+ * {@link CHECKPOINT_REFUSAL_CODES} — so a verb that let an operator drop a key
+ * casually would be a verb that broke a log's verification to tidy a list.
+ *
+ * Keyed by the record's self-reported `key_sha256`, which is the only thing
+ * `checkLogCheckpoints` looks a key up by, so the answer is exactly the set of
+ * names whose removal would change a verdict. Records with an unreadable
+ * payload are skipped: they refuse for a different reason already, and no
+ * removal makes that better or worse.
+ */
+export function checkpointSignersIn(
+  records: readonly EventRecord[],
+): Map<string, number[]> {
+  const signers = new Map<string, number[]>();
+  for (const record of records) {
+    if (!isCheckpointRecord(record)) continue;
+    const payload = readCheckpointPayload(record);
+    if (payload === null) continue;
+    const seqs = signers.get(payload.keySha256);
+    if (seqs === undefined) signers.set(payload.keySha256, [record.seq]);
+    else seqs.push(record.seq);
+  }
+  return signers;
+}
+
 // ---------------------------------------------------------------------------
 // Appending one
 // ---------------------------------------------------------------------------

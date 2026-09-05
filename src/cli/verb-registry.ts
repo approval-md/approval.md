@@ -2056,6 +2056,29 @@ const VERBS: VerbSpec[] = [
 
   {
     name: "setup",
+    subcommand: "checkpoint",
+    purpose:
+      "Mint the Ed25519 keypair a human signs the log's head with (APRV-220). The PRIVATE half goes into the vault under approval.checkpoint.key and is never printed; the PUBLIC half is printed with the exact audit.checkpoint_keys block to paste. It does not edit an attested policy, so the key is INERT until a human adds that block and re-attests. --rotate mints a new key and ADDS it to the list; --retire prints the block that drops one, and REFUSES any key that signed a checkpoint, naming the seqs that would stop verifying. INTERACTIVE ONLY.",
+    human_only: true,
+    human_only_note:
+      "It mints the key that makes a checkpoint mean anything. An agent that could run it could mint a key, store it, and then vouch for a chain it had just written, so the verb classifies policy.core and the Claude Code hook denies it before a process starts — behind the terminal check and the --as gate this family already carries.",
+    input: input({
+      flags: {
+        "--rotate": "boolean",
+        "--retire": "string",
+        ...AS_FLAG,
+        ...LOG_FLAG,
+        ...POLICY_FLAGS,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
+    name: "setup",
     subcommand: "channel",
     purpose:
       "Configure one CHANNEL's transport credential: for telegram, collect the bot token, prove it with getMe, discover the approver chat, and record both variable sources. A channel holds no state, so what it needs goes to the OS keystore and .approval/env — never the vault. INTERACTIVE ONLY.",
