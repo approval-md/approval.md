@@ -335,8 +335,8 @@ Until that lands the key is inert: a checkpoint signed by a key
 
 **Then nothing.** With the cadence set, `approval up`'s listener puts one
 `CHECKPOINT DUE` prompt on the phone when one is owed, showing the `(seq, hash)`
-you are being asked to sign. Tap Sign and the listener signs that head — the one
-you were shown, not whatever the head has become in the meantime — and appends
+you are being asked to sign. Tap Sign and the listener signs that head (the one
+you were shown, not whatever the head has become in the meantime) and appends
 the record. `approval channel cli` asks the same question in a terminal. At most
 one prompt is outstanding at a time, and it is never repeated for one lapse.
 

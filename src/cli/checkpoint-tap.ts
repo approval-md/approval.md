@@ -245,7 +245,13 @@ export type CheckpointTapResult =
   | { ok: false; code: string; message: string };
 
 /**
- * Sign one offer and append the record, on the machine the channel runs on.
+ * Sign one head and append the record, on the machine the channel runs on.
+ *
+ * `head` is the `(seq, hash)` that was on the screen, handed back by the
+ * channel unchanged. It is a head rather than the whole offer on purpose: by
+ * tap time the offer's cadence arithmetic is hours stale and nothing should be
+ * tempted to read it, while the head is the one part that must survive
+ * verbatim.
  *
  * The key is resolved at TAP time and not at offer time, and that ordering is
  * the point: a prompt sitting on a phone for an hour holds no key material

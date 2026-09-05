@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-g'
 created_date: '2026-09-04 23:57'
-updated_date: '2026-09-05 09:09'
+updated_date: '2026-09-05 09:14'
 labels:
   - channels
   - log
@@ -38,10 +38,10 @@ Also here: approval doctor gains a checkpoint row (newest checkpoint, its age ag
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 approval setup mints the checkpoint keypair, stores the private half in the vault, and prints the public half with the exact APPROVAL.md line to paste; nothing an agent runs writes that line
-- [ ] #2 Key rotation appends to audit.checkpoint_keys and refuses to remove a key that signed any checkpoint in the log, naming the seqs that would stop verifying
-- [ ] #3 A checkpoint can be requested and answered from a channel prompt (Telegram and CLI), signed by the listener from the head the human was shown, proved against the mock bot and through the real append path
-- [ ] #4 The daemon enqueues a checkpoint prompt when audit.checkpoint_every says one is due, at most one outstanding, and never escalates a missing one past a warning
+- [x] #1 approval setup mints the checkpoint keypair, stores the private half in the vault, and prints the public half with the exact APPROVAL.md line to paste; nothing an agent runs writes that line
+- [x] #2 Key rotation appends to audit.checkpoint_keys and refuses to remove a key that signed any checkpoint in the log, naming the seqs that would stop verifying
+- [x] #3 A checkpoint can be requested and answered from a channel prompt (Telegram and CLI), signed by the listener from the head the human was shown, proved against the mock bot and through the real append path
+- [x] #4 The daemon enqueues a checkpoint prompt when audit.checkpoint_every says one is due, at most one outstanding, and never escalates a missing one past a warning
 - [ ] #5 approval doctor gains a checkpoint row; docs/cli-reference.md and a runbook paragraph on a lost key; npm test passes; lint clean
 <!-- AC:END -->
 
