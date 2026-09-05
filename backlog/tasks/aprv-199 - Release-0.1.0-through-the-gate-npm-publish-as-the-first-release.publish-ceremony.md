@@ -16,6 +16,32 @@ dependencies:
   - APRV-224
 priority: high
 ordinal: 165000
+approval:
+  origin:
+    app: manual
+    created_by: 'agent:fable'
+  route:
+    assignee: 'human:carter'
+    rationale: >-
+      Release 0.1.0 of approval-md to npm from the primary checkout, as the
+      first release.publish ceremony run through the gate. Preflight recorded
+      on this task: files field ships cli.js, dist, schema,
+      docs/cli-reference.md, SPEC.md, README.md and LICENSE only; npm pack
+      dry-run reviewed by the human; version 0.1.0 in package.json; CI green
+      on main. The agent prepares and never triggers the publish (AC4): the
+      human runs register, request, wait and run.
+  state: proposed
+  actions:
+    - class: release.publish
+      summary: >-
+        npm publish from /Users/carter/dev/approval-md: publish approval-md
+        0.1.0 to the public npm registry under the human's npm credential.
+        Irreversible: a published version cannot be republished, only
+        deprecated or unpublished within the registry's window.
+      reversible: false
+      est_cost_usd: '0'
+      idempotency_key: 'aprv-199:npm-publish:0.1.0'
+      payload_hash: '3d2fb7d3e8b83e223c134f1b9ae1ec17e8bd9c8cd6886a6cb3220e1b7b70d4bd'
 ---
 
 ## Description
