@@ -439,6 +439,11 @@ export function exitForDaemonOutcome(outcome: DaemonOutcome): number {
     // a supervisor that restarts on 4 and stops on 1 must stop on this.
     case "anchor-diverged":
       return EXIT_INTEGRITY;
+    // APRV-220. The same place again, for the third witness: a log that
+    // contradicts a signature a human made over it is an integrity failure,
+    // whatever the chain walk and the committed copy say about it.
+    case "checkpoint-invalid":
+      return EXIT_INTEGRITY;
   }
 }
 

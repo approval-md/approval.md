@@ -4,11 +4,11 @@ title: >-
   Daemon advance stacks on the day's records branch and goes DIRTY when main
   moves the log: rebuild the branch on the remote tip, or fall back to a fresh
   branch
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-r'
 created_date: '2026-09-02 20:19'
-updated_date: '2026-09-04 21:34'
+updated_date: '2026-09-04 23:35'
 labels:
   - daemon
   - bug
@@ -28,7 +28,7 @@ Seen 2026-09-02: PR #240 (records-log-2026-09-02, opened by the daemon's cadence
 - [x] #1 A test with a bare remote where main gains a commit touching the log after the day's branch was pushed proves the next advance produces a branch that merges cleanly into main and whose log is byte-identical to the working log
 - [x] #2 A working log that is not a superset of main's committed log refuses with a distinct machine-readable code and pushes nothing
 - [x] #3 The daemon's advance DaemonEvent and the log-advance-cadence doctor row say whether the branch was rebuilt and on which base
-- [ ] #4 npm test passes; lint clean
+- [x] #4 npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -172,3 +172,9 @@ including the pinned row count) is unaffected by the log-advance-cadence row
 gaining the rebuild words, because the words are in the row's message rather
 than in a new row.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+When the day's records branch exists and the trunk moved the log under it, the advance rebuilds the branch's commit on the current origin/main through the scratch index (working log must be a superset of main's, else remote-diverged and nothing pushed) and pushes by refspec; the DaemonEvent and the doctor cadence row say whether it was rebuilt and on which base; the daemon still never merges. Verified with the APRV-233 suites and CI; merged in PR #259.
+<!-- SECTION:FINAL_SUMMARY:END -->

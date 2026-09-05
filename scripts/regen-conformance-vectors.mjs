@@ -259,6 +259,10 @@ const unionVectors = [
     "anchor_refusal_codes",
     "every way the log-anchoring check can refuse a working log that contradicts the committed copy of it",
   ],
+  [
+    "checkpoint_refusal_codes",
+    "every way the human-signed checkpoint check can refuse a range whose signed heads the log contradicts",
+  ],
 ].map(([union, description]) => ({
   id: `union-${union}`,
   description: `${description}. Order is definition order; conformance means emitting exactly these codes, no more, no fewer.`,
@@ -1003,7 +1007,12 @@ const SUITES = [
     // implementation that answers five of them covers five sixths of invariant
     // 6, and a runner reporting that as a pass would be reporting coverage of
     // work nobody did.
-    vectors_version: "7.0.0",
+    // 8.0.0 (APRV-220): a SEVENTH union, `checkpoint_refusal_codes`, for the
+    // human-signed checkpoint check. Major for the reason 7.0.0 was major: the
+    // suite pins which unions exist, and an implementation that verifies a
+    // chain and an anchor but cannot say what a bad checkpoint signature is
+    // called has not implemented invariant 6 for checkpoints at all.
+    vectors_version: "8.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
@@ -1043,7 +1052,15 @@ const SUITES = [
     // harness kind — are new vectors. No existing expectation moved: the two
     // names are OPTIONAL and additive, so every record written before them
     // validates exactly as it did.
-    vectors_version: "1.4.0",
+    // 1.5.0 (APRV-220): another MINOR bump. The five `log.checkpoint` event
+    // fixtures — a well-formed checkpoint, an agent actor, a missing
+    // signature, a truncated signed hash, an unimplemented signature alg — and
+    // the two policy fixtures for `audit.checkpoint_keys` /
+    // `audit.checkpoint_every` are new vectors. No existing expectation moved:
+    // the event type is new, so no record written before it names it, and the
+    // two policy keys are OPTIONAL, so every policy written before them
+    // validates exactly as it did.
+    vectors_version: "1.5.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

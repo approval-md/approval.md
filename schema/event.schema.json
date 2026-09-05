@@ -55,9 +55,10 @@
         "payload.pruned",
         "gate.opened",
         "gate.closed",
-        "gate.bypassed"
+        "gate.bypassed",
+        "log.checkpoint"
       ],
-      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of twenty-eight event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, `execution.indeterminate` with `execution.reconciled` (APRV-120) the third and fourth, `reconciliation.required` / `reconciliation.satisfied` (APRV-127) the fifth and sixth, `policy.proposed` / `policy.declined` (APRV-109) the seventh and eighth, `audit.dark_session` (APRV-192) the ninth, and `gate.opened` / `gate.closed` / `gate.bypassed` (APRV-214) the tenth, eleventh and twelfth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept them all."
+      "description": "SPEC.md §8 'Event types (v0.1)': the closed set of twenty-nine event types. Closed by design — an unrecognized type fails closed at the write boundary rather than entering the log unvalidated. `payload.pruned` (APRV-38) is the first addition after the v0.1 draft set of sixteen, `approval.withdrawn` (APRV-106) the second, `execution.indeterminate` with `execution.reconciled` (APRV-120) the third and fourth, `reconciliation.required` / `reconciliation.satisfied` (APRV-127) the fifth and sixth, `policy.proposed` / `policy.declined` (APRV-109) the seventh and eighth, `audit.dark_session` (APRV-192) the ninth, `gate.opened` / `gate.closed` / `gate.bypassed` (APRV-214) the tenth, eleventh and twelfth, and `log.checkpoint` (APRV-220) the thirteenth: a reader of a v0.1 log may encounter any of them, and a verifier written against the draft enum must be updated to accept them all."
     },
     "actor": {
       "type": "string",
@@ -1394,6 +1395,73 @@
               "cwd": {
                 "type": "string",
                 "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "SPEC.md §9 (amended, APRV-220): a human's signature over the chain head at a moment. The chain is unkeyed, so a party with write access to `events.jsonl` can truncate it and recompute a chain that walks clean from genesis (the boundary the conformance suite states as `chain-verification/truncation-unanchored`); what that party cannot do is reproduce a signature over the hashes they replaced. The actor MUST be `^human:`, in the schema as well as in `core/checkpoint.ts`, for the reason `gate.opened` carries the same rule: an agent able to author a checkpoint could vouch for a chain it had just written. `key_sha256` is a HINT and never the authority — a verifier looks the public key up in the policy's `audit.checkpoint_keys`, so a record naming a key nobody lists is a refusal and not a self-signed pass (§11.1: self-reported fields never reduce scrutiny). Gate-typed, so `ts` is stamped at the write boundary and never accepted from the caller: the whole content of this record is a claim about a moment.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "log.checkpoint"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "actor",
+          "payload"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "pattern": "^human:"
+          },
+          "payload": {
+            "type": "object",
+            "required": [
+              "seq",
+              "hash",
+              "alg",
+              "key_sha256",
+              "signature"
+            ],
+            "properties": {
+              "seq": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The `seq` of the record whose hash was signed. That it is below this record's own seq, and that the log carries this hash there, are the runtime's checks; a schema sees one record and can only constrain the shape."
+              },
+              "hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "The chain hash at that seq, as the signer read it. A chain recomputed after this record was written cannot produce a signature over this value, which is the whole of what a checkpoint proves."
+              },
+              "alg": {
+                "type": "string",
+                "enum": [
+                  "ed25519"
+                ],
+                "description": "The signature scheme. One value at v0.1, and an enum rather than a free string so that a second scheme is an explicit schema change and never a value a signer invents."
+              },
+              "key_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "SHA-256 of the signing key's DER SPKI bytes, hex. A pointer, not a credential and not an authority: the verifier resolves it against `audit.checkpoint_keys` in the attested policy, and a fingerprint naming a key the policy does not list is refused. Recording the fingerprint rather than the key itself is deliberate — a record carrying its own public key invites a reader to verify the signature against it, which any forger could satisfy."
+              },
+              "signature": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9+/]+={0,2}$",
+                "description": "Base64 Ed25519 signature over `\"approval.md/log-checkpoint/v1\\n\"` followed by the RFC 8785 canonicalization of `{alg, hash, seq}`. Domain-separated, so a signature made here cannot be lifted into another use of the same key and one made elsewhere cannot be presented as a checkpoint."
               }
             }
           }

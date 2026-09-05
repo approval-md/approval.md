@@ -144,6 +144,109 @@ diverged   {"status":"anchor-diverged","records":9,"head":{...},
 run` makes it at startup and on every full prefix re-proof — see
 [git evidence](git-evidence.md).
 
+### `--checkpoints`: the second witness (APRV-220)
+
+The anchor asks whether anybody else holds a copy of these bytes, and answers
+from git, so it is exactly as fresh as the last push and says nothing at all on
+a machine with no remote. `--checkpoints` asks a different question: did a key
+that no agent process holds sign this head? It answers from the log plus the
+policy, so it works offline and covers the window nobody has pushed yet.
+
+The two are independent and neither may be weakened to let the other pass. A
+forger who truncates the log and recomputes the chain defeats neither: the
+anchor sees bytes nobody else has, and every checkpoint inside the rewritten
+range now names a hash the rewritten chain does not carry.
+
+Every `log.checkpoint` record in the walked range must clear four things:
+
+1. its payload reads (`seq`, `hash`, `alg: ed25519`, `key_sha256`, `signature`);
+2. the seq it signs is below its own (a checkpoint signs the past);
+3. its `key_sha256` names one of `audit.checkpoint_keys` in the policy;
+4. the signature verifies over `"approval.md/log-checkpoint/v1\n"` followed by
+   the RFC 8785 canonicalization of `{alg, hash, seq}`, AND the log's record at
+   that seq carries that hash.
+
+The first failure refuses, with its own frozen union
+(`conformance/vectors/refusal-unions.v1.json`, `checkpoint_refusal_codes`):
+`checkpoint-key-unknown`, `checkpoint-signature-invalid`,
+`checkpoint-hash-mismatch`, `checkpoint-out-of-order`, `checkpoint-malformed`.
+The third of those is the one this whole check exists for.
+
+`checkpoint-key-unknown` is a refusal rather than a shrug, deliberately. If a
+record naming an unlisted key were merely skipped, a forger could neutralize the
+whole mechanism by rewriting each checkpoint's `key_sha256`. The cost is that
+retiring a key out of `audit.checkpoint_keys` de-verifies every checkpoint it
+signed, which is why that field is a list and why retired keys stay in it.
+
+| outcome | exit | meaning |
+|---|---|---|
+| `pass` | 0 | every checkpoint in range validates (possibly none, which is not a failure) |
+| `skip` | 0 | no usable key is configured; the reason is printed on stderr |
+| `checkpoint-invalid` | 1 | a checkpoint in range does not validate |
+
+A log with no checkpoints at all is a pass, not a refusal: a human who has been
+away is not a forger. When `audit.checkpoint_every` is set and the newest
+checkpoint is older than it, the pass carries a `warning` — report-only, at
+every layer, with no path anywhere in this runtime from due to refused.
+
+A missing key is a skip and never a pass, the same rule the anchor follows.
+
+```
+pass    {"status":"clean",...,"checkpoints":{"status":"pass","verified":3,
+          "keys":1,"unchecked":0,"newest":{"at":41,"seq":40,"hash":"<64 hex>"}}}
+skip    {"status":"clean",...,"checkpoints":{"status":"skip","reason":"..."}}
+bad     {"status":"checkpoint-invalid","records":9,"head":{...},
+         "checkpoints":{"status":"refused","code":"checkpoint-hash-mismatch",
+                        "at":41,"verified":2,"message":"..."},"message":"..."}
+```
+
+## log checkpoint
+
+The human half of the mechanism `log verify --checkpoints` reads. It signs the
+log's CURRENT head with an Ed25519 key and appends one `log.checkpoint` record
+carrying `(seq, hash)` and the signature.
+
+```
+approval log checkpoint --as human:<id> [--key-file <path>] [--log <path>] [--json]
+```
+
+Human-only in three independent places, because this is the one record an agent
+must not be able to author: `core/checkpoint.ts` refuses a non-`human:` actor,
+`schema/event.schema.json` refuses one at the write boundary, and
+`core/command-class.ts` classifies the invocation `policy.core`, which the
+reference policy holds human-only, so the harness hook denies an agent that
+tries to run it.
+
+**Where the key comes from.** The private half lives in the credential vault
+under `approval.checkpoint.key`: encrypted at rest under the passphrase
+`vault.passphrase_env` names, which `core/child-env.ts` strips from every child
+this runtime spawns, in a file whose reading classifies `account.credential`.
+`--key-file <path>` reads it from a file instead, for a key kept outside the
+vault. There is no `--key` flag and no environment variable holding the key
+itself: a key on a command line is a key in the shell history, and a key in the
+session environment is a key every child inherits.
+
+**Where the public half goes.** `audit.checkpoint_keys` in `APPROVAL.md`, base64
+DER SPKI, which only the human may edit. It is written in the policy rather than
+carried by the record because a record that carried its own public key would
+invite a reader to verify the signature against it, which any forger could
+satisfy. The record names only a fingerprint; the policy is the authority.
+
+The head is read, then signed, then written with that head as the
+compare-and-append precondition, so a concurrent append is `head-moved` and the
+repair is to run the verb again. Nothing partial is left behind.
+
+```
+{"ok":true,"seq":41,"signed":{"seq":40,"hash":"<64 hex>"},
+ "key_sha256":"<64 hex>","actor":"human:carter","ts":"..."}
+{"ok":false,"error":{"code":"checkpoint-key-unreadable","message":"..."}}
+```
+
+Refusals: `actor-not-human`, `checkpoint-key-unreadable`,
+`checkpoint-key-unusable`, `log-empty`, `log-unreadable`, `log-torn-tail`,
+`log-corrupt`, `append-failed`. A torn or corrupt log is exit 1; everything else
+here is exit 4, because an operator without a key does not have a broken log.
+
 ## log tail
 
 The chain is verified first. On a torn tail the intact records are printed and the
