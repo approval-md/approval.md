@@ -44,7 +44,7 @@ import {
   resolveAnchor,
 } from "../src/cli/log-anchor.js";
 import { publishedState } from "../src/cli/log-advance.js";
-import { repoRoot } from "../src/cli/git-scope.js";
+import { GIT_OUTPUT_LIMIT_BYTES, repoRoot } from "../src/cli/git-scope.js";
 import { Daemon, type DaemonEvent } from "../src/daemon/daemon.js";
 import { POLICY } from "./scenario.js";
 
@@ -72,6 +72,12 @@ function git(args: string[], cwd: string): Run {
   const result = spawnSync("git", args, {
     cwd,
     encoding: "utf8",
+    // The same ceiling the runtime raised, for the same reason and with the
+    // same lesson: this helper ran `git show HEAD:<log>` on every fixture and
+    // would have started answering `code: -1` the moment a fixture's log
+    // crossed a megabyte. A harness that cannot read what it is asserting
+    // about reports failures it cannot explain.
+    maxBuffer: GIT_OUTPUT_LIMIT_BYTES,
     env: {
       ...process.env,
       GIT_AUTHOR_NAME: "Test",
