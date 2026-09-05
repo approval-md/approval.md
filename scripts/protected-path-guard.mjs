@@ -395,6 +395,23 @@ async function main() {
     const policySha256AtHead =
       policyBytes === null ? null : createHash("sha256").update(policyBytes, "utf8").digest("hex");
 
+    // The same digest, per GATE ORGAN, for the `attested` verdict on the
+    // harness files that install the hook (APRV-272). Computed exactly as the
+    // policy digest above is — from the blob at the HEAD COMMIT, never from the
+    // working tree, so the guard hashes the bytes the pull request carries and
+    // not the bytes the machine running CI happens to have. A path the head
+    // tree does not carry (a deletion) is `null`, which the guard reads as "no
+    // attestation can match", the fail-closed direction.
+    const organShaCache = new Map();
+    const organSha256AtHead = (path) => {
+      if (organShaCache.has(path)) return organShaCache.get(path);
+      const blob = showBlob(repo, head, path);
+      const value =
+        blob === null ? null : createHash("sha256").update(blob, "utf8").digest("hex");
+      organShaCache.set(path, value);
+      return value;
+    };
+
     // Bound material, from the payload store beside the log that was chosen and
     // then from head's. A grant only reachable in a records branch has its
     // payload only there, and a grant head already carried has it at head.
@@ -472,6 +489,7 @@ async function main() {
       policyProtectedPaths,
       policySha256AtHead,
       policyPath: POLICY_PATH,
+      organSha256AtHead,
       payloadFor,
       changeTsFor,
       window,

@@ -395,6 +395,59 @@ export function isProtectedPath(
   return protectedPathClass(candidate, extra) !== null;
 }
 
+/**
+ * One path, in the spelling an organ attestation records (APRV-272).
+ *
+ * Segment-wise: separators collapse, `./` noise disappears, a trailing slash
+ * goes, and the result is joined with `/` whatever the caller's platform uses.
+ * Two spellings of one file therefore attest and match as one file, which is
+ * the property the guard needs, since git reports `.claude/settings.json` and a
+ * human at a terminal may type `./.claude/settings.json`.
+ *
+ * Pure and disk-free, like everything else in this file: it never resolves,
+ * never follows a link, and never asks whether the path exists.
+ */
+export function normalizePathSpelling(candidate: string): string {
+  return pathSegments(candidate).join("/");
+}
+
+/**
+ * Is this path one of the gate's ORGANS — a `policy.core` surface a human can
+ * attest by content (APRV-272)?
+ *
+ * The organs are the harness files that install the hook: `.claude/settings*`
+ * and Cursor's `hooks.json`, `hooks/` and `agents/`. They are `policy.core`
+ * because an agent that could write them could write itself out of the gate,
+ * and `policy.core` is human-only, so the gate mints no record for them at all
+ * — which is exactly why the protected-path guard could never pass a hand-made
+ * edit to one, and why {@link normalizePathSpelling}-keyed attestation is the
+ * evidence for them.
+ *
+ * Two `policy.core` surfaces are deliberately NOT organs, and both keep their
+ * own rules:
+ *
+ * - The policy file, which has had content attestation since APRV-15 and whose
+ *   attestation the gate reads on every operation. An organ record must never
+ *   be able to stand in for it.
+ * - Everything under the approval home (`.approval/`): the payload store, the
+ *   vault, the keys, the environment map, the queue. Those are the human's own
+ *   ceremony surface, and the log directory under them is `log.mutate`, which
+ *   is stricter still.
+ *
+ * The question is asked of the BUILT-IN set alone. A policy may not route any
+ * path to `policy.core` (§11.1 invariant 9 and the `policy.edit.*` namespace
+ * close that), so consulting the policy's entries here could only ever widen
+ * the set of files a human may attest by a routing the classifier already
+ * refuses to honor.
+ */
+export function isGateOrganPath(candidate: string): boolean {
+  if (builtinProtectedPathClass(candidate) !== "policy.core") return false;
+  const segments = pathSegments(candidate);
+  const last = segments[segments.length - 1];
+  if (last !== undefined && CORE_FILENAMES.includes(last)) return false;
+  return !segments.includes(".approval");
+}
+
 // ===========================================================================
 // Credential material (account.credential, APRV-194)
 // ===========================================================================
