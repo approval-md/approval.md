@@ -3,11 +3,11 @@ id: APRV-247
 title: >-
   examples/telegram-demo.md is stale: run step and refusal forms predate the
   argv+cwd payload hash and the current refusal rendering
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-j'
 created_date: '2026-09-02 21:42'
-updated_date: '2026-09-05 00:05'
+updated_date: '2026-09-05 10:05'
 labels:
   - docs
 dependencies: []
@@ -25,7 +25,7 @@ Found by the APRV-226 lane on 2026-09-02 while writing the Backlog.md example: e
 <!-- AC:BEGIN -->
 - [x] #1 Every command and output block in examples/telegram-demo.md matches a fresh end-to-end run of the current CLI; the run step's payload hash is derived the way approval run derives it
 - [x] #2 A docs-guard test asserts examples use the current refusal rendering
-- [ ] #3 npm test passes; lint clean
+- [x] #3 npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -88,3 +88,9 @@ No global invariant in SPEC.md section 11 is touched: nothing here changes an en
 
 AC3 (full `npm test`) is left for the orchestrator: this lane was scoped to the docs-guard and fixtures suites plus lint.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+examples/telegram-demo.md re-run against the current CLI (argv+cwd payload, reader-computed hash, current status rows, log tail and Telegram message order); a docs-guard test pins the current refusal form across examples and caught the same stale form in the email and AgentMail demos. Verified by docs-guard 13/13 and the demo, payload and classify suites, CI full run; merged in PR #267.
+<!-- SECTION:FINAL_SUMMARY:END -->

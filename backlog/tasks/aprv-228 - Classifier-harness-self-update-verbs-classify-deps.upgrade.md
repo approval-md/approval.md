@@ -1,11 +1,11 @@
 ---
 id: APRV-228
 title: 'Classifier: harness self-update verbs classify deps.upgrade'
-status: In Progress
+status: Done
 assignee:
   - 'agent:fable-lane-o'
 created_date: '2026-09-02 17:01'
-updated_date: '2026-09-02 21:48'
+updated_date: '2026-09-05 10:05'
 labels:
   - enhancement
 dependencies: []
@@ -55,3 +55,9 @@ SPEC draft, if the class table wants a sentence (deps.* row of §7): 'A harness 
 
 docs/cursor-hook.md rule table also gained both rows: tests/cli-hook-cursor.test.ts pins that the Cursor doc names every COMMAND_RULES id (8/8 pass after the edit). Suite results: command-class 319/319, dogfood 32/32, cli-hook 89 (88 pass + the APRV-228 test, which failed once on a payload-field assumption and passes after the log-record rewrite), cli-hook-cursor 8/8, oxlint clean.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Harness self-update verbs (claude|codex|gemini update, uca) classify deps.upgrade with no new class; negatives stay unclassified; docs tables updated. Verified by command-class 319, dogfood 32 and the hook suites, lint clean; merged in PR #248.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -3,11 +3,11 @@ id: APRV-231
 title: >-
   Conformance vectors drift from schema fixtures without a test failing:
   regenerate for the APRV-214 gate-window fixtures and pin the check
-status: In Progress
+status: Done
 assignee:
   - 'agent:opus-lane-h'
 created_date: '2026-09-02 19:18'
-updated_date: '2026-09-05 08:31'
+updated_date: '2026-09-05 10:05'
 labels:
   - conformance
   - test
@@ -76,3 +76,9 @@ created: 2026-09-02 22:04
 APRV-237's conformance regen (branch claude/approval-signals-human-values-f0cf71) swept in the six APRV-214 gate fixtures this task names, so the drift half is fixed there. The 'pin the check' half (a test that fails when schema fixtures and schema-validation.v1.json disagree) is still open and stays with this task.
 ---
 <!-- COMMENTS:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The conformance generator is a side-effect-free export; tests/conformance-regen.test.ts regenerates in memory and fails naming the regen command on any drift in either direction, ignoring version numbers but flagging moved content under an unchanged version; the schema list is compared with the registry. Verified by conformance-regen 7/7, conformance 25/25, run.mjs ok, full run 3395 pass; merged in PR #274.
+<!-- SECTION:FINAL_SUMMARY:END -->
