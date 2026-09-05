@@ -642,10 +642,15 @@ export function checkLogCheckpoints(options: CheckpointCheckOptions): Checkpoint
     };
   }
 
-  // Hash by seq once. A range with many checkpoints would otherwise scan the
-  // whole record list per checkpoint, and this check runs on a daemon tick.
+  // Hash by seq, once, and only when there is something to look up. A range
+  // with many checkpoints would otherwise scan the whole record list per
+  // checkpoint; a log with none would build an index of every record it holds
+  // to answer no questions, and this check runs on a daemon tick over a log
+  // that grows without bound.
   const hashAt = new Map<number, string>();
-  for (const record of options.records) hashAt.set(record.seq, record.hash);
+  if (found.length > 0) {
+    for (const record of options.records) hashAt.set(record.seq, record.hash);
+  }
   const firstSeq = options.records[0]?.seq ?? 0;
 
   const verified: VerifiedCheckpoint[] = [];

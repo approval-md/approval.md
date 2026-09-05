@@ -384,14 +384,14 @@ Usage:
 
 Subcommands:
   verify   walk the hash chain end to end; clean | torn-tail | corrupt
-  tail     print the last N records (default 10)
-  export   stream every stored line to stdout, byte for byte
+  tail / export   the last N records (default 10) / every line, verbatim
   sync     fast-forward pull, with a snapshot and a chain reconcile
   advance  commit the log's new records onto a records branch
   checkpoint  sign the current head with your own key (human-only)
 
 verify, tail and export only read. sync and advance move the FILE and append no
 record; checkpoint appends one. Default log: .approval/log/events.jsonl
+JSON shapes: docs/cli-reference.md
 
 ${EXIT_CODES_POINTER}
 ${JSON_ERRORS}
