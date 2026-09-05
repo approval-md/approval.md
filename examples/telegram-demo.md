@@ -311,6 +311,12 @@ The agency has not answered two emails. Chase once more, then escalate.
 EOF
 ```
 
+The `summary` describes an email and the payload spawns `echo`, and that gap is
+worth keeping rather than tidying away. A summary is a claim the requesting
+party writes about its own action, and the runtime checks none of it; the
+binding, which the runtime does check, is the hash above. Step 8 shows how the
+message on your phone labels the two differently.
+
 ### Step 4: attest the policy
 
 ```sh
@@ -405,7 +411,7 @@ whole point stated as a refusal.
 `--payload-hash` is optional, and it is not how the binding is computed. `run`
 derives the hash from the argv after `--` and the physical `cwd`, then checks the
 flag against it. The flag states what you believe you are about to run, so a
-mismatch is a refusal to run something else rather than a permission to. Drop the
+mismatch is a refusal to run something else, never a licence to run it. Drop the
 flag and the refusal above is identical.
 
 ### Step 8: start the listener
@@ -455,10 +461,11 @@ WHAT THIS DOES — CLAIMED by agent:drafter, NOT verified by the runtime
 • est. cost: $0.02 (agent:drafter)
 ```
 
-That is the one transcript here taken through `tests/telegram-mock.ts` rather
-than a real bot, and it is written above as the phone shows it: on the wire those
-lines carry HTML, and the two buttons, Approve and Reject, ride an inline
-keyboard rather than the text.
+That block, and the listener output in step 9, came from `tests/telegram-mock.ts`
+rather than a real bot; they are the two exceptions this document opened with.
+It is written above as the phone shows it: on the wire those lines carry HTML,
+and the two buttons, Approve and Reject, ride an inline keyboard rather than the
+text.
 
 The order is the argument. What the runtime **computed** comes first, the
 **payload** itself next, and what the agent **claims** about it last, labelled as
