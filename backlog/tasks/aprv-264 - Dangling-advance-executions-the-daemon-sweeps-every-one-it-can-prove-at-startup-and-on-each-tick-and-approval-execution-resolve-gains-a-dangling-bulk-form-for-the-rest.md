@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - 'agent:opus-lane-a'
 created_date: '2026-09-05 10:04'
-updated_date: '2026-09-05 11:42'
+updated_date: '2026-09-05 11:54'
 labels:
   - daemon
   - cli
@@ -29,7 +29,7 @@ Seen 2026-09-05 after the APRV-233 build went live: approval status listed five 
 - [x] #1 A test with three dangling advance executions whose seqs the scratch trunk carries proves the daemon closes all three on its first tick with execution.completed records naming the ref, then advances
 - [x] #2 A dangling execution the trunk does not carry is reported once (started line and doctor row), not on every tick, and the advance refusal names every outstanding key plus the bulk command
 - [x] #3 approval execution resolve --dangling lists provable and unprovable keys, asks once, and appends one human-attested outcome per provable key; --json carries the list
-- [ ] #4 npm test passes; lint clean
+- [x] #4 npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -146,4 +146,16 @@ The branch carries a merge of origin/main taken after APRV-262 (PR #284) and
 APRV-266 (PR #290) landed; the only conflict was the conformance manifest, which
 both sides had regenerated, and it was resolved by regenerating on the merged
 tree.
+
+## Verification
+
+`npm test` on the merged tree: 3523 tests, 3522 pass, 0 fail, 1 skipped,
+340s, exit 0. `npx oxlint src tests` exit 0. `npm run build` (tsc) clean.
+
+Two failures the first full run surfaced and this one does not, both from the
+registry and help conventions rather than from the feature: the `--dangling`
+input arity had to stop being a positional tuple (a 1-tuple with minItems 0 is
+not a tuple under strict Ajv), and the short help had to come back under the
+25-line cap while keeping the clause `cli-resolve` pins, that resolve exercises
+no policy authority.
 <!-- SECTION:NOTES:END -->
