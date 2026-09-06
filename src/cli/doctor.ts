@@ -113,7 +113,12 @@ import {
   snapshotPathFor,
   snapshotSummary,
 } from "../core/verified-snapshot.js";
-import { askDaemonSampling, drawSocketPathFor, liveClassesOf } from "../core/live-draw.js";
+import {
+  askDaemonSampling,
+  dialDrawSocket,
+  drawSocketPathFor,
+  liveClassesOf,
+} from "../core/live-draw.js";
 import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { policyWebPort } from "./channel-web.js";
@@ -753,10 +758,21 @@ function checkVerifiedSnapshot(logPath: string): DoctorCheck {
  * when a live class is declared and no usable socket is there, because that IS
  * the operator's control not being in force.
  *
- * It asks the daemon nothing. It looks at the socket exactly as an asker does
- * and reports what an asker would conclude.
+ * ## Why it connects (APRV-282)
+ *
+ * It used to `stat` the socket and stop there, and on 2026-09-05 that read a
+ * socket file left behind by a daemon that had exited as a healthy gate: the
+ * row was green while every tap on the operator's phone sat unconsumed. A
+ * socket file is created by a bind and removed by an orderly shutdown, so the
+ * one state its presence cannot report is the one that matters — a process that
+ * died. PRESENCE PROVES NOTHING. So the row opens a connection and closes it
+ * again, which is the first thing an asker does and the first thing that fails.
+ *
+ * It still asks the daemon NOTHING: it sends no question, waits for no answer,
+ * and hangs up the moment the connection is accepted. What it reports is what
+ * an asker would conclude before it had said a word.
  */
-function checkLiveDraw(logPath: string, load: PolicyLoadResult): DoctorCheck {
+async function checkLiveDraw(logPath: string, load: PolicyLoadResult): Promise<DoctorCheck> {
   const path = drawSocketPathFor(logPath);
   // The same helper the daemon's server asks, so this row and the process that
   // serves draws can never disagree about whether the file declares one.
@@ -790,10 +806,23 @@ function checkLiveDraw(logPath: string, load: PolicyLoadResult): DoctorCheck {
       fix: "stop the daemon, remove the socket, and start it again as the user who owns this approval home",
     };
   }
+
+  // The question a `stat` cannot answer: is anything on the other end?
+  const dialled = await dialDrawSocket(path, null);
+  if (!dialled.ok) {
+    return {
+      check: "live-draw",
+      status: "fail",
+      detail: oneLine(
+        `${path} is on disk and refuses connections (${dialled.detail}). That is what a daemon killed rather than stopped leaves behind: the file was last written ${stats.mtime.toISOString()} and nothing has served it since. Every action of ${declared} gates to a human at 100% while this stands, and the file's presence says otherwise.`,
+      ),
+      fix: "approval up — start the ambient runtime again, in a shell where the sampling secret resolves; it clears the stale socket and binds a new one",
+    };
+  }
   return {
     check: "live-draw",
     status: "pass",
-    detail: `${path} is present and owner-only, so a gate process with no sampling secret can have its draw answered and ${declared} is sampled at its declared rate rather than gated at 100%. A daemon that stops removes its socket, so this row falling to fail is the signal.`,
+    detail: `${path} is owner-only and answered a connection, so a gate process with no sampling secret can have its draw answered and ${declared} is sampled at its declared rate rather than gated at 100%. The connection was opened and closed with no question asked.`,
   };
 }
 
@@ -2751,7 +2780,9 @@ export function commandDoctor(
       checkHarnessVersion(dir, verified.records),
       // APRV-208: appended, fourteenth time, same reason. The one row that says
       // whether supervised-live is actually live on this machine.
-      checkLiveDraw(logPath, policyLoad),
+      // APRV-282: it connects now, because a socket file outlives the process
+      // that bound it and a `stat` reads the leftovers as a healthy gate.
+      await checkLiveDraw(logPath, policyLoad),
       // APRV-238: appended, fifteenth time, same reason. The one surface
       // besides `approval values` that would notice a broken values block:
       // `policy check` deliberately says nothing about it, because guidance has

@@ -2220,14 +2220,22 @@ The checks, at length:
   and reduces nothing anywhere, so a match is not proof the hook fired.
 - **live-draw** — whether a daemon is answering `supervised-live` draws for this
   log (APRV-208). SKIP when the policy declares no live class: no draw is ever
-  made, and a missing socket is nothing. PASS when the socket is present and
-  owner-only, naming the classes it keeps live. The one FAIL is a live class
-  declared with no usable socket there, because that is the operator's control
-  not being in force: every action of that class gates to a human, at 100%
-  rather than the declared rate, and the two are indistinguishable from inside
-  the policy file. The fix starts the runtime in a shell where the sampling
-  secret resolves. It asks the daemon nothing — it looks at the socket exactly
-  as an asker does and reports what an asker would conclude.
+  made, and a missing socket is nothing. It FAILS in three shapes, all of them
+  the operator's control not being in force — every action of that class gates
+  to a human at 100% rather than at the declared rate, and the two are
+  indistinguishable from inside the policy file. No socket at all; a socket
+  every asker would refuse on sight (a foreign owner, or a mode that lets
+  somebody else bind it); and, since APRV-282, a socket file that is there and
+  REFUSES CONNECTIONS. That last one is why the row opens a connection and
+  closes it again rather than stopping at a `stat`: a socket file is made by a
+  bind and removed by an orderly shutdown, so the one state its presence cannot
+  report is a daemon that died, which is exactly the state seen on 2026-09-05
+  with a green row and a phone full of unconsumed taps. The detail names the
+  file's mtime, because a leftover socket's last write is when its daemon was
+  last alive, and the fix is `approval up`. PASS means the socket answered a
+  connection, and it still asks the daemon NOTHING: no question is sent and no
+  answer is waited for, so what the row reports is what an asker would conclude
+  before it had said a word.
 - **values-block** — whether the optional `approval-values` block of the policy
   file parses (APRV-238). Nothing else would ever report a broken one: a values
   block is guidance and not policy (SPEC.md §5.3, §11.1 invariant 10), so a

@@ -32,7 +32,9 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -1267,6 +1269,104 @@ test("doctor: nothing a daemon invents in its answer reaches the operator's scre
   } finally {
     server.close();
   }
+});
+
+// ---------------------------------------------------------------------------
+// live-draw connects rather than stats (APRV-282)
+// ---------------------------------------------------------------------------
+
+/**
+ * A home whose `files.write.*` class is `supervised-live`, so the live-draw row
+ * has something to be about. Without a live class it skips, which is right and
+ * is not what these cases are testing.
+ */
+async function socketHomeLive(port: number): Promise<string> {
+  socketCounter += 1;
+  const dir = join(socketScratch, `L${socketCounter}`);
+  mkdirSync(join(dir, ".approval", "log"), { recursive: true });
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    policyWith(port).replace(
+      "    autonomy: supervised",
+      ["    autonomy: supervised-live", "    live_rate: 0.1"].join("\n"),
+    ),
+  );
+  const attested = await runCli(["policy", "attest"], dir, { APPROVAL_HUMAN: "human:carter" });
+  assert.equal(attested.code, 0, attested.stderr);
+  return dir;
+}
+
+/**
+ * A socket file with nothing behind it, made the way the wild makes one.
+ *
+ * There is no way to create a socket inode except by binding, and a bind that
+ * is closed takes its file with it (libuv unlinks the path it bound). So this
+ * binds one path, renames the file to the one doctor will look at, and closes:
+ * the unlink then misses, the inode survives with no listener, and connecting
+ * to it is refused. That is precisely the aftermath of a daemon that was killed
+ * — the state APRV-282 exists for, and the one a `stat` reads as healthy.
+ */
+async function staleSocket(home: string): Promise<void> {
+  const dir = drawDirFor(logPathOf(home));
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const bound = join(dir, "t.sock");
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(bound, resolve);
+  });
+  renameSync(bound, drawSocketPathFor(logPathOf(home)));
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  chmodSync(drawSocketPathFor(logPathOf(home)), 0o600);
+}
+
+test("doctor: live-draw passes only on a socket that accepts a connection", async () => {
+  const { port } = healthy();
+  const home = await socketHomeLive(port);
+  const server = await fakeDaemon(home, () => ({ ok: false, detail: "no question asked" }));
+  try {
+    const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+    const check = checkNamed(run, "live-draw");
+    assert.equal(check.status, "pass", check.detail);
+    assert.match(check.detail, /answered a connection/u);
+    assert.equal(check.fix, undefined);
+  } finally {
+    server.close();
+  }
+});
+
+test("doctor: a socket file nothing is listening on fails, and names when it was written", async () => {
+  const { port } = healthy();
+  const home = await socketHomeLive(port);
+  await staleSocket(home);
+  const path = drawSocketPathFor(logPathOf(home));
+  const written = statSync(path).mtime.toISOString();
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "live-draw");
+  assert.equal(check.status, "fail", check.detail);
+  assert.match(check.detail, /refuses connections/u);
+  assert.ok(
+    check.detail.includes(written),
+    `the row does not name the stale socket's mtime (${written}): ${check.detail}`,
+  );
+  // The one thing an operator has to type, and APRV-282's first criterion.
+  assert.ok(
+    (check.fix ?? "").startsWith("approval up"),
+    `the fix does not start with \`approval up\`: ${check.fix ?? "<none>"}`,
+  );
+  // A stale socket is a failed run, not a cosmetic note.
+  assert.equal(run.code, 1);
+});
+
+test("doctor: no socket at all is still the absent failure, with its own fix", async () => {
+  const { port } = healthy();
+  const home = await socketHomeLive(port);
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "live-draw");
+  assert.equal(check.status, "fail", check.detail);
+  assert.match(check.detail, /no draw socket at/u);
+  assert.match(check.fix ?? "", /approval up/u);
 });
 
 // ---------------------------------------------------------------------------
