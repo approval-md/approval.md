@@ -132,16 +132,29 @@ test("run without `--` is a usage error rather than a silent no-op", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The control: unsandboxed, the non-routable address times out
+// The control: unsandboxed, the refusal does not carry the SANDBOX's signature
 // ---------------------------------------------------------------------------
 
-test("control: outside the sandbox, the non-routable address times out rather than being refused", () => {
+test("control: outside the sandbox, the non-routable address is not refused with EPERM", () => {
+  // Amended by APRV-193's build lane. The design lane asserted a TIMEOUT here,
+  // which held on the machine it was written on and is a fact about that
+  // machine's routing rather than about the sandbox: TEST-NET-1 has no route,
+  // and a host that says so answers EHOSTUNREACH in milliseconds instead of
+  // letting the connection hang. Both are the unsandboxed outcome.
+  //
+  // What must never happen unsandboxed is the kernel refusing the socket
+  // outright, which is Seatbelt's own signature and is exactly what the case
+  // below asserts inside the profile. So the discriminating property survives —
+  // a no-op profile still fails the suite, because EPERM appears only where the
+  // sandbox put it — and the brittle half is gone. `tests/sandbox.test.ts`
+  // avoids the question entirely by connecting to a live loopback listener.
   const { stdout } = probe(["connect", NON_ROUTABLE, "443", "1500"]);
   const verdict = JSON.parse(stdout) as ConnectVerdict;
-  assert.equal(
-    verdict.outcome,
-    "timeout",
-    `expected a timeout outside the sandbox, got ${JSON.stringify(verdict)}`,
+  assert.notEqual(verdict.outcome, "connected", `TEST-NET-1 answered: ${JSON.stringify(verdict)}`);
+  assert.notEqual(
+    verdict.code,
+    "EPERM",
+    `an unsandboxed connect was refused EPERM: ${JSON.stringify(verdict)}`,
   );
 });
 
@@ -178,6 +191,15 @@ test("outbound network inside the sandbox is DENIED, not merely slow", { skip: S
     verdict.outcome,
     "error",
     `expected an immediate socket refusal, got ${JSON.stringify(verdict)}`,
+  );
+  // EPERM, specifically: the kernel refusing to open the socket at all. That is
+  // the sandbox's own signature, and the control above pins that it does not
+  // appear without one (amended by the build lane, where the control's timeout
+  // turned out to be a fact about one machine's routing).
+  assert.equal(
+    verdict.code,
+    "EPERM",
+    `expected the sandbox's EPERM, got ${JSON.stringify(verdict)}`,
   );
   assert.ok(
     verdict.ms < 1000,

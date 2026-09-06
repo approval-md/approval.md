@@ -419,6 +419,7 @@ Never `ask`. The `agent_message` is `<code>: <detail>`, and the codes are frozen
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
 | `hook-grant-unverified` | the grant was spent, and the verified log cannot be seen to carry the `execution.started` recording it. The record IS the authorization on a harness surface, because the harness executes and never sees the gate's return value, so no verdict is printed until the chain carries it (APRV-200) |
+| `hook-sandbox-required` | `APPROVAL_HOOK_REQUIRE_SANDBOX=1` is set and this command runs code the runtime did not author, unwrapped. Re-run it as `approval sandbox -- <command>` (`docs/sandboxed-exec.md`). Off unless the operator set the variable |
 | `hook-policy-unavailable` | `APPROVAL.md` could not be loaded |
 | `hook-log-unreachable` | no log where the hook was pointed; it writes to an existing log and creates none |
 | `hook-io` | malformed hook input, or an unreadable log |
@@ -427,6 +428,14 @@ Never `ask`. The `agent_message` is `<code>: <detail>`, and the codes are frozen
 `sudo`, `env`, `xargs`, `node -e`, `python3 -c`, backticks, arithmetic expansion,
 and any `$(…)` that is not purely a read: all deny. The fix is to write the
 command out, or to run the effect through `approval run` with a granted token.
+
+Sandbox wrappers classify as the command INSIDE them (APRV-193):
+`approval sandbox -- npm install left-pad` is `deps.add`, with the same rule id
+the bare command has. Both directions matter — a wrapper with a class of its own
+would be a laundering device, and a wrapper that stayed unclassified would mean
+the hook denied the safe spelling of a command it allows unwrapped.
+`docs/claude-code-hook.md` has the full rule and `docs/sandboxed-exec.md` the
+sandbox itself.
 
 ### When the grant can follow the write (APRV-200)
 

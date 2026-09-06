@@ -57,7 +57,8 @@ Usage:
   approval consume    <action-key> --token <t> [--payload-hash <64hex>]
                       [--as <id>] [--json]                            (internal)
   approval run        <action-key> [--token <t>] [--payload-hash <64hex>]
-                      [--as <id>] [--json] -- <cmd…>
+                      [--as <id>] [--no-sandbox] [--json] -- <cmd…>
+  approval sandbox    [--allow-loopback] [--log <path>] -- <cmd…>
   approval adapter email <action-key> --token <t> --payload <file|->
                       [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
   approval adapter agentmail <action-key> --token <t> --payload <file|->
@@ -940,8 +941,7 @@ export const RUN_HELP = `approval run — execute a command behind the gate
 
 Usage:
   approval run <action-key> [--token <t>] [--payload-hash <64hex>] [--as <id>]
-               [--policy <path>] [--dir <path>] [--log <path>] [--json]
-               -- <cmd> [args…]
+       [--no-sandbox] [--policy <p>] [--dir <p>] [--log <p>] [--json] -- <cmd>…
 
 Flags:
   --token <t>      the raw token "approval grant" printed. REQUIRED for manual
@@ -949,17 +949,42 @@ Flags:
                    always hashes "the argv array and cwd" it is about to spawn;
                    a differing value is refused payload-mismatch, not obeyed
   --as <id>        the executing identity; else APPROVAL_HUMAN
+  --no-sandbox     give the child the session's network. RECORDED (untokened
+                   children otherwise run egress-denied: docs/sandboxed-exec.md)
   --policy <p> / --dir <p> / --log <p>   policy, its discovery dir, and the log
   --json / -h, --help   machine-readable summary ON STDERR / this text
 
 Appends execution.started BEFORE spawning the child, then execution.completed or
 execution.failed with the child's real exit code, and exits with that code.
-
 JSON shape and refusal codes: docs/cli-reference.md#run
 ${EXIT_CODES_POINTER}, plus one code this verb alone emits:
   5  NO VALID EXECUTION TOKEN. Nothing was appended.
 ${JSON_ERRORS}
 ${why("run")}`;
+
+export const SANDBOX_HELP = `approval sandbox — run a command with no way out (APRV-193)
+
+Usage:
+  approval sandbox [--allow-loopback] [--log <path>] -- <cmd> [args…]
+
+Flags:
+  --allow-loopback  also allow connections to localhost. For a suite that
+                    starts its own server. A real widening: a port is a port
+  --log <path>      the log, so the credential material beside it can be made
+                    unreadable to the child (vault, env map, sealing keys)
+  -h, --help        this text ("--help --long" adds the reference section)
+
+Denies the child outbound network (macOS sandbox-exec), scrubs the
+credential-bearing variables out of its environment, and exits with the child's
+own exit code. It appends NOTHING: it removes a capability rather than
+authorizing anything, and the gate stays reachable because its IPC is a file.
+
+The point is laundered exec: "npm test" runs whatever was written a minute ago,
+so the command's NAME stopped describing its effect. An agent HARNESS cannot run
+under this — it needs the model API, which is exactly what is denied.
+
+${EXIT_CODES_POINTER}, plus 127: no sandbox here, the command did NOT run.
+${why("sandbox")}`;
 
 export const WAIT_HELP = `approval wait — block until a task's requests are decided
 
@@ -1401,8 +1426,8 @@ Flags (claude-code, cursor):
 
 Deny: hook-unclassified, hook-class-human-only, hook-opaque, hook-unparseable,
 hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout,
-hook-gate-refused:<c>, hook-grant-unverified, hook-policy-unavailable,
-hook-log-unreachable, hook-io.
+hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required,
+hook-policy-unavailable, hook-log-unreachable, hook-io.
 
 ${EXIT_CODES_POINTER} (harness verbs use 0 and 2 only; 0 is a verdict, never "ask")
 ${why("hook")}`;

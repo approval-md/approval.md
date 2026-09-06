@@ -87,6 +87,7 @@ import { childEnvironment } from "../core/child-env.js";
 import {
   classifyCommand,
   commandSegmentWords,
+  CODE_EXECUTING_RULES,
   GATE_SELF_CLASS,
   protectedPathClass,
   type ClassifiedSegment,
@@ -229,6 +230,22 @@ export const HOOK_DENY_CODES = [
    * one more prompt on the retry, and nothing authorized meanwhile.
    */
   "hook-grant-unverified",
+  /**
+   * `APPROVAL_HOOK_REQUIRE_SANDBOX=1` is set and this command runs code the
+   * runtime did not author, unwrapped (APRV-193).
+   *
+   * The one deny in this union that names a spelling that would work rather
+   * than a decision or a fault: re-run it as `approval sandbox -- <cmd>` and it
+   * proceeds, classified exactly as it is now, with no way out to the network.
+   *
+   * It exists because the hook DECIDES and the harness EXECUTES. A verdict
+   * cannot rewrite a command into a wrapper, so the only way for this runtime
+   * to insist on the room is to refuse the spelling that does not ask for it.
+   * Off by default, and turning it on can only ever refuse more — which is why
+   * an environment variable is an acceptable home for it, and why nothing in
+   * the other direction is readable from one.
+   */
+  "hook-sandbox-required",
   /** The policy could not be loaded, so no class can be resolved. */
   "hook-policy-unavailable",
   /**
@@ -2214,6 +2231,12 @@ type ToolDescription =
       payload: unknown;
       headline: string;
       notes: string[];
+      /**
+       * The classified segments, on the shell path only (APRV-193). A file edit
+       * has none, and needs none: the sandbox requirement is about commands
+       * that RUN, and an edit runs nothing.
+       */
+      segments?: readonly ClassifiedSegment[];
     }
   /** A tool call this hook does not gate at all. */
   | { kind: "allow"; reason: string }
@@ -2258,6 +2281,7 @@ function describeToolCall(
       payload,
       headline: raw,
       notes: refined.notes,
+      segments: classified.segments,
     };
   }
 
@@ -2274,6 +2298,49 @@ function describeToolCall(
     // `allow` says which checkout it authorized (APRV-124).
     notes: [fileTierNote(gated)],
   };
+}
+
+/** The environment variable that turns the sandbox requirement on (APRV-193). */
+export const REQUIRE_SANDBOX_ENV = "APPROVAL_HOOK_REQUIRE_SANDBOX";
+
+/**
+ * Must this command have been written `approval sandbox -- …`? (APRV-193.)
+ *
+ * Returns the deny detail, or `null` to proceed. Four conditions, and every one
+ * of them is a narrowing, so the answer is `null` for everything the operator
+ * did not deliberately ask about:
+ *
+ * 1. the operator set `APPROVAL_HOOK_REQUIRE_SANDBOX=1`;
+ * 2. some segment runs code this runtime did not author
+ *    (`CODE_EXECUTING_RULES`: `npm test`, `node x.mjs`, `tsc`, `make`…);
+ * 3. that segment is not already inside the runtime's own wrapper. A
+ *    hand-written `sandbox-exec -f mine.sb` does NOT satisfy it, because a
+ *    profile a caller wrote can allow everything, and a requirement met by
+ *    writing your own permission is not a requirement;
+ * 4. no class of the command is manual. A manual command is going to a human,
+ *    and a human's grant over these exact bytes is the authority to reach the
+ *    world — the same line `approval run` draws at the token.
+ *
+ * The environment variable is read in the strict direction only: setting it can
+ * refuse commands that would otherwise run, and nothing an agent can set makes
+ * this function return `null` where it would otherwise deny (SPEC.md §11.1
+ * invariant 4).
+ */
+export function sandboxRequirement(
+  segments: readonly ClassifiedSegment[] | undefined,
+  autonomies: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  if (env[REQUIRE_SANDBOX_ENV] !== "1") return null;
+  if (segments === undefined) return null;
+  if (autonomies.some((autonomy) => autonomy === "manual")) return null;
+  const unwrapped = segments.filter(
+    (segment) => CODE_EXECUTING_RULES.includes(segment.rule) && segment.sandbox !== "runtime",
+  );
+  if (unwrapped.length === 0) return null;
+  const first = unwrapped[0] as ClassifiedSegment;
+  const external = first.sandbox === "external";
+  return `${REQUIRE_SANDBOX_ENV}=1, and this command runs code the runtime did not author: ${JSON.stringify(first.text)} (rule ${first.rule}), ${external ? "under a profile this runtime did not write, which is a permission you granted yourself" : "with the session's own network"}. A command like this executes whatever is in the files it names, so its class describes what was typed rather than what will happen. Re-run it as \`approval sandbox -- <command>\`: it classifies the same, it is allowed the same, and it runs with no way out to the network (docs/sandboxed-exec.md). Nothing was appended.`;
 }
 
 /** The window standing over `logPath`, and the records it was derived from. */
@@ -2681,6 +2748,15 @@ function runHarnessHook(
       `${humanOnlyRefusal(reserved, "this command may not run under an agent")} The gate's own code for this fact is \`class-human-only\`.`,
       adapter.kind,
     );
+  }
+
+  // APRV-193, and BELOW the human-only deny for the same reason that one sits
+  // above the floor: a class no agent may run is answered before a question
+  // about which room it would run in. Above everything that appends, so a
+  // refused command leaves the log exactly as it found it.
+  const unsandboxed = sandboxRequirement(described.segments, autonomies);
+  if (unsandboxed !== null) {
+    return deny(streams, "hook-sandbox-required", unsandboxed, adapter.kind);
   }
 
   // APRV-145, amended SPEC.md §10.2: loop safety on a surface that mints a
