@@ -691,6 +691,7 @@ is running: the vault, the adapter boundary, and the single-use token. Keep
 ## Running the checks
 
 ```
+npm run ci:local             # run the CI tier this diff would get, before pushing
 npm run check:changed        # classify the working tree, then run that tier
 npm run check:tier -- <path> # classify the given paths and print the tier
 approval doctor              # the other check: this machine, not the code
@@ -746,6 +747,35 @@ Classification is computed from the changed paths by
 `scripts/classify-tier.mjs`, never asserted by the author of the change. Every
 merge to `main` runs the full suite unconditionally, and anything ambiguous, an
 empty path set included, resolves to full.
+
+### Before the push: `npm run ci:local`
+
+The merge queue is serial, so every red run there costs a slot, a re-merge and
+another wait. `npm run ci:local` (APRV-275) is where that red gets found
+instead. It asks the same classifier the workflow's `classify` job asks, by
+spawning the same command with the same arguments, and then runs the jobs
+`.github/workflows/ci.yml` declares for the tier that comes back: the docs
+guard for light, the record-reading tests for records, the three shards plus
+lint for full, and the protected-path grant cross-check on every tier whenever
+a merge base is computable. `--base <ref>` picks the base (default
+`origin/main`, three-dot, as CI classifies), `--working-tree` and explicit paths
+are the other two path sources, `--dry-run` prints the plan and runs nothing,
+`--json` prints it as data, and `--parallel` runs the tier's jobs concurrently
+the way the matrix does.
+
+`npm run check:changed` predates it and answers a different question: it
+classifies the working tree and runs the tier in its own shape, which for full
+is `npm test`, `npm run lint` and `npm run typecheck`. Use it while working, and
+`ci:local` before pushing, when the question is what the workflow will say.
+
+What it cannot reproduce it says, rather than passing over. The Node 20 floor
+legs need Node 20, and this host runs whatever it runs. CI's runner is
+`ubuntu-latest`, so on any other platform the report names the suites whose
+meaning differs here, the temp root's shape and the symlink cases among them. A
+cross-check with no reachable merge base, or with the records branches
+unfetched, is reported unresolved and kept out of the verdict. A red step exits
+non-zero and names the files that failed. Nothing in CI consults any of this: a
+green run locally is a prediction, and the workflow remains the verdict.
 
 A full-tier CI job compiles once. It builds, then runs `node
 scripts/run-tests.mjs` over what it built, because `npm test` and `npm run
