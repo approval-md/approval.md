@@ -839,6 +839,18 @@ Credentials answer only to single-use tokens, so the send it was never granted
 stays impossible, and `approval coverage` reports every observed effect with its
 evidence seq or `none`.
 
+Designs that are proposed and not yet built live under `docs/proposals/`.
+[docs/proposals/hardened-authorization.md](docs/proposals/hardened-authorization.md)
+is the longest of them: what a grant in this log can and cannot prove to a
+service that does not trust the operator, and what an optional stronger tier
+would have to be. Identity in v0.1 is config-declared, so the honest ceiling
+today is "a party with write access to this log recorded a decision", and the
+proposal works through device-bound keys, WebAuthn on a separately controlled
+surface, per-decision signatures over the existing checkpoint machinery, and
+third-party witnesses, with the phasing, the receipt format, and the negative
+tests each would need. Nothing in it is implemented, and nothing in it amends
+SPEC.md.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
