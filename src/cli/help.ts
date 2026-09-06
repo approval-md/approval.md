@@ -672,11 +672,11 @@ Flags:
   --branch <name> / --direct      force the BRANCH or the DIRECT flow
   --yes / --json / -h, --help     skip the prompt / machine-readable / this text
 
-Hashes the live policy, diffs it against the BASELINE (classes AND every policy key), attests, then
-runs a git ceremony of EXACTLY two files, commit-preconditions first (git-failed, push-rejected,
-pr-failed break after the append). Attested TEXT is NOT recoverable from the log: no blob means
-HASH-ONLY MODE. Flows, in PRECEDENCE, highest first: --branch <name>, --direct; a refused push
-PUBLISHES ITSELF without moving your checkout, dropping to a RUNBOOK; merge by MERGE COMMIT.
+Hashes the policy, diffs it against the BASELINE (classes AND every policy key), attests, then
+commits EXACTLY the policy, the log and the pins when they moved. commit-preconditions, the pins
+and the DOGFOOD SUITE refuse BEFORE the append; git-failed, push-rejected, pr-failed break after it.
+Attested TEXT is NOT recoverable from the log: HASH-ONLY MODE. Flows, in PRECEDENCE, highest first:
+--branch <name>, --direct; a refused push PUBLISHES ITSELF, dropping to a RUNBOOK. MERGE COMMIT it.
 --as agent: appends policy.proposed; the TAP attests. Fail closed: no-channel, declined, timeout.
 
 ${EXIT_CODES_POINTER}
