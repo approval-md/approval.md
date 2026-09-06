@@ -87,18 +87,24 @@ classes:
   exec.local:
     autonomy: manual
     approvers: [demo]
+    limits:
+      requests_per_hour: 3
   communicate.email.external:
     autonomy: manual
     approvers: [demo]
     limits:
       max_pending: 3
+      requests_per_hour: 3
   policy.edit:
     autonomy: manual
     approvers: [demo]
+    limits:
+      requests_per_hour: 3
 
 budgets:
   global:
     daily_actions: 25
+    max_pending: 10
 
 channels:
   telegram:
@@ -132,9 +138,38 @@ What each part is doing:
   integer count; the sibling key is `daily_usd`.
 - `read.*: autonomous` keeps the agent's reads out of the queue.
 
-`limits.max_pending: 3` is policy vocabulary in v0.1 (enforcement lands with the
-daemon). It is valid and it parses; drop it if you would rather the file
-described only what runs today.
+### The intake limits, and why they are three and ten
+
+`limits.max_pending`, `limits.requests_per_hour` and `budgets.global.max_pending`
+are enforced at intake since APRV-173 (SPEC §5.2). They are not budgets. A budget
+meters what the world is exposed to; these meter the queue, which is what the
+*human* is exposed to, and the numbers here are chosen for a room:
+
+- **`requests_per_hour: 3`, on every manual class.** Counted per origin, and at
+  v0.1 origin is the `approval.requested` record's actor. Under
+  `approval mcp serve --http --guest` every session mints its own
+  `agent:guest-<6 hex>` before its transport exists, so this is three requests
+  per class per connected stranger per hour, and no header, URL or client name
+  can move a request onto somebody else's count. A fourth is refused
+  `rate-limited`, nothing is appended for it, and the refusal consumes neither
+  the window nor the budget.
+- **`budgets.global.max_pending: 10`.** The whole queue, whatever the class: an
+  eleventh simultaneously pending request is refused `queue-full` until the
+  queue drains. Ten rows is about what a person can still read on a phone.
+- **`communicate.email.external.limits.max_pending: 3`** keeps the one class
+  with a credential behind it from filling that queue on its own.
+- `read.*` deliberately carries none. An autonomous class returns `proceed` before
+  `request()` reaches the intake limits, so a ceiling there would be a number in
+  the file that nothing enforces.
+
+Both refusals are machine-readable and distinct, and neither appends anything:
+one log record per refused request would hand a flooder the log growth it was
+refused the queue for. That is why the tripwire firing is visible in the exit
+code and in `.approval/QUEUE.md`, and nowhere in the chain.
+
+`tests/demo-guest-limits.test.ts` reads this policy block out of this file and
+drives a real guest MCP session against it until each refusal fires, so the
+numbers above and the runtime cannot drift apart.
 
 Confirm the file loads before signing it. If the policy were unparseable, every
 class would answer `manual` and this check would still print `manual` for the
