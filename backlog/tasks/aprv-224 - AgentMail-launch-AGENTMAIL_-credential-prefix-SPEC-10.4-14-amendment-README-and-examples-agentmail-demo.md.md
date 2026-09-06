@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude-opus'
 created_date: '2026-09-02 16:30'
-updated_date: '2026-09-02 17:50'
+updated_date: '2026-09-06 01:42'
 labels:
   - adapter
   - launch
@@ -72,6 +72,8 @@ SPEC.md: the three edits of the legend were applied through the harness hook, wh
 VERIFICATION. npm run build clean. node --test over dist/tests/child-env.test.js, dist/tests/command-class.test.js and dist/tests/docs-guard.test.js: 317 tests, 317 pass, 0 fail. Full npm test: 2902 tests, 2901 pass, 0 fail. npm run lint (oxlint src tests): clean, no output. Note for the reader: APRV-223 is running in this same worktree, so two earlier full-suite runs failed inside ITS in-flight CLI files (a setup-adapter help string, a per-verb help length); both were transient and the final run is green.
 
 AC4 (manual e2e against a real AgentMail account) is NOT done and is left unchecked. It cannot be done from this session: there are no AgentMail credentials here and the calls are network.call. It is Carter's step, and examples/agentmail-demo.md is the runbook for it. The four things to record afterwards: (1) step 6, the agent key returns 403 on POST /v0/inboxes/{inbox}/drafts/{draft}/send; (2) step 9, an edited draft refuses 'adapter-failed (agentmail-draft-drifted)' at exit 1 with no execution.completed and the grant still spendable; (3) step 10, the restored draft sends exactly once, execution.completed appended; (4) step 12, 'approval log verify' clean, with the seq range and head hash noted here. No result for any of these is claimed or fabricated in this task.
+
+Manual e2e against a real AgentMail account, 2026-09-06, run by Carter from /tmp/approval-agentmail-demo on the RSI demo bot (@ApprovalRSIBot), inbox approval-demo@agentmail.to, agent key scoped to that inbox with Advanced/Custom access minus draft_send and message_send, sending key with Send & read mail. Results: (1) POST .../drafts/{id}/send with the agent key: HTTP 403 from AgentMail before the gate was consulted. (2) task-042: request seq 3, grant seq 4 via telegram, adapter sent (execution.started seq 5, completed seq 6); the runbook's edit step used POST on the draft path, which AgentMail answers not_found, so no drift occurred on this round (APRV-277). (3) task-043 on a fresh draft: grant seq 9; PATCH edit of the subject then adapter: refused agentmail-draft-drifted naming subject only, nothing sent, exit 1; but the attempt appended execution.started seq 10 and execution.failed seq 11, so restoring the subject and re-running refused token-consumed. The grant record is intact and the token is not; the runbook promises a send on the same grant. Filed as APRV-276. (4) task-044 on the restored draft: grant seq 14, sent once (seq 15, 16, exit 0), second spend refused token-consumed (exit 1). (5) approval log verify: clean, 16 records, head cae72025. Both sent mails arrived at the Gmail address with the approved subject. AC4 is left unchecked on the 'with grant intact' clause until APRV-276 lands and steps 5 to 7 are rerun on a fresh draft; every other clause is proven.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

@@ -350,6 +350,29 @@ That is `approval log tail` piped, fields tab-separated for `cut` and its kin; o
 a terminal it aligns and colours its columns. `approval log verify` answers for
 the chain: `clean: 6 record(s), head seq 6 843705c6bbea…`.
 
+## The other half of the word
+
+Everything above is control: what an agent may do, who decides, what is
+sampled. From 0.1.0 the file carries the human's voice too. Below the policy
+block, `APPROVAL.md` may hold one optional `yaml approval-values` block:
+what you love, like and dislike in the work, what you want from an agent as
+behaviour, and how you read and answer.
+
+```sh
+approval values      # the operator's block, or "the operator has declared no values here."
+approval feedback    # the reactions and notes humans left on this log's actions
+```
+
+A retrospective review or a grant can carry a graded reaction (`disliked`,
+`indifferent`, `liked`, `loved`; the two extremes need a note), and
+`approval feedback` reads them back to the agent whose work they were about.
+Both verbs print human-authored guidance behind a banner that says so, and
+neither reaches enforcement: no verdict, sample, budget or token is moved by
+anything in them (SPEC.md section 11.1, invariant 10). They are the mirror of
+`approval journal write`, the agent's outlet the gate does not stand in front
+of. The importer drafts the block too: `approval import agents-md` turns a
+"What I value" heading into a `wants` list for you to grade.
+
 ## Define what needs approval
 
 A policy is a fenced `yaml approval-policy` block inside a markdown file named
@@ -516,8 +539,10 @@ agentmail-draft` snapshots the draft's recipients, subject and text at request
 time, and that snapshot is what the payload hash binds and what your phone
 displays. Before it sends, the adapter re-fetches the draft and compares; a
 draft edited after the grant refuses `agentmail-draft-drifted`, sends nothing,
-and names which fields differ without quoting text nobody approved. Approving a
-draft id alone would be approving whatever the agent wrote into it last.
+and names which fields differ without quoting text nobody approved. That
+comparison runs before the token is spent, so the refusal costs no authority:
+restore the approved text and the same token still sends. Approving a draft id
+alone would be approving whatever the agent wrote into it last.
 
 ## The APPROVAL.md dictionary
 

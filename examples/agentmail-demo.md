@@ -137,10 +137,10 @@ curl -sS -X POST "https://api.agentmail.to/v0/inboxes/$INBOX/drafts" \
   }'
 ```
 
-Keep the `draft_id` it returns:
+Keep the `draft_id` it returns. It is a UUID, not a prefixed id:
 
 ```sh
-export DRAFT=dr_…
+export DRAFT=67799b7c-…
 ```
 
 ### Step 6: watch the agent key fail to send
@@ -175,7 +175,7 @@ HASH=$(approval payload hash payload.json)
 ```json
 {
   "inbox_id": "you@agentmail.to",
-  "draft_id": "dr_…",
+  "draft_id": "67799b7c-…",
   "to": ["someone-you-know@example.com"],
   "subject": "Deposit refund: second chaser",
   "text": "The deposit has been due since 12 July.\n\nOne chaser was sent on 21 July with no reply. Please confirm the refund date by return.\n"
@@ -212,10 +212,14 @@ export TOKEN=aceea22f…
 
 ### Step 9: edit the draft, and watch the send refuse
 
-Change the draft through AgentMail (raise the amount, add a recipient, anything):
+Change the draft through AgentMail (raise the amount, add a recipient, anything).
+Editing a draft is `PATCH` on the draft's own path, and it answers with the
+updated draft, so the first command below is also how you confirm the edit landed
+before the adapter is asked about it. `POST` on that same path answers
+`not_found`, which reads like a missing draft and is really a missing route:
 
 ```sh
-curl -sS -X POST "https://api.agentmail.to/v0/inboxes/$INBOX/drafts/$DRAFT" \
+curl -sS -X PATCH "https://api.agentmail.to/v0/inboxes/$INBOX/drafts/$DRAFT" \
   -H "Authorization: Bearer $AGENTMAIL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"subject": "Deposit refund: FINAL notice"}'
@@ -224,6 +228,8 @@ approval adapter agentmail task-042:chaser:2026-09-02 --token "$TOKEN" \
   --payload payload.json --as agent:claude-admin
 echo "exit=$?"
 ```
+
+The `PATCH` echoes the updated draft back, and then the adapter refuses:
 
 ```
 approval: adapter-failed (agentmail-draft-drifted): the draft differs from the snapshot the grant was taken over in: subject. Nothing was sent.
@@ -237,13 +243,22 @@ the grant is untouched.
 
 ### Step 10: restore the text and send it
 
-Put the approved subject back, then run the adapter again:
+Put the approved subject back with the same `PATCH`, then run the adapter again
+with the same token. The refusal in Step 9 spent nothing, so there is no second
+tap here:
 
 ```sh
+curl -sS -X PATCH "https://api.agentmail.to/v0/inboxes/$INBOX/drafts/$DRAFT" \
+  -H "Authorization: Bearer $AGENTMAIL_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"subject": "Deposit refund: second chaser"}'
+
 approval adapter agentmail task-042:chaser:2026-09-02 --token "$TOKEN" \
   --payload payload.json --as agent:claude-admin
 echo "exit=$?"
 ```
+
+The `PATCH` echoes the restored draft back, and then the send goes through:
 
 ```
 sent task-042:chaser:2026-09-02 through the agentmail adapter: execution.started at seq 6, execution.completed at seq 7
@@ -251,10 +266,13 @@ exit=0
 ```
 
 In order: the payload was re-hashed against the binding the grant recorded, the
-token was verified and consumed, `execution.started` was appended, the vault was
-opened and the sending key was read **inside the token window**, the draft was
-re-fetched and compared field by field, `POST /v0/inboxes/{inbox_id}/drafts/{draft_id}/send`
-was called, the window closed, and `execution.completed` was appended. AgentMail
+declared credentials resolved and the sending key was read from the vault, the
+draft was re-fetched and compared field by field **before the token was spent**
+(the refusal in Step 9 came from here, which is why it cost no authority), then
+the token was verified and consumed, `execution.started` was appended, the
+draft was compared once more inside the window, immediately before
+`POST /v0/inboxes/{inbox_id}/drafts/{draft_id}/send`, the window closed, and
+`execution.completed` was appended. AgentMail
 deletes a draft when it sends, so the draft id is now gone and the mail exists;
 re-running would find nothing to send.
 

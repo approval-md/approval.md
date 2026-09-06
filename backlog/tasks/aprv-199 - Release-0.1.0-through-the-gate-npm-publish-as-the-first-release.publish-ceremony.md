@@ -3,10 +3,11 @@ id: APRV-199
 title: >-
   Release 0.1.0 through the gate: npm publish as the first release.publish
   ceremony
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@fable'
 created_date: '2026-09-01 18:46'
-updated_date: '2026-09-02 16:31'
+updated_date: '2026-09-06 02:07'
 labels:
   - release
   - dogfood
@@ -16,32 +17,6 @@ dependencies:
   - APRV-224
 priority: high
 ordinal: 165000
-approval:
-  origin:
-    app: manual
-    created_by: 'agent:fable'
-  route:
-    assignee: human
-    rationale: >-
-      Release 0.1.0 of approval-md to npm from the primary checkout, as the
-      first release.publish ceremony run through the gate. Preflight recorded
-      on this task: files field ships cli.js, dist, schema,
-      docs/cli-reference.md, SPEC.md, README.md and LICENSE only; npm pack
-      dry-run reviewed by the human; version 0.1.0 in package.json; CI green
-      on main. The agent prepares and never triggers the publish (AC4): the
-      human runs register, request, wait and run.
-  state: proposed
-  actions:
-    - class: release.publish
-      summary: >-
-        npm publish from /Users/carter/dev/approval-md: publish approval-md
-        0.1.0 to the public npm registry under the human's npm credential.
-        Irreversible: a published version cannot be republished, only
-        deprecated or unpublished within the registry's window.
-      reversible: false
-      est_cost_usd: '0'
-      idempotency_key: 'aprv-199:npm-publish:0.1.0'
-      payload_hash: '3d2fb7d3e8b83e223c134f1b9ae1ec17e8bd9c8cd6886a6cb3220e1b7b70d4bd'
 ---
 
 ## Description
@@ -57,3 +32,17 @@ Every SPEC section 14 milestone (M0 to M8) has shipped, package.json already rea
 - [ ] #3 v0.1.0 tag pushed through its own gated action and the package installs on a clean machine under the published name; verified and recorded
 - [ ] #4 The human decides go or no-go; the agent prepares and never triggers the publish
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Preflight (AC1, agent work): package.json files whitelist reviewed (cli.js, dist, schema, docs/cli-reference.md, SPEC.md, README.md; no .approval, backlog, .claude, journal or proposals ship; no .npmignore needed); npm pack --dry-run is unclassified by the hook, so the whitelist is the evidence and Carter runs the dry-run once by hand before the tap. Write CHANGELOG.md with the 0.1.0 line. README front page gains the values/feedback verbs (APRV-237..240) so the shipped surface is current.
+2. Ride the aprv-276-278 stack: APRV-276 (drift check before token spend), APRV-277 (runbook PATCH, listener 400), APRV-278 (ambient-bleed false positive) land in the same PR so there is one merge before the publish.
+3. AC2-AC4 are Carter's: envelope on this task, register/request/wait/run npm publish from the primary through the gate, tag v0.1.0 through its own gated action, install on a clean machine, go/no-go.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Preflight (fable, 2026-09-06, branch aprv-276-278-agentmail-release-stack): package.json ships by whitelist only (cli.js, dist, schema, docs/cli-reference.md, SPEC.md, README.md), no .npmignore needed; .approval, backlog, .claude, .approval-journal and docs/proposals cannot ship. npm pack --dry-run is unclassified by the hook for an agent, so Carter runs it once by hand before the tap and pastes the file list. CHANGELOG.md created with the 0.1.0 line (unreleased until the tag). README front page gains a section on approval values / approval feedback; tests/docs-guard passes. Riding the same PR as APRV-276/277/278 so one merge precedes the publish.
+<!-- SECTION:NOTES:END -->
