@@ -258,6 +258,10 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--interval": "string",
   "--debounce": "string",
   "--once": "boolean",
+  // The watcher trace (APRV-230), spelled identically to `daemon run`'s: the
+  // ambient runtime is the process an operator actually runs, so the diagnostic
+  // for what is waking it has to be reachable from this spelling too.
+  "--trace-watch": "boolean",
   "--git-evidence": "boolean",
   // The cadence advance (APRV-204), spelled identically to `daemon run`'s.
   "--advance": "boolean",
@@ -620,6 +624,7 @@ export function commandUp(
     intervalMs: interval.ms,
     debounceMs: debounce.ms,
     once,
+    traceWatch: boolFlag(flags, "--trace-watch"),
     sink: {
       emit: (event: DaemonEvent) => {
         if (json) {

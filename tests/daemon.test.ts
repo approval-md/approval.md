@@ -990,6 +990,170 @@ test("the daemon does not wake itself from its own writes", async () => {
   assertClean(dir);
 });
 
+// ===========================================================================
+// The watcher trace and the bookkeeping filter (APRV-230)
+// ===========================================================================
+
+/** Every `tick` line this daemon has printed so far. */
+function ticksOf(daemon: LiveDaemon): Record<string, unknown>[] {
+  return daemon.lines().filter((line) => line["event"] === "tick");
+}
+
+/** Every `watch` line this daemon has printed about `file`. */
+function tracesOf(daemon: LiveDaemon, file: string): Record<string, unknown>[] {
+  return daemon.lines().filter((line) => line["event"] === "watch" && line["file"] === file);
+}
+
+/**
+ * The bookkeeping files, one case each (APRV-230, AC2).
+ *
+ * Each of these lands in a watched directory as a side effect of how some
+ * change was made, and never as the change: the append lockfile is created and
+ * removed by every writer in this runtime around every append (two events per
+ * append, from every session on the machine), and the rest are what an editor
+ * scatters beside a task file it has open. A tick scheduled for one of them
+ * re-derives an answer nothing moved, at the full price of a tick.
+ */
+const BOOKKEEPING: ReadonlyArray<{ where: "log" | "tasks"; name: string; what: string }> = [
+  { where: "log", name: "events.jsonl.lock", what: "the append lockfile" },
+  { where: "tasks", name: ".task-042.md.swp", what: "vim's swap file" },
+  { where: "tasks", name: ".DS_Store", what: "the Finder's own index" },
+  { where: "tasks", name: "task-042.md~", what: "an editor's backup copy" },
+];
+
+for (const bookkeeping of BOOKKEEPING) {
+  test(`watch: ${bookkeeping.what} (${bookkeeping.name}) does not schedule a tick`, async () => {
+    // A long interval and a short debounce, exactly as the no-self-wake case
+    // above: the only thing that can produce a second tick here is a watcher
+    // event, so the tick COUNT is the assertion and the trace says why.
+    const dir = ready(POLICY, "proposed");
+    const daemon = new LiveDaemon(dir, [
+      "--interval",
+      "60s",
+      "--debounce",
+      "50ms",
+      "--trace-watch",
+    ]);
+    await until(() => ticksOf(daemon).length >= 1, "the first tick");
+    const before = ticksOf(daemon).length;
+
+    // Created and removed, which is the lockfile's whole life around one append
+    // and is also what an editor does with a swap file (APRV-230, AC4).
+    const path =
+      bookkeeping.where === "log"
+        ? join(dir, ".approval", "log", bookkeeping.name)
+        : join(dir, "backlog", "tasks", bookkeeping.name);
+    writeFileSync(path, "bookkeeping, not a change\n", "utf8");
+    rmSync(path, { force: true });
+
+    await until(
+      () => tracesOf(daemon, bookkeeping.name).length >= 1,
+      `a watch line naming ${bookkeeping.name}`,
+    );
+    for (const line of tracesOf(daemon, bookkeeping.name)) {
+      assert.equal(line["watcher"], bookkeeping.where);
+      assert.equal(line["action"], "ignored", `${bookkeeping.name} scheduled a tick`);
+      assert.equal(line["reason"], "bookkeeping");
+    }
+
+    // Well past the 50ms debounce: nothing the watcher saw turned into work.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(
+      ticksOf(daemon).length,
+      before,
+      `${bookkeeping.name} woke the daemon: ${String(ticksOf(daemon).length - before)} extra tick(s)`,
+    );
+
+    // Deaf to bookkeeping, not deaf: a real append still wakes it well inside
+    // the 60s interval.
+    request(dir, "task-042:chaser");
+    await until(() => ticksOf(daemon).length >= before + 1, "a tick woken by a real append");
+
+    const code = await daemon.stopWith("SIGTERM");
+    assert.equal(code, 0, `daemon exited ${code}: ${daemon.stderr}`);
+    assertClean(dir);
+  });
+}
+
+test("watch: --trace-watch names the watcher, the event type and the file", async () => {
+  // AC1's instrument. Every watcher event, ignored ones included, so the
+  // question the 2026-09-02 phantom ticks could not be asked — which directory
+  // fired, and about what — is answerable from the stream itself.
+  const dir = ready(POLICY, "proposed");
+  const daemon = new LiveDaemon(dir, ["--interval", "60s", "--debounce", "50ms", "--trace-watch"]);
+  await until(() => ticksOf(daemon).length >= 1, "the first tick");
+
+  request(dir, "task-042:chaser");
+  await until(
+    () =>
+      daemon
+        .lines()
+        .some((line) => line["event"] === "watch" && line["action"] === "scheduled"),
+    "a scheduled watch line",
+  );
+
+  const scheduled = daemon
+    .lines()
+    .filter((line) => line["event"] === "watch" && line["action"] === "scheduled");
+  const log = scheduled.find((line) => line["watcher"] === "log");
+  assert.ok(log !== undefined, `no log-dir watch line: ${daemon.stdout}`);
+  assert.equal(log["file"], "events.jsonl", "the trace names the file the platform named");
+  assert.equal(log["reason"], null, "a scheduled event has no ignore reason");
+  assert.ok(
+    typeof log["type"] === "string" && log["type"].length > 0,
+    `the platform's own event name is reported: ${JSON.stringify(log["type"])}`,
+  );
+
+  // The snapshot the daemon publishes beside the log is in the trace too, as
+  // an IGNORED event: the filter is visible rather than silent, which is the
+  // difference between a diagnostic and a second thing to distrust.
+  await until(
+    () => tracesOf(daemon, "verified-head.json").length >= 1,
+    "the snapshot's own watch line",
+  );
+  for (const line of tracesOf(daemon, "verified-head.json")) {
+    assert.equal(line["action"], "ignored");
+    assert.equal(line["reason"], "not-the-log");
+  }
+
+  const code = await daemon.stopWith("SIGTERM");
+  assert.equal(code, 0, `daemon exited ${code}: ${daemon.stderr}`);
+  assertClean(dir);
+});
+
+test("watch: the tick line says what woke it", async () => {
+  const dir = ready(POLICY, "proposed");
+
+  // A `--once` pass is woken by nothing: no watcher is even attached.
+  const startup = daemonOnce(dir).lines.find((line) => line["event"] === "tick");
+  assert.ok(startup !== undefined, "no tick line");
+  assert.equal(startup["woke_by"], "interval");
+  assert.equal(startup["woke_file"], undefined, "an interval tick names no file");
+
+  const daemon = new LiveDaemon(dir, ["--interval", "60s", "--debounce", "50ms"]);
+  await until(() => ticksOf(daemon).length >= 1, "the first tick");
+  assert.equal(ticksOf(daemon)[0]?.["woke_by"], "interval", "the startup tick woke on nothing");
+
+  // The task folder. Done BEFORE anything drifts, so the daemon has written no
+  // task file of its own and this save cannot be mistaken for its own hand.
+  writeFileSync(taskPath(dir), readFileSync(taskPath(dir), "utf8"), "utf8");
+  await until(() => ticksOf(daemon).length >= 2, "a tick woken by a task-file save");
+  const fromTasks = ticksOf(daemon)[1];
+  assert.equal(fromTasks?.["woke_by"], "tasks");
+  assert.equal(fromTasks?.["woke_file"], "task-042.md");
+
+  // The log's directory.
+  request(dir, "task-042:chaser");
+  await until(() => ticksOf(daemon).length >= 3, "a tick woken by an append");
+  const fromLog = ticksOf(daemon)[2];
+  assert.equal(fromLog?.["woke_by"], "log");
+  assert.equal(fromLog?.["woke_file"], "events.jsonl");
+
+  const code = await daemon.stopWith("SIGTERM");
+  assert.equal(code, 0, `daemon exited ${code}: ${daemon.stderr}`);
+  assertClean(dir);
+});
+
 test("a torn tail stops the daemon at exit 3", () => {
   const dir = ready(POLICY, "proposed");
   appendFileSync(logPath(dir), "{\"seq\":99", "utf8");
@@ -1076,6 +1240,9 @@ test("the DaemonEvent union is frozen public output: every variant, listed", () 
     escalated: true,
     escalation_cleared: true,
     tick: true,
+    // APRV-230: the watcher trace's line, emitted only under --trace-watch.
+    // Appended to the union, so no existing entry changed meaning.
+    watch: true,
     warning: true,
     stopped: true,
   };
@@ -1094,6 +1261,7 @@ test("the DaemonEvent union is frozen public output: every variant, listed", () 
     "stopped",
     "tick",
     "warning",
+    "watch",
     "write_back",
   ]);
 });

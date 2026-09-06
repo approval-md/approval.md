@@ -3684,7 +3684,37 @@ a load problem.
 
 The daemon never wakes itself: the verified-head snapshot it publishes beside
 the log, `QUEUE.md`, and its own task-file write-backs are filtered out of the
-watcher. Any tick you see with no external append is the `--interval` tick.
+watcher. Bookkeeping files are filtered too (APRV-230): the append lockfile
+`events.jsonl.lock` that every writer creates and removes around each append,
+editor swap, autosave, lock and backup files (`.task-042.md.swp`,
+`#task-042.md#`, `.#task-042.md`, `task-042.md~`), and macOS's `.DS_Store` and
+`._*` residue. Those are events about how a change was made rather than about
+the change, and a tick scheduled for one re-derives an answer nothing moved.
+
+**What woke a tick.** Every `tick` line carries `woke_by`: `log` or `tasks` for
+the watcher whose event opened the debounce window, `interval` for the periodic
+tick, the startup tick and `--once`. When the platform named a file, `woke_file`
+carries it. A tick that says `log` at an unchanged head is a watcher event this
+runtime has not learned to attribute, which is exactly the question APRV-230
+opened; the one wake source left deliberately unattributed is a platform event
+that names no file, which is the platform saying "something in this directory
+changed" and could be the log itself.
+
+**`--trace-watch`** prints one line per filesystem watcher event, ignored ones
+included, and changes nothing else about the run. It is the instrument for "why
+is this daemon ticking": each line names the watcher, the platform's own event
+type, the file it named (or `null`), whether a tick was scheduled, and, when it
+was not, the reason (`self-write`, `own-temp`, `bookkeeping`, `not-the-log`). On
+a busy checkout it is several lines per second, so it is off by default and is
+meant to be run for a window and counted, not left on. It is spelled the same on
+`approval up`.
+
+```
+watch: log change events.jsonl — tick scheduled
+watch: log rename events.jsonl.lock — ignored (bookkeeping)
+watch: log rename verified-head.json — ignored (not-the-log)
+watch: tasks change task-042.md — ignored (self-write)
+```
 
 If `tick.ms` times the append rate approaches one core, raise `--debounce`
 (`1s` to `5s` coalesces a burst of appends into one tick at the cost of that much
@@ -3715,8 +3745,13 @@ with the log idle is a bug: file it with the `tick` line's `phases`.
  "commit":"<40hex>","pr_url":"https://github.com/…","pr_created":true,
  "rebuilt":false,"rebuilt_on":null,
  "code":null,"message":"seq 4..10 is on records-log-2026-09-01","flush":false}
+{"event":"watch","watcher":"log","type":"change","file":"events.jsonl",
+ "action":"scheduled","reason":null}
+{"event":"watch","watcher":"log","type":"rename","file":"events.jsonl.lock",
+ "action":"ignored","reason":"bookkeeping"}
 {"event":"tick","n":1,"head":10,"drift":1,"expired":1,"escalated":0,
- "ms":41,"reads":8,"reproof":"full","phases":{"drift":9,"ttl":3,"audit":6,
+ "ms":41,"reads":8,"reproof":"full","woke_by":"log","woke_file":"events.jsonl",
+ "phases":{"drift":9,"ttl":3,"audit":6,
  "dark":0,"prune":1,"write_back":4,"advance":0,"escalations":1,"render":12}}
 {"event":"stopped","reason":"SIGINT","ticks":3,"drift":1,"expired":1,
  "renders":3}
