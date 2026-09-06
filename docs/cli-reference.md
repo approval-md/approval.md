@@ -4250,6 +4250,31 @@ Already-exported values win. A variable set in this shell is reported
 authority, and a file that could override it would be a file that silently
 redirects a gate operation's credentials.
 
+**The export block says what it exported.** Alongside the values it emits one
+more line, which carries no value on any path:
+
+```
+export APPROVAL_ENV_PROVENANCE='1:3f2a9c11:<64 hex>:APPROVAL_TG_TOKEN,APPROVAL_TG_CHAT'
+                                │ │        │        └ the NAMES it exported from the file
+                                │ │        └ sha256 of the env file bytes it read
+                                │ └ the instance whose file that was
+                                └ the format version
+```
+
+`approval up`, `approval doctor` and `--check` below report an exported variable
+whose file line was not consulted, and they read no values by design, so without
+this they could not tell a stranger's export from the one `eval "$(approval
+env)"` had just made from this instance's own file. They reported the documented
+ritual as cross-instance bleed, which is a check asserting something it never
+tested. With the line present, a variable it names is treated as this instance's
+own export and is not reported; an export with no provenance, with another
+instance's id, with a digest that no longer matches the file, or simply not in
+the list is still reported. A value that was already exported in your shell is
+re-exported by the block and is deliberately left out of the list, so passing a
+foreign credential through one `eval` cannot launder it. The line is omitted when
+nothing was resolved from the file. Nothing here changes what wins: your shell
+still does.
+
 Exit 0 even when variables are unresolved, because the output is destined for
 `eval` and a shell function that failed on an unconfigured channel is one nobody
 keeps in their profile. `--check` is the path with an opinion. A defaulted
