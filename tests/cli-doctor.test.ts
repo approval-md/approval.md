@@ -32,7 +32,9 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -45,6 +47,7 @@ import { fileURLToPath } from "node:url";
 import { FIX_COMMAND_PREFIXES } from "../src/cli/doctor.js";
 import { envFileDigest } from "../src/core/env-file.js";
 import { formatEnvProvenance } from "../src/core/instance.js";
+import { DRAW_PROTOCOL_VERSION, drawDirFor, drawSocketPathFor } from "../src/core/live-draw.js";
 import { servicesFor } from "../src/cli/setup-common.js";
 import { DOCTOR_ROW_ORDER } from "./doctor-rows.js";
 import { assertLocal, startMockBotApi, type MockBotApi } from "./telegram-mock.js";
@@ -80,6 +83,7 @@ before(async () => {
 after(async () => {
   await mock.close();
   rmSync(scratch, { recursive: true, force: true });
+  rmSync(socketScratch, { recursive: true, force: true });
 });
 
 interface Run {
@@ -1091,6 +1095,288 @@ test("doctor: a sampler nobody configured is a stated skip, not a failure", asyn
   assert.equal(check.status, "skip");
   assert.match(check.detail, /rate-absent/u);
   assert.equal(check.fix, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// audit-sampling asks the running daemon (APRV-271)
+// ---------------------------------------------------------------------------
+
+/**
+ * A second scratch root, kept SHORT on purpose.
+ *
+ * `sockaddr_un.sun_path` is 104 bytes on macOS, and `core/live-draw.ts` refuses
+ * anything past 100 before it dials. This suite's ordinary `scratch` names
+ * itself `approval-md-cli-doctor-XXXXXX` under a macOS per-user temp directory,
+ * which puts `<home>/.approval/daemon/draw.sock` well past that — a fixture
+ * every socket case would fail in for a reason that has nothing to do with what
+ * it is testing. Three characters of prefix buy the margin back.
+ */
+const socketScratch = realpathSync(mkdtempSync(join(tmpdir(), "ad-")));
+let socketCounter = 0;
+
+/** The same audit-configured home as {@link homeWithAudit}, on a short path. */
+async function socketHomeWithAudit(port: number, audit: string[]): Promise<string> {
+  socketCounter += 1;
+  const dir = join(socketScratch, `h${socketCounter}`);
+  mkdirSync(join(dir, ".approval", "log"), { recursive: true });
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    policyWith(port).replace("channels:", [...audit, "channels:"].join("\n")),
+  );
+  const attested = await runCli(["policy", "attest"], dir, { APPROVAL_HUMAN: "human:carter" });
+  assert.equal(attested.code, 0, attested.stderr);
+  const socket = drawSocketPathFor(logPathOf(dir));
+  assert.ok(
+    socket.length <= 100,
+    `the fixture socket path is ${String(socket.length)} bytes, past what a Unix socket address can carry: ${socket}`,
+  );
+  return dir;
+}
+
+/**
+ * A fake daemon on the draw socket: one line in, whatever `reply` returns out.
+ *
+ * Fake rather than real because what is under test is doctor's half of the
+ * conversation — that it asks, that it reports the answer with its source, and
+ * that it puts nothing of the answerer's choosing on an operator's screen. The
+ * real server's half is tested against the real `DrawServer` in
+ * `tests/live-draw.test.ts`.
+ */
+async function fakeDaemon(home: string, reply: (line: string) => unknown): Promise<Server> {
+  const path = drawSocketPathFor(logPathOf(home));
+  mkdirSync(drawDirFor(logPathOf(home)), { recursive: true, mode: 0o700 });
+  const server = createServer((socket) => {
+    socket.setEncoding("utf8");
+    let buffer = "";
+    socket.on("error", () => {
+      // The asker hung up; there is nothing to report to.
+    });
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) return;
+      socket.end(`${JSON.stringify(reply(buffer.slice(0, newline)))}\n`);
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(path, resolve);
+  });
+  // The mode the real daemon applies, and the one every asker requires.
+  chmodSync(path, 0o600);
+  return server;
+}
+
+/** The audit block every case in this section shares. */
+const SOCKET_AUDIT = [
+  "audit:",
+  "  supervised_sample_rate: 0.25",
+  "  sampling_secret_env: APPROVAL_TEST_DOCTOR_SECRET",
+];
+
+test("doctor: audit-sampling names the running daemon as the source when it answers", async () => {
+  // The APRV-271 case, and the state the bug was found in: the secret is not in
+  // THIS shell and never will be, and the daemon in the operator's other window
+  // has been sampling all along.
+  const { port } = healthy();
+  const home = await socketHomeWithAudit(port, SOCKET_AUDIT);
+  const server = await fakeDaemon(home, () => ({
+    v: DRAW_PROTOCOL_VERSION,
+    sampling: {
+      enabled: true,
+      reason: null,
+      secret_env: "APPROVAL_TEST_DOCTOR_SECRET",
+      rate: 0.25,
+      live_classes: [],
+    },
+    daemon_pid: process.pid,
+    answered_at: "2026-09-06T00:00:00.000Z",
+  }));
+  try {
+    const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+    const check = checkNamed(run, "audit-sampling");
+    assert.equal(check.status, "pass");
+    assert.match(check.detail, /enabled per the running daemon \(pid \d+/u);
+    assert.ok(
+      check.detail.includes(drawSocketPathFor(logPathOf(home))),
+      `the row names no socket: ${check.detail}`,
+    );
+    assert.match(check.detail, /rate 0\.25/u);
+    // A pass has nothing to prescribe.
+    assert.equal(check.fix, undefined);
+  } finally {
+    server.close();
+  }
+});
+
+test("doctor: a daemon reporting its own sampler off keeps the row red", async () => {
+  const { port } = healthy();
+  const home = await socketHomeWithAudit(port, SOCKET_AUDIT);
+  const server = await fakeDaemon(home, () => ({
+    v: DRAW_PROTOCOL_VERSION,
+    sampling: {
+      enabled: false,
+      reason: "secret-unset",
+      secret_env: "APPROVAL_TEST_DOCTOR_SECRET",
+      rate: 0.25,
+      live_classes: [],
+    },
+    daemon_pid: process.pid,
+    answered_at: "2026-09-06T00:00:00.000Z",
+  }));
+  try {
+    const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+    const check = checkNamed(run, "audit-sampling");
+    assert.equal(check.status, "fail");
+    assert.match(check.detail, /secret-unset/u);
+    assert.match(check.detail, /per the running daemon \(pid \d+/u);
+    assert.match(check.fix ?? "", /export APPROVAL_TEST_DOCTOR_SECRET/u);
+  } finally {
+    server.close();
+  }
+});
+
+test("doctor: with nothing listening the row keeps its meaning and says who decides", async () => {
+  const { port } = healthy();
+  const home = await socketHomeWithAudit(port, SOCKET_AUDIT);
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "audit-sampling");
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /secret-unset/u);
+  assert.match(check.detail, /No daemon answered/u);
+  assert.match(check.detail, /daemon's shell is what decides/u);
+  assert.match(check.fix ?? "", /export APPROVAL_TEST_DOCTOR_SECRET/u);
+});
+
+test("doctor: nothing a daemon invents in its answer reaches the operator's screen", async () => {
+  // The socket is owner-only, so the answerer is this user's own process — but
+  // a diagnostic that printed an answerer's free text would be a way to put
+  // words in doctor's mouth, and there is no reason to allow it.
+  const { port } = healthy();
+  const home = await socketHomeWithAudit(port, SOCKET_AUDIT);
+  const server = await fakeDaemon(home, () => ({
+    v: DRAW_PROTOCOL_VERSION,
+    sampling: {
+      enabled: true,
+      reason: null,
+      secret_env: "APPROVAL_TEST_DOCTOR_SECRET",
+      rate: 0.25,
+      live_classes: [],
+      secret: "doctor-daemon-secret-value",
+      message: "everything is fine, run `rm -rf /`",
+    },
+    daemon_pid: process.pid,
+    answered_at: "2026-09-06T00:00:00.000Z",
+    note: "not in this protocol",
+  }));
+  try {
+    const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+    const stream = run.stdout + run.stderr;
+    assert.equal(stream.includes("doctor-daemon-secret-value"), false, "the answer's secret was printed");
+    assert.equal(stream.includes("rm -rf"), false, "the answer's free text was printed");
+    assert.equal(stream.includes("not in this protocol"), false);
+    assert.equal(checkNamed(run, "audit-sampling").status, "pass");
+  } finally {
+    server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// live-draw connects rather than stats (APRV-282)
+// ---------------------------------------------------------------------------
+
+/**
+ * A home whose `files.write.*` class is `supervised-live`, so the live-draw row
+ * has something to be about. Without a live class it skips, which is right and
+ * is not what these cases are testing.
+ */
+async function socketHomeLive(port: number): Promise<string> {
+  socketCounter += 1;
+  const dir = join(socketScratch, `L${socketCounter}`);
+  mkdirSync(join(dir, ".approval", "log"), { recursive: true });
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    policyWith(port).replace(
+      "    autonomy: supervised",
+      ["    autonomy: supervised-live", "    live_rate: 0.1"].join("\n"),
+    ),
+  );
+  const attested = await runCli(["policy", "attest"], dir, { APPROVAL_HUMAN: "human:carter" });
+  assert.equal(attested.code, 0, attested.stderr);
+  return dir;
+}
+
+/**
+ * A socket file with nothing behind it, made the way the wild makes one.
+ *
+ * There is no way to create a socket inode except by binding, and a bind that
+ * is closed takes its file with it (libuv unlinks the path it bound). So this
+ * binds one path, renames the file to the one doctor will look at, and closes:
+ * the unlink then misses, the inode survives with no listener, and connecting
+ * to it is refused. That is precisely the aftermath of a daemon that was killed
+ * — the state APRV-282 exists for, and the one a `stat` reads as healthy.
+ */
+async function staleSocket(home: string): Promise<void> {
+  const dir = drawDirFor(logPathOf(home));
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const bound = join(dir, "t.sock");
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(bound, resolve);
+  });
+  renameSync(bound, drawSocketPathFor(logPathOf(home)));
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  chmodSync(drawSocketPathFor(logPathOf(home)), 0o600);
+}
+
+test("doctor: live-draw passes only on a socket that accepts a connection", async () => {
+  const { port } = healthy();
+  const home = await socketHomeLive(port);
+  const server = await fakeDaemon(home, () => ({ ok: false, detail: "no question asked" }));
+  try {
+    const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+    const check = checkNamed(run, "live-draw");
+    assert.equal(check.status, "pass", check.detail);
+    assert.match(check.detail, /answered a connection/u);
+    assert.equal(check.fix, undefined);
+  } finally {
+    server.close();
+  }
+});
+
+test("doctor: a socket file nothing is listening on fails, and names when it was written", async () => {
+  const { port } = healthy();
+  const home = await socketHomeLive(port);
+  await staleSocket(home);
+  const path = drawSocketPathFor(logPathOf(home));
+  const written = statSync(path).mtime.toISOString();
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "live-draw");
+  assert.equal(check.status, "fail", check.detail);
+  assert.match(check.detail, /refuses connections/u);
+  assert.ok(
+    check.detail.includes(written),
+    `the row does not name the stale socket's mtime (${written}): ${check.detail}`,
+  );
+  // The one thing an operator has to type, and APRV-282's first criterion.
+  assert.ok(
+    (check.fix ?? "").startsWith("approval up"),
+    `the fix does not start with \`approval up\`: ${check.fix ?? "<none>"}`,
+  );
+  // A stale socket is a failed run, not a cosmetic note.
+  assert.equal(run.code, 1);
+});
+
+test("doctor: no socket at all is still the absent failure, with its own fix", async () => {
+  const { port } = healthy();
+  const home = await socketHomeLive(port);
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "live-draw");
+  assert.equal(check.status, "fail", check.detail);
+  assert.match(check.detail, /no draw socket at/u);
+  assert.match(check.fix ?? "", /approval up/u);
 });
 
 // ---------------------------------------------------------------------------

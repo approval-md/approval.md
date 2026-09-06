@@ -1072,11 +1072,11 @@ Flags:
   --verbose / --json   never abbreviate a detail / machine-readable output
   -h, --help       this text
 
-Twelve checks, in the order in which their failures cascade: build-freshness,
-identity, attestation, log, telegram, web-port, payload-store, audit-sampling,
-envelope-integrity, vault, environment, log-drift. APPENDS NOTHING, sends
-nothing, repairs nothing: every failure carries a fix that begins with a command
-you can paste, and no value of any credential appears in the output.
+One row per check, in the order in which their failures cascade: the build, your
+identity, the policy, the log, channels, the store, sampling, the vault, the
+environment, harness hooks, evidence sweeps, daemon health, values, checkpoints.
+Each named at docs/cli-reference.md#doctor. APPENDS NOTHING, sends nothing, and
+repairs nothing: every fix opens with a command; no credential value is printed.
 
 JSON shape: docs/cli-reference.md#doctor
 ${EXIT_CODES_POINTER} (1 when ANY check failed; 4 when doctor could not look)
