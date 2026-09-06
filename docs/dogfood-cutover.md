@@ -539,6 +539,17 @@ $EDITOR APPROVAL.md
 approval policy amend --commit
 ```
 
+When the amendment needs the pins moved as well, it is still three steps: edit
+both files, run the verb, tap.
+
+```sh
+cd /Users/carter/dev/approval-md
+$EDITOR APPROVAL.md
+$EDITOR src/core/policy-expectations.ts   # only when a class resolution moved
+npm run build                             # the ceremony runs the BUILT suite
+approval policy amend --commit
+```
+
 No `git fetch` and no `git reset --keep origin/main` first. That instruction used
 to precede every ceremony, and it was both a step to forget and a step that could
 fail on its own (`Entry '…' not uptodate. Cannot merge.` on a task file that had
@@ -551,16 +562,31 @@ protected default branch and switches to the branch flow on its own, creating
 `--direct` forces the in-place commit, and warns before printing a push that
 protection will reject.
 
+Since APRV-274 the pins travel with the amendment. When
+`src/core/policy-expectations.ts` differs from the commit the amendment is built
+on, it joins the amendment commit as a third file, the pin deltas print in the
+semantic diff beside the class deltas, and the pull request is green on the first
+push. The seq 23351 ceremony is what that replaces: the pins had to be fetched
+from a branch, unstaged (the verb refused a commit carrying anything but the
+policy and the log), then cherry-picked onto `policy-amend-<seq>` by an agent
+after the push. A pins file the base already carries stays as the base carries
+it, so a pins edit somebody else landed is never reverted by your ceremony.
+
 Your checkout is left exactly as the verb found it: still on `main`, working tree
-carrying the policy edit you made and nothing else, and the amendment commit held
-on `policy-amend-<seq>`. After the pull request merges, `approval log sync`
-brings main down safely. Four things stop the ceremony, all of them before the
+carrying the edits you made and nothing else, and the amendment commit held on
+`policy-amend-<seq>`. After the pull request merges, `approval log sync`
+brings main down safely. Five things stop the ceremony, all of them before the
 attestation, so nothing is ever half-done: `fetch-failed`,
 `base-policy-diverged` (somebody amended the policy on origin since this edit
 began; bring the checkout up to origin and re-apply the edit),
-`base-log-diverged` (run `approval log sync` first), and `policy-suite-failed`
+`base-log-diverged` (run `approval log sync` first), `policy-suite-failed`
 (the amended policy no longer resolves the way `src/core/policy-expectations.ts`
-pins it: update the pins, `npm run build`, run the verb again).
+pins it: update the pins, `npm run build`, run the verb again; and where the
+policy declares a class nothing pins, the refusal prints the exact line to
+paste), and `dogfood-suite-failed` (the whole of `tests/dogfood.test.ts` is red
+against the amended file, and the refusal names the failing test; it is also
+what you get from a `dist/` the last edit did not rebuild, because an unrun
+suite is not a green one).
 
 ## If an envelope goes missing
 

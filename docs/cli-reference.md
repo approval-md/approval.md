@@ -664,7 +664,8 @@ verifying the log chain before anything is read from it
 recovering the attested baseline and diffing it against the live policy
 fetching origin/main: the amendment is based on the remote, not on this checkout
 verifying that origin/main 4c1d90ab2f77 is this edit's base
-running the policy suite against the amended file (21 pinned resolutions)
+running the policy suite against the amended file (26 pinned resolutions)
+running the dogfood suite against the amended file (tests/dogfood.test.ts)
 building the amendment commit on origin/main 4c1d90ab2f77 (nothing is checked out)
 pushing 9b31c0de51aa to origin policy-amend-7413
 opening the pull request for policy-amend-7413
@@ -698,6 +699,27 @@ expectation diff. Nothing is attested, committed or pushed on that path. The pin
 live in `src/core/policy-expectations.ts`, which the dogfood suite imports too, so
 the check on the laptop and the check in CI are one list: update the pins, run
 `npm run build`, and re-run the ceremony.
+
+A class the policy DECLARES and the pins do not cover is the same refusal with a
+different remedy, so the refusal carries the remedy (APRV-274): it prints the
+exact source lines to paste into `REPO_POLICY_EXPECTATIONS`, resolved from the
+amended policy itself, in the message, in the runbook, and as
+`{"pins":{"module":"…","add":["  { actionClass: … },"]}}` beside the `--json`
+error object. The operator edits one file rather than working out a spelling.
+
+**And then the whole dogfood suite, still before the attestation.** The pin check
+is a subset of `tests/dogfood.test.ts`, and the seq 23351 ceremony passed the pins
+and went red on CI over a dogfood test about the values block. So `--commit` also
+RUNS the built suite (`node --test dist/tests/dogfood.test.js`, from the repo
+root) and refuses `dogfood-suite-failed` naming the failing test. The suite is run
+rather than reimplemented: it reads the live `APPROVAL.md` off disk and imports the
+pins out of `dist/`, so it asks CI's question of this ceremony's own bytes. Three
+things fail closed under that one code, because an unrun suite is not a green one:
+a red suite, a suite present in `tests/` and absent from `dist/` (a stale build,
+whose pins are the previous edit's), and a suite that could not be spawned or ran
+past its five-minute limit. A repository with no `tests/dogfood.test.ts` in source
+skips the whole step, which is what keeps the shipped CLI from running this
+project's tests inside somebody else's checkout.
 
 **Branch protection (the two flows).** A protected default branch rejects the
 push that would land the amendment, so this verb detects one and offers the flow
@@ -749,14 +771,26 @@ semantic diff is unavailable, and only the load advisory and the attestation
 run. There is no `--baseline` flag, because a baseline supplied by hand is a
 baseline nobody can verify.
 
-`--commit` carries exactly two files: the policy and the log. It refuses outside
-a git repository, and refuses when the index holds staged changes to anything
-else — a commit that swept in an unrelated staged edit would make "this commit
-is the amendment" false. On the branch flow it also refuses when there is no
-`origin` remote, and when a `--branch` name already exists. Every one of those
-refusals happens BEFORE the attestation, so a refused `--commit` never leaves an
-attested policy without its commit. The same holds for the fetch, the two base
-checks and the policy suite above.
+`--commit` carries exactly these files: the policy, the log, and (APRV-274) the
+pins in `src/core/policy-expectations.ts` when they moved. The pins are part of
+an amendment's contract (CI's dogfood suite resolves the amended policy against
+them, and it reads both out of the same commit), so a rule that took the policy
+and the log and refused the pins was a rule that split one amendment across a
+commit, a hand-run cherry-pick and a second red CI run. "Moved" is measured against the
+commit the amendment is BUILT ON (`origin/<default branch>`, or `HEAD` where
+there is no remote), so a pins file the base already carries stays exactly as the
+base carries it, and a pins edit somebody else landed is not reverted by this
+ceremony. The pin deltas print in the semantic diff beside the class deltas, ride
+in the commit subject, and appear in `--json` as `pins`.
+
+It refuses outside a git repository, and refuses when the index holds staged
+changes to anything beyond those three: a commit that swept in an unrelated
+staged edit would make "this commit is the amendment" false. On the branch flow
+it also refuses when there is no `origin` remote, and when a `--branch` name
+already exists. Every one of those refusals happens BEFORE the attestation, so a
+refused `--commit` never leaves an attested policy without its commit. The same
+holds for the fetch, the two base checks, the policy suite and the dogfood suite
+above.
 
 `--commit` also pushes, on both flows. When there is no `origin` to push to, the
 direct flow reports the push as still to run rather than listing it among the
@@ -895,9 +929,9 @@ is the human rendering only.
 4. runs the load advisory;
 5. asks for confirmation (skipped by `--yes` and `--dry-run`);
 6. attests: one `policy.updated` event, identical to `approval policy attest`;
-7. prints, or with `--commit` runs, the git ceremony — `git add <policy> <log>`,
-   a `git commit` citing the attestation seq, and the push (and, on the branch
-   flow, the branch and the pull request);
+7. prints, or with `--commit` runs, the git ceremony — `git add <policy> <log>`
+   (plus the pins when they moved), a `git commit` citing the attestation seq,
+   and the push (and, on the branch flow, the branch and the pull request);
 8. publishes, unless `--no-publish`: a push the remote refuses is answered by
    the branch, push, pull request and auto-merge above, each reported as it
    lands, and a step that fails drops to the runbook from there.
@@ -947,6 +981,9 @@ attestation may still proceed.
              "commands":["git add ...","git commit -m ...","git push ..."],
              "committed":false,"pushed":false,"prUrl":null|"https://...",
              "output":null|"..."},
+ "pins":null|{"module":"src/core/policy-expectations.ts",
+             "changes":[{"actionClass":"log.sync","before":null|"autonomous/rule",
+               "after":null|"manual/rule"}]},
  "ceremony":{"attested":true|false,"seq":null|2},
  "publishing":null|{"attempted":true,"complete":true,
              "via":"direct"|"branch"|"recovery"|"none",
@@ -965,6 +1002,12 @@ key beside them): `ceremony.attested` is whether THIS run attested, while the
 top-level `attested` remains the attestation it moved from, and `publishing` is
 null until a ceremony reaches its publishing half. `publishing.steps` lists the
 commands the verb RAN, in order, the refused direct push included.
+`pins` (additive, always present) is null when the pins are no part of the
+ceremony, for any of its three reasons: these pins do not govern this policy,
+there is no pins module, the file is what the base carries. Inside `changes`, a
+null `before` or `after` means the class was NOT PINNED on that side, and it is
+the only thing it means: an entry whose resolution the reader could not make out
+reads `"unreadable"` there instead.
 A refusal is `{"ok":false,"error":{"code":"...","message":"..."}}` on stderr,
 and after the attestation it carries `ceremony` and `publishing` alongside
 `error`, so a machine caller reads "attested, not published" without parsing
@@ -978,9 +1021,21 @@ the message.
 - `load-failed` — `--require-load` and the policy does not load. Nothing was
   appended.
 - `commit-preconditions` — `--commit` outside a git repository, with staged
-  changes beyond the policy and the log, or (branch flow) with no origin remote
-  or a `--branch` name already taken. Checked before the attestation; nothing was
-  appended.
+  changes beyond the policy, the log and the pins, or (branch flow) with no
+  origin remote or a `--branch` name already taken. Checked before the
+  attestation; nothing was appended.
+- `fetch-failed` / `base-policy-diverged` / `base-log-diverged` — the remote the
+  amendment would be based on could not be fetched, carries a policy this edit
+  was not written against, or carries a log this working log does not contain.
+  All three are checked before the attestation; nothing was appended.
+- `policy-suite-failed` — a pinned class resolves differently under the amended
+  policy, or the policy declares a class the pins do not cover. The message
+  carries the expectation diff and, for an unpinned class, the exact pin line to
+  add. Checked before the attestation; nothing was appended.
+- `dogfood-suite-failed` — the built dogfood suite is red against the amended
+  policy (the message names the failing test), is absent from `dist/` while
+  present in `tests/`, or could not be run at all. Checked before the
+  attestation; nothing was appended.
 - `git-failed` — the attestation WAS appended and git then failed; the message
   names the seq and what to run by hand.
 - `push-rejected` — the attestation was appended and committed, and the remote

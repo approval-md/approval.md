@@ -60,6 +60,7 @@ import { createHash } from "node:crypto";
 import {
   accessSync,
   constants,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -81,8 +82,13 @@ import { diffPolicies, renderDiff, SPEC_NAMESPACES, type PolicyDiff } from "../c
 import {
   checkPolicyExpectations,
   describeFailure,
+  describePinChange,
+  diffPinSources,
   expectationsFor,
+  DOGFOOD_SUITE_BUILT,
+  DOGFOOD_SUITE_SOURCE,
   EXPECTATIONS_MODULE,
+  type PinChange,
 } from "../core/policy-expectations.js";
 import {
   loadPolicy,
@@ -185,6 +191,21 @@ type AmendErrorCode =
   | "base-log-diverged"
   /** The amended policy does not resolve the way its pins say it must. */
   | "policy-suite-failed"
+  /**
+   * The dogfood suite is red against the amended policy (APRV-274).
+   *
+   * Distinct from `policy-suite-failed`, which is the pin check alone. This one
+   * is the whole of `tests/dogfood.test.ts`: the pins, the parsed shape of the
+   * policy, the classifier reachability sweep, and whatever a later task adds
+   * to it. The seq 23351 ceremony went red on CI over a dogfood test the pin
+   * check does not run, so a ceremony that ran only the pins was still handing
+   * CI a pull request that already carried an attestation. Like every code
+   * above it, it fires BEFORE the attestation and leaves nothing behind. The
+   * same code answers a suite that is present in source and absent from the
+   * build, and a suite that could not be run at all: an unrun suite is not a
+   * green one.
+   */
+  | "dogfood-suite-failed"
   | "git-failed"
   | "push-rejected"
   | "pr-failed"
@@ -709,19 +730,303 @@ function recoverBaseline(policyPath: string, attestedSha256: string | null): Bas
 }
 
 // ---------------------------------------------------------------------------
+// The pins file, and the suite that reads it (APRV-274)
+// ---------------------------------------------------------------------------
+
+/** The pins file's part in this ceremony, when it has one. */
+interface PinsChange {
+  /** Repo-relative, as git spells it: the path that joins the commit. */
+  arg: string;
+  /** Absolute, for the `git add` line an operator may copy. */
+  path: string;
+  /** Which pins moved, for the Changes section and the `--json` report. */
+  changes: PinChange[];
+}
+
+/**
+ * Did the pins file move between `rev` and the working tree (APRV-274)?
+ *
+ * The seq 23351 ceremony is the reason this exists. The pins in
+ * `src/core/policy-expectations.ts` are part of an amendment's contract: CI's
+ * dogfood suite resolves the amended policy against them, and it reads both out
+ * of the same commit. The verb used to refuse a commit carrying anything but
+ * the policy and the log, so the pins had to be unstaged before the ceremony
+ * and cherry-picked onto the amendment branch after the push, which is four
+ * hand steps and two red CI runs for one policy edit.
+ *
+ * `rev` is the commit the amendment is being BUILT ON, not `HEAD`: the commit is
+ * assembled on the remote's tip, so the remote's tip is the thing this file is
+ * moving away from. Where a ceremony has no base yet (the report-only and
+ * `--dry-run` paths, which build nothing) `HEAD` stands in for it.
+ *
+ * `null` is "the pins are not part of this ceremony", for all three of its
+ * reasons: the policy is not one these pins govern, the file is not there, and
+ * the file is byte-for-byte what `rev` carries.
+ */
+function pinsChangeIn(root: string, policyPath: string, rev: string): PinsChange | null {
+  if (expectationsFor(policyPath) === null) return null;
+  const path = join(root, EXPECTATIONS_MODULE);
+  let working: string;
+  try {
+    working = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  const based = showBlob(root, rev, EXPECTATIONS_MODULE);
+  const before = based === null ? "" : based.toString("utf8");
+  if (before === working) return null;
+  return { arg: EXPECTATIONS_MODULE, path, changes: diffPinSources(before, working) };
+}
+
+/**
+ * How long the ceremony waits for the dogfood suite before giving up on it.
+ *
+ * Generous, because the cost of being wrong in each direction is not
+ * symmetrical: a suite that needed one more second reports `dogfood-suite-failed`
+ * and the operator re-runs a ceremony that has attested nothing, while a
+ * ceremony that gave up early and called it green is the outcome this whole
+ * check exists to prevent. The suite reads one policy file and resolves a few
+ * dozen classes; it does not go near this ceiling.
+ */
+const DOGFOOD_SUITE_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** At most this many failing test names ride in a refusal; the rest are counted. */
+const DOGFOOD_FAILURES_SHOWN = 5;
+
+/** What running the dogfood suite established. Every arm but `passed` refuses. */
+type SuiteOutcome =
+  | { kind: "skipped" }
+  | { kind: "passed" }
+  | { kind: "not-built" }
+  | { kind: "failed"; tests: string[] }
+  | { kind: "unrunnable"; detail: string };
+
+/**
+ * The names of the tests a TAP stream reported as failing.
+ *
+ * `not ok <n> - <name>`, at any indent, because a failing subtest is a failing
+ * test and its name is the one that says what broke. A trailing TAP directive
+ * (`# SKIP`, `# TODO`) is not part of the name. Duplicates collapse: one test
+ * can be reported at its own level and again in its parent's summary, and a
+ * refusal naming the same test twice reads as two failures. A name that is an
+ * absolute path is the runner's own FILE-level line, which some versions emit
+ * beside the failing test and which tells an operator nothing they did not
+ * already know from the code they are reading.
+ */
+function failedTapTests(output: string): string[] {
+  const names = new Set<string>();
+  for (const line of output.split("\n")) {
+    const matched = /^\s*not ok\s+\d+\s*-?\s*(.*)$/u.exec(line);
+    if (matched === null) continue;
+    const name = (matched[1] ?? "").replace(/\s+#\s.*$/u, "").trim();
+    if (name.length > 0 && !name.startsWith("/")) names.add(name);
+  }
+  return [...names];
+}
+
+/**
+ * How many tests a TAP stream says it ran, or `null` when it did not say.
+ *
+ * The counterpart to {@link failedTapTests} and the reason a green exit is not
+ * taken at face value: a runner that ran NOTHING also exits 0, and a ceremony
+ * that read that as a passing suite would be reporting the strongest possible
+ * evidence from the weakest possible run.
+ */
+function tapTestCount(output: string): number | null {
+  const matched = /^#\s+tests\s+(\d+)\s*$/mu.exec(output);
+  return matched === null ? null : Number(matched[1]);
+}
+
+/** The failing tests as one clause, capped so a refusal stays readable. */
+function summarizeFailures(tests: readonly string[]): string {
+  if (tests.length === 0) return "the suite exited non-zero and named no test";
+  const shown = tests.slice(0, DOGFOOD_FAILURES_SHOWN);
+  const rest = tests.length - shown.length;
+  return `${shown.join("; ")}${rest > 0 ? ` (and ${String(rest)} more)` : ""}`;
+}
+
+/**
+ * Run this repository's dogfood suite against the amended policy (APRV-274).
+ *
+ * It is run rather than reimplemented: `tests/dogfood.test.ts` reads the live
+ * `APPROVAL.md` off disk and imports the BUILT pins, so running the built suite
+ * from the repository root asks exactly the question CI asks, of exactly the
+ * bytes this ceremony is about to attest. A second copy of those assertions
+ * inside the verb would be a second thing to keep in step with the first.
+ *
+ * Fail closed in four directions. A build output that is missing beside a
+ * present source is refused rather than skipped, because the suite would
+ * otherwise read the PREVIOUS build's pins and answer for an edit nobody made.
+ * A suite that could not be spawned, or that ran past its timeout, is refused
+ * for the same reason: nothing was established. A suite that exits 0 having
+ * reported no tests is refused too, because a green exit over an empty run is
+ * the strongest-looking evidence this check could report and the weakest there
+ * is. And a repository with no dogfood suite in source is skipped outright,
+ * which is what keeps a shipped CLI from running this repository's tests inside
+ * somebody else's checkout.
+ *
+ * `NODE_TEST_CONTEXT` is stripped from the child's environment, and that line is
+ * load-bearing rather than tidy. `node:test` responds to that variable by
+ * declining to run files recursively: it prints a warning, runs nothing, and
+ * EXITS 0. The variable is set for anything the test runner itself spawned, so
+ * a ceremony run from inside a test (which is how this code is exercised) read a
+ * red suite as green and published the whole amendment. The empty-run guard
+ * above does not catch that case on its own, because the runner still counts the
+ * file it declined to run as one passing test.
+ */
+function runDogfoodSuite(root: string): SuiteOutcome {
+  if (!existsSync(join(root, DOGFOOD_SUITE_SOURCE))) return { kind: "skipped" };
+  const built = join(root, DOGFOOD_SUITE_BUILT);
+  if (!existsSync(built)) return { kind: "not-built" };
+
+  const env = { ...process.env };
+  // See the header: with this set, `node:test` runs nothing and exits 0.
+  delete env["NODE_TEST_CONTEXT"];
+  const run = spawnSync(process.execPath, ["--test", "--test-reporter=tap", built], {
+    cwd: root,
+    encoding: "utf8",
+    env,
+    timeout: DOGFOOD_SUITE_TIMEOUT_MS,
+    maxBuffer: GIT_OUTPUT_LIMIT_BYTES,
+  });
+  if (run.error !== undefined || run.status === null) {
+    return {
+      kind: "unrunnable",
+      detail:
+        run.error === undefined
+          ? `the suite produced no exit status (it may have run past its ${String(
+              DOGFOOD_SUITE_TIMEOUT_MS / 1000,
+            )}s limit)`
+          : run.error.message,
+    };
+  }
+  const output = `${run.stdout}\n${run.stderr}`;
+  if (run.status === 0) {
+    const count = tapTestCount(output);
+    if (count === null || count === 0) {
+      return {
+        kind: "unrunnable",
+        detail:
+          count === null
+            ? "the suite exited 0 and reported no test count at all"
+            : "the suite exited 0 having run 0 tests",
+      };
+    }
+    return { kind: "passed" };
+  }
+  return { kind: "failed", tests: failedTapTests(output) };
+}
+
+/**
+ * A `dogfood-suite-failed` refusal, on both surfaces.
+ *
+ * One function for the three arms so the machine message and the runbook can
+ * never drift into telling an operator two different stories about the same
+ * outcome. Every arm ends the same way: nothing was attested.
+ */
+function dogfoodRefusal(
+  suite: Extract<SuiteOutcome, { kind: "not-built" | "failed" | "unrunnable" }>,
+  st: ReturnType<typeof style>,
+): { message: string; human: string } {
+  const rerun = `node --test ${DOGFOOD_SUITE_BUILT}`;
+  const shared = {
+    state: [
+      "nothing was attested: the policy edit is still only a working-tree change",
+      "nothing was committed and nothing was pushed",
+    ],
+    footer: [
+      "this is the suite CI runs: failing it here costs a minute, failing it there costs a red pull request carrying an attestation",
+    ],
+  };
+  if (suite.kind === "not-built") {
+    return {
+      message: `the dogfood suite ${DOGFOOD_SUITE_SOURCE} is not built: there is no ${DOGFOOD_SUITE_BUILT} to run, so the pins a ceremony would check are the ones the last build compiled`,
+      human: runbook(st, "dogfood-suite-failed", "the dogfood suite is not built", {
+        ...shared,
+        steps: [
+          { command: "npm run build", note: "the ceremony runs the BUILT suite and the built pins" },
+          { command: "approval policy amend --commit", note: "re-run; it starts over cleanly" },
+        ],
+      }),
+    };
+  }
+  if (suite.kind === "unrunnable") {
+    return {
+      message: `the dogfood suite ${DOGFOOD_SUITE_SOURCE} could not be run (${suite.detail}), so nothing about the amended policy was established`,
+      human: runbook(st, "dogfood-suite-failed", "the dogfood suite could not be run", {
+        ...shared,
+        quote: [suite.detail],
+        steps: [
+          { command: rerun, note: "run it yourself and see what it says" },
+          { command: "approval policy amend --commit", note: "re-run once it runs" },
+        ],
+      }),
+    };
+  }
+  return {
+    message: `the dogfood suite ${DOGFOOD_SUITE_SOURCE} is RED against the amended policy: ${summarizeFailures(
+      suite.tests,
+    )}`,
+    human: runbook(st, "dogfood-suite-failed", "the dogfood suite is red against the amended policy", {
+      ...shared,
+      state: [...shared.state, ...suite.tests.slice(0, DOGFOOD_FAILURES_SHOWN)],
+      steps: [
+        { command: rerun, note: "the same run, with the whole output" },
+        {
+          command: `$EDITOR ${EXPECTATIONS_MODULE}`,
+          note: "when it is the pins that have to move with this amendment",
+        },
+        { command: "npm run build", note: "the ceremony runs the BUILT suite and the built pins" },
+        { command: "approval policy amend --commit", note: "re-run; it starts over cleanly" },
+      ],
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // The verb
 // ---------------------------------------------------------------------------
 
-/** The one-line summary that becomes the commit subject. */
-function summarize(policyPath: string, diff: PolicyDiff | null): string {
+/** What `--commit` needs before it may write anything. */
+interface CommitPlan {
+  root: string;
+  policyArg: string;
+  logArg: string;
+  /**
+   * The pins file, repo-relative, when these pins govern this policy (APRV-274).
+   * It is the third file the amendment commit may carry, and the third path the
+   * staged-changes check does not treat as a stray.
+   */
+  pinsArg: string | null;
+}
+
+/**
+ * The one-line summary that becomes the commit subject.
+ *
+ * The pins ride in it on the same footing as the class resolutions (APRV-274):
+ * they are part of the amendment's contract, they are in the commit, and a
+ * subject that named only the policy would describe a commit carrying more than
+ * it said. A pins file that moved without moving any pin (a comment, a note) is
+ * still named, because it is still in the commit.
+ */
+function summarize(policyPath: string, diff: PolicyDiff | null, pins: PinsChange | null): string {
   const name = basename(policyPath);
-  if (diff === null) return `amend ${name} (semantic diff unavailable)`;
+  const pinPart =
+    pins === null
+      ? null
+      : pins.changes.length === 0
+        ? "pins file"
+        : `${pins.changes.length} pin(s)`;
+  if (diff === null) {
+    return `amend ${name} (semantic diff unavailable${pinPart === null ? "" : `, ${pinPart}`})`;
+  }
   const parts: string[] = [];
   if (diff.classes.length > 0) parts.push(`${diff.classes.length} class resolution(s)`);
   if (diff.approvers.length > 0) parts.push(`${diff.approvers.length} approver change(s)`);
   if (diff.defaults.length > 0) parts.push(`${diff.defaults.length} default(s)`);
   if (diff.budgets.length > 0) parts.push(`${diff.budgets.length} limit(s)`);
   if (diff.vocabulary.length > 0) parts.push(`${diff.vocabulary.length} policy key(s)`);
+  if (pinPart !== null) parts.push(pinPart);
   if (parts.length === 0) return `amend ${name} (no semantic change)`;
   return `amend ${name}: ${parts.join(", ")}`;
 }
@@ -1171,7 +1476,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
   // --commit's preconditions are checked BEFORE anything is written. Refusing
   // after the attestation would recreate the very interregnum this verb exists
   // to close: an attested policy with no commit carrying it.
-  let commitPlan: { root: string; policyArg: string; logArg: string } | null = null;
+  let commitPlan: CommitPlan | null = null;
   /**
    * The remote tip this ceremony's commit will be parented on (APRV-203).
    *
@@ -1180,6 +1485,11 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
    * base nobody checked.
    */
   let commitBase: { remote: string | null; branch: string; sha: string } | null = null;
+  /**
+   * The pins file's part in this ceremony (APRV-274), settled before the
+   * attestation like everything else the commit depends on.
+   */
+  let pinsChange: PinsChange | null = null;
   if (wantCommit && !dryRun) {
     const plan = planCommit(policyPath, logPath, useBranch ? { branch: branchFlag } : null);
     if (!plan.ok) {
@@ -1197,6 +1507,11 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     }
     commitBase = prepared.base;
 
+    // APRV-274: the pins are read against the commit this amendment is BUILT
+    // on, so a pins file that moved rides in the amendment commit and one that
+    // did not is left exactly as the base carries it.
+    pinsChange = pinsChangeIn(commitPlan.root, policyPath, commitBase.sha);
+
     // The dogfood pins, run against the AMENDED file before anything is
     // attested or pushed (APRV-203). A policy edit whose pins nobody updated
     // used to be found by CI, hours later, on a pull request that was already
@@ -1209,13 +1524,23 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       const checked = checkPolicyExpectations(liveLoad, expectations);
       progress.done();
       if (!checked.ok) {
+        // APRV-274: an undeclared class the check reports as `unpinned` carries
+        // the line that pins it, resolved from the amended policy itself. The
+        // operator edits one file; they do not work out a spelling.
+        const pinsToAdd = checked.failures
+          .map((failure) => failure.pinLine)
+          .filter((line): line is string => line !== undefined);
+        const addSentence =
+          pinsToAdd.length === 0
+            ? ""
+            : ` Add to ${EXPECTATIONS_MODULE}: ${pinsToAdd.map((line) => line.trim()).join(" ")}`;
         return refuse(
           streams,
           json,
           "policy-suite-failed",
           `the amended policy does not match its pins: ${checked.failures
             .map(describeFailure)
-            .join("; ")}. Nothing was attested, committed or pushed`,
+            .join("; ")}.${addSentence}. Nothing was attested, committed or pushed`,
           EXIT_USAGE,
           runbook(st, "policy-suite-failed", "the amended policy does not match its pins", {
             state: [
@@ -1226,18 +1551,58 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
             steps: [
               {
                 command: `$EDITOR ${EXPECTATIONS_MODULE}`,
-                note: "make the pins say what the amendment means them to say",
+                note:
+                  pinsToAdd.length === 0
+                    ? "make the pins say what the amendment means them to say"
+                    : `add ${String(pinsToAdd.length)} line(s), printed below`,
               },
               { command: "npm run build", note: "the ceremony reads the compiled pins" },
               { command: "approval policy amend --commit", note: "re-run; it starts over cleanly" },
             ],
             footer: [
+              ...(pinsToAdd.length === 0
+                ? []
+                : [
+                    `the lines to add to REPO_POLICY_EXPECTATIONS in ${EXPECTATIONS_MODULE}:`,
+                    ...pinsToAdd.map((line) => st.value(line)),
+                    "",
+                  ]),
               "this is the check CI runs: failing it here costs a minute, failing it there costs a red pull request carrying an attestation",
             ],
           }),
+          pinsToAdd.length === 0 ? undefined : { pins: { module: EXPECTATIONS_MODULE, add: pinsToAdd } },
+        );
+      }
+
+      // APRV-274: and then the whole suite, which is more than the pins. The
+      // seq 23351 ceremony passed the pin check and went red on CI over a
+      // dogfood test about the values block, a test the pin check does not run
+      // and could not have run. Reading `APPROVAL.md` off disk and the pins out
+      // of `dist/`, the built suite asks the ceremony's own question of the
+      // ceremony's own bytes.
+      progress.phase(`running the dogfood suite against the amended file (${DOGFOOD_SUITE_SOURCE})`);
+      const suite = runDogfoodSuite(commitPlan.root);
+      progress.done();
+      if (suite.kind !== "passed" && suite.kind !== "skipped") {
+        const refusal = dogfoodRefusal(suite, st);
+        return refuse(
+          streams,
+          json,
+          "dogfood-suite-failed",
+          `${refusal.message}. Nothing was attested, committed or pushed`,
+          EXIT_USAGE,
+          refusal.human,
+          suite.kind === "failed" ? { dogfood: { suite: DOGFOOD_SUITE_SOURCE, failed: suite.tests } } : undefined,
         );
       }
     }
+  }
+
+  // The report-only and `--dry-run` paths build no commit, so they have no base
+  // to read the pins against; HEAD stands in for one, which is what the printed
+  // `git add` would be run against by hand anyway (APRV-274).
+  if (commitPlan === null && amendRoot !== null) {
+    pinsChange = pinsChangeIn(amendRoot, policyPath, "HEAD");
   }
 
   /**
@@ -1249,8 +1614,16 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
    * resolve against. `git` itself resolves a relative pathspec against the
    * process's cwd, so the printed line is still the line that works.
    */
-  const humanCommand = (command: string): string =>
-    command.split(policyPath).join(relPath(policyPath, cwd)).split(logPath).join(relPath(logPath, cwd));
+  const humanCommand = (command: string): string => {
+    const shortened = command
+      .split(policyPath)
+      .join(relPath(policyPath, cwd))
+      .split(logPath)
+      .join(relPath(logPath, cwd));
+    return pinsChange === null
+      ? shortened
+      : shortened.split(pinsChange.path).join(relPath(pinsChange.path, cwd));
+  };
 
   /** A `Label` heading with its body indented under it, then a blank line. */
   const section = (label: string, body: readonly string[]): void => {
@@ -1262,9 +1635,12 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     streams.out("\n");
   };
 
-  const summary = summarize(policyPath, diff);
+  const summary = summarize(policyPath, diff, pinsChange);
+  // APRV-274: the pins file is a member of the `git add` exactly when it moved,
+  // so a copied command lands the same three (or two) files the verb would.
+  const ceremonyFiles = [policyPath, logPath, ...(pinsChange === null ? [] : [pinsChange.path])];
   const commitCommands = (seq: string): string[] => [
-    `git add ${policyPath} ${logPath}`,
+    `git add ${ceremonyFiles.join(" ")}`,
     `git commit -m ${JSON.stringify(`Policy: ${summary} (attested seq ${seq})`)}`,
   ];
   const gitCommands = (seq: string): string[] => {
@@ -1331,17 +1707,31 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     ];
     section("Policy", [st.table(identity)]);
 
-    section(
-      "Changes",
-      diff === null
+    // APRV-274: the pin deltas print BESIDE the class deltas, in the same
+    // section, because they are one amendment. A pin that moved changes what CI
+    // asserts about the policy in this very commit, and a reader deciding
+    // whether to sign has to see both halves at once.
+    const pinSection =
+      pinsChange === null
+        ? []
+        : [
+            "",
+            `${st.key("pins")} ${EXPECTATIONS_MODULE} moves with this amendment:`,
+            ...(pinsChange.changes.length === 0
+              ? [st.muted("  no pinned resolution moved (a note or a comment did)")]
+              : pinsChange.changes.map((change) => `  ${describePinChange(change)}`)),
+          ];
+    section("Changes", [
+      ...(diff === null
         ? [
             `${st.warn("HASH-ONLY MODE:")} no semantic diff. ${recovered.baseline.reason ?? ""}`,
             st.muted(
               "The load advisory below and the attestation still apply; what changed in MEANING is not shown, so read the file diff yourself.",
             ),
           ]
-        : renderDiff(diff),
-    );
+        : renderDiff(diff)),
+      ...pinSection,
+    ]);
 
     section(
       "Load",
@@ -1370,6 +1760,18 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       EXIT_INTEGRITY,
     );
   }
+
+  /**
+   * The `pins` sub-object of the JSON report (APRV-274), or `null` when the
+   * pins are no part of this ceremony.
+   *
+   * `null` is the answer for all three of its reasons: these pins do not govern
+   * this policy, there is no pins module, the file is what the base carries. A
+   * machine caller that wants to know WHICH reason reads `git.commands`, where
+   * the `git add` names the files the commit carries.
+   */
+  const pinsReport = (): { module: string; changes: PinChange[] } | null =>
+    pinsChange === null ? null : { module: EXPECTATIONS_MODULE, changes: pinsChange.changes };
 
   /** The `git` sub-object of the JSON report. Every key is always present. */
   const gitReport = (over: {
@@ -1412,6 +1814,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
         noop: false,
         dryRun: true,
         aborted: false,
+        pins: pinsReport(),
       });
     } else {
       section("Would run", [
@@ -1679,7 +2082,14 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     progress.phase(`building the amendment commit on ${baseLabel} (nothing is checked out)`);
     const built = commitOnBase(commitPlan.root, {
       base: commitBase.sha,
-      paths: [commitPlan.policyArg, commitPlan.logArg],
+      // APRV-274: the pins join the tree exactly when they moved away from the
+      // base. Where they did not, the base's own copy stands, which is what
+      // keeps this ceremony from reverting a pins edit somebody else landed.
+      paths: [
+        commitPlan.policyArg,
+        commitPlan.logArg,
+        ...(pinsChange === null ? [] : [pinsChange.arg]),
+      ],
       message,
     });
     progress.done();
@@ -1989,6 +2399,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       noop: false,
       dryRun: false,
       aborted: false,
+      pins: pinsReport(),
       ceremony: { attested: true, seq },
       publishing,
       ...(collected === null
@@ -2004,10 +2415,14 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     });
   } else {
     if (committed) {
+      // APRV-274: the headline names what the commit actually carries. A reader
+      // who is told "the policy and the log" and finds a third file in the diff
+      // has been told something false about the one commit that must not lie.
+      const carried = pinsChange === null ? "the policy and the log" : "the policy, the log and the pins";
       const done: string[] = [
         branch === null
-          ? `${st.glyph("ok")} committed the policy and the log together:`
-          : `${st.glyph("ok")} committed the policy and the log together on ${branch}:`,
+          ? `${st.glyph("ok")} committed ${carried} together:`
+          : `${st.glyph("ok")} committed ${carried} together on ${branch}:`,
         "",
       ];
       // APRV-111: only the commands that actually RAN are listed under
@@ -2085,12 +2500,19 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
 /**
  * `--commit`'s preconditions.
  *
- * The amendment commit carries **exactly** the policy file and the log, so a
- * staged change to anything else is refused rather than swept in: a commit that
- * quietly carried an unrelated staged edit would make "this commit is the
- * amendment" false, and that sentence is the whole reason the commit exists.
- * Unstaged and untracked changes elsewhere are left alone — they are not going
- * into this commit.
+ * The amendment commit carries **exactly these files**: the policy, the log,
+ * and (APRV-274) the pins in `src/core/policy-expectations.ts` when they moved.
+ * A staged change to anything else is refused rather than swept in, because a
+ * commit that quietly carried an unrelated staged edit would make "this commit
+ * is the amendment" false, and that sentence is the whole reason the commit
+ * exists. Unstaged and untracked changes elsewhere are left alone: they are not
+ * going into this commit.
+ *
+ * The pins joined that set rather than widening it. They are part of an
+ * amendment's contract (CI's dogfood suite resolves the amended policy against
+ * them, and it reads both from the same commit), so a rule that admitted the
+ * policy and the log and refused the pins was a rule that split one amendment
+ * across two commits and a hand-run cherry-pick.
  */
 function planCommit(
   policyPath: string,
@@ -2104,7 +2526,7 @@ function planCommit(
    * the append happens.
    */
   branchFlow: { branch: string | null } | null,
-): { ok: true; plan: { root: string; policyArg: string; logArg: string } } | { ok: false; message: string } {
+): { ok: true; plan: CommitPlan } | { ok: false; message: string } {
   const root = repoRoot(dirname(policyPath));
   if (root === null) {
     return {
@@ -2114,6 +2536,13 @@ function planCommit(
   }
   const policyArg = repoPath(root, policyPath);
   const logArg = repoPath(root, logPath);
+  // APRV-274. `null` where these pins do not govern this policy, and where the
+  // repository simply has no pins module: in both cases the ceremony's file set
+  // is the two it always was.
+  const pinsArg =
+    expectationsFor(policyPath) !== null && existsSync(join(root, EXPECTATIONS_MODULE))
+      ? EXPECTATIONS_MODULE
+      : null;
   if (policyArg.startsWith("../") || logArg.startsWith("../")) {
     return {
       ok: false,
@@ -2134,13 +2563,14 @@ function planCommit(
     // unusable in any working repository.
     if (index === " " || index === "?") continue;
     const path = line.slice(3).trim();
-    if (path === policyArg || path === logArg) continue;
+    if (path === policyArg || path === logArg || path === pinsArg) continue;
     strays.push(path);
   }
   if (strays.length > 0) {
+    const carried = pinsArg === null ? "the policy and the log" : `the policy, the log and ${pinsArg}`;
     return {
       ok: false,
-      message: `--commit refuses: the index carries ${strays.length} staged change(s) beyond the policy and the log (${strays.join(", ")}). The amendment commit carries EXACTLY those two files, so that "this commit is the amendment" stays true. Unstage them, or drop --commit and run the printed commands yourself. Nothing was attested`,
+      message: `--commit refuses: the index carries ${strays.length} staged change(s) beyond ${carried} (${strays.join(", ")}). The amendment commit carries EXACTLY those files, so that "this commit is the amendment" stays true. Unstage them, or drop --commit and run the printed commands yourself. Nothing was attested`,
     };
   }
 
@@ -2162,7 +2592,7 @@ function planCommit(
       }
     }
   }
-  return { ok: true, plan: { root, policyArg, logArg } };
+  return { ok: true, plan: { root, policyArg, logArg, pinsArg } };
 }
 
 /**
@@ -2361,6 +2791,11 @@ interface Report {
   dryRun: boolean;
   aborted: boolean;
   /**
+   * The pins file's part in this ceremony (APRV-274), or `null` when it has
+   * none. Additive and always present in the emitted object.
+   */
+  pins?: { module: string; changes: PinChange[] } | null;
+  /**
    * Did the ATTESTATION land (APRV-130)? A separate key because the report's
    * top-level `attested` is, and stays, the attestation this amendment moved
    * FROM. Two different facts; two different names.
@@ -2390,6 +2825,9 @@ function emitReport(streams: Streams, report: Report): void {
       load: report.load,
       attestation: report.attestation,
       git: report.git,
+      // APRV-274, additive and always present: which pins moved with this
+      // amendment, `null` when the pins are no part of it.
+      pins: report.pins ?? null,
       // Additive (APRV-130), and always present: a machine caller reads the
       // ceremony's own outcome without inferring it from `attestation`.
       ceremony: report.ceremony ?? { attested: report.attestation !== null, seq: null },
