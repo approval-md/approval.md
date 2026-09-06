@@ -11,42 +11,80 @@
       There is no endpoint here that decides anything.
     -->
     <style>
+      /*
+        The paper theme, taken value-for-value from the landing page at
+        approval.md (its :root block, its .card/.log idioms, its type scale).
+        This is a reskin and nothing else: every id, every class the script
+        touches, and every structural rule is the one that was here before.
+
+        The old names (--bg, --panel, --muted, --ok, --bad, --warn) are kept as
+        aliases of the paper palette so a rule added later against either
+        vocabulary lands on the same colour.
+      */
       :root {
-        --bg: #0b0d10;
-        --panel: #14181d;
-        --line: #262d35;
-        --ink: #e8edf2;
-        --muted: #8a97a5;
-        --ok: #3ddc84;
-        --bad: #ff5f57;
-        --warn: #ffbd2e;
-        --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        --paper: #f6f3ec;
+        --ink: #17191d;
+        --green: #17a15e;
+        --mut: #8a857b;
+        --line: #e3ded2;
+        --card: #fdfcf8;
+        /* rust: irreversible, errors, rejections. The landing page's .warn. */
+        --rust: #b4552d;
+        /* muted amber: waiting on a human, class labels, ttl. */
+        --amber: #a97c21;
+        --amber-wash: #f0dfae;
+        /* the inverted ink blocks: the landing page's .log palette. */
+        --log-bg: var(--ink);
+        --log-ink: #c9c5ba;
+        --log-green: #5fd69a;
+        --log-dim: #7e7a70;
+        /* rust is unreadable on ink; this is its inverted twin. */
+        --log-rust: #e08a5e;
+        --mono: "JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+          "DejaVu Sans Mono", monospace;
+        /* aliases, so both vocabularies name the same paper colours */
+        --bg: var(--paper);
+        --panel: var(--card);
+        --muted: var(--mut);
+        --ok: var(--green);
+        --bad: var(--rust);
+        --warn: var(--amber);
       }
       * { box-sizing: border-box; }
       body {
-        margin: 0;
-        background: var(--bg);
+        margin: 0 auto;
+        max-width: 960px;
+        background: var(--paper);
         color: var(--ink);
-        font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
-        padding: 28px clamp(16px, 4vw, 48px) 64px;
+        font-family: var(--mono);
+        font-size: 16px;
+        line-height: 1.65;
+        padding: 40px clamp(16px, 4vw, 48px) 80px;
       }
       header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 16px; margin-bottom: 8px; }
-      h1 { font-size: clamp(28px, 4vw, 44px); margin: 0; letter-spacing: -0.02em; }
-      h1 span { color: var(--muted); font-weight: 400; }
+      h1 {
+        font-size: clamp(30px, 5vw, 48px);
+        margin: 0;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+      }
+      h1 span { color: var(--mut); font-weight: 700; }
       h2 {
-        font-size: clamp(18px, 2vw, 24px);
+        font-size: 15px;
         margin: 0 0 12px;
         text-transform: uppercase;
-        letter-spacing: 0.08em;
-        color: var(--muted);
+        letter-spacing: 0.14em;
+        color: var(--mut);
+        font-weight: 700;
       }
-      .sub { color: var(--muted); font-family: var(--mono); font-size: 14px; }
-      section { margin-top: 32px; }
+      .sub { color: var(--mut); font-size: 14px; }
+      section { margin-top: 48px; }
       .panel {
-        background: var(--panel);
+        background: var(--card);
         border: 1px solid var(--line);
-        border-radius: 10px;
-        padding: 18px 20px;
+        border-radius: 12px;
+        padding: 20px 22px;
+        box-shadow: 0 1px 0 rgba(23, 25, 29, 0.04);
       }
       /* ---- verify badge ---- */
       #badge {
@@ -54,109 +92,162 @@
         align-items: center;
         gap: 14px;
         border-radius: 999px;
-        padding: 14px 26px;
-        font-size: clamp(20px, 2.4vw, 30px);
-        font-weight: 600;
-        border: 2px solid var(--muted);
-        color: var(--muted);
+        padding: 12px 26px;
+        font-size: clamp(18px, 2.2vw, 26px);
+        font-weight: 700;
+        background: var(--card);
+        border: 2px solid var(--mut);
+        color: var(--mut);
+        transition: border-color 0.25s ease, color 0.25s ease;
       }
-      #badge.ok { border-color: var(--ok); color: var(--ok); }
-      #badge.bad { border-color: var(--bad); color: var(--bad); }
+      #badge.ok { border-color: var(--green); color: var(--green); }
+      #badge.bad { border-color: var(--rust); color: var(--rust); }
       #badge .dot { width: 14px; height: 14px; border-radius: 50%; background: currentColor; }
-      #badge .detail { font-family: var(--mono); font-size: 15px; font-weight: 400; opacity: 0.85; }
+      #badge .detail { font-size: 14px; font-weight: 400; color: var(--mut); }
       /* ---- tables / lists ---- */
-      table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 15px; }
+      table { width: 100%; border-collapse: collapse; font-size: 14px; }
       th {
         text-align: left;
-        color: var(--muted);
-        font-weight: 500;
-        font-size: 13px;
+        color: var(--mut);
+        font-weight: 700;
+        font-size: 12px;
         text-transform: uppercase;
-        letter-spacing: 0.06em;
+        letter-spacing: 0.1em;
         padding: 0 14px 8px 0;
         border-bottom: 1px solid var(--line);
       }
       td { padding: 9px 14px 9px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
       tr:last-child td { border-bottom: none; }
+      /* Unchanged in meaning: on this page `.wrap` is the horizontal scroll
+         container the markup already used, not the landing page's column. */
       .wrap { overflow-x: auto; }
-      .empty { color: var(--muted); font-family: var(--mono); }
-      .err { color: var(--bad); font-family: var(--mono); font-size: 14px; }
+      .empty { color: var(--mut); }
+      .err { color: var(--rust); font-size: 14px; }
       .key { color: var(--ink); }
-      .cls { color: var(--warn); }
-      .seq { color: var(--muted); }
-      .actor-human { color: var(--ok); }
-      .actor-agent { color: #7cc4ff; }
-      .ttl { color: var(--warn); }
-      .ttl.gone { color: var(--bad); }
+      .cls { color: var(--amber); }
+      .seq { color: var(--mut); }
+      /* The human is the actor that matters; the agent stays quiet. */
+      .actor-human { color: var(--green); font-weight: 700; }
+      .actor-agent { color: var(--mut); }
+      .ttl { color: var(--amber); }
+      .ttl.gone { color: var(--rust); }
+      /* ---- the log: the other inverted ink block ---- */
+      #tail-panel {
+        background: var(--log-bg);
+        border-color: var(--ink);
+        color: var(--log-ink);
+        box-shadow: none;
+      }
+      #tail-panel th { color: var(--log-dim); border-bottom-color: #2c2e33; }
+      #tail-panel td { border-bottom-color: #2c2e33; }
+      #tail-panel .empty { color: var(--log-dim); }
+      #tail-panel .err { color: var(--log-rust); }
+      #tail-panel .seq { color: var(--log-dim); }
+      #tail-panel .key { color: var(--log-ink); }
+      #tail-panel .actor-human { color: var(--log-green); }
+      #tail-panel .actor-agent { color: var(--log-dim); }
       /* ---- task desk ---- */
       .templates { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
       .tpl {
         font: inherit;
-        font-family: var(--mono);
         font-size: 14px;
+        font-weight: 700;
         text-align: left;
-        background: #0f1216;
+        background: var(--paper);
         color: var(--ink);
         border: 1px solid var(--line);
         border-radius: 8px;
         padding: 10px 14px;
         cursor: pointer;
         max-width: 300px;
+        transition: border-color 0.2s ease, background 0.2s ease;
       }
-      .tpl:hover { border-color: var(--muted); }
-      .tpl:disabled { opacity: 0.5; cursor: default; }
-      .tpl .cls { display: block; font-size: 12px; margin-top: 4px; }
-      .tpl .blurb { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+      .tpl:hover { border-color: var(--ink); background: var(--card); }
+      .tpl:disabled { opacity: 0.45; cursor: default; }
+      .tpl .cls { display: block; font-size: 12px; margin-top: 4px; font-weight: 400; }
+      .tpl .blurb { display: block; color: var(--mut); font-size: 12px; margin-top: 4px; font-weight: 400; }
       .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
       #task-input, #task-send {
         font: inherit;
-        font-family: var(--mono);
-        background: #0f1216;
+        border-radius: 8px;
+        padding: 11px 18px;
+      }
+      #task-input {
+        width: min(560px, 100%);
+        background: var(--paper);
         color: var(--ink);
         border: 1px solid var(--line);
+      }
+      #task-input:focus { outline: none; border-color: var(--ink); }
+      #task-send {
+        font-weight: 700;
+        background: var(--ink);
+        color: var(--paper);
+        border: 1px solid var(--ink);
+        cursor: pointer;
+        transition: background 0.2s ease, border-color 0.2s ease;
+      }
+      #task-send:hover:not(:disabled) { background: var(--green); border-color: var(--green); }
+      #task-send:disabled { opacity: 0.45; cursor: default; }
+      #task-note { font-size: 13px; color: var(--mut); }
+      #task-note.bad { color: var(--rust); }
+      /* ---- the transcript: an inverted ink block, like the landing page's log ---- */
+      .feed {
+        margin-top: 18px;
+        background: var(--log-bg);
+        color: var(--log-ink);
         border-radius: 8px;
-        padding: 12px 16px;
+        padding: 10px 16px;
+        overflow-x: auto;
       }
-      #task-input { width: min(560px, 100%); }
-      #task-send { cursor: pointer; }
-      #task-send:disabled { opacity: 0.5; cursor: default; }
-      #task-note { font-family: var(--mono); font-size: 13px; color: var(--muted); }
-      #task-note.bad { color: var(--bad); }
-      .feed { margin-top: 18px; }
       .feed .line {
-        font-family: var(--mono);
-        font-size: 14px;
-        padding: 8px 0 8px 14px;
-        border-left: 2px solid var(--line);
+        font-size: 13px;
+        line-height: 1.7;
+        padding: 6px 0 6px 14px;
+        border-left: 2px solid var(--log-dim);
+        color: var(--log-ink);
       }
-      .feed .line.text { border-left-color: var(--muted); white-space: pre-wrap; }
-      .feed .line.tool_use { border-left-color: #7cc4ff; color: #7cc4ff; }
-      .feed .line.tool_use.gate { border-left-color: var(--warn); color: var(--warn); }
-      .feed .line.tool_result { border-left-color: var(--line); color: var(--muted); }
-      .feed .line.tool_result.err { border-left-color: var(--bad); color: var(--bad); }
-      .feed .line.result { border-left-color: var(--ok); color: var(--ok); white-space: pre-wrap; }
-      .feed .line.result.err { border-left-color: var(--bad); color: var(--bad); }
-      .feed .line.system, .feed .line.raw { border-left-color: var(--line); color: var(--muted); }
+      .feed .line.text { border-left-color: var(--log-dim); white-space: pre-wrap; }
+      .feed .line.tool_use { border-left-color: var(--log-ink); color: var(--log-ink); }
+      /* A gate call is the point of the demo: green on ink, and bold. */
+      .feed .line.tool_use.gate {
+        border-left-color: var(--log-green);
+        color: var(--log-green);
+        font-weight: 700;
+      }
+      .feed .line.tool_result { border-left-color: var(--log-dim); color: var(--log-dim); }
+      .feed .line.tool_result.err { border-left-color: var(--log-rust); color: var(--log-rust); }
+      .feed .line.result {
+        border-left-color: var(--log-green);
+        color: var(--log-green);
+        white-space: pre-wrap;
+      }
+      .feed .line.result.err { border-left-color: var(--log-rust); color: var(--log-rust); }
+      .feed .line.system, .feed .line.raw { border-left-color: var(--log-dim); color: var(--log-dim); }
+      /* The loudest thing on the page, because it is the moment the demo is for. */
       .waiting {
         margin-top: 14px;
-        border: 1px solid var(--warn);
+        background: var(--amber-wash);
+        border: 2px solid var(--amber);
         border-radius: 8px;
         padding: 12px 16px;
-        color: var(--warn);
-        font-family: var(--mono);
+        color: var(--ink);
+        font-weight: 700;
       }
       .pill {
         display: inline-block;
         border: 1px solid var(--line);
         border-radius: 999px;
         padding: 3px 12px;
-        font-family: var(--mono);
         font-size: 12px;
-        color: var(--muted);
+        color: var(--mut);
         margin-left: 10px;
         vertical-align: middle;
       }
-      footer { margin-top: 44px; color: var(--muted); font-family: var(--mono); font-size: 13px; }
+      footer { margin-top: 64px; color: var(--mut); font-size: 13px; }
+      @media (prefers-reduced-motion: reduce) {
+        #badge, .tpl, #task-send { transition: none; }
+      }
     </style>
   </head>
   <body>

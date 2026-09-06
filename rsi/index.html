@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>approval.md / rsi — the live gate</title>
+<meta name="description" content="approval.md at the RSI Harnesses hack: an agent whose only path to a real-world side effect runs through a cryptographically-logged human approval. Paste the day-of URL to watch the queue and the log live.">
+<style>
+  :root{
+    --paper:#F6F3EC; --ink:#17191D; --green:#17A15E; --mut:#8A857B;
+    --line:#E3DED2; --card:#FDFCF8; --rust:#B4552D;
+    --mono:"JetBrains Mono",ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--paper);color:var(--ink);font-family:var(--mono)}
+  body{font-size:16px;line-height:1.65}
+  a{color:var(--ink);text-underline-offset:3px}
+  a:hover{color:var(--green)}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 24px 96px}
+
+  /* wordmark */
+  .mark{display:flex;align-items:center;gap:0;font-weight:700;font-size:clamp(34px,7vw,56px);letter-spacing:.5px;user-select:none;flex-wrap:wrap}
+  .mark svg{height:.86em;width:auto;display:block;margin:0 .03em}
+  .mark .md{color:var(--mut)}
+  .mark .slash{color:var(--mut);margin-left:.34em}
+
+  .tag{margin:18px 0 0;font-size:clamp(17px,2.6vw,21px)}
+  .sub{margin:10px 0 0;color:var(--mut);max-width:56ch}
+
+  h2{margin:64px 0 12px;font-size:15px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut);font-weight:700}
+  p{margin:12px 0;max-width:62ch}
+  .rule{border:0;border-top:1px solid var(--line);margin:0}
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:22px 22px 18px;margin-top:18px;
+        box-shadow:0 1px 0 rgba(23,25,29,.04)}
+  .card .head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+  .card .evt{font-size:13px;color:var(--mut)}
+  .card .evt b{color:var(--ink)}
+  .card .task{margin:10px 0 2px;font-weight:700}
+  .fx{margin:8px 0 0;padding:0;list-style:none;font-size:14px}
+  .fx li{margin:4px 0;color:var(--mut)}
+  .fx .k{color:var(--ink)}
+  .fx .warn{color:var(--rust)}
+  .actions{display:flex;gap:10px;margin-top:16px;align-items:center;flex-wrap:wrap}
+  button{font:inherit;font-weight:700;border-radius:8px;padding:10px 20px;cursor:pointer;border:1px solid var(--ink)}
+  .approve{background:var(--ink);color:var(--paper)}
+  .approve:hover{background:var(--green);border-color:var(--green)}
+  .reject{background:transparent;color:var(--ink)}
+  .reject:hover{color:var(--rust);border-color:var(--rust)}
+
+  /* the four beats */
+  .beats{margin:18px 0 0;padding:0;list-style:none;counter-reset:beat}
+  .beats li{position:relative;margin:14px 0;padding-left:34px;max-width:62ch}
+  .beats li::before{counter-increment:beat;content:counter(beat);position:absolute;left:0;top:.1em;
+        width:22px;height:22px;border:1px solid var(--line);border-radius:6px;background:var(--card);
+        color:var(--mut);font-size:12px;line-height:20px;text-align:center;font-weight:700}
+  .beats b{font-weight:700}
+  .beats .why{color:var(--mut)}
+
+  /* the connect box */
+  .connect{display:flex;gap:10px;margin-top:14px;align-items:center;flex-wrap:wrap}
+  .connect label{font-size:13px;color:var(--mut)}
+  .prompt{display:flex;align-items:center;gap:10px;flex:1 1 320px;background:var(--ink);border-radius:8px;padding:10px 14px}
+  .prompt .ps1{color:#7E7A70;font-size:13px;user-select:none}
+  .prompt input{flex:1;min-width:0;font:inherit;font-size:14px;background:transparent;border:0;outline:none;color:#C9C5BA}
+  .prompt input::placeholder{color:#5C594F}
+  .connect .go{background:var(--ink);color:var(--paper)}
+  .connect .go:hover{background:var(--green);border-color:var(--green)}
+  .connect .clear{background:transparent;color:var(--ink)}
+  .connect .clear:hover{color:var(--rust);border-color:var(--rust)}
+
+  .origin{margin-top:10px;font-size:13px;color:var(--mut)}
+  .origin b{color:var(--ink);font-weight:700}
+
+  .badge{display:inline-flex;align-items:center;gap:9px;margin-top:16px;border:1px solid var(--line);
+         border-radius:999px;padding:7px 15px;font-size:13.5px;font-weight:700;background:var(--card)}
+  .badge .dot{width:9px;height:9px;border-radius:50%;background:var(--mut);flex:none}
+  .badge.ok{color:var(--green);border-color:var(--green)}
+  .badge.ok .dot{background:var(--green)}
+  .badge.bad{color:var(--rust);border-color:var(--rust)}
+  .badge.bad .dot{background:var(--rust)}
+  .badge .why{color:var(--mut);font-weight:400}
+
+  .offline{margin-top:16px;color:var(--mut);font-size:14px}
+
+  table{border-collapse:collapse;width:100%;font-size:13.5px;margin-top:4px}
+  th{text-align:left;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);
+     font-weight:700;padding:0 12px 8px 0;border-bottom:1px solid var(--line)}
+  td{padding:8px 12px 8px 0;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  td.cls{color:var(--mut)}
+  td.ttl{color:var(--mut)}
+  td.ttl.gone{color:var(--rust)}
+  .scroll{overflow-x:auto}
+  .empty{color:var(--mut);font-size:14px}
+
+  .log{margin-top:16px;background:var(--ink);color:#C9C5BA;border-radius:8px;padding:14px 16px;font-size:12.5px;
+       overflow-x:auto;white-space:pre;line-height:1.7}
+  .log .g{color:#5FD69A}
+  .log .dim{color:#7E7A70}
+  .log .r{color:#E08256}
+
+  pre.snippet{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;
+       overflow-x:auto;font-size:13.5px;line-height:1.7;margin-top:14px}
+  .c{color:var(--mut)} .g{color:var(--green);font-weight:700}
+
+  .soon{border:1px dashed var(--line);border-radius:12px;padding:20px 22px;margin-top:18px;background:transparent}
+  .soon .stamp{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--rust);font-weight:700}
+  .soon p{margin:10px 0 0;color:var(--mut)}
+
+  .links{margin-top:14px;display:flex;gap:22px;flex-wrap:wrap;font-size:15px}
+  footer{margin-top:80px;color:var(--mut);font-size:13px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+
+  .pulse{animation:pulse 2s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  @media (prefers-reduced-motion: reduce){ .pulse{animation:none} }
+</style>
+</head>
+<body>
+<main class="wrap">
+
+  <!-- wordmark: appr[✓]val.md / rsi -->
+  <h1 class="mark" aria-label="approval.md / rsi">appr<svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z" fill="#17191D"/><path d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z" fill="#17191D"/><path d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg>val<span class="md">.md</span><span class="slash">/ rsi</span></h1>
+
+  <p class="tag"><b>Human approval for agent actions, demonstrated live at the RSI Harnesses hack.</b></p>
+  <p class="sub">One agent, one gate, one phone. Everything below is read straight out of an append-only, hash-chained log you can verify yourself.</p>
+
+  <h2>What you are watching</h2>
+  <p>An agent is running with a harness that gives it exactly one path to the real world: a request into an approval gate, and a human decision coming back. It has no email client, no shell, no card on file. When it wants a side effect it registers the action, the runtime classifies it against a policy file, and anything marked manual stops dead until a person says yes from their phone. Execution then runs against a single-use token that names that one action.</p>
+  <p>Every step of that is a record in an append-only log, each entry hashed onto the one before it. Nothing is claimed here that the chain cannot show, which is why the verify badge below turns green only when the whole log recomputes clean.</p>
+
+  <ol class="beats">
+    <li><b>A benign task runs untouched.</b> <span class="why">Reads and local work are autonomous. The gate is a filter, and a filter that stops everything teaches an agent nothing.</span></li>
+    <li><b>A side-effecting run waits, and is approved from a phone.</b> <span class="why">The request lands in the queue with its class, cost and TTL. The token is minted only after a human taps approve.</span></li>
+    <li><b>The agent asks to loosen its own policy, and is refused.</b> <span class="why">Policy edits are themselves a gated class. Self-modification gets the same scrutiny as spending money, and the refusal lands in the log as its own record.</span></li>
+    <li><b>A real email goes out inside the granted window.</b> <span class="why">One approval, one action, one token, and a TTL that expires. The irreversible thing happens because a person chose it, seconds earlier, on the record.</span></li>
+  </ol>
+
+  <h2>Watch live</h2>
+  <p>The gate runs on a laptop in the room and is exposed for the length of the demo. Paste the URL announced on stage and this page polls it every three seconds. The connection stays in your browser; nothing is stored anywhere else.</p>
+
+  <div class="connect">
+    <div class="prompt">
+      <span class="ps1" aria-hidden="true">$ approval watch --url</span>
+      <input id="url" type="url" inputmode="url" spellcheck="false" autocomplete="off"
+             placeholder="https://…" aria-label="Live gate URL">
+    </div>
+    <button class="go" id="go">Connect</button>
+    <button class="clear" id="clear">Clear</button>
+  </div>
+  <p class="origin" id="origin">No live window connected. The page below stays exactly as it is until you paste a URL.</p>
+
+  <div id="live" hidden>
+    <div class="badge" id="badge"><span class="dot"></span><span id="badge-text">connecting</span> <span class="why" id="badge-why"></span></div>
+    <p class="offline" id="offline" hidden>live window offline — still retrying</p>
+
+    <h2>Pending approvals</h2>
+    <div class="card">
+      <div class="head">
+        <span class="evt"><b>approval queue</b> · waiting on a human</span>
+        <span class="evt" id="meta"></span>
+      </div>
+      <div class="scroll" id="queue-panel"><p class="empty">waiting for the first read…</p></div>
+    </div>
+
+    <h2>The log, newest first</h2>
+    <div class="log" id="tail"><span class="dim">$ approval log tail --json</span>
+<span class="dim">waiting for the first read…</span></div>
+  </div>
+
+  <h2>Connect your agent</h2>
+  <div class="soon">
+    <span class="stamp">coming soon · next week</span>
+    <p>The crowd-MCP track: point your own agent's MCP client at the live gate and let it request whatever it likes. A human still decides, and nothing a guest agent asks for executes.</p>
+  </div>
+
+  <h2>Read on</h2>
+  <div class="links">
+    <a href="https://approval.md">approval.md</a>
+    <a href="https://github.com/approval-md/approval.md">GitHub</a>
+  </div>
+
+  <footer>
+    <span>MIT · built under its own policy</span>
+    <span>RSI Harnesses hack</span>
+  </footer>
+</main>
+
+<script>
+(function(){
+  "use strict";
+
+  var POLL_MS = 3000, KEY = "approval-md.rsi.url", TIMEOUT_MS = 8000;
+
+  var input = document.getElementById("url"),
+      go = document.getElementById("go"),
+      clearBtn = document.getElementById("clear"),
+      origin = document.getElementById("origin"),
+      live = document.getElementById("live"),
+      badge = document.getElementById("badge"),
+      badgeText = document.getElementById("badge-text"),
+      badgeWhy = document.getElementById("badge-why"),
+      offline = document.getElementById("offline"),
+      queuePanel = document.getElementById("queue-panel"),
+      tail = document.getElementById("tail"),
+      meta = document.getElementById("meta");
+
+  var base = null, timer = null;
+
+  // ---- storage: never let a blocked or full store break the page ----------
+  function load(){ try { return window.localStorage.getItem(KEY); } catch (e) { return null; } }
+  function save(v){ try { window.localStorage.setItem(KEY, v); } catch (e) {} }
+  function drop(){ try { window.localStorage.removeItem(KEY); } catch (e) {} }
+
+  function esc(v){
+    return String(v === null || v === undefined ? "" : v)
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+  }
+
+  // Tunnels are https; a local rehearsal is http. Anything else is refused.
+  function normalize(raw){
+    var text = String(raw || "").trim();
+    if (text === "") return null;
+    if (!/^https?:\/\//i.test(text)) text = "https://" + text;
+    var parsed;
+    try { parsed = new URL(text); } catch (e) { return null; }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+    return parsed.origin + parsed.pathname.replace(/\/+$/, "");
+  }
+
+  function mmss(ms){
+    if (typeof ms !== "number" || !isFinite(ms)) return "—";
+    if (ms <= 0) return "expired";
+    var total = Math.floor(ms / 1000);
+    var m = Math.floor(total / 60), s = total % 60;
+    return m + "m " + (s < 10 ? "0" : "") + s + "s";
+  }
+
+  function setBadge(kind, text, why){
+    badge.className = "badge" + (kind ? " " + kind : "");
+    badgeText.textContent = text;
+    badgeWhy.textContent = why || "";
+  }
+
+  function renderBadge(verify){
+    if (!verify || verify.error || verify.status !== "clean") {
+      var why = verify && verify.error ? String(verify.error).slice(0,120)
+              : verify && verify.status ? "status: " + verify.status
+              : "no answer";
+      setBadge("bad", "chain NOT verified", why);
+      return;
+    }
+    var n = (verify.records === null || verify.records === undefined) ? "?" : verify.records;
+    setBadge("ok", "chain verified · " + n + " records", "");
+  }
+
+  function renderQueue(queue){
+    if (!queue || queue.error) {
+      queuePanel.innerHTML = '<p class="empty">queue unavailable' +
+        (queue && queue.error ? " · " + esc(String(queue.error).slice(0,120)) : "") + "</p>";
+      return;
+    }
+    var pending = Array.isArray(queue.pending) ? queue.pending : [];
+    if (pending.length === 0) {
+      queuePanel.innerHTML = '<p class="empty">nothing pending — the agent is not asking for anything</p>';
+      return;
+    }
+    var rows = pending.map(function(item){
+      var left = item.ttl_remaining_ms;
+      var gone = typeof left === "number" && left <= 0;
+      return "<tr>" +
+        "<td>" + esc(item.action_key) + "</td>" +
+        '<td class="cls">' + esc(item["class"]) + "</td>" +
+        "<td>" + esc(item.task) + "</td>" +
+        "<td>" + (item.est_cost_usd === null || item.est_cost_usd === undefined ? "—" : "$" + esc(item.est_cost_usd)) + "</td>" +
+        '<td class="ttl' + (gone ? " gone" : "") + '">' + esc(mmss(left)) + "</td>" +
+      "</tr>";
+    }).join("");
+    queuePanel.innerHTML = "<table><thead><tr><th>action</th><th>class</th><th>task</th><th>cost</th><th>ttl</th></tr></thead><tbody>" +
+      rows + "</tbody></table>";
+  }
+
+  function eventClass(event){
+    var e = String(event || "");
+    if (e.indexOf("granted") >= 0 || e.indexOf("completed") >= 0) return "g";
+    if (e.indexOf("rejected") >= 0 || e.indexOf("refused") >= 0 ||
+        e.indexOf("denied") >= 0 || e.indexOf("expired") >= 0 || e.indexOf("failed") >= 0) return "r";
+    return "";
+  }
+
+  function renderTail(logTail){
+    var head = '<span class="dim">$ approval log tail --json</span>';
+    if (!logTail || logTail.error) {
+      tail.innerHTML = head + '\n<span class="dim">log tail unavailable' +
+        (logTail && logTail.error ? " · " + esc(String(logTail.error).slice(0,120)) : "") + "</span>";
+      return;
+    }
+    var records = Array.isArray(logTail.records) ? logTail.records : [];
+    if (records.length === 0) {
+      tail.innerHTML = head + '\n<span class="dim">no records yet — nothing has happened</span>';
+      return;
+    }
+    // `log tail` returns oldest-first; the demo reads newest-first.
+    var lines = records.slice().reverse().map(function(r){
+      var cls = eventClass(r.event);
+      var when = String(r.ts === null || r.ts === undefined ? "" : r.ts).replace("T"," ").replace("Z","");
+      return '<span class="dim">' + esc(r.seq) + "</span> " +
+        (cls ? '<span class="' + cls + '">' : "") + esc(r.event) + (cls ? "</span>" : "") +
+        "  " + esc(r.actor) + '  <span class="dim">' + esc(r.action_key || r.task || "") + "  " + esc(when) + "</span>";
+    }).join("\n");
+    tail.innerHTML = head + "\n" + lines;
+  }
+
+  function renderMeta(state){
+    var healthy = state.status && state.status.healthy;
+    var attest = state.status && state.status.attestation ? state.status.attestation.state : "unknown";
+    var when = new Date(state.fetched_at_ms || Date.now()).toLocaleTimeString();
+    meta.textContent = "policy: " + attest +
+      " · health: " + (healthy === undefined ? "?" : healthy ? "ok" : "attention") +
+      " · read " + when;
+  }
+
+  function goOffline(){
+    // One line, not two: the badge speaks only about the chain, and offline
+    // means the chain has not been read at all.
+    offline.hidden = false;
+    offline.classList.add("pulse");
+    badge.hidden = true;
+    meta.textContent = "";
+  }
+
+  function poll(){
+    if (base === null) return;
+    var url = base + "/api/state";
+    var controller = null, killer = null;
+    try { controller = new AbortController(); } catch (e) {}
+    var options = { cache: "no-store", mode: "cors" };
+    if (controller) {
+      options.signal = controller.signal;
+      killer = window.setTimeout(function(){ controller.abort(); }, TIMEOUT_MS);
+    }
+    fetch(url, options).then(function(response){
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      return response.json();
+    }).then(function(state){
+      if (killer !== null) window.clearTimeout(killer);
+      if (base === null) return;
+      offline.hidden = true;
+      offline.classList.remove("pulse");
+      badge.hidden = false;
+      renderBadge(state.log_verify);
+      renderQueue(state.queue);
+      renderTail(state.log_tail);
+      renderMeta(state);
+    })["catch"](function(){
+      if (killer !== null) window.clearTimeout(killer);
+      if (base === null) return;
+      goOffline();
+    });
+  }
+
+  function connect(raw, persist){
+    var next = normalize(raw);
+    if (next === null) {
+      origin.innerHTML = 'That does not look like a URL. Paste the full address from the stage, for example <b>https://something.trycloudflare.com</b>.';
+      return;
+    }
+    base = next;
+    input.value = next;
+    if (persist) save(next);
+    origin.innerHTML = "Reading <b>" + esc(next) + "/api/state</b> every 3s, straight from the gate in the room.";
+    live.hidden = false;
+    badge.hidden = false;
+    offline.hidden = true;
+    setBadge("", "connecting", "");
+    if (timer !== null) window.clearInterval(timer);
+    poll();
+    timer = window.setInterval(poll, POLL_MS);
+  }
+
+  function disconnect(){
+    base = null;
+    if (timer !== null) { window.clearInterval(timer); timer = null; }
+    drop();
+    input.value = "";
+    live.hidden = true;
+    offline.hidden = true;
+    origin.textContent = "No live window connected. The page below stays exactly as it is until you paste a URL.";
+  }
+
+  go.addEventListener("click", function(){ connect(input.value, true); });
+  clearBtn.addEventListener("click", disconnect);
+  input.addEventListener("keydown", function(event){
+    if (event.key === "Enter") { event.preventDefault(); connect(input.value, true); }
+  });
+
+  var stored = load();
+  if (stored) connect(stored, false);
+})();
+</script>
+</body>
+</html>
