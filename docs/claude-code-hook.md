@@ -366,6 +366,30 @@ Stricter-when-unsure, throughout: `git push` with no refspec is `vcs.push.main`,
 an `rm` path holding an unexpanded `$VAR` is `files.delete.out_of_scope`, and a
 remote-branch deletion takes the trunk class rather than the branch one.
 
+### Sandbox wrappers (APRV-193)
+
+A wrapper is a room, not a command, so the class belongs to what runs inside it.
+`approval sandbox -- npm install left-pad` is `deps.add`, with the same rule id
+(`npm-install-package`) the bare command has, and `sandbox-exec -f p.sb npm test`
+is `files.write.workspace` by the `npm-script` row.
+
+Both directions matter. If the wrapper kept a class of its own,
+`approval sandbox -- <anything>` would be `gate.self` — the pass-through
+pseudo-class — and wrapping would BE a laundering device. And before this rule
+existed, every `sandbox-exec` spelling was `hook-unclassified` and denied, so the
+hook penalised the safe form of a command it allowed unwrapped.
+
+What the rule will not do is guess. `sandbox-exec` is read only in the
+`-f <profile>` form: `-p`, `-n` and `-D` change what the profile allows, so a
+command carrying one is `hook-unclassified` rather than read past the part that
+matters. `approval sandbox` with no `--` runs nothing (it prints help) and stays
+`gate.self`.
+
+The wrapper is also recorded per segment as `runtime` (a profile this runtime
+wrote) or `external` (a profile the caller wrote), which is what
+`APPROVAL_HOOK_REQUIRE_SANDBOX=1` reads: only `runtime` satisfies it, because a
+profile a caller wrote can allow everything. See `docs/sandboxed-exec.md`.
+
 ### GET-shaped fetches
 
 SPEC.md §7 puts "web fetch, API GET" under `read.*`, and the classifier used to
@@ -660,6 +684,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
 | `hook-grant-unverified` | the grant was spent, and the verified log cannot be seen to carry the `execution.started` recording it. On this surface the record IS the authorization, because the harness executes and never sees the gate's return value, so no verdict is printed until the chain carries it. The grant is spent by then: the retry costs one prompt and authorizes nothing meanwhile |
+| `hook-sandbox-required` | `APPROVAL_HOOK_REQUIRE_SANDBOX=1` is set and this command runs code the runtime did not author, unwrapped. The one deny that names a spelling that works: re-run it as `approval sandbox -- <command>` (`docs/sandboxed-exec.md`). Off unless the operator set the variable |
 | `hook-policy-unavailable` | `APPROVAL.md` could not be loaded |
 | `hook-log-unreachable` | no log where the hook was pointed; it writes to an existing log and creates none |
 | `hook-io` | malformed hook input, or an unreadable log |

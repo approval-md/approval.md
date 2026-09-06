@@ -618,6 +618,85 @@ test("an autonomous command is allowed and records only its execution", () => {
   assertClean(dir);
 });
 
+// ---------------------------------------------------------------------------
+// The sandbox requirement (APRV-193), off by default
+// ---------------------------------------------------------------------------
+
+test("APPROVAL_HOOK_REQUIRE_SANDBOX denies unwrapped code execution, and the wrapper passes", () => {
+  const dir = ready();
+
+  // Off by default: this is the behaviour every session has today, and the
+  // whole point of the variable is that turning it on can only refuse MORE.
+  const off = verdictOf(runCli(["hook", "claude-code"], dir, bashEvent("npm test")));
+  assert.equal(off.permission, "allow");
+
+  const before = rawLog(dir);
+  const on = verdictOf(runCli(["hook", "claude-code"], dir, bashEvent("npm test"), {
+    APPROVAL_HOOK_REQUIRE_SANDBOX: "1",
+  }));
+  assert.equal(on.permission, "deny");
+  assert.match(on.reason, /^hook-sandbox-required: /u);
+  // A deny that names the spelling that works, rather than one that leaves an
+  // agent guessing which of its commands offended.
+  assert.match(on.reason, /approval sandbox -- <command>/u);
+  assert.equal(rawLog(dir), before, "a refused command wrote to the log");
+
+  // The wrapped form is allowed, and it is allowed AS `npm test`: the class the
+  // policy resolved is the inner command's own, so wrapping neither hides the
+  // command from the gate nor asks anything extra of it.
+  const wrapped = verdictOf(
+    runCli(["hook", "claude-code"], dir, bashEvent("approval sandbox -- npm test"), {
+      APPROVAL_HOOK_REQUIRE_SANDBOX: "1",
+    }),
+  );
+  assert.equal(wrapped.permission, "allow");
+  assert.match(wrapped.reason, /files\.write\.workspace/u);
+
+  // A hand-written profile satisfies nothing: it is a permission the caller
+  // wrote for itself.
+  const external = verdictOf(
+    runCli(["hook", "claude-code"], dir, bashEvent("sandbox-exec -f /tmp/mine.sb npm test"), {
+      APPROVAL_HOOK_REQUIRE_SANDBOX: "1",
+    }),
+  );
+  assert.equal(external.permission, "deny");
+  assert.match(external.reason, /^hook-sandbox-required: /u);
+
+  // And a command that runs no code of ours is untouched by the requirement.
+  const unrelated = verdictOf(
+    runCli(["hook", "claude-code"], dir, bashEvent("mkdir build"), {
+      APPROVAL_HOOK_REQUIRE_SANDBOX: "1",
+    }),
+  );
+  assert.equal(unrelated.permission, "allow");
+  assertClean(dir);
+});
+
+test("a sandbox wrapper is classified as the command inside it (APRV-193)", () => {
+  const dir = ready();
+  // The hole this closes, on the surface where it mattered: before the
+  // unwrapping, `approval sandbox -- <anything>` was the gate's own CLI
+  // (`gate.self`, pass-through) and `sandbox-exec …` was unclassified, so one
+  // spelling laundered every class and the other was denied for being safe.
+  const laundered = runCli(
+    ["hook", "classify", "--json", "--", "approval sandbox -- npm install left-pad"],
+    dir,
+  );
+  assert.equal(laundered.code, 0, laundered.stderr);
+  const classified = JSON.parse(laundered.stdout) as { classes: string[] };
+  assert.deepEqual(classified.classes, ["deps.add"]);
+
+  // `deps.add` is manual in this fixture policy, so the wrapper reaches the
+  // human gate exactly as the bare command does.
+  const verdict = verdictOf(
+    runCli(["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"], dir,
+      bashEvent("approval sandbox -- npm install left-pad")),
+  );
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(rawLog(dir), /"class":"deps\.add"/u);
+});
+
 test("a GET-shaped fetch runs unattended, and a POST-shaped one does not", () => {
   // APRV-114: the noise this refinement exists to remove. A research fetch is
   // a read under the policy's `read.*` rule and asks nobody; the same binary

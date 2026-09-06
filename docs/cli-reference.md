@@ -1575,10 +1575,31 @@ constructs the child's environment instead:
 never a name and never a value: a variable's name is half of a credential. The
 count is informational, and nothing in the gate reads it back.
 
-This is a scrub and not a sandbox. The child keeps the network, the filesystem,
-and every other ambient capability of the session, so a granted command can
-still reach anything the session could reach. Taking those away is APRV-193's
-subject, and `approval run` says nothing here that pretends otherwise.
+The scrub is not the sandbox, and since APRV-193 the sandbox is here too. A
+child spawned WITHOUT a token runs with outbound network denied by the operating
+system (macOS `sandbox-exec`), and the credential material beside the log
+(`vault.enc`, the `env` source map, the sealing keys) is unreadable to it. A
+child spawned WITH a token keeps the network: the manual path is a human's grant
+over these exact bytes, and `approval run` on a grant is the one door to the
+world: the registry for `deps.add`, the API host for `network.call`. Reading
+the token rather than re-resolving the class keeps the decision on the near side
+of the append, and it widens nothing an agent can reach alone, because a token
+that does not verify runs no command at all.
+
+`execution.started` records which room the child ran in, as `sandbox`:
+
+- `egress-denied`: the child ran with no outbound network.
+- `granted-egress`: a token was presented, so a human approved these bytes.
+- `opted-out`: `--no-sandbox` was passed. Recorded precisely because an opt-out
+  nobody can see afterwards is an opt-out that costs nothing to take.
+- `unsupported`: this platform has no mechanism in this build (anything but
+  macOS today; Linux is the follow-up). The execution proceeded UNPROTECTED, and
+  the field is how an auditor finds every run that did.
+
+On macOS, a sandbox that is present and broken is a refusal: the command is not
+run, nothing is appended, and the same token still spends once it works. See
+`docs/sandboxed-exec.md` for the profile, the survey of what egress denial
+costs, and the carve-outs.
 
 **What it does, in this order.**
 
@@ -1639,6 +1660,61 @@ refusal  {"ok":false,"error":{"code":"...","message":"...","detail"?:"...",
   close, or that execution already has an outcome.
 - `log-unreadable` (exit 4) / `log-torn-tail` (exit 3) / `log-corrupt` (exit 1).
 - `append-failed` — the append itself failed; the exit code follows the cause.
+
+## sandbox
+
+```
+approval sandbox [--allow-loopback] [--log <path>] -- <cmd> [args…]
+```
+
+Runs a command with outbound network denied by the operating system. It appends
+nothing, authorizes nothing, and exits with the child's own exit code.
+
+**Why it exists.** `approval run` covers the actions the gate SEES. It does not
+cover the commands a harness runs on its own (`npm test`, `node
+scripts/whatever.mjs`), which the hook classifies `files.write.workspace`, allows, and then
+never touches again, because the hook decides and the harness executes. Those
+are exactly the commands that run code an agent wrote a minute ago, so the
+command's NAME has stopped describing its effect, and no classifier over shell
+text can fix that. This verb is where such a command runs when its effects
+cannot leave.
+
+The hook cannot apply the sandbox itself: a `PreToolUse` verdict is allow or
+deny, and it cannot rewrite a command into a wrapper. Two things make the
+wrapper more than a convention:
+
+1. the classifier reads `approval sandbox -- <cmd>` as the class of `<cmd>`, so
+   wrapping neither hides a command from the gate nor is punished by it (before
+   APRV-193, `sandbox-exec …` was `hook-unclassified` and denied, while the bare
+   command was allowed: the hook actively penalised the safe spelling);
+2. `APPROVAL_HOOK_REQUIRE_SANDBOX=1` makes the hook DENY an allowed-class exec
+   that is not written this way, naming the spelling that works. Off by default,
+   and turning it on can only ever refuse more.
+
+**What the child gets.** No outbound network, including loopback (the gate needs
+none: its IPC is a file). No credential-bearing environment variable
+(`core/child-env.ts`, APRV-205). No read of the vault, the `.approval/env`
+source map, or the sealing keys. Everything else (the filesystem, the working
+tree, `PATH`) is untouched, because a sandbox that broke ordinary development
+is a sandbox somebody turns off.
+
+**`--allow-loopback`** carves loopback back in, for a suite that starts its own
+server. It is a real widening: a port is a port, and anything listening on one is
+reachable from inside.
+
+**Exit 127** means the command was NOT run: this machine has no working sandbox
+primitive, or the command is not on `PATH`. Unlike `approval run`, this verb
+fails closed on both: it makes one promise and has nothing else to offer.
+
+**An agent harness cannot run under this.** `claude` and `cursor-agent` talk to
+a model over the network, which is exactly what is denied, so
+`approval sandbox -- claude` is a session that cannot think. A whole-session
+sandbox needs an egress allowlist reaching one host, which Seatbelt cannot
+express by hostname and which the prior art solves with a local proxy. Until
+that exists the unit this verb protects is the command.
+
+See `docs/sandboxed-exec.md` for the profile, the survey of what egress denial
+costs, and the carve-outs.
 
 ## wait
 

@@ -95,6 +95,7 @@ import { usdOrZero } from "./money.js";
 import { isPayloadHash } from "./payload.js";
 import { loadPolicy, POLICY_FILENAMES, type Autonomy, type LoadPolicyOptions } from "./policy-load.js";
 import { humanOnlyRefusal, resolve } from "./policy-match.js";
+import type { SandboxState } from "./sandbox.js";
 import { readVerifiedRecords, type LogReadRefusal } from "./state.js";
 import { forgetPrivateKey, keyStoreDirFor } from "./seal.js";
 import { consumeToken, deliveredToken, type TokenRefusal } from "./token.js";
@@ -319,6 +320,21 @@ export interface ExecuteOptions extends ClockOptions {
    * spawns.
    */
   envStripped?: number;
+  /**
+   * The room the child ran in (APRV-193), recorded on `execution.started` as
+   * `sandbox`.
+   *
+   * Computed at the spawn site by `core/sandbox.ts` from what the MACHINE can
+   * do and what the caller was holding, never from a claim about either: the
+   * three interesting values are the runtime's own findings, and the fourth
+   * (`opted-out`) is the operator's `--no-sandbox`, which is recorded precisely
+   * because an opt-out nobody can see afterwards is an opt-out that costs
+   * nothing to take. Informational in the same sense `envStripped` is: nothing
+   * in the gate reads it back and no decision turns on it, which is what keeps
+   * it clear of §11.1's "self-reported fields never reduce scrutiny" — the
+   * field records a decision already made rather than making one.
+   */
+  sandbox?: SandboxState;
   /**
    * Where per-request private keys live (APRV-105). Defaults to `.approval/keys/`
    * beside the log. Read when no `token` is passed and a grant carries a
@@ -823,6 +839,9 @@ function attemptStart(
       // APRV-205: the manual path's `execution.started` is appended by
       // `consumeToken`, so the count travels with the spend.
       ...(options.envStripped === undefined ? {} : { envStripped: options.envStripped }),
+      // APRV-193: and the room it ran in, for the same reason — the manual
+      // path's start event is written by the spend, so both fields travel with it.
+      ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
       // One moment for the whole operation: the timestamp already read above is
       // the one the spend records, so `startExecution` and the `execution.started`
       // it produces cannot disagree about when this happened.
@@ -977,6 +996,11 @@ function attemptStart(
         // adapter's `act`, which runs in this process) records no count at all,
         // because "none withheld" and "no child" are different facts.
         ...(options.envStripped === undefined ? {} : { env_stripped: options.envStripped }),
+        // APRV-193: the room the child ran in. `egress-denied` is the default
+        // for this path — nobody was asked about this action, so the code it
+        // runs executes into a room with no doors. Optional and additive for
+        // the same reason the count above is.
+        ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
       },
     },
     options,
