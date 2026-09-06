@@ -49,13 +49,7 @@ to prevent.
    merge queue takes it from there. A policy that raises the class puts
    the same command on the phone instead. A PR sitting at CLEAN waiting
    for a hand click in the GitHub UI is the failure mode this rule
-   removes (APRV-182). Records PRs arm themselves (APRV-284): `approval
-   log advance --pr` and the daemon's cadence advance run `gh pr merge
-   <branch> --merge --auto` on the `records-log-<date>` PR they open or
-   update, so nobody clicks it. Same command, same `vcs.push.main` class,
-   riding the advance's own authorization; the arm is withheld when the
-   branch carries anything but the log, `QUEUE.md` and payloads, and
-   `--no-auto-merge` (`--no-advance-auto-merge` for the daemon) opts out.
+   removes (APRV-182).
 
 ## Model tiers
 

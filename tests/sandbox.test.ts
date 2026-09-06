@@ -444,7 +444,9 @@ test("resolveExecutable answers what execvp would, and null when it cannot", () 
   assert.equal(resolveExecutable("definitely-not-a-binary-aprv193", { PATH: "/usr/bin:/bin" }), null);
   assert.equal(resolveExecutable("/bin/cat", {}), "/bin/cat");
   assert.equal(resolveExecutable("/bin/does-not-exist", {}), null);
-  assert.equal(resolveExecutable("cat", { PATH: "/usr/bin:/bin" }), "/bin/cat");
+  // First PATH entry wins. The order is /bin first because merged-/usr Linux
+  // (Ubuntu runners) has /usr/bin/cat too, and the test pins the walk, not the OS.
+  assert.equal(resolveExecutable("cat", { PATH: "/bin:/usr/bin" }), "/bin/cat");
   // No PATH is not "search the whole disk": it is a lookup that cannot be done.
   assert.equal(resolveExecutable("cat", {}), null);
 });
