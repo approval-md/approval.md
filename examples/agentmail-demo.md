@@ -266,10 +266,13 @@ exit=0
 ```
 
 In order: the payload was re-hashed against the binding the grant recorded, the
-token was verified and consumed, `execution.started` was appended, the vault was
-opened and the sending key was read **inside the token window**, the draft was
-re-fetched and compared field by field, `POST /v0/inboxes/{inbox_id}/drafts/{draft_id}/send`
-was called, the window closed, and `execution.completed` was appended. AgentMail
+declared credentials resolved and the sending key was read from the vault, the
+draft was re-fetched and compared field by field **before the token was spent**
+(the refusal in Step 9 came from here, which is why it cost no authority), then
+the token was verified and consumed, `execution.started` was appended, the
+draft was compared once more inside the window, immediately before
+`POST /v0/inboxes/{inbox_id}/drafts/{draft_id}/send`, the window closed, and
+`execution.completed` was appended. AgentMail
 deletes a draft when it sends, so the draft id is now gone and the mail exists;
 re-running would find nothing to send.
 

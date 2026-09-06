@@ -4311,9 +4311,26 @@ the action's `idempotency_key` and its `payload_hash`. An agent that bypasses
 this CLI still cannot send, because the credentials only answer to tokens.
 
 The runtime, not the adapter, owns the sequence: recompute the payload hash,
+read the declared class from the verified log, resolve the credentials the
+adapter says it cannot act without, run the adapter's own pre-token check,
 verify and consume the token, append `execution.started`, call the adapter,
 append the outcome. The adapter implements one method and cannot skip a step,
 because it never holds the sequence.
+
+The two steps that sit BEFORE the token spend are there for one reason: a
+condition that makes the side effect impossible, and that the runtime can
+establish without attempting it, must not cost a human's single-use grant to
+discover. A credential nobody stored refuses `credential-unavailable`; whatever
+the adapter's own check refuses arrives as `adapter-precheck-refused` with the
+adapter's reason in `adapter_code`. Both leave the log exactly as they found it,
+`acted` is `false`, there is no `started_seq` and no `outcome`, and the same
+token executes once the condition is repaired.
+
+The pre-token check is offered only bytes the log binds to the action: the
+grant's `payload_hash` on the manual path, the registered declaration's off it.
+Anything else never reaches an adapter at all and is refused `payload-mismatch`
+by the runtime, in the runtime's own words, with nothing appended and the token
+still live.
 
 Which outcome is decided by where the sequence stopped, and the boundary is the
 moment `act` is invoked. A failure on the way in, or a failure the adapter
@@ -4449,6 +4466,22 @@ fields differ and never what they now hold: a drift message is written to a log
 and read by a human who did not approve the new text, and quoting it there would
 publish unapproved content through the refusal path.
 
+That comparison happens twice, and the first time is before the token is spent
+(APRV-276). In order, for a draft send: the payload's shape, the inbox it names,
+`GET .../drafts/{draft_id}`, and the field comparison, all as the adapter's
+pre-token check, with the sending key read from the vault in the same pre-token
+window the declared credentials resolve in. A drift there refuses
+`adapter-precheck-refused` with `agentmail-draft-drifted` in `adapter_code`,
+appends nothing, and spends nothing, so restoring the approved text and running
+the command again sends under the same token. Then the token is consumed,
+`execution.started` is appended, and the whole comparison runs a second time
+inside the window, immediately before the POST: AgentMail sends a draft by id, so
+something has to bound the gap between the last read and the send. A drift caught
+by that second comparison is `adapter-failed` with `execution.started` and
+`execution.failed` on the log, which is the honest record of a window that was
+open when the far side moved. A direct send has no such object and pays for no
+pre-token read: its bytes are the payload, and the payload hash binds them.
+
 **Failure codes** (in `adapter_code`): `agentmail-payload-invalid`,
 `agentmail-payload-ambiguous`, `agentmail-config-invalid`,
 `agentmail-inbox-mismatch`, `agentmail-from-mismatch`,
@@ -4457,11 +4490,15 @@ publish unapproved content through the refusal path.
 `agentmail-rate-limited`, `agentmail-rejected`, `agentmail-server-error`, and
 the contract's own `credential-unavailable` / `credential-refused`.
 
-Every HTTP refusal is a returned failure, so the contract records
-`execution.failed`: the far side answered, and an answer is knowledge. A throw
-from the SEND call is deliberately not caught — `execution.indeterminate` is the
-honest record of a request that may have left the process. A throw from either
-pre-send GET is `agentmail-unreachable`, because nothing was attempted.
+Every HTTP refusal inside the window is a returned failure, so the contract
+records `execution.failed`: the far side answered, and an answer is knowledge. A
+throw from the SEND call is deliberately not caught, and
+`execution.indeterminate` is the honest record of a request that may have left
+the process. A throw from either pre-send GET is `agentmail-unreachable`, because
+nothing was attempted. The draft read that runs before the token is spent follows
+the same mapping into its own `adapter_code` (`agentmail-draft-missing`,
+`agentmail-server-error`, `agentmail-unreachable`, and the rest), and the
+difference is only that it appends nothing and leaves the grant spendable.
 
 **`--json`** carries the adapter contract's own result, unmodified, exactly as
 `adapter email` does, with `"adapter":"agentmail"` and a `detail` of
