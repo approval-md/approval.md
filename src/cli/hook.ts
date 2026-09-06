@@ -120,6 +120,7 @@ import {
   UNKNOWN_SESSION,
   type HarnessLoopState,
 } from "../core/loop.js";
+import { drawSocketPathFor, drawSocketUsable } from "../core/live-draw.js";
 import type { EventRecord } from "../core/log.js";
 import { payloadHash } from "../core/payload.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
@@ -1385,6 +1386,17 @@ interface HookRun {
    * nothing for it. See {@link registrationProvenance}.
    */
   eventVersion: string | null;
+  /**
+   * The channel names this policy configures, sorted (APRV-281).
+   *
+   * Read off the policy the caller already loaded, and used for ONE thing: the
+   * line this hook prints when it appends a request, so the agent and the
+   * operator watching its error stream are told where the question went. It
+   * resolves nothing and reaches no verdict. An empty list is a fact worth
+   * printing rather than a default to fill in: a request under a policy that
+   * configures no channel is a question nothing is delivering.
+   */
+  channels: readonly string[];
 }
 
 /**
@@ -1696,6 +1708,63 @@ function recordUnattended(
 }
 
 /**
+ * Say, on STDERR, that a question is now on a human's queue and where it went
+ * (APRV-281).
+ *
+ * The behaviour this replaces: a gated tool call appended its request and then
+ * blocked for the whole wait in complete silence, ending in a `hook-timeout` the
+ * agent read as a refusal and the operator never saw coming. Nine minutes of a
+ * session's clock, with no way to tell "nobody has answered yet" from "nothing
+ * is even delivering this".
+ *
+ * **STDERR, and never stdout.** Stdout carries the verdict object the harness
+ * parses (see this file's header); a second object, or any prose at all, on that
+ * stream is a hook the harness cannot read. Claude Code shows stderr to the
+ * operator, which is exactly the audience for this.
+ *
+ * **It decides nothing.** No verdict, no timeout, no record, no refusal code
+ * turns on any of it. Both lines are printed after the request is appended and
+ * before the poll loop starts, so the state they describe is the state that
+ * exists; a probe that reported nothing (an unreadable directory, a platform
+ * with no euid) simply stays quiet rather than changing what this process does.
+ *
+ * **The listener line names a socket, and claims only what a socket can tell
+ * you.** `drawSocketUsable` is the same predicate an asker consults, and this
+ * connects to nothing: a usable-looking socket therefore prints NOTHING here,
+ * because a `stat` cannot establish that the far side answers. What an absent
+ * or untrustworthy socket does establish is that `approval up` is not running
+ * against this log in this checkout, and `approval up` is the one process that
+ * both serves the channels and consumes the taps. That is worth saying: on
+ * 2026-09-05 taps piled up unconsumed while hooks waited out their windows.
+ */
+function announceWait(
+  streams: Streams,
+  run: HookRun,
+  waiting: readonly GatedAction[],
+): void {
+  const where =
+    run.channels.length === 0
+      ? "no channel (this policy configures none, so nothing is delivering the question)"
+      : `channel ${run.channels.join(", ")}`;
+  for (const action of waiting) {
+    const adopted =
+      action.origin === "adopted"
+        ? " The question was already open for these exact bytes, so this tool call adopts it rather than asking a second time."
+        : "";
+    streams.err(
+      `approval: ${action.actionKey} (${action.cls}) is waiting for a human on ${where}; a decision on the phone releases it, and this hook blocks for up to ${String(run.timeoutMs)}ms before denying with hook-timeout and leaving the request open.${adopted}\n`,
+    );
+  }
+
+  const socket = drawSocketPathFor(run.logPath);
+  const listener = drawSocketUsable(socket);
+  if (listener.ok) return;
+  streams.err(
+    `approval: no listener is running for this log (${listener.reason}: ${socket}), so the request above may sit undelivered and a decision may go unconsumed. Start the gate's ambient runtime in the checkout that owns this log: \`eval "$(approval env)" && approval up\`, which runs the daemon loop and every configured channel in one process.\n`,
+  );
+}
+
+/**
  * The gated half: find what is already open for these bytes, request whatever
  * is not, wait for the decisions, spend the grants. Returns the exit code of
  * whatever verdict it printed.
@@ -1920,6 +1989,18 @@ function gateAndWait(
     if (unverified !== null) return sayDeny(unverified.code, unverified.detail);
     return sayAllow(`granted: ${classes.join(", ")}${provenance}${note}`);
   }
+
+  // Past every early return, so this is reached only where this process is
+  // genuinely about to block on a human (APRV-281). The set it names is the set
+  // it waits on: the keys this invocation opened, plus the ones it adopted from
+  // an earlier tool call, which wait in the same silence and were the case the
+  // announce would most easily have missed. A carried grant is not here because
+  // nothing is waiting on it.
+  announceWait(
+    streams,
+    run,
+    actions.filter((action) => waitKeys.includes(action.actionKey)),
+  );
 
   const deadline = Date.now() + run.timeoutMs;
 
@@ -2676,6 +2757,12 @@ function runHarnessHook(
     harness: adapter.kind,
     originApp: adapter.originApp,
     eventVersion: input.harnessVersion,
+    // Off the policy this function already loaded and validated, so the names
+    // printed are the names a channel process would serve (APRV-281). Sorted
+    // for a stable line; `Object.keys` order is the file's, and a line that
+    // changed when an operator reordered their policy would read as a change of
+    // state.
+    channels: Object.keys(load.policy.channels ?? {}).sort(),
   };
 
   const autonomies = classes.map((cls) => resolvePolicy(load, cls).autonomy);
