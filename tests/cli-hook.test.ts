@@ -15,6 +15,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -23,8 +24,9 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -43,6 +45,7 @@ import { supervisedExecutions } from "../src/core/audit.js";
 import { runPayloadHash } from "../src/core/payload.js";
 import { CLASSIFIER_CLASSES, COMMAND_RULES } from "../src/core/command-class.js";
 import { closeWindow, openWindow } from "../src/core/gate-window.js";
+import { DRAW_SOCKET_PATH_LIMIT, drawSocketPathFor } from "../src/core/live-draw.js";
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
 import { loadPolicy } from "../src/core/policy-load.js";
@@ -1940,6 +1943,136 @@ test("a mixed command gates on the strictest class it contains", () => {
   assert.equal(verdict.permission, "deny");
   assert.match(verdict.reason, /^hook-timeout: /u);
   assert.match(rawLog(dir), /"class":"network\.call"/u);
+  assertClean(dir);
+});
+
+// ===========================================================================
+// APRV-281: the wait says what it is waiting for, and where
+//
+// The behaviour before this: append the request, then block for the whole
+// window in silence and end in a bare `hook-timeout`. Both lines below go to
+// STDERR and nowhere else, and every case here re-parses stdout as the harness
+// does, because a hook whose verdict stream grew prose is a hook the harness
+// cannot read.
+// ===========================================================================
+
+/** The same policy, with a channel configured for the request to go to. */
+const POLICY_CHANNEL = POLICY.replace(
+  "classes:",
+  ["channels:", "  telegram:", "    token_env: APPROVAL_TG_TOKEN", "classes:"].join("\n"),
+);
+
+/**
+ * A scratch root short enough to hold a bound Unix socket.
+ *
+ * `sun_path` is 104 bytes on macOS, and the suite's own `case-N` directories
+ * under a realpath'd `$TMPDIR` are already close to that before `.approval/
+ * daemon/draw.sock` is appended. The socket case asserts the budget it is
+ * relying on rather than silently testing the path-too-long arm.
+ */
+const socketScratch = realpathSync(mkdtempSync(join(tmpdir(), "ap-")));
+let socketCases = 0;
+
+after(() => {
+  rmSync(socketScratch, { recursive: true, force: true });
+});
+
+/** `ready()`, under the short root. */
+function readyShort(policyText: string): string {
+  socketCases += 1;
+  const dir = join(socketScratch, `c${String(socketCases)}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "APPROVAL.md"), policyText, "utf8");
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+  return dir;
+}
+
+test("a manual request announces key, class and channel on stderr before it waits", () => {
+  const dir = readyShort(POLICY_CHANNEL);
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-announce"),
+  );
+
+  // The verdict is unchanged: same wait, same timeout, same code, and stdout
+  // still parses as one decision object.
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.doesNotMatch(run.stdout, /is waiting for a human/u);
+
+  assert.match(
+    run.stderr,
+    /approval: hook:sess-1:tu-announce:deps\.add \(deps\.add\) is waiting for a human on channel telegram;/u,
+    run.stderr,
+  );
+  assert.match(run.stderr, /a decision on the phone releases it/u);
+
+  // AC#2: nothing is serving this log, so the line says so and names the verb
+  // that fixes it.
+  assert.match(run.stderr, /approval: no listener is running for this log/u);
+  assert.match(run.stderr, /approval up/u);
+  assertClean(dir);
+});
+
+test("a policy that configures no channel is told so, in the same line", () => {
+  const dir = ready();
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install right-pad", "tu-announce-nochannel"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(
+    run.stderr,
+    /hook:sess-1:tu-announce-nochannel:deps\.add \(deps\.add\) is waiting for a human on no channel \(this policy configures none/u,
+    run.stderr,
+  );
+  assertClean(dir);
+});
+
+test("a usable socket prints the announce line and NO listener line", async () => {
+  const dir = readyShort(POLICY_CHANNEL);
+  const socketPath = drawSocketPathFor(join(dir, LOG));
+  assert.ok(
+    socketPath.length <= DRAW_SOCKET_PATH_LIMIT,
+    `the scratch root is too long to bind a socket under (${String(socketPath.length)} bytes): ${socketPath}`,
+  );
+
+  // A socket exactly as `approval up` leaves one: owner-only, in an owner-only
+  // directory. Nothing here answers, and nothing needs to — the hook stats the
+  // file and never dials it, which is the claim this case pins.
+  mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
+  chmodSync(dirname(socketPath), 0o700);
+  const server = createServer();
+  await new Promise<void>((settle) => {
+    server.listen(socketPath, settle);
+  });
+  chmodSync(socketPath, 0o600);
+
+  try {
+    const run = runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+      dir,
+      bashEvent("npm install left-pad", "tu-listening"),
+    );
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny");
+    assert.match(verdict.reason, /^hook-timeout: /u);
+    assert.match(run.stderr, /is waiting for a human on channel telegram;/u, run.stderr);
+    assert.doesNotMatch(run.stderr, /no listener is running/u);
+  } finally {
+    await new Promise<void>((settle) => {
+      server.close(() => {
+        settle();
+      });
+    });
+    rmSync(socketPath, { force: true });
+  }
   assertClean(dir);
 });
 

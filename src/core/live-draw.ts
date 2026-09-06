@@ -445,7 +445,24 @@ export function drawChildPath(): string {
   return fileURLToPath(new URL("../daemon/draw-child.js", import.meta.url));
 }
 
-function socketUsable(path: string): { ok: true } | { ok: false; reason: DrawRefusalReason; detail: string } {
+/**
+ * What an asker concludes about the socket file, before anything is dialled.
+ *
+ * Exported since APRV-281 for a second, non-asking caller: the hook prints a
+ * line saying where a request went and whether anything is there to consume it,
+ * and "anything is there" is exactly this question. Nothing is connected here,
+ * so a `{ ok: true }` says the file looks like this user's live daemon rather
+ * than that the far side answers; a caller that needs the stronger claim asks a
+ * question through {@link askDaemonDraw}.
+ *
+ * One predicate rather than a copy per caller, for the reason `liveClassesOf`
+ * is shared: two readers of the same file that reach different conclusions
+ * about whether a daemon is up would each be right in its own words and
+ * useless together.
+ */
+export function drawSocketUsable(
+  path: string,
+): { ok: true } | { ok: false; reason: DrawRefusalReason; detail: string } {
   if (path.length > DRAW_SOCKET_PATH_LIMIT) {
     return {
       ok: false,
@@ -517,7 +534,7 @@ function socketUsable(path: string): { ok: true } | { ok: false; reason: DrawRef
  */
 export function askDaemonDraw(logPath: string, question: DrawQuestion): DrawOutcome {
   const path = drawSocketPathFor(logPath);
-  const usable = socketUsable(path);
+  const usable = drawSocketUsable(path);
   if (!usable.ok) return usable;
 
   const child = spawnSync(process.execPath, [drawChildPath(), path], {
