@@ -23,7 +23,7 @@
  */
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   appendFileSync,
   chmodSync,
@@ -43,6 +43,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { FIX_COMMAND_PREFIXES } from "../src/cli/doctor.js";
+import { GITIGNORE_ENTRIES } from "../src/cli/scaffold.js";
 import { servicesFor } from "../src/cli/setup-common.js";
 import { DOCTOR_ROW_ORDER } from "./doctor-rows.js";
 import { assertLocal, startMockBotApi, type MockBotApi } from "./telegram-mock.js";
@@ -407,6 +408,10 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // directory, so there is no harness file here for a human to have
       // attested — the same absence harness-hook-wiring skips on (APRV-272).
       "skip",
+      // sealed-keys skips: the fixture is a scratch directory and not a git
+      // checkout, so there is nothing here to commit a private key to — the
+      // same absence log-drift and main-behind-origin skip on (APRV-285).
+      "skip",
     ],
   );
   for (const entry of parsed.checks) {
@@ -445,7 +450,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 26);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 27);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
@@ -904,13 +909,14 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  // 26: APRV-257 appended `checkpoint` (the second witness, as a row).
+  // 27: APRV-257 appended `checkpoint` (the second witness, as a row).
   // APRV-227 appended `harness-version-unverified` (whether the binary
   // hosting the hook changed under it), APRV-208 appended `live-draw`
-  // (whether a daemon is answering supervised-live draws for this log), and
+  // (whether a daemon is answering supervised-live draws for this log),
   // APRV-272 appended `gate-organs` (which harness files carry no attestation
-  // of their current bytes).
-  assert.equal(parsed.checks.length, 26);
+  // of their current bytes), and APRV-285 appended `sealed-keys` (whether a
+  // sealed-delivery private key is tracked or unignored).
+  assert.equal(parsed.checks.length, 27);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);
@@ -1773,4 +1779,127 @@ test("doctor: attesting the organ turns the row green, and editing it turns it b
   );
   assert.equal(drifted.status, "skip");
   assert.match(drifted.detail, /edited since seq \d+/u);
+});
+
+// ---------------------------------------------------------------------------
+// sealed-keys (APRV-285)
+// ---------------------------------------------------------------------------
+
+/**
+ * Real git, in the temp home. The vault and environment rows can be driven with
+ * an empty `.git` directory because they only ever read `.gitignore`; this row
+ * also asks git what it TRACKS, and there is no honest way to fake that.
+ */
+function gitIn(args: string[], cwd: string): void {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  assert.equal(result.error, undefined, `git failed: ${String(result.error)}`);
+  assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.stderr}`);
+}
+
+/** A doctor home that is a real repository, with an X25519 private key in the store. */
+async function homeWithKeyStore(
+  options: { ignored: boolean; key?: boolean } = { ignored: false },
+): Promise<{ home: string; keyPath: string; relative: string }> {
+  const home = await makeHome({ port: await freePort() });
+  gitIn(["init", "-q", "-b", "main", "."], home);
+  if (options.ignored) writeFileSync(join(home, ".gitignore"), ".approval/keys/\n", "utf8");
+  const relative = ".approval/keys/task-1:send:2026-09-06.key";
+  const keyPath = join(home, ".approval", "keys", "task-1:send:2026-09-06.key");
+  if (options.key !== false) {
+    mkdirSync(join(home, ".approval", "keys"), { recursive: true });
+    // Shape only. The row counts files and never opens one, which is the point:
+    // a diagnostic that read a private key to report on it would be the fault.
+    writeFileSync(keyPath, "MC4CAQAwBQYDK2VuBCIEIA==\n", { encoding: "utf8", mode: 0o600 });
+  }
+  return { home, keyPath, relative };
+}
+
+test("doctor: a private key in a store no .gitignore line covers fails with that line", async () => {
+  const { home } = await homeWithKeyStore({ ignored: false });
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const keys = checkNamed(run, "sealed-keys");
+
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(keys.status, "fail");
+  assert.match(keys.detail, /NOT gitignored/u);
+  assert.match(keys.detail, /git add \.approval\//u);
+  // The fix is the exact line, pasteable, and it neither deletes nor commits.
+  assert.match(keys.fix ?? "", /^echo '\.approval\/keys\/' >> /u);
+  assert.ok(
+    FIX_COMMAND_PREFIXES.some((prefix) => (keys.fix ?? "").startsWith(prefix)),
+    `the sealed-keys fix does not begin with an allowed command: ${String(keys.fix)}`,
+  );
+});
+
+test("doctor: an empty key store with no ignore line is named, and does not fail the run", async () => {
+  const { home } = await homeWithKeyStore({ ignored: false, key: false });
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const keys = checkNamed(run, "sealed-keys");
+
+  // Nothing is exposed today, so this is a state and not a fault. The line an
+  // operator needs is still named, in the DETAIL rather than in a `fix`:
+  // doctor's older rule is that only a failing row hands over something to type,
+  // the pinned-fix sweep above enforces it across every row, and a skip that
+  // broke it would be this row teaching people to scroll past it.
+  assert.equal(keys.status, "skip");
+  assert.match(keys.detail, /no key is in/u);
+  assert.equal(keys.fix, undefined);
+  assert.match(keys.detail, /`\.approval\/keys\/` line covers it/u);
+  assert.equal(
+    parseDoctor(run).checks.some(
+      (entry) => entry.check === "sealed-keys" && entry.status === "fail",
+    ),
+    false,
+  );
+});
+
+test("doctor: the line `approval init` writes turns the sealed-keys row green", async () => {
+  const { home } = await homeWithKeyStore({ ignored: true });
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const keys = checkNamed(run, "sealed-keys");
+
+  assert.equal(keys.status, "pass");
+  assert.equal(keys.fix, undefined);
+  assert.match(keys.detail, /1 key\(s\) are stored there/u);
+  // The scaffolded entry and the row's verdict are the same line, so a reader
+  // who ran `approval init` is never asked to do the same thing twice.
+  assert.ok(GITIGNORE_ENTRIES.includes(".approval/keys/"));
+});
+
+test("doctor: a private key git already tracks fails, naming the untrack and the revoke", async () => {
+  const { home, relative } = await homeWithKeyStore({ ignored: true });
+  // `git add -f`: the ignore line is in place and the key is staged anyway,
+  // which is the shape a forced add or a commit made before the line leaves.
+  gitIn(["add", "-f", "--", relative], home);
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const keys = checkNamed(run, "sealed-keys");
+
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(keys.status, "fail");
+  assert.match(keys.detail, /TRACKED by git/u);
+  assert.match(keys.detail, /token_sealed/u);
+  assert.match(keys.fix ?? "", /^approval init\b/u);
+  assert.match(keys.fix ?? "", /git rm --cached/u);
+  assert.match(keys.fix ?? "", /revoked/u);
+});
+
+test("doctor: a key consumed and unlinked is still reported while it is in the index", async () => {
+  const { home, keyPath, relative } = await homeWithKeyStore({ ignored: true });
+  gitIn(["add", "-f", "--", relative], home);
+  // Consume, expiry and revocation all unlink the private half. The working
+  // tree is then clean and the index is not, and it is the index that becomes
+  // a commit.
+  rmSync(keyPath);
+
+  const keys = checkNamed(
+    await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV),
+    "sealed-keys",
+  );
+
+  assert.equal(keys.status, "fail");
+  assert.match(keys.detail, /TRACKED by git/u);
 });

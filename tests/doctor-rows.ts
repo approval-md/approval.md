@@ -111,18 +111,24 @@ export const DOCTOR_ROW_ORDER = [
   // its enforcement is the CI-side protected-path guard. The row exists so a
   // hand edit is visible at the terminal before a pull request fails on it.
   "gate-organs",
+  // APRV-285: whether a sealed-delivery private key is tracked by git or sits
+  // in a key store no .gitignore line covers, appended for the same reason.
+  // `.approval/payloads/` is tracked on purpose, so `.approval/` is a directory
+  // an operator adds from, and this is the one path under it whose contents are
+  // raw private keys.
+  "sealed-keys",
 ] as const;
 
 /**
  * The rows that report `not applicable` when doctor runs in a directory `init`
  * has just scaffolded: no bot variables, no vault, no `.approval/env`, no
  * `daemon` block, no `supervised-live` class, no checkpoint key, no harness
- * settings file, no gate organ files, no daemon snapshot, and no git
- * repository.
+ * settings file, no gate organ files, no daemon snapshot, no sealed-delivery
+ * key store, and no git repository.
  *
  * A subset of {@link DOCTOR_ROW_ORDER} and asserted to be one, so a renamed row
  * cannot leave a name here that doctor no longer emits. The README names these
- * so a reader meeting sixteen dashes on their first run can tell a
+ * so a reader meeting seventeen dashes on their first run can tell a
  * configuration from a fault.
  */
 export const DOCTOR_FRESH_SKIPS: readonly string[] = [
@@ -142,4 +148,5 @@ export const DOCTOR_FRESH_SKIPS: readonly string[] = [
   "live-draw",
   "checkpoint",
   "gate-organs",
+  "sealed-keys",
 ];

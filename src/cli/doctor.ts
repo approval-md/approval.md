@@ -114,6 +114,7 @@ import {
   snapshotSummary,
 } from "../core/verified-snapshot.js";
 import { drawSocketPathFor, liveClassesOf } from "../core/live-draw.js";
+import { keyStoreDirFor } from "../core/seal.js";
 import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { policyWebPort } from "./channel-web.js";
@@ -136,7 +137,7 @@ import {
   readHarnessProvenance,
   type HarnessKind,
 } from "../core/harness-version.js";
-import { repoRoot } from "./git-scope.js";
+import { git, repoPath, repoRoot } from "./git-scope.js";
 import {
   ScanError,
   checkBuildFreshness,
@@ -1129,8 +1130,18 @@ const ENV_IGNORE_LINE = ".approval/env";
  * (APRV-75), because the two questions are the same question: the bare basename
  * is included in both cases because a `.gitignore` pattern with no slash matches
  * at every level, so a line `vault.enc` — or `env` — does cover the file.
+ *
+ * `kind` was added for the sealed-token key store (APRV-285), which is a
+ * DIRECTORY rather than a file. The trailing-slash forms are accepted only for
+ * that kind, and deliberately: `keys/` covers everything under `.approval/keys`,
+ * while a line `env/` would match a directory and not the file `.approval/env`,
+ * so accepting it there would be exactly the false PASS this list is shaped to
+ * avoid.
  */
-function ignorePatternsFor(relative: string): readonly string[] {
+function ignorePatternsFor(
+  relative: string,
+  kind: "file" | "dir" = "file",
+): readonly string[] {
   const base = relative.slice(relative.lastIndexOf("/") + 1);
   return [
     relative,
@@ -1143,6 +1154,7 @@ function ignorePatternsFor(relative: string): readonly string[] {
     "/.approval/*",
     base,
     ...(relative.endsWith(".enc") ? ["*.enc"] : []),
+    ...(kind === "dir" ? [`${relative}/`, `/${relative}/`, `${base}/`] : []),
   ];
 }
 
@@ -1156,7 +1168,11 @@ type IgnoreVerdict = "ignored" | "not-ignored" | "not-a-repo";
  * accidentally commit the file to, and failing a check about a risk that does
  * not exist trains people to ignore the check.
  */
-function ignoreVerdict(dir: string, relative: string): IgnoreVerdict {
+function ignoreVerdict(
+  dir: string,
+  relative: string,
+  kind: "file" | "dir" = "file",
+): IgnoreVerdict {
   try {
     statSync(join(dir, ".git"));
   } catch {
@@ -1168,7 +1184,7 @@ function ignoreVerdict(dir: string, relative: string): IgnoreVerdict {
   } catch {
     return "not-ignored";
   }
-  const patterns = ignorePatternsFor(relative);
+  const patterns = ignorePatternsFor(relative, kind);
   for (const raw of text.split(/\r\n|\n|\r/u)) {
     const line = raw.trim();
     if (line.length === 0 || line.startsWith("#")) continue;
@@ -2435,6 +2451,133 @@ function checkGateOrgans(dir: string, records: readonly EventRecord[]): DoctorCh
   };
 }
 
+// ---------------------------------------------------------------------------
+// 28. sealed-keys (APRV-285)
+// ---------------------------------------------------------------------------
+
+/** The exact line doctor tells an operator to add for the sealed-token key store. */
+const KEYS_IGNORE_LINE = ".approval/keys/";
+
+/** The same path without the trailing slash, which is how git spells a path. */
+const KEYS_IGNORE_PATH = ".approval/keys";
+
+/** The private key files this key store actually holds, sorted, names only. */
+function listPrivateKeys(keyDir: string): string[] {
+  try {
+    return readdirSync(keyDir)
+      .filter((name) => name.endsWith(".key"))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The paths git TRACKS under `keyDir`, repo-relative, or `[]` when git cannot say.
+ *
+ * Tracking is asked of git rather than inferred from the working tree, because
+ * the two can disagree in the direction that matters: a key consumed and
+ * unlinked is gone from disk and still in the index, and it is the index that
+ * becomes a commit.
+ */
+function trackedPrivateKeys(root: string, keyDir: string): string[] {
+  const relative = repoPath(root, keyDir);
+  // A key store outside this repository cannot be committed to it.
+  if (relative.startsWith("../") || isAbsolute(relative)) return [];
+  const listed = git(["ls-files", "-z", "--", relative], root);
+  if (!listed.ok) return [];
+  return listed.stdout.split("\0").filter((entry) => entry.length > 0);
+}
+
+/**
+ * Is a sealed-delivery private key one `git add` away from publication?
+ *
+ * The key store holds the X25519 private halves of sealed token delivery
+ * (`core/seal.ts`): one per request, written 0600 in a 0700 directory, unlinked
+ * at consume, expiry or revocation. The log — which IS shared, and which this
+ * project commits on purpose — carries only the ciphertext. A private key in
+ * that same history hands every reader of it the ability to open that action's
+ * `token_sealed` for as long as the token is unspent and inside its TTL, so the
+ * whole design of sealed delivery rests on the key never being committed.
+ *
+ * Nothing enforced that. `.approval/payloads/` is deliberately TRACKED (evidence
+ * belongs in the history), so `.approval/` is a directory an operator adds from
+ * during a records or ceremony commit, and a key store with no ignore line is
+ * swept in by the same `git add` that carries the payloads.
+ *
+ * Two questions, in the order of what stays wrong the longest, the same reading
+ * the vault and environment rows use:
+ *
+ * 1. **A tracked key** is the fault that has already happened, and a commit is
+ *    not something a later commit removes. Asked of git, so a key that was
+ *    consumed and unlinked but is still in the index is still reported.
+ * 2. **An unignored key store** is the fault about to happen. A key present with
+ *    no ignore line covering it FAILS; an empty or absent store is a SKIP that
+ *    still names the line in its detail and carries no `fix`, because nothing on
+ *    this machine is wrong yet and a non-failing row that hands an operator
+ *    something to type is a row they learn to scroll past.
+ *
+ * Outside a git repository the row skips: there is nothing here to commit a key
+ * to, and failing a check about a risk that does not exist trains people to
+ * ignore the check.
+ *
+ * Neither fix line deletes anything and neither commits anything. The repair for
+ * a key already in the index is named in prose and left to the human, exactly as
+ * {@link FIX_COMMAND_PREFIXES} requires.
+ */
+function checkSealedKeys(logPath: string, dir: string): DoctorCheck {
+  const check = "sealed-keys";
+  const keyDir = keyStoreDirFor(logPath);
+  const ignored = ignoreVerdict(dir, KEYS_IGNORE_PATH, "dir");
+
+  if (ignored === "not-a-repo") {
+    return {
+      check,
+      status: "skip",
+      detail: `no git repository at ${dir}, so there is nothing to commit a sealed-delivery private key to. ${keyDir} is where they would live, 0600 in a 0700 directory, and the log carries only the ciphertext they open`,
+    };
+  }
+
+  const root = repoRoot(dir);
+  const tracked = root === null ? [] : trackedPrivateKeys(root, keyDir);
+  if (tracked.length > 0) {
+    return {
+      check,
+      status: "fail",
+      detail: `${String(tracked.length)} sealed-delivery private key(s) are TRACKED by git: ${tracked.join(", ")}. The log is committed and carries the ciphertext, so a committed key opens that action's token_sealed for anyone holding the history, for as long as the token is unspent and inside its TTL — and a commit is not something a later commit removes`,
+      fix: `approval init — it writes '${KEYS_IGNORE_LINE}' into .gitignore so the next key is not swept in; a key already in the index has to be untracked by hand (\`git rm --cached\` on the paths above), and every action whose token is still unspent inside its TTL treated as disclosed and revoked`,
+    };
+  }
+
+  const present = listPrivateKeys(keyDir);
+  if (ignored === "not-ignored") {
+    if (present.length > 0) {
+      return {
+        check,
+        status: "fail",
+        detail: `${String(present.length)} sealed-delivery private key(s) in ${keyDir} are NOT gitignored in ${dir}: one \`git add .approval/\` — the command a records or ceremony commit uses, because \`.approval/payloads/\` is deliberately tracked — publishes a live key beside the ciphertext it opens`,
+        fix: `echo '${KEYS_IGNORE_LINE}' >> ${join(dir, ".gitignore")} — the line \`approval init\` writes; and treat every action whose token is still unspent inside its TTL as disclosed`,
+      };
+    }
+    // A SKIP WITH NO FIX, because nothing here is wrong yet. Doctor's older
+    // rule is that a non-failing row carries no `fix` line, and an operator
+    // scanning a wall of them for the next thing to type must not be handed one
+    // for a risk that does not exist on this machine today. The line is named in
+    // the detail instead, where a reader who wants it can still find it.
+    return {
+      check,
+      status: "skip",
+      detail: `no key is in ${keyDir}, so nothing is exposed here today, and no \`${KEYS_IGNORE_LINE}\` line covers it in ${dir}. \`approval init\` writes that line whether or not a policy has opted into \`token_delivery: sealed\`, because the entry an operator needs is the one already there on the day they turn the knob`,
+    };
+  }
+
+  return {
+    check,
+    status: "pass",
+    detail: `${keyDir} is covered by ${KEYS_IGNORE_LINE} in ${dir} and git tracks nothing under it${present.length === 0 ? " (no key is stored there right now)" : `; ${String(present.length)} key(s) are stored there`}. The private halves stay on this machine and the log carries only the ciphertext they open`,
+  };
+}
+
 /** The Backlog.md board key a task file's name begins with (`task-3 - Slug.md`). */
 function taskIdFromFileName(name: string): string | null {
   const match = /^([A-Za-z][A-Za-z0-9_]*-\d+)/u.exec(name);
@@ -2649,6 +2792,12 @@ export function commandDoctor(
       // protected-path guard, and this row exists so a hand edit is visible at
       // the terminal before a pull request fails on it.
       checkGateOrgans(dir, verified.records),
+      // APRV-285: appended, eighteenth time, same reason. The sibling of the
+      // vault and environment rows for the one file under `.approval/` that is
+      // a raw private key: `.approval/payloads/` is tracked on purpose, so
+      // `.approval/` is a directory people `git add` from, and the key store had
+      // nothing telling them it must not come along.
+      checkSealedKeys(logPath, dir),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

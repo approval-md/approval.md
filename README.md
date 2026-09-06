@@ -87,7 +87,7 @@ approval doctor                  # can this machine run the system at all?
 attested /tmp/approval-demo/APPROVAL.md at seq 1: sha256 cff55216c7be9bfbf35a7d980b6a0c75d250ebc039d7584cb9b3aa3bf25b2f91
 ```
 
-`doctor` prints one line per check and a tally. Three of the 26 lines from a
+`doctor` prints one line per check and a tally. Three of the 27 lines from a
 fresh directory, plus that tally:
 
 ```
@@ -95,7 +95,7 @@ fresh directory, plus that tally:
 ✓ log                 /tmp/approval-demo/.approval/log/events.jsonl verifies: 1 record(s), head seq 1 0f3c4a19187a…
 ✗ audit-sampling      disabled (secret-env-unnamed): APPROVAL.md sets audit.supervised_sample_rate to 0.1 but names no audit.sampling_secret_env. …
     fix: approval policy attest --as human:<id> — after setting audit.supervised_sample_rate and audit.sampling_secret_env in the policy; then export the named variable where the daemon runs
-9 ok · 16 not applicable · 1 failed
+9 ok · 17 not applicable · 1 failed
 ```
 
 The checks run in the order their failures cascade, from build freshness through
@@ -696,7 +696,7 @@ npm run check:tier -- <path> # classify the given paths and print the tier
 approval doctor              # the other check: this machine, not the code
 ```
 
-`approval doctor` prints **26 rows** and a tally, in the order their failures
+`approval doctor` prints **27 rows** and a tally, in the order their failures
 cascade: build freshness, identity, attestation, the log chain, the channels
 (`telegram`, `web-port`), the payload store, audit sampling, envelope integrity,
 the vault, the environment source map, then the rows that ask git and the harness
@@ -704,17 +704,21 @@ what happened (`log-drift`, `reconciliation`, `harness-hook-outcomes`,
 `harness-hook-wiring`, `keychain-scope`, `log-advance-cadence`, `dark-sessions`,
 `verified-snapshot`, `read-proof`, `main-behind-origin`,
 `harness-version-unverified`, `live-draw`, `values-block`, `checkpoint`,
-`gate-organs`).
+`gate-organs`, `sealed-keys`).
 
-**16 of the 26 report `not applicable` in a fresh directory**, and each names the
+**17 of the 27 report `not applicable` in a fresh directory**, and each names the
 absence it skipped on rather than passing quietly: `telegram` (no bot variables),
 `envelope-integrity` (no task folder), `vault` (no vault file), `environment` (no
 `.approval/env`), `read-proof` (no `daemon` block), `live-draw` (no
 `supervised-live` class), `checkpoint` (no `audit.checkpoint_keys`),
 `harness-hook-outcomes`, `harness-hook-wiring`, `harness-version-unverified` and
 `gate-organs` (no harness settings file), `verified-snapshot` (no daemon has
-run), and `log-drift`, `log-advance-cadence`, `dark-sessions` and
-`main-behind-origin` (not a git checkout). `gate-organs` is informational
+run), and `log-drift`, `log-advance-cadence`, `dark-sessions`,
+`main-behind-origin` and `sealed-keys` (not a git checkout). `sealed-keys` is
+the one that asks git what it TRACKS: `.approval/payloads/` is tracked on
+purpose, so `.approval/` is a directory people `git add` from, and a
+sealed-delivery private key swept in by one of those adds opens that action's
+token for everyone holding the log. `gate-organs` is informational
 wherever it lands: it lists the harness files whose current bytes carry no
 `approval policy attest --organ` record, and it never moves the exit code, since
 the enforcement for one of those is the protected-path guard in CI. Doctor

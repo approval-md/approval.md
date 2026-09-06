@@ -2149,6 +2149,22 @@ The checks, at length:
   the policy file. The fix starts the runtime in a shell where the sampling
   secret resolves. It asks the daemon nothing — it looks at the socket exactly
   as an asker does and reports what an asker would conclude.
+- **sealed-keys** — whether a sealed-delivery private key is one `git add` away
+  from publication, or already past it (APRV-285). `.approval/keys/` holds the
+  X25519 private halves of sealed token delivery, one per request, 0600 in a
+  0700 directory; the log is committed and carries only the ciphertext, so a
+  committed key opens that action's `token_sealed` for anyone holding the
+  history while the token is unspent and inside its TTL. Two questions, worst
+  first, the same reading the vault and environment rows use. A key git already
+  TRACKS is a FAIL, asked of `git ls-files` rather than of the working tree, so
+  a key consumed and unlinked is still reported while it sits in the index. A
+  key present in a store no `.gitignore` line covers is a FAIL naming the line;
+  an empty or absent store with no line covering it is a SKIP that still names
+  it, because the entry an operator needs is the one already there on the day
+  they turn the `token_delivery: sealed` knob. SKIP outside a git checkout,
+  where there is nothing to commit a key to. Neither fix deletes nor commits:
+  `git rm --cached` for a key already in the index is named in the prose and
+  left to you, along with revoking every action whose token is still unspent.
 
 **`--json`** (one object on stdout):
 
@@ -2985,6 +3001,16 @@ Payloads are tracked. `.approval/payloads/` is deliberately not ignored: those
 bytes are what each approval bound to, and evidence belongs in the history. To
 ignore them instead, add `.approval/payloads/` yourself — the log keeps every
 `payload_hash`, but the bytes behind them stop being rebuildable.
+
+Keys are not. The merged block ignores `.approval/*.sqlite` (a projection),
+`.approval/vault.enc`, `.approval/env`, `.approval/keys/`, `.approval/**/*.tmp-*`
+and `.approval-journal/`. `.approval/keys/` is the one that matters most and is
+easiest to miss: it holds the X25519 private halves of sealed token delivery, and
+because the payload store beside it is tracked on purpose, `.approval/` is a
+directory people `git add` from. A key committed there opens that action's
+`token_sealed` for everyone holding the log. The line is written whether or not
+your policy has opted into `token_delivery: sealed`, and `approval doctor`'s
+`sealed-keys` row reports a key that is tracked or in a store no line covers.
 
 The per-file codes reported in `existing` are `policy-exists`, `log-dir-exists`,
 `queue-exists` and `gitignore-entries-present`. `.gitignore` is the one file that
