@@ -4484,7 +4484,15 @@ test("/queue lists every pending request while one is being shown (APRV-216)", a
     assert.equal(reply.includes(key), true, `${key} is pending and absent from /queue`);
   }
   assert.equal(reply.includes(`${a} `), true, "the list is not keyed by action key");
-  assert.equal(reply.includes("shown now"), true, "/queue did not mark the shown request");
+  assert.equal(reply.includes("selected"), true, "/queue did not mark the selected request");
+
+  // APRV-256, over the real wire: the reply an approver actually receives says
+  // it has no buttons and how to recover a card they cannot find, and it still
+  // appends nothing while saying so (asserted against `before` above).
+  assert.equal(reply.includes("no decision buttons"), true, `not self-identified: ${reply}`);
+  assert.equal(reply.includes("/skip is the recovery"), true, `no recovery offered: ${reply}`);
+  assert.equal(reply.includes("shown now"), false, `the old marker reached the chat: ${reply}`);
+  assert.equal(reply.includes("message above"), false, `the old pointer reached the chat: ${reply}`);
 
   // The queue is derived, not held: a decision changes the next reply with no
   // command and no cycle in between.
@@ -4496,6 +4504,89 @@ test("/queue lists every pending request while one is being shown (APRV-216)", a
   const secondReply = sentSince(secondFrom).join("\n");
   assert.equal(secondReply.includes("2 pending"), true, `stale count: ${secondReply}`);
   assert.equal(secondReply.includes(a), false, "a decided request is still listed as pending");
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+/**
+ * The marker `/queue` puts on the request the listener has selected, spelled out
+ * here rather than imported so that a change to the shipped wording has to be
+ * made twice, deliberately (APRV-256).
+ */
+const SELECTED_LINE_MARKER = " — selected — card sent earlier";
+
+/**
+ * APRV-256, at the command level rather than the renderer's. Two states an
+ * approver can reach without doing anything wrong — a pending request nothing
+ * has selected yet, and an empty queue — and in neither may a reply point at an
+ * approval card, since in neither has one been sent.
+ */
+test("the commands answer a queue with nothing selected without naming a card (APRV-256)", async () => {
+  const world = staged(1, distinctPayloadFor);
+  const channel = channelFor();
+  const setup = setupFor(world, channel, undefined, "paced");
+  const state = newDispatchState();
+  const { streams, err } = capture();
+  const commands = commandHandlerFor(setup, streams, state, () => at(70));
+
+  const only = requestAt(world, 0, at(1));
+
+  // Pending, and NOT yet dispatched: the listener holds no selection.
+  const before = recordCount(world);
+  const from = mock.sentTexts().length;
+  await commands("queue");
+  const listing = sentSince(from).join("\n");
+  assert.equal(listing.includes("1 pending"), true, `no summary: ${listing}`);
+  assert.equal(listing.includes(only), true, "the pending request is not listed");
+  assert.equal(listing.includes("no decision buttons"), true, "the reply is not self-identified");
+  assert.equal(
+    listing.includes("no approval card has been sent for any of these"),
+    true,
+    `a card was implied with nothing selected: ${listing}`,
+  );
+  assert.equal(listing.includes(SELECTED_LINE_MARKER), false, "an undelivered request was marked");
+
+  // /skip and /next with no selection: same vocabulary, no card, no decision.
+  for (const command of ["skip", "next"] as const) {
+    const mark = mock.sentTexts().length;
+    await commands(command);
+    const reply = sentSince(mark).join("\n");
+    assert.equal(
+      reply.includes("no request selected"),
+      true,
+      `${command} did not report the empty selection: ${reply}`,
+    );
+    assert.equal(
+      reply.includes("with its buttons on an upcoming cycle"),
+      true,
+      `${command} did not say where buttons come from: ${reply}`,
+    );
+    for (const banned of ["in front of you", "message above", "shown now"]) {
+      assert.equal(reply.includes(banned), false, `${command} said ${banned}: ${reply}`);
+    }
+  }
+
+  // Navigation stayed non-decisional and log-free across all three.
+  assert.equal(recordCount(world), before, "a navigation command appended to the log");
+
+  // And an empty queue says only that, with no card, buttons or verbs offered.
+  channel.onDecision(handlerFor(world, at(71)));
+  await dispatchPending(setup, streams, state, at(72));
+  assert.equal((await press(channel, only, "grant"))?.ok, true);
+  const emptyFrom = mock.sentTexts().length;
+  await commands("queue");
+  const empty = sentSince(emptyFrom).join("\n");
+  // The announce path bolds the first line, so this is `includes` against a
+  // reply whose only content is that line.
+  assert.equal(
+    empty.includes("Nothing pending — the queue is empty."),
+    true,
+    `not the empty reply: ${empty}`,
+  );
+  for (const banned of ["card", "button", "/skip", "/next"]) {
+    assert.equal(empty.includes(banned), false, `an empty queue mentioned ${banned}: ${empty}`);
+  }
 
   assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
   assertClean(world.unit);
@@ -4730,11 +4821,140 @@ test("the summary and the queue listing are arithmetic on the log alone (APRV-21
   assert.equal(summary[0]?.includes("2 pending"), true);
   assert.equal(summary[0]?.includes("2h 59m ago"), true, `oldest age wrong: ${String(summary[0])}`);
 
+  // [0] summary, [1] the "this is a list" line (APRV-256), then the items.
   const listed = queueLines(requests, at(180), [world.keys[1] as string]);
-  assert.equal(listed[1]?.startsWith("1. "), true, "the list is not numbered from one");
-  assert.equal(listed[1]?.includes(TASK), true, "the list names no task");
-  assert.equal(listed[2]?.includes("shown now"), true, "the shown request is not marked");
+  assert.equal(listed[2]?.startsWith("1. "), true, "the list is not numbered from one");
+  assert.equal(listed[2]?.includes(TASK), true, "the list names no task");
+  assert.equal(listed[3]?.includes("selected"), true, "the selected request is not marked");
 
   assert.deepEqual(summaryLines([], at(180)), ["Nothing pending — the queue is empty."]);
   assert.deepEqual(queueLines([], at(180), []), ["Nothing pending — the queue is empty."]);
+});
+
+/**
+ * APRV-256. The reported bug was a reply that said "shown now" and "Tap the
+ * buttons on the message above" to an approver who could see no buttons at all:
+ * `/queue` was asserting present visibility from a delivery bookkeeping entry,
+ * which records only that a send once returned success.
+ *
+ * These assertions are about words, and they are worth their space because the
+ * words are the whole product here. Nothing in the queue's derivation changed,
+ * so a test that only checked keys and counts would have passed before the fix
+ * and after it.
+ */
+test("/queue calls itself a list and never claims a card is visible (APRV-256)", () => {
+  const world = staged(3, distinctPayloadFor);
+  requestAt(world, 0, at(1));
+  requestAt(world, 1, at(2));
+  requestAt(world, 2, at(3));
+  const queue = buildPendingQueue(world.unit.logPath, world.tagOptions, at(180));
+  assert.equal(queue.ok, true);
+  const requests = queue.ok ? queue.requests : [];
+
+  // --- Selected item -------------------------------------------------------
+  const selected = queueLines(requests, at(180), [world.keys[0] as string]).join("\n");
+
+  // AC #1: the reply identifies itself as a list without decision buttons, and
+  // points at the card without placing it.
+  assert.equal(selected.includes("no decision buttons"), true, `not self-identified: ${selected}`);
+  assert.equal(selected.includes("its own approval card"), true, "decisions are not directed");
+  assert.equal(
+    selected.includes("wherever that card sits"),
+    true,
+    "the card's position is asserted or omitted",
+  );
+
+  // AC #2: the two reported phrases are gone, and no synonym takes their place.
+  for (const banned of [
+    "shown now",
+    "message above",
+    "the message below",
+    "above to decide",
+    "being shown",
+    "in front of you",
+  ]) {
+    assert.equal(selected.includes(banned), false, `${banned} survived in: ${selected}`);
+  }
+  assert.equal(
+    selected.includes("card sent earlier"),
+    true,
+    "the marker does not describe prior delivery",
+  );
+  assert.equal(
+    selected.includes("cannot tell whether that card is still here"),
+    true,
+    "the reply vouches for a card it cannot see",
+  );
+
+  // AC #3: recovery, and what recovery does not do.
+  assert.equal(selected.includes("/skip is the recovery"), true, "no /skip recovery is offered");
+  assert.equal(selected.includes("Nothing is decided by typing it"), true, "no decision disclaimer");
+  assert.equal(selected.includes("stays pending in the log"), true, "pendingness is not stated");
+  assert.equal(
+    selected.includes("a fresh card is sent on a later listener cycle"),
+    true,
+    "the fresh card is not promised to a later cycle",
+  );
+  assert.equal(selected.includes("gloss is being written"), true, "the gloss delay is unmentioned");
+  assert.equal(
+    selected.includes("It is not a way to ask for the card again."),
+    true,
+    "/next is left readable as a resend",
+  );
+  assert.equal(selected.includes("no new card is sent for it"), true, "/next is not disambiguated");
+
+  // Only the selected key is marked, and it is marked once.
+  assert.equal(
+    selected.split(SELECTED_LINE_MARKER).length - 1,
+    1,
+    `more than one request is marked: ${selected}`,
+  );
+  const markedLine = selected
+    .split("\n")
+    .find((line) => line.includes(SELECTED_LINE_MARKER)) as string;
+  assert.equal(markedLine.includes(world.keys[0] as string), true, "the wrong request is marked");
+
+  // --- A digest selection is still ONE card --------------------------------
+  // `state.paced.current` carries every key of a digest group, and the group
+  // reached Telegram as a single message, so the plural branch must not invite
+  // the approver to hunt for one card per marked line.
+  const grouped = queueLines(requests, at(180), [
+    world.keys[0] as string,
+    world.keys[1] as string,
+  ]).join("\n");
+  assert.equal(grouped.split(SELECTED_LINE_MARKER).length - 1, 2, "both keys were not marked");
+  assert.equal(
+    grouped.includes("a single approval card for them was sent to this chat earlier"),
+    true,
+    `a digest selection implied several cards: ${grouped}`,
+  );
+  assert.equal(grouped.includes("/skip is the recovery"), true, "recovery is singular-only");
+
+  // --- No selected item ----------------------------------------------------
+  const none = queueLines(requests, at(180), []).join("\n");
+  assert.equal(none.includes("no decision buttons"), true, "the list line is selection-dependent");
+  assert.equal(none.includes(SELECTED_LINE_MARKER), false, "an unselected request was marked");
+  assert.equal(
+    none.includes("Nothing is selected right now"),
+    true,
+    `the empty selection is not stated: ${none}`,
+  );
+  assert.equal(
+    none.includes("no approval card has been sent for any of these"),
+    true,
+    "a card is implied with nothing selected",
+  );
+  // With nothing selected there is no lost card to recover, so the recovery
+  // paragraph stays off rather than inviting a /skip that has nothing to skip.
+  assert.equal(none.includes("/skip is the recovery"), false, "recovery offered with no selection");
+  for (const banned of ["shown now", "message above", "in front of you"]) {
+    assert.equal(none.includes(banned), false, `${banned} survived in: ${none}`);
+  }
+
+  // --- Empty queue ---------------------------------------------------------
+  const empty = queueLines([], at(180), []).join("\n");
+  assert.equal(empty, "Nothing pending — the queue is empty.");
+  for (const banned of ["card", "button", "shown now", "message above", "/skip", "/next"]) {
+    assert.equal(empty.includes(banned), false, `an empty queue mentioned ${banned}: ${empty}`);
+  }
 });
