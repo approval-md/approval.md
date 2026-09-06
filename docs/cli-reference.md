@@ -3009,7 +3009,9 @@ the command text and nothing else — never the agent's own `description` field,
 which is self-reported. The hard boundary remains the vault and the execution
 token (SPEC.md §10.4). See `docs/claude-code-hook.md` for the Claude Code
 settings.json entry and `docs/cursor-hook.md` for Cursor's `.cursor/hooks.json`.
-A HUMAN commits those files: they are `policy.edit`.
+A HUMAN commits those files: they are `policy.edit`. `docs/agent-sdk-hook.md`
+is the third caller: a Python Agent SDK application has no settings file, so it
+spawns this same verb from a hook callback (APRV-242).
 
 **Register the same command for the post-execution event too (APRV-145).** One
 binary answers two events, dispatched on `hook_event_name`. A `PostToolUse` or

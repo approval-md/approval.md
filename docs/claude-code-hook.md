@@ -897,6 +897,22 @@ classify -- <command…>` says which class a command falls under, and the verdic
 line reports how it resolved. A manual class re-records just as well and costs
 one prompt, which is why the supervised one is the ritual.
 
+## The same binary, from a Python Agent SDK app (APRV-242)
+
+An application built on `claude-agent-sdk` has no `.claude/settings.json` to
+commit a hook entry into: it is its own host, and it decides its own permission
+mode. It reaches this verb anyway, because the SDK's `HookMatcher` callbacks
+receive the same PreToolUse event this hook reads on stdin and return the same
+`hookSpecificOutput` object it prints. A shim that serializes the event, spawns
+`approval hook claude-code`, and returns the verdict makes such an application
+gateable with no new surface and no Python client.
+
+The recipe, the one shape difference (`tool_use_id` arrives as a positional
+argument rather than as a key), the fail-closed table for a gate the shim
+cannot reach, and the limits are in `docs/agent-sdk-hook.md`. The Python itself
+is `docs/agent-sdk-hook.py`; `tests/agent-sdk-hook.test.ts` runs this CLI on
+the pinned event and asserts it still prints what the recipe expects.
+
 ## Limits, stated plainly
 
 - **The classifier is best effort.** It reads shell text without being a shell.

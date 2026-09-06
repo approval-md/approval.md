@@ -1,0 +1,7 @@
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "agent-sdk-shim-unreachable: cannot run approval: [Errno 2] No such file or directory: 'approval'"
+  }
+}
