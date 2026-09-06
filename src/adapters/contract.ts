@@ -70,9 +70,12 @@
  *    are replaced with {@link REDACTION_PLACEHOLDER} and counted. SPEC.md §11.1
  *    invariant 3 ("raw secrets never appear in the log") is the reason adapters
  *    exist; here it is a mechanical check rather than a convention. Note what
- *    reaches the log from an adapter: nothing. The outcome events carry
- *    `exit_code` and nothing else, so the adapter's own vocabulary rides in the
- *    returned result, which is scanned before it is handed back.
+ *    reaches the log from an adapter: one bounded field. Since APRV-251 a
+ *    completion may carry `provider_ref`, the identifier the provider files the
+ *    effect under, and the sweep runs BEFORE that record is appended so the id
+ *    is scanned exactly as the rest of the detail is. Everything else in the
+ *    adapter's own vocabulary rides in the returned result, which is scanned
+ *    before it is handed back.
  *
  * ## What is deliberately not here
  *
@@ -107,10 +110,12 @@ import {
   finishExecution,
   findDeclaration,
   indeterminateExecution,
+  providerRefRecordable,
   startExecution,
   type Declaration,
   type ExecuteOptions,
   type ExecuteRefusal,
+  type ProviderRef,
 } from "../core/execute.js";
 import type { ObservationWindow, ObservedEffect } from "../core/coverage.js";
 import { payloadHash } from "../core/payload.js";
@@ -452,6 +457,61 @@ export type ActOutcome =
   | { ok: false; code: string; message: string };
 
 /**
+ * The one key by which a success `detail` NAMES the provider's own identifier
+ * for the effect (APRV-251, SPEC.md §8).
+ *
+ * An adapter that wants its effect joinable by id puts a short printable string
+ * at the top level of its detail under this key, beside whatever else its
+ * receipt says. Everything after that is the contract's: the value passes the
+ * redaction sweep with the rest of the detail, the adapter half of the record
+ * is this runtime's own knowledge of which adapter it called, and the record is
+ * written by {@link finishExecution}.
+ *
+ * ONE conventional key rather than a guess across `message_id`, `sid`, `id` and
+ * whatever the next provider calls it. A contract that guessed would sooner or
+ * later lift the wrong field of some receipt onto a permanent log, and an
+ * adapter that says nothing under this key is treated as naming no reference,
+ * which is the pre-amendment behaviour and always valid.
+ */
+export const PROVIDER_REF_DETAIL_KEY = "provider_ref";
+
+/**
+ * The reference to record for this call, or `null` for none.
+ *
+ * Given BOTH the raw detail the adapter returned and the redacted copy about to
+ * be handed back, because the interesting case is the one where they differ. A
+ * lifted id whose bytes the redaction sweep touched is dropped rather than
+ * recorded: `[redacted]` matches no provider's record, and writing it would put
+ * a value in the join column that reads exactly like one that means something.
+ * The credential itself never reaches the log either way, since what would be
+ * written is the redacted copy.
+ *
+ * Everything else it declines is declined for the same reason the schema would
+ * reject it (an absent key, a value that is not a string, a string that is
+ * empty, too long, or carries a space or a control character). Declining here
+ * rather than at the append is deliberate: a record the write boundary rejects
+ * would leave a side effect that already happened with no outcome in the log,
+ * and a completion carrying no reference is the better failure.
+ */
+export function providerRefFor(
+  adapterName: string,
+  rawDetail: JsonValue | undefined,
+  redactedDetail: JsonValue,
+): ProviderRef | null {
+  const read = (node: JsonValue | undefined): string | null => {
+    if (typeof node !== "object" || node === null || Array.isArray(node)) return null;
+    const named = (node as Record<string, JsonValue>)[PROVIDER_REF_DETAIL_KEY];
+    return typeof named === "string" ? named : null;
+  };
+  const raw = read(rawDetail);
+  if (raw === null) return null;
+  // The redacted copy is what a reader would get, so it is what is compared.
+  if (read(redactedDetail) !== raw) return null;
+  const ref: ProviderRef = { adapter: adapterName, id: raw };
+  return providerRefRecordable(ref) ? ref : null;
+}
+
+/**
  * Everything an adapter is given for {@link Adapter.precheck}, and nothing else
  * (APRV-276).
  *
@@ -728,6 +788,12 @@ export interface AdapterExecuteSuccess {
   exit_code: number;
   /** The adapter's own detail, after redaction. */
   detail?: JsonValue;
+  /**
+   * The reference the log now carries for this effect, when one was recorded
+   * (APRV-251). Absent when the adapter's detail named none, or named one the
+   * contract declined to write; see {@link providerRefFor}.
+   */
+  provider_ref?: ProviderRef;
   redactions: number;
 }
 
@@ -1290,13 +1356,17 @@ export async function executeThroughAdapter(
     tell(provider, null);
   }
 
-  // (f) The outcome event, then the redacted result.
+  // (f) The redaction sweep, THEN the outcome event, then the redacted result.
+  //
+  // The sweep runs first because one thing it produces now goes into the record
+  // rather than only into the result: the provider reference of APRV-251, which
+  // the adapter names inside its own detail and which therefore passes exactly
+  // the scan every other returned string passes before anything writes it down.
+  // Nothing else about the ordering matters — the sweep reads the outcome and
+  // the issued secrets, both settled the moment `act` returned.
   const secrets = scope.issued;
   const unknown = threw !== null && entered;
   const exitCode = outcome.ok ? 0 : ADAPTER_FAILURE_EXIT_CODE;
-  const finished = unknown
-    ? indeterminateExecution(logPath, actionKey, "act-threw", actor, executeOptions)
-    : finishExecution(logPath, actionKey, exitCode, actor, executeOptions);
 
   const failureCode: AdapterRefusalCode = threw === null ? "adapter-failed" : "adapter-act-threw";
   const rawMessage = outcome.ok ? "" : outcome.message;
@@ -1307,6 +1377,21 @@ export async function executeThroughAdapter(
       ? redactJson(outcome.detail, secrets)
       : { value: null, hits: 0 };
   const redactions = message.hits + adapterCode.hits + detail.hits;
+
+  // Only a completion has an effect for a provider to have filed, and only the
+  // adapter can say what its receipt called it. The `adapter` half is this
+  // runtime's own knowledge of which adapter it called, never a claim the
+  // detail makes about itself.
+  const providerRef = outcome.ok
+    ? providerRefFor(adapter.name, outcome.detail, detail.value)
+    : null;
+
+  const finished = unknown
+    ? indeterminateExecution(logPath, actionKey, "act-threw", actor, executeOptions)
+    : finishExecution(logPath, actionKey, exitCode, actor, {
+        ...executeOptions,
+        ...(providerRef === null ? {} : { providerRef }),
+      });
 
   if (!finished.ok) {
     return {
@@ -1372,6 +1457,10 @@ export async function executeThroughAdapter(
     outcome_seq: finished.record.seq,
     exit_code: 0,
     ...(outcome.detail === undefined ? {} : { detail: detail.value }),
+    // What the log now says this effect is called on the provider's side, so a
+    // caller reads the recorded reference rather than re-deriving it from the
+    // detail and reaching a different answer (APRV-251).
+    ...(providerRef === null ? {} : { provider_ref: providerRef }),
     redactions,
   };
 }

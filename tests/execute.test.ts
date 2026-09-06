@@ -1252,3 +1252,86 @@ test("F3 CLOSED: an action declared with no payload_hash cannot execute at all",
   assert.equal(records(unit).length, before, "a refused start appended something");
   assertClean(unit);
 });
+
+// ===========================================================================
+// the provider reference (APRV-251)
+// ===========================================================================
+
+/** A started execution for `task-042:draft`, ready to be closed. */
+function startedUnit(): ReturnType<typeof ready> {
+  const unit = ready();
+  assert.equal(
+    startExecution(unit.logPath, "task-042:draft", bound(unit, "task-042:draft"), at(2), "agent:claude")
+      .ok,
+    true,
+  );
+  return unit;
+}
+
+test("finishExecution records a provider reference on a completion", () => {
+  const unit = startedUnit();
+  const finished = finishExecution(unit.logPath, "task-042:draft", 0, at(3), "agent:claude", {
+    providerRef: { adapter: "agentmail", id: "msg_01JQ2XKV" },
+  });
+
+  assert.equal(finished.ok, true, finished.ok ? "" : finished.message);
+  if (!finished.ok) throw new Error("unreachable");
+  assert.deepEqual(finished.record.payload, {
+    exit_code: 0,
+    provider_ref: { adapter: "agentmail", id: "msg_01JQ2XKV" },
+  });
+  // The write boundary accepted it, which is the claim: the schema constrains
+  // the shape and the chain still walks.
+  assertClean(unit);
+});
+
+test("a failure carries no provider reference, whatever the caller states", () => {
+  const unit = startedUnit();
+  const finished = finishExecution(unit.logPath, "task-042:draft", 1, at(3), "agent:claude", {
+    providerRef: { adapter: "agentmail", id: "msg_01JQ2XKV" },
+  });
+
+  assert.equal(finished.ok, true, finished.ok ? "" : finished.message);
+  if (!finished.ok) throw new Error("unreachable");
+  assert.equal(finished.event, "execution.failed");
+  // A failure produced no effect for a provider to file. A join key on one
+  // would claim the log covers something that did not happen.
+  assert.deepEqual(finished.record.payload, { exit_code: 1 });
+  assertClean(unit);
+});
+
+test("a reference the schema would reject is dropped, and the outcome is still recorded", () => {
+  for (const ref of [
+    { adapter: "agentmail", id: "" },
+    { adapter: "", id: "msg_01JQ2XKV" },
+    { adapter: "agentmail", id: "msg 01JQ2XKV" },
+    { adapter: "agentmail", id: `msg_${"x".repeat(300)}` },
+    { adapter: "a".repeat(80), id: "msg_01JQ2XKV" },
+  ]) {
+    const unit = startedUnit();
+    const finished = finishExecution(unit.logPath, "task-042:draft", 0, at(3), "agent:claude", {
+      providerRef: ref,
+    });
+
+    // The outcome is the thing that must be written. A record the write
+    // boundary would reject would leave a side effect with no outcome at all,
+    // so the unrecordable half is dropped and the completion stands.
+    assert.equal(finished.ok, true, finished.ok ? "" : finished.message);
+    if (!finished.ok) throw new Error("unreachable");
+    assert.deepEqual(
+      finished.record.payload,
+      { exit_code: 0 },
+      `an unrecordable reference was written: ${JSON.stringify(ref)}`,
+    );
+    assertClean(unit);
+  }
+});
+
+test("a completion with no stated reference is unchanged", () => {
+  const unit = startedUnit();
+  const finished = finishExecution(unit.logPath, "task-042:draft", 0, at(3), "agent:claude");
+  assert.equal(finished.ok, true, finished.ok ? "" : finished.message);
+  if (!finished.ok) throw new Error("unreachable");
+  assert.deepEqual(finished.record.payload, { exit_code: 0 });
+  assertClean(unit);
+});

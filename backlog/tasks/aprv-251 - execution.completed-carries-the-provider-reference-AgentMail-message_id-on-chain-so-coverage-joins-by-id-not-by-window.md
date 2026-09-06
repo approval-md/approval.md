@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opus-251'
 created_date: '2026-09-04 21:13'
-updated_date: '2026-09-06 12:57'
+updated_date: '2026-09-06 13:12'
 labels: []
 dependencies:
   - APRV-245
@@ -26,11 +26,11 @@ APRV-245 joins AgentMail sent messages to verified records by class and time win
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 SPEC.md 8 amendment marked pending sign-off: execution.completed MAY carry provider_ref {adapter, id}; the schema in schema/ admits it and rejects other shapes
-- [ ] #2 executeThroughAdapter writes provider_ref when the adapter detail names one, through the same redaction sweep as the detail
-- [ ] #3 The AgentMail adapter surfaces message_id as the provider reference for direct and draft sends; the mock and conformance suite cover it
-- [ ] #4 src/core/coverage.ts prefers an exact provider_ref match as evidence and reports it distinctly from the class-and-window match; docs/cli-reference.md coverage section updated
-- [ ] #5 npm test, lint, typecheck pass
+- [x] #1 SPEC.md 8 amendment marked pending sign-off: execution.completed MAY carry provider_ref {adapter, id}; the schema in schema/ admits it and rejects other shapes
+- [x] #2 executeThroughAdapter writes provider_ref when the adapter detail names one, through the same redaction sweep as the detail
+- [x] #3 The AgentMail adapter surfaces message_id as the provider reference for direct and draft sends; the mock and conformance suite cover it
+- [x] #4 src/core/coverage.ts prefers an exact provider_ref match as evidence and reports it distinctly from the class-and-window match; docs/cli-reference.md coverage section updated
+- [x] #5 npm test, lint, typecheck pass
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -52,4 +52,18 @@ APRV-245 joins AgentMail sent messages to verified records by class and time win
 
 <!-- SECTION:NOTES:BEGIN -->
 Schema slice (commit 1). SPEC.md §8 gains a bullet, marked (Amended APRV-251, pending sign-off.): execution.completed MAY carry payload.provider_ref, an object of exactly two non-empty printable strings, adapter and id, both written by the runtime at the write boundary; it authorizes nothing, is bounded so an identifier cannot become a message body, and its absence is the pre-amendment record. schema/event.schema.json gains an execution.completed-only conditional constraining that shape with additionalProperties:false and printable-ASCII patterns (adapter <=64, id <=256). Five fixtures: one valid, four invalid (extra member, missing adapter, empty id, non-string id). Conformance vectors regenerated from the fixtures (schema-validation gains 5 vectors, 4 of them negative controls); conformance/run.mjs 293/293, exit 0. Invariants touched: 'validate at the write boundary' (the new field is constrained by the schema every append passes, and the closed object is what keeps the constraint meaningful) and 'raw secrets never appear in the log' (the id is an opaque provider identifier and never a credential; §11.1 invariant 4 is untouched because nothing reads the field back).
+
+Code slice (commit 2). core/execute.ts: FinishOptions gains providerRef (with ProviderRef, the schema-matching bounds and providerRefRecordable beside it); finishExecution records it on execution.completed only, and only when it fits what the schema admits, since handing the write boundary a record it will reject would leave a side effect that happened with no outcome in the log. adapters/contract.ts: PROVIDER_REF_DETAIL_KEY is the one key by which a success detail names a reference, so the contract lifts a declared field instead of guessing between message_id, sid and id; the redaction sweep now runs BEFORE the outcome append, and providerRefFor drops a reference whose bytes the sweep touched (a redacted identifier matches nothing and would read like one that does), plus anything the schema would reject. The adapter half of the pair is the contract's own knowledge of which adapter it called, never a claim the detail makes. adapters/agentmail.ts: the receipt names the message_id under that key for direct and draft sends, and only when the provider returned one. adapters/conformance.ts: the happy-path check asserts both directions against the contract's own lift function. core/coverage.ts: a provider_ref index over execution.completed, consulted before the guard and the window; the key is the (source, adapter) pair plus the id, and match 'provider-ref' prints as '(id)'.
+
+Design decisions worth recording. (1) The lift is by ONE conventional detail key rather than by a per-adapter callback or a guess across receipt fields: a contract that guessed would eventually lift the wrong field of some receipt onto a permanent log. (2) An unrecordable reference is DROPPED, never refused: the outcome record matters more than the join key. (3) The id join applies no window and ignores class, because an id names one effect; the pair (adapter, id) is the key so one provider's identifier is never evidence about another's effect. (4) Only execution.completed carries one; a failed execution produced no effect for a provider to file.
+
+Invariants touched (SPEC §11.1). 'Validate at the write boundary': a new payload field, constrained by the schema, with the write path declining anything the schema would reject. 'Raw secrets never appear in the log': a provider message_id is an opaque identifier the provider issues for an effect that already happened, not a credential; it authorises nothing, opens nothing and is useless without the API key that the vault holds. The path that could have made it a leak is an adapter quoting a secret inside its receipt, and that is closed twice: the id passes the same redaction sweep as the rest of the detail, and a reference the sweep touched is not recorded at all (tests/adapters-contract.test.ts pins both). 'Self-reported fields never reduce scrutiny' is untouched: nothing in the gate reads provider_ref back, no verdict, budget or grant turns on it, and coverage is informational by SPEC §10.1.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+execution.completed may now carry provider_ref {adapter, id}, and approval coverage joins on it. SPEC.md §8 states the rule and §10.1 states its effect on the join, both marked pending sign-off; schema/event.schema.json admits exactly that shape on execution.completed and rejects every other (five fixtures, and the conformance vectors regenerated from them). executeThroughAdapter lifts the id from the one conventional detail key after the redaction sweep it moved above the outcome append, names the adapter from its own knowledge, and drops a reference the sweep touched or the schema would reject rather than risk the outcome record. The AgentMail receipt names the message_id under that key for direct and draft sends; the mock adapter grew the same option and the shared conformance suite checks both directions on every adapter. core/coverage.ts prefers an exact (source, id) match over the guard and the window and reports it as match 'provider-ref', printed '(id)'; docs/cli-reference.md replaces the 'joined by class and window, not by message id' paragraph with the id rule and what it does not cover.
+
+Verified: npm run build clean; node conformance/run.mjs 293/293 vectors, 142 controls, exit 0; node --test over event-schema, fixtures, execute, adapter-agentmail, adapters-contract, coverage, coverage-sources, cli-coverage, docs-guard, conformance and conformance-regen: 433 tests, 433 pass, exit 0; docs-guard, cli-adapter, e2e-email-demo and dogfood: 79 pass, exit 0; cli-setup, cli-payload, child-env, command-class, cli-instructions and coverage-sources: 543 pass, exit 0. npm run lint and npm run typecheck both clean. Two commits, schema first per CLAUDE.md. Full npm test not run in this lane.
+<!-- SECTION:FINAL_SUMMARY:END -->

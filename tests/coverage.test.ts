@@ -33,8 +33,18 @@ import {
   coverageReport,
   type ObservedEffect,
 } from "../src/core/coverage.js";
+import {
+  executeThroughAdapter,
+  inMemoryCredentials,
+  type JsonValue,
+} from "../src/adapters/contract.js";
 import type { EventRecord } from "../src/core/log.js";
+import { payloadHash } from "../src/core/payload.js";
 import type { GuardReport } from "../src/core/protected-path-guard.js";
+import { readVerifiedRecords } from "../src/core/state.js";
+import { MOCK_CLASS, MOCK_CREDENTIAL, mockAdapter } from "./adapter-mock.js";
+import { decide, register, request } from "./clock-adapters.js";
+import { at, attest, fixedClock, newScenario, T0 } from "./scenario.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
@@ -396,4 +406,181 @@ test("the join reads its inputs and returns; it opens no file and appends nothin
   const before = readFileSync(logPath(dir), "utf8");
   coverageReport([effect({ at: "2026-09-01T12:00:00.000Z" })], recordsOf(dir));
   assert.equal(readFileSync(logPath(dir), "utf8"), before, "the join wrote to the log");
+});
+
+// ---------------------------------------------------------------------------
+// The id rule (APRV-251)
+// ---------------------------------------------------------------------------
+
+/**
+ * A log holding one action registered, granted and EXECUTED through the adapter
+ * contract, so that its `execution.completed` carries a real `provider_ref`.
+ *
+ * Built the same way as everything else in this file: the gate writes every
+ * record, the grant is a real decision, and the completion is what
+ * `executeThroughAdapter` appended after the mock adapter acted. Nothing here
+ * hand-writes the reference the join is about, which is the only way the case
+ * proves anything about the join.
+ */
+async function executed(providerRef: string | undefined): Promise<{
+  records: EventRecord[];
+  actionKey: string;
+}> {
+  counter += 1;
+  // A root of its own: `ready()` above names its directories the same way
+  // `newScenario` does, and two suites' counters sharing one root would put two
+  // logs in one file.
+  const root = join(scratch, "executed");
+  mkdirSync(root, { recursive: true });
+  const unit = newScenario(root, POLICY);
+  attest(unit, T0);
+  const actionKey = `task-042:chaser-${String(counter)}`;
+  const payload: JsonValue = { to: ["agency@vendor.invalid"], subject: `chase ${String(counter)}` };
+
+  const registered = register(
+    unit.logPath,
+    {
+      task: "task-042",
+      envelope: {
+        origin: { app: "manual", created_by: "agent:claude" },
+        state: "awaiting",
+        actions: [
+          {
+            class: MOCK_CLASS,
+            idempotency_key: actionKey,
+            summary: `chase deposit ${String(counter)}`,
+            reversible: false,
+            est_cost_usd: "0.02",
+            payload_hash: payloadHash(payload),
+          },
+        ],
+      },
+    },
+    T0,
+    "agent:claude",
+    unit.options,
+  );
+  assert.equal(registered.ok, true, `registration failed: ${JSON.stringify(registered)}`);
+
+  const requested = request(
+    unit.logPath,
+    {
+      task: "task-042",
+      actionKey,
+      cls: MOCK_CLASS,
+      est_cost_usd: "0.02",
+      reversible: false,
+      summary: `chase deposit ${String(counter)}`,
+    },
+    at(1),
+    "agent:claude",
+    unit.options,
+  );
+  assert.equal(requested.ok, true, `request failed: ${JSON.stringify(requested)}`);
+
+  const decided = decide(unit.logPath, actionKey, "grant", "human:carter", at(2), unit.options);
+  assert.equal(decided.ok, true, `grant failed: ${JSON.stringify(decided)}`);
+  if (!decided.ok || decided.token === undefined) throw new Error("expected a token");
+
+  const result = await executeThroughAdapter(
+    mockAdapter(providerRef === undefined ? {} : { providerRef }),
+    { logPath: unit.logPath, actionKey, payload, actor: "agent:claude" },
+    {
+      policy: { file: unit.policyPath },
+      clock: fixedClock(at(3)),
+      token: decided.token,
+      credentials: inMemoryCredentials({ [MOCK_CREDENTIAL]: "sk-live-coverage-1f2e" }),
+    },
+  );
+  assert.equal(result.ok, true, `the execution was refused: ${JSON.stringify(result)}`);
+
+  const read = readVerifiedRecords(unit.logPath);
+  assert.equal(read.ok, true, `the log does not verify: ${JSON.stringify(read)}`);
+  if (!read.ok) throw new Error("unreachable");
+  return { records: [...read.records], actionKey };
+}
+
+/** A message effect from the adapter that executed, as its source would report it. */
+function messageEffect(id: string, when: string, source = "mock-email"): ObservedEffect {
+  return {
+    source,
+    id,
+    class: MOCK_CLASS,
+    at: when,
+    actorHint: null,
+    detail: "sent one message",
+  };
+}
+
+test("an effect the log names by id cites that record, with no window applied", async () => {
+  const { records } = await executed("msg_01JQ2XKV");
+  const completed = records.find((entry) => entry.event === "execution.completed");
+  assert.ok(completed !== undefined, "no execution.completed in the log");
+
+  // A YEAR after the record: the class-and-window rule would call this a gap,
+  // and it is not one. An id names one effect; a window names a period.
+  const far = iso(Date.parse(completed.ts) + 365 * 24 * 60 * 60 * 1000);
+  const report = coverageReport([messageEffect("msg_01JQ2XKV", far)], records);
+
+  assert.equal(report.covered, 1);
+  const entry = report.entries[0];
+  assert.ok(entry !== undefined);
+  assert.equal(entry.match, "provider-ref");
+  assert.deepEqual(entry.evidence, { seq: completed.seq, event: "execution.completed" });
+});
+
+test("the id-level match outranks the class-and-window match and is reported apart", async () => {
+  const { records } = await executed("msg_01JQ2XKV");
+  const completed = records.find((entry) => entry.event === "execution.completed");
+  assert.ok(completed !== undefined);
+  const registration = records.find((entry) => entry.event === "task.registered");
+  assert.ok(registration !== undefined);
+
+  // Inside the window, so a class match exists and is the EARLIER record. The
+  // id answer wins anyway, and names the completion rather than the earlier
+  // registration: the reader is told about this message, not about the day.
+  const inside = iso(Date.parse(completed.ts) + 60_000);
+  const report = coverageReport([messageEffect("msg_01JQ2XKV", inside)], records);
+  const entry = report.entries[0];
+  assert.ok(entry !== undefined);
+  assert.equal(entry.match, "provider-ref");
+  assert.deepEqual(entry.evidence, { seq: completed.seq, event: "execution.completed" });
+  assert.notEqual(completed.seq, registration.seq, "the two records are the same record");
+});
+
+test("an id another source reported is not evidence: the pair is the key", async () => {
+  const { records } = await executed("msg_01JQ2XKV");
+  const completed = records.find((entry) => entry.event === "execution.completed");
+  assert.ok(completed !== undefined);
+  const far = iso(Date.parse(completed.ts) + 365 * 24 * 60 * 60 * 1000);
+
+  // The same string, from a provider this action was never executed through.
+  // One provider's identifier is not evidence about another's effect, and the
+  // fall-through is the class-and-window rule, which finds nothing this far out.
+  const report = coverageReport([messageEffect("msg_01JQ2XKV", far, "agentmail")], records);
+  const entry = report.entries[0];
+  assert.ok(entry !== undefined);
+  assert.equal(entry.match, "none");
+  assert.equal(entry.evidence, null);
+});
+
+test("an execution that named no reference leaves the window rule in charge", async () => {
+  const { records } = await executed(undefined);
+  const completed = records.find((entry) => entry.event === "execution.completed");
+  assert.ok(completed !== undefined);
+  assert.equal(
+    (completed.payload as Record<string, unknown> | undefined)?.["provider_ref"],
+    undefined,
+    "the mock named no reference and the record carries one",
+  );
+
+  // Inside the window it is covered by class, exactly as before the amendment.
+  const inside = iso(Date.parse(completed.ts) + 60_000);
+  const near = coverageReport([messageEffect("msg_01JQ2XKV", inside)], records);
+  assert.equal(near.entries[0]?.match, "exact");
+
+  // Outside it, a gap. Absence of a reference is not evidence of anything.
+  const far = iso(Date.parse(completed.ts) + 365 * 24 * 60 * 60 * 1000);
+  const away = coverageReport([messageEffect("msg_01JQ2XKV", far)], records);
+  assert.equal(away.entries[0]?.match, "none");
 });

@@ -2058,9 +2058,31 @@ error, 3 for a torn tail and 4 for a log it could not read, because a log it
 could not read is a report it did not make. It reads only verified records
 (SPEC.md §11.1 invariant 1) and writes nothing anywhere.
 
+### The id rule, which outranks the window
+
+An `execution.completed` may carry `payload.provider_ref`, the identifier the
+provider filed the effect under, written by the adapter contract at the moment
+the execution closed (SPEC.md §8, APRV-251). An observed effect whose source and
+id match one is covered by that record and reported as `match: "provider-ref"`,
+printed in the evidence column as `seq <n> execution.completed (id)`. No window
+is applied to it: an id names one effect, and a class inside a span of time names
+a period.
+
+That is the whole difference the reference buys. Under the window rule below, a
+gated send covers an ungated one of the same class sitting beside it in the same
+day; under this rule, the log answers about the message actually in front of the
+reader, and a message the provider recorded that no record names is a gap no
+window can close.
+
+Absence is not a gap. A send whose adapter names no reference, a send made
+before the amendment, and every effect from `git` and `gh` fall through to the
+class-and-window rule below, which is the same answer this verb has always
+given and is labelled as such.
+
 ### The window rule, stated exactly
 
-For one observed effect, evidence is the EARLIEST record that is all three of:
+For one observed effect with no id-level match above, evidence is the EARLIEST
+record that is all three of:
 
 1. one of `task.registered`, `approval.granted`, `execution.started`,
    `execution.completed` — the four records that mean "this runtime was told
@@ -2091,14 +2113,15 @@ gets. The guard's third verdict, `granted-command`, is deliberately not
 surfaced: it is a run attributed by time rather than by bytes, and printing it
 beside `attested` would flatten the distinction the guard exists to draw.
 
-**The AgentMail join is by class and window, not by message id.** The adapter
-reports the provider's own `message_id` and the report prints it, but the id is
-not matched against anything: `execution.completed` records an `exit_code`, and
-the provider's id reaches only the CLI result, so an id-level binding needs an
-event-schema amendment. Putting the reference on-chain is APRV-251. Until that
-lands, a sent message is covered by a record of its class inside its window,
-exactly like a commit, and the id in the report is there for a person to paste
-into the provider's own console rather than for this verb to match on.
+**The AgentMail join is by message id where the log carries one** (APRV-251). A
+send that went through the adapter records the provider's `message_id` on its
+`execution.completed` as `provider_ref`, and the same id comes back from the
+inbox when this verb asks what was sent, so the two join exactly. A message this
+inbox sent that no record names by id takes the class-and-window rule like a
+commit does: that covers a send made before the amendment, and it covers a send
+made with a credential outside the adapter that happens to sit inside a gated
+send's window. The id stays printed either way, because a person pastes it into
+the provider's own console.
 
 ### The three tiers
 
@@ -4610,8 +4633,12 @@ difference is only that it appends nothing and leaves the grant spendable.
 
 **`--json`** carries the adapter contract's own result, unmodified, exactly as
 `adapter email` does, with `"adapter":"agentmail"` and a `detail` of
-`{"mode":"direct"|"draft","message_id":…,"thread_id":…,"payload_hash":…,
-"recipients":N,"http_status":N}`.
+`{"mode":"direct"|"draft","message_id":…,"provider_ref":…,"thread_id":…,
+"payload_hash":…,"recipients":N,"http_status":N}`. `provider_ref` is the same
+string as `message_id`, under the one key the adapter contract lifts onto
+`execution.completed` (APRV-251), and the result repeats the recorded reference
+as `"provider_ref":{"adapter":"agentmail","id":…}` beside the detail. A send
+whose answer names no id carries neither.
 
 ## env
 

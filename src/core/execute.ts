@@ -1042,6 +1042,45 @@ export interface FailureReason {
   message: string;
 }
 
+/**
+ * The provider's own identifier for a completed effect (APRV-251, SPEC.md §8).
+ *
+ * Two strings and no more, because the schema admits two and no more: the
+ * adapter that executed the action, and the id the provider's record files the
+ * effect under. See {@link FinishOptions.providerRef} for who may write one and
+ * what nobody may do with it.
+ */
+export interface ProviderRef {
+  adapter: string;
+  id: string;
+}
+
+/**
+ * The bounds SPEC.md §8 and `schema/event.schema.json` place on a reference.
+ *
+ * Printable ASCII with no spaces, and short. An identifier is short; the bound
+ * is what keeps the field from becoming somewhere to put a message. Stated here
+ * as well as in the schema so that the write path can DECLINE to record a
+ * reference that would not validate, rather than hand the schema a record it
+ * will reject and leave a completed side effect with no outcome in the log.
+ */
+export const PROVIDER_REF_ADAPTER_MAX = 64;
+export const PROVIDER_REF_ID_MAX = 256;
+const PROVIDER_REF_SHAPE = /^[\x21-\x7e]+$/u;
+
+/** Does `value` fit what the schema will accept for a reference member? */
+export function providerRefMemberOk(value: string, max: number): boolean {
+  return value.length > 0 && value.length <= max && PROVIDER_REF_SHAPE.test(value);
+}
+
+/** Is `ref` recordable, in full? A half-recordable reference is not recorded. */
+export function providerRefRecordable(ref: ProviderRef): boolean {
+  return (
+    providerRefMemberOk(ref.adapter, PROVIDER_REF_ADAPTER_MAX) &&
+    providerRefMemberOk(ref.id, PROVIDER_REF_ID_MAX)
+  );
+}
+
 /** {@link ExecuteOptions} plus the reason a non-zero exit carries (APRV-211). */
 export interface FinishOptions extends ExecuteOptions {
   reason?: FailureReason;
@@ -1064,6 +1103,31 @@ export interface FinishOptions extends ExecuteOptions {
    * log.
    */
   note?: FailureReason;
+  /**
+   * The identifier the provider's own record files this effect under
+   * (APRV-251), recorded on `execution.completed` and on nothing else.
+   *
+   * `approval coverage` reads a witness this project does not write (git, `gh`,
+   * an adapter's provider) and asks whether the log ever saw each effect. With
+   * no reference the strongest answer available is a record of a matching class
+   * inside the effect's window, so a gated send covers an ungated one of the
+   * same class beside it. A reference names the exact effect, which is what
+   * turns that answer into one about this action and no other.
+   *
+   * Written by the adapter contract and by nothing else in this runtime: the
+   * `adapter` half is the registered adapter's name, which the contract already
+   * holds, and the `id` half is lifted from what the adapter returned, after
+   * the redaction sweep that scans everything else it returned. The contract
+   * omits a reference whose bytes that sweep touched, because a redacted
+   * identifier matches nothing and would read like one that does.
+   *
+   * A REPORT and never an authorization, exactly as {@link FailureReason} and
+   * `note` are: nothing in the gate reads it back, no decision anywhere turns
+   * on it, and SPEC.md §11.1's rule that self-reported fields never reduce
+   * scrutiny is untouched. Recorded only when the caller states one, so an
+   * execution whose adapter names no reference records none.
+   */
+  providerRef?: ProviderRef;
   /**
    * A test seam and nothing else (APRV-261): called once, between the read that
    * authorizes this outcome and the append that records it.
@@ -1150,6 +1214,23 @@ export function finishExecution(
         event === "execution.completed" && options.note !== undefined
         ? { code: options.note.code, message: options.note.message }
         : {};
+  // APRV-251. The provider's own identifier for the effect, on a completion and
+  // nowhere else: a failed execution produced no effect for a provider to file.
+  // Recorded only when the caller states one, and only when it fits what the
+  // schema admits — handing the write boundary a record it will reject would
+  // leave a side effect that happened with no outcome in the log, which is a
+  // worse outcome than a completion carrying no reference.
+  const providerRef =
+    event === "execution.completed" &&
+    options.providerRef !== undefined &&
+    providerRefRecordable(options.providerRef)
+      ? {
+          provider_ref: {
+            adapter: options.providerRef.adapter,
+            id: options.providerRef.id,
+          },
+        }
+      : {};
   const appended = append(
     logPath,
     {
@@ -1158,7 +1239,7 @@ export function finishExecution(
       actor,
       task: open.task,
       action_key: actionKey,
-      payload: { exit_code: exitCode, ...reason },
+      payload: { exit_code: exitCode, ...reason, ...providerRef },
     },
     options,
     // The head read above, when the not-started / already-finished checks ran.

@@ -135,12 +135,22 @@ interface RenderedSource {
   covered: number;
 }
 
-/** The evidence column, as one short string a reader can act on. */
+/**
+ * The evidence column, as one short string a reader can act on.
+ *
+ * The qualifier says how the record was found, so that a weaker match is never
+ * read as a stronger one and the strongest is not read as the ordinary one.
+ * `(id)` is APRV-251's: the record names this exact effect by the provider's own
+ * identifier, which is a different claim from "a record of this class sits in
+ * this effect's window" and prints as one.
+ */
 export function evidenceText(entry: CoverageEntry): string {
   const evidence = entry.evidence;
   if (evidence === null) return "none";
   if ("verdict" in evidence) return evidence.verdict;
-  return `seq ${String(evidence.seq)} ${evidence.event}${entry.match === "family" ? " (family)" : ""}`;
+  const qualifier =
+    entry.match === "family" ? " (family)" : entry.match === "provider-ref" ? " (id)" : "";
+  return `seq ${String(evidence.seq)} ${evidence.event}${qualifier}`;
 }
 
 /** The coverage line one source prints, in the shape the help promises. */
