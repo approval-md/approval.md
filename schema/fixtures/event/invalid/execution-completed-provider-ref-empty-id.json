@@ -1,0 +1,18 @@
+{
+  "seq": 55,
+  "ts": "2026-09-05T08:41:07Z",
+  "event": "execution.completed",
+  "task": "task-042",
+  "action_key": "task-042:chaser:2026-09-05",
+  "actor": "agent:chaser",
+  "payload": {
+    "exit_code": 0,
+    "provider_ref": {
+      "adapter": "agentmail",
+      "id": ""
+    }
+  },
+  "alg": "sha256/jcs",
+  "prev": "1676b527a61665bf74287f00506bee5c1856453b413782f912ab927fb06f1836",
+  "hash": "9b1c3d5e7f9a1b3c5d7e9f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9b1c"
+}

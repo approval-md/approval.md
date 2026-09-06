@@ -1171,6 +1171,51 @@
       }
     },
     {
+      "$comment": "SPEC.md §8 (amended, APRV-251): an `execution.completed` MAY carry `provider_ref`, the identifier the provider's own record files this effect under, so that `approval coverage` (§10.1) can join a witness outside this runtime to the log by id instead of by class and time window. Exactly two members and no others: `adapter`, the name of the adapter that executed the action, and `id`, the provider's identifier. `additionalProperties: false` is the whole point of the shape — a reference that could carry a third member is a place to put a message body, and the length and character bounds close the same door on the two members it does have. Both are written by the runtime: `adapter` from the registered adapter, `id` lifted from what the adapter returned, through the same redaction sweep as every other string it returned (§11.1 invariant 3). An id whose bytes that sweep touched is OMITTED by the write path rather than recorded, since a redacted identifier matches nothing and would read like one that does. The field authorizes nothing and no verdict reads it back, so §11.1 invariant 4 is untouched by a value that came in part from the far side. OPTIONAL and additive: an execution whose adapter names no reference records none, and every record written before the field existed still validates and still verifies. Constrained on `execution.completed` alone, because that is the only event a completed side effect's identifier belongs on; a failed execution produced no effect for a provider to file.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "execution.completed"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "provider_ref": {
+                "type": "object",
+                "required": [
+                  "adapter",
+                  "id"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "adapter": {
+                    "type": "string",
+                    "pattern": "^[\\x21-\\x7e]{1,64}$",
+                    "description": "The name of the adapter that executed the action, as the runtime holds it. Printable ASCII with no spaces, at most 64 characters."
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[\\x21-\\x7e]{1,256}$",
+                    "description": "The provider's own identifier for the effect (an AgentMail `message_id`). Printable ASCII with no spaces, at most 256 characters: an identifier is short, and the bound is what keeps this field from becoming somewhere to put a message."
+                  }
+                },
+                "examples": [{ "adapter": "agentmail", "id": "msg_01JQ2" }]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "SPEC.md §6.3/§10.4 (amended, APRV-120): `execution.indeterminate` records that a side effect was ATTEMPTED and that its outcome is unknown. It is not a failure — a failure is a fact — and the difference is what stops a blind retry against an action that may already have happened. Two constraints, both about what may be written down. `reason` is required and closed: an unknown outcome that does not say where the unknowing began is not machine-readable, and a free-text reason is where an exception message (and the credential quoted inside it) would arrive. `exit_code` is `null` when present, never a number: nobody observed one, and a fabricated code would read exactly like a measured one. The bytes of the exception are deliberately absent from this record; the executing caller receives them, redacted, and the log holds the closed code.",
       "if": {
         "type": "object",
