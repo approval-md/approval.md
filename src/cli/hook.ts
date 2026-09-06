@@ -116,6 +116,7 @@ import {
 import {
   harnessLoopFloor,
   isLoopEscalated,
+  loopClearance,
   UNKNOWN_SESSION,
   type HarnessLoopState,
 } from "../core/loop.js";
@@ -1614,7 +1615,7 @@ function unattendedGuard(
   if (isLoopEscalated(read.records, task)) {
     return {
       code: "hook-gate-refused:loop-escalated",
-      detail: `task ${task} has three consecutive execution.failed events and is escalated to manual (SPEC.md §10.2), so its unattended classes may not run. The escalation clears when an execution.completed for the task lands.`,
+      detail: `loop-escalated: task ${task} has three consecutive failed side-effecting executions and is escalated to manual (amended SPEC.md §10.2), so its unattended classes may not run. ${loopClearance("task", task)}.`,
     };
   }
 
@@ -1754,19 +1755,40 @@ function gateAndWait(
   /** The history-rewrite refinement's own words, or `""` (APRV-108). */
   note = "",
   /**
-   * Loop safety floors every class of this invocation to `manual` (APRV-145).
+   * The harness streak that floored every class of this invocation to `manual`
+   * (APRV-145), or `null` where policy alone sent it here.
    *
-   * Passed into `request` rather than acted on here, so the floored action takes
-   * the identical path a manual class takes — same records, same order, same
-   * wait — and nothing below knows how it got there.
+   * Passed into `request` as a boolean rather than acted on here, so the floored
+   * action takes the identical path a manual class takes — same records, same
+   * order, same wait — and nothing below knows how it got there. What the STATE
+   * adds (APRV-280) is the deny text: an agent whose commands are all suddenly
+   * on the phone is owed the reason and the way out in the same breath, and
+   * before APRV-280 the nine-minute wait ended in a bare `hook-timeout` that
+   * said neither.
    */
-  loopFloor = false,
+  floor: HarnessLoopState | null = null,
 ): number {
+  const loopFloor = floor !== null;
   const hash = payloadHash(payload);
   const summary = truncate(headline, SUMMARY_LIMIT);
   const sayAllow = (reason: string): number => allow(streams, reason, run.harness);
+  /**
+   * Every deny this function can print, with the floor's own sentence appended
+   * when a floor is what routed the command here (APRV-280). One wrapper rather
+   * than a sentence bolted onto the timeout alone: a floored invocation that
+   * ends in a rejection, a lapse or an I/O fault leaves the agent in exactly the
+   * same place, and the operator reading the harness's error stream needs the
+   * scope key either way.
+   */
   const sayDeny = (code: string, detail: string): number =>
-    deny(streams, code, detail, run.harness);
+    deny(
+      streams,
+      code,
+      floor === null
+        ? detail
+        : `${detail} This tool call was routed to a human by loop safety rather than by policy — loop-escalated: ${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed side-effecting harness tool calls (amended SPEC.md §10.2). ${loopClearance(floor.scope, floor.key)}`,
+      run.harness,
+    );
 
   // Intake reads the VERIFIED log, once, before anything is written: an
   // enforcement path reads nothing else (SPEC.md §11.1), and a carry decided
@@ -2704,7 +2726,7 @@ function runHarnessHook(
     // count that tripped, the way `core/execute.ts` names the irreversibility
     // floor beside a resolution's provenance.
     notes.push(
-      `loop floor (SPEC.md §10.2): ${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed harness tool calls, so every class of this command is routed to a human for this invocation regardless of policy`,
+      `loop-escalated (amended SPEC.md §10.2): ${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed side-effecting harness tool calls, so every class of this command is routed to a human for this invocation regardless of policy`,
     );
   }
   /**
@@ -2747,7 +2769,7 @@ function runHarnessHook(
     headline,
     task,
     note,
-    floor !== null,
+    floor,
   );
 }
 

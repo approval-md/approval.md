@@ -144,7 +144,7 @@ import {
   type EventRecord,
   type LogHead,
 } from "./log.js";
-import { HARNESS_TASK_PREFIX, harnessLoopFloor, isLoopEscalated } from "./loop.js";
+import { HARNESS_TASK_PREFIX, harnessLoopFloor, isLoopEscalated, loopClearance } from "./loop.js";
 import { normalizeUsd, usdOrZero, type UsdInput } from "./money.js";
 import { isPayloadHash, payloadHash as hashOfPayload } from "./payload.js";
 import { loadPayload, payloadStoreDirFor, storePayload } from "./payload-store.js";
@@ -1977,7 +1977,7 @@ function attemptRequest(
     if (isLoopEscalated(read.records, input.task)) {
       return refuse(
         "loop-escalated",
-        `task ${input.task} has three consecutive execution.failed events and is escalated to manual (SPEC.md §10.2); its ${resolution.autonomy} action ${input.actionKey} may not proceed unsupervised. The task's manual actions are unaffected — escalation puts a human in the loop, it does not close the task — and the streak clears when an execution.completed for the task lands.`,
+        `loop-escalated: task ${input.task} has three consecutive failed side-effecting executions and is escalated to manual (amended SPEC.md §10.2); its ${resolution.autonomy} action ${input.actionKey} may not proceed unsupervised. The task's manual actions are unaffected — escalation puts a human in the loop, it does not close the task — and ${loopClearance("task", input.task)}.`,
       );
     }
     // APRV-127. A `supervised-live` class puts a declared fraction of its
@@ -3664,7 +3664,7 @@ function attemptHarnessStart(
   if (isLoopEscalated(read.records, input.task)) {
     return refuse(
       "loop-escalated",
-      `task ${input.task} has three consecutive execution.failed events and is escalated to manual (SPEC.md §10.2), so its ${resolution.autonomy} actions may not start unsupervised. The streak clears when an execution.completed for the task lands.`,
+      `loop-escalated: task ${input.task} has three consecutive failed side-effecting executions and is escalated to manual (amended SPEC.md §10.2), so its ${resolution.autonomy} actions may not start unsupervised. ${loopClearance("task", input.task)}.`,
     );
   }
 
@@ -3680,7 +3680,7 @@ function attemptHarnessStart(
   if (floor !== null) {
     return refuse(
       "loop-escalated",
-      `${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed harness tool calls and is floored to manual (amended SPEC.md §10.2), so ${input.actionKey} may not be recorded as an unattended execution. Route the command through the human gate, or land an execution.completed in the same ${floor.scope} scope: nothing else clears the streak.`,
+      `loop-escalated: ${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed side-effecting harness tool calls and is floored to manual (amended SPEC.md §10.2), so ${input.actionKey} may not be recorded as an unattended execution. Route the command through the human gate; ${loopClearance(floor.scope, floor.key)}`,
     );
   }
 

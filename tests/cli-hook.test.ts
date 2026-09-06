@@ -908,6 +908,17 @@ function allRecords(dir: string): Record<string, unknown>[] {
 }
 
 /**
+ * A tool call that DOES something: `files.write.workspace`, autonomous under
+ * this fixture policy, and the class every loop-safety case below accrues on
+ * since APRV-280. A read would accrue nothing, which is the point of the rule
+ * and is pinned in its own case.
+ */
+const WRITE_COMMAND = "mkdir -p build";
+
+/** A tool call that only looks: `read.shell`, transparent to loop safety. */
+const READ_COMMAND = "ls -la";
+
+/**
  * Run one gated tool call and report an outcome for it, both through the real
  * CLI: a PreToolUse event that allows and records `execution.started`, then a
  * PostToolUse event that closes it.
@@ -917,6 +928,7 @@ function toolCall(
   toolUseId: string,
   outcome: "text" | "error",
   session = "sess-1",
+  command = WRITE_COMMAND,
 ): void {
   const pre = runCli(
     ["hook", "claude-code"],
@@ -927,7 +939,7 @@ function toolCall(
       cwd: "/repo",
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
-      tool_input: { command: "ls -la" },
+      tool_input: { command },
       tool_use_id: toolUseId,
     }),
   );
@@ -1037,6 +1049,81 @@ test("THE DEFECT: three failed tool calls accrue nothing per task and escalate t
   assertClean(dir);
 });
 
+test("APRV-280: three failed read.* tool calls escalate nothing and the next read still runs", () => {
+  // The incident this rule was filed on. A `grep` that matches nothing and an
+  // `ls` of a path that is not there exit non-zero, the counterpart records
+  // three `execution.failed` for the session, and before APRV-280 that floored
+  // every command the session made afterwards to a phone nobody was holding.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error", "sess-1", READ_COMMAND);
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records),
+    [],
+    "a read.* class is transparent to both harness scopes: no state, not even a zero",
+  );
+  assert.deepEqual(loopEscalation(read.records), [], "…and to the per-task streak");
+
+  // The verdict the whole task is about: the fourth read is answered by the
+  // policy, unattended, with nothing asked of anybody.
+  const verdict = verdictOf(runCli(["hook", "claude-code"], dir, bashEvent(READ_COMMAND, "tu-4")));
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /^autonomous: read\.shell/u);
+  assert.equal(
+    allRecords(dir).some((record) => record["event"] === "approval.requested"),
+    false,
+    "no request was opened: nothing here needed a human",
+  );
+  assertClean(dir);
+});
+
+test("APRV-280: a failed read does not clear a side-effecting streak either", () => {
+  // Transparency reads in both directions, and this is the direction that would
+  // be a hole: an agent three failed writes deep must not be able to shed the
+  // streak by running a `grep` that works.
+  const dir = ready();
+  toolCall(dir, "tu-1", "error");
+  toolCall(dir, "tu-2", "error");
+  toolCall(dir, "tu-3", "text", "sess-1", READ_COMMAND);
+  toolCall(dir, "tu-4", "error");
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records).map((state) => [state.consecutiveFailures, state.escalated]),
+    [
+      [3, true],
+      [3, true],
+    ],
+    "the successful read cleared nothing; the third failed write escalated both scopes",
+  );
+  assertClean(dir);
+});
+
+test("APRV-280: a floored tool call's deny names loop-escalated, the scope and what clears it", () => {
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+  // Nobody answers, so the wait times out — the nine minutes of silence the
+  // stalled session actually saw, with the timeout cut to a second.
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "200ms"],
+    dir,
+    bashEvent(READ_COMMAND, "tu-4"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(verdict.reason, /loop-escalated: session hook:sess-1 has 3 consecutive/u);
+  assert.match(verdict.reason, /one side-effecting tool call completing in this session scope/u);
+  assert.match(verdict.reason, /approval gate open/u);
+  assertClean(dir);
+});
+
 test("an escalated session floors the next autonomous command to the human gate", () => {
   const dir = ready();
   for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
@@ -1056,8 +1143,11 @@ test("an escalated session floors the next autonomous command to the human gate"
   // The decision trace: the verdict says a FLOOR rather than the matched rule
   // decided it, and names the scope and the count, the way `core/execute.ts`
   // names the §7 irreversibility floor beside a resolution's provenance.
-  assert.match(verdict.reason, /loop floor \(SPEC\.md §10\.2\)/u);
-  assert.match(verdict.reason, /session hook:sess-1 has 3 consecutive failed harness tool calls/u);
+  assert.match(verdict.reason, /loop-escalated \(amended SPEC\.md §10\.2\)/u);
+  assert.match(
+    verdict.reason,
+    /session hook:sess-1 has 3 consecutive failed side-effecting harness tool calls/u,
+  );
 
   const events = allRecords(dir).map((record) => record["event"]);
   assert.ok(
@@ -1103,7 +1193,10 @@ test("the actor scope backstops a rotated session id", () => {
   );
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "allow", verdict.reason);
-  assert.match(verdict.reason, /actor agent:claude-code has 3 consecutive failed harness tool calls/u);
+  assert.match(
+    verdict.reason,
+    /actor agent:claude-code has 3 consecutive failed side-effecting harness tool calls/u,
+  );
   assertClean(dir);
 });
 
@@ -1119,7 +1212,7 @@ test("an unreadable session id lands in ONE shared bucket, so absence accrues fa
         cwd: "/repo",
         hook_event_name: "PreToolUse",
         tool_name: "Bash",
-        tool_input: { command: "ls -la" },
+        tool_input: { command: WRITE_COMMAND },
         tool_use_id: id,
       }),
     );
@@ -1131,7 +1224,7 @@ test("an unreadable session id lands in ONE shared bucket, so absence accrues fa
         cwd: "/repo",
         hook_event_name: "PostToolUse",
         tool_name: "Bash",
-        tool_input: { command: "ls -la" },
+        tool_input: { command: WRITE_COMMAND },
         tool_use_id: id,
         tool_response: { type: "error", error: "…" },
       }),
@@ -1349,10 +1442,27 @@ test("status reports the harness streaks by scope, and counterpart coverage", ()
 
   const run = runCli(["status", "--json"], dir);
   const body = JSON.parse(run.stdout) as Record<string, unknown>;
-  assert.deepEqual(body["loop_escalations"], [
-    { task: "agent:claude-code", scope: "actor", consecutive_failures: 3, escalated: true },
-    { task: "hook:sess-1", scope: "session", consecutive_failures: 3, escalated: true },
-  ]);
+  // APRV-280 added `clears`: the scope alone tells an operator where the floor
+  // is and nothing about how to get out from under it.
+  assert.deepEqual(
+    (body["loop_escalations"] as Record<string, unknown>[]).map((entry) => [
+      entry["task"],
+      entry["scope"],
+      entry["consecutive_failures"],
+      entry["escalated"],
+    ]),
+    [
+      ["agent:claude-code", "actor", 3, true],
+      ["hook:sess-1", "session", 3, true],
+    ],
+  );
+  for (const entry of body["loop_escalations"] as Record<string, unknown>[]) {
+    assert.match(
+      String(entry["clears"]),
+      /one side-effecting tool call completing in this (session|actor) scope/u,
+    );
+    assert.match(String(entry["clears"]), /approval gate open/u);
+  }
   assert.deepEqual(body["harness_outcomes"], { started: 4, reported: 3, unreported: 1 });
   assert.equal(body["healthy"], false, "an escalated scope is not a healthy repo");
 
@@ -1360,8 +1470,9 @@ test("status reports the harness streaks by scope, and counterpart coverage", ()
   assert.match(human.stdout, /^loop escalations {2,}2$/mu);
   assert.match(
     human.stdout,
-    /hook:sess-1 \(3 consecutive failed tool calls, session\) — escalated to manual/u,
+    /hook:sess-1 \(3 consecutive failed side-effecting tool calls, session\) — escalated to manual/u,
   );
+  assert.match(human.stdout, /clears: one side-effecting tool call completing/u);
   assert.match(human.stdout, /^harness outcomes {2,}4 started, 3 reported, 1 unreported$/mu);
   assertClean(dir);
 });

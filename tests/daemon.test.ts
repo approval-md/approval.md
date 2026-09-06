@@ -859,10 +859,21 @@ test("escalation: three consecutive failures are surfaced by the daemon and by s
   // The daemon surfaces the projection; it does not own it. `status` agrees.
   const status = runCli(["status", "--json"], dir);
   assert.equal(status.code, 1);
-  assert.deepEqual((JSON.parse(status.stdout) as Record<string, unknown>)["loop_escalations"], [
-    // APRV-145: `scope` is the additive field; `task` still carries the key.
-    { task: "task-042", scope: "task", consecutive_failures: 3, escalated: true },
-  ]);
+  assert.deepEqual(
+    (
+      (JSON.parse(status.stdout) as Record<string, unknown>)[
+        "loop_escalations"
+      ] as Record<string, unknown>[]
+    ).map((entry) => [
+      // APRV-145: `scope` is the additive field; `task` still carries the key.
+      // APRV-280 added `clears`, which `tests/cli-status.test.ts` pins.
+      entry["task"],
+      entry["scope"],
+      entry["consecutive_failures"],
+      entry["escalated"],
+    ]),
+    [["task-042", "task", 3, true]],
+  );
   assertClean(dir);
 });
 

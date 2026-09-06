@@ -1285,9 +1285,12 @@ to decide whether to fix itself, stop retrying, or ask a human.
   policy hash, or against which budget. `withdraw` and `expire` are deliberately
   NOT refused: they are the exits for a request whose class a policy amendment
   raised after it was opened.
-- `loop-escalated` — three consecutive `execution.failed` events escalated the
-  task to manual (SPEC.md §10.2). Its MANUAL actions are unaffected; the streak
-  clears on a completion.
+- `loop-escalated` — three consecutive failed SIDE-EFFECTING executions escalated
+  the task to manual, or a harness session or actor scope reached the same count
+  (amended SPEC.md §10.2, APRV-280). A failed `read.*` action accrues nothing and
+  a successful one clears nothing. Its MANUAL actions are unaffected; the streak
+  clears on a side-effecting completion, and the refusal names the scope and that
+  clearing action.
 - `not-requested` — there is no request to decide or expire.
 - `already-decided` — the request is already granted, rejected, revoked or
   expired.
@@ -1560,8 +1563,9 @@ refusal  {"ok":false,"error":{"code":"...","message":"...","detail"?:"...",
   this action outside agent execution. Refused on both paths, before either is
   chosen, and nothing is appended. Distinct from `token-required`, which is a
   redirection: here there is no token to get and no grant that could mint one.
-- `loop-escalated` — three consecutive `execution.failed` events escalated the
-  task to manual; route it through a human grant instead.
+- `loop-escalated` — three consecutive failed SIDE-EFFECTING executions escalated
+  the task to manual (amended SPEC.md §10.2, APRV-280); route it through a human
+  grant instead. Failed `read.*` actions accrue nothing.
 - `policy-not-attested` — policy unattested or its bytes changed (detail:
   `not-attested` | `hash-mismatch` | `unreadable`).
 - `already-executed` — an `execution.started` already exists for this key.
@@ -1826,7 +1830,10 @@ does not know the flag exists.
   were attempted and whose fate nobody has established, with the closed `reason`
   each was recorded under.
 - `budgets` — headroom per configured GLOBAL limit, from a zero-cost probe.
-- `loop_escalations` — tasks with three consecutive `execution.failed` events.
+- `loop_escalations` — tasks, harness sessions and harness actors with three
+  consecutive failed side-effecting executions. Each row carries `scope`, the
+  derivation that produced the key, and `clears`, the sentence naming what ends
+  the streak (APRV-280).
 - `coverage` — `{available, reason, observed, covered}` for this branch's own
   commits, as git recorded them. Informational.
 - `reconciliation` — obligations opened by a retrospective denial and not yet
@@ -1848,8 +1855,8 @@ does not know the flag exists.
  "budgets":[{"limit":"global.daily_usd","scope":"global",
    "window":"rolling-24h","consumed":0.02,"requested":0,"remaining":9.98,
    "pass":true}],
- "loop_escalations":[{"task":"task-042","consecutive_failures":3,
-   "escalated":true}],
+ "loop_escalations":[{"task":"task-042","scope":"task","consecutive_failures":3,
+   "escalated":true,"clears":"an execution.completed for task task-042 …"}],
  "coverage":{"available":true,"reason":null,"observed":4,"covered":3},
  "reconciliation":[{"seq":18,"ts":"...","action_key":"...","task":"...",
    "class":"records.write","obligation":"gated-revert","review_seq":17}],
