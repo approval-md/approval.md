@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opus-policy'
 created_date: '2026-08-30 22:31'
-updated_date: '2026-09-06 07:56'
+updated_date: '2026-09-06 08:23'
 labels:
   - policy
 dependencies: []
@@ -52,4 +52,8 @@ What the log CANNOT show, recorded so this check can be reversed on better infor
 Policy state re-derived: defaults.token_delivery: sealed is present in the file attested at seq 23351 (APPROVAL.md sha256 a6d7b83d492994a7ab5152ccc6881dd849cc9fe9a0cfb15c449ff3e2ce40ac2d, equal to that policy.updated record). No YAML diff and no src/core/policy-expectations.ts diff are owed: token_delivery is a defaults key and moves no class resolution, and the dogfood suite passes 39/39 against the live policy unchanged. Deliverable: docs/proposals/policy-amendments-184-166.md, which carries the verdict, the ceremony runbook for the day a line does move, and the operational risks of sealed delivery (machine-local and action-local private key at .approval/keys/<action-key>.key unlinked at consume/expiry/revocation; a requester without the keypair falls back to the paste and refuses token-required rather than losing the authorization; sealToken returns null on an unusable recipient key and the grant still stands, because a convenience must not void a human's yes; the daemon is not in the seal's path).
 
 Task left In Progress: the amendment needs no ceremony and this lane does not move tasks to terminal status.
+
+2026-09-06 verification addendum (@opus-policy). The 'no human token relay' half of AC3 has stronger corroboration than the note above credited it with: tests/sealed-delivery.test.ts passes 10/10 (exit 0) and two of its cases are exactly the property in question. 'request on A, grant on B, wait and run on A: the token never crosses in clear' exercises the split-machine shape this repo's ceremony actually uses (agent session requests, human grants from the phone/listener, agent waits and runs), and 'a machine that did not open the request gets no token from wait' is its negative. A third, 'the human render never prints the token, whatever the delivery mode is', bounds what a relay could even have copied from a --json-free surface. Combined with the 17 sealed request/grant pairs observed in the committed log, the mechanism is proven both in the suite and in production traffic; what stays unprovable from the log alone is only the negative for any one specific action, which is a property of the event schema rather than a gap in the feature.
+
+Also verified this session: node dist/tests/dogfood.test.js 39/39 exit 0 against the live APPROVAL.md, npm run lint exit 0.
 <!-- SECTION:NOTES:END -->

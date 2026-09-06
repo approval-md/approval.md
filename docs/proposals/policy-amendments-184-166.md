@@ -168,6 +168,17 @@ optional under sealed delivery"), and `approval wait --json` returns the raw tok
 the granted action's entry. A relay is possible and is no longer necessary, which is
 what the amendment set out to achieve.
 
+`tests/sealed-delivery.test.ts` carries the property under test, and it passes 10/10
+(exit 0). Two of its cases are the exact shape this repository's ceremony uses:
+**"request on A, grant on B, wait and run on A: the token never crosses in clear"** is
+the split between the agent session that opens the request and the phone the human
+grants from, and **"a machine that did not open the request gets no token from wait"**
+is its negative. A third, "the human render never prints the token, whatever the
+delivery mode is", bounds what a relay could have copied off a terminal in the first
+place. So the mechanism is proven in the suite and exercised in production traffic, and
+the residual is the negative for any one named action, which is a property of the event
+schema rather than a gap in the feature.
+
 ### Recommendation
 
 Do not run a ceremony. Check AC3 and close APRV-166. If the stricter reading is wanted,
@@ -221,7 +232,9 @@ approval log sync        # once the pull request merges
 | `approval policy test log.advance` | `supervised-live` 0.01, provenance `rule` |
 | `approval policy test policy.core` | `human-only`, provenance `rule` |
 | `approval policy check <class> --policy <scratch copy of origin/main:APPROVAL.md>` | same answers from the scratch bytes |
-| `node dist/tests/dogfood.test.js` | 39 tests, 39 pass, 0 fail |
+| `node dist/tests/dogfood.test.js` | 39 tests, 39 pass, 0 fail, exit 0 |
+| `node dist/tests/sealed-delivery.test.js` | 10 tests, 10 pass, 0 fail, exit 0 |
+| `npm run lint` | exit 0 |
 | `shasum -a 256 APPROVAL.md` | `a6d7b83d…`, equal to the seq 23351 `policy.updated` record |
 | `approval doctor` (this worktree) | `attestation` pass at seq 23351, `log` pass at 23721 records |
 
