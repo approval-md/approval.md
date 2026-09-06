@@ -1914,8 +1914,7 @@ export const ADAPTER_HELP = `approval adapter — execute an approved action thr
 Usage:
   approval adapter email|agentmail <action-key> --token <t> --payload <file|->
                       [--as human:<id>|agent:<id>] [--vault <path>]
-                      [--policy <path>] [--dir <path>] [--log <path>]
-                      [--timeout <ms>] [--json]
+                      [--policy|--dir|--log <path>] [--timeout <ms>] [--json]
 
 Adapters:
   email   send one RFC 5322 message over SMTP, for actions declared under
@@ -1926,11 +1925,12 @@ Adapters:
 An adapter is the HARD BOUNDARY of SPEC.md §10.4: it holds the credentials and
 refuses to act without a valid, unexpired, single-use execution token bound to
 the action's idempotency_key AND its payload_hash. The runtime, not the adapter,
-owns the sequence: recompute the hash, verify and consume the token, append
-execution.started, call the adapter, append the outcome.
+owns the sequence: recompute the hash, resolve the credentials the adapter
+declared, run its pre-token check, verify and consume the token, append
+execution.started, call the adapter, append the outcome. The two steps before
+the spend refuse without appending or spending, so the token stays live.
 
-${EXIT_CODES_POINTER} (5 when no valid token was presented and nothing was sent;
-1 for everything else the runtime decided)
+${EXIT_CODES_POINTER} (5 when no valid token was presented; 1 for every refusal)
 ${JSON_ERRORS}
 ${why("adapter")}`;
 
@@ -1963,8 +1963,7 @@ export const ADAPTER_AGENTMAIL_HELP = `approval adapter agentmail — send one a
 
 Usage:
   approval adapter agentmail <action-key> --token <t> --payload <file|->
-      [--as <id>] [--vault <p>] [--policy <p>] [--dir <p>] [--log <p>]
-      [--timeout <ms>] [--json]
+      [--as <id>] [--vault|--policy|--dir|--log <p>] [--timeout <ms>] [--json]
 
 Flags:
   --token <t> / --payload <file|->   the token and the bytes. BOTH REQUIRED
@@ -1975,7 +1974,8 @@ TWO PAYLOAD MODES, told apart by shape and never inferred between:
   direct  {from, to[], cc?, bcc?, subject, body, content_type?}: "from" is
           checked against the inbox's address, since AgentMail has no From
   draft   {inbox_id, draft_id, to[], cc?, bcc?, subject, text}: RE-READ, and
-          refused "agentmail-draft-drifted" if an approved field changed
+          refused "agentmail-draft-drifted" if an approved field changed.
+          Drift is caught BEFORE the spend: restore the text, re-run, SAME token
 
 The VAULT holds agentmail.inbox_id and agentmail.api_key, and that key is the one
 WITH draft_send and message_send; the agent's own key must not have them.

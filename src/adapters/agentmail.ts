@@ -41,8 +41,8 @@
  * { inbox_id, draft_id, to: string[], cc?, bcc?, subject, text }
  * ```
  *
- * `act` re-fetches the draft, canonicalizes those same fields (RFC 8785, the
- * same `core/jcs.ts` the hash chain uses) on both sides, and refuses
+ * The adapter re-fetches the draft, canonicalizes those same fields (RFC 8785,
+ * the same `core/jcs.ts` the hash chain uses) on both sides, and refuses
  * `agentmail-draft-drifted` on any difference before calling
  * `POST .../drafts/{draft_id}/send`. That check is the whole point of the mode:
  * a draft is mutable server-side state, and an approval of a draft id would
@@ -51,6 +51,38 @@
  * message is written to a log and read by a human who did not approve the new
  * text, and quoting it there would publish unapproved content through the
  * refusal path.
+ *
+ * ## The comparison runs before the token is spent (APRV-276)
+ *
+ * It happens TWICE, through one function ({@link checkDraftBeforeSend}), and
+ * the first of the two is the one this section exists for.
+ *
+ * The first call is {@link Adapter.precheck}: the contract runs it after the
+ * declared credentials resolve and BEFORE the token is consumed, so a drifted
+ * draft refuses with nothing appended and the grant intact. Until APRV-276 the
+ * comparison ran only inside `act`, which meant a drift refused correctly and
+ * spent the single-use token doing it: the human's tap was consumed by an
+ * attempt that sent nothing, and restoring the approved text then refused
+ * `token-consumed`. That is the failure mode the whole design is against — a
+ * refusal that costs a human another tap teaches operators to stop checking.
+ *
+ * The second call is `act`'s own, inside the consumed-token window and
+ * immediately before the POST. It is not redundant: AgentMail sends a draft by
+ * id, so something must stand between the last read and the send, and this is
+ * what makes that gap as small as the transport allows. A drift caught there is
+ * `execution.started` then `execution.failed`, which is the honest record of a
+ * window that was open when the far side moved.
+ *
+ * **Which key performs the pre-spend read.** The same sending key from the
+ * vault, handed over by the credential provider the contract scopes to the
+ * precheck call. Not the agent's own `AGENTMAIL_API_KEY`, even though the demo
+ * has one in the environment: a comparison whose input the party under
+ * oversight chooses is scrutiny that party controls, and SPEC.md §11.1
+ * invariant 4 puts that the other way round. Nothing new is opened to make this
+ * possible — the contract already reads the vault before the spend, to resolve
+ * {@link Adapter.requiredCredentials} (APRV-169), inside APRV-168's
+ * `presented`-phase grant, which is minted only when the caller's token matches
+ * the digest the human's grant recorded. SPEC.md §10.4 carries the decision.
  *
  * A payload carrying markers of both modes, or of neither, is refused rather
  * than guessed at (`agentmail-payload-ambiguous`, `agentmail-payload-invalid`):
@@ -102,6 +134,8 @@ import {
   type Adapter,
   type CredentialProvider,
   type JsonValue,
+  type PrecheckInput,
+  type PrecheckOutcome,
 } from "./contract.js";
 import { EMAIL_CLASS, envelopeRecipients, validateEmailPayload } from "./email.js";
 
@@ -877,6 +911,132 @@ export async function readAgentmailDraft(
 }
 
 // ---------------------------------------------------------------------------
+// The draft comparison, written once and performed twice (APRV-276)
+// ---------------------------------------------------------------------------
+
+/** A pre-send read: a throw is `agentmail-unreachable`, nothing attempted. */
+async function preSendRead(
+  transport: Transport,
+  scrub: (text: string) => string,
+  path: string,
+  what: string,
+): Promise<
+  { ok: true; answer: HttpAnswer } | { ok: false; code: AgentmailFailureCode; message: string }
+> {
+  try {
+    return { ok: true, answer: await call(transport, "GET", path) };
+  } catch (cause) {
+    return {
+      ok: false,
+      code: "agentmail-unreachable",
+      message: scrub(
+        `the AgentMail API could not be reached to read ${what}: ${describeThrow(cause)}. Nothing was sent`,
+      ),
+    };
+  }
+}
+
+type AgentmailDraftCheck =
+  | { ok: true; payload: AgentmailDraftPayload; draftPath: string }
+  | { ok: false; code: AgentmailFailureCode; message: string };
+
+/**
+ * Everything that must hold before a draft send, up to but not including the
+ * send: the payload's shape, the inbox it names, the draft's existence, and the
+ * comparison of the approved snapshot against what the far side holds now.
+ *
+ * One function because it is performed twice, and the two calls answer two
+ * different questions (APRV-276):
+ *
+ * - As {@link Adapter.precheck}, BEFORE the token is consumed. What it protects
+ *   there is the grant: a draft the agent edited after the human read it is a
+ *   refusal this runtime can reach without attempting anything, so it must not
+ *   cost the human another tap. A refusal there appends nothing and spends
+ *   nothing, and the same token sends once the approved text is restored.
+ * - Inside `act`, in the consumed-token window, immediately before the POST.
+ *   What it protects there is the bytes: AgentMail sends a draft by id, so the
+ *   gap between the last read and the send can never be zero, and this is the
+ *   check that makes it as small as the transport allows. A drift found here is
+ *   an execution that started and failed, which is the honest record — the
+ *   window was open and the far side moved inside it.
+ *
+ * Reads only, so calling it twice sends nothing twice. The message names WHICH
+ * fields differ and never what they now hold, on both calls, for the reason the
+ * module header gives.
+ */
+async function checkDraftBeforeSend(
+  actionKey: string,
+  value: JsonValue,
+  config: AgentmailConfig,
+  transport: Transport,
+  scrub: (text: string) => string,
+): Promise<AgentmailDraftCheck> {
+  const validated = validateAgentmailDraftPayload(value);
+  if (!validated.ok) {
+    return {
+      ok: false,
+      code: "agentmail-payload-invalid",
+      message: `the approved payload for ${actionKey} is not a well-formed draft send: ${validated.message}. Nothing was requested and nothing was sent`,
+    };
+  }
+  const payload = validated.payload;
+
+  // The inbox the payload names must be the inbox the vault configures.
+  // Checked before any request: a payload naming another inbox is a wiring
+  // mistake, and asking the far side about it would be asking it to arbitrate
+  // whose mailbox this grant covers.
+  if (payload.inbox_id !== config.inboxId) {
+    return {
+      ok: false,
+      code: "agentmail-inbox-mismatch",
+      message: `the approved draft names the inbox ${payload.inbox_id}, and this runtime is configured for ${config.inboxId}. Nothing was requested and nothing was sent`,
+    };
+  }
+
+  const draftPath = draftPathFor(config.inboxId, payload.draft_id);
+  const fetched = await preSendRead(transport, scrub, draftPath, `the draft ${payload.draft_id}`);
+  if (!fetched.ok) return { ok: false, code: fetched.code, message: fetched.message };
+  if (fetched.answer.status === 404) {
+    return {
+      ok: false,
+      code: "agentmail-draft-missing",
+      message: scrub(
+        `the draft ${payload.draft_id} in inbox ${config.inboxId} no longer exists. A grant is over a snapshot of a draft, and the draft it named is gone; nothing was sent`,
+      ),
+    };
+  }
+  if (fetched.answer.status < 200 || fetched.answer.status >= 300) {
+    return {
+      ok: false,
+      code: codeForStatus(fetched.answer.status),
+      message: scrub(
+        `reading the draft ${payload.draft_id} answered HTTP ${String(fetched.answer.status)}: ${describeBody(fetched.answer.body)}. Nothing was sent`,
+      ),
+    };
+  }
+  const body = parseObject(fetched.answer.body);
+  if (body === null) {
+    return {
+      ok: false,
+      code: "agentmail-draft-drifted",
+      message: `the draft ${payload.draft_id} did not read back as a JSON object, so what the human approved cannot be compared with what would be sent. Nothing was sent`,
+    };
+  }
+
+  // The drift check: the whole point of the mode. Field NAMES only.
+  const drifted = draftDrift(payload, body);
+  if (drifted.length > 0) {
+    return {
+      ok: false,
+      code: "agentmail-draft-drifted",
+      message: `the draft ${payload.draft_id} has changed since the snapshot a human approved: ${drifted.join(", ")} ${drifted.length === 1 ? "differs" : "differ"}. The differing content is deliberately not quoted here — it is unapproved text, and a refusal is not a channel for publishing it. Nothing was sent; re-request approval for the current draft`,
+    };
+  }
+
+  return { ok: true, payload, draftPath };
+}
+
+// ---------------------------------------------------------------------------
 // Observation (APRV-245): what the provider says this inbox actually sent
 // ---------------------------------------------------------------------------
 
@@ -1133,6 +1293,15 @@ export function agentmailAdapter(options: AgentmailAdapterOptions = {}): Adapter
   const apiBase = (options.apiBase ?? AGENTMAIL_DEFAULT_API_BASE).replace(/\/+$/u, "");
   const timeoutMs = options.timeoutMs ?? AGENTMAIL_DEFAULT_TIMEOUT_MS;
 
+  /** The transport for one call, built in one place for both entry points. */
+  const transportFor = (config: AgentmailConfig, signal: AbortSignal | undefined): Transport => ({
+    fetch: options.fetch ?? (globalThis.fetch as unknown as AgentmailFetch),
+    apiBase,
+    timeoutMs,
+    apiKey: config.apiKey,
+    signal,
+  });
+
   return {
     name: "agentmail",
     classes,
@@ -1185,6 +1354,62 @@ export function agentmailAdapter(options: AgentmailAdapterOptions = {}): Adapter
         ),
       }));
     },
+    /**
+     * The draft comparison, run BEFORE the token is consumed (APRV-276).
+     *
+     * The bug this closes was found on a live inbox: the comparison used to run
+     * only inside `act`, so a draft the agent had edited after the grant refused
+     * `agentmail-draft-drifted` with `execution.started` and `execution.failed`
+     * already on the log. The refusal was right and the accounting was wrong —
+     * the single-use token was spent by an attempt that sent nothing, and
+     * restoring the approved text could not send under the grant the human had
+     * already given. A refusal that costs a human another tap teaches operators
+     * to stop checking, which is the one lesson this project cannot afford to
+     * teach.
+     *
+     * DRAFT MODE ONLY, and the asymmetry is the point. A draft is state the far
+     * side holds and the agent can rewrite, so what a grant binds and what would
+     * be sent can diverge with nobody at fault. A direct send has no such
+     * object: its bytes are the payload, the payload hash binds them, and the
+     * only pre-send refusal left is `agentmail-from-mismatch`, which is a fact
+     * about the configured inbox rather than about anything that moved. That
+     * check stays in `act`, where its inbox read doubles as the credential
+     * check, and a direct send therefore costs no extra request here.
+     *
+     * Reads and compares; sends nothing. The API key comes from the vault
+     * through the provider the contract scopes to this call, which is the same
+     * sending key `act` uses: see SPEC.md §10.4 for why the comparison is not
+     * performed with a key the caller supplies.
+     */
+    async precheck(input: PrecheckInput): Promise<PrecheckOutcome> {
+      const mode = agentmailMode(input.payload);
+      if (!mode.ok) {
+        return {
+          ok: false,
+          code: mode.code,
+          message: `the approved payload for ${input.actionKey} is not a well-formed AgentMail send: ${mode.message}. Nothing was requested and nothing was sent`,
+        };
+      }
+      // Nothing server-side to compare, so nothing to spend a request on.
+      if (mode.mode === "direct") return { ok: true };
+
+      const configured = readAgentmailConfig(input.credentials, names);
+      if (!configured.ok) {
+        // Already scrubbed with everything that had been read when it failed.
+        return { ok: false, code: configured.code, message: configured.message };
+      }
+      const config = configured.config;
+      const scrub = (text: string): string => redactSecrets(text, configured.secrets).text;
+
+      const checked = await checkDraftBeforeSend(
+        input.actionKey,
+        input.payload,
+        config,
+        transportFor(config, input.signal),
+        scrub,
+      );
+      return checked.ok ? { ok: true } : { ok: false, code: checked.code, message: checked.message };
+    },
     async act(input: ActInput): Promise<ActOutcome> {
       // (1) The mode, then the shape. Both refused before any credential is
       //     read: a malformed payload is not a reason to touch the vault.
@@ -1206,35 +1431,8 @@ export function agentmailAdapter(options: AgentmailAdapterOptions = {}): Adapter
         return { ok: false, code: configured.code, message: configured.message };
       }
       const config = configured.config;
-      const transport: Transport = {
-        fetch: options.fetch ?? (globalThis.fetch as unknown as AgentmailFetch),
-        apiBase,
-        timeoutMs,
-        apiKey: config.apiKey,
-        signal: input.signal,
-      };
+      const transport = transportFor(config, input.signal);
       const hash = payloadHash(input.payload);
-
-      /** A pre-send read: a throw is `agentmail-unreachable`, nothing attempted. */
-      const read = async (
-        path: string,
-        what: string,
-      ): Promise<
-        { ok: true; answer: HttpAnswer } | { ok: false; code: AgentmailFailureCode; message: string }
-      > => {
-        try {
-          const answer = await call(transport, "GET", path);
-          return { ok: true, answer };
-        } catch (cause) {
-          return {
-            ok: false,
-            code: "agentmail-unreachable",
-            message: scrub(
-              `the AgentMail API could not be reached to read ${what}: ${describeThrow(cause)}. Nothing was sent`,
-            ),
-          };
-        }
-      };
 
       if (mode.mode === "direct") {
         const validated = validateEmailPayload(input.payload);
@@ -1249,7 +1447,12 @@ export function agentmailAdapter(options: AgentmailAdapterOptions = {}): Adapter
 
         // (3) The inbox read. It answers the `from` question AND is the
         //     credential check; see the module header.
-        const inbox = await read(inboxPath(config.inboxId), `the inbox ${config.inboxId}`);
+        const inbox = await preSendRead(
+          transport,
+          scrub,
+          inboxPath(config.inboxId),
+          `the inbox ${config.inboxId}`,
+        );
         if (!inbox.ok) return { ok: false, code: inbox.code, message: inbox.message };
         if (inbox.answer.status < 200 || inbox.answer.status >= 300) {
           return {
@@ -1296,70 +1499,24 @@ export function agentmailAdapter(options: AgentmailAdapterOptions = {}): Adapter
       }
 
       // ---- draft mode --------------------------------------------------
-      const validated = validateAgentmailDraftPayload(input.payload);
-      if (!validated.ok) {
-        return {
-          ok: false,
-          code: "agentmail-payload-invalid",
-          message: `the approved payload for ${input.actionKey} is not a well-formed draft send: ${validated.message}. Nothing was requested and nothing was sent`,
-        };
-      }
-      const payload = validated.payload;
-
-      // (3) The inbox the payload names must be the inbox the vault configures.
-      //     Checked before any request: a payload naming another inbox is a
-      //     wiring mistake, and asking the far side about it would be asking it
-      //     to arbitrate whose mailbox this grant covers.
-      if (payload.inbox_id !== config.inboxId) {
-        return {
-          ok: false,
-          code: "agentmail-inbox-mismatch",
-          message: `the approved draft names the inbox ${payload.inbox_id}, and this runtime is configured for ${config.inboxId}. Nothing was requested and nothing was sent`,
-        };
-      }
-
-      const draftPath = draftPathFor(config.inboxId, payload.draft_id);
-      const fetched = await read(draftPath, `the draft ${payload.draft_id}`);
-      if (!fetched.ok) return { ok: false, code: fetched.code, message: fetched.message };
-      if (fetched.answer.status === 404) {
-        return {
-          ok: false,
-          code: "agentmail-draft-missing",
-          message: scrub(
-            `the draft ${payload.draft_id} in inbox ${config.inboxId} no longer exists. A grant is over a snapshot of a draft, and the draft it named is gone; nothing was sent`,
-          ),
-        };
-      }
-      if (fetched.answer.status < 200 || fetched.answer.status >= 300) {
-        return {
-          ok: false,
-          code: codeForStatus(fetched.answer.status),
-          message: scrub(
-            `reading the draft ${payload.draft_id} answered HTTP ${String(fetched.answer.status)}: ${describeBody(fetched.answer.body)}. Nothing was sent`,
-          ),
-        };
-      }
-      const body = parseObject(fetched.answer.body);
-      if (body === null) {
-        return {
-          ok: false,
-          code: "agentmail-draft-drifted",
-          message: `the draft ${payload.draft_id} did not read back as a JSON object, so what the human approved cannot be compared with what would be sent. Nothing was sent`,
-        };
-      }
-
-      // (4) The drift check: the whole point of the mode. Field NAMES only.
-      const drifted = draftDrift(payload, body);
-      if (drifted.length > 0) {
-        return {
-          ok: false,
-          code: "agentmail-draft-drifted",
-          message: `the draft ${payload.draft_id} has changed since the snapshot a human approved: ${drifted.join(", ")} ${drifted.length === 1 ? "differs" : "differ"}. The differing content is deliberately not quoted here — it is unapproved text, and a refusal is not a channel for publishing it. Nothing was sent; re-request approval for the current draft`,
-        };
-      }
+      //
+      // (3) and (4): the shape, the inbox, the draft read and the drift
+      //     comparison, through the one function `precheck` also calls. This
+      //     call is the one that binds the bytes: it runs inside the consumed-
+      //     token window, immediately before the POST, so the gap between the
+      //     comparison and the send is as small as the transport allows.
+      const checked = await checkDraftBeforeSend(
+        input.actionKey,
+        input.payload,
+        config,
+        transport,
+        scrub,
+      );
+      if (!checked.ok) return { ok: false, code: checked.code, message: checked.message };
+      const payload = checked.payload;
 
       // (5) The send. Unwrapped, for the reason given in direct mode.
-      const answer = await call(transport, "POST", `${draftPath}/send`);
+      const answer = await call(transport, "POST", `${checked.draftPath}/send`);
       if (answer.status < 200 || answer.status >= 300) {
         return {
           ok: false,

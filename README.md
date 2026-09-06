@@ -539,8 +539,10 @@ agentmail-draft` snapshots the draft's recipients, subject and text at request
 time, and that snapshot is what the payload hash binds and what your phone
 displays. Before it sends, the adapter re-fetches the draft and compares; a
 draft edited after the grant refuses `agentmail-draft-drifted`, sends nothing,
-and names which fields differ without quoting text nobody approved. Approving a
-draft id alone would be approving whatever the agent wrote into it last.
+and names which fields differ without quoting text nobody approved. That
+comparison runs before the token is spent, so the refusal costs no authority:
+restore the approved text and the same token still sends. Approving a draft id
+alone would be approving whatever the agent wrote into it last.
 
 ## The APPROVAL.md dictionary
 

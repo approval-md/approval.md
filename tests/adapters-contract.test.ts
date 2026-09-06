@@ -38,6 +38,7 @@ import {
   type AdapterExecuteOptions,
   type CredentialProvider,
   type JsonValue,
+  type PrecheckOutcome,
 } from "../src/adapters/contract.js";
 import {
   runAdapterConformance,
@@ -51,7 +52,7 @@ import {
 } from "../src/adapters/agentmail.js";
 import { EXECUTE_REFUSAL_CODES } from "../src/core/execute.js";
 import { payloadHash } from "../src/core/payload.js";
-import { MOCK_CLASS, MOCK_CREDENTIAL, mockAdapter } from "./adapter-mock.js";
+import { MOCK_CLASS, MOCK_CREDENTIAL, mockAdapter, type MockAdapter } from "./adapter-mock.js";
 import {
   assertLocal as assertAgentmailLocal,
   startMockAgentmail,
@@ -243,6 +244,7 @@ test("the adapter refusal union is frozen and a superset of the execute union", 
       "adapter-failed",
       "adapter-act-threw",
       "credential-unavailable",
+      "adapter-precheck-refused",
     ],
     "the adapter refusal union changed; it is frozen public API",
   );
@@ -399,6 +401,136 @@ test("a credential refusal leaves the token spendable, and the same token then s
   assert.equal(third.ok, false, "a spent token executed twice");
   if (!third.ok) assert.equal(third.code, "token-consumed", `wrong refusal: ${third.code}`);
   assert.equal(adapter.sends.length, 1, "a second send happened on a spent token");
+  unit.cleanup?.();
+});
+
+// ---------------------------------------------------------------------------
+// 3c-bis. The pre-token check (APRV-276)
+// ---------------------------------------------------------------------------
+
+test("a precheck refusal appends nothing, spends nothing, and act never runs", async () => {
+  const unit = granted();
+  const adapter = mockAdapter();
+  const before = readFileSync(unit.logPath, "utf8");
+  let asked = 0;
+
+  const refusing: MockAdapter = {
+    ...adapter,
+    precheck(input): PrecheckOutcome {
+      asked += 1;
+      assert.deepEqual(input.payload, unit.payload, "precheck was handed different bytes");
+      assert.equal(input.actionKey, unit.actionKey);
+      // The window is open here too: this is the pre-token one APRV-169 opens.
+      assert.equal(input.credentials.get(MOCK_CREDENTIAL).ok, true);
+      return { ok: false, code: "far-side-moved", message: "the object under the grant changed" };
+    },
+  };
+
+  const result = await run(refusing, unit);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.code, "adapter-precheck-refused");
+    assert.equal(result.adapter_code, "far-side-moved");
+    assert.equal(result.acted, false, "act ran after a precheck refusal");
+    assert.equal(result.started_seq, undefined, "an execution was started for a refused precheck");
+    assert.equal(result.outcome, undefined, "an outcome was recorded for an execution never begun");
+    assert.match(result.message, /the object under the grant changed/u);
+  }
+  assert.equal(asked, 1, "the precheck was not called exactly once");
+  assert.equal(adapter.sends.length, 0, "the mock sent after a precheck refusal");
+  assert.equal(
+    readFileSync(unit.logPath, "utf8"),
+    before,
+    "a precheck refusal wrote to the log; it must cost no authority",
+  );
+
+  // The grant is intact, so the SAME token executes once the condition clears.
+  const second = await run(adapter, unit);
+  assert.equal(second.ok, true, `the retained token was refused: ${JSON.stringify(second)}`);
+  assert.equal(adapter.sends.length, 1, "the retry did not send exactly once");
+  unit.cleanup?.();
+});
+
+test("a precheck that throws is a refusal, not an exception, and spends nothing", async () => {
+  const unit = granted();
+  const adapter = mockAdapter();
+  const before = readFileSync(unit.logPath, "utf8");
+  const hostile: MockAdapter = {
+    ...adapter,
+    precheck(): PrecheckOutcome {
+      throw new Error(`the far side is unreachable ${SECRET}`);
+    },
+  };
+
+  const result = await run(hostile, unit);
+  assert.equal(result.ok, false, "a check that could not be performed is not a check that passed");
+  if (!result.ok) {
+    assert.equal(result.code, "adapter-precheck-refused");
+    assert.equal(result.adapter_code, "precheck-threw");
+    assert.equal(result.acted, false);
+    assert.equal(JSON.stringify(result).includes(SECRET), false, "the secret survived the refusal");
+  }
+  assert.equal(adapter.sends.length, 0);
+  assert.equal(readFileSync(unit.logPath, "utf8"), before, "a throwing precheck wrote to the log");
+  unit.cleanup?.();
+});
+
+test("an adapter with no precheck keeps the ordering it always had", async () => {
+  const unit = granted();
+  const adapter = mockAdapter();
+  assert.equal(adapter.precheck, undefined, "the mock adapter grew a precheck");
+  const result = await run(adapter, unit);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(
+    logRecords(unit).map((entry) => entry["event"]).slice(-2),
+    ["execution.started", "execution.completed"],
+  );
+  unit.cleanup?.();
+});
+
+/**
+ * The precheck is handed the approved bytes or it is not run at all (APRV-276).
+ *
+ * A precheck reasons ABOUT the payload — AgentMail compares the live draft
+ * against it — so bytes the log never bound make its answer meaningless: a
+ * refusal would describe the caller's own edit in the far side's vocabulary,
+ * and `payload-mismatch` is the runtime's word for that fact. `startExecution`
+ * keeps sole authority over it, and the adapter is not consulted, does not
+ * reach the far side, and cannot dress the refusal up as its own.
+ */
+test("a payload the grant did not bind to never reaches the precheck", async () => {
+  const unit = granted();
+  const adapter = mockAdapter();
+  const before = readFileSync(unit.logPath, "utf8");
+  let asked = 0;
+
+  const watching: MockAdapter = {
+    ...adapter,
+    precheck(): PrecheckOutcome {
+      asked += 1;
+      return { ok: false, code: "far-side-moved", message: "the object under the grant changed" };
+    },
+  };
+
+  const tampered: JsonValue = { approved: unit.payload, tampered: "after the human said yes" };
+  const result = await executeThroughAdapter(
+    watching,
+    { logPath: unit.logPath, actionKey: unit.actionKey, payload: tampered, actor: unit.actor },
+    options(unit),
+  );
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.code, "payload-mismatch", `wrong refusal code: ${result.code}`);
+    assert.equal(result.acted, false);
+  }
+  assert.equal(asked, 0, "the precheck was asked about bytes no human approved");
+  assert.equal(adapter.sends.length, 0);
+  assert.equal(readFileSync(unit.logPath, "utf8"), before, "a payload-mismatch wrote to the log");
+
+  // And the grant is intact: the approved bytes still execute under it.
+  const good = await run(adapter, unit);
+  assert.equal(good.ok, true, `the retained token was refused: ${JSON.stringify(good)}`);
   unit.cleanup?.();
 });
 

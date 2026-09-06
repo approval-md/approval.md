@@ -53,6 +53,8 @@ import {
 } from "../src/adapters/contract.js";
 import type { EmailPayload } from "../src/adapters/email.js";
 import { payloadHash } from "../src/core/payload.js";
+import { readVerifiedRecords } from "../src/core/state.js";
+import { verifyToken } from "../src/core/token.js";
 import { decide, register, request } from "./clock-adapters.js";
 import { assertLocal, startMockAgentmail, type MockAgentmail } from "./agentmail-mock.js";
 import { at, attest, fixedClock, newScenario, scratchRoot, T0 } from "./scenario.js";
@@ -347,8 +349,8 @@ test("a granted draft send re-reads the draft, finds no drift, and sends it once
   assert.deepEqual(mock.sentDrafts().slice(-1), [payload.draft_id]);
   assert.equal(
     mock.requestsFor("draft").filter((entry) => entry.path.includes(payload.draft_id)).length,
-    1,
-    "the draft was not re-read exactly once before the send",
+    2,
+    "the draft was not read exactly twice before the send: once before the token is spent (APRV-276) and once inside the window, immediately before the POST",
   );
   if (result.ok) {
     const detail = result.detail as Record<string, JsonValue>;
@@ -386,13 +388,21 @@ for (const field of AGENTMAIL_DRAFT_FIELDS) {
     const unit = granted(payload as unknown as JsonValue);
 
     const posts = postCount();
+    const before = readFileSync(unit.logPath, "utf8");
     const result = await run(unit);
     const refused = refusal(result);
-    assert.equal(refused.code, "adapter-failed");
+    // APRV-276: the comparison runs BEFORE the token is consumed, so a drift is
+    // refused with the log untouched rather than recorded as a failed execution.
+    assert.equal(refused.code, "adapter-precheck-refused");
     assert.equal(refused.adapter_code, "agentmail-draft-drifted");
-    assert.equal(refused.outcome, "execution.failed");
+    assert.equal(refused.outcome, undefined, "a drift refusal recorded an outcome");
     assert.match(refused.message, new RegExp(`\\b${field}\\b`, "u"), "the field was not named");
     assert.equal(postCount(), posts, "a drifted draft was sent anyway");
+    assert.equal(
+      readFileSync(unit.logPath, "utf8"),
+      before,
+      "a drift refusal wrote to the log; it must cost the human no authority",
+    );
 
     // The message names the field and never the value: a refusal is not a
     // channel for publishing text nobody approved.
@@ -403,6 +413,67 @@ for (const field of AGENTMAIL_DRAFT_FIELDS) {
     );
   });
 }
+
+/**
+ * The APRV-276 regression, end to end on ONE token.
+ *
+ * Found on a live AgentMail inbox on 2026-09-06: the drift refusal was recorded
+ * as `execution.started` then `execution.failed`, so the human's single-use
+ * grant was spent by an attempt that sent nothing, and restoring the approved
+ * text refused `token-consumed`. What `examples/agentmail-demo.md` promises, and
+ * what this pins, is the opposite: nothing sent, the grant untouched, and the
+ * same token sending once the draft matches the snapshot again.
+ */
+test("a drift costs no authority: restore the draft and the SAME token sends once", async () => {
+  const payload = draftPayload();
+  const approved = draftBodyOf(payload);
+  mock.setDraft(payload.draft_id, { ...approved, subject: `${NEEDLE} subject` });
+  const unit = granted(payload as unknown as JsonValue);
+
+  const before = readFileSync(unit.logPath, "utf8");
+  const posts = postCount();
+
+  // 1. Drifted. Refused before the spend: nothing appended, nothing sent.
+  const drifted = refusal(await run(unit));
+  assert.equal(drifted.code, "adapter-precheck-refused");
+  assert.equal(drifted.adapter_code, "agentmail-draft-drifted");
+  assert.equal(drifted.outcome, undefined, "the drift refusal recorded an execution");
+  assert.equal(postCount(), posts, "a drifted draft was sent");
+  assert.equal(
+    readFileSync(unit.logPath, "utf8"),
+    before,
+    "the drift refusal appended to the log; the grant must be untouched",
+  );
+  assert.equal(
+    eventsOf(unit.logPath).includes("execution.started"),
+    false,
+    "execution.started was appended for a refusal that attempted nothing",
+  );
+
+  // …and the token is still the live, unspent one the grant minted.
+  const read = readVerifiedRecords(unit.logPath, {});
+  assert.equal(read.ok, true, `the log did not verify: ${JSON.stringify(read)}`);
+  if (read.ok) {
+    const status = verifyToken([...read.records], unit.actionKey, unit.token, at(3));
+    assert.equal(status.ok, true, `the token stopped verifying after a drift: ${JSON.stringify(status)}`);
+  }
+
+  // 2. The operator restores the approved text. The SAME token sends, once.
+  mock.setDraft(payload.draft_id, approved);
+  const sent = await run(unit);
+  assert.equal(sent.ok, true, `the retained token was refused: ${JSON.stringify(sent)}`);
+  assert.deepEqual(mock.sentDrafts().slice(-1), [payload.draft_id]);
+  assert.deepEqual(eventsOf(unit.logPath).slice(-2), ["execution.started", "execution.completed"]);
+
+  // 3. And it is still single-use.
+  const third = refusal(await run(unit));
+  assert.equal(third.code, "token-consumed", `a spent token was refused for the wrong reason`);
+  assert.equal(
+    mock.sentDrafts().filter((id) => id === payload.draft_id).length,
+    1,
+    "the draft was sent more than once across three runs of one token",
+  );
+});
 
 test("an absent cc and an empty cc are the same fact, and neither is drift", async () => {
   const payload = draftPayload();
@@ -429,10 +500,16 @@ test("a draft that no longer exists refuses agentmail-draft-missing without send
   const unit = granted(payload as unknown as JsonValue);
 
   const posts = postCount();
+  const before = readFileSync(unit.logPath, "utf8");
   const refused = refusal(await run(unit));
+  // Same pre-spend position as drift (APRV-276): the draft read that discovers
+  // this happens before the token is consumed, and a draft that is gone is a
+  // condition the runtime established without attempting anything.
+  assert.equal(refused.code, "adapter-precheck-refused");
   assert.equal(refused.adapter_code, "agentmail-draft-missing");
-  assert.equal(refused.outcome, "execution.failed");
+  assert.equal(refused.outcome, undefined);
   assert.equal(postCount(), posts, "a missing draft produced a send");
+  assert.equal(readFileSync(unit.logPath, "utf8"), before, "a missing draft spent the grant");
 });
 
 test("a draft payload naming another inbox refuses before any request is made", async () => {
