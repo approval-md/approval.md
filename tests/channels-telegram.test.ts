@@ -70,11 +70,13 @@ import {
   digestCallbackData,
   digestKeyOf,
   groupForDigest,
+  isMessageNotModified,
   parseCallbackData,
   payloadShapeKey,
   renderTelegram,
   PAYLOAD_CHUNK_LABEL_TAIL,
   TELEGRAM_ANOMALY_MARK,
+  TelegramApiError,
   TelegramChannel,
   TELEGRAM_DEFAULT_RETENTION_MS,
   TELEGRAM_DIGEST_MAX_MEMBERS,
@@ -1408,6 +1410,153 @@ test("a failed edit does not block the decision or the loop", async () => {
   // And the loop is still a loop: the next poll works.
   const next = await channel.pollOnce();
   assert.equal(next.updates, 0);
+  assertClean(world.unit);
+});
+
+// ---------------------------------------------------------------------------
+// "message is not modified" (APRV-277)
+//
+// The report: after a tap that visibly worked, the listener printed
+//   approval: telegram could not annotate the granted <key> (message N):
+//   editMessageText: HTTP 400 — the buttons are stale but the gate refuses a
+//   tap on them
+// with the phone already showing the annotated message. Telegram answers 400
+// "Bad Request: message is not modified" when an edit would change nothing,
+// which is what a second annotation of an already-annotated message is. The
+// warning was false, and the bare status was why nobody could tell: the
+// transport threw the status away along with the Bot API's own description.
+// ---------------------------------------------------------------------------
+
+/** A fetch that fails `editMessageText` with one Bot API error body. */
+function editFailsWith(
+  status: number,
+  description: string | null,
+): NonNullable<TelegramConfig["fetch"]> {
+  const passthrough = globalThis.fetch as unknown as NonNullable<TelegramConfig["fetch"]>;
+  const body =
+    description === null
+      ? "<html>gateway</html>"
+      : JSON.stringify({ ok: false, error_code: status, description });
+  return async (url, init) => {
+    if (url.endsWith("/editMessageText")) {
+      return { ok: false, status, text: async () => body };
+    }
+    return await passthrough(url, init);
+  };
+}
+
+const NOT_MODIFIED_DESCRIPTION = "Bad Request: message is not modified";
+
+test("a 400 that says the message is not modified is not reported (APRV-277)", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  const channel = channelFor({ fetch: editFailsWith(400, NOT_MODIFIED_DESCRIPTION) });
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(request_);
+
+  const before = complaints.length;
+  const outcome = await press(channel, key, "grant");
+  assert.equal(outcome?.ok, true, JSON.stringify(outcome));
+
+  // Nothing on the operator's terminal: the message already reads the way the
+  // annotation wanted it to read, so there is no staleness to warn about.
+  assert.deepEqual(
+    complaints.slice(before).filter((entry) => entry.includes("could not annotate")),
+    [],
+    "an edit that changed nothing was reported as a failure",
+  );
+
+  // And the silence cost the decision nothing.
+  assert.equal(
+    recordsOf(world.unit.logPath).filter(
+      (record) => record.event === "approval.granted" && record.action_key === key,
+    ).length,
+    1,
+  );
+  const next = await channel.pollOnce();
+  assert.equal(next.updates, 0);
+  assertClean(world.unit);
+});
+
+test("every other 400 is still reported, and says what the Bot API said (APRV-277)", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  // Same status, a different reason: this one really is a stale message, and an
+  // operator who is not told cannot know the phone stopped agreeing with the
+  // log.
+  const channel = channelFor({
+    fetch: editFailsWith(400, "Bad Request: message to edit not found"),
+  });
+  channel.onDecision(handlerFor(world, at(2)));
+  await channel.notify(request_);
+
+  const before = complaints.length;
+  const outcome = await press(channel, key, "grant");
+  assert.equal(outcome?.ok, true, JSON.stringify(outcome));
+
+  const said = complaints.slice(before).join("\n");
+  assert.match(
+    said,
+    /could not annotate the decided .* — the decision is recorded; only the message is stale/u,
+  );
+  // The status alone was the whole complaint before this task, which is why the
+  // false one and the real one read identically.
+  assert.match(said, /editMessageText: HTTP 400 \(Bad Request: message to edit not found\)/u);
+  assertClean(world.unit);
+});
+
+test("the not-modified predicate reads the Bot API's own description (APRV-277)", async () => {
+  const world = live(1);
+  const key = world.keys[0] as string;
+  const [request_] = queueOf(world, at(2));
+  assert.ok(request_ !== undefined);
+
+  /** What `annotate` throws when the edit fails this way. */
+  const thrownBy = async (
+    status: number,
+    description: string | null,
+  ): Promise<TelegramApiError> => {
+    const channel = channelFor({ fetch: editFailsWith(status, description) });
+    const messageId = await channel.notify(request_ as ChannelRequest);
+    try {
+      await channel.annotate(messageId, "GRANTED", ["by carter"], key);
+    } catch (cause) {
+      assert.ok(cause instanceof TelegramApiError, `not a TelegramApiError: ${String(cause)}`);
+      return cause;
+    }
+    return assert.fail("the failing edit did not throw");
+  };
+
+  const notModified = await thrownBy(400, NOT_MODIFIED_DESCRIPTION);
+  assert.equal(notModified.status, 400);
+  assert.equal(notModified.description, NOT_MODIFIED_DESCRIPTION);
+  assert.equal(isMessageNotModified(notModified), true);
+
+  // Every other 400, every other status, and a body with nothing quotable in it
+  // are all ordinary failures. The predicate is deliberately narrow: 400 is
+  // also every malformed edit and every message the bot can no longer reach.
+  const otherReason = await thrownBy(400, "Bad Request: message to edit not found");
+  assert.equal(isMessageNotModified(otherReason), false);
+  const otherStatus = await thrownBy(500, NOT_MODIFIED_DESCRIPTION);
+  assert.equal(otherStatus.status, 500);
+  assert.equal(isMessageNotModified(otherStatus), false);
+
+  const noBody = await thrownBy(502, null);
+  assert.equal(noBody.status, 502);
+  assert.equal(noBody.description, null);
+  assert.equal(noBody.message, "editMessageText: HTTP 502");
+  assert.equal(isMessageNotModified(noBody), false);
+
+  // And nothing that is not one of these errors is ever mistaken for one.
+  assert.equal(isMessageNotModified(new Error(NOT_MODIFIED_DESCRIPTION)), false);
+  assert.equal(isMessageNotModified(NOT_MODIFIED_DESCRIPTION), false);
+  assert.equal(isMessageNotModified(null), false);
   assertClean(world.unit);
 });
 

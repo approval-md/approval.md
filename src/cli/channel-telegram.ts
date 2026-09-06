@@ -132,6 +132,7 @@ import {
   actionRefOf,
   decidedLine,
   groupForDigest,
+  isMessageNotModified,
   isTelegramTerminalState,
   TelegramChannel,
   telegramChatEnvFor,
@@ -1218,6 +1219,14 @@ export async function dispatchPending(
         );
       }
     } catch (cause) {
+      // APRV-277. Telegram answers an edit that would change nothing with 400
+      // "message is not modified", and this pass re-derives its annotations
+      // from the verified log rather than remembering which ones landed — so a
+      // message this listener (or a previous one, or the channel's own decision
+      // path) already annotated produces exactly that. The phone shows the
+      // outcome, the annotation stands, and there is nothing to report. Every
+      // other 400 and every other failure still reaches the operator below.
+      if (isMessageNotModified(cause)) continue;
       // Cosmetic, and said so on stderr. The gate refuses a tap on the stale
       // buttons anyway (`already-decided`, `request-withdrawn`, `expired`), so
       // nothing can be decided by one.

@@ -1525,10 +1525,51 @@ export class TelegramApiError extends Error {
   constructor(
     message: string,
     readonly method: string,
+    /**
+     * The HTTP status, when the failure was an HTTP one. `null` for a transport
+     * failure, an unparseable body, or an `ok: false` envelope that arrived
+     * with a 200 (APRV-277).
+     */
+    readonly status: number | null = null,
+    /**
+     * The Bot API's own `description` for this failure, redacted, when the
+     * error body carried one. `null` when the body was absent, unreadable, not
+     * JSON, or carried no description.
+     */
+    readonly description: string | null = null,
   ) {
     super(message);
     this.name = "TelegramApiError";
   }
+}
+
+/**
+ * Telegram's wording for "that edit would have changed nothing" (APRV-277).
+ *
+ * Matched on the description rather than the status alone, because 400 is also
+ * every malformed edit, every wrong chat and every deleted message.
+ */
+const TELEGRAM_NOT_MODIFIED = /message is not modified/iu;
+
+/**
+ * Whether a failed call is the Bot API saying an edit changed nothing
+ * (APRV-277).
+ *
+ * `editMessageText` answers 400 "Bad Request: message is not modified" when the
+ * text and the keyboard it was handed are already what the message holds. Every
+ * caller here re-annotates from the verified log rather than from memory, so a
+ * message annotated once and derived again produces exactly that: the phone
+ * already shows the outcome, and the operator has nothing to be told. It is the
+ * one 400 that means the intended state stands, which is why it is the only one
+ * that goes unreported.
+ */
+export function isMessageNotModified(cause: unknown): boolean {
+  return (
+    cause instanceof TelegramApiError &&
+    cause.status === 400 &&
+    cause.description !== null &&
+    TELEGRAM_NOT_MODIFIED.test(cause.description)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -2701,6 +2742,8 @@ export class TelegramChannel implements TestableChannel {
         delivery.actionKey,
       );
     } catch (cause) {
+      // APRV-277: the one failure that is not one. See isMessageNotModified.
+      if (isMessageNotModified(cause)) return;
       this.complain(
         `approval: telegram could not annotate the decided ${delivery.actionKey} (message ${delivery.deliveryId}): ${this.describe(cause)} — the decision is recorded; only the message is stale`,
       );
@@ -2813,6 +2856,8 @@ export class TelegramChannel implements TestableChannel {
     try {
       await this.redraw(digest);
     } catch (cause) {
+      // APRV-277: the one failure that is not one. See isMessageNotModified.
+      if (isMessageNotModified(cause)) return;
       this.complain(
         `approval: telegram could not redraw the digest (message ${digest.deliveryId}): ${this.describe(cause)} — the decisions are recorded; only the message is stale`,
       );
@@ -2826,6 +2871,10 @@ export class TelegramChannel implements TestableChannel {
    * Every caller on the decision path wants the same thing from a failed edit:
    * say so on the operator's terminal and carry on, because whatever the gate
    * did or did not append has already happened and no chat message changes it.
+   *
+   * The exception is {@link isMessageNotModified}, which says the message
+   * already reads the way this call wanted it to read (APRV-277). Nothing is
+   * printed for it: there is no staleness to warn about.
    */
   private async annotateQuietly(
     deliveryId: DeliveryId,
@@ -2836,6 +2885,8 @@ export class TelegramChannel implements TestableChannel {
     try {
       await this.annotate(deliveryId, headline, detail, actionKey);
     } catch (cause) {
+      // APRV-277: the one failure that is not one. See isMessageNotModified.
+      if (isMessageNotModified(cause)) return;
       this.complain(
         `approval: telegram could not annotate ${actionKey} (message ${deliveryId}): ${this.describe(cause)} — the log is what it is; only the message is stale`,
       );
@@ -3027,6 +3078,34 @@ export class TelegramChannel implements TestableChannel {
   }
 
   /**
+   * The Bot API's own `description` for a failed response, redacted (APRV-277).
+   *
+   * `null` whenever there is nothing trustworthy to quote: the body could not
+   * be read, it was not JSON, or it carried no description. Every failure mode
+   * here is silent by design, because this runs on a path that is already
+   * reporting a failure and a second one thrown from the diagnostic would
+   * replace the real reason with a worse one.
+   */
+  private async describeFailure(response: { text(): Promise<string> }): Promise<string | null> {
+    let body: string;
+    try {
+      body = await response.text();
+    } catch {
+      return null;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return null;
+    }
+    if (parsed === null || typeof parsed !== "object") return null;
+    const description = (parsed as Record<string, unknown>)["description"];
+    if (typeof description !== "string" || description.length === 0) return null;
+    return this.redact(description);
+  }
+
+  /**
    * One Bot API call.
    *
    * The token is in the URL, which is how the Bot API works — there is no
@@ -3052,7 +3131,21 @@ export class TelegramChannel implements TestableChannel {
         signal: controller.signal,
       });
       if (!response.ok) {
-        throw new TelegramApiError(`${method}: HTTP ${response.status}`, method);
+        // APRV-277. The Bot API puts its reason in the error body's
+        // `description`, and dropping it made every failure read as a bare
+        // status: an edit that changed nothing and an edit into a chat the bot
+        // was thrown out of were the same "HTTP 400" on the operator's
+        // terminal. Read best effort — a status is still worth reporting when
+        // the body is missing, truncated, or not JSON at all.
+        const description = await this.describeFailure(response);
+        throw new TelegramApiError(
+          description === null
+            ? `${method}: HTTP ${response.status}`
+            : `${method}: HTTP ${response.status} (${description})`,
+          method,
+          response.status,
+          description,
+        );
       }
       raw = await response.text();
     } catch (cause) {
@@ -3071,9 +3164,22 @@ export class TelegramChannel implements TestableChannel {
     }
     const envelope = (parsed ?? {}) as Record<string, unknown>;
     if (envelope["ok"] !== true) {
+      const said = envelope["description"];
+      const description = typeof said === "string" && said.length > 0 ? this.redact(said) : null;
+      // Unchanged wording: anything the Bot API put here is still shown, and an
+      // absent one is still "no description". `description` is the narrower
+      // field — a non-empty string only — because that is what a caller is
+      // entitled to match on (APRV-277).
+      const shown =
+        said === undefined || said === null ? "no description" : this.redact(String(said));
       throw new TelegramApiError(
-        `${method}: the Bot API refused (${this.redact(String(envelope["description"] ?? "no description"))})`,
+        `${method}: the Bot API refused (${shown})`,
         method,
+        // No HTTP status: this envelope arrived on a 2xx. The description is
+        // carried anyway so a caller reads the same field whichever shape the
+        // failure took (APRV-277).
+        null,
+        description,
       );
     }
     return envelope["result"] as T;
