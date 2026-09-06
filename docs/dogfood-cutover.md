@@ -193,8 +193,11 @@ policy.edit ×3, network.call ×2`) and the OLDEST request, with its buttons. Th
 next one arrives on the first cycle after you decide that one, `/skip` it (it
 comes round again, last) or `/next` past it (this process does not show it
 again). `/queue` lists everything pending at any time, including while a request
-is on screen, and that list is read from the log rather than from the chat, so it
-is right even when the chat is not.
+is selected, and that list is read from the log rather than from the chat, so it
+is right even when the chat is not. The list carries no decision buttons and
+does not claim to know where the selected request's card ended up; if you cannot
+find that card, `/skip` puts the request at the back of the order without
+deciding it and a fresh card follows on a later cycle.
 
 Nothing is withheld by this. Every request is still pending in the log, still
 listed by `approval queue`, and still decidable from any copy of its message

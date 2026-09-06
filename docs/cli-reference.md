@@ -2838,9 +2838,9 @@ to.
 
 | Command  | What it does |
 | -------- | ------------ |
-| `/queue` | Replies with the summary and a numbered list of every pending request (action key, task, class, age), marking the one currently shown. Derived from the verified log at reply time, and it works while a request is on screen. |
-| `/skip`  | Shows the next request; the skipped one goes to the BACK of this process's order and comes round again after the rest. |
-| `/next`  | Shows the next request; this process does not show the passed-over one again. |
+| `/queue` | Replies with the summary and a numbered list of every pending request (action key, task, class, age), marking the one this listener has selected. Derived from the verified log at reply time, and it works while a request is selected. |
+| `/skip`  | Selects the next request; the skipped one goes to the BACK of this process's order and comes round again after the rest, with a fresh card when it does. |
+| `/next`  | Selects the next request; this process does not offer the passed-over one again, and sends no further card for it. |
 
 **None of the three decides anything.** They have no path to the gate: a
 decision is a button, because a button carries the nonce and action reference
@@ -2848,6 +2848,27 @@ that bind an answer to the bytes you were shown, and a typed word carries
 neither. `/skip` and `/next` leave the message already in the chat live, its
 buttons still deciding the same request, so passing over a question never takes
 it away from you.
+
+**`/queue` is a list, and it says so** (APRV-256). The reply carries no decision
+buttons of its own, and it names no position for the ones it points at: a
+request is decided on its own approval card, wherever that card has ended up in
+the chat. The marker on the selected line reads `selected — card sent earlier`,
+because that is the whole of what the listener knows. Delivery bookkeeping
+records that a send returned success; the Bot API never reports that a message
+is still there, and a card can be deleted, buried, or lost with the chat
+history. So the reply states prior delivery and stops, rather than telling you
+to tap something it cannot see.
+
+**When you cannot find the card, `/skip` is the recovery.** It puts the request
+at the back of the order and lets the next one through. Typing it decides
+nothing, the request stays pending in the log, and a fresh card goes out on a
+later listener cycle once the requests ahead of it have had their turn (a cycle
+can run a little long while a gloss is being written; see `--no-gloss`).
+`/next` is the opposite trade and not a resend: this process moves past the
+request, stops offering it, and sends no new card for it, though the copy
+already in the chat keeps its buttons. With nothing selected at all (before the
+first dispatch, or right after a decision), the reply says so and promises the
+next card on an upcoming cycle, and an empty queue says only that it is empty.
 
 Pacing withholds attention, never the queue: every request stays pending in the
 log whether or not it has been shown, `approval queue` and `/queue` list them
