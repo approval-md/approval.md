@@ -45,7 +45,7 @@ import {
   startExecution,
 } from "./clock-adapters.js";
 import type { EventRecord } from "../src/core/log.js";
-import { isLoopEscalated } from "../src/core/loop.js";
+import { isLoopEscalated, isSideEffectingClass, loopClearance } from "../src/core/loop.js";
 import { verify } from "../src/core/verify.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "approval-md-execute-"));
@@ -1014,6 +1014,42 @@ test("an escalated task refuses a supervised start, and the gate refuses the req
   assertClean(unit);
 });
 
+test("APRV-280: the side-effect predicate is a carve-out of read.*, so the unknown is strict", () => {
+  for (const cls of ["read", "read.shell", "read.files", "read.web", "read.vcs.remote"]) {
+    assert.equal(isSideEffectingClass(cls), false, `${cls} only looks at things`);
+  }
+  for (const cls of [
+    "files.write.workspace",
+    "files.delete.out_of_scope",
+    "vcs.push.main",
+    "deps.add",
+    "network.call",
+    "communicate.email.external",
+    "policy.edit.spec",
+    "log.mutate",
+    // Starts with the four letters and is not in the namespace. The predicate
+    // matches the segment, never the prefix.
+    "readme.publish",
+    // A class no build of this runtime has ever heard of falls on the strict
+    // side by construction, which is why the predicate is written this way
+    // round.
+    "something.nobody.declared",
+  ]) {
+    assert.equal(isSideEffectingClass(cls), true, `${cls} does something`);
+  }
+});
+
+test("APRV-280: the clearing sentence names a side-effecting completion, and the window for a scope", () => {
+  // One sentence, three surfaces (the gate's refusals, the hook's denies,
+  // `approval status`). It is pinned here so a rewrite that quietly widens what
+  // clears a streak has to come through a failing test.
+  assert.match(loopClearance("task", "task-042"), /execution\.completed for task task-042/u);
+  assert.match(loopClearance("task", "task-042"), /a read that succeeds clears nothing/u);
+  assert.doesNotMatch(loopClearance("task", "task-042"), /gate open/u);
+  assert.match(loopClearance("session", "hook:sess-1"), /this session scope \(hook:sess-1\)/u);
+  assert.match(loopClearance("actor", "agent:claude-code"), /approval gate open/u);
+});
+
 test("loopEscalation is per task and ignores other tasks' failures", () => {
   const unit = ready();
   failOnce(unit, "task-042:draft", 2);
@@ -1214,5 +1250,88 @@ test("F3 CLOSED: an action declared with no payload_hash cannot execute at all",
   assert.equal(refusal.code, "payload-mismatch");
   assert.match(refusal.message, /carries no payload_hash/u);
   assert.equal(records(unit).length, before, "a refused start appended something");
+  assertClean(unit);
+});
+
+// ===========================================================================
+// the provider reference (APRV-251)
+// ===========================================================================
+
+/** A started execution for `task-042:draft`, ready to be closed. */
+function startedUnit(): ReturnType<typeof ready> {
+  const unit = ready();
+  assert.equal(
+    startExecution(unit.logPath, "task-042:draft", bound(unit, "task-042:draft"), at(2), "agent:claude")
+      .ok,
+    true,
+  );
+  return unit;
+}
+
+test("finishExecution records a provider reference on a completion", () => {
+  const unit = startedUnit();
+  const finished = finishExecution(unit.logPath, "task-042:draft", 0, at(3), "agent:claude", {
+    providerRef: { adapter: "agentmail", id: "msg_01JQ2XKV" },
+  });
+
+  assert.equal(finished.ok, true, finished.ok ? "" : finished.message);
+  if (!finished.ok) throw new Error("unreachable");
+  assert.deepEqual(finished.record.payload, {
+    exit_code: 0,
+    provider_ref: { adapter: "agentmail", id: "msg_01JQ2XKV" },
+  });
+  // The write boundary accepted it, which is the claim: the schema constrains
+  // the shape and the chain still walks.
+  assertClean(unit);
+});
+
+test("a failure carries no provider reference, whatever the caller states", () => {
+  const unit = startedUnit();
+  const finished = finishExecution(unit.logPath, "task-042:draft", 1, at(3), "agent:claude", {
+    providerRef: { adapter: "agentmail", id: "msg_01JQ2XKV" },
+  });
+
+  assert.equal(finished.ok, true, finished.ok ? "" : finished.message);
+  if (!finished.ok) throw new Error("unreachable");
+  assert.equal(finished.event, "execution.failed");
+  // A failure produced no effect for a provider to file. A join key on one
+  // would claim the log covers something that did not happen.
+  assert.deepEqual(finished.record.payload, { exit_code: 1 });
+  assertClean(unit);
+});
+
+test("a reference the schema would reject is dropped, and the outcome is still recorded", () => {
+  for (const ref of [
+    { adapter: "agentmail", id: "" },
+    { adapter: "", id: "msg_01JQ2XKV" },
+    { adapter: "agentmail", id: "msg 01JQ2XKV" },
+    { adapter: "agentmail", id: `msg_${"x".repeat(300)}` },
+    { adapter: "a".repeat(80), id: "msg_01JQ2XKV" },
+  ]) {
+    const unit = startedUnit();
+    const finished = finishExecution(unit.logPath, "task-042:draft", 0, at(3), "agent:claude", {
+      providerRef: ref,
+    });
+
+    // The outcome is the thing that must be written. A record the write
+    // boundary would reject would leave a side effect with no outcome at all,
+    // so the unrecordable half is dropped and the completion stands.
+    assert.equal(finished.ok, true, finished.ok ? "" : finished.message);
+    if (!finished.ok) throw new Error("unreachable");
+    assert.deepEqual(
+      finished.record.payload,
+      { exit_code: 0 },
+      `an unrecordable reference was written: ${JSON.stringify(ref)}`,
+    );
+    assertClean(unit);
+  }
+});
+
+test("a completion with no stated reference is unchanged", () => {
+  const unit = startedUnit();
+  const finished = finishExecution(unit.logPath, "task-042:draft", 0, at(3), "agent:claude");
+  assert.equal(finished.ok, true, finished.ok ? "" : finished.message);
+  if (!finished.ok) throw new Error("unreachable");
+  assert.deepEqual(finished.record.payload, { exit_code: 0 });
   assertClean(unit);
 });

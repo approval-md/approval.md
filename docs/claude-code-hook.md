@@ -224,11 +224,12 @@ an addition).
 | `workspace-write` | mkdir, cp, mv, touch, tee, ln, chmod, truncate, rmdir | (any) | files.write.workspace |
 | `rm` | rm | (any) | files.write.workspace, files.delete.out_of_scope, files.delete.scratch ‡ |
 | `sed` | sed | (any) | read.shell, files.write.workspace |
+| `find` | find | (any) | read.shell for a walk; files.delete.out_of_scope for `-delete`; files.write.workspace for `-fprint`, `-fprintf`, `-fls`; OPAQUE for `-exec`, `-execdir`, `-ok`, `-okdir`, which run a command this classifier does not read (APRV-283) |
 | `web-fetch` | curl, wget, http, httpie | (any) | read.web for a GET-shaped fetch; network.call for a body, an upload, a non-GET method, or anything ambiguous |
 | `network` | ssh, scp, sftp, rsync, nc, telnet, ftp | (any) | network.call |
 | `keychain` | security, secret-tool, keyring, pass | (any) | account.credential |
 | `printenv` | printenv | (any) | account.credential bare, or with a variable whose NAME is credential-bearing; read.shell otherwise |
-| `read-shell` | basename, cat, cd, cksum, cut, diff, dirname, du, echo, false, file, find, grep, head, jq, ls, md5sum, printf, pwd, readlink, realpath, rg, shasum, sha256sum, sort, stat, tail, test, tr, tree, true, type, uniq, wc, which | (any) | read.shell |
+| `read-shell` | basename, cat, cd, cksum, cut, diff, dirname, du, echo, false, file, grep, head, jq, ls, md5sum, printf, pwd, readlink, realpath, rg, shasum, sha256sum, sort, stat, tail, test, tr, tree, true, type, uniq, wc, which | (any) | read.shell |
 
 † These rewrites are LOCAL, and the hook refines them against the checkout it
 runs in: see [Rewriting unpublished history](#rewriting-unpublished-history).
@@ -344,7 +345,12 @@ Five overrides sit on top of the table:
   protected again, and a copy FROM credential material INTO the journal is
   still `account.credential`, because that rule reads every argument.
 - **`redirect-write` → `files.write.workspace`.** A read command with a `>` or
-  `>>` writes a file, and the class says so.
+  `>>` writes a file, and the class says so. Since APRV-283 a redirection onto a
+  DISCARD device is exempt, because it creates nothing: `/dev/null`,
+  `/dev/stdout`, `/dev/stderr`, `/dev/tty` and `/dev/fd/<n>`, exactly those.
+  `grep -r TODO src 2>/dev/null` is the read it looks like; `grep -r TODO src
+  2> errors.log` still writes. The set is closed, so any other device node is
+  read as a write.
 - **`gate.self`.** The `approval` CLI (and `node …/dist/src/cli/main.js`) is the
   enforcement path; gating it with itself would deadlock. It is allowed and
   nothing is logged.
@@ -359,6 +365,30 @@ Five overrides sit on top of the table:
 Stricter-when-unsure, throughout: `git push` with no refspec is `vcs.push.main`,
 an `rm` path holding an unexpanded `$VAR` is `files.delete.out_of_scope`, and a
 remote-branch deletion takes the trunk class rather than the branch one.
+
+### Sandbox wrappers (APRV-193)
+
+A wrapper is a room, not a command, so the class belongs to what runs inside it.
+`approval sandbox -- npm install left-pad` is `deps.add`, with the same rule id
+(`npm-install-package`) the bare command has, and `sandbox-exec -f p.sb npm test`
+is `files.write.workspace` by the `npm-script` row.
+
+Both directions matter. If the wrapper kept a class of its own,
+`approval sandbox -- <anything>` would be `gate.self` — the pass-through
+pseudo-class — and wrapping would BE a laundering device. And before this rule
+existed, every `sandbox-exec` spelling was `hook-unclassified` and denied, so the
+hook penalised the safe form of a command it allowed unwrapped.
+
+What the rule will not do is guess. `sandbox-exec` is read only in the
+`-f <profile>` form: `-p`, `-n` and `-D` change what the profile allows, so a
+command carrying one is `hook-unclassified` rather than read past the part that
+matters. `approval sandbox` with no `--` runs nothing (it prints help) and stays
+`gate.self`.
+
+The wrapper is also recorded per segment as `runtime` (a profile this runtime
+wrote) or `external` (a profile the caller wrote), which is what
+`APPROVAL_HOOK_REQUIRE_SANDBOX=1` reads: only `runtime` satisfies it, because a
+profile a caller wrote can allow everything. See `docs/sandboxed-exec.md`.
 
 ### GET-shaped fetches
 
@@ -654,6 +684,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
 | `hook-grant-unverified` | the grant was spent, and the verified log cannot be seen to carry the `execution.started` recording it. On this surface the record IS the authorization, because the harness executes and never sees the gate's return value, so no verdict is printed until the chain carries it. The grant is spent by then: the retry costs one prompt and authorizes nothing meanwhile |
+| `hook-sandbox-required` | `APPROVAL_HOOK_REQUIRE_SANDBOX=1` is set and this command runs code the runtime did not author, unwrapped. The one deny that names a spelling that works: re-run it as `approval sandbox -- <command>` (`docs/sandboxed-exec.md`). Off unless the operator set the variable |
 | `hook-policy-unavailable` | `APPROVAL.md` could not be loaded |
 | `hook-log-unreachable` | no log where the hook was pointed; it writes to an existing log and creates none |
 | `hook-io` | malformed hook input, or an unreadable log |
@@ -896,6 +927,22 @@ Substitute a command your own policy resolves to `supervised`. `approval hook
 classify -- <command…>` says which class a command falls under, and the verdict
 line reports how it resolved. A manual class re-records just as well and costs
 one prompt, which is why the supervised one is the ritual.
+
+## The same binary, from a Python Agent SDK app (APRV-242)
+
+An application built on `claude-agent-sdk` has no `.claude/settings.json` to
+commit a hook entry into: it is its own host, and it decides its own permission
+mode. It reaches this verb anyway, because the SDK's `HookMatcher` callbacks
+receive the same PreToolUse event this hook reads on stdin and return the same
+`hookSpecificOutput` object it prints. A shim that serializes the event, spawns
+`approval hook claude-code`, and returns the verdict makes such an application
+gateable with no new surface and no Python client.
+
+The recipe, the one shape difference (`tool_use_id` arrives as a positional
+argument rather than as a key), the fail-closed table for a gate the shim
+cannot reach, and the limits are in `docs/agent-sdk-hook.md`. The Python itself
+is `docs/agent-sdk-hook.py`; `tests/agent-sdk-hook.test.ts` runs this CLI on
+the pinned event and asserts it still prints what the recipe expects.
 
 ## Limits, stated plainly
 

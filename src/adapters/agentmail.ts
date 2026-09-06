@@ -128,6 +128,7 @@ import { canonicalize } from "../core/jcs.js";
 import { payloadHash } from "../core/payload.js";
 import {
   CREDENTIAL_REFUSAL_CODES,
+  PROVIDER_REF_DETAIL_KEY,
   redactSecrets,
   type ActInput,
   type ActOutcome,
@@ -1255,7 +1256,22 @@ function directBody(payload: {
   };
 }
 
-/** The success detail. Nothing secret, and nothing the log has not earned. */
+/**
+ * The success detail. Nothing secret, and nothing the log has not earned.
+ *
+ * `message_id` is what AgentMail calls its identifier and is what a person
+ * pastes into the provider's own console. `provider_ref` is the same string
+ * under the ONE key the adapter contract lifts onto the record (APRV-251,
+ * `PROVIDER_REF_DETAIL_KEY`), so that `approval coverage` can join what this
+ * inbox actually sent to this log by id. The duplication is deliberate: the
+ * contract lifts one conventional key rather than guessing which field of a
+ * receipt is the id, and this adapter keeps its own vocabulary intact for the
+ * reader of the CLI result.
+ *
+ * Written only when the provider returned an id. A send whose answer carries no
+ * `message_id` names no reference, and the completion records none, which is the
+ * pre-amendment record and always valid.
+ */
 function receipt(
   mode: AgentmailMode,
   answer: HttpAnswer,
@@ -1265,9 +1281,11 @@ function receipt(
   const parsed = parseObject(answer.body);
   const messageId = parsed?.["message_id"];
   const threadId = parsed?.["thread_id"];
+  const named = typeof messageId === "string" && messageId.length > 0 ? messageId : null;
   return {
     mode,
-    message_id: typeof messageId === "string" ? messageId : null,
+    message_id: named,
+    ...(named === null ? {} : { [PROVIDER_REF_DETAIL_KEY]: named }),
     ...(typeof threadId === "string" ? { thread_id: threadId } : {}),
     payload_hash: hash,
     recipients,
@@ -1315,12 +1333,14 @@ export function agentmailAdapter(options: AgentmailAdapterOptions = {}): Adapter
      * probe, and never the `.approval/env` passphrase fallback, which is
      * defensible only inside a consumed-token window.
      *
-     * The effect id is the provider's `message_id`. It is deliberately NOT
-     * matched against the log: `execution.completed` records an `exit_code` and
-     * the provider's id reaches only the CLI result, so an id-level binding
-     * would need a schema amendment. That amendment is APRV-251; until it
-     * lands, this source is joined by class and time window like every other,
-     * and `docs/cli-reference.md` says so where a reader will see it.
+     * The effect id is the provider's `message_id`, and since APRV-251 it is
+     * the join key rather than a string for a person to read. A send that went
+     * through this adapter recorded the same id on its `execution.completed`
+     * (the receipt names it under `provider_ref`, and the contract lifts it), so
+     * `approval coverage` answers about THAT message. A message this inbox sent
+     * that no record names by id falls through to the class-and-window rule
+     * every other source gets, which is the honest weaker answer rather than a
+     * gap: a send made before the amendment carries no reference.
      */
     async observe(
       window: ObservationWindow,

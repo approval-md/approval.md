@@ -739,3 +739,90 @@ test("a grant may carry the same four-word reaction (APRV-237)", () => {
     "approval.granted accepted a disliked reaction with a blank note",
   );
 });
+
+// ---------------------------------------------------------------------------
+// APRV-251: the provider reference on `execution.completed`
+// ---------------------------------------------------------------------------
+
+test("execution.completed admits provider_ref and rejects every other shape", () => {
+  const completed = fixture("execution.completed");
+  const payload = (completed["payload"] ?? {}) as Record<string, unknown>;
+  const withRef = (providerRef: unknown): unknown => ({
+    ...completed,
+    payload: { ...payload, exit_code: 0, provider_ref: providerRef },
+  });
+
+  assert.equal(
+    validate("event", withRef({ adapter: "agentmail", id: "msg_01JQ2" })).ok,
+    true,
+    "execution.completed rejected a well-formed provider_ref",
+  );
+
+  // Absence is the pre-amendment record, and it must stay valid forever: a
+  // reader treats a missing reference as "this runtime recorded none".
+  assert.equal(
+    validate("event", completed).ok,
+    true,
+    "execution.completed must stay valid with no provider_ref at all",
+  );
+
+  // Exactly two members. A third is where a message body would arrive, which is
+  // the whole reason the object is closed rather than open.
+  for (const bad of [
+    { adapter: "agentmail" },
+    { id: "msg_01JQ2" },
+    { adapter: "agentmail", id: "msg_01JQ2", body: "Hi Dana, chasing the invoice" },
+    { adapter: "", id: "msg_01JQ2" },
+    { adapter: "agentmail", id: "" },
+    { adapter: "agentmail", id: 4271 },
+    { adapter: "agentmail", id: null },
+    { adapter: ["agentmail"], id: "msg_01JQ2" },
+    "msg_01JQ2",
+    ["agentmail", "msg_01JQ2"],
+    null,
+  ]) {
+    assert.equal(
+      validate("event", withRef(bad)).ok,
+      false,
+      `execution.completed accepted provider_ref ${JSON.stringify(bad)}`,
+    );
+  }
+
+  // An identifier is short and printable. The bounds are what keep the field
+  // from becoming somewhere to put a message, so they are pinned here.
+  assert.equal(
+    validate("event", withRef({ adapter: "agentmail", id: "x".repeat(256) })).ok,
+    true,
+    "execution.completed rejected an id at the 256-character bound",
+  );
+  assert.equal(
+    validate("event", withRef({ adapter: "agentmail", id: "x".repeat(257) })).ok,
+    false,
+    "execution.completed accepted an id past the 256-character bound",
+  );
+  assert.equal(
+    validate("event", withRef({ adapter: "a".repeat(65), id: "msg_01JQ2" })).ok,
+    false,
+    "execution.completed accepted an adapter name past the 64-character bound",
+  );
+  for (const id of ["msg 01JQ2", "msg\n01JQ2", "msg\t01JQ2", "msg_01JQ2 ", "msg 01JQ2"]) {
+    assert.equal(
+      validate("event", withRef({ adapter: "agentmail", id })).ok,
+      false,
+      `execution.completed accepted a non-printable id ${JSON.stringify(id)}`,
+    );
+  }
+
+  // The constraint is on the completed event alone. A failed execution produced
+  // no effect for a provider to file, and this schema says nothing about what
+  // such a record may carry; the write path never puts one there.
+  assert.equal(
+    validate("event", {
+      ...completed,
+      event: "execution.failed",
+      payload: { exit_code: 1 },
+    }).ok,
+    true,
+    "execution.failed stopped validating",
+  );
+});

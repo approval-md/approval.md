@@ -83,6 +83,9 @@ const RUN_FLAGS: Record<string, FlagKind> = {
   "--interval": "string",
   "--debounce": "string",
   "--once": "boolean",
+  // The watcher trace (APRV-230). A diagnostic: it prints one line per
+  // filesystem event, ignored ones included, and changes nothing else.
+  "--trace-watch": "boolean",
   "--git-evidence": "boolean",
   // The cadence advance (APRV-204). Opt-in, like `--git-evidence`: it pushes to
   // a remote and opens pull requests, which a daemon must never start doing
@@ -93,6 +96,7 @@ const RUN_FLAGS: Record<string, FlagKind> = {
   "--advance-remote": "string",
   "--advance-base": "string",
   "--no-advance-pr": "boolean",
+  "--no-advance-auto-merge": "boolean",
   // The dark-session sweep (APRV-192). Opt-in for the reason above, in a milder
   // form: it runs `git log` over every worktree of the checkout on a cadence.
   "--dark-sessions": "boolean",
@@ -197,6 +201,10 @@ export function advanceFlags(
       remote: stringFlag(flags, "--advance-remote") ?? fallback.remote,
       base: stringFlag(flags, "--advance-base"),
       pr: !boolFlag(flags, "--no-advance-pr"),
+      // APRV-284. Armed by default: a records pull request nobody arms is a
+      // pull request sitting at CLEAN waiting for a click that was never a
+      // review. `--no-advance-auto-merge` puts it back on a person.
+      autoMerge: !boolFlag(flags, "--no-advance-auto-merge"),
     },
   };
 }
@@ -377,16 +385,30 @@ export function describeDaemonEvent(event: DaemonEvent): { text: string; stderr:
         text: `loop escalation cleared: ${event.task} recorded an execution.completed`,
         stderr: false,
       };
+    case "watch":
+      // APRV-230's trace, off unless the operator asked for it. On stdout with
+      // the rest of the narrative: it is an observation, not a complaint, and an
+      // operator who turned it on is reading it.
+      return {
+        text: `watch: ${event.watcher} ${event.type} ${event.file ?? "<unnamed>"} — ${
+          event.action === "scheduled" ? "tick scheduled" : `ignored (${event.reason ?? "?"})`
+        }`,
+        stderr: false,
+      };
     case "tick":
       return {
         // The cost of the tick is on the line an operator already reads
         // (APRV-211): a tick that takes seconds, or that reads the log dozens of
         // times, is the shape of the incident this field exists to make obvious.
+        // What WOKE it is on the same line for the same reason (APRV-230): a
+        // tick nobody asked for costs exactly as much as one somebody did.
         text: `tick ${String(event.n)}: head ${
           event.head === null ? "none" : `seq ${String(event.head)}`
         }, ${String(event.drift)} drift, ${String(event.expired)} expired, ${String(
           event.escalated,
-        )} escalated (${String(event.ms)} ms, ${String(event.reads)} reads)`,
+        )} escalated (${String(event.ms)} ms, ${String(event.reads)} reads, woke by ${
+          event.woke_by
+        }${event.woke_file === undefined ? "" : ` ${event.woke_file}`})`,
         stderr: false,
       };
     case "warning":
@@ -570,6 +592,7 @@ export function commandDaemonRun(
     intervalMs: interval.ms,
     debounceMs: debounce.ms,
     once: boolFlag(flags, "--once"),
+    traceWatch: boolFlag(flags, "--trace-watch"),
     sink: {
       emit: (event) => {
         if (json) {

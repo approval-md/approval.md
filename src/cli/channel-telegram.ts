@@ -745,14 +745,46 @@ export function summaryLines(requests: ChannelRequest[], now: string): string[] 
 }
 
 /**
+ * The marker `/queue` puts on the request this listener has selected (APRV-256).
+ *
+ * It says two things and claims no third. "Selected" is this process's memory of
+ * which request it is holding; "card sent earlier" is the delivery bookkeeping
+ * recording that a send once succeeded. Neither is evidence that the card is
+ * still in the chat: Telegram reports a successful send, never a message's
+ * continued existence, and a card can be deleted, buried under a thousand later
+ * messages, or lost with the chat history on a reinstall. The old marker,
+ * "shown now", asserted present visibility from a past delivery, which is the
+ * bug this constant exists to keep fixed.
+ */
+const SELECTED_MARKER = " — selected — card sent earlier";
+
+/**
+ * What `/queue` says about itself, immediately under the summary (APRV-256).
+ *
+ * `/queue` is a summary reply and carries no buttons, so an approver reading it
+ * on a phone must not be left hunting this message for controls that were never
+ * on it. Where the controls DO live is stated without a direction: a card is
+ * somewhere in the chat's history, and "above" was only ever true for the
+ * approver who asked while looking straight at it.
+ */
+const QUEUE_IS_A_LIST =
+  "This is a list of what the log is holding. It has no decision buttons: a request is decided on its own approval card, wherever that card sits in this chat.";
+
+/**
  * `/queue`'s reply: the summary, then one numbered line per pending request.
  *
  * Derived, like the summary, from the verified log at reply time and not from
  * anything this process is holding: the numbering is positional and names no
  * button, so a stale copy of this list cannot be used to decide anything. The
- * marker says which one is currently in front of the approver, because the
- * question `/queue` is usually asked to answer is "what else is there besides
- * the one I am looking at".
+ * marker says which one this listener has selected and once delivered, because
+ * the question `/queue` is usually asked to answer is "what else is there
+ * besides the one I am looking at" — and, since APRV-256, its unhappy twin,
+ * "where is the one I am supposed to be looking at".
+ *
+ * The footer answers that second question the only honest way available to a
+ * process whose knowledge of the chat ends at "a send returned success": it
+ * says what was sent, says it cannot tell whether the card survived, and then
+ * spends its remaining words on recovery rather than reassurance.
  */
 export function queueLines(
   requests: ChannelRequest[],
@@ -764,6 +796,8 @@ export function queueLines(
 
   const nowMs = Date.parse(now);
   const current = new Set(shown);
+  let selected = 0;
+  lines.push(QUEUE_IS_A_LIST);
   requests.forEach((request, index) => {
     const key = request.action_key.value;
     const requestedMs = Date.parse(request.requested_ts.value);
@@ -772,14 +806,40 @@ export function queueLines(
         ? "unknown age"
         : ageText(nowMs - requestedMs);
     const task = request.task.value ?? "no task";
+    const isSelected = current.has(key);
+    if (isSelected) selected += 1;
     lines.push(
       `${String(index + 1)}. ${key} — ${task} — ${request.class.value} — ${age}${
-        current.has(key) ? " — shown now" : ""
+        isSelected ? SELECTED_MARKER : ""
       }`,
     );
   });
+
+  if (selected === 0) {
+    // Nothing selected is an ordinary state, not a fault: a decided or passed
+    // over request leaves the listener holding nothing until the next cycle
+    // picks the next one up. Saying so is what stops the reader searching the
+    // chat for a card this process never claimed to have sent.
+    lines.push(
+      "Nothing is selected right now, so no approval card has been sent for any of these. The next one goes out with its buttons on an upcoming listener cycle.",
+    );
+    return lines;
+  }
+
+  // More than one key is marked when the selection is a digest group, which
+  // Telegram receives as ONE card covering the set. Hence "a single approval
+  // card" in the plural branch and no positional word in either: the reply may
+  // be chunked across several messages, so "above" is not this function's to
+  // promise even about its own lines.
+  const holding =
+    selected === 1
+      ? "The request marked selected is the one this listener is holding, and an approval card for it was sent to this chat earlier. The buttons on that card decide it."
+      : `The ${String(selected)} requests marked selected are what this listener is holding as one digest, and a single approval card for them was sent to this chat earlier. The buttons on that card decide them.`;
+
   lines.push(
-    "Tap the buttons on the message above to decide the one being shown. /skip shows it again later, /next moves past it.",
+    `${holding} This listener cannot tell whether that card is still here.`,
+    "If you cannot find the card, /skip is the recovery: it puts the request at the back of the order and lets the next one through. Nothing is decided by typing it, the request stays pending in the log, and a fresh card is sent on a later listener cycle once the requests ahead of it have had their turn (a cycle can run a little long while a gloss is being written).",
+    "/next gives up your place instead: this listener moves past the request and stops offering it, and no new card is sent for it. It is not a way to ask for the card again.",
   );
   return lines;
 }
@@ -1808,8 +1868,9 @@ export function checkpointHandlerFor(
  * What they do move is process memory:
  *
  * - `/queue` reads the verified log and replies with the summary and a numbered
- *   list. It changes nothing, and it works while an item is shown, because the
- *   list is derived and not held.
+ *   list. It changes nothing, and it works while a request is selected, because
+ *   the list is derived and not held. The reply says outright that it carries no
+ *   buttons and that it cannot vouch for a card it once sent (APRV-256).
  * - `/skip` sends the shown unit to the BACK of this process's order and
  *   forgets having delivered it, so the next cycle shows the next question and
  *   this one comes round again after the rest. The copy already in the chat
@@ -1872,10 +1933,13 @@ export function commandHandlerFor(
     const shown = state.paced.current;
     if (shown === null) {
       await say([
+        // APRV-256: selection language, matching `/queue`'s. "In front of you"
+        // was a claim about the approver's screen, which this process has never
+        // been able to see.
         command === "skip"
-          ? "Nothing to skip — no request is in front of you."
-          : "Nothing is in front of you right now.",
-        "The next pending request is sent as soon as there is one. /queue lists what the log is holding.",
+          ? "Nothing to skip — this listener has no request selected."
+          : "This listener has no request selected right now.",
+        "The next pending request is sent with its buttons on an upcoming cycle. /queue lists what the log is holding.",
       ]);
       return;
     }

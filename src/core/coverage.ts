@@ -23,8 +23,17 @@
  *
  * ## What counts as evidence, stated exactly
  *
- * For one {@link ObservedEffect}, evidence is the EARLIEST record that is all
- * three of:
+ * The strongest answer first (APRV-251): an `execution.completed` may carry
+ * `payload.provider_ref`, the identifier the provider filed the effect under
+ * (SPEC.md §8), and an effect whose source and id match one is covered by that
+ * record, reported as `provider-ref`. No window is applied to it, because an id
+ * names one effect and a class in a span of time names a period. That is the
+ * whole difference the reference buys: without it, a gated send covers an
+ * ungated one of the same class sitting beside it in the window, and with it
+ * the log answers about the message actually in front of the reader.
+ *
+ * Otherwise, for one {@link ObservedEffect}, evidence is the EARLIEST record
+ * that is all three of:
  *
  * 1. one of `task.registered`, `approval.granted`, `execution.started`,
  *    `execution.completed` — the four records that mean "this runtime was told
@@ -129,6 +138,12 @@ export type Evidence =
 
 /** How the evidence was found, so a weaker match is never read as a stronger one. */
 export type CoverageMatch =
+  /**
+   * An `execution.completed` names this exact effect by the provider's own
+   * identifier (APRV-251). The strongest answer this join can give: it is about
+   * one effect rather than about a class in a span of time.
+   */
+  | "provider-ref"
   /** The record's declared class equals the effect's class. */
   | "exact"
   /** Only the class FAMILY matched (the first two dotted segments). */
@@ -247,6 +262,42 @@ export function classFamily(cls: string): string {
   return parts.length <= 2 ? cls : `${parts[0] as string}.${parts[1] as string}`;
 }
 
+/**
+ * The provider references the log carries, keyed by adapter and id (APRV-251).
+ *
+ * Built from `execution.completed` records alone, because that is the only event
+ * SPEC.md §8 lets carry one. EARLIEST wins, on the same reasoning the
+ * class-and-window rule uses: records arrive in seq order, and a later record
+ * naming the same effect cannot improve on the first one that did.
+ *
+ * The key is the pair. An id alone would let one provider's identifier be read
+ * as evidence about another provider's effect that happens to share the string,
+ * and the pair costs nothing: the source name a witness reports (`agentmail`) is
+ * the adapter name the contract wrote (`agentmail`), because the same adapter is
+ * both the executor and the observer. A source whose name does not match the
+ * adapter that executed simply falls through to the class-and-window rule, which
+ * is the weaker answer rather than a wrong one.
+ */
+function providerRefIndex(records: readonly EventRecord[]): Map<string, { seq: number; event: string }> {
+  const found = new Map<string, { seq: number; event: string }>();
+  for (const record of records) {
+    if (record.event !== "execution.completed") continue;
+    const ref = payloadOf(record)["provider_ref"];
+    if (typeof ref !== "object" || ref === null || Array.isArray(ref)) continue;
+    const { adapter, id } = ref as Record<string, unknown>;
+    if (typeof adapter !== "string" || adapter.length === 0) continue;
+    if (typeof id !== "string" || id.length === 0) continue;
+    const key = providerRefKey(adapter, id);
+    if (!found.has(key)) found.set(key, { seq: record.seq, event: record.event });
+  }
+  return found;
+}
+
+/** The index key: a NUL separator, which neither half can contain. */
+function providerRefKey(adapter: string, id: string): string {
+  return `${adapter}\u0000${id}`;
+}
+
 /** The guard's verdict for `path`, or `null` when the report has none that passed. */
 function guardVerdict(
   guard: GuardReport | null | undefined,
@@ -318,8 +369,20 @@ export function coverageReport(
     }))
     .filter((candidate) => candidate.at !== null && candidate.classes.size > 0);
 
+  // APRV-251. Read once, consulted per effect.
+  const references = providerRefIndex(records);
+
   const entries: CoverageEntry[] = [];
   for (const effect of effects) {
+    // The id-level answer outranks both the guard's and the window's, and it is
+    // the only one of the three that is about this effect rather than about a
+    // class, a path or a span of time.
+    const named = references.get(providerRefKey(effect.source, effect.id));
+    if (named !== undefined) {
+      entries.push({ effect, evidence: named, match: "provider-ref" });
+      continue;
+    }
+
     const verdict = guardVerdict(options.guard, effect.path);
     if (verdict !== null) {
       entries.push({ effect, evidence: { verdict }, match: "protected-path" });

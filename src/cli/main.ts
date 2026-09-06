@@ -989,6 +989,14 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
       const { commandRun } = await import("./execute.js");
       return commandRun(rest, streams, cwd);
     }
+    // The starving verb (APRV-193). It authorizes nothing and appends nothing:
+    // it runs a command with outbound network denied, which is what the hook
+    // cannot do for the commands it merely allows. `approval run` is the gate;
+    // this is the room the code the gate never saw runs in.
+    case "sandbox": {
+      const { commandSandbox } = await import("./sandbox.js");
+      return commandSandbox(rest, streams, cwd);
+    }
     // The recovery verb (APRV-20 pass two). `execution resolve` is the only
     // sanctioned way to close a dangling execution, and it is human-only,
     // note-mandatory, and records no invented exit code.

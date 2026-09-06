@@ -31,6 +31,7 @@ import { anchorOf, helpFor, longHelp, referenceSection } from "../src/cli/long-h
 import { main } from "../src/cli/main.js";
 import { makeStyle } from "../src/cli/style.js";
 import { plainWordmark, VERSION, wordmark } from "../src/cli/wordmark.js";
+import { DOCTOR_ROW_ORDER } from "./doctor-rows.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const CLI_ENTRY = join(REPO_ROOT, "cli.js");
@@ -354,4 +355,116 @@ test("--no-color is not stolen from the command a verb is asked to run", async (
   const dir = scratch();
   const run = await capture(["hook", "classify", "--", "mytool", "--no-color"], dir);
   assert.match(run.out + run.err, /--no-color/u, "the flag was stripped from the child's argv");
+});
+
+// ---------------------------------------------------------------------------
+// 5. The doctor roster (APRV-270)
+// ---------------------------------------------------------------------------
+
+/**
+ * The number words a help text could plausibly spell a row count with. Digits
+ * are read directly; this map exists so a count spelled out in prose, which is
+ * how the stale one was spelled, is caught by the same guard.
+ */
+const COUNT_WORDS: ReadonlyMap<string, number> = new Map([
+  ["one", 1],
+  ["two", 2],
+  ["three", 3],
+  ["four", 4],
+  ["five", 5],
+  ["six", 6],
+  ["seven", 7],
+  ["eight", 8],
+  ["nine", 9],
+  ["ten", 10],
+  ["eleven", 11],
+  ["twelve", 12],
+  ["thirteen", 13],
+  ["fourteen", 14],
+  ["fifteen", 15],
+  ["sixteen", 16],
+  ["seventeen", 17],
+  ["eighteen", 18],
+  ["nineteen", 19],
+  ["twenty", 20],
+  ["twenty-one", 21],
+  ["twenty-two", 22],
+  ["twenty-three", 23],
+  ["twenty-four", 24],
+  ["twenty-five", 25],
+  ["twenty-six", 26],
+  ["twenty-seven", 27],
+  ["twenty-eight", 28],
+  ["twenty-nine", 29],
+  ["thirty", 30],
+]);
+
+/**
+ * Every "<n> checks" or "<n> rows" claim in `text`, in either spelling.
+ *
+ * "one row per check" is a claim about SHAPE and not about how many there are,
+ * so a `per` following the noun ends the match. That is the only exemption:
+ * everything else a number can precede here is a count somebody could get
+ * wrong, which is the thing being guarded.
+ */
+function statedRowCounts(text: string): number[] {
+  const found: number[] = [];
+  for (const match of text.matchAll(/([A-Za-z-]+|\d+)\s+(?:checks?|rows?)\b(?!\s+per\b)/gu)) {
+    const token = (match[1] ?? "").toLowerCase();
+    if (/^\d+$/u.test(token)) {
+      found.push(Number(token));
+      continue;
+    }
+    const spelled = COUNT_WORDS.get(token);
+    if (spelled !== undefined) found.push(spelled);
+  }
+  return found;
+}
+
+test("doctor's short help states no row count it could be wrong about", () => {
+  // APRV-270: the help said "Twelve checks" and named twelve of them for as
+  // long as it took the roster to reach its current length, which is the whole
+  // failure mode of a count written into prose. Either the number is the
+  // roster's own or there is none, and this test does not care which — both
+  // stay true as rows are appended, which is the only way rows are ever added.
+  for (const count of statedRowCounts(help.DOCTOR_HELP)) {
+    assert.equal(
+      count,
+      DOCTOR_ROW_ORDER.length,
+      `DOCTOR_HELP claims doctor prints ${String(count)} rows; tests/doctor-rows.ts holds ${String(
+        DOCTOR_ROW_ORDER.length,
+      )}. State the roster's own length or state none.`,
+    );
+  }
+
+  // The reference carries the row-by-row list now, so the help has to point at
+  // it: dropping the count AND the pointer would leave a reader no way to find
+  // out what doctor checks.
+  assert.match(
+    help.DOCTOR_HELP,
+    /docs\/cli-reference\.md#doctor/u,
+    "DOCTOR_HELP no longer points at the reference section that names every row",
+  );
+
+  // The guard is worth nothing if it cannot see a count in the first place.
+  assert.deepEqual(statedRowCounts("Twelve checks, in the order"), [12]);
+  assert.deepEqual(statedRowCounts("26 rows"), [26]);
+  assert.deepEqual(statedRowCounts("One row per check, in the order"), []);
+});
+
+test("the reference's doctor section names every row, in roster order", () => {
+  // The other half of APRV-270. The help has stopped enumerating, so the
+  // reference is the only place a reader can count, and a row appended to the
+  // roster but never written up here would leave doctor printing a line the
+  // documentation has never heard of.
+  const section = referenceSection("doctor", REFERENCE);
+  assert.notEqual(section, null, "docs/cli-reference.md has no #doctor section");
+  const documented = [...(section ?? "").matchAll(/^- \*\*([a-z][a-z-]*)\*\*/gmu)].map(
+    (match) => match[1] ?? "",
+  );
+  assert.deepEqual(
+    documented,
+    [...DOCTOR_ROW_ORDER],
+    "the doctor section's bullets are not the doctor roster in roster order (tests/doctor-rows.ts)",
+  );
 });

@@ -311,15 +311,18 @@ test("a granted direct send posts exactly the approved message and returns a rec
   assert.equal(post?.raw.includes(API_KEY), false, "the key was in the request body");
 
   if (result.ok) {
+    const detail = result.detail as Record<string, JsonValue>;
     assert.deepEqual(result.detail, {
       mode: "direct",
-      message_id: (result.detail as Record<string, JsonValue>)["message_id"],
-      thread_id: (result.detail as Record<string, JsonValue>)["thread_id"],
+      message_id: detail["message_id"],
+      // The same id under the one key the contract lifts (APRV-251).
+      provider_ref: detail["message_id"],
+      thread_id: detail["thread_id"],
       payload_hash: payloadHash(payload),
       recipients: 2,
       http_status: 200,
     });
-    assert.match(String((result.detail as Record<string, JsonValue>)["message_id"]), /^msg_/u);
+    assert.match(String(detail["message_id"]), /^msg_/u);
   }
   assert.deepEqual(eventsOf(unit.logPath).slice(-2), [
     "execution.started",
@@ -1058,4 +1061,99 @@ test("the agentmail failure union is frozen", () => {
   );
   for (const code of AGENTMAIL_FAILURE_CODES) assert.equal(isAgentmailFailureCode(code), true);
   assert.equal(isAgentmailFailureCode("smtp-550"), false);
+});
+
+// ---------------------------------------------------------------------------
+// 10. The provider reference on the record (APRV-251)
+// ---------------------------------------------------------------------------
+
+/** The `provider_ref` on the last outcome of `event` in this log, if any. */
+function recordedProviderRef(logPath: string, event = "execution.completed"): unknown {
+  const read = readVerifiedRecords(logPath);
+  assert.equal(read.ok, true, `the log does not verify: ${JSON.stringify(read)}`);
+  if (!read.ok) throw new Error("unreachable");
+  const outcome = read.records.filter((entry) => entry.event === event).at(-1);
+  assert.ok(outcome !== undefined, `no ${event} in the log`);
+  return (outcome.payload as Record<string, unknown> | undefined)?.["provider_ref"];
+}
+
+test("a direct send records the provider's message_id on execution.completed", async () => {
+  const payload = directPayload();
+  const unit = granted(payload);
+
+  const result = await run(unit);
+  assert.equal(result.ok, true, `the granted send was refused: ${JSON.stringify(result)}`);
+  if (!result.ok) throw new Error("unreachable");
+
+  const id = String((result.detail as Record<string, JsonValue>)["message_id"]);
+  assert.match(id, /^msg_/u, "the mock did not answer with a message id");
+
+  // The id the provider gave is the id the log carries, under the adapter this
+  // runtime called. That pair is what `approval coverage` joins on, so a send
+  // this inbox reports is answered about by name rather than by its hour.
+  assert.deepEqual(
+    recordedProviderRef(unit.logPath),
+    { adapter: "agentmail", id },
+    "the completed record does not name the message that was sent",
+  );
+  assert.deepEqual(result.provider_ref, { adapter: "agentmail", id });
+});
+
+test("a draft send records the provider's message_id too", async () => {
+  const payload = draftPayload();
+  mock.setDraft(payload.draft_id, draftBodyOf(payload));
+  const unit = granted(payload as unknown as JsonValue);
+
+  const result = await run(unit);
+  assert.equal(result.ok, true, `the granted draft send was refused: ${JSON.stringify(result)}`);
+  if (!result.ok) throw new Error("unreachable");
+
+  const detail = result.detail as Record<string, JsonValue>;
+  const id = String(detail["message_id"]);
+  assert.match(id, /^msg_/u, "the mock did not answer the draft send with a message id");
+  assert.equal(
+    detail["provider_ref"],
+    id,
+    "the draft receipt does not name the reference under the conventional key",
+  );
+  assert.deepEqual(recordedProviderRef(unit.logPath), { adapter: "agentmail", id });
+});
+
+test("a send whose answer carries no message_id records no reference", async () => {
+  const payload = directPayload();
+  const unit = granted(payload);
+
+  // A 200 with no id: the send happened and the provider named nothing. The
+  // completion is then the pre-amendment record, which is always valid, rather
+  // than a record carrying an invented or empty reference.
+  mock.fail({ status: 200, body: JSON.stringify({ ok: true }) }, "message-send");
+  const result = await run(unit);
+  mock.fail(null, "message-send");
+  assert.equal(result.ok, true, `the granted send was refused: ${JSON.stringify(result)}`);
+  if (!result.ok) throw new Error("unreachable");
+
+  assert.equal((result.detail as Record<string, JsonValue>)["message_id"], null);
+  assert.equal(
+    (result.detail as Record<string, JsonValue>)["provider_ref"],
+    undefined,
+    "a receipt with no id named a reference anyway",
+  );
+  assert.equal(recordedProviderRef(unit.logPath), undefined);
+  assert.equal(result.provider_ref, undefined);
+});
+
+test("a failed send records no reference, because nothing was filed", async () => {
+  const payload = directPayload();
+  const unit = granted(payload);
+
+  mock.fail({ status: 502, body: JSON.stringify({ message: "upstream is down" }) }, "message-send");
+  const result = await run(unit);
+  mock.fail(null, "message-send");
+  assert.equal(result.ok, false, "a 502 send reported success");
+
+  assert.equal(
+    recordedProviderRef(unit.logPath, "execution.failed"),
+    undefined,
+    "a failed execution named a provider reference for an effect that did not happen",
+  );
 });

@@ -200,6 +200,29 @@ test("the .gitignore lines are the index, the vault, the env map and the temp fi
   assert.equal(readFileSync(join(dir, ".gitignore"), "utf8"), GITIGNORE_BLOCK);
 });
 
+/**
+ * The one entry pinned by NAME rather than through the constant (APRV-285).
+ *
+ * Every other assertion in this file derives from {@link GITIGNORE_ENTRIES}, so
+ * none of them can notice a line leaving the list — the block would simply be
+ * one line shorter and every comparison would still hold. That is tolerable for
+ * a cache or a temp-file pattern and not for this one: `.approval/keys/` holds
+ * the X25519 private halves of sealed token delivery, `.approval/payloads/` is
+ * deliberately tracked so `.approval/` is a directory people `git add` from, and
+ * a key committed beside the ciphertext it opens is not something a later commit
+ * takes back.
+ */
+test("the sealed-token key store is one of the lines init writes, by name", () => {
+  const dir = caseDir();
+  runCli(["init"], dir);
+
+  assert.ok(
+    GITIGNORE_ENTRIES.includes(".approval/keys/"),
+    "GITIGNORE_ENTRIES no longer carries .approval/keys/, so `approval init` would scaffold a repository that commits sealed-delivery private keys",
+  );
+  assert.match(readFileSync(join(dir, ".gitignore"), "utf8"), /^\.approval\/keys\/$/mu);
+});
+
 test(".approval/payloads/ is NOT ignored, and both halves of the choice are printed", () => {
   const dir = caseDir();
   const { run, parsed } = initJson(dir);
@@ -315,6 +338,9 @@ test("an existing .gitignore is merged: unrelated lines survive, the marker appe
   for (const entry of GITIGNORE_ENTRIES) {
     assert.ok(merged.includes(`\n${entry}\n`), `the merge dropped ${entry}`);
   }
+  // Named, not derived, for the reason the fresh-scaffold pin above gives: a
+  // line that left the constant would leave this loop still passing (APRV-285).
+  assert.match(merged, /^\.approval\/keys\/$/mu);
 
   runCli(["init"], dir);
   const twice = readFileSync(join(dir, ".gitignore"), "utf8");

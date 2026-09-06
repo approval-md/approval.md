@@ -6,7 +6,11 @@
  * yet are gathered into a commit whose message names the seq range they cover,
  * and pushed to a short-lived records branch that exists for it. Main is
  * protected here, so the commit reaches it through a pull request, and the PR
- * step is `--pr`, which runs the ordinary gated `gh` path.
+ * step is `--pr`, which runs the ordinary gated `gh` path. Since APRV-284 that
+ * step also ARMS the merge (`gh pr merge <branch> --merge --auto`, off with
+ * `--no-auto-merge`): a records pull request carries only evidence paths, so
+ * the click it was waiting for was never a review. {@link armAutoMerge} carries
+ * the reasoning and the guard that keeps it true.
  *
  * ## The three refusals that are the point
  *
@@ -122,6 +126,9 @@ export const LOG_ADVANCE_REFUSAL_CODES = [
 
 export type LogAdvanceRefusalCode = (typeof LOG_ADVANCE_REFUSAL_CODES)[number];
 
+/** What became of the auto-merge arm. Closed (SPEC.md §11.1 invariant 6). */
+export type AutoMergeState = "armed" | "withheld" | "refused" | "off";
+
 export interface LogAdvanceOptions {
   cwd: string;
   /** The records branch to push to. Default `records-log-<YYYY-MM-DD>`. */
@@ -134,6 +141,15 @@ export interface LogAdvanceOptions {
   base?: string | null;
   /** Open the pull request through `gh` as well as pushing. */
   pr?: boolean;
+  /**
+   * Arm auto-merge on the pull request `--pr` opens or updates (APRV-284).
+   *
+   * Defaults to true and is read only when {@link pr} is set: there is nothing
+   * to arm without a pull request. `false` is the opt-out, and it is an opt-out
+   * rather than an opt-in because a records pull request that sits at CLEAN
+   * waiting for a hand click is the thing this option exists to remove.
+   */
+  autoMerge?: boolean;
   /** Report what would happen and stage, commit, and push nothing. */
   dryRun?: boolean;
   /** The date the default branch name is built from. Injected by the CLI edge. */
@@ -178,6 +194,25 @@ export interface LogAdvanceReport {
   fallbackFrom?: string | null;
   /** True when this run OPENED the pull request; false when one already stood. */
   prCreated?: boolean;
+  /**
+   * What became of the auto-merge arm (APRV-284). A closed set, machine-read.
+   *
+   * - `null` — no pull request step ran at all (`pr` was not asked for, or
+   *   nothing was owed and nothing was pushed).
+   * - `"off"` — the caller turned the arm off (`--no-auto-merge`).
+   * - `"armed"` — `gh pr merge <branch> --merge --auto` succeeded: the pull
+   *   request lands as a merge commit when its checks and its branch rules
+   *   say so, and never before.
+   * - `"withheld"` — THIS verb declined to arm, because the branch it pushed
+   *   carries something outside {@link ADVANCE_PATHS}. See
+   *   {@link autoMergeNote}.
+   * - `"refused"` — `gh` said no (auto-merge disabled on the repository, a
+   *   merge queue, a pull request already mergeable). The pull request is open
+   *   either way, so this is reported and never fatal.
+   */
+  autoMerge?: AutoMergeState | null;
+  /** Why the arm was withheld or refused, verbatim; `null` when it was not. */
+  autoMergeNote?: string | null;
   /** The seq range this advance carries, inclusive; null when nothing is owed. */
   range: { from: number; to: number } | null;
   committedHead: LogHead | null;
@@ -537,6 +572,8 @@ function advanceOnSnapshot(ctx: UnderLock, snapshot: LogSnapshot): LogAdvanceRes
     rebuilt,
     ...(rebuiltOn === undefined ? {} : { rebuiltOn }),
     prCreated: false,
+    autoMerge: null,
+    autoMergeNote: null,
     range,
     committedHead: drift.committedHead,
     workingHead: drift.workingHead,
@@ -647,14 +684,28 @@ function advanceOnSnapshot(ctx: UnderLock, snapshot: LogSnapshot): LogAdvanceRes
 
   progress.phase(`opening or updating the pull request for ${target}`);
   const pr = ghPullRequest(root, target, range);
-  progress.done();
   if (!pr.ok) {
+    progress.done();
     return {
       ok: false,
       code: "log-advance-pr-failed",
       message: `the advance is committed and pushed to ${target}, but \`gh pr ${pr.step}\` failed: ${pr.message}. Open the pull request by hand and merge it with a merge commit.`,
     };
   }
+
+  // APRV-284. The arm, and never a refusal of the verb: the records are
+  // committed, pushed and open as a pull request whatever `gh` says next.
+  const arm =
+    options.autoMerge === false
+      ? { state: "off" as const, note: null }
+      : armAutoMerge(root, target, { baseSha, commit });
+  if (arm.state === "armed") {
+    progress.phase(`auto-merge armed on ${target}`);
+  } else if (arm.note !== null) {
+    progress.phase(`auto-merge was not armed on ${target}: ${arm.note}`);
+  }
+  progress.done();
+
   return {
     ok: true,
     report: report({
@@ -664,6 +715,8 @@ function advanceOnSnapshot(ctx: UnderLock, snapshot: LogSnapshot): LogAdvanceRes
       fallbackFrom,
       prUrl: pr.url,
       prCreated: pr.created,
+      autoMerge: arm.state,
+      autoMergeNote: arm.note,
     }),
   };
 }
@@ -867,6 +920,99 @@ function ghPullRequest(
     return { ok: false, step: "create", message: failureText(created) };
   }
   return { ok: true, url: urlOf(created.stdout), created: true };
+}
+
+/**
+ * Arm auto-merge on the day's records pull request (APRV-284).
+ *
+ * ## Why a records pull request may arm its own merge
+ *
+ * A records commit carries EXACTLY the log, `QUEUE.md` and
+ * `.approval/payloads/` (the `log-advance-dirty-stage` refusal is the other
+ * half of that rule), those three are the paths CI's protected-path guard
+ * exempts, and there is nothing in them a reviewer reviews: the log is
+ * append-only evidence and the queue is a projection of it. So a records pull
+ * request is the one shape in this repository that never needs a human to read
+ * it, and leaving it at CLEAN until somebody clicks is exactly the failure mode
+ * CLAUDE.md's workflow item 7 exists to remove.
+ *
+ * ## What the arm is, in this project's own taxonomy
+ *
+ * `gh pr merge <branch> --merge --auto` — the same command with the same class
+ * (`vcs.push.main`, `core/command-class.ts`'s `gh-pr-merge` row) a session runs
+ * to arm its own pull request. Nothing here mints a class, claims an exemption,
+ * or asks a second question: this runs inside whatever authorized the advance,
+ * which for the daemon is the `log.advance` grant APRV-204 opened and for a
+ * session is the harness hook's answer on the verb.
+ *
+ * ## The guard, and why the arm is not unconditional
+ *
+ * The reasoning above holds only while the branch really does carry nothing
+ * else. It is a branch on a shared remote, so a commit this verb did not make
+ * can be sitting on it, and the advance would fast-forward over that commit and
+ * then arm a merge for it. So the arm is preceded by a check of the pushed
+ * branch against the base it is measured from, and anything outside
+ * {@link ADVANCE_PATHS} WITHHOLDS the arm and names what it saw. Everything
+ * ambiguous withholds too: an unreadable diff, a base that could not be
+ * resolved. A withheld arm costs a human one click; an unconditional one would
+ * land whatever rode the branch.
+ *
+ * ## An arm `gh` says no to is not a failure
+ *
+ * Auto-merge disabled on the repository, a merge queue, a pull request already
+ * mergeable: `gh` refuses all three, and the advance is committed, pushed and
+ * open as a pull request regardless. The refusal is reported and the verb still
+ * succeeds — the same rule `cli/amend.ts`'s ceremony arm has followed since
+ * APRV-130.
+ */
+function armAutoMerge(
+  root: string,
+  recordsBranch: string,
+  span: { baseSha: string; commit: string },
+): { state: AutoMergeState; note: string | null } {
+  const carried = branchDiffPaths(root, span.baseSha, span.commit);
+  if (carried === null) {
+    return {
+      state: "withheld",
+      note: `\`git diff --name-only ${span.baseSha.slice(0, 12)} ${span.commit.slice(
+        0,
+        12,
+      )}\` could not be read, so what ${recordsBranch} carries is unknown`,
+    };
+  }
+  const foreign = carried.filter((path) => !isAdvancePath(path));
+  if (foreign.length > 0) {
+    return {
+      state: "withheld",
+      note: `${recordsBranch} carries paths an advance does not: ${foreign.join(
+        ", ",
+      )}. A records pull request arms its own merge because it carries only evidence; this one does not, so it wants a reviewer`,
+    };
+  }
+
+  const merged = gh(["pr", "merge", recordsBranch, "--merge", "--auto"], root);
+  if (merged.ok) return { state: "armed", note: null };
+  return {
+    state: "refused",
+    note: outputLines(merged.stderr, merged.stdout)[0] ?? failureText(merged),
+  };
+}
+
+/**
+ * Every path `from..to` touches, or `null` when git would not say.
+ *
+ * `null` is not "nothing changed": an empty diff is `[]`, and the two must not
+ * collapse, because the caller treats the unknown as a reason to withhold and
+ * the empty as a branch carrying nothing foreign.
+ */
+function branchDiffPaths(root: string, from: string, to: string): string[] | null {
+  if (from.length === 0 || to.length === 0) return null;
+  const diff = git(["diff", "--name-only", `${from}..${to}`], root);
+  if (!diff.ok) return null;
+  return diff.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
 }
 
 /**

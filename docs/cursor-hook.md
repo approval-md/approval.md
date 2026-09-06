@@ -131,11 +131,12 @@ an addition).
 | `workspace-write` | mkdir, cp, mv, touch, tee, ln, chmod, truncate, rmdir | (any) | files.write.workspace |
 | `rm` | rm | (any) | files.write.workspace, files.delete.out_of_scope, files.delete.scratch ‡ |
 | `sed` | sed | (any) | read.shell, files.write.workspace |
+| `find` | find | (any) | read.shell for a walk; files.delete.out_of_scope for `-delete`; files.write.workspace for `-fprint`, `-fprintf`, `-fls`; OPAQUE for `-exec`, `-execdir`, `-ok`, `-okdir` (APRV-283) |
 | `web-fetch` | curl, wget, http, httpie | (any) | read.web for a GET-shaped fetch; network.call for a body, an upload, a non-GET method, or anything ambiguous |
 | `network` | ssh, scp, sftp, rsync, nc, telnet, ftp | (any) | network.call |
 | `keychain` | security, secret-tool, keyring, pass | (any) | account.credential |
 | `printenv` | printenv | (any) | account.credential bare, or with a variable whose NAME is credential-bearing; read.shell otherwise |
-| `read-shell` | basename, cat, cd, cksum, cut, diff, dirname, du, echo, false, file, find, grep, head, jq, ls, md5sum, printf, pwd, readlink, realpath, rg, shasum, sha256sum, sort, stat, tail, test, tr, tree, true, type, uniq, wc, which | (any) | read.shell |
+| `read-shell` | basename, cat, cd, cksum, cut, diff, dirname, du, echo, false, file, grep, head, jq, ls, md5sum, printf, pwd, readlink, realpath, rg, shasum, sha256sum, sort, stat, tail, test, tr, tree, true, type, uniq, wc, which | (any) | read.shell |
 
 † These rewrites are LOCAL, and the hook refines them against the checkout it
 runs in: see [Rewriting unpublished history](#rewriting-unpublished-history).
@@ -183,7 +184,11 @@ Five overrides sit on top of the table:
   makes the channel ungated. Traversal back out of it is protected again, and a
   copy from credential material into it is still `account.credential`.
 - **`redirect-write` → `files.write.workspace`.** A read command with a `>` or
-  `>>` writes a file, and the class says so.
+  `>>` writes a file, and the class says so. A redirection onto a DISCARD device
+  is exempt since APRV-283, because it creates nothing: `/dev/null`,
+  `/dev/stdout`, `/dev/stderr`, `/dev/tty` and `/dev/fd/<n>`, exactly those. So
+  `grep -r TODO src 2>/dev/null` is a read and `grep -r TODO src 2> errors.log`
+  is not.
 - **`gate.self`.** The `approval` CLI (and `node …/dist/src/cli/main.js`) is the
   enforcement path; gating it with itself would deadlock. It is allowed and
   nothing is logged.
@@ -419,6 +424,7 @@ Never `ask`. The `agent_message` is `<code>: <detail>`, and the codes are frozen
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
 | `hook-grant-unverified` | the grant was spent, and the verified log cannot be seen to carry the `execution.started` recording it. The record IS the authorization on a harness surface, because the harness executes and never sees the gate's return value, so no verdict is printed until the chain carries it (APRV-200) |
+| `hook-sandbox-required` | `APPROVAL_HOOK_REQUIRE_SANDBOX=1` is set and this command runs code the runtime did not author, unwrapped. Re-run it as `approval sandbox -- <command>` (`docs/sandboxed-exec.md`). Off unless the operator set the variable |
 | `hook-policy-unavailable` | `APPROVAL.md` could not be loaded |
 | `hook-log-unreachable` | no log where the hook was pointed; it writes to an existing log and creates none |
 | `hook-io` | malformed hook input, or an unreadable log |
@@ -427,6 +433,14 @@ Never `ask`. The `agent_message` is `<code>: <detail>`, and the codes are frozen
 `sudo`, `env`, `xargs`, `node -e`, `python3 -c`, backticks, arithmetic expansion,
 and any `$(…)` that is not purely a read: all deny. The fix is to write the
 command out, or to run the effect through `approval run` with a granted token.
+
+Sandbox wrappers classify as the command INSIDE them (APRV-193):
+`approval sandbox -- npm install left-pad` is `deps.add`, with the same rule id
+the bare command has. Both directions matter — a wrapper with a class of its own
+would be a laundering device, and a wrapper that stayed unclassified would mean
+the hook denied the safe spelling of a command it allows unwrapped.
+`docs/claude-code-hook.md` has the full rule and `docs/sandboxed-exec.md` the
+sandbox itself.
 
 ### When the grant can follow the write (APRV-200)
 

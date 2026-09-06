@@ -15,17 +15,22 @@
  */
 
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
+import { envFileDigest } from "../src/core/env-file.js";
 import {
+  ENV_PROVENANCE_VAR,
   INSTANCE_ID_LENGTH,
   LEGACY_SERVICE_TELEGRAM_TOKEN,
+  formatEnvProvenance,
   instanceFindings,
   instanceHomeFor,
   instanceIdFor,
+  ownEnvExports,
+  parseEnvProvenance,
   scopeOfService,
   scopedService,
 } from "../src/core/instance.js";
@@ -76,6 +81,32 @@ function makeInstance(): Instance {
 function writeEnv(instance: Instance, lines: string[]): void {
   writeFileSync(instance.envPath, `${lines.join("\n")}\n`, "utf8");
   chmodSync(instance.envPath, 0o600);
+}
+
+/** The digest of the env file as it now reads, the way `approval env` computes it. */
+function digestOf(instance: Instance): string {
+  return envFileDigest(readFileSync(instance.envPath, "utf8"));
+}
+
+/**
+ * The environment `eval "$(approval env)"` leaves behind, for one variable
+ * this instance's own file resolves.
+ *
+ * A synthetic value stands in for the resolved secret, which is the point: the
+ * rule under test never reads it, and this file never puts a real one anywhere.
+ */
+function afterTheRitual(
+  instance: Instance,
+  names: string[],
+  values: Record<string, string>,
+  overrides: { instanceId?: string; digest?: string } = {},
+): NodeJS.ProcessEnv {
+  const claim = formatEnvProvenance(instance.logPath, overrides.digest ?? digestOf(instance), names);
+  const withOtherId =
+    overrides.instanceId === undefined
+      ? claim
+      : claim.replace(`:${instanceIdFor(instance.logPath)}:`, `:${overrides.instanceId}:`);
+  return { ...values, [ENV_PROVENANCE_VAR]: withOtherId };
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +214,14 @@ test("a value exported in the shell over an instance's own line is reported as b
   const bleed = findings.filter((finding) => finding.kind === "ambient-bleed");
   assert.equal(bleed.length, 1);
   assert.equal(bleed[0]?.variable, "APPROVAL_TG_TOKEN");
+  // APRV-278: the wording says only what was checked. "The value in use is not
+  // the one this instance configured" was a claim about a value this rule never
+  // reads, and it fired on the documented start ritual.
+  assert.match(
+    bleed[0]?.detail ?? "",
+    /was exported before this process started and is not this instance's own `approval env` export/u,
+  );
+  assert.doesNotMatch(bleed[0]?.detail ?? "", /the value in use/u);
   assert.equal(
     findings.some((finding) => finding.detail.includes("9999:PRODUCTION")),
     false,
@@ -193,4 +232,168 @@ test("a value exported in the shell over an instance's own line is reported as b
 test("an instance with no env file at all has nothing to report", () => {
   const instance = makeInstance();
   assert.deepEqual(instanceFindings(instance.logPath, loadPolicy({ dir: instance.dir }), {}), []);
+});
+
+// ---------------------------------------------------------------------------
+// Export provenance: the documented ritual is not bleed (APRV-278)
+// ---------------------------------------------------------------------------
+
+test("the documented ritual is quiet: this instance's own `approval env` export is not bleed", () => {
+  const instance = makeInstance();
+  writeEnv(instance, [
+    `APPROVAL_TG_TOKEN=keychain:${scopedService(LEGACY_SERVICE_TELEGRAM_TOKEN, instance.logPath)}`,
+    "APPROVAL_TG_CHAT=12345",
+  ]);
+
+  // `unset APPROVAL_TG_TOKEN && eval "$(approval env)" && approval up` — the
+  // ritual docs/dogfood-cutover.md prescribes and `approval up` itself prints.
+  const findings = instanceFindings(
+    instance.logPath,
+    loadPolicy({ dir: instance.dir }),
+    afterTheRitual(instance, ["APPROVAL_TG_TOKEN", "APPROVAL_TG_CHAT"], {
+      APPROVAL_TG_TOKEN: "9999:FROM-THIS-INSTANCES-OWN-KEYCHAIN-ITEM",
+      APPROVAL_TG_CHAT: "12345",
+    }),
+  );
+
+  assert.deepEqual(
+    findings.filter((finding) => finding.kind === "ambient-bleed"),
+    [],
+    "the start ritual was reported as cross-instance bleed",
+  );
+});
+
+test("a variable the provenance does not list is still bleed, even beside ones it does", () => {
+  const instance = makeInstance();
+  writeEnv(instance, [
+    `APPROVAL_TG_TOKEN=keychain:${scopedService(LEGACY_SERVICE_TELEGRAM_TOKEN, instance.logPath)}`,
+    "APPROVAL_TG_CHAT=12345",
+  ]);
+
+  // The shape that must NOT be launderable: the chat id came from the file, the
+  // token was already exported by a shell profile when the eval ran, and
+  // `approval env` re-exported it verbatim without vouching for it.
+  const findings = instanceFindings(
+    instance.logPath,
+    loadPolicy({ dir: instance.dir }),
+    afterTheRitual(instance, ["APPROVAL_TG_CHAT"], {
+      APPROVAL_TG_TOKEN: "9999:PRODUCTION",
+      APPROVAL_TG_CHAT: "12345",
+    }),
+  );
+
+  const bleed = findings.filter((finding) => finding.kind === "ambient-bleed");
+  assert.equal(bleed.length, 1);
+  assert.equal(bleed[0]?.variable, "APPROVAL_TG_TOKEN");
+});
+
+test("provenance from ANOTHER instance vouches for nothing", () => {
+  const mine = makeInstance();
+  const theirs = makeInstance();
+  writeEnv(mine, [
+    `APPROVAL_TG_TOKEN=keychain:${scopedService(LEGACY_SERVICE_TELEGRAM_TOKEN, mine.logPath)}`,
+    "APPROVAL_TG_CHAT=12345",
+  ]);
+
+  const findings = instanceFindings(
+    mine.logPath,
+    loadPolicy({ dir: mine.dir }),
+    afterTheRitual(
+      mine,
+      ["APPROVAL_TG_TOKEN"],
+      { APPROVAL_TG_TOKEN: "9999:THE-OTHER-GATES" },
+      { instanceId: instanceIdFor(theirs.logPath) },
+    ),
+  );
+
+  const bleed = findings.filter((finding) => finding.kind === "ambient-bleed");
+  assert.equal(bleed.length, 1);
+  assert.equal(bleed[0]?.variable, "APPROVAL_TG_TOKEN");
+  assert.match(
+    bleed[0]?.detail ?? "",
+    /is not this instance's own `approval env` export/u,
+  );
+});
+
+test("provenance for a stale version of the env file vouches for nothing", () => {
+  const instance = makeInstance();
+  writeEnv(instance, [
+    `APPROVAL_TG_TOKEN=keychain:${scopedService(LEGACY_SERVICE_TELEGRAM_TOKEN, instance.logPath)}`,
+    "APPROVAL_TG_CHAT=12345",
+  ]);
+  const stale = afterTheRitual(instance, ["APPROVAL_TG_TOKEN"], {
+    APPROVAL_TG_TOKEN: "9999:EXPORTED-BEFORE-THE-EDIT",
+  });
+
+  // The operator re-pointed the line at another item after the eval. The shell
+  // still holds the old resolution and the file no longer describes it.
+  writeEnv(instance, [
+    `APPROVAL_TG_TOKEN=keychain:${LEGACY_SERVICE_TELEGRAM_TOKEN}`,
+    "APPROVAL_TG_CHAT=12345",
+  ]);
+
+  const bleed = instanceFindings(instance.logPath, loadPolicy({ dir: instance.dir }), stale).filter(
+    (finding) => finding.kind === "ambient-bleed",
+  );
+  assert.equal(bleed.length, 1);
+  assert.equal(bleed[0]?.variable, "APPROVAL_TG_TOKEN");
+  // Narrowed to what IS known: the export cannot be matched to the file as it
+  // now reads. It is not claimed to be a stranger's, because it may not be.
+  assert.match(bleed[0]?.detail ?? "", /cannot match to .* env file as it now reads/u);
+});
+
+test("a malformed, mis-versioned or truncated provenance vouches for nothing", () => {
+  const instance = makeInstance();
+  writeEnv(instance, [
+    `APPROVAL_TG_TOKEN=keychain:${scopedService(LEGACY_SERVICE_TELEGRAM_TOKEN, instance.logPath)}`,
+  ]);
+  const good = formatEnvProvenance(instance.logPath, digestOf(instance), ["APPROVAL_TG_TOKEN"]);
+  assert.notEqual(parseEnvProvenance(good), null);
+
+  for (const bad of [
+    "",
+    "nonsense",
+    good.replace(/^1:/u, "2:"),
+    good.replace(/^1:/u, ""),
+    `${good}:extra`,
+    good.replace(/^1:[0-9a-f]{8}:/u, "1:NOTHEX12:"),
+    good.replace(/:[0-9a-f]{64}:/u, ":short:"),
+    good.replace(/:APPROVAL_TG_TOKEN$/u, ":not a name"),
+  ]) {
+    assert.equal(parseEnvProvenance(bad), null, `parsed a claim it should refuse: ${bad}`);
+    const bleed = instanceFindings(instance.logPath, loadPolicy({ dir: instance.dir }), {
+      APPROVAL_TG_TOKEN: "9999:PRODUCTION",
+      [ENV_PROVENANCE_VAR]: bad,
+    }).filter((finding) => finding.kind === "ambient-bleed");
+    assert.equal(bleed.length, 1, `a malformed claim silenced the finding: ${bad}`);
+  }
+});
+
+test("ownEnvExports vouches for nothing without a digest to check the claim against", () => {
+  const instance = makeInstance();
+  writeEnv(instance, [
+    `APPROVAL_TG_TOKEN=keychain:${scopedService(LEGACY_SERVICE_TELEGRAM_TOKEN, instance.logPath)}`,
+  ]);
+  const ambientEnv = afterTheRitual(instance, ["APPROVAL_TG_TOKEN"], {});
+
+  assert.deepEqual(
+    [...ownEnvExports(instance.logPath, { ambientEnv, envFileDigest: digestOf(instance) })],
+    ["APPROVAL_TG_TOKEN"],
+  );
+  // A caller that supplies neither half gets the pre-APRV-278 behaviour: the
+  // absent input makes the report louder, never quieter.
+  assert.deepEqual([...ownEnvExports(instance.logPath, { ambientEnv })], []);
+  assert.deepEqual([...ownEnvExports(instance.logPath)], []);
+});
+
+test("provenance carries names, an id and a digest, and never a value", () => {
+  const instance = makeInstance();
+  writeEnv(instance, ["APPROVAL_TG_CHAT=12345"]);
+  const claim = formatEnvProvenance(instance.logPath, digestOf(instance), ["APPROVAL_TG_CHAT"]);
+
+  assert.equal(claim, `1:${instanceIdFor(instance.logPath)}:${digestOf(instance)}:APPROVAL_TG_CHAT`);
+  assert.equal(claim.includes("12345"), false, "the provenance claim carried a value");
+  const parsed = parseEnvProvenance(claim);
+  assert.equal(parsed?.instanceId, instanceIdFor(instance.logPath));
+  assert.deepEqual([...(parsed?.names ?? [])], ["APPROVAL_TG_CHAT"]);
 });

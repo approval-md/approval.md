@@ -5,9 +5,9 @@ title: >-
   demands every checkpoint in range
 status: In Progress
 assignee:
-  - 'agent:opus-lane-i'
+  - '@opus-220'
 created_date: '2026-09-02 16:26'
-updated_date: '2026-09-05 00:29'
+updated_date: '2026-09-06 08:01'
 labels:
   - core
   - log
@@ -35,24 +35,26 @@ Second layer against a same-user forger (see docs/proposals/incremental-prefix-p
 - [ ] #1 A design section states the signing key, the record schema, the delivery path, the cadence semantics, and the verify rule; Carter signs it off before implementation
 - [x] #2 log.checkpoint records are appended only through the gate with the human's signature over (seq, hash) and validate against the attested public key
 - [x] #3 approval log verify and the daemon's full re-proof refuse a range whose checkpoint signature does not validate or whose named hash is not at that seq, with a distinct machine-readable code; a due-but-missing checkpoint is a warning
-- [ ] #4 A checkpoint can be requested from the terminal and answered from a channel prompt; tests through the real append path and the mock Telegram bot
-- [ ] #5 Schema change (event payload) is its own subtask; SPEC.md §9 gains the checkpoint sentence via a gated edit; docs updated; npm test passes; lint clean
+- [x] #4 A checkpoint can be requested from the terminal and answered from a channel prompt; tests through the real append path and the mock Telegram bot
+- [x] #5 Schema change (event payload) is its own subtask; SPEC.md §9 gains the checkpoint sentence via a gated edit; docs updated; npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-SPLIT (orchestrator-sanctioned). This task keeps half (a): the record, the schema, the key handling and verification. Half (b) — the channel tap, the setup key ceremony and the paced cadence delivery — is a new task, and AC #4 moves there.
+CLOSING PASS (@opus-220). The plan below replaces the build plan: half (a) and half (b) both shipped on main, so this pass is an ASSESSMENT plus the two things nobody has done yet.
 
-1. src/core/checkpoint.ts. Ed25519 from node:crypto, no dependency. CHECKPOINT_ALG = 'ed25519'; CHECKPOINT_REFUSAL_CODES, a new closed union (checkpoint-key-unknown, checkpoint-signature-invalid, checkpoint-hash-mismatch, checkpoint-out-of-order, checkpoint-malformed). checkpointMessage({alg,seq,hash}) = 'approval.md/log-checkpoint/v1\n' + JCS({alg,hash,seq}), domain-separated. mintCheckpointKeypair / publicKeyFingerprint (SHA-256 of DER SPKI). appendCheckpoint(logPath, {privateKey}, actor, options): human actor only, reads the log, signs the head it read, appends log.checkpoint under expectedHead. checkLogCheckpoints({records, keys, checkpointEveryMs, now}): pass | skip(reason) | warn | refused(code), over the caller's ALREADY-VERIFIED records.
-2. Schema (its own subtask): log.checkpoint joins EventType and event.schema.json's enum, plus a conditional block requiring ^human: actor and payload {seq, hash, alg, key_sha256, signature}. Valid and invalid fixtures.
-3. Policy vocabulary: audit.checkpoint_keys (array of base64 DER SPKI public keys, retired keys retained) and audit.checkpoint_every (duration, absent = off). policy.schema.json + policy-load resolution (checkpointEveryMs beside skewToleranceMs).
-4. CLI: approval log checkpoint --as human:<id>, key from the vault under the reserved name approval.checkpoint.key or from --key-file. Classified policy.core in core/command-class.ts (human-only, mints no new class), the way gate open/close are.
-5. Verify: approval log verify --checkpoints, after the chain verdict on a clean log, beside --anchor and never in place of it. Refusal at EXIT_INTEGRITY, skip on err, warning on due-but-missing.
-6. Daemon: the same check on every full re-proof, beside the anchor comparison; a distinct fatal outcome kind, and a warning code for due-but-missing.
-7. Conformance: checkpoint_refusal_codes joins the harness UNIONS and the regen script; refusal-unions 8.0.0 (a seventh union), README table and history, manifest re-pinned.
-8. Tests: tests/log-checkpoint.test.ts through the real append path with keys generated per test in scratch; the forgery is built the way a forger builds one (truncate, re-append, walk clean from genesis) and every checkpoint inside the rewritten range must refuse.
-9. Draft the SPEC sentence and the union row in the notes; SPEC.md is protected and is not edited here.
+WHAT IS ALREADY ON MAIN, WITH EVIDENCE.
+- AC #2, AC #3: PR #268 (e999945, ce1036b, 0bd92bf, 26a6a1a, 02ee913, 4b49fdd, 025128b, 937d405). src/core/checkpoint.ts, src/cli/log-checkpoint.ts, the verify rule, the daemon check, tests/log-checkpoint.test.ts. Checked already.
+- AC #4: PR #276, APRV-257 (cea9e1c..c4f1226). The terminal request is `approval log checkpoint`; the channel answer is channels/telegram.ts offerCheckpoint/onCheckpoint plus channels/cli.ts collectCheckpoint; tests/checkpoint-tap.test.ts proves both through the real append path and against tests/telegram-mock.ts (startMockBotApi). Nothing left to build.
+- AC #5, the schema half: APRV-220.1 (Done). schema/event.schema.json carries log.checkpoint at the type enum and a conditional block; fixtures schema/fixtures/event/valid/log-checkpoint.json plus four invalid ones and two policy fixtures; conformance schema-validation 1.6.0 and refusal-unions 8.0.0 are already regenerated and pinned. No schema edit is needed in this pass, so no regen.
+- AC #5, the docs half: docs/cli-reference.md (two sections), docs/git-evidence.md (the second-witness section and the comparison table), docs/dogfood-cutover.md (the ceremony and the lost-key runbook), README policy rows. Already on main.
+
+WHAT IS ACTUALLY LEFT.
+1. AC #1 has no artifact. The design exists only inside two tasks' implementation notes, which is not a section anybody can sign off. Write docs/checkpoints.md: the signing key and its custody, the record schema, what is signed, the delivery path (terminal verb, Telegram tap, CLI channel, the enqueue), the cadence semantics (report-only at every layer), the verify rule and its refusal union, and the relationship to APRV-219's anchor. Marked PENDING SIGN-OFF at the top. AC #1 stays UNCHECKED: it is Carter's signature, not an agent's.
+2. AC #5's SPEC.md sentence. §9 gains APRV-220's checkpoint paragraph beside the anchoring one, marked (Amended APRV-220, pending sign-off.). §8's event-type list gains log.checkpoint, which it has been missing since the record landed. §11.1 invariant 6's union list gains tests/log-checkpoint.test.ts, since CHECKPOINT_REFUSAL_CODES is a pinned union the row does not name.
+3. Verify rather than assume: build, then tests/log-checkpoint.test.ts, tests/checkpoint-tap.test.ts, tests/verify.test.ts, tests/log.test.ts, tests/log-anchor.test.ts, tests/channels-telegram.test.ts, tests/event-schema.test.ts, tests/fixtures.test.ts, conformance/run.mjs, lint, typecheck.
+4. Finalize: check #4 and #5 on evidence, leave #1 for Carter, append notes saying which task did what.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -119,4 +121,51 @@ VALIDATION. Full npm test on the final tree: 3202 tests, 3201 pass, 0 fail, 1 pr
 ONE REGRESSION, CAUGHT BY THE SUITE AND FIXED (commit 025128b). Fitting the checkpoint subcommand into LOG_HELP under APRV-91's 25-line cap dropped the only occurrence of the word JSON, which tests/cli.test.ts requires of every per-verb help. The tail and export subcommand rows are merged onto one line instead and the JSON-shapes pointer is back.
 
 AC STATUS. #2 and #3 checked. #1 is drafted above and is Carter's to sign off. #4 moved to APRV-257. #5 is HALF met and left unchecked on purpose: the schema change is its own subtask (APRV-220.1, Done), docs are updated (docs/cli-reference.md gains two sections, README gains the two policy rows), npm test passes and lint is clean, but the SPEC.md sentence is protected and is drafted above for the orchestrator to apply under a grant.
+
+=== CLOSING PASS (@opus-220, branch worktree-agent-ad95070f3b0926f51) ===
+
+This pass built no runtime code. Both halves of the mechanism were already on main, and what was missing was the artifact AC #1 asks for and the SPEC sentences neither prior lane could apply.
+
+WHAT WAS ALREADY DONE, AND BY WHICH TASK.
+- AC #2, AC #3 — APRV-220 half (a), PR #268 (e999945, ce1036b, 0bd92bf, 26a6a1a, 02ee913, 4b49fdd, 025128b, 937d405). Already checked. Re-verified here: tests/log-checkpoint.test.ts 32/32 exit 0.
+- AC #4 — APRV-257, PR #276 (cea9e1c..c4f1226). The terminal request is `approval log checkpoint`; the channel answer is channels/telegram.ts offerCheckpoint/onCheckpoint and channels/cli.ts collectCheckpoint. Proved through the real append path and against the mock bot (tests/telegram-mock.ts startMockBotApi): "a due checkpoint reaches the phone once, and only once", "tapping Sign appends a checkpoint over the head that was shown", "a tapped nonce is spent: the second tap signs nothing", "the cli channel asks the same question and takes s / n / nothing". 32/32 exit 0. CHECKED here on that evidence, with one honest caveat below.
+- AC #5, the schema half — APRV-220.1 (Done). schema/event.schema.json carries log.checkpoint in the type enum and a conditional block requiring a ^human: actor and payload {seq, hash, alg, key_sha256, signature}; fixtures at schema/fixtures/event/valid/log-checkpoint.json plus four invalid ones and two policy fixtures. Conformance was already regenerated and pinned (schema-validation 1.6.0, refusal-unions 8.0.0), so this pass needed no schema edit and no regen. Re-verified: event-schema + fixtures + docs-guard 221/221 exit 0, conformance 288/288 vectors, 138 controls, exit 0.
+- AC #5, the docs half — already on main across docs/cli-reference.md, docs/git-evidence.md, docs/dogfood-cutover.md and the README policy rows.
+
+WHAT THIS PASS ADDED.
+
+1. docs/checkpoints.md, the design section AC #1 asks for, marked PENDING SIGN-OFF at the top. The design existed only inside two tasks' implementation notes, which is not a section anybody can sign. It states the five things the criterion names — the signing key (a dedicated Ed25519 pair, not the attestation identity, with the reasoning and the custody rules), the record schema, the delivery path across all three surfaces, the cadence semantics, and the verify rule with its closed union — plus the two decisions a reviewer is most likely to want to argue with: why checkpoint-key-unknown is a refusal rather than a skip, and why the checkpoint key is the second sanctioned caller of vault.getCredential. Section 10 is a table of what a sign-off decides and where each decision is reversed.
+
+   AC #1 STAYS UNCHECKED. It is Carter's signature, and an agent checking it would be the one box in this task that means nothing.
+
+2. SPEC.md, three edits, the amendment APRV-220 and APRV-257 both drafted and neither could apply.
+   - §9 gains the **Checkpoints** paragraph beside APRV-219's anchoring one. It is APRV-220's drafted sentence with APRV-257's channel-invitation and rotation sentences folded in, condensed into one paragraph, so §9 describes the mechanism that actually shipped rather than half of it. Marked "(Amended APRV-220, pending sign-off. The channel invitation and the rotation rule are APRV-257.)"
+   - §8's event-type list gains `log.checkpoint`, missing since the record landed, and the enum-versioning bullet gains its shape and its actor rule.
+   - §11.1 invariant 6's union list gains tests/log-checkpoint.test.ts and names the checkpoint union's task, as APRV-220's notes drafted.
+   The edits went through the harness hook as policy.edit.spec under the open window, which is the gated path AC #5 names.
+
+3. Three cross-links into the new page, from docs/cli-reference.md's --checkpoints section, docs/git-evidence.md's second-witness section, and docs/dogfood-cutover.md's ceremony section, so the design is reachable from every surface that describes the mechanism.
+
+INVARIANT PATHS TOUCHED (SPEC §11.1, per CLAUDE.md). None weakened, and no code changed. §11.1 invariant 6 is EDITED rather than touched: the row now names the test file pinning CHECKPOINT_REFUSAL_CODES, which it did not, so the invariant's own claim ("every code union is pinned by a test") is now checkable against the list.
+
+THE ONE GAP, NAMED RATHER THAN CHECKED AWAY. AC #4's words are satisfied — a checkpoint is requested from the terminal (`approval log checkpoint`) and answered from a channel prompt (the Telegram tap, the CLI channel) — but the task description also says "and on demand", and that does not exist. A checkpoint prompt reaches a channel from the CADENCE and from nothing else. There is no verb that asks the phone for a checkpoint now; the terminal path signs directly instead of requesting, and a terminal-to-listener request means signalling into a running process, which is a design question rather than a flag. This is written into docs/checkpoints.md §10 so a sign-off is a sign-off on what exists. If Carter wants the on-demand request, it is a follow-up task and not a defect in what shipped.
+
+=== VALIDATION (@opus-220 closing pass) ===
+
+Diff is documentation and SPEC prose only. No src/, schema/ or test file changed, so no conformance regen was needed or done.
+
+npm run build exit 0. npm run typecheck exit 0. npm run lint (oxlint src tests) exit 0.
+
+Per-suite, each exit 0:
+- tests/log-checkpoint.test.ts 32/32 (the record, the verify rule, the daemon's re-proof)
+- tests/checkpoint-tap.test.ts 32/32 (the ceremony, the Telegram tap against the mock bot, the CLI channel, the no-route-to-the-key proof)
+- tests/verify.test.ts + tests/log.test.ts + tests/log-anchor.test.ts 82/82
+- tests/event-schema.test.ts + tests/fixtures.test.ts + tests/docs-guard.test.ts 221/221 (docs-guard is the suite a new page under docs/ has to satisfy)
+- tests/cli-init.test.ts + tests/channels-telegram.test.ts 140/140 (cli-init is the suite that reads SPEC.md's bytes)
+- conformance/run.mjs: 288/288 vectors, 138 controls, exit 0
+
+FULL npm test WAS NOT COMPLETED IN THIS WORKTREE, and the reason is the worktree rather than the diff. Two findings, both environmental:
+1. tests/ci-guard.test.ts "every production dependency's engines.node admits the Node floor" fails with ENOENT on <repo>/node_modules/@modelcontextprotocol/sdk/package.json. This worktree has no node_modules of its own; imports resolve by walking up to the primary checkout, but that test reads a literal repo-relative path, which does not. It fails here on an unmodified tree and has nothing to do with this task.
+2. The run is far slower here than in the primary checkout: dist/tests/cli-amend.test.js alone had run 488 seconds when the run was stopped. The prior lanes' full runs (3202 and 3434 tests) were on the primary checkout.
+656 tests had passed with that single environmental failure when the run was stopped. AC #5's "npm test passes" was proved by APRV-220's own 3201/3202 run and APRV-257's 3433/3434 run on the code this pass did not touch; what this pass adds cannot fail a test that does not read SPEC.md or docs/, and every suite that does read them passes.
 <!-- SECTION:NOTES:END -->

@@ -15,6 +15,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -23,8 +24,9 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -43,6 +45,7 @@ import { supervisedExecutions } from "../src/core/audit.js";
 import { runPayloadHash } from "../src/core/payload.js";
 import { CLASSIFIER_CLASSES, COMMAND_RULES } from "../src/core/command-class.js";
 import { closeWindow, openWindow } from "../src/core/gate-window.js";
+import { DRAW_SOCKET_PATH_LIMIT, drawSocketPathFor } from "../src/core/live-draw.js";
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
 import { loadPolicy } from "../src/core/policy-load.js";
@@ -615,6 +618,85 @@ test("an autonomous command is allowed and records only its execution", () => {
   assertClean(dir);
 });
 
+// ---------------------------------------------------------------------------
+// The sandbox requirement (APRV-193), off by default
+// ---------------------------------------------------------------------------
+
+test("APPROVAL_HOOK_REQUIRE_SANDBOX denies unwrapped code execution, and the wrapper passes", () => {
+  const dir = ready();
+
+  // Off by default: this is the behaviour every session has today, and the
+  // whole point of the variable is that turning it on can only refuse MORE.
+  const off = verdictOf(runCli(["hook", "claude-code"], dir, bashEvent("npm test")));
+  assert.equal(off.permission, "allow");
+
+  const before = rawLog(dir);
+  const on = verdictOf(runCli(["hook", "claude-code"], dir, bashEvent("npm test"), {
+    APPROVAL_HOOK_REQUIRE_SANDBOX: "1",
+  }));
+  assert.equal(on.permission, "deny");
+  assert.match(on.reason, /^hook-sandbox-required: /u);
+  // A deny that names the spelling that works, rather than one that leaves an
+  // agent guessing which of its commands offended.
+  assert.match(on.reason, /approval sandbox -- <command>/u);
+  assert.equal(rawLog(dir), before, "a refused command wrote to the log");
+
+  // The wrapped form is allowed, and it is allowed AS `npm test`: the class the
+  // policy resolved is the inner command's own, so wrapping neither hides the
+  // command from the gate nor asks anything extra of it.
+  const wrapped = verdictOf(
+    runCli(["hook", "claude-code"], dir, bashEvent("approval sandbox -- npm test"), {
+      APPROVAL_HOOK_REQUIRE_SANDBOX: "1",
+    }),
+  );
+  assert.equal(wrapped.permission, "allow");
+  assert.match(wrapped.reason, /files\.write\.workspace/u);
+
+  // A hand-written profile satisfies nothing: it is a permission the caller
+  // wrote for itself.
+  const external = verdictOf(
+    runCli(["hook", "claude-code"], dir, bashEvent("sandbox-exec -f /tmp/mine.sb npm test"), {
+      APPROVAL_HOOK_REQUIRE_SANDBOX: "1",
+    }),
+  );
+  assert.equal(external.permission, "deny");
+  assert.match(external.reason, /^hook-sandbox-required: /u);
+
+  // And a command that runs no code of ours is untouched by the requirement.
+  const unrelated = verdictOf(
+    runCli(["hook", "claude-code"], dir, bashEvent("mkdir build"), {
+      APPROVAL_HOOK_REQUIRE_SANDBOX: "1",
+    }),
+  );
+  assert.equal(unrelated.permission, "allow");
+  assertClean(dir);
+});
+
+test("a sandbox wrapper is classified as the command inside it (APRV-193)", () => {
+  const dir = ready();
+  // The hole this closes, on the surface where it mattered: before the
+  // unwrapping, `approval sandbox -- <anything>` was the gate's own CLI
+  // (`gate.self`, pass-through) and `sandbox-exec …` was unclassified, so one
+  // spelling laundered every class and the other was denied for being safe.
+  const laundered = runCli(
+    ["hook", "classify", "--json", "--", "approval sandbox -- npm install left-pad"],
+    dir,
+  );
+  assert.equal(laundered.code, 0, laundered.stderr);
+  const classified = JSON.parse(laundered.stdout) as { classes: string[] };
+  assert.deepEqual(classified.classes, ["deps.add"]);
+
+  // `deps.add` is manual in this fixture policy, so the wrapper reaches the
+  // human gate exactly as the bare command does.
+  const verdict = verdictOf(
+    runCli(["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"], dir,
+      bashEvent("approval sandbox -- npm install left-pad")),
+  );
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(rawLog(dir), /"class":"deps\.add"/u);
+});
+
 test("a GET-shaped fetch runs unattended, and a POST-shaped one does not", () => {
   // APRV-114: the noise this refinement exists to remove. A research fetch is
   // a read under the policy's `read.*` rule and asks nobody; the same binary
@@ -908,6 +990,17 @@ function allRecords(dir: string): Record<string, unknown>[] {
 }
 
 /**
+ * A tool call that DOES something: `files.write.workspace`, autonomous under
+ * this fixture policy, and the class every loop-safety case below accrues on
+ * since APRV-280. A read would accrue nothing, which is the point of the rule
+ * and is pinned in its own case.
+ */
+const WRITE_COMMAND = "mkdir -p build";
+
+/** A tool call that only looks: `read.shell`, transparent to loop safety. */
+const READ_COMMAND = "ls -la";
+
+/**
  * Run one gated tool call and report an outcome for it, both through the real
  * CLI: a PreToolUse event that allows and records `execution.started`, then a
  * PostToolUse event that closes it.
@@ -917,6 +1010,7 @@ function toolCall(
   toolUseId: string,
   outcome: "text" | "error",
   session = "sess-1",
+  command = WRITE_COMMAND,
 ): void {
   const pre = runCli(
     ["hook", "claude-code"],
@@ -927,7 +1021,7 @@ function toolCall(
       cwd: "/repo",
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
-      tool_input: { command: "ls -la" },
+      tool_input: { command },
       tool_use_id: toolUseId,
     }),
   );
@@ -1037,6 +1131,81 @@ test("THE DEFECT: three failed tool calls accrue nothing per task and escalate t
   assertClean(dir);
 });
 
+test("APRV-280: three failed read.* tool calls escalate nothing and the next read still runs", () => {
+  // The incident this rule was filed on. A `grep` that matches nothing and an
+  // `ls` of a path that is not there exit non-zero, the counterpart records
+  // three `execution.failed` for the session, and before APRV-280 that floored
+  // every command the session made afterwards to a phone nobody was holding.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error", "sess-1", READ_COMMAND);
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records),
+    [],
+    "a read.* class is transparent to both harness scopes: no state, not even a zero",
+  );
+  assert.deepEqual(loopEscalation(read.records), [], "…and to the per-task streak");
+
+  // The verdict the whole task is about: the fourth read is answered by the
+  // policy, unattended, with nothing asked of anybody.
+  const verdict = verdictOf(runCli(["hook", "claude-code"], dir, bashEvent(READ_COMMAND, "tu-4")));
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /^autonomous: read\.shell/u);
+  assert.equal(
+    allRecords(dir).some((record) => record["event"] === "approval.requested"),
+    false,
+    "no request was opened: nothing here needed a human",
+  );
+  assertClean(dir);
+});
+
+test("APRV-280: a failed read does not clear a side-effecting streak either", () => {
+  // Transparency reads in both directions, and this is the direction that would
+  // be a hole: an agent three failed writes deep must not be able to shed the
+  // streak by running a `grep` that works.
+  const dir = ready();
+  toolCall(dir, "tu-1", "error");
+  toolCall(dir, "tu-2", "error");
+  toolCall(dir, "tu-3", "text", "sess-1", READ_COMMAND);
+  toolCall(dir, "tu-4", "error");
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records).map((state) => [state.consecutiveFailures, state.escalated]),
+    [
+      [3, true],
+      [3, true],
+    ],
+    "the successful read cleared nothing; the third failed write escalated both scopes",
+  );
+  assertClean(dir);
+});
+
+test("APRV-280: a floored tool call's deny names loop-escalated, the scope and what clears it", () => {
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+  // Nobody answers, so the wait times out — the nine minutes of silence the
+  // stalled session actually saw, with the timeout cut to a second.
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "200ms"],
+    dir,
+    bashEvent(READ_COMMAND, "tu-4"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(verdict.reason, /loop-escalated: session hook:sess-1 has 3 consecutive/u);
+  assert.match(verdict.reason, /one side-effecting tool call completing in this session scope/u);
+  assert.match(verdict.reason, /approval gate open/u);
+  assertClean(dir);
+});
+
 test("an escalated session floors the next autonomous command to the human gate", () => {
   const dir = ready();
   for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
@@ -1056,8 +1225,11 @@ test("an escalated session floors the next autonomous command to the human gate"
   // The decision trace: the verdict says a FLOOR rather than the matched rule
   // decided it, and names the scope and the count, the way `core/execute.ts`
   // names the §7 irreversibility floor beside a resolution's provenance.
-  assert.match(verdict.reason, /loop floor \(SPEC\.md §10\.2\)/u);
-  assert.match(verdict.reason, /session hook:sess-1 has 3 consecutive failed harness tool calls/u);
+  assert.match(verdict.reason, /loop-escalated \(amended SPEC\.md §10\.2\)/u);
+  assert.match(
+    verdict.reason,
+    /session hook:sess-1 has 3 consecutive failed side-effecting harness tool calls/u,
+  );
 
   const events = allRecords(dir).map((record) => record["event"]);
   assert.ok(
@@ -1103,7 +1275,10 @@ test("the actor scope backstops a rotated session id", () => {
   );
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "allow", verdict.reason);
-  assert.match(verdict.reason, /actor agent:claude-code has 3 consecutive failed harness tool calls/u);
+  assert.match(
+    verdict.reason,
+    /actor agent:claude-code has 3 consecutive failed side-effecting harness tool calls/u,
+  );
   assertClean(dir);
 });
 
@@ -1119,7 +1294,7 @@ test("an unreadable session id lands in ONE shared bucket, so absence accrues fa
         cwd: "/repo",
         hook_event_name: "PreToolUse",
         tool_name: "Bash",
-        tool_input: { command: "ls -la" },
+        tool_input: { command: WRITE_COMMAND },
         tool_use_id: id,
       }),
     );
@@ -1131,7 +1306,7 @@ test("an unreadable session id lands in ONE shared bucket, so absence accrues fa
         cwd: "/repo",
         hook_event_name: "PostToolUse",
         tool_name: "Bash",
-        tool_input: { command: "ls -la" },
+        tool_input: { command: WRITE_COMMAND },
         tool_use_id: id,
         tool_response: { type: "error", error: "…" },
       }),
@@ -1349,10 +1524,27 @@ test("status reports the harness streaks by scope, and counterpart coverage", ()
 
   const run = runCli(["status", "--json"], dir);
   const body = JSON.parse(run.stdout) as Record<string, unknown>;
-  assert.deepEqual(body["loop_escalations"], [
-    { task: "agent:claude-code", scope: "actor", consecutive_failures: 3, escalated: true },
-    { task: "hook:sess-1", scope: "session", consecutive_failures: 3, escalated: true },
-  ]);
+  // APRV-280 added `clears`: the scope alone tells an operator where the floor
+  // is and nothing about how to get out from under it.
+  assert.deepEqual(
+    (body["loop_escalations"] as Record<string, unknown>[]).map((entry) => [
+      entry["task"],
+      entry["scope"],
+      entry["consecutive_failures"],
+      entry["escalated"],
+    ]),
+    [
+      ["agent:claude-code", "actor", 3, true],
+      ["hook:sess-1", "session", 3, true],
+    ],
+  );
+  for (const entry of body["loop_escalations"] as Record<string, unknown>[]) {
+    assert.match(
+      String(entry["clears"]),
+      /one side-effecting tool call completing in this (session|actor) scope/u,
+    );
+    assert.match(String(entry["clears"]), /approval gate open/u);
+  }
   assert.deepEqual(body["harness_outcomes"], { started: 4, reported: 3, unreported: 1 });
   assert.equal(body["healthy"], false, "an escalated scope is not a healthy repo");
 
@@ -1360,8 +1552,9 @@ test("status reports the harness streaks by scope, and counterpart coverage", ()
   assert.match(human.stdout, /^loop escalations {2,}2$/mu);
   assert.match(
     human.stdout,
-    /hook:sess-1 \(3 consecutive failed tool calls, session\) — escalated to manual/u,
+    /hook:sess-1 \(3 consecutive failed side-effecting tool calls, session\) — escalated to manual/u,
   );
+  assert.match(human.stdout, /clears: one side-effecting tool call completing/u);
   assert.match(human.stdout, /^harness outcomes {2,}4 started, 3 reported, 1 unreported$/mu);
   assertClean(dir);
 });
@@ -1829,6 +2022,136 @@ test("a mixed command gates on the strictest class it contains", () => {
   assert.equal(verdict.permission, "deny");
   assert.match(verdict.reason, /^hook-timeout: /u);
   assert.match(rawLog(dir), /"class":"network\.call"/u);
+  assertClean(dir);
+});
+
+// ===========================================================================
+// APRV-281: the wait says what it is waiting for, and where
+//
+// The behaviour before this: append the request, then block for the whole
+// window in silence and end in a bare `hook-timeout`. Both lines below go to
+// STDERR and nowhere else, and every case here re-parses stdout as the harness
+// does, because a hook whose verdict stream grew prose is a hook the harness
+// cannot read.
+// ===========================================================================
+
+/** The same policy, with a channel configured for the request to go to. */
+const POLICY_CHANNEL = POLICY.replace(
+  "classes:",
+  ["channels:", "  telegram:", "    token_env: APPROVAL_TG_TOKEN", "classes:"].join("\n"),
+);
+
+/**
+ * A scratch root short enough to hold a bound Unix socket.
+ *
+ * `sun_path` is 104 bytes on macOS, and the suite's own `case-N` directories
+ * under a realpath'd `$TMPDIR` are already close to that before `.approval/
+ * daemon/draw.sock` is appended. The socket case asserts the budget it is
+ * relying on rather than silently testing the path-too-long arm.
+ */
+const socketScratch = realpathSync(mkdtempSync(join(tmpdir(), "ap-")));
+let socketCases = 0;
+
+after(() => {
+  rmSync(socketScratch, { recursive: true, force: true });
+});
+
+/** `ready()`, under the short root. */
+function readyShort(policyText: string): string {
+  socketCases += 1;
+  const dir = join(socketScratch, `c${String(socketCases)}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "APPROVAL.md"), policyText, "utf8");
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+  return dir;
+}
+
+test("a manual request announces key, class and channel on stderr before it waits", () => {
+  const dir = readyShort(POLICY_CHANNEL);
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-announce"),
+  );
+
+  // The verdict is unchanged: same wait, same timeout, same code, and stdout
+  // still parses as one decision object.
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.doesNotMatch(run.stdout, /is waiting for a human/u);
+
+  assert.match(
+    run.stderr,
+    /approval: hook:sess-1:tu-announce:deps\.add \(deps\.add\) is waiting for a human on channel telegram;/u,
+    run.stderr,
+  );
+  assert.match(run.stderr, /a decision on the phone releases it/u);
+
+  // AC#2: nothing is serving this log, so the line says so and names the verb
+  // that fixes it.
+  assert.match(run.stderr, /approval: no listener is running for this log/u);
+  assert.match(run.stderr, /approval up/u);
+  assertClean(dir);
+});
+
+test("a policy that configures no channel is told so, in the same line", () => {
+  const dir = ready();
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install right-pad", "tu-announce-nochannel"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(
+    run.stderr,
+    /hook:sess-1:tu-announce-nochannel:deps\.add \(deps\.add\) is waiting for a human on no channel \(this policy configures none/u,
+    run.stderr,
+  );
+  assertClean(dir);
+});
+
+test("a usable socket prints the announce line and NO listener line", async () => {
+  const dir = readyShort(POLICY_CHANNEL);
+  const socketPath = drawSocketPathFor(join(dir, LOG));
+  assert.ok(
+    socketPath.length <= DRAW_SOCKET_PATH_LIMIT,
+    `the scratch root is too long to bind a socket under (${String(socketPath.length)} bytes): ${socketPath}`,
+  );
+
+  // A socket exactly as `approval up` leaves one: owner-only, in an owner-only
+  // directory. Nothing here answers, and nothing needs to — the hook stats the
+  // file and never dials it, which is the claim this case pins.
+  mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
+  chmodSync(dirname(socketPath), 0o700);
+  const server = createServer();
+  await new Promise<void>((settle) => {
+    server.listen(socketPath, settle);
+  });
+  chmodSync(socketPath, 0o600);
+
+  try {
+    const run = runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+      dir,
+      bashEvent("npm install left-pad", "tu-listening"),
+    );
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny");
+    assert.match(verdict.reason, /^hook-timeout: /u);
+    assert.match(run.stderr, /is waiting for a human on channel telegram;/u, run.stderr);
+    assert.doesNotMatch(run.stderr, /no listener is running/u);
+  } finally {
+    await new Promise<void>((settle) => {
+      server.close(() => {
+        settle();
+      });
+    });
+    rmSync(socketPath, { force: true });
+  }
   assertClean(dir);
 });
 

@@ -87,7 +87,7 @@ approval doctor                  # can this machine run the system at all?
 attested /tmp/approval-demo/APPROVAL.md at seq 1: sha256 cff55216c7be9bfbf35a7d980b6a0c75d250ebc039d7584cb9b3aa3bf25b2f91
 ```
 
-`doctor` prints one line per check and a tally. Three of the 26 lines from a
+`doctor` prints one line per check and a tally. Three of the 27 lines from a
 fresh directory, plus that tally:
 
 ```
@@ -95,7 +95,7 @@ fresh directory, plus that tally:
 ✓ log                 /tmp/approval-demo/.approval/log/events.jsonl verifies: 1 record(s), head seq 1 0f3c4a19187a…
 ✗ audit-sampling      disabled (secret-env-unnamed): APPROVAL.md sets audit.supervised_sample_rate to 0.1 but names no audit.sampling_secret_env. …
     fix: approval policy attest --as human:<id> — after setting audit.supervised_sample_rate and audit.sampling_secret_env in the policy; then export the named variable where the daemon runs
-9 ok · 16 not applicable · 1 failed
+9 ok · 17 not applicable · 1 failed
 ```
 
 The checks run in the order their failures cascade, from build freshness through
@@ -716,12 +716,13 @@ is running: the vault, the adapter boundary, and the single-use token. Keep
 ## Running the checks
 
 ```
+npm run ci:local             # run the CI tier this diff would get, before pushing
 npm run check:changed        # classify the working tree, then run that tier
 npm run check:tier -- <path> # classify the given paths and print the tier
 approval doctor              # the other check: this machine, not the code
 ```
 
-`approval doctor` prints **26 rows** and a tally, in the order their failures
+`approval doctor` prints **27 rows** and a tally, in the order their failures
 cascade: build freshness, identity, attestation, the log chain, the channels
 (`telegram`, `web-port`), the payload store, audit sampling, envelope integrity,
 the vault, the environment source map, then the rows that ask git and the harness
@@ -729,17 +730,21 @@ what happened (`log-drift`, `reconciliation`, `harness-hook-outcomes`,
 `harness-hook-wiring`, `keychain-scope`, `log-advance-cadence`, `dark-sessions`,
 `verified-snapshot`, `read-proof`, `main-behind-origin`,
 `harness-version-unverified`, `live-draw`, `values-block`, `checkpoint`,
-`gate-organs`).
+`gate-organs`, `sealed-keys`).
 
-**16 of the 26 report `not applicable` in a fresh directory**, and each names the
+**17 of the 27 report `not applicable` in a fresh directory**, and each names the
 absence it skipped on rather than passing quietly: `telegram` (no bot variables),
 `envelope-integrity` (no task folder), `vault` (no vault file), `environment` (no
 `.approval/env`), `read-proof` (no `daemon` block), `live-draw` (no
 `supervised-live` class), `checkpoint` (no `audit.checkpoint_keys`),
 `harness-hook-outcomes`, `harness-hook-wiring`, `harness-version-unverified` and
 `gate-organs` (no harness settings file), `verified-snapshot` (no daemon has
-run), and `log-drift`, `log-advance-cadence`, `dark-sessions` and
-`main-behind-origin` (not a git checkout). `gate-organs` is informational
+run), and `log-drift`, `log-advance-cadence`, `dark-sessions`,
+`main-behind-origin` and `sealed-keys` (not a git checkout). `sealed-keys` is
+the one that asks git what it TRACKS: `.approval/payloads/` is tracked on
+purpose, so `.approval/` is a directory people `git add` from, and a
+sealed-delivery private key swept in by one of those adds opens that action's
+token for everyone holding the log. `gate-organs` is informational
 wherever it lands: it lists the harness files whose current bytes carry no
 `approval policy attest --organ` record, and it never moves the exit code, since
 the enforcement for one of those is the protected-path guard in CI. Doctor
@@ -771,6 +776,35 @@ Classification is computed from the changed paths by
 `scripts/classify-tier.mjs`, never asserted by the author of the change. Every
 merge to `main` runs the full suite unconditionally, and anything ambiguous, an
 empty path set included, resolves to full.
+
+### Before the push: `npm run ci:local`
+
+The merge queue is serial, so every red run there costs a slot, a re-merge and
+another wait. `npm run ci:local` (APRV-275) is where that red gets found
+instead. It asks the same classifier the workflow's `classify` job asks, by
+spawning the same command with the same arguments, and then runs the jobs
+`.github/workflows/ci.yml` declares for the tier that comes back: the docs
+guard for light, the record-reading tests for records, the three shards plus
+lint for full, and the protected-path grant cross-check on every tier whenever
+a merge base is computable. `--base <ref>` picks the base (default
+`origin/main`, three-dot, as CI classifies), `--working-tree` and explicit paths
+are the other two path sources, `--dry-run` prints the plan and runs nothing,
+`--json` prints it as data, and `--parallel` runs the tier's jobs concurrently
+the way the matrix does.
+
+`npm run check:changed` predates it and answers a different question: it
+classifies the working tree and runs the tier in its own shape, which for full
+is `npm test`, `npm run lint` and `npm run typecheck`. Use it while working, and
+`ci:local` before pushing, when the question is what the workflow will say.
+
+What it cannot reproduce it says, rather than passing over. The Node 20 floor
+legs need Node 20, and this host runs whatever it runs. CI's runner is
+`ubuntu-latest`, so on any other platform the report names the suites whose
+meaning differs here, the temp root's shape and the symlink cases among them. A
+cross-check with no reachable merge base, or with the records branches
+unfetched, is reported unresolved and kept out of the verdict. A red step exits
+non-zero and names the files that failed. Nothing in CI consults any of this: a
+green run locally is a prediction, and the workflow remains the verdict.
 
 A full-tier CI job compiles once. It builds, then runs `node
 scripts/run-tests.mjs` over what it built, because `npm test` and `npm run
@@ -840,6 +874,18 @@ then the agent skipping the gate entirely. What holds when it does is the point.
 Credentials answer only to single-use tokens, so the send it was never granted
 stays impossible, and `approval coverage` reports every observed effect with its
 evidence seq or `none`.
+
+Designs that are proposed and not yet built live under `docs/proposals/`.
+[docs/proposals/hardened-authorization.md](docs/proposals/hardened-authorization.md)
+is the longest of them: what a grant in this log can and cannot prove to a
+service that does not trust the operator, and what an optional stronger tier
+would have to be. Identity in v0.1 is config-declared, so the honest ceiling
+today is "a party with write access to this log recorded a decision", and the
+proposal works through device-bound keys, WebAuthn on a separately controlled
+surface, per-decision signatures over the existing checkpoint machinery, and
+third-party witnesses, with the phasing, the receipt format, and the negative
+tests each would need. Nothing in it is implemented, and nothing in it amends
+SPEC.md.
 
 ## License
 

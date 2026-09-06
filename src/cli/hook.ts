@@ -87,6 +87,7 @@ import { childEnvironment } from "../core/child-env.js";
 import {
   classifyCommand,
   commandSegmentWords,
+  CODE_EXECUTING_RULES,
   GATE_SELF_CLASS,
   protectedPathClass,
   type ClassifiedSegment,
@@ -116,9 +117,11 @@ import {
 import {
   harnessLoopFloor,
   isLoopEscalated,
+  loopClearance,
   UNKNOWN_SESSION,
   type HarnessLoopState,
 } from "../core/loop.js";
+import { drawSocketPathFor, drawSocketUsable } from "../core/live-draw.js";
 import type { EventRecord } from "../core/log.js";
 import { payloadHash } from "../core/payload.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
@@ -229,6 +232,22 @@ export const HOOK_DENY_CODES = [
    * one more prompt on the retry, and nothing authorized meanwhile.
    */
   "hook-grant-unverified",
+  /**
+   * `APPROVAL_HOOK_REQUIRE_SANDBOX=1` is set and this command runs code the
+   * runtime did not author, unwrapped (APRV-193).
+   *
+   * The one deny in this union that names a spelling that would work rather
+   * than a decision or a fault: re-run it as `approval sandbox -- <cmd>` and it
+   * proceeds, classified exactly as it is now, with no way out to the network.
+   *
+   * It exists because the hook DECIDES and the harness EXECUTES. A verdict
+   * cannot rewrite a command into a wrapper, so the only way for this runtime
+   * to insist on the room is to refuse the spelling that does not ask for it.
+   * Off by default, and turning it on can only ever refuse more — which is why
+   * an environment variable is an acceptable home for it, and why nothing in
+   * the other direction is readable from one.
+   */
+  "hook-sandbox-required",
   /** The policy could not be loaded, so no class can be resolved. */
   "hook-policy-unavailable",
   /**
@@ -1384,6 +1403,17 @@ interface HookRun {
    * nothing for it. See {@link registrationProvenance}.
    */
   eventVersion: string | null;
+  /**
+   * The channel names this policy configures, sorted (APRV-281).
+   *
+   * Read off the policy the caller already loaded, and used for ONE thing: the
+   * line this hook prints when it appends a request, so the agent and the
+   * operator watching its error stream are told where the question went. It
+   * resolves nothing and reaches no verdict. An empty list is a fact worth
+   * printing rather than a default to fill in: a request under a policy that
+   * configures no channel is a question nothing is delivering.
+   */
+  channels: readonly string[];
 }
 
 /**
@@ -1614,7 +1644,7 @@ function unattendedGuard(
   if (isLoopEscalated(read.records, task)) {
     return {
       code: "hook-gate-refused:loop-escalated",
-      detail: `task ${task} has three consecutive execution.failed events and is escalated to manual (SPEC.md §10.2), so its unattended classes may not run. The escalation clears when an execution.completed for the task lands.`,
+      detail: `loop-escalated: task ${task} has three consecutive failed side-effecting executions and is escalated to manual (amended SPEC.md §10.2), so its unattended classes may not run. ${loopClearance("task", task)}.`,
     };
   }
 
@@ -1695,6 +1725,63 @@ function recordUnattended(
 }
 
 /**
+ * Say, on STDERR, that a question is now on a human's queue and where it went
+ * (APRV-281).
+ *
+ * The behaviour this replaces: a gated tool call appended its request and then
+ * blocked for the whole wait in complete silence, ending in a `hook-timeout` the
+ * agent read as a refusal and the operator never saw coming. Nine minutes of a
+ * session's clock, with no way to tell "nobody has answered yet" from "nothing
+ * is even delivering this".
+ *
+ * **STDERR, and never stdout.** Stdout carries the verdict object the harness
+ * parses (see this file's header); a second object, or any prose at all, on that
+ * stream is a hook the harness cannot read. Claude Code shows stderr to the
+ * operator, which is exactly the audience for this.
+ *
+ * **It decides nothing.** No verdict, no timeout, no record, no refusal code
+ * turns on any of it. Both lines are printed after the request is appended and
+ * before the poll loop starts, so the state they describe is the state that
+ * exists; a probe that reported nothing (an unreadable directory, a platform
+ * with no euid) simply stays quiet rather than changing what this process does.
+ *
+ * **The listener line names a socket, and claims only what a socket can tell
+ * you.** `drawSocketUsable` is the same predicate an asker consults, and this
+ * connects to nothing: a usable-looking socket therefore prints NOTHING here,
+ * because a `stat` cannot establish that the far side answers. What an absent
+ * or untrustworthy socket does establish is that `approval up` is not running
+ * against this log in this checkout, and `approval up` is the one process that
+ * both serves the channels and consumes the taps. That is worth saying: on
+ * 2026-09-05 taps piled up unconsumed while hooks waited out their windows.
+ */
+function announceWait(
+  streams: Streams,
+  run: HookRun,
+  waiting: readonly GatedAction[],
+): void {
+  const where =
+    run.channels.length === 0
+      ? "no channel (this policy configures none, so nothing is delivering the question)"
+      : `channel ${run.channels.join(", ")}`;
+  for (const action of waiting) {
+    const adopted =
+      action.origin === "adopted"
+        ? " The question was already open for these exact bytes, so this tool call adopts it rather than asking a second time."
+        : "";
+    streams.err(
+      `approval: ${action.actionKey} (${action.cls}) is waiting for a human on ${where}; a decision on the phone releases it, and this hook blocks for up to ${String(run.timeoutMs)}ms before denying with hook-timeout and leaving the request open.${adopted}\n`,
+    );
+  }
+
+  const socket = drawSocketPathFor(run.logPath);
+  const listener = drawSocketUsable(socket);
+  if (listener.ok) return;
+  streams.err(
+    `approval: no listener is running for this log (${listener.reason}: ${socket}), so the request above may sit undelivered and a decision may go unconsumed. Start the gate's ambient runtime in the checkout that owns this log: \`eval "$(approval env)" && approval up\`, which runs the daemon loop and every configured channel in one process.\n`,
+  );
+}
+
+/**
  * The gated half: find what is already open for these bytes, request whatever
  * is not, wait for the decisions, spend the grants. Returns the exit code of
  * whatever verdict it printed.
@@ -1754,19 +1841,40 @@ function gateAndWait(
   /** The history-rewrite refinement's own words, or `""` (APRV-108). */
   note = "",
   /**
-   * Loop safety floors every class of this invocation to `manual` (APRV-145).
+   * The harness streak that floored every class of this invocation to `manual`
+   * (APRV-145), or `null` where policy alone sent it here.
    *
-   * Passed into `request` rather than acted on here, so the floored action takes
-   * the identical path a manual class takes — same records, same order, same
-   * wait — and nothing below knows how it got there.
+   * Passed into `request` as a boolean rather than acted on here, so the floored
+   * action takes the identical path a manual class takes — same records, same
+   * order, same wait — and nothing below knows how it got there. What the STATE
+   * adds (APRV-280) is the deny text: an agent whose commands are all suddenly
+   * on the phone is owed the reason and the way out in the same breath, and
+   * before APRV-280 the nine-minute wait ended in a bare `hook-timeout` that
+   * said neither.
    */
-  loopFloor = false,
+  floor: HarnessLoopState | null = null,
 ): number {
+  const loopFloor = floor !== null;
   const hash = payloadHash(payload);
   const summary = truncate(headline, SUMMARY_LIMIT);
   const sayAllow = (reason: string): number => allow(streams, reason, run.harness);
+  /**
+   * Every deny this function can print, with the floor's own sentence appended
+   * when a floor is what routed the command here (APRV-280). One wrapper rather
+   * than a sentence bolted onto the timeout alone: a floored invocation that
+   * ends in a rejection, a lapse or an I/O fault leaves the agent in exactly the
+   * same place, and the operator reading the harness's error stream needs the
+   * scope key either way.
+   */
   const sayDeny = (code: string, detail: string): number =>
-    deny(streams, code, detail, run.harness);
+    deny(
+      streams,
+      code,
+      floor === null
+        ? detail
+        : `${detail} This tool call was routed to a human by loop safety rather than by policy — loop-escalated: ${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed side-effecting harness tool calls (amended SPEC.md §10.2). ${loopClearance(floor.scope, floor.key)}`,
+      run.harness,
+    );
 
   // Intake reads the VERIFIED log, once, before anything is written: an
   // enforcement path reads nothing else (SPEC.md §11.1), and a carry decided
@@ -1898,6 +2006,18 @@ function gateAndWait(
     if (unverified !== null) return sayDeny(unverified.code, unverified.detail);
     return sayAllow(`granted: ${classes.join(", ")}${provenance}${note}`);
   }
+
+  // Past every early return, so this is reached only where this process is
+  // genuinely about to block on a human (APRV-281). The set it names is the set
+  // it waits on: the keys this invocation opened, plus the ones it adopted from
+  // an earlier tool call, which wait in the same silence and were the case the
+  // announce would most easily have missed. A carried grant is not here because
+  // nothing is waiting on it.
+  announceWait(
+    streams,
+    run,
+    actions.filter((action) => waitKeys.includes(action.actionKey)),
+  );
 
   const deadline = Date.now() + run.timeoutMs;
 
@@ -2214,6 +2334,12 @@ type ToolDescription =
       payload: unknown;
       headline: string;
       notes: string[];
+      /**
+       * The classified segments, on the shell path only (APRV-193). A file edit
+       * has none, and needs none: the sandbox requirement is about commands
+       * that RUN, and an edit runs nothing.
+       */
+      segments?: readonly ClassifiedSegment[];
     }
   /** A tool call this hook does not gate at all. */
   | { kind: "allow"; reason: string }
@@ -2258,6 +2384,7 @@ function describeToolCall(
       payload,
       headline: raw,
       notes: refined.notes,
+      segments: classified.segments,
     };
   }
 
@@ -2274,6 +2401,49 @@ function describeToolCall(
     // `allow` says which checkout it authorized (APRV-124).
     notes: [fileTierNote(gated)],
   };
+}
+
+/** The environment variable that turns the sandbox requirement on (APRV-193). */
+export const REQUIRE_SANDBOX_ENV = "APPROVAL_HOOK_REQUIRE_SANDBOX";
+
+/**
+ * Must this command have been written `approval sandbox -- …`? (APRV-193.)
+ *
+ * Returns the deny detail, or `null` to proceed. Four conditions, and every one
+ * of them is a narrowing, so the answer is `null` for everything the operator
+ * did not deliberately ask about:
+ *
+ * 1. the operator set `APPROVAL_HOOK_REQUIRE_SANDBOX=1`;
+ * 2. some segment runs code this runtime did not author
+ *    (`CODE_EXECUTING_RULES`: `npm test`, `node x.mjs`, `tsc`, `make`…);
+ * 3. that segment is not already inside the runtime's own wrapper. A
+ *    hand-written `sandbox-exec -f mine.sb` does NOT satisfy it, because a
+ *    profile a caller wrote can allow everything, and a requirement met by
+ *    writing your own permission is not a requirement;
+ * 4. no class of the command is manual. A manual command is going to a human,
+ *    and a human's grant over these exact bytes is the authority to reach the
+ *    world — the same line `approval run` draws at the token.
+ *
+ * The environment variable is read in the strict direction only: setting it can
+ * refuse commands that would otherwise run, and nothing an agent can set makes
+ * this function return `null` where it would otherwise deny (SPEC.md §11.1
+ * invariant 4).
+ */
+export function sandboxRequirement(
+  segments: readonly ClassifiedSegment[] | undefined,
+  autonomies: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  if (env[REQUIRE_SANDBOX_ENV] !== "1") return null;
+  if (segments === undefined) return null;
+  if (autonomies.some((autonomy) => autonomy === "manual")) return null;
+  const unwrapped = segments.filter(
+    (segment) => CODE_EXECUTING_RULES.includes(segment.rule) && segment.sandbox !== "runtime",
+  );
+  if (unwrapped.length === 0) return null;
+  const first = unwrapped[0] as ClassifiedSegment;
+  const external = first.sandbox === "external";
+  return `${REQUIRE_SANDBOX_ENV}=1, and this command runs code the runtime did not author: ${JSON.stringify(first.text)} (rule ${first.rule}), ${external ? "under a profile this runtime did not write, which is a permission you granted yourself" : "with the session's own network"}. A command like this executes whatever is in the files it names, so its class describes what was typed rather than what will happen. Re-run it as \`approval sandbox -- <command>\`: it classifies the same, it is allowed the same, and it runs with no way out to the network (docs/sandboxed-exec.md). Nothing was appended.`;
 }
 
 /** The window standing over `logPath`, and the records it was derived from. */
@@ -2654,6 +2824,12 @@ function runHarnessHook(
     harness: adapter.kind,
     originApp: adapter.originApp,
     eventVersion: input.harnessVersion,
+    // Off the policy this function already loaded and validated, so the names
+    // printed are the names a channel process would serve (APRV-281). Sorted
+    // for a stable line; `Object.keys` order is the file's, and a line that
+    // changed when an operator reordered their policy would read as a change of
+    // state.
+    channels: Object.keys(load.policy.channels ?? {}).sort(),
   };
 
   const autonomies = classes.map((cls) => resolvePolicy(load, cls).autonomy);
@@ -2683,6 +2859,15 @@ function runHarnessHook(
     );
   }
 
+  // APRV-193, and BELOW the human-only deny for the same reason that one sits
+  // above the floor: a class no agent may run is answered before a question
+  // about which room it would run in. Above everything that appends, so a
+  // refused command leaves the log exactly as it found it.
+  const unsandboxed = sandboxRequirement(described.segments, autonomies);
+  if (unsandboxed !== null) {
+    return deny(streams, "hook-sandbox-required", unsandboxed, adapter.kind);
+  }
+
   // APRV-145, amended SPEC.md §10.2: loop safety on a surface that mints a
   // fresh task id per tool call. The floor is applied AFTER class resolution and
   // never inside it, exactly as §7's irreversibility floor is: `resolve` is pure
@@ -2704,7 +2889,7 @@ function runHarnessHook(
     // count that tripped, the way `core/execute.ts` names the irreversibility
     // floor beside a resolution's provenance.
     notes.push(
-      `loop floor (SPEC.md §10.2): ${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed harness tool calls, so every class of this command is routed to a human for this invocation regardless of policy`,
+      `loop-escalated (amended SPEC.md §10.2): ${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed side-effecting harness tool calls, so every class of this command is routed to a human for this invocation regardless of policy`,
     );
   }
   /**
@@ -2747,7 +2932,7 @@ function runHarnessHook(
     headline,
     task,
     note,
-    floor !== null,
+    floor,
   );
 }
 

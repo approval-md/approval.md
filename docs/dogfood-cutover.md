@@ -59,6 +59,26 @@ channel the human used. For a phone grant via the Telegram listener, the token
 reaches the operator terminal running the listener; handing it to the session
 is the human's step, which is what makes the human the gate.
 
+### Before the push: run the tier CI would run (APRV-275)
+
+A lane's last step before `git push` is `npm run ci:local`. It classifies the
+branch's own diff with the classifier the workflow uses, then runs the jobs
+`.github/workflows/ci.yml` declares for that tier, so a red arrives on the
+laptop instead of in the queue. The queue is serial: a red run there costs the
+entry its slot, a re-merge, and the wait again.
+
+```sh
+npm run ci:local              # classify origin/main...HEAD and run that tier
+npm run ci:local -- --dry-run # print the plan, run nothing
+```
+
+It is not a gate and CI never consults it. A green run is a prediction, and the
+three things it cannot prove are printed rather than skipped over: the Node 20
+floor legs on a host that is not Node 20, the platform-sensitive suites on a
+host that is not Linux, and the protected-path cross-check when no merge base or
+no records branch is reachable from this checkout. See the README's "Running the
+checks" for the flags.
+
 ## The daemon, live
 
 The human runs, in the primary checkout:
@@ -193,8 +213,11 @@ policy.edit ×3, network.call ×2`) and the OLDEST request, with its buttons. Th
 next one arrives on the first cycle after you decide that one, `/skip` it (it
 comes round again, last) or `/next` past it (this process does not show it
 again). `/queue` lists everything pending at any time, including while a request
-is on screen, and that list is read from the log rather than from the chat, so it
-is right even when the chat is not.
+is selected, and that list is read from the log rather than from the chat, so it
+is right even when the chat is not. The list carries no decision buttons and
+does not claim to know where the selected request's card ended up; if you cannot
+find that card, `/skip` puts the request at the back of the order without
+deciding it and a fresh card follows on a later cycle.
 
 Nothing is withheld by this. Every request is still pending in the log, still
 listed by `approval queue`, and still decidable from any copy of its message
@@ -302,7 +325,8 @@ with the outcome the log now carries, so the transcript catches up on its own.
 
 A one-time ceremony, and the only part of this runbook that cannot be delegated
 to an agent by design. It gives the log a second witness beside git anchoring: a
-key no agent process holds, signing the head on a cadence.
+key no agent process holds, signing the head on a cadence. Why it is shaped this
+way is [checkpoints](checkpoints.md); the steps are here.
 
 **Step 1, at a terminal in the primary checkout.** The vault passphrase must be
 in the shell first, because the private half goes into the vault:
@@ -462,8 +486,15 @@ file and still needs committing —
 hand, because an advance that carried it would be the mixed branch the rule
 forbids.
 
-Merge it with a **merge commit**. A branch that exists for one commit and is
-merged the moment CI passes is not a feature branch in the sense the rule
+You do not merge it either (APRV-284). `--pr` arms the merge as it opens the
+pull request (`gh pr merge <branch> --merge --auto`), so it lands as a merge
+commit when CI is green and never before; the verb's `auto-merge` row says
+whether the arm took. `--no-auto-merge` puts it back on you, and so does the
+verb itself when the branch carries a path an advance may not carry.
+
+Merge it with a **merge commit** where the arm did not take. A branch that
+exists for one commit and is merged the moment CI passes is not a feature
+branch in the sense the rule
 forbids: nothing else appends to the log while it is open, so no second chain
 is ever created, which is the property the rule protects. What the rule still
 forbids is a branch that accumulates work alongside the log commit, and two
@@ -539,6 +570,17 @@ $EDITOR APPROVAL.md
 approval policy amend --commit
 ```
 
+When the amendment needs the pins moved as well, it is still three steps: edit
+both files, run the verb, tap.
+
+```sh
+cd /Users/carter/dev/approval-md
+$EDITOR APPROVAL.md
+$EDITOR src/core/policy-expectations.ts   # only when a class resolution moved
+npm run build                             # the ceremony runs the BUILT suite
+approval policy amend --commit
+```
+
 No `git fetch` and no `git reset --keep origin/main` first. That instruction used
 to precede every ceremony, and it was both a step to forget and a step that could
 fail on its own (`Entry '…' not uptodate. Cannot merge.` on a task file that had
@@ -551,16 +593,31 @@ protected default branch and switches to the branch flow on its own, creating
 `--direct` forces the in-place commit, and warns before printing a push that
 protection will reject.
 
+Since APRV-274 the pins travel with the amendment. When
+`src/core/policy-expectations.ts` differs from the commit the amendment is built
+on, it joins the amendment commit as a third file, the pin deltas print in the
+semantic diff beside the class deltas, and the pull request is green on the first
+push. The seq 23351 ceremony is what that replaces: the pins had to be fetched
+from a branch, unstaged (the verb refused a commit carrying anything but the
+policy and the log), then cherry-picked onto `policy-amend-<seq>` by an agent
+after the push. A pins file the base already carries stays as the base carries
+it, so a pins edit somebody else landed is never reverted by your ceremony.
+
 Your checkout is left exactly as the verb found it: still on `main`, working tree
-carrying the policy edit you made and nothing else, and the amendment commit held
-on `policy-amend-<seq>`. After the pull request merges, `approval log sync`
-brings main down safely. Four things stop the ceremony, all of them before the
+carrying the edits you made and nothing else, and the amendment commit held on
+`policy-amend-<seq>`. After the pull request merges, `approval log sync`
+brings main down safely. Five things stop the ceremony, all of them before the
 attestation, so nothing is ever half-done: `fetch-failed`,
 `base-policy-diverged` (somebody amended the policy on origin since this edit
 began; bring the checkout up to origin and re-apply the edit),
-`base-log-diverged` (run `approval log sync` first), and `policy-suite-failed`
+`base-log-diverged` (run `approval log sync` first), `policy-suite-failed`
 (the amended policy no longer resolves the way `src/core/policy-expectations.ts`
-pins it: update the pins, `npm run build`, run the verb again).
+pins it: update the pins, `npm run build`, run the verb again; and where the
+policy declares a class nothing pins, the refusal prints the exact line to
+paste), and `dogfood-suite-failed` (the whole of `tests/dogfood.test.ts` is red
+against the amended file, and the refusal names the failing test; it is also
+what you get from a `dist/` the last edit did not rebuild, because an unrun
+suite is not a green one).
 
 ## If an envelope goes missing
 

@@ -35,6 +35,7 @@ import {
   resolveExecution as resolveExecutionCore,
   startExecution as startExecutionCore,
   type ExecuteOptions,
+  type FinishOptions,
   type FinishResult,
   type IndeterminateReason,
   type IndeterminateResult,
@@ -163,7 +164,10 @@ export function finishExecution(
   exitCode: number,
   ts: string,
   actor: string,
-  options: ExecuteOptions = {},
+  // `FinishOptions` rather than `ExecuteOptions`, so a suite can state the
+  // things only a completion carries: the failure reason, the note, and the
+  // provider reference of APRV-251.
+  options: FinishOptions = {},
 ): FinishResult {
   return finishExecutionCore(logPath, actionKey, exitCode, actor, frozen(options, ts));
 }

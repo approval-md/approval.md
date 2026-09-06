@@ -113,7 +113,13 @@ import {
   snapshotPathFor,
   snapshotSummary,
 } from "../core/verified-snapshot.js";
-import { drawSocketPathFor, liveClassesOf } from "../core/live-draw.js";
+import {
+  askDaemonSampling,
+  dialDrawSocket,
+  drawSocketPathFor,
+  liveClassesOf,
+} from "../core/live-draw.js";
+import { keyStoreDirFor } from "../core/seal.js";
 import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { policyWebPort } from "./channel-web.js";
@@ -136,7 +142,7 @@ import {
   readHarnessProvenance,
   type HarnessKind,
 } from "../core/harness-version.js";
-import { repoRoot } from "./git-scope.js";
+import { git, repoPath, repoRoot } from "./git-scope.js";
 import {
   ScanError,
   checkBuildFreshness,
@@ -753,10 +759,21 @@ function checkVerifiedSnapshot(logPath: string): DoctorCheck {
  * when a live class is declared and no usable socket is there, because that IS
  * the operator's control not being in force.
  *
- * It asks the daemon nothing. It looks at the socket exactly as an asker does
- * and reports what an asker would conclude.
+ * ## Why it connects (APRV-282)
+ *
+ * It used to `stat` the socket and stop there, and on 2026-09-05 that read a
+ * socket file left behind by a daemon that had exited as a healthy gate: the
+ * row was green while every tap on the operator's phone sat unconsumed. A
+ * socket file is created by a bind and removed by an orderly shutdown, so the
+ * one state its presence cannot report is the one that matters — a process that
+ * died. PRESENCE PROVES NOTHING. So the row opens a connection and closes it
+ * again, which is the first thing an asker does and the first thing that fails.
+ *
+ * It still asks the daemon NOTHING: it sends no question, waits for no answer,
+ * and hangs up the moment the connection is accepted. What it reports is what
+ * an asker would conclude before it had said a word.
  */
-function checkLiveDraw(logPath: string, load: PolicyLoadResult): DoctorCheck {
+async function checkLiveDraw(logPath: string, load: PolicyLoadResult): Promise<DoctorCheck> {
   const path = drawSocketPathFor(logPath);
   // The same helper the daemon's server asks, so this row and the process that
   // serves draws can never disagree about whether the file declares one.
@@ -790,10 +807,23 @@ function checkLiveDraw(logPath: string, load: PolicyLoadResult): DoctorCheck {
       fix: "stop the daemon, remove the socket, and start it again as the user who owns this approval home",
     };
   }
+
+  // The question a `stat` cannot answer: is anything on the other end?
+  const dialled = await dialDrawSocket(path, null);
+  if (!dialled.ok) {
+    return {
+      check: "live-draw",
+      status: "fail",
+      detail: oneLine(
+        `${path} is on disk and refuses connections (${dialled.detail}). That is what a daemon killed rather than stopped leaves behind: the file was last written ${stats.mtime.toISOString()} and nothing has served it since. Every action of ${declared} gates to a human at 100% while this stands, and the file's presence says otherwise.`,
+      ),
+      fix: "approval up — start the ambient runtime again, in a shell where the sampling secret resolves; it clears the stale socket and binds a new one",
+    };
+  }
   return {
     check: "live-draw",
     status: "pass",
-    detail: `${path} is present and owner-only, so a gate process with no sampling secret can have its draw answered and ${declared} is sampled at its declared rate rather than gated at 100%. A daemon that stops removes its socket, so this row falling to fail is the signal.`,
+    detail: `${path} is owner-only and answered a connection, so a gate process with no sampling secret can have its draw answered and ${declared} is sampled at its declared rate rather than gated at 100%. The connection was opened and closed with no question asked.`,
   };
 }
 
@@ -948,7 +978,101 @@ function classDetail(load: PolicyLoadResult, sampler: Sampler): string {
   return `; supervised classes: ${rendered.join(", ")}`;
 }
 
-function checkSampling(load: PolicyLoadResult): DoctorCheck {
+/**
+ * The half of the sampling report that this shell cannot answer (APRV-271).
+ *
+ * `secret-unset` means "the variable the policy names is not in MY
+ * environment", and doctor's environment is almost never the one that matters.
+ * The secret lives in the single terminal the operator ran `eval "$(approval
+ * env)"` in and started the daemon from, and `core/child-env.ts` strips
+ * `APPROVAL_*` from every child, so a doctor run from an agent session, a
+ * different tab, or a hook could not see it even on a machine where sampling
+ * has been running for a fortnight. That is what this row reported as a fault
+ * on 2026-09-05, in red, beside a daemon banner confirming the secret in use.
+ *
+ * So the row asks the daemon, over the APRV-208 socket, and reports the answer
+ * WITH ITS SOURCE. Three things bound what that is allowed to do:
+ *
+ * - **Only this branch.** `secret-unset` is the one disabled reason that is a
+ *   fact about a process environment. `rate-absent`, `rate-invalid`,
+ *   `rate-zero`, `secret-env-unnamed` and `policy-unreadable` are facts about
+ *   the policy FILE, which doctor is reading for itself, and no daemon's answer
+ *   may soften one of those.
+ * - **Only an owner-only socket.** `askDaemonSampling` refuses a socket that is
+ *   not owned by this euid or is reachable by group or other, and refuses an
+ *   answer naming a pid that is gone.
+ * - **Nothing is authorized either way.** The answer moves a diagnostic row and
+ *   the exit code of a verb that appends nothing, sends nothing and repairs
+ *   nothing. It reaches no gate, no budget and no log, so SPEC.md §11.1's rule
+ *   that self-reported fields never reduce scrutiny is not in play: there is no
+ *   scrutiny here to reduce, only a report to get right.
+ */
+async function samplingFromDaemon(
+  logPath: string,
+  sampler: Sampler,
+): Promise<DoctorCheck | null> {
+  if (sampler.enabled || sampler.reason !== "secret-unset") return null;
+  const probe = await askDaemonSampling(logPath);
+  const variable = sampler.secretEnv ?? "the sampling secret's variable";
+  if (!probe.ok) {
+    return {
+      check: "audit-sampling",
+      status: "fail",
+      detail: oneLine(
+        `disabled (${sampler.reason}): ${sampler.message} No daemon answered on ${probe.socket} (${probe.reason}), so this is what THIS shell can see and the daemon's shell is what decides: a daemon started where ${variable} resolves is sampling whatever this row says.`,
+      ),
+      fix: `approval setup sampling — or set it yourself: export ${variable} with the operator-held sampling secret in the environment that runs the daemon`,
+    };
+  }
+
+  const report = probe.answer.sampling;
+  const where = `the running daemon (pid ${String(probe.answer.daemon_pid)}, ${probe.socket})`;
+  if (!report.enabled) {
+    return {
+      check: "audit-sampling",
+      status: "fail",
+      detail: oneLine(
+        `disabled (${report.reason ?? "unstated"}) per ${where}, which is the process that decides: ${variable} is unset in this shell too, and the daemon reports its own sampler off. Nothing is sampled.`,
+      ),
+      fix: `approval setup sampling — or set it yourself: export ${variable} with the operator-held sampling secret in the environment that runs the daemon, then restart it`,
+    };
+  }
+  const rate =
+    report.rate === null
+      ? "no global fallback rate: only classes declaring their own retro_rate are sampled"
+      : `fallback rate ${String(report.rate)} from audit.supervised_sample_rate`;
+  return {
+    check: "audit-sampling",
+    status: "pass",
+    detail: oneLine(
+      `enabled per ${where}; ${variable} is not exported in THIS shell, and the daemon's is the environment that decides. The value itself is never printed and never logged; ${rate}.`,
+    ),
+  };
+}
+
+/**
+ * The per-class half of the report, said in DECLARED terms (APRV-271).
+ *
+ * {@link classDetail} renders what the LOCAL sampler puts in force, which on
+ * this branch is nothing: the local reading is `secret-unset`, so every class
+ * would come out as "none (secret-unset)" beside a sentence saying sampling is
+ * enabled. The entries still carry each rule's own declared `retro_rate`, which
+ * is a fact about the policy file and true whoever is holding the secret, so
+ * they are rendered as declarations and a rule with no rate of its own is named
+ * as taking the daemon's fallback.
+ */
+function declaredClassDetail(load: PolicyLoadResult, sampler: Sampler): string {
+  const entries = classSampling(load, sampler);
+  if (entries.length === 0) return "";
+  const rendered = entries.map((entry) =>
+    entry.rate === null
+      ? `${entry.pattern} at the daemon's fallback rate`
+      : `${entry.pattern} ${String(entry.rate)} (class)`,
+  );
+  return `; supervised classes, as the policy declares them: ${rendered.join(", ")}`;
+}
+
+function checkSamplingLocally(load: PolicyLoadResult): DoctorCheck {
   const sampler = resolveSampler(load);
   if (sampler.enabled) {
     const fallback =
@@ -978,6 +1102,29 @@ function checkSampling(load: PolicyLoadResult): DoctorCheck {
         ? `approval setup sampling — or set it yourself: export ${sampler.secretEnv} with the operator-held sampling secret in the environment that runs the daemon`
         : "approval policy attest --as human:<id> — after setting audit.supervised_sample_rate and audit.sampling_secret_env in the policy; then export the named variable where the daemon runs",
   };
+}
+
+/**
+ * The row, from this shell first and from the daemon only where this shell
+ * cannot be right (APRV-271).
+ *
+ * The local reading is computed regardless, so a daemon that answers nothing
+ * leaves the row saying exactly what it said before, plus who could have
+ * answered. There is no path on which the probe makes the report weaker.
+ */
+async function checkSampling(load: PolicyLoadResult, logPath: string): Promise<DoctorCheck> {
+  const sampler = resolveSampler(load);
+  const delegated = await samplingFromDaemon(logPath, sampler);
+  if (delegated === null) return checkSamplingLocally(load);
+  // The per-class breakdown is a fact about the policy file, so it belongs on
+  // the row whichever process answered the environment half. It is said in
+  // declared terms only where the daemon says sampling is on: everywhere else
+  // the local reading IS what is in force, and the existing wording holds.
+  const classes =
+    delegated.status === "pass"
+      ? declaredClassDetail(load, sampler)
+      : classDetail(load, sampler);
+  return { ...delegated, detail: `${delegated.detail}${classes}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -1129,8 +1276,18 @@ const ENV_IGNORE_LINE = ".approval/env";
  * (APRV-75), because the two questions are the same question: the bare basename
  * is included in both cases because a `.gitignore` pattern with no slash matches
  * at every level, so a line `vault.enc` — or `env` — does cover the file.
+ *
+ * `kind` was added for the sealed-token key store (APRV-285), which is a
+ * DIRECTORY rather than a file. The trailing-slash forms are accepted only for
+ * that kind, and deliberately: `keys/` covers everything under `.approval/keys`,
+ * while a line `env/` would match a directory and not the file `.approval/env`,
+ * so accepting it there would be exactly the false PASS this list is shaped to
+ * avoid.
  */
-function ignorePatternsFor(relative: string): readonly string[] {
+function ignorePatternsFor(
+  relative: string,
+  kind: "file" | "dir" = "file",
+): readonly string[] {
   const base = relative.slice(relative.lastIndexOf("/") + 1);
   return [
     relative,
@@ -1143,6 +1300,7 @@ function ignorePatternsFor(relative: string): readonly string[] {
     "/.approval/*",
     base,
     ...(relative.endsWith(".enc") ? ["*.enc"] : []),
+    ...(kind === "dir" ? [`${relative}/`, `/${relative}/`, `${base}/`] : []),
   ];
 }
 
@@ -1156,7 +1314,11 @@ type IgnoreVerdict = "ignored" | "not-ignored" | "not-a-repo";
  * accidentally commit the file to, and failing a check about a risk that does
  * not exist trains people to ignore the check.
  */
-function ignoreVerdict(dir: string, relative: string): IgnoreVerdict {
+function ignoreVerdict(
+  dir: string,
+  relative: string,
+  kind: "file" | "dir" = "file",
+): IgnoreVerdict {
   try {
     statSync(join(dir, ".git"));
   } catch {
@@ -1168,7 +1330,7 @@ function ignoreVerdict(dir: string, relative: string): IgnoreVerdict {
   } catch {
     return "not-ignored";
   }
-  const patterns = ignorePatternsFor(relative);
+  const patterns = ignorePatternsFor(relative, kind);
   for (const raw of text.split(/\r\n|\n|\r/u)) {
     const line = raw.trim();
     if (line.length === 0 || line.startsWith("#")) continue;
@@ -2435,6 +2597,133 @@ function checkGateOrgans(dir: string, records: readonly EventRecord[]): DoctorCh
   };
 }
 
+// ---------------------------------------------------------------------------
+// 28. sealed-keys (APRV-285)
+// ---------------------------------------------------------------------------
+
+/** The exact line doctor tells an operator to add for the sealed-token key store. */
+const KEYS_IGNORE_LINE = ".approval/keys/";
+
+/** The same path without the trailing slash, which is how git spells a path. */
+const KEYS_IGNORE_PATH = ".approval/keys";
+
+/** The private key files this key store actually holds, sorted, names only. */
+function listPrivateKeys(keyDir: string): string[] {
+  try {
+    return readdirSync(keyDir)
+      .filter((name) => name.endsWith(".key"))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The paths git TRACKS under `keyDir`, repo-relative, or `[]` when git cannot say.
+ *
+ * Tracking is asked of git rather than inferred from the working tree, because
+ * the two can disagree in the direction that matters: a key consumed and
+ * unlinked is gone from disk and still in the index, and it is the index that
+ * becomes a commit.
+ */
+function trackedPrivateKeys(root: string, keyDir: string): string[] {
+  const relative = repoPath(root, keyDir);
+  // A key store outside this repository cannot be committed to it.
+  if (relative.startsWith("../") || isAbsolute(relative)) return [];
+  const listed = git(["ls-files", "-z", "--", relative], root);
+  if (!listed.ok) return [];
+  return listed.stdout.split("\0").filter((entry) => entry.length > 0);
+}
+
+/**
+ * Is a sealed-delivery private key one `git add` away from publication?
+ *
+ * The key store holds the X25519 private halves of sealed token delivery
+ * (`core/seal.ts`): one per request, written 0600 in a 0700 directory, unlinked
+ * at consume, expiry or revocation. The log — which IS shared, and which this
+ * project commits on purpose — carries only the ciphertext. A private key in
+ * that same history hands every reader of it the ability to open that action's
+ * `token_sealed` for as long as the token is unspent and inside its TTL, so the
+ * whole design of sealed delivery rests on the key never being committed.
+ *
+ * Nothing enforced that. `.approval/payloads/` is deliberately TRACKED (evidence
+ * belongs in the history), so `.approval/` is a directory an operator adds from
+ * during a records or ceremony commit, and a key store with no ignore line is
+ * swept in by the same `git add` that carries the payloads.
+ *
+ * Two questions, in the order of what stays wrong the longest, the same reading
+ * the vault and environment rows use:
+ *
+ * 1. **A tracked key** is the fault that has already happened, and a commit is
+ *    not something a later commit removes. Asked of git, so a key that was
+ *    consumed and unlinked but is still in the index is still reported.
+ * 2. **An unignored key store** is the fault about to happen. A key present with
+ *    no ignore line covering it FAILS; an empty or absent store is a SKIP that
+ *    still names the line in its detail and carries no `fix`, because nothing on
+ *    this machine is wrong yet and a non-failing row that hands an operator
+ *    something to type is a row they learn to scroll past.
+ *
+ * Outside a git repository the row skips: there is nothing here to commit a key
+ * to, and failing a check about a risk that does not exist trains people to
+ * ignore the check.
+ *
+ * Neither fix line deletes anything and neither commits anything. The repair for
+ * a key already in the index is named in prose and left to the human, exactly as
+ * {@link FIX_COMMAND_PREFIXES} requires.
+ */
+function checkSealedKeys(logPath: string, dir: string): DoctorCheck {
+  const check = "sealed-keys";
+  const keyDir = keyStoreDirFor(logPath);
+  const ignored = ignoreVerdict(dir, KEYS_IGNORE_PATH, "dir");
+
+  if (ignored === "not-a-repo") {
+    return {
+      check,
+      status: "skip",
+      detail: `no git repository at ${dir}, so there is nothing to commit a sealed-delivery private key to. ${keyDir} is where they would live, 0600 in a 0700 directory, and the log carries only the ciphertext they open`,
+    };
+  }
+
+  const root = repoRoot(dir);
+  const tracked = root === null ? [] : trackedPrivateKeys(root, keyDir);
+  if (tracked.length > 0) {
+    return {
+      check,
+      status: "fail",
+      detail: `${String(tracked.length)} sealed-delivery private key(s) are TRACKED by git: ${tracked.join(", ")}. The log is committed and carries the ciphertext, so a committed key opens that action's token_sealed for anyone holding the history, for as long as the token is unspent and inside its TTL — and a commit is not something a later commit removes`,
+      fix: `approval init — it writes '${KEYS_IGNORE_LINE}' into .gitignore so the next key is not swept in; a key already in the index has to be untracked by hand (\`git rm --cached\` on the paths above), and every action whose token is still unspent inside its TTL treated as disclosed and revoked`,
+    };
+  }
+
+  const present = listPrivateKeys(keyDir);
+  if (ignored === "not-ignored") {
+    if (present.length > 0) {
+      return {
+        check,
+        status: "fail",
+        detail: `${String(present.length)} sealed-delivery private key(s) in ${keyDir} are NOT gitignored in ${dir}: one \`git add .approval/\` — the command a records or ceremony commit uses, because \`.approval/payloads/\` is deliberately tracked — publishes a live key beside the ciphertext it opens`,
+        fix: `echo '${KEYS_IGNORE_LINE}' >> ${join(dir, ".gitignore")} — the line \`approval init\` writes; and treat every action whose token is still unspent inside its TTL as disclosed`,
+      };
+    }
+    // A SKIP WITH NO FIX, because nothing here is wrong yet. Doctor's older
+    // rule is that a non-failing row carries no `fix` line, and an operator
+    // scanning a wall of them for the next thing to type must not be handed one
+    // for a risk that does not exist on this machine today. The line is named in
+    // the detail instead, where a reader who wants it can still find it.
+    return {
+      check,
+      status: "skip",
+      detail: `no key is in ${keyDir}, so nothing is exposed here today, and no \`${KEYS_IGNORE_LINE}\` line covers it in ${dir}. \`approval init\` writes that line whether or not a policy has opted into \`token_delivery: sealed\`, because the entry an operator needs is the one already there on the day they turn the knob`,
+    };
+  }
+
+  return {
+    check,
+    status: "pass",
+    detail: `${keyDir} is covered by ${KEYS_IGNORE_LINE} in ${dir} and git tracks nothing under it${present.length === 0 ? " (no key is stored there right now)" : `; ${String(present.length)} key(s) are stored there`}. The private halves stay on this machine and the log carries only the ciphertext they open`,
+  };
+}
+
 /** The Backlog.md board key a task file's name begins with (`task-3 - Slug.md`). */
 function taskIdFromFileName(name: string): string | null {
   const match = /^([A-Za-z][A-Za-z0-9_]*-\d+)/u.exec(name);
@@ -2581,7 +2870,9 @@ export function commandDoctor(
       await checkTelegram(apiBase, policyLoad),
       await checkWebPort(port ?? WEB_DEFAULT_PORT),
       checkPayloadStore(logPath, verified.records),
-      checkSampling(policyLoad),
+      // APRV-271: asks the running daemon for the one half of this answer that
+      // doctor's own environment cannot hold.
+      await checkSampling(policyLoad, logPath),
       checkEnvelopeIntegrity(tasksDir, verified.records),
       // APRV-68: appended rather than inserted, for the same reason the
       // envelope check was — a reader's position-based expectations still hold.
@@ -2632,7 +2923,9 @@ export function commandDoctor(
       checkHarnessVersion(dir, verified.records),
       // APRV-208: appended, fourteenth time, same reason. The one row that says
       // whether supervised-live is actually live on this machine.
-      checkLiveDraw(logPath, policyLoad),
+      // APRV-282: it connects now, because a socket file outlives the process
+      // that bound it and a `stat` reads the leftovers as a healthy gate.
+      await checkLiveDraw(logPath, policyLoad),
       // APRV-238: appended, fifteenth time, same reason. The one surface
       // besides `approval values` that would notice a broken values block:
       // `policy check` deliberately says nothing about it, because guidance has
@@ -2649,6 +2942,12 @@ export function commandDoctor(
       // protected-path guard, and this row exists so a hand edit is visible at
       // the terminal before a pull request fails on it.
       checkGateOrgans(dir, verified.records),
+      // APRV-285: appended, eighteenth time, same reason. The sibling of the
+      // vault and environment rows for the one file under `.approval/` that is
+      // a raw private key: `.approval/payloads/` is tracked on purpose, so
+      // `.approval/` is a directory people `git add` from, and the key store had
+      // nothing telling them it must not come along.
+      checkSealedKeys(logPath, dir),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

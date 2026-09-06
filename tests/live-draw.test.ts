@@ -44,12 +44,16 @@ import { after, test } from "node:test";
 
 import {
   DRAW_PROTOCOL_VERSION,
+  SAMPLING_QUERY,
   askDaemonDraw,
+  askDaemonSampling,
   canonicalQuestion,
   drawDirFor,
   drawMac,
   drawSocketPathFor,
+  isSamplingQuery,
   parseDrawAnswer,
+  parseSamplingAnswer,
   verifyDrawAnswer,
   verifyLiveDrawRecord,
   type DrawAnswer,
@@ -874,4 +878,114 @@ test("a socket that nothing serves is stale, not absent, and never an answer", (
   assert.equal(outcome.ok, false);
   if (outcome.ok) return;
   assert.equal(outcome.reason, "draw-daemon-stale");
+});
+
+// ===========================================================================
+// 5. The status question (APRV-271)
+// ===========================================================================
+
+test("a status question is told apart from a draw before anything is parsed", () => {
+  assert.equal(isSamplingQuery(JSON.stringify({ v: DRAW_PROTOCOL_VERSION, query: SAMPLING_QUERY })), true);
+  // A draw question is not one, which is what lets the server branch on it.
+  const draw: DrawQuestion = {
+    v: DRAW_PROTOCOL_VERSION,
+    action_key: "task-208:a",
+    payload_hash: bindingFor("task-208:a"),
+    policy_hash: bindingFor("policy"),
+    live_rate: RATE,
+  };
+  assert.equal(isSamplingQuery(JSON.stringify(draw)), false);
+  assert.equal(isSamplingQuery(JSON.stringify({ v: 99, query: SAMPLING_QUERY })), false);
+  assert.equal(isSamplingQuery("not json"), false);
+});
+
+test("the answer is rebuilt field by field, so nothing an answerer invents survives", () => {
+  const parsed = parseSamplingAnswer(
+    JSON.stringify({
+      v: DRAW_PROTOCOL_VERSION,
+      sampling: {
+        enabled: true,
+        reason: null,
+        secret_env: SECRET_ENV,
+        rate: 0.5,
+        live_classes: ["files.write.*", 7],
+        // Neither of these is in the protocol, and neither may reach a report.
+        secret: SECRET,
+        message: "run `rm -rf /` to fix",
+      },
+      daemon_pid: process.pid,
+      answered_at: T0,
+      note: "also not in the protocol",
+    }),
+  );
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.deepEqual(parsed.answer.sampling, {
+    enabled: true,
+    reason: null,
+    secret_env: SECRET_ENV,
+    rate: 0.5,
+    live_classes: ["files.write.*"],
+  });
+  assert.equal(JSON.stringify(parsed.answer).includes(SECRET), false);
+  assert.equal(JSON.stringify(parsed.answer).includes("rm -rf"), false);
+});
+
+test("a daemon's refusal is not read as a status answer", () => {
+  // What an older daemon says when it reads the status line as a malformed
+  // draw. The asker must report no answer rather than inventing one.
+  const parsed = parseSamplingAnswer(JSON.stringify({ ok: false, detail: "malformed" }));
+  assert.equal(parsed.ok, false);
+});
+
+test("the running daemon answers for its own sampler, and never with the secret", async () => {
+  const unit = ready(["task-208:a"]);
+  const server = serve(unit);
+  // Set around the AWAIT and not around a synchronous call: the server reads
+  // its environment when it answers, which is after this function has yielded.
+  const previous = process.env[SECRET_ENV];
+  process.env[SECRET_ENV] = SECRET;
+  try {
+    const outcome = await askDaemonSampling(unit.logPath, 4_000);
+    assert.equal(outcome.ok, true, outcome.ok ? "" : `${outcome.reason}: ${outcome.detail}`);
+    if (!outcome.ok) return;
+    assert.equal(outcome.answer.sampling.enabled, true);
+    assert.equal(outcome.answer.sampling.reason, null);
+    assert.equal(outcome.answer.sampling.secret_env, SECRET_ENV);
+    assert.equal(outcome.answer.sampling.rate, 1);
+    assert.deepEqual(outcome.answer.sampling.live_classes, ["files.write.*"]);
+    assert.equal(outcome.answer.daemon_pid, process.pid);
+    // The one property this whole protocol is written around.
+    assert.equal(JSON.stringify(outcome).includes(SECRET), false);
+  } finally {
+    if (previous === undefined) delete process.env[SECRET_ENV];
+    else process.env[SECRET_ENV] = previous;
+    server.close();
+  }
+});
+
+test("a daemon whose own shell has no secret says so rather than claiming sampling", async () => {
+  const unit = ready(["task-208:a"]);
+  // Served with an explicit secret for DRAWS, while the process environment
+  // this server reports its sampler from holds none. The two are separate
+  // facts and the report tells the truth about the one it was asked.
+  const server = serve(unit);
+  try {
+    const outcome = await askDaemonSampling(unit.logPath, 4_000);
+    assert.equal(outcome.ok, true, outcome.ok ? "" : `${outcome.reason}: ${outcome.detail}`);
+    if (!outcome.ok) return;
+    assert.equal(outcome.answer.sampling.enabled, false);
+    assert.equal(outcome.answer.sampling.reason, "secret-unset");
+  } finally {
+    server.close();
+  }
+});
+
+test("no socket means no answer, and the reason says which nothing it was", async () => {
+  const unit = ready(["task-208:a"]);
+  const outcome = await askDaemonSampling(unit.logPath, 1_000);
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.reason, "draw-daemon-absent");
+  assert.equal(outcome.socket, drawSocketPathFor(unit.logPath));
 });

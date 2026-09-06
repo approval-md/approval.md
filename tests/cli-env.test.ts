@@ -51,7 +51,7 @@ import { delimiter, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { ENV_FILE_REFUSAL_CODES, envFilePathFor } from "../src/core/env-file.js";
+import { ENV_FILE_REFUSAL_CODES, envFileDigest, envFilePathFor } from "../src/core/env-file.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "../src/cli/exit-codes.js";
 import { GITIGNORE_ENTRIES } from "../src/cli/scaffold.js";
 import { shellSingleQuote } from "../src/cli/env.js";
@@ -125,6 +125,10 @@ function runCli(
     "APPROVAL_TG_CHAT",
     "APPROVAL_VAULT_PASSPHRASE",
     "APPROVAL_AUDIT_SECRET",
+    // APRV-278: whoever runs the suite may have evaluated `approval env` in
+    // their own shell, and an inherited claim would quietly silence the bleed
+    // cases below.
+    "APPROVAL_ENV_PROVENANCE",
   ]) {
     if (options.env?.[name] === undefined) delete childEnv[name];
   }
@@ -640,6 +644,100 @@ test("an already-set variable is re-exported, marked, and still correct", () => 
     emitsValues: true,
   });
   assert.match(run.stdout, /^export APPROVAL_HUMAN='human:carter' {2}# already set$/mu);
+});
+
+// ---------------------------------------------------------------------------
+// Export provenance (APRV-278)
+// ---------------------------------------------------------------------------
+
+/** The `APPROVAL_ENV_PROVENANCE` value an export block claims, if it claims one. */
+function provenanceIn(block: string): string | null {
+  const line = /^export APPROVAL_ENV_PROVENANCE='(?<claim>[^']*)'$/mu.exec(block);
+  return line?.groups?.["claim"] ?? null;
+}
+
+test("the export block names what it took from the file, with an id, a digest and NO value", () => {
+  const envText = [`APPROVAL_TG_TOKEN=${TOKEN}`, "APPROVAL_TG_CHAT=12345", `APPROVAL_HUMAN=human:from-the-file`, ""].join("\n");
+  const home = makeHome({ env: envText });
+  // APPROVAL_HUMAN arrives already exported, so the block passes it through
+  // rather than resolving the file's line for it.
+  const run = runCli(["env"], home, { env: { APPROVAL_HUMAN: HUMAN }, emitsValues: true });
+  assert.equal(run.code, EXIT_OK, run.stderr);
+
+  const claim = provenanceIn(run.stdout);
+  assert.notEqual(claim, null, "the export block claimed nothing");
+  const fields = (claim ?? "").split(":");
+  assert.equal(fields.length, 4);
+  assert.equal(fields[0], "1");
+  assert.match(fields[1] ?? "", /^[0-9a-f]{8}$/u);
+  assert.equal(fields[2], envFileDigest(envText), "the digest is not this file's");
+  assert.deepEqual((fields[3] ?? "").split(",").sort(), ["APPROVAL_TG_CHAT", "APPROVAL_TG_TOKEN"]);
+
+  // The line that exists to make a check quieter must not itself be a leak, and
+  // a value that came from the shell must not be laundered into the claim.
+  assert.equal((claim ?? "").includes(TOKEN), false, "the provenance line carried a secret");
+  assert.equal((claim ?? "").includes("APPROVAL_HUMAN"), false, "a pass-through was vouched for");
+});
+
+test("nothing resolved from the file means nothing is claimed", () => {
+  const run = runCli(["env"], makeHome(), { emitsValues: true });
+  assert.equal(provenanceIn(run.stdout), null);
+  assert.equal(run.stdout.includes("APPROVAL_ENV_PROVENANCE"), false);
+});
+
+test("the documented ritual stops --check reporting cross-instance bleed, and an edit starts it again", () => {
+  // A policy naming ONLY the two telegram variables, so `--check`'s verdict is
+  // about the bleed report and not about an unrelated unresolved declaration.
+  const policy = `# Approval Policy
+
+\`\`\`yaml approval-policy
+version: "0.1"
+
+defaults:
+  autonomy: manual
+  channel: telegram
+
+channels:
+  telegram:
+    chat_id_env: APPROVAL_TG_CHAT
+    token_env: APPROVAL_TG_TOKEN
+\`\`\`
+`;
+  const envText = [`APPROVAL_TG_TOKEN=${TOKEN}`, "APPROVAL_TG_CHAT=12345", ""].join("\n");
+  const home = makeHome({ policy, env: envText });
+  const envPath = join(home, ".approval", "env");
+
+  // 1. `eval "$(approval env)"`: the real block, and the environment it leaves.
+  const block = runCli(["env"], home, { emitsValues: true });
+  assert.equal(block.code, EXIT_OK, block.stderr);
+  const claim = provenanceIn(block.stdout) ?? "";
+  const afterEval = {
+    APPROVAL_TG_TOKEN: TOKEN,
+    APPROVAL_TG_CHAT: "12345",
+    APPROVAL_ENV_PROVENANCE: claim,
+  };
+
+  // 2. `approval env --check` in that shell. The variables ARE exported over
+  // lines the file names, which is the shape the old rule called bleed — and it
+  // is the shape the documented start ritual produces every single time.
+  const quiet = runCli(["env", "--check"], home);
+  assert.equal(quiet.code, EXIT_OK, quiet.stderr);
+  const evaluated = runCli(["env", "--check"], home, { env: afterEval });
+  assert.equal(evaluated.code, EXIT_OK, evaluated.stderr);
+  assert.doesNotMatch(evaluated.stdout, /CROSS-INSTANCE BLEED/u);
+
+  // 3. The same shell, with no claim in it: a stranger's export, still reported.
+  const foreign = runCli(["env", "--check"], home, {
+    env: { APPROVAL_TG_TOKEN: TOKEN, APPROVAL_TG_CHAT: "12345" },
+  });
+  assert.match(foreign.stdout, /CROSS-INSTANCE BLEED/u);
+
+  // 4. The file is edited after the eval. The shell still holds the old
+  // resolution, the digest no longer matches, and the claim expires.
+  writeFileSync(envPath, `${envText}APPROVAL_HUMAN=${HUMAN}\n`, "utf8");
+  chmodSync(envPath, 0o600);
+  const stale = runCli(["env", "--check"], home, { env: afterEval });
+  assert.match(stale.stdout, /CROSS-INSTANCE BLEED/u);
 });
 
 // ---------------------------------------------------------------------------

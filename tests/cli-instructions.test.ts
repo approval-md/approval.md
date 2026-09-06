@@ -438,6 +438,12 @@ const AGENT_FACING: readonly string[] = [
   "withdraw",
   "wait",
   "run",
+  // APRV-193. It REMOVES a capability from a command and establishes nothing:
+  // no record, no token, no authority. Withholding it from agents would leave
+  // the one spelling that starves a command available only to the operator,
+  // which is the opposite of the point — the party under oversight is exactly
+  // who should be able to run its own code where the effects cannot leave.
+  "sandbox",
   "consume",
   "token",
   "queue",

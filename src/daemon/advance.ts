@@ -35,12 +35,25 @@
  * last-attempt clock is set by a refusal exactly as it is by a success. There
  * is no retry loop and no backoff ladder: the cadence IS the backoff.
  *
- * ## `gh pr merge` appears nowhere in this file
+ * ## The merge: armed here, performed by nobody (APRV-284)
  *
- * The daemon opens or updates the day's records pull request and stops there.
- * Merging to the trunk is `vcs.push.main`, which is a session's supervised act
- * or a human's, and a daemon that merged its own records would be the gate
- * approving its own evidence.
+ * This file still calls no merge. What it does is ask `logAdvance` to ARM one:
+ * `gh pr merge <branch> --merge --auto` on the day's records pull request, so
+ * the pull request lands when its checks and the repository's branch rules say
+ * it may, and never earlier. Before APRV-284 it sat at CLEAN until a person
+ * clicked, which is the failure mode CLAUDE.md's workflow item 7 is written
+ * against — and clicking was never a review, because a records branch carries
+ * only the log, `QUEUE.md` and `.approval/payloads/`, the three paths CI's
+ * protected-path guard exempts.
+ *
+ * Two things keep that from being a daemon approving its own evidence. The arm
+ * is `vcs.push.main` in this project's taxonomy — the same class as the same
+ * command in a session's hands — and it rides the SAME `log.advance`
+ * authorization this cycle already holds rather than opening a second question
+ * or claiming a second grant: one authorization, one act. And `cli/log-advance.
+ * ts`'s `armAutoMerge` withholds the arm outright when the branch it pushed
+ * carries a path an advance may not carry, so what gets armed is only ever
+ * evidence. `--no-advance-auto-merge` turns the whole thing off.
  *
  * ## The self-perpetuation trap, and how the trigger avoids it
  *
@@ -93,6 +106,7 @@ import {
   defaultRecordsBranch,
   logAdvance,
   publishedState,
+  type AutoMergeState,
   type LogAdvanceReport,
 } from "../cli/log-advance.js";
 import { repoRoot } from "../cli/git-scope.js";
@@ -128,6 +142,10 @@ export interface AdvanceCadence {
   base: string | null;
   /** Open or update the day's pull request. */
   pr: boolean;
+  /**
+   * Arm auto-merge on that pull request (APRV-284). Read only when `pr` is set.
+   */
+  autoMerge: boolean;
 }
 
 /** The default cadence, spelled once. */
@@ -138,6 +156,7 @@ export function defaultCadence(): AdvanceCadence {
     remote: "origin",
     base: null,
     pr: true,
+    autoMerge: true,
   };
 }
 
@@ -168,6 +187,13 @@ export interface AdvanceAttempt {
   prUrl: string | null;
   /** True when this attempt OPENED the day's pull request rather than updating it. */
   prCreated: boolean;
+  /**
+   * What became of the auto-merge arm (APRV-284), or `null` when no pull
+   * request step ran. `cli/log-advance.ts`'s `AutoMergeState` documents each.
+   */
+  autoMerge: AutoMergeState | null;
+  /** Why the arm was withheld or refused; `null` when it was not. */
+  autoMergeNote: string | null;
   range: { from: number; to: number } | null;
   /** The refusal code, for every outcome that carries one. */
   code: string | null;
@@ -268,6 +294,10 @@ export function advanceArgv(cadence: AdvanceCadence): string[] {
     "log",
     "advance",
     ...(cadence.pr ? ["--pr"] : []),
+    // APRV-284. Present only when the arm is OFF, so the default cadence's argv
+    // is byte-identical to what it was before the arm existed and no payload
+    // hash or idempotency key moves under a running daemon.
+    ...(cadence.pr && !cadence.autoMerge ? ["--no-auto-merge"] : []),
     "--remote",
     cadence.remote,
     ...(cadence.base === null ? [] : ["--base", cadence.base]),
@@ -323,6 +353,8 @@ function answerFor(
     commit: null,
     prUrl: null,
     prCreated: false,
+    autoMerge: null,
+    autoMergeNote: null,
     range: null,
     code: null,
     rebuilt: false,
@@ -861,6 +893,7 @@ function runVerbHere(input: AdvanceInput, auth: Extract<AdvanceAuthorization, { 
       remote: input.cadence.remote,
       base: input.cadence.base,
       pr: input.cadence.pr,
+      autoMerge: input.cadence.autoMerge,
       branch: auth.recordsBranch,
       today: auth.today,
     });
@@ -949,6 +982,8 @@ function recordFinish(
     commit: report.commit,
     prUrl: report.prUrl,
     prCreated: report.prCreated ?? false,
+    autoMerge: report.autoMerge ?? null,
+    autoMergeNote: report.autoMergeNote ?? null,
     range: report.range,
     recordsBranch: report.recordsBranch,
     rebuilt: report.rebuilt === true,
@@ -963,8 +998,30 @@ function recordFinish(
             report.rebuilt === true
               ? ` (rebuilt on ${report.rebuiltOn?.ref ?? "the base"} ${(report.rebuiltOn?.sha ?? "").slice(0, 12)})`
               : ""
-          }${report.prUrl === null ? "" : ` (${report.prUrl})`}${dangling}`,
+          }${report.prUrl === null ? "" : ` (${report.prUrl})`}${armNote(report)}${dangling}`,
   });
+}
+
+/**
+ * What the attempt's message says about the arm (APRV-284).
+ *
+ * Every outcome but `armed` names its reason: a pull request nobody armed is
+ * one a person still has to land, and an operator reading this line is the one
+ * who has to know that from the line rather than from the pull request.
+ */
+function armNote(report: LogAdvanceReport): string {
+  switch (report.autoMerge ?? null) {
+    case null:
+      return "";
+    case "armed":
+      return ", auto-merge armed";
+    case "off":
+      return ", auto-merge not armed (--no-advance-auto-merge)";
+    case "withheld":
+      return `, auto-merge WITHHELD: ${report.autoMergeNote ?? "the branch carries more than an advance may"}`;
+    default:
+      return `, auto-merge refused by gh: ${report.autoMergeNote ?? "no reason given"}`;
+  }
 }
 
 /**
@@ -1022,6 +1079,7 @@ export function runAdvanceAsync(
       remote: input.cadence.remote,
       base: input.cadence.base,
       pr: input.cadence.pr,
+      autoMerge: input.cadence.autoMerge,
       branch: auth.recordsBranch,
       today: auth.today,
     });

@@ -191,6 +191,32 @@ export interface ExpectationFailure {
   expected: string;
   actual: string;
   note?: string;
+  /**
+   * The exact source line this failure wants added to
+   * {@link REPO_POLICY_EXPECTATIONS} (APRV-274).
+   *
+   * Present on `unpinned` and nowhere else, because `unpinned` is the one
+   * failure whose whole remedy is a line of text: the policy declares a class,
+   * nothing pins what it resolves to, and the fix is to state the resolution
+   * the amended policy already produces. The old refusal named the class and
+   * left the operator to work out the spelling, which is how a ceremony came to
+   * be a branch fetch and a hand-written pin. Printed, never applied: no verb
+   * in this repository writes the pins file.
+   */
+  pinLine?: string;
+}
+
+/**
+ * One pin, as the source line a human pastes into {@link REPO_POLICY_EXPECTATIONS}.
+ *
+ * The single-line form the list already uses for a pin with no note. A pin
+ * worth a note gets one from the person who knows why it reads that way, which
+ * is not something a resolution can supply.
+ */
+export function pinLine(actionClass: string, autonomy: string, provenance: string): string {
+  return `  { actionClass: ${JSON.stringify(actionClass)}, autonomy: ${JSON.stringify(
+    autonomy,
+  )}, provenance: ${JSON.stringify(provenance)} },`;
 }
 
 /** One line per failure, in the shape a terminal and a `--json` array share. */
@@ -255,11 +281,17 @@ export function checkPolicyExpectations(
   const declared = Object.keys(load.policy.classes ?? {}).filter((pattern) => !pattern.includes("*"));
   for (const actionClass of declared) {
     if (!pinned.has(actionClass)) {
+      // APRV-274: the resolution the AMENDED policy already produces, spelled
+      // as the line that pins it. Read from the same matcher the pin check
+      // uses, so the printed line is the one that would make this failure go
+      // away rather than a guess at what the operator meant.
+      const resolution = resolve(load, actionClass);
       failures.push({
         kind: "unpinned",
         actionClass,
         expected: "a pin in REPO_POLICY_EXPECTATIONS",
         actual: "the policy declares this class and nothing pins what it resolves to",
+        pinLine: pinLine(actionClass, resolution.autonomy, resolution.provenance),
       });
     }
     // APRV-266: reachability is asked WITH the policy's own `protected_paths`,
@@ -284,6 +316,142 @@ export function checkPolicyExpectations(
 
 /** The name of the module a human edits when a pin has to move. */
 export const EXPECTATIONS_MODULE = "src/core/policy-expectations.ts";
+
+/**
+ * The dogfood suite, in source and as the build output that actually runs
+ * (APRV-274). Repo-relative, so a caller joins them onto the repository root.
+ *
+ * Both spellings are needed and they answer different questions. The SOURCE
+ * says whether this repository has a dogfood suite at all, which is what keeps
+ * the ceremony inert in somebody else's checkout. The BUILT file is what a
+ * ceremony runs, and its absence beside a present source is a stale build: the
+ * pins the suite would read are the ones in `dist/`, so a ceremony that ran the
+ * suite there would be checking the previous edit's pins.
+ */
+export const DOGFOOD_SUITE_SOURCE = "tests/dogfood.test.ts";
+export const DOGFOOD_SUITE_BUILT = "dist/tests/dogfood.test.js";
+
+/**
+ * The body of `const <constant> … = [ … ];` in `text`, or the whole text when
+ * no such declaration is there.
+ *
+ * The scope is what keeps the reader honest about which `actionClass` mentions
+ * are pins. The fallback is deliberately permissive rather than empty: this is
+ * a display reader over somebody's edited file, and a version whose declaration
+ * it cannot find is better reported approximately than reported as no pins at
+ * all. A `constant` that is not a plain identifier is refused outright rather
+ * than interpolated into a pattern.
+ */
+function pinsArrayOf(text: string, constant: string): string {
+  if (!/^[A-Za-z_$][\w$]*$/u.test(constant)) return text;
+  // `const <name>` and not a bare mention: the name appears in prose above the
+  // declaration, and a match there would scope the read to a doc comment. The
+  // type annotation between the name and the `=` may itself carry brackets
+  // (`readonly PolicyExpectation[]`), so only the newline bounds the middle.
+  const declared = new RegExp(`\\bconst\\s+${constant}\\b[^=\\n]*=\\s*\\[`, "u").exec(text);
+  if (declared === null) return text;
+  const from = declared.index + declared[0].length;
+  const end = text.indexOf("\n];", from);
+  return end < 0 ? text.slice(from) : text.slice(from, end);
+}
+
+/** One pin as the source text spells it: what class, resolving to what. */
+export interface PinSourceEntry {
+  actionClass: string;
+  /** `autonomy/provenance` as written, or `null` where the text is unreadable. */
+  resolution: string | null;
+}
+
+/**
+ * How one class's pin moved between two versions of the pins module.
+ *
+ * `null` on a side means the class was NOT PINNED in that version, and it is
+ * the only thing it means: an entry whose resolution the reader could not make
+ * out reads `"unreadable"` there, so "nobody pinned this" and "the pin is
+ * written in a shape this reader does not know" never arrive as the same fact.
+ */
+export interface PinChange {
+  actionClass: string;
+  before: string | null;
+  after: string | null;
+}
+
+/**
+ * The pins a version of the module TEXT declares (APRV-274).
+ *
+ * A DISPLAY reader and nothing else. It exists so the amendment ceremony can
+ * show what the pins file did between the commit it is built on and the working
+ * tree, and the committed side of that comparison is a git blob: TypeScript
+ * source, with no build output to import. Nothing here gates anything. The pin
+ * check that can refuse a ceremony resolves the COMPILED
+ * {@link REPO_POLICY_EXPECTATIONS} against a loaded policy, exactly as it did
+ * before this function existed, so a text this reader misreads costs a report
+ * line and never a wrong verdict.
+ *
+ * The read is lexical and SCOPED to the named array literal, which matters:
+ * this very module mentions `actionClass` outside the pins (in the failure it
+ * builds for a policy that does not parse), and a reader that swept the whole
+ * file would report that mention as a pin. Inside the array, entries are split
+ * on `actionClass:`, and within one entry the first `autonomy:` and
+ * `provenance:` string literals are its resolution. That holds for a list
+ * written in the shape this module's own list is written in, where both fields
+ * precede the free-text `note`. An entry it cannot read is reported with a
+ * `null` resolution rather than dropped, so a pin that moved is never silently
+ * absent from the report.
+ */
+export function readPinSource(text: string, constant = "REPO_POLICY_EXPECTATIONS"): PinSourceEntry[] {
+  const entries: PinSourceEntry[] = [];
+  const scoped = pinsArrayOf(text, constant);
+  const boundaries = [...scoped.matchAll(/\bactionClass\s*:\s*"([^"]*)"/gu)];
+  for (const [index, boundary] of boundaries.entries()) {
+    const actionClass = boundary[1];
+    if (actionClass === undefined || actionClass.length === 0) continue;
+    const from = (boundary.index ?? 0) + boundary[0].length;
+    const to = boundaries[index + 1]?.index ?? scoped.length;
+    const body = scoped.slice(from, to);
+    const autonomy = /\bautonomy\s*:\s*"([^"]*)"/u.exec(body)?.[1];
+    const provenance = /\bprovenance\s*:\s*"([^"]*)"/u.exec(body)?.[1];
+    entries.push({
+      actionClass,
+      resolution:
+        autonomy === undefined || provenance === undefined ? null : `${autonomy}/${provenance}`,
+    });
+  }
+  return entries;
+}
+
+/**
+ * How the pins moved from one version of the module text to another, sorted by
+ * class so two runs of the same ceremony print the same report.
+ *
+ * A class pinned twice in one version keeps the FIRST reading, which is what
+ * the compiled list resolves to as well: {@link checkPolicyExpectations} walks
+ * the array in order and a duplicate cannot change an earlier entry's verdict.
+ */
+export function diffPinSources(before: string, after: string): PinChange[] {
+  const read = (text: string): Map<string, string> => {
+    const map = new Map<string, string>();
+    for (const entry of readPinSource(text)) {
+      if (!map.has(entry.actionClass)) map.set(entry.actionClass, entry.resolution ?? "unreadable");
+    }
+    return map;
+  };
+  const from = read(before);
+  const to = read(after);
+  const changes: PinChange[] = [];
+  for (const actionClass of [...new Set([...from.keys(), ...to.keys()])].sort()) {
+    const was = from.get(actionClass) ?? null;
+    const now = to.get(actionClass) ?? null;
+    if (was === now) continue;
+    changes.push({ actionClass, before: was, after: now });
+  }
+  return changes;
+}
+
+/** One pin change on one line, for a terminal and for a `--json` array. */
+export function describePinChange(change: PinChange): string {
+  return `${change.actionClass}: ${change.before ?? "not pinned"} -> ${change.after ?? "not pinned"}`;
+}
 
 /**
  * The pins that govern `policyPath`, or `null` when none do.

@@ -23,7 +23,7 @@
  */
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   appendFileSync,
   chmodSync,
@@ -32,7 +32,9 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -43,6 +45,10 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { FIX_COMMAND_PREFIXES } from "../src/cli/doctor.js";
+import { envFileDigest } from "../src/core/env-file.js";
+import { formatEnvProvenance } from "../src/core/instance.js";
+import { DRAW_PROTOCOL_VERSION, drawDirFor, drawSocketPathFor } from "../src/core/live-draw.js";
+import { GITIGNORE_ENTRIES } from "../src/cli/scaffold.js";
 import { servicesFor } from "../src/cli/setup-common.js";
 import { DOCTOR_ROW_ORDER } from "./doctor-rows.js";
 import { assertLocal, startMockBotApi, type MockBotApi } from "./telegram-mock.js";
@@ -78,6 +84,7 @@ before(async () => {
 after(async () => {
   await mock.close();
   rmSync(scratch, { recursive: true, force: true });
+  rmSync(socketScratch, { recursive: true, force: true });
 });
 
 interface Run {
@@ -103,7 +110,15 @@ async function runCli(
   env: Record<string, string> = {},
 ): Promise<Run> {
   const childEnv = { ...process.env, ...env };
-  for (const name of ["APPROVAL_HUMAN", "APPROVAL_TG_TOKEN", "APPROVAL_TG_CHAT"]) {
+  for (const name of [
+    "APPROVAL_HUMAN",
+    "APPROVAL_TG_TOKEN",
+    "APPROVAL_TG_CHAT",
+    // APRV-278: whoever runs the suite may have evaluated `approval env` in
+    // their own shell, and an inherited claim would quietly silence the bleed
+    // rows below.
+    "APPROVAL_ENV_PROVENANCE",
+  ]) {
     if (env[name] === undefined) delete childEnv[name];
   }
   // The same discipline as `assertLocal`, one layer out: a fully configured
@@ -407,6 +422,10 @@ test("doctor: every check passes or skips on a healthy environment", async () =>
       // directory, so there is no harness file here for a human to have
       // attested — the same absence harness-hook-wiring skips on (APRV-272).
       "skip",
+      // sealed-keys skips: the fixture is a scratch directory and not a git
+      // checkout, so there is nothing here to commit a private key to — the
+      // same absence log-drift and main-behind-origin skip on (APRV-285).
+      "skip",
     ],
   );
   for (const entry of parsed.checks) {
@@ -445,7 +464,7 @@ test("doctor: human output is one line per check with indented fixes", async () 
   // APRV-91 #9 made this an aligned table, so the check name is padded into a
   // column instead of being followed by a colon. The line ARITHMETIC is what
   // the contract was and still is: one line per check, one indented fix under it.
-  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 26);
+  assert.equal(lines.filter((line) => /^[✓✗–] /u.test(line)).length, 27);
   assert.ok(lines.some((line) => /^✗ identity {2,}APPROVAL_HUMAN is unset/u.test(line)));
   assert.ok(lines.some((line) => /^– telegram {2,}\S/u.test(line)));
   // The fix belongs to the failing check, is indented under it, and begins with
@@ -904,13 +923,14 @@ test("doctor: --json emits exactly one object with the frozen shape", async () =
   const parsed = parseDoctor(run);
   assert.deepEqual(Object.keys(parsed), ["ok", "checks"]);
   assert.equal(typeof parsed.ok, "boolean");
-  // 26: APRV-257 appended `checkpoint` (the second witness, as a row).
+  // 27: APRV-257 appended `checkpoint` (the second witness, as a row).
   // APRV-227 appended `harness-version-unverified` (whether the binary
   // hosting the hook changed under it), APRV-208 appended `live-draw`
-  // (whether a daemon is answering supervised-live draws for this log), and
+  // (whether a daemon is answering supervised-live draws for this log),
   // APRV-272 appended `gate-organs` (which harness files carry no attestation
-  // of their current bytes).
-  assert.equal(parsed.checks.length, 26);
+  // of their current bytes), and APRV-285 appended `sealed-keys` (whether a
+  // sealed-delivery private key is tracked or unignored).
+  assert.equal(parsed.checks.length, 27);
   for (const entry of parsed.checks) {
     const keys = Object.keys(entry);
     assert.deepEqual(keys.slice(0, 3), ["check", "status", "detail"]);
@@ -1081,6 +1101,288 @@ test("doctor: a sampler nobody configured is a stated skip, not a failure", asyn
   assert.equal(check.status, "skip");
   assert.match(check.detail, /rate-absent/u);
   assert.equal(check.fix, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// audit-sampling asks the running daemon (APRV-271)
+// ---------------------------------------------------------------------------
+
+/**
+ * A second scratch root, kept SHORT on purpose.
+ *
+ * `sockaddr_un.sun_path` is 104 bytes on macOS, and `core/live-draw.ts` refuses
+ * anything past 100 before it dials. This suite's ordinary `scratch` names
+ * itself `approval-md-cli-doctor-XXXXXX` under a macOS per-user temp directory,
+ * which puts `<home>/.approval/daemon/draw.sock` well past that — a fixture
+ * every socket case would fail in for a reason that has nothing to do with what
+ * it is testing. Three characters of prefix buy the margin back.
+ */
+const socketScratch = realpathSync(mkdtempSync(join(tmpdir(), "ad-")));
+let socketCounter = 0;
+
+/** The same audit-configured home as {@link homeWithAudit}, on a short path. */
+async function socketHomeWithAudit(port: number, audit: string[]): Promise<string> {
+  socketCounter += 1;
+  const dir = join(socketScratch, `h${socketCounter}`);
+  mkdirSync(join(dir, ".approval", "log"), { recursive: true });
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    policyWith(port).replace("channels:", [...audit, "channels:"].join("\n")),
+  );
+  const attested = await runCli(["policy", "attest"], dir, { APPROVAL_HUMAN: "human:carter" });
+  assert.equal(attested.code, 0, attested.stderr);
+  const socket = drawSocketPathFor(logPathOf(dir));
+  assert.ok(
+    socket.length <= 100,
+    `the fixture socket path is ${String(socket.length)} bytes, past what a Unix socket address can carry: ${socket}`,
+  );
+  return dir;
+}
+
+/**
+ * A fake daemon on the draw socket: one line in, whatever `reply` returns out.
+ *
+ * Fake rather than real because what is under test is doctor's half of the
+ * conversation — that it asks, that it reports the answer with its source, and
+ * that it puts nothing of the answerer's choosing on an operator's screen. The
+ * real server's half is tested against the real `DrawServer` in
+ * `tests/live-draw.test.ts`.
+ */
+async function fakeDaemon(home: string, reply: (line: string) => unknown): Promise<Server> {
+  const path = drawSocketPathFor(logPathOf(home));
+  mkdirSync(drawDirFor(logPathOf(home)), { recursive: true, mode: 0o700 });
+  const server = createServer((socket) => {
+    socket.setEncoding("utf8");
+    let buffer = "";
+    socket.on("error", () => {
+      // The asker hung up; there is nothing to report to.
+    });
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) return;
+      socket.end(`${JSON.stringify(reply(buffer.slice(0, newline)))}\n`);
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(path, resolve);
+  });
+  // The mode the real daemon applies, and the one every asker requires.
+  chmodSync(path, 0o600);
+  return server;
+}
+
+/** The audit block every case in this section shares. */
+const SOCKET_AUDIT = [
+  "audit:",
+  "  supervised_sample_rate: 0.25",
+  "  sampling_secret_env: APPROVAL_TEST_DOCTOR_SECRET",
+];
+
+test("doctor: audit-sampling names the running daemon as the source when it answers", async () => {
+  // The APRV-271 case, and the state the bug was found in: the secret is not in
+  // THIS shell and never will be, and the daemon in the operator's other window
+  // has been sampling all along.
+  const { port } = healthy();
+  const home = await socketHomeWithAudit(port, SOCKET_AUDIT);
+  const server = await fakeDaemon(home, () => ({
+    v: DRAW_PROTOCOL_VERSION,
+    sampling: {
+      enabled: true,
+      reason: null,
+      secret_env: "APPROVAL_TEST_DOCTOR_SECRET",
+      rate: 0.25,
+      live_classes: [],
+    },
+    daemon_pid: process.pid,
+    answered_at: "2026-09-06T00:00:00.000Z",
+  }));
+  try {
+    const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+    const check = checkNamed(run, "audit-sampling");
+    assert.equal(check.status, "pass");
+    assert.match(check.detail, /enabled per the running daemon \(pid \d+/u);
+    assert.ok(
+      check.detail.includes(drawSocketPathFor(logPathOf(home))),
+      `the row names no socket: ${check.detail}`,
+    );
+    assert.match(check.detail, /rate 0\.25/u);
+    // A pass has nothing to prescribe.
+    assert.equal(check.fix, undefined);
+  } finally {
+    server.close();
+  }
+});
+
+test("doctor: a daemon reporting its own sampler off keeps the row red", async () => {
+  const { port } = healthy();
+  const home = await socketHomeWithAudit(port, SOCKET_AUDIT);
+  const server = await fakeDaemon(home, () => ({
+    v: DRAW_PROTOCOL_VERSION,
+    sampling: {
+      enabled: false,
+      reason: "secret-unset",
+      secret_env: "APPROVAL_TEST_DOCTOR_SECRET",
+      rate: 0.25,
+      live_classes: [],
+    },
+    daemon_pid: process.pid,
+    answered_at: "2026-09-06T00:00:00.000Z",
+  }));
+  try {
+    const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+    const check = checkNamed(run, "audit-sampling");
+    assert.equal(check.status, "fail");
+    assert.match(check.detail, /secret-unset/u);
+    assert.match(check.detail, /per the running daemon \(pid \d+/u);
+    assert.match(check.fix ?? "", /export APPROVAL_TEST_DOCTOR_SECRET/u);
+  } finally {
+    server.close();
+  }
+});
+
+test("doctor: with nothing listening the row keeps its meaning and says who decides", async () => {
+  const { port } = healthy();
+  const home = await socketHomeWithAudit(port, SOCKET_AUDIT);
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "audit-sampling");
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /secret-unset/u);
+  assert.match(check.detail, /No daemon answered/u);
+  assert.match(check.detail, /daemon's shell is what decides/u);
+  assert.match(check.fix ?? "", /export APPROVAL_TEST_DOCTOR_SECRET/u);
+});
+
+test("doctor: nothing a daemon invents in its answer reaches the operator's screen", async () => {
+  // The socket is owner-only, so the answerer is this user's own process — but
+  // a diagnostic that printed an answerer's free text would be a way to put
+  // words in doctor's mouth, and there is no reason to allow it.
+  const { port } = healthy();
+  const home = await socketHomeWithAudit(port, SOCKET_AUDIT);
+  const server = await fakeDaemon(home, () => ({
+    v: DRAW_PROTOCOL_VERSION,
+    sampling: {
+      enabled: true,
+      reason: null,
+      secret_env: "APPROVAL_TEST_DOCTOR_SECRET",
+      rate: 0.25,
+      live_classes: [],
+      secret: "doctor-daemon-secret-value",
+      message: "everything is fine, run `rm -rf /`",
+    },
+    daemon_pid: process.pid,
+    answered_at: "2026-09-06T00:00:00.000Z",
+    note: "not in this protocol",
+  }));
+  try {
+    const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+    const stream = run.stdout + run.stderr;
+    assert.equal(stream.includes("doctor-daemon-secret-value"), false, "the answer's secret was printed");
+    assert.equal(stream.includes("rm -rf"), false, "the answer's free text was printed");
+    assert.equal(stream.includes("not in this protocol"), false);
+    assert.equal(checkNamed(run, "audit-sampling").status, "pass");
+  } finally {
+    server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// live-draw connects rather than stats (APRV-282)
+// ---------------------------------------------------------------------------
+
+/**
+ * A home whose `files.write.*` class is `supervised-live`, so the live-draw row
+ * has something to be about. Without a live class it skips, which is right and
+ * is not what these cases are testing.
+ */
+async function socketHomeLive(port: number): Promise<string> {
+  socketCounter += 1;
+  const dir = join(socketScratch, `L${socketCounter}`);
+  mkdirSync(join(dir, ".approval", "log"), { recursive: true });
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    policyWith(port).replace(
+      "    autonomy: supervised",
+      ["    autonomy: supervised-live", "    live_rate: 0.1"].join("\n"),
+    ),
+  );
+  const attested = await runCli(["policy", "attest"], dir, { APPROVAL_HUMAN: "human:carter" });
+  assert.equal(attested.code, 0, attested.stderr);
+  return dir;
+}
+
+/**
+ * A socket file with nothing behind it, made the way the wild makes one.
+ *
+ * There is no way to create a socket inode except by binding, and a bind that
+ * is closed takes its file with it (libuv unlinks the path it bound). So this
+ * binds one path, renames the file to the one doctor will look at, and closes:
+ * the unlink then misses, the inode survives with no listener, and connecting
+ * to it is refused. That is precisely the aftermath of a daemon that was killed
+ * — the state APRV-282 exists for, and the one a `stat` reads as healthy.
+ */
+async function staleSocket(home: string): Promise<void> {
+  const dir = drawDirFor(logPathOf(home));
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const bound = join(dir, "t.sock");
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(bound, resolve);
+  });
+  renameSync(bound, drawSocketPathFor(logPathOf(home)));
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  chmodSync(drawSocketPathFor(logPathOf(home)), 0o600);
+}
+
+test("doctor: live-draw passes only on a socket that accepts a connection", async () => {
+  const { port } = healthy();
+  const home = await socketHomeLive(port);
+  const server = await fakeDaemon(home, () => ({ ok: false, detail: "no question asked" }));
+  try {
+    const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+    const check = checkNamed(run, "live-draw");
+    assert.equal(check.status, "pass", check.detail);
+    assert.match(check.detail, /answered a connection/u);
+    assert.equal(check.fix, undefined);
+  } finally {
+    server.close();
+  }
+});
+
+test("doctor: a socket file nothing is listening on fails, and names when it was written", async () => {
+  const { port } = healthy();
+  const home = await socketHomeLive(port);
+  await staleSocket(home);
+  const path = drawSocketPathFor(logPathOf(home));
+  const written = statSync(path).mtime.toISOString();
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "live-draw");
+  assert.equal(check.status, "fail", check.detail);
+  assert.match(check.detail, /refuses connections/u);
+  assert.ok(
+    check.detail.includes(written),
+    `the row does not name the stale socket's mtime (${written}): ${check.detail}`,
+  );
+  // The one thing an operator has to type, and APRV-282's first criterion.
+  assert.ok(
+    (check.fix ?? "").startsWith("approval up"),
+    `the fix does not start with \`approval up\`: ${check.fix ?? "<none>"}`,
+  );
+  // A stale socket is a failed run, not a cosmetic note.
+  assert.equal(run.code, 1);
+});
+
+test("doctor: no socket at all is still the absent failure, with its own fix", async () => {
+  const { port } = healthy();
+  const home = await socketHomeLive(port);
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const check = checkNamed(run, "live-draw");
+  assert.equal(check.status, "fail", check.detail);
+  assert.match(check.detail, /no draw socket at/u);
+  assert.match(check.fix ?? "", /approval up/u);
 });
 
 // ---------------------------------------------------------------------------
@@ -1711,8 +2013,56 @@ test("doctor: a value inherited from the shell over the instance's own line is r
   );
   const scope = checkNamed(bled, "keychain-scope");
   assert.equal(scope.status, "skip");
-  assert.match(scope.detail, /APPROVAL_TG_TOKEN is exported in this environment/u);
+  // APRV-278: the row says what was checked, which is that the export is not
+  // this instance's own `approval env`. It no longer asserts anything about the
+  // VALUE in use, which this check never reads.
+  assert.match(
+    scope.detail,
+    /APPROVAL_TG_TOKEN was exported before this process started and is not this instance's own `approval env` export/u,
+  );
+  assert.doesNotMatch(scope.detail, /the value in use/u);
   assert.equal(bled.stdout.includes(TOKEN), false, "the bleed report carried the value");
+});
+
+test("doctor: the documented start ritual is not reported as cross-instance bleed", async () => {
+  const home = await makeHome({ port: await freePort() });
+  const lines = [
+    `APPROVAL_TG_TOKEN=keychain:${servicesFor(logPathOf(home)).telegramToken}`,
+    "APPROVAL_TG_CHAT=12345",
+  ];
+  writeEnvFile(home, lines);
+
+  // The environment `eval "$(approval env)"` leaves behind: the two values
+  // exported, and beside them the claim the export block makes about itself.
+  // A synthetic token stands in for the resolved secret, because this check
+  // reads no value on any path and this suite writes no real one.
+  const ritual = {
+    APPROVAL_TG_TOKEN: TOKEN,
+    APPROVAL_TG_CHAT: "12345",
+    APPROVAL_ENV_PROVENANCE: formatEnvProvenance(
+      logPathOf(home),
+      envFileDigest(`${lines.join("\n")}\n`),
+      ["APPROVAL_TG_TOKEN", "APPROVAL_TG_CHAT"],
+    ),
+  };
+
+  const run = await runCli(
+    ["doctor", "--json", "--root", makeRoot("fresh"), "--api-base", assertLocal(mock.url)],
+    home,
+    ritual,
+  );
+  const scope = checkNamed(run, "keychain-scope");
+  assert.equal(scope.status, "pass", `the start ritual was reported: ${scope.detail}`);
+  assert.doesNotMatch(scope.detail, /APPROVAL_TG_TOKEN was exported/u);
+
+  // The same shell with the claim removed is the case the finding exists for.
+  const foreign = await runCli(
+    ["doctor", "--json", "--root", makeRoot("fresh"), "--api-base", assertLocal(mock.url)],
+    home,
+    { APPROVAL_TG_TOKEN: TOKEN, APPROVAL_TG_CHAT: "12345" },
+  );
+  assert.equal(checkNamed(foreign, "keychain-scope").status, "skip");
+  assert.equal(run.stdout.includes(TOKEN), false, "the quiet path carried the value");
 });
 
 // ---------------------------------------------------------------------------
@@ -1773,4 +2123,127 @@ test("doctor: attesting the organ turns the row green, and editing it turns it b
   );
   assert.equal(drifted.status, "skip");
   assert.match(drifted.detail, /edited since seq \d+/u);
+});
+
+// ---------------------------------------------------------------------------
+// sealed-keys (APRV-285)
+// ---------------------------------------------------------------------------
+
+/**
+ * Real git, in the temp home. The vault and environment rows can be driven with
+ * an empty `.git` directory because they only ever read `.gitignore`; this row
+ * also asks git what it TRACKS, and there is no honest way to fake that.
+ */
+function gitIn(args: string[], cwd: string): void {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  assert.equal(result.error, undefined, `git failed: ${String(result.error)}`);
+  assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.stderr}`);
+}
+
+/** A doctor home that is a real repository, with an X25519 private key in the store. */
+async function homeWithKeyStore(
+  options: { ignored: boolean; key?: boolean } = { ignored: false },
+): Promise<{ home: string; keyPath: string; relative: string }> {
+  const home = await makeHome({ port: await freePort() });
+  gitIn(["init", "-q", "-b", "main", "."], home);
+  if (options.ignored) writeFileSync(join(home, ".gitignore"), ".approval/keys/\n", "utf8");
+  const relative = ".approval/keys/task-1:send:2026-09-06.key";
+  const keyPath = join(home, ".approval", "keys", "task-1:send:2026-09-06.key");
+  if (options.key !== false) {
+    mkdirSync(join(home, ".approval", "keys"), { recursive: true });
+    // Shape only. The row counts files and never opens one, which is the point:
+    // a diagnostic that read a private key to report on it would be the fault.
+    writeFileSync(keyPath, "MC4CAQAwBQYDK2VuBCIEIA==\n", { encoding: "utf8", mode: 0o600 });
+  }
+  return { home, keyPath, relative };
+}
+
+test("doctor: a private key in a store no .gitignore line covers fails with that line", async () => {
+  const { home } = await homeWithKeyStore({ ignored: false });
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const keys = checkNamed(run, "sealed-keys");
+
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(keys.status, "fail");
+  assert.match(keys.detail, /NOT gitignored/u);
+  assert.match(keys.detail, /git add \.approval\//u);
+  // The fix is the exact line, pasteable, and it neither deletes nor commits.
+  assert.match(keys.fix ?? "", /^echo '\.approval\/keys\/' >> /u);
+  assert.ok(
+    FIX_COMMAND_PREFIXES.some((prefix) => (keys.fix ?? "").startsWith(prefix)),
+    `the sealed-keys fix does not begin with an allowed command: ${String(keys.fix)}`,
+  );
+});
+
+test("doctor: an empty key store with no ignore line is named, and does not fail the run", async () => {
+  const { home } = await homeWithKeyStore({ ignored: false, key: false });
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const keys = checkNamed(run, "sealed-keys");
+
+  // Nothing is exposed today, so this is a state and not a fault. The line an
+  // operator needs is still named, in the DETAIL rather than in a `fix`:
+  // doctor's older rule is that only a failing row hands over something to type,
+  // the pinned-fix sweep above enforces it across every row, and a skip that
+  // broke it would be this row teaching people to scroll past it.
+  assert.equal(keys.status, "skip");
+  assert.match(keys.detail, /no key is in/u);
+  assert.equal(keys.fix, undefined);
+  assert.match(keys.detail, /`\.approval\/keys\/` line covers it/u);
+  assert.equal(
+    parseDoctor(run).checks.some(
+      (entry) => entry.check === "sealed-keys" && entry.status === "fail",
+    ),
+    false,
+  );
+});
+
+test("doctor: the line `approval init` writes turns the sealed-keys row green", async () => {
+  const { home } = await homeWithKeyStore({ ignored: true });
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const keys = checkNamed(run, "sealed-keys");
+
+  assert.equal(keys.status, "pass");
+  assert.equal(keys.fix, undefined);
+  assert.match(keys.detail, /1 key\(s\) are stored there/u);
+  // The scaffolded entry and the row's verdict are the same line, so a reader
+  // who ran `approval init` is never asked to do the same thing twice.
+  assert.ok(GITIGNORE_ENTRIES.includes(".approval/keys/"));
+});
+
+test("doctor: a private key git already tracks fails, naming the untrack and the revoke", async () => {
+  const { home, relative } = await homeWithKeyStore({ ignored: true });
+  // `git add -f`: the ignore line is in place and the key is staged anyway,
+  // which is the shape a forced add or a commit made before the line leaves.
+  gitIn(["add", "-f", "--", relative], home);
+
+  const run = await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV);
+  const keys = checkNamed(run, "sealed-keys");
+
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(keys.status, "fail");
+  assert.match(keys.detail, /TRACKED by git/u);
+  assert.match(keys.detail, /token_sealed/u);
+  assert.match(keys.fix ?? "", /^approval init\b/u);
+  assert.match(keys.fix ?? "", /git rm --cached/u);
+  assert.match(keys.fix ?? "", /revoked/u);
+});
+
+test("doctor: a key consumed and unlinked is still reported while it is in the index", async () => {
+  const { home, keyPath, relative } = await homeWithKeyStore({ ignored: true });
+  gitIn(["add", "-f", "--", relative], home);
+  // Consume, expiry and revocation all unlink the private half. The working
+  // tree is then clean and the index is not, and it is the index that becomes
+  // a commit.
+  rmSync(keyPath);
+
+  const keys = checkNamed(
+    await runCli(["doctor", "--json", "--root", makeRoot("fresh")], home, GREEN_ENV),
+    "sealed-keys",
+  );
+
+  assert.equal(keys.status, "fail");
+  assert.match(keys.detail, /TRACKED by git/u);
 });

@@ -10,7 +10,8 @@
  * "the seq-2 shape" (an edit that does not load: the advisory says so, a plain
  * amend still attests, and --require-load refuses without touching the log) and
  * "the interregnum" (--commit lands the policy edit and its attestation as one
- * commit carrying exactly two files).
+ * commit carrying exactly the policy and the log, plus the pins when APRV-274's
+ * ceremony has any to carry).
  *
  * Nothing here writes a log line by hand; every record is produced by the CLI,
  * and log bytes are compared before/after for the cases that must write nothing.
@@ -540,7 +541,8 @@ function withoutProgress(text: string): string {
       (line) =>
         !/^(verifying the log chain|recovering the attested baseline)/u.test(line) &&
         // APRV-203's phases: the ceremony's own git preconditions, narrated.
-        !/^(fetching |verifying that |running the policy suite|building the amendment commit|pushing )/u.test(
+        // APRV-274 added one more of them: the dogfood suite's own phase.
+        !/^(fetching |verifying that |running the (policy|dogfood) suite|building the amendment commit|pushing )/u.test(
           line,
         ) &&
         !/^ {2}\d+\/\d+ records$/u.test(line),
@@ -591,6 +593,9 @@ test("the no-op --json report carries every frozen key", () => {
     "load",
     "noop",
     "ok",
+    // APRV-274, additive: which pins moved with this amendment. `null` when the
+    // pins are no part of the ceremony, which a no-op's never are.
+    "pins",
     "policy",
     // APRV-109, additive: the attestation prompt this ceremony collected its tap
     // from. `null` on every human-identity run, which is what this one is.
@@ -601,6 +606,7 @@ test("the no-op --json report carries every frozen key", () => {
   // boolean is `ceremony.attested`, and a no-op ceremony attested nothing.
   assert.deepEqual(parsed["ceremony"], { attested: false, seq: null });
   assert.equal(parsed["publishing"], null);
+  assert.equal(parsed["pins"], null);
   assert.equal(parsed["ok"], true);
   assert.equal(parsed["noop"], true);
   assert.equal(parsed["diff"], null);
@@ -2516,7 +2522,10 @@ test("the help states the baseline limitation, the flags, and the refusal codes"
   assert.match(run.stdout, /HASH-ONLY MODE/u);
   assert.match(run.stdout, /--require-load/u);
   assert.match(run.stdout, /commit-preconditions/u);
-  assert.match(run.stdout, /EXACTLY two files/u);
+  // APRV-274: the ceremony's file set grew from two to "exactly these", so the
+  // help says which three rather than how many.
+  assert.match(run.stdout, /EXACTLY the policy, the log and the pins/u);
+  assert.match(run.stdout, /DOGFOOD SUITE/u);
   // The two flows, the detection, and the precedence between them.
   assert.match(run.stdout, /--branch <name>/u);
   assert.match(run.stdout, /--direct/u);
@@ -2721,5 +2730,364 @@ test("APRV-203: the dogfood pins are checked against the amended file, and a fai
     git(["ls-remote", "--heads", "origin"], dir).stdout,
     /policy-amend-/u,
     "the clean re-run did not publish its branch",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// APRV-274: the pins ride in the commit, and the dogfood suite runs before it
+// ---------------------------------------------------------------------------
+
+/**
+ * A stand-in for `src/core/policy-expectations.ts` inside a fixture repository.
+ *
+ * The fixture's copy is never imported and never compiled. `expectationsFor`
+ * decides which pins govern a policy by package identity alone, so a fixture
+ * whose `package.json` names `approval-md` is checked against the REAL compiled
+ * pins. This file exists so the ceremony has a pins file to notice moving, and
+ * so the pin diff has two versions of a machine-shaped list to read.
+ */
+const PINS_BEFORE = [
+  "export const REPO_POLICY_EXPECTATIONS = [",
+  '  { actionClass: "deps.add", autonomy: "manual", provenance: "rule" },',
+  '  { actionClass: "log.sync", autonomy: "autonomous", provenance: "rule" },',
+  "];",
+  "",
+].join("\n");
+
+/** The same list with one pin moved: the change the ceremony must carry. */
+const PINS_AFTER = PINS_BEFORE.replace(
+  '{ actionClass: "log.sync", autonomy: "autonomous", provenance: "rule" },',
+  '{ actionClass: "log.sync", autonomy: "manual", provenance: "rule" },',
+);
+
+/** The source file whose presence tells the ceremony this repo has a suite. */
+const DOGFOOD_SOURCE_STUB =
+  "// A stand-in for tests/dogfood.test.ts. The ceremony asks only whether it exists;\n" +
+  "// what it RUNS is the built file beside it.\n";
+
+/**
+ * The built dogfood suite the ceremony actually spawns, green or red.
+ *
+ * A real `node:test` file, run by the real runner through the real spawn, so
+ * the case exercises the TAP parse rather than a stub of it. The test name is
+ * the one the seq 23351 ceremony went red on, because naming the failing test
+ * is the thing under test.
+ */
+function dogfoodBuilt(green: boolean): string {
+  return [
+    'import assert from "node:assert/strict";',
+    'import { test } from "node:test";',
+    'test("the proposed values block leaves the live policy byte-for-byte the same", () => {',
+    `  assert.ok(${green ? "true" : "false"}, "the values block moved");`,
+    "});",
+    "",
+  ].join("\n");
+}
+
+/**
+ * A repository that reads as the approval-md package: the real policy, a
+ * `package.json` that names the package, a pins module, and optionally the
+ * dogfood suite in source, in build output, or in source alone.
+ *
+ * Everything is committed and pushed before it returns, so the index is clean
+ * and `--commit`'s stray check has nothing to complain about.
+ */
+function repoAsPackage(
+  options: { policy?: string; suite?: "green" | "red" | "unbuilt" } = {},
+): { dir: string; remote: string } {
+  const { dir, remote } = repoWithRemote(options.policy ?? REPO_POLICY);
+  writeFileSync(
+    join(dir, "package.json"),
+    `${JSON.stringify({ name: "approval-md", type: "module" })}\n`,
+    "utf8",
+  );
+  mkdirSync(join(dir, "src", "core"), { recursive: true });
+  writeFileSync(join(dir, "src", "core", "policy-expectations.ts"), PINS_BEFORE, "utf8");
+  if (options.suite !== undefined) {
+    mkdirSync(join(dir, "tests"), { recursive: true });
+    writeFileSync(join(dir, "tests", "dogfood.test.ts"), DOGFOOD_SOURCE_STUB, "utf8");
+    if (options.suite !== "unbuilt") {
+      mkdirSync(join(dir, "dist", "tests"), { recursive: true });
+      writeFileSync(
+        join(dir, "dist", "tests", "dogfood.test.js"),
+        dogfoodBuilt(options.suite === "green"),
+        "utf8",
+      );
+    }
+  }
+  // A broken fixture is not a finding: if the suite files are not where the
+  // ceremony looks for them, every case below would pass by skipping.
+  if (options.suite !== undefined) {
+    assert.equal(existsSync(join(dir, "tests", "dogfood.test.ts")), true, "fixture: no suite source");
+    assert.equal(
+      existsSync(join(dir, "dist", "tests", "dogfood.test.js")),
+      options.suite !== "unbuilt",
+      "fixture: the built suite is not in the state the case asked for",
+    );
+  }
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "package"], dir);
+  attest(dir);
+  git(["add", "-A"], dir);
+  git(["commit", "-qm", "attestation"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  return { dir, remote };
+}
+
+/** An amendment the pins have nothing to say about: one budget, widened. */
+const WIDENED_BUDGET = REPO_POLICY.replace("daily_actions: 20000", "daily_actions: 20001");
+
+test("APRV-274: a ceremony whose pins moved commits policy, log and pins as ONE commit", () => {
+  const { dir, remote } = repoAsPackage({ suite: "green" });
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/74" });
+  assert.notEqual(WIDENED_BUDGET, REPO_POLICY, "the fixture policy no longer carries the budget line");
+  writeFileSync(join(dir, "APPROVAL.md"), WIDENED_BUDGET, "utf8");
+  writeFileSync(join(dir, "src", "core", "policy-expectations.ts"), PINS_AFTER, "utf8");
+
+  // The dry run names all three files in the `git add` it would run, so the
+  // hand procedure and the automatic one land the same commit.
+  const dry = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--dry-run", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(dry.code, 0, dry.stderr);
+  const planned = (report(dry)["git"] as { commands: string[] }).commands;
+  const add = planned.find((command) => command.startsWith("git add"));
+  assert.match(
+    add ?? "",
+    /src\/core\/policy-expectations\.ts/u,
+    `the dry run's git add omits the pins: ${planned.join(" | ")}`,
+  );
+  assert.deepEqual((report(dry)["pins"] as { changes: unknown[] }).changes, [
+    { actionClass: "log.sync", before: "autonomous/rule", after: "manual/rule" },
+  ]);
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+
+  // ONE commit, carrying exactly the three files: no second push, and nothing
+  // left over for a later cherry-pick to add.
+  assert.deepEqual(
+    remoteFiles(remote, "policy-amend-2"),
+    [".approval/log/events.jsonl", "APPROVAL.md", "src/core/policy-expectations.ts"].sort(),
+  );
+  assert.equal(
+    git(["rev-list", "--count", "main..policy-amend-2"], remote).stdout.trim(),
+    "1",
+    "the amendment is more than one commit",
+  );
+  assert.match(
+    git(["show", "policy-amend-2:src/core/policy-expectations.ts"], remote).stdout,
+    /"log\.sync", autonomy: "manual"/u,
+    "the pushed commit does not carry the moved pin",
+  );
+
+  // The pin change is reported beside the class changes, and the commit says so.
+  assert.match(run.stdout, /pins\s+src\/core\/policy-expectations\.ts moves with this amendment/u);
+  assert.match(run.stdout, /log\.sync: autonomous\/rule -> manual\/rule/u);
+  assert.match(run.stdout, /committed the policy, the log and the pins together/u);
+  assert.match(
+    git(["log", "-1", "--pretty=%s", "policy-amend-2"], remote).stdout,
+    /1 pin\(s\)/u,
+    "the commit subject does not name the pins it carries",
+  );
+});
+
+test("APRV-274: a pins file the base already carries is left out of the commit", () => {
+  const { dir, remote } = repoAsPackage();
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/75" });
+  writeFileSync(join(dir, "APPROVAL.md"), WIDENED_BUDGET, "utf8");
+
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(report(run)["pins"], null, "an unmoved pins file was reported as part of the ceremony");
+  assert.deepEqual(remoteFiles(remote, "policy-amend-2"), [
+    ".approval/log/events.jsonl",
+    "APPROVAL.md",
+  ].sort());
+});
+
+test("APRV-274: a staged pins edit is not a stray, and a staged anything-else still is", () => {
+  const { dir, remote } = repoAsPackage();
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/76" });
+  writeFileSync(join(dir, "APPROVAL.md"), WIDENED_BUDGET, "utf8");
+  writeFileSync(join(dir, "src", "core", "policy-expectations.ts"), PINS_AFTER, "utf8");
+  git(["add", "src/core/policy-expectations.ts"], dir);
+
+  // The rule did not become "sweep in whatever is staged": one unrelated staged
+  // file is still a refusal, and it names the three the commit may carry.
+  writeFileSync(join(dir, "UNRELATED.md"), "# not part of the amendment\n", "utf8");
+  git(["add", "UNRELATED.md"], dir);
+  const recordsBefore = logRecords(dir).length;
+  const refused = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.notEqual(refused.code, 0);
+  assert.equal(errorOf(refused).code, "commit-preconditions");
+  assert.match(errorOf(refused).message, /UNRELATED\.md/u);
+  assert.match(
+    errorOf(refused).message,
+    /the policy, the log and src\/core\/policy-expectations\.ts/u,
+  );
+  assert.equal(logRecords(dir).length, recordsBefore, "a refused precondition attested something");
+
+  // With the stray unstaged, the staged pins edit alone is a ceremony that runs.
+  git(["rm", "--cached", "-q", "UNRELATED.md"], dir);
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  assert.deepEqual(
+    remoteFiles(remote, "policy-amend-2"),
+    [".approval/log/events.jsonl", "APPROVAL.md", "src/core/policy-expectations.ts"].sort(),
+  );
+});
+
+test("APRV-274: a RED dogfood suite refuses BEFORE the attestation, naming the test", () => {
+  // This case also proves the environment strip, and it is the case that found
+  // the need for one. Every test in this file runs under `node --test`, so the
+  // CLI it spawns inherits NODE_TEST_CONTEXT, and `node:test` responds to that
+  // variable by declining to run files recursively and exiting 0 with a
+  // warning. Before `runDogfoodSuite` stripped it, this red suite came back
+  // green and the whole ceremony published: the strongest-looking evidence this
+  // check can report, from a run that asserted nothing.
+  const { dir, remote } = repoAsPackage({ suite: "red" });
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/77" });
+  writeFileSync(join(dir, "APPROVAL.md"), WIDENED_BUDGET, "utf8");
+
+  const recordsBefore = logRecords(dir).length;
+  const headBefore = git(["rev-parse", "HEAD"], dir).stdout.trim();
+  const failed = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.notEqual(failed.code, 0, `the red suite did not refuse: ${failed.stdout}${failed.stderr}`);
+  assert.equal(errorOf(failed).code, "dogfood-suite-failed");
+  assert.match(
+    errorOf(failed).message,
+    /the proposed values block leaves the live policy byte-for-byte the same/u,
+    "the refusal does not name the failing test",
+  );
+  assert.match(errorOf(failed).message, /Nothing was attested, committed or pushed/u);
+  assert.equal(
+    (JSON.parse(failed.stderr) as { dogfood: { failed: string[] } }).dogfood.failed.includes(
+      "the proposed values block leaves the live policy byte-for-byte the same",
+    ),
+    true,
+    "the machine surface does not carry the failing test",
+  );
+
+  // Nothing anywhere: not in the log, not in this checkout, not on origin.
+  assert.equal(logRecords(dir).length, recordsBefore, "a red suite still attested");
+  assert.equal(git(["rev-parse", "HEAD"], dir).stdout.trim(), headBefore);
+  assert.equal(
+    git(["ls-remote", "--heads", "origin", "policy-amend-*"], dir).stdout.trim(),
+    "",
+    "a branch from a red ceremony reached origin",
+  );
+  assert.equal(remoteHead(remote, "refs/heads/policy-amend-2"), "");
+
+  // The same ceremony, once the suite is green, runs clean. Only the suite is
+  // committed here: the policy edit stays a working-tree change, which is what
+  // the amendment is still about.
+  writeFileSync(join(dir, "dist", "tests", "dogfood.test.js"), dogfoodBuilt(true), "utf8");
+  git(["add", "dist"], dir);
+  git(["commit", "-qm", "fix the suite"], dir);
+  git(["push", "-q", "origin", "main"], dir);
+  const passed = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.equal(passed.code, 0, passed.stderr);
+  assert.match(passed.stderr, /^running the dogfood suite against the amended file/mu);
+});
+
+test("APRV-274: a dogfood suite present in source and absent from the build is refused", () => {
+  const { dir } = repoAsPackage({ suite: "unbuilt" });
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/78" });
+  writeFileSync(join(dir, "APPROVAL.md"), WIDENED_BUDGET, "utf8");
+
+  const recordsBefore = logRecords(dir).length;
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.notEqual(run.code, 0);
+  assert.equal(errorOf(run).code, "dogfood-suite-failed");
+  assert.match(errorOf(run).message, /is not built/u);
+  assert.match(errorOf(run).message, /Nothing was attested, committed or pushed/u);
+  assert.equal(logRecords(dir).length, recordsBefore);
+});
+
+test("APRV-274: an unpinned class is refused with the exact pin lines to add", () => {
+  // A class the policy declares, the classifier can emit, and nothing pins.
+  const withUnpinned = REPO_POLICY.replace(
+    "  deps.add:                  { autonomy: manual }",
+    "  deps.add:                  { autonomy: manual }\n  deps.remove:               { autonomy: manual }",
+  );
+  assert.notEqual(withUnpinned, REPO_POLICY, "the fixture policy no longer carries the deps.add line");
+  const { dir } = repoAsPackage();
+  const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/79" });
+  writeFileSync(join(dir, "APPROVAL.md"), withUnpinned, "utf8");
+
+  const recordsBefore = logRecords(dir).length;
+  const run = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.notEqual(run.code, 0);
+  assert.equal(errorOf(run).code, "policy-suite-failed");
+  assert.match(errorOf(run).message, /deps\.remove: expected a pin in REPO_POLICY_EXPECTATIONS/u);
+  assert.match(
+    errorOf(run).message,
+    /\{ actionClass: "deps\.remove", autonomy: "manual", provenance: "rule" \},/u,
+    "the refusal does not print the line to add",
+  );
+  assert.deepEqual((JSON.parse(run.stderr) as { pins: { add: string[] } }).pins.add, [
+    '  { actionClass: "deps.remove", autonomy: "manual", provenance: "rule" },',
+  ]);
+  assert.equal(logRecords(dir).length, recordsBefore);
+
+  // And on a terminal: the runbook prints the same line, copyable as it stands.
+  const human = runCli(
+    ["policy", "amend", "--as", "human:carter", "--yes", "--commit"],
+    dir,
+    {},
+    pathWith(stub.dir),
+  );
+  assert.notEqual(human.code, 0);
+  assert.match(
+    human.stderr,
+    /the lines to add to REPO_POLICY_EXPECTATIONS in src\/core\/policy-expectations\.ts/u,
+  );
+  assert.match(
+    human.stderr,
+    /^\s+\{ actionClass: "deps\.remove", autonomy: "manual", provenance: "rule" \},$/mu,
   );
 });

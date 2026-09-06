@@ -30,6 +30,7 @@ import {
   containsSecret,
   executeThroughAdapter,
   inMemoryCredentials,
+  providerRefFor,
   redactJson,
   redactSecrets,
   type ActInput,
@@ -859,4 +860,121 @@ test("the agentmail adapter conforms to the adapter contract", async (t) => {
     () => agentmailAdapter({ apiBase: assertAgentmailLocal(agentmailMock.url), timeoutMs: 5_000 }),
     AGENTMAIL_CONFORMANCE,
   );
+});
+
+// ---------------------------------------------------------------------------
+// 3g. The provider reference (APRV-251)
+// ---------------------------------------------------------------------------
+
+/** Every record in this log, parsed. Read back off disk, never assembled. */
+function linesOf(logPath: string): Record<string, unknown>[] {
+  return readFileSync(logPath, "utf8")
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+/** The `provider_ref` on the last record of `event`, or `undefined`. */
+function refOf(logPath: string, event = "execution.completed"): unknown {
+  const outcome = linesOf(logPath)
+    .filter((record) => record["event"] === event)
+    .at(-1);
+  assert.ok(outcome !== undefined, `no ${event} in the log`);
+  return (outcome["payload"] as Record<string, unknown> | undefined)?.["provider_ref"];
+}
+
+test("a detail naming a reference puts it on the completed record", async () => {
+  const unit = granted();
+  const result = await run(mockAdapter({ providerRef: "msg_01JQ2XKV" }), unit);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  // The adapter half is the contract's own knowledge of which adapter it
+  // called, so an adapter cannot file its effect under somebody else's name.
+  assert.deepEqual(refOf(unit.logPath), { adapter: "mock-email", id: "msg_01JQ2XKV" });
+  if (result.ok) {
+    assert.deepEqual(result.provider_ref, { adapter: "mock-email", id: "msg_01JQ2XKV" });
+  }
+});
+
+test("an adapter that names no reference leaves the record carrying none", async () => {
+  const unit = granted();
+  const result = await run(mockAdapter(), unit);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(refOf(unit.logPath), undefined, "a reference was invented for an adapter naming none");
+  if (result.ok) assert.equal(result.provider_ref, undefined);
+});
+
+test("a reference the redaction sweep touched is dropped rather than recorded", async () => {
+  const unit = granted();
+  // The careless adapter of the redaction checks, one field over: the secret is
+  // inside the value that would become the join key.
+  const result = await run(mockAdapter({ providerRef: `msg-${SECRET}` }), unit);
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const raw = readFileSync(unit.logPath, "utf8");
+  assert.equal(raw.includes(SECRET), false, "the secret reached the log (SPEC.md §11.1 invariant 3)");
+  assert.equal(
+    raw.includes(REDACTION_PLACEHOLDER),
+    false,
+    "a redacted identifier was written as though it were an identifier",
+  );
+  assert.equal(refOf(unit.logPath), undefined);
+  if (result.ok) {
+    assert.equal(result.provider_ref, undefined);
+    assert.ok(result.redactions > 0, "the sweep did not count the hit inside the reference");
+    const detail = result.detail as Record<string, JsonValue>;
+    assert.equal(
+      String(detail["provider_ref"]).includes(SECRET),
+      false,
+      "the returned detail still carried the secret",
+    );
+  }
+});
+
+for (const [label, id] of [
+  ["a space", "msg 01JQ2XKV"],
+  ["a newline", "msg\n01JQ2XKV"],
+  ["nothing at all", ""],
+  ["more than 256 characters", `msg_${"x".repeat(300)}`],
+] as const) {
+  test(`a reference carrying ${label} is dropped, and the execution still completes`, async () => {
+    const unit = granted();
+    const result = await run(mockAdapter({ providerRef: id }), unit);
+
+    // The side effect happened. A record the write boundary would reject is the
+    // one thing that must not follow it, so the reference is dropped and the
+    // completion is the pre-amendment record.
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(refOf(unit.logPath), undefined, `a reference of ${label} was recorded anyway`);
+    if (result.ok) assert.equal(result.provider_ref, undefined);
+  });
+}
+
+test("a failed execution records no reference even when the adapter named one", async () => {
+  const unit = granted();
+  const result = await run(
+    mockAdapter({ providerRef: "msg_01JQ2XKV", fail: { code: "upstream-said-no", message: "no" } }),
+    unit,
+  );
+
+  assert.equal(result.ok, false, "a reported failure completed");
+  // A failure produced no effect for a provider to file, and a join key on it
+  // would claim the log covers an effect that never happened.
+  assert.equal(refOf(unit.logPath, "execution.failed"), undefined);
+});
+
+test("the reference the contract lifts is the one the record carries", async () => {
+  const unit = granted();
+  const adapter = mockAdapter({ providerRef: "msg_01JQ2XKV" });
+  const result = await run(adapter, unit);
+  assert.equal(result.ok, true, JSON.stringify(result));
+
+  // The same function the contract uses to lift, run over the returned detail:
+  // a suite that spelled the rule a second time would eventually disagree with
+  // the runtime and fail an adapter that had done nothing wrong.
+  if (result.ok) {
+    const detail = result.detail as JsonValue;
+    assert.deepEqual(providerRefFor(adapter.name, detail, detail), result.provider_ref);
+  }
 });
