@@ -1763,7 +1763,7 @@ Flags:
   --interval <d> / --debounce <d>  tick period (30s) / event settle time (250ms)
   --once / --json / --no-preflight  one tick / JSON lines / skip the git check
   --git-evidence / --advance / --dark-sessions  three OPT-INs, off by default
-  --read-proof full|incremental    prefix proof per read; full is the default
+  --read-proof full|incremental (default full) / --trace-watch (watch events)
   --with-channels  the channels in this process too: SAME VERB as "approval up"
   -h, --help       this text
 

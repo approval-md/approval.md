@@ -60,6 +60,13 @@
  * Watch events are debounced (`debounceMs`) so a burst collapses into one tick.
  * Ticks are synchronous end to end, so they cannot interleave.
  *
+ * Which of those events are acted on, and which are dropped as this loop's own
+ * hand or as bookkeeping nobody reads, is {@link Daemon.attachWatchers}.
+ * `traceWatch` prints the decision for every event, and the `tick` line's
+ * `woke_by` names the one that opened the window it closed (APRV-230): a tick is
+ * the daemon's unit of work, and one nobody asked for costs exactly as much as
+ * one somebody did.
+ *
  * ## Single writer, in intent only
  *
  * CLAUDE.md's rule is that the daemon is the sole writer while it runs. That is
@@ -159,6 +166,66 @@ export const DEFAULT_INTERVAL_MS = 30_000;
 
 /** How long a burst of watcher events is allowed to settle before a tick. */
 export const DEFAULT_DEBOUNCE_MS = 250;
+
+// ---------------------------------------------------------------------------
+// The watchers (APRV-211, APRV-230)
+// ---------------------------------------------------------------------------
+
+/** The two directories this loop watches, as they are named in its output. */
+export type WatchSource = "tasks" | "log";
+
+/**
+ * Why a watcher event did not schedule a tick (APRV-230).
+ *
+ * Machine-readable and a closed union, for the reason {@link
+ * DAEMON_WARNING_CODES} is: an operator counting phantom ticks groups the trace
+ * by this field, and a free-text sentence would make that a grep instead of a
+ * count.
+ */
+export const WATCH_IGNORE_REASONS = [
+  /** A task file this daemon's own write-back pass placed (APRV-211). */
+  "self-write",
+  /** The `.<name>.tmp-<pid>-<n>` file this process writes a task file through. */
+  "own-temp",
+  /** A bookkeeping file: see {@link bookkeepingKind}. */
+  "bookkeeping",
+  /** Something in the log's directory that is not the log (the snapshot). */
+  "not-the-log",
+] as const;
+
+export type WatchIgnoreReason = (typeof WATCH_IGNORE_REASONS)[number];
+
+/**
+ * What kind of bookkeeping file `name` is, or `null` when it is not one.
+ *
+ * The files that live in these two directories without ever being their
+ * subject: the append lockfile every writer in this runtime creates and removes
+ * (`<log>.lock`, `core/log.ts`), the swap, autosave, backup and lock files an
+ * editor scatters beside a file it is editing, and macOS's own `.DS_Store` and
+ * AppleDouble residue. Each of these is a filesystem event about how a change
+ * was made and never about the change; a tick scheduled for one re-derives an
+ * answer nothing has moved (APRV-230, and the lockfile pair is two events per
+ * append from every writer on the machine).
+ *
+ * Safe for exactly the reason {@link Daemon.attachWatchers} documents: the
+ * watcher is a latency optimization and correctness never depended on it
+ * (SPEC.md §10.2), so the worst an over-eager name here can cost is one
+ * `--interval` of latency. Nothing in this list can name a Backlog.md task file,
+ * which is `<id> - <slug>.md`.
+ */
+export function bookkeepingKind(name: string): string | null {
+  // The append lockfile, and any other `.lock` a tool leaves in these folders.
+  if (name.endsWith(".lock")) return "lockfile";
+  // vim: `.task-042.md.swp`, `.task-042.md.swo`, …
+  if (/\.sw[a-p]$/u.test(name)) return "swap";
+  // emacs: `#task-042.md#` (autosave) and `.#task-042.md` (the lock symlink).
+  if (/^#.+#$/u.test(name) || name.startsWith(".#")) return "editor-lock";
+  // Backups: `task-042.md~`, and JetBrains' write-through temporaries.
+  if (name.endsWith("~") || /___jb_(?:tmp|old)___$/u.test(name)) return "backup";
+  // macOS: the Finder's own index, and AppleDouble sidecars.
+  if (name === ".DS_Store" || name.startsWith("._")) return "macos";
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // The output stream
@@ -364,6 +431,31 @@ export type DaemonEvent =
   | { event: "escalated"; task: string; consecutive_failures: number }
   | { event: "escalation_cleared"; task: string }
   | {
+      /**
+       * One filesystem watcher event, as the platform delivered it (APRV-230).
+       *
+       * Emitted only under {@link DaemonOptions.traceWatch}, because a busy
+       * checkout produces several of these per second and they are a diagnostic
+       * rather than a narrative. It is what the phantom-tick investigation had
+       * no way to ask: which directory fired, what the platform called the
+       * event, which file it named, and whether this loop acted on it.
+       *
+       * Report-only in the strongest sense: nothing downstream reads it, and
+       * turning the trace on changes no verdict and no schedule.
+       */
+      event: "watch";
+      /** Which watcher fired: the task folder, or the log's directory. */
+      watcher: WatchSource;
+      /** The platform's own event name (`rename`, `change`). */
+      type: string;
+      /** The file the platform named, or `null` when it named none. */
+      file: string | null;
+      /** Whether this event scheduled a tick. */
+      action: "scheduled" | "ignored";
+      /** Why it was ignored, or `null` when it scheduled. */
+      reason: WatchIgnoreReason | null;
+    }
+  | {
       event: "tick";
       n: number;
       head: number | null;
@@ -426,6 +518,22 @@ export type DaemonEvent =
          */
         due: boolean;
       };
+      /**
+       * What woke this tick (APRV-230). Additive, and report-only.
+       *
+       * `log` and `tasks` name the watcher whose event opened the debounce
+       * window this tick closed; `interval` covers everything else (the
+       * periodic tick, the startup tick, and `--once`). The 2026-09-02 incident
+       * was diagnosed by counting ticks at an unchanged head, and this field is
+       * that count without a profiler: a tick that says `log` with no append
+       * behind it is a watcher event this daemon has not learned to attribute.
+       */
+      woke_by: WatchSource | "interval";
+      /**
+       * The file the waking event named, when it named one. Absent for an
+       * `interval` tick and for a platform event that named no file.
+       */
+      woke_file?: string;
       /** Per-phase duration in milliseconds, in the order the tick runs them. */
       phases: {
         drift: number;
@@ -554,6 +662,13 @@ export interface DaemonOptions {
   debounceMs: number;
   /** Run exactly one tick and stop. The cron-shaped invocation, and the tests'. */
   once: boolean;
+  /**
+   * Emit a `watch` line for every filesystem watcher event (APRV-230), ignored
+   * ones included. Off by default: it is a diagnostic an operator turns on to
+   * find out what is waking their daemon, and on a busy checkout it is several
+   * lines per second. It changes nothing else about the run.
+   */
+  traceWatch?: boolean;
   /** The write-boundary clock, injected by tests (amended SPEC.md §8). */
   clock?: Clock;
   /**
@@ -795,6 +910,13 @@ export class Daemon {
     keys: number;
     due: boolean;
   } | null = null;
+  /**
+   * The watcher event that opened the current debounce window (APRV-230), or
+   * `null` when nothing has woken this daemon since the last tick consumed it.
+   * Read once at the top of a tick and cleared there, so a periodic tick that
+   * happens to run first takes the attribution with the work.
+   */
+  private pendingWake: { source: WatchSource; file: string | null } | null = null;
   /** Basenames {@link writeBack} placed this tick, so the watcher can ignore them. */
   private selfWrites = new Set<string>();
   /** The previous tick's, kept one generation: watch events arrive after the write. */
@@ -988,6 +1110,24 @@ export class Daemon {
    * changed" and must still be believed), and the tasks watcher ignores the
    * basenames this daemon just placed.
    *
+   * ## Bookkeeping, nobody's hand (APRV-230)
+   *
+   * The self-wake was not the whole of it. Both directories also carry files
+   * that no reader ever reads: the append lockfile every writer in this runtime
+   * creates and removes around each append, and the swap, autosave and backup
+   * files an editor scatters beside a task file. Those are events about how a
+   * change was made, and a tick scheduled for one re-derives an answer nothing
+   * has moved. {@link bookkeepingKind} names them and they are dropped here, in
+   * both directories.
+   *
+   * What is left unattributed on purpose is a platform event that names no file.
+   * That is the platform saying "something in this directory changed" and
+   * declining to say what, and the log itself is one of the things it might
+   * have been; believing it costs a tick and doubting it could cost an append's
+   * latency. {@link DaemonOptions.traceWatch} makes every one of these decisions
+   * visible, which is how the remaining wake sources get counted rather than
+   * guessed at.
+   *
    * This is safe for exactly the reason stated in the module header: correctness
    * never depended on the watcher. Every tick re-scans the folder and re-derives
    * everything from the verified log, and the periodic tick runs regardless
@@ -1000,22 +1140,28 @@ export class Daemon {
     this.watchAttempted = true;
     const logName = basename(this.options.logPath);
     const ownTempFile = new RegExp(`^\\..*\\.tmp-${String(process.pid)}-\\d+$`, "u");
+    /** Decide one watcher event, report it under the trace, and act on it. */
+    const handle = (source: WatchSource, type: string, raw: string | null): void => {
+      const file = raw === null || raw === undefined || raw === "" ? null : raw;
+      const reason = this.classifyWatchEvent(source, file, logName, ownTempFile);
+      if (this.options.traceWatch === true) {
+        this.emit({
+          event: "watch",
+          watcher: source,
+          type,
+          file,
+          action: reason === null ? "scheduled" : "ignored",
+          reason,
+        });
+      }
+      if (reason === null) this.schedule({ source, file });
+    };
     const triggers = {
-      // A rename or a save the daemon did not make. `null` (or an undefined
-      // name) is a platform that will not say which file moved: believe it.
-      tasks: (_event: string, name: string | null): void => {
-        if (name !== null && name !== undefined) {
-          if (this.selfWrites.has(name) || this.previousSelfWrites.has(name)) return;
-          // `core/task-file.ts` places a file through `.<name>.tmp-<pid>-<n>`
-          // in the same directory, and that temp file's create and rename are
-          // two more events about a write this process made.
-          if (ownTempFile.test(name)) return;
-        }
-        this.schedule();
+      tasks: (type: string, name: string | null): void => {
+        handle("tasks", type, name);
       },
-      log: (_event: string, name: string | null): void => {
-        if (name !== null && name !== undefined && name !== logName) return;
-        this.schedule();
+      log: (type: string, name: string | null): void => {
+        handle("log", type, name);
       },
     };
     for (const [label, dir] of [
@@ -1042,9 +1188,45 @@ export class Daemon {
     }
   }
 
+  /**
+   * Whether one watcher event schedules a tick, and if not, why not (APRV-230).
+   *
+   * Pure, apart from reading the two sets of basenames this loop's own
+   * write-back placed. `null` means "schedule"; every other answer is a reason
+   * an operator can count.
+   */
+  private classifyWatchEvent(
+    source: WatchSource,
+    file: string | null,
+    logName: string,
+    ownTempFile: RegExp,
+  ): WatchIgnoreReason | null {
+    // A platform that will not say which file moved is saying "something in
+    // here changed", and one of the things it might be is the log: believe it.
+    if (file === null) return null;
+    if (source === "log") {
+      if (file === logName) return null;
+      // The lockfile first, so the trace names what it actually was rather than
+      // lumping it in with the verified-head snapshot beside it.
+      if (bookkeepingKind(file) !== null) return "bookkeeping";
+      return "not-the-log";
+    }
+    if (this.selfWrites.has(file) || this.previousSelfWrites.has(file)) return "self-write";
+    // `core/task-file.ts` places a file through `.<name>.tmp-<pid>-<n>` in the
+    // same directory, and that temp file's create and rename are two more
+    // events about a write this process made.
+    if (ownTempFile.test(file)) return "own-temp";
+    if (bookkeepingKind(file) !== null) return "bookkeeping";
+    return null;
+  }
+
   /** Coalesce a burst of watcher events into one tick. */
-  private schedule(): void {
+  private schedule(wake: { source: WatchSource; file: string | null }): void {
     if (this.finished) return;
+    // The event that OPENED the window is the one that woke the daemon
+    // (APRV-230); the ones behind it in the same burst only move the deadline,
+    // and the tick they share is attributed to the first of them.
+    this.pendingWake ??= wake;
     if (this.debounce !== null) clearTimeout(this.debounce);
     this.debounce = setTimeout(() => {
       this.debounce = null;
@@ -1092,6 +1274,11 @@ export class Daemon {
         phases[phase] += performance.now() - from;
       }
     };
+    // What woke this tick (APRV-230), taken exactly once: the next watcher
+    // event opens a fresh window, and a tick that ran on the interval reports
+    // the wake it happened to cover rather than leaving it for a second tick.
+    const woke = this.pendingWake;
+    this.pendingWake = null;
     try {
       this.ticks += 1;
       this.reads = 0;
@@ -1254,6 +1441,8 @@ export class Daemon {
         reproof: this.fullReproofThisTick ? "full" : "incremental",
         ...(this.anchorThisTick === null ? {} : { anchor: this.anchorThisTick }),
         ...(this.checkpointsThisTick === null ? {} : { checkpoints: this.checkpointsThisTick }),
+        woke_by: woke === null ? "interval" : woke.source,
+        ...(woke === null || woke.file === null ? {} : { woke_file: woke.file }),
         phases: {
           drift: Math.round(phases.drift * 10) / 10,
           ttl: Math.round(phases.ttl * 10) / 10,
