@@ -305,7 +305,8 @@ with the outcome the log now carries, so the transcript catches up on its own.
 
 A one-time ceremony, and the only part of this runbook that cannot be delegated
 to an agent by design. It gives the log a second witness beside git anchoring: a
-key no agent process holds, signing the head on a cadence.
+key no agent process holds, signing the head on a cadence. Why it is shaped this
+way is [checkpoints](checkpoints.md); the steps are here.
 
 **Step 1, at a terminal in the primary checkout.** The vault passphrase must be
 in the shell first, because the private half goes into the vault:

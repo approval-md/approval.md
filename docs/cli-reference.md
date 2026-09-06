@@ -150,7 +150,10 @@ The anchor asks whether anybody else holds a copy of these bytes, and answers
 from git, so it is exactly as fresh as the last push and says nothing at all on
 a machine with no remote. `--checkpoints` asks a different question: did a key
 that no agent process holds sign this head? It answers from the log plus the
-policy, so it works offline and covers the window nobody has pushed yet.
+policy, so it works offline and covers the window nobody has pushed yet. The
+design behind the mechanism, including why an unknown key is a refusal and why
+the signing key is not the attestation identity, is
+[checkpoints](checkpoints.md).
 
 The two are independent and neither may be weakened to let the other pass. A
 forger who truncates the log and recomputes the chain defeats neither: the
