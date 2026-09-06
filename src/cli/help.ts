@@ -1997,9 +1997,9 @@ Flags:
   --json           machine-readable output (carries values; --check does not)
   -h, --help       this text
 
-THIS COMMAND IS THE ONLY THING THAT READS .approval/env (invariant 7) and its
-default output CARRIES SECRETS, deliberately. The file is one KEY=VALUE per line
-at mode 0600, and VALUE says WHERE the value lives.
+THIS COMMAND IS THE ONLY THING THAT READS .approval/env (invariant 7), a mode
+0600 file of KEY=VALUE lines saying WHERE each value lives. Its default output
+CARRIES SECRETS by design; its APPROVAL_ENV_PROVENANCE line carries no value.
 
     approval env --check      # look first: no value is printed on this path
     eval "$(approval env)"    # then establish the environment yourself

@@ -43,6 +43,8 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { FIX_COMMAND_PREFIXES } from "../src/cli/doctor.js";
+import { envFileDigest } from "../src/core/env-file.js";
+import { formatEnvProvenance } from "../src/core/instance.js";
 import { servicesFor } from "../src/cli/setup-common.js";
 import { DOCTOR_ROW_ORDER } from "./doctor-rows.js";
 import { assertLocal, startMockBotApi, type MockBotApi } from "./telegram-mock.js";
@@ -103,7 +105,15 @@ async function runCli(
   env: Record<string, string> = {},
 ): Promise<Run> {
   const childEnv = { ...process.env, ...env };
-  for (const name of ["APPROVAL_HUMAN", "APPROVAL_TG_TOKEN", "APPROVAL_TG_CHAT"]) {
+  for (const name of [
+    "APPROVAL_HUMAN",
+    "APPROVAL_TG_TOKEN",
+    "APPROVAL_TG_CHAT",
+    // APRV-278: whoever runs the suite may have evaluated `approval env` in
+    // their own shell, and an inherited claim would quietly silence the bleed
+    // rows below.
+    "APPROVAL_ENV_PROVENANCE",
+  ]) {
     if (env[name] === undefined) delete childEnv[name];
   }
   // The same discipline as `assertLocal`, one layer out: a fully configured
@@ -1711,8 +1721,56 @@ test("doctor: a value inherited from the shell over the instance's own line is r
   );
   const scope = checkNamed(bled, "keychain-scope");
   assert.equal(scope.status, "skip");
-  assert.match(scope.detail, /APPROVAL_TG_TOKEN is exported in this environment/u);
+  // APRV-278: the row says what was checked, which is that the export is not
+  // this instance's own `approval env`. It no longer asserts anything about the
+  // VALUE in use, which this check never reads.
+  assert.match(
+    scope.detail,
+    /APPROVAL_TG_TOKEN was exported before this process started and is not this instance's own `approval env` export/u,
+  );
+  assert.doesNotMatch(scope.detail, /the value in use/u);
   assert.equal(bled.stdout.includes(TOKEN), false, "the bleed report carried the value");
+});
+
+test("doctor: the documented start ritual is not reported as cross-instance bleed", async () => {
+  const home = await makeHome({ port: await freePort() });
+  const lines = [
+    `APPROVAL_TG_TOKEN=keychain:${servicesFor(logPathOf(home)).telegramToken}`,
+    "APPROVAL_TG_CHAT=12345",
+  ];
+  writeEnvFile(home, lines);
+
+  // The environment `eval "$(approval env)"` leaves behind: the two values
+  // exported, and beside them the claim the export block makes about itself.
+  // A synthetic token stands in for the resolved secret, because this check
+  // reads no value on any path and this suite writes no real one.
+  const ritual = {
+    APPROVAL_TG_TOKEN: TOKEN,
+    APPROVAL_TG_CHAT: "12345",
+    APPROVAL_ENV_PROVENANCE: formatEnvProvenance(
+      logPathOf(home),
+      envFileDigest(`${lines.join("\n")}\n`),
+      ["APPROVAL_TG_TOKEN", "APPROVAL_TG_CHAT"],
+    ),
+  };
+
+  const run = await runCli(
+    ["doctor", "--json", "--root", makeRoot("fresh"), "--api-base", assertLocal(mock.url)],
+    home,
+    ritual,
+  );
+  const scope = checkNamed(run, "keychain-scope");
+  assert.equal(scope.status, "pass", `the start ritual was reported: ${scope.detail}`);
+  assert.doesNotMatch(scope.detail, /APPROVAL_TG_TOKEN was exported/u);
+
+  // The same shell with the claim removed is the case the finding exists for.
+  const foreign = await runCli(
+    ["doctor", "--json", "--root", makeRoot("fresh"), "--api-base", assertLocal(mock.url)],
+    home,
+    { APPROVAL_TG_TOKEN: TOKEN, APPROVAL_TG_CHAT: "12345" },
+  );
+  assert.equal(checkNamed(foreign, "keychain-scope").status, "skip");
+  assert.equal(run.stdout.includes(TOKEN), false, "the quiet path carried the value");
 });
 
 // ---------------------------------------------------------------------------
