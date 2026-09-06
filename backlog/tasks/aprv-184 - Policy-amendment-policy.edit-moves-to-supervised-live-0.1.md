@@ -1,10 +1,11 @@
 ---
 id: APRV-184
 title: 'Policy amendment: policy.edit moves to supervised-live 0.1'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@opus-policy'
 created_date: '2026-08-31 23:38'
-updated_date: '2026-09-02 07:58'
+updated_date: '2026-09-06 08:01'
 labels:
   - policy
   - gate
@@ -35,6 +36,17 @@ Note for the drafter: consider whether the live grants for sampled policy.edit a
 - [x] #4 Human runs the amend ceremony; attestation seq and PR recorded in implementation notes
 - [ ] #5 Post-amend: one sampled and one unsampled policy.edit observed and their selection verified against the secret, recorded in notes
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Read the CURRENT committed policy (git show origin/main:APPROVAL.md) rather than the task's historical draft, and resolve the class with the real engine (approval policy test policy.edit --json) instead of reading YAML by eye.
+2. Determine whether the amendment this task asks for is still owed. It is not: the live policy (sha256 a6d7b83d…, attested seq 23351) already carries policy.edit: { autonomy: supervised-live, live_rate: 0.1 }, landed at the seq 5147 ceremony and carried through every ceremony since.
+3. Re-derive AC3/AC5 against the log as it stands today, not as the 2026-09-02 lane left it, because APRV-208 moved the live draw out of the gate process and into the daemon. The AC3 question changed shape: the secret must resolve in the DAEMON's environment, and the gate process asks over .approval/daemon/draw.sock.
+4. Classify every supervised-live action in the log by event shape (approval.requested present = gated; execution.* alone = drawn through), and read the new approval.requested.live_draw field, which records the draw's provenance where the draw failed.
+5. Run the dogfood suite against the live policy to confirm the pins in src/core/policy-expectations.ts already match, so a proposal that changes no YAML also needs no pins diff.
+6. Write docs/proposals/policy-amendments-184-166.md stating the no-op finding, the AC-closing conditions with the commands that produce the evidence, and the operational risk. No APPROVAL.md, .approval/, SPEC.md, src/ or CLAUDE.md edits from this lane.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
@@ -76,4 +88,18 @@ AC3 (sampling secret verified resolvable in the gate process environment): NOT M
 AC5 (one sampled + one unsampled policy.edit observed and verified against the secret): NOT MET, and cannot be met while AC3 is unmet -- there is no unsampled example in the log to observe.
 
 Nothing here questions AC1/AC2/AC4, which this lane did not re-derive and leaves as recorded. Task NOT moved to Done: two of five ACs remain open, and per SPEC's fail-closed principle that is the correct, safe state -- every policy.edit/log.advance since the ceremony has, in fact, gone to a human. What remains is an operational step outside this codebase: the process that launches the Claude Code hook (and, per APRV-127, the daemon) needs APPROVAL_SAMPLING_SECRET exported into its own environment before it starts, e.g. via the same session/terminal setup approval setup sampling wrote for, verified with approval env --check or approval doctor from that same process's environment -- not merely minted into the keychain/.approval/env, which by design nothing sources into a hook/gate process automatically.
+
+2026-09-06, @opus-policy proposal lane (worktree agent-a9022a34174fdc9f9, read-only against origin/main). No ceremony is owed: the amendment this task asks for has been in the attested policy since the seq 5147 ceremony and is still there. Re-derived with the engine rather than by reading YAML: approval policy test policy.edit returns supervised-live at rate 0.1, provenance rule, matched pattern policy.edit, in the file attested at seq 23351 (sha256 a6d7b83d492994a7ab5152ccc6881dd849cc9fe9a0cfb15c449ff3e2ce40ac2d, equal to that policy.updated record). policy.edit.spec inherits the same line (provenance inherited, SPEC 5.2 as amended by APRV-266), so SPEC.md edits carry the 0.1 rate too. The APRV-198 split is in the file as well: policy.core, log.mutate and account.credential are human-only, so the 0.1 sample no longer sits on the gate's own organs, which was the second blocker this task recorded on 2026-09-01. No pins diff is owed either: policy-expectations.ts pins policy.edit at supervised/rule (the rate lives in the note beside it, since resolve reports the resolved level), and node dist/tests/dogfood.test.js passes 39/39 against the live policy.
+
+AC3 HAS CHANGED SHAPE and remains unmet. The criterion was written before APRV-208, which moved the live draw out of the gate process and into the daemon: a gate process holds no sampling secret and asks over an owner-only socket at .approval/daemon/draw.sock, and the daemon answers because a human exported the secret in the terminal they started it from. So 'resolvable in the gate process environment' now reads: the daemon is up in a shell where the secret resolves, and approval doctor's live-draw row passes in the primary. The log now says why it does not, in its own words: the approval.requested payload gained a live_draw field, and the two records carrying it (seq 23709 at 2026-09-05T22:15:52Z and seq 23714 at 22:33:11Z, both policy.edit.spec) both read {v:1, live_rate:0.1, source:'unavailable', reason:'draw-daemon-stale'}, meaning something was listening and would not answer, so the action failed closed to a human. approval doctor in this worktree reports the same row as fail, with the fix line naming approval env followed by approval up. This is better evidence than the 2026-09-02 lane could produce: that lane inferred an unresolved secret from 15/15 gating, and the runtime now names the reason on the record.
+
+THE MECHANISM ITSELF WORKS, which is new information. log.advance is the other supervised-live class (rate 0.01), and since its seq 7413 ceremony the log holds 99 actions that executed with no approval.requested at all against 15 that gated, and 9 of the executed ones were afterwards picked up as audit.sampled with reason 'supervised-sample', rate 0.15 and a real selection value of the form hmac-sha256/... Live selection and the retrospective sampler both run correctly wherever the secret resolves; the gap is only that a policy.edit is decided by a hook child whose route to the secret was not answering. policy.edit itself has had no action since seq 19638 (2026-09-05T08:10Z), and across the whole log it stands at 218 gated, 0 drawn through, so there is no post-APRV-208 sample of the class to read either way.
+
+AC5 stays unmet and stays blocked on AC3, unchanged in substance: the sampled half is what every policy.edit in the log already is, and the unsampled half needs one edit to be drawn through after the daemon serves draws.
+
+To close both, in the primary checkout, in the terminal that owns the daemon: cd to /Users/carter/dev/approval-md, eval the output of approval env, run approval up, then run approval doctor and read the live-draw row. AC5 then needs one policy.edit whose log shape is task.registered followed straight by execution.started, its draw verified by recomputing HMAC-SHA-256 over that action's payload_hash under the secret against 0.1.
+
+Deliverable: docs/proposals/policy-amendments-184-166.md. Recommendation recorded there: run no ceremony; either close this task on AC1/AC2/AC4 and carry AC3/AC5 into a follow-up about the daemon draw being live, or leave it open until the next approval up with the secret exported closes it. Task left In Progress; this lane does not move tasks to terminal status.
+
+Found in passing, outside this task's scope and not acted on: .approval/keys/ has no .gitignore entry, while .approval/daemon/, .approval/env, .approval/vault.enc and .approval/log/verified-head.json all do and .approval/payloads/ is deliberately tracked. Sealed-delivery private keys are written there (0600 in a 0700 dir) and unlinked at consume, expiry and revocation, so one rarely sits on disk, but adding .approval/ wholesale during a records or ceremony commit could sweep a live private key into a public repository, and a committed key opens that action's token_sealed for anyone holding the log. Worth its own task: add the ignore line and give approval doctor a row for it the way it has one for .approval/vault.enc.
 <!-- SECTION:NOTES:END -->
