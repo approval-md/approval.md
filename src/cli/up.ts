@@ -266,6 +266,7 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--advance-remote": "string",
   "--advance-base": "string",
   "--no-advance-pr": "boolean",
+  "--no-advance-auto-merge": "boolean",
   // The live draw (APRV-208), spelled identically to `daemon run`'s.
   "--no-draw": "boolean",
   // The dark-session sweep (APRV-192), spelled identically to `daemon run`'s.

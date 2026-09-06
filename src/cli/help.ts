@@ -450,14 +450,14 @@ export const LOG_ADVANCE_HELP = `approval log advance — commit and push the lo
 
 Usage:
   approval log advance [--remote <n>] [--branch <n>] [--base <n>] [--pr]
-                       [--dry-run] [--json]
+                       [--no-auto-merge] [--dry-run] [--json]
 
 Flags:
   --remote <name>  remote to push to (default origin)
   --branch <name>  records branch (default records-log-<date>); never main
   --base <name>    branch to parent the commit on (default: the one you are on)
-  --pr / --dry-run   open the pull request through gh / write nothing at all
-  --json / -h, --help   machine-readable output / this text
+  --pr / --dry-run  open the PR through gh and ARM its merge / write nothing
+  --no-auto-merge / --json / -h, --help  do not arm / JSON output / this text
 
 Verifies the chain under the append lock, FETCHES the base branch, builds a
 commit on <remote>/<base> carrying EXACTLY the log, QUEUE.md and payloads, and

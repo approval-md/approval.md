@@ -93,7 +93,7 @@ function git(args: string[], cwd: string): { code: number; stdout: string; stder
 }
 
 /**
- * A `gh` stub whose `pr list` is stateful and whose `pr merge` fails loudly.
+ * A `gh` stub whose `pr list` is stateful and whose `pr merge` arms.
  *
  * `PROTECT` (a file beside it) makes nothing here refuse: the push refusal that
  * drives the fallback branch is a git-side refusal, and it is installed with a
@@ -110,7 +110,10 @@ function ghStub(): string {
     '  pr) case "$2" in',
     `    list) if [ -f ${JSON.stringify(marker)} ]; then echo '[{"url":"https://example.invalid/pr/1"}]'; else echo '[]'; fi; exit 0 ;;`,
     `    create) : > ${JSON.stringify(marker)}; echo "https://example.invalid/pr/1"; exit 0 ;;`,
-    '    merge) echo "the daemon must never merge" >&2; exit 3 ;;',
+    // APRV-284: `pr merge --auto` arms the day's records pull request and
+    // merges nothing. Answered rather than refused so the rebuild cases run
+    // against the same shape production does.
+    '    merge) echo "armed"; exit 0 ;;',
     "  esac ;;",
     "esac",
     "exit 1",

@@ -93,6 +93,7 @@ const RUN_FLAGS: Record<string, FlagKind> = {
   "--advance-remote": "string",
   "--advance-base": "string",
   "--no-advance-pr": "boolean",
+  "--no-advance-auto-merge": "boolean",
   // The dark-session sweep (APRV-192). Opt-in for the reason above, in a milder
   // form: it runs `git log` over every worktree of the checkout on a cadence.
   "--dark-sessions": "boolean",
@@ -197,6 +198,10 @@ export function advanceFlags(
       remote: stringFlag(flags, "--advance-remote") ?? fallback.remote,
       base: stringFlag(flags, "--advance-base"),
       pr: !boolFlag(flags, "--no-advance-pr"),
+      // APRV-284. Armed by default: a records pull request nobody arms is a
+      // pull request sitting at CLEAN waiting for a click that was never a
+      // review. `--no-advance-auto-merge` puts it back on a person.
+      autoMerge: !boolFlag(flags, "--no-advance-auto-merge"),
     },
   };
 }

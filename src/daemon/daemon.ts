@@ -102,7 +102,7 @@ import {
   type ReadRecordsResult,
 } from "../core/state.js";
 import { validate } from "../core/validate.js";
-import { publishedState } from "../cli/log-advance.js";
+import { publishedState, type AutoMergeState } from "../cli/log-advance.js";
 import { isAdvanceBookkeeping } from "../core/advance-cycle.js";
 import { repoRoot } from "../cli/git-scope.js";
 import { checkLogAnchor, resolveAnchor, type AnchorCheck } from "../cli/log-anchor.js";
@@ -318,6 +318,16 @@ export type DaemonEvent =
       pr_url: string | null;
       /** True when this attempt opened the day's pull request rather than updating it. */
       pr_created: boolean;
+      /**
+       * What became of the auto-merge arm on that pull request (APRV-284), and
+       * why when it was not armed. `null` when no pull request step ran.
+       *
+       * Reported because "the records are pushed" and "the records will land"
+       * are different facts, and only the second one means nobody has anything
+       * left to do.
+       */
+      auto_merge: AutoMergeState | null;
+      auto_merge_note: string | null;
       /**
        * True when the day's records branch was REBUILT on the base rather than
        * stacked on its own tip, and the ref it was rebuilt on (APRV-234).
@@ -1457,6 +1467,8 @@ export class Daemon {
           commit: null,
           pr_url: null,
           pr_created: false,
+          auto_merge: null,
+          auto_merge_note: null,
           rebuilt: false,
           rebuilt_on: null,
           code: "advance-settled",
@@ -1491,6 +1503,8 @@ export class Daemon {
           commit: null,
           pr_url: null,
           pr_created: false,
+          auto_merge: null,
+          auto_merge_note: null,
           rebuilt: false,
           rebuilt_on: null,
           code: "advance-reconciled",
@@ -1626,6 +1640,8 @@ export class Daemon {
       commit: attempt.commit,
       pr_url: attempt.prUrl,
       pr_created: attempt.prCreated,
+      auto_merge: attempt.autoMerge,
+      auto_merge_note: attempt.autoMergeNote,
       rebuilt: attempt.rebuilt,
       rebuilt_on: attempt.rebuiltOn,
       code: attempt.code,
