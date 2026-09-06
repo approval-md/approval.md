@@ -2068,15 +2068,39 @@ The checks, at length:
   or ACL prompt, and a diagnostic must never hang or ask a human for a password.
   Value-free by construction: it reads each variable's status and source and
   never its value, on any path.
-- **keychain-scope** — whose keystore items this instance's `.approval/env`
-  names, answered from the NAMES alone so that it too can never block on an
-  unlock dialog. FAIL for an item whose eight-hex scope suffix belongs to
-  another instance: two gates pointed at one credential is how a demo instance
-  ended up sending through the production bot and eating its approval taps.
-  SKIP, named, for the unscoped pre-APRV-178 item every gate on the machine
-  resolves alike, and for a value inherited from the shell while the file names
-  a source of its own — both are correct configurations that become somebody
-  else's problem the moment a second instance exists.
+- **log-drift** — how the working log stands against the committed one
+  (APRV-125). Since APRV-219 the row IS `approval log verify --anchor`'s check
+  (`cli/log-anchor.ts`), rather than a second comparison written beside it: two
+  implementations of "has this repository forked" were two chances to disagree
+  about the one question where disagreement is intolerable, and the
+  disagreement duly arrived (APRV-210). SKIP where no committed copy resolves at
+  any rev, with no `fix`, because a check that could not look has nothing to
+  prescribe. PASS when the working file extends the committed one, keeping a
+  `fix` while records are still waiting to be published, and PASS when the
+  committed copy is instead ahead, whose fix is `approval log sync`. The one
+  FAIL is a real divergence: hash chains do not merge, nothing in this runtime
+  will re-chain them, and which of the two is the log is a human decision. Reads
+  only, and never fetches or pulls: the committed side comes out of the object
+  store.
+- **reconciliation** — is any retrospective denial still unreconciled
+  (APRV-127)? A denial cannot undo the action it denies. What it opens is an
+  obligation, and an obligation nobody is told about is worth nothing, so doctor
+  FAILS while one is open, in the same voice it uses for a half-configured
+  sampler. It repairs nothing: satisfaction is human-only in the code and in the
+  event schema, and a doctor that could close an obligation would be the runtime
+  closing its own homework. The `fix` is the command a person runs after they
+  have actually done the thing.
+- **harness-hook-outcomes** — whether `.claude/settings.json` registers the
+  harness for the event that reports OUTCOMES (APRV-145), and not only for the
+  one that asks permission. The configuration this exists to name is the one in
+  which loop escalation cannot accrue AT ALL: the pre-execution hook registered
+  and the post-execution one not, so every tool call opens a delegated
+  `execution.started` that nothing ever closes, the harness streaks of amended
+  SPEC.md §10.2 hold at zero, and the guard reads as passing because there is
+  nothing for it to see. A silent control is worse than an absent one. Doctor
+  READS that file and never writes it: a file that configures the gate is part
+  of the gate, so the repair is a line for a human to commit, printed by
+  `approval instructions hook`.
 - **harness-hook-wiring** — whether THIS checkout's `.claude/settings.json`
   registers `approval hook` for PreToolUse over every gated tool (Bash, Edit,
   Write, NotebookEdit). SKIP, named, when the file is absent, unreadable, or
@@ -2089,6 +2113,43 @@ The checks, at length:
   committed log, which since APRV-202 requires every added and removed line of a
   protected path to trace to the bound material of a grant, rather than only
   that the path was granted at some point in the week.
+- **keychain-scope** — whose keystore items this instance's `.approval/env`
+  names, answered from the NAMES alone so that it too can never block on an
+  unlock dialog. FAIL for an item whose eight-hex scope suffix belongs to
+  another instance: two gates pointed at one credential is how a demo instance
+  ended up sending through the production bot and eating its approval taps.
+  SKIP, named, for the unscoped pre-APRV-178 item every gate on the machine
+  resolves alike, and for a value inherited from the shell while the file names
+  a source of its own — both are correct configurations that become somebody
+  else's problem the moment a second instance exists.
+- **log-advance-cadence** — how far the log has run ahead of any records branch,
+  and how the daemon's last cadence advance ended (APRV-204). There is no
+  `approval daemon status` subcommand and no status file: the daemon reports
+  live on its own event stream, which is gone the moment nobody is tailing it,
+  and a status file would be a second copy of facts the log already carries. So
+  the answer is read from the log itself (the `daemon-advance-*` cycles the
+  daemon registers) plus local refs, which is why a DIFFERENT process can answer
+  it, and why an operator gets the same answer whether or not a daemon is
+  running at all. Advisory rather than failing: records waiting to be published
+  is the normal state of a checkout that has been recording decisions, and only
+  the reader knows how long is too long. Reads only, and never fetches, which is
+  the rule `log-drift` holds itself to.
+- **dark-sessions** — does the activity in this checkout have log records beside
+  it (APRV-192)? The detective complement to `harness-hook-wiring` above. That
+  row asks this checkout's settings file whether the hook is registered and says
+  plainly that this is not proof a session loaded it; this one asks what
+  happened and asks a session nothing at all. It DOES fail the run, which is
+  where the two part company: a configuration this runtime cannot verify from
+  disk is not a health verdict, while a dark session is an EVENT, work done in
+  this repository that the log was never told about, and a row reporting one in
+  the pass column would be tolerating it quietly in the one place an operator
+  goes to ask whether anything is wrong. An `undetermined` subject is a SKIP and
+  never a fail, named in the detail rather than folded into a pass: what the
+  detector could not see is a gap in the instrument, and a red row for it would
+  train an operator to ignore red rows. Doctor appends nothing, so a subject
+  found here is reported and not recorded; the record is the daemon's, written
+  by the sweep it runs on its own cadence
+  (`approval daemon run --dark-sessions`).
 - **verified-snapshot** — whether the daemon's verified-head snapshot
   (`.approval/log/verified-head.json`, APRV-188) is in place and still covers
   the live log, so a hook re-proves one SHA-256 instead of re-walking the chain
@@ -2149,6 +2210,39 @@ The checks, at length:
   the policy file. The fix starts the runtime in a shell where the sampling
   secret resolves. It asks the daemon nothing — it looks at the socket exactly
   as an asker does and reports what an asker would conclude.
+- **values-block** — whether the optional `approval-values` block of the policy
+  file parses (APRV-238). Nothing else would ever report a broken one: a values
+  block is guidance and not policy (SPEC.md §5.3, §11.1 invariant 10), so a
+  malformed one changes nothing about what the policy says and deliberately does
+  not appear in `approval policy check`, whose answer is the enforcement trace.
+  Left there, a typo would silently mean the operator's stated values reach no
+  agent while every gate keeps working perfectly. Absence is a PASS, in the
+  words SPEC.md §5.3 fixes: a file with no block is an operator who has declared
+  no values, which is a state and not a fault. The only FAIL is a block that is
+  present and unreadable, and its fix names the code rather than proposing a
+  repair, because what the block should say is the human's to write.
+- **checkpoint** — how this log stands against its own human-signed checkpoints
+  (APRV-257), running the same check as `approval log verify --checkpoints`, so
+  two implementations of "does this log's own signature contradict it" cannot
+  come to different conclusions. SKIP when the policy declares no readable key:
+  nothing was verified, and a check that could not look must never report a
+  pass. FAIL on any refusal, because a signature that does not verify, or one
+  naming a hash that is not the hash at that seq, is a human's key vouching for
+  a chain this file does not carry, and that is the finding the whole mechanism
+  exists to produce. PASS otherwise, INCLUDING when a checkpoint is due: the
+  cadence carries a `fix` rather than a status, since a person who has not
+  signed recently is not evidence of tampering, and a doctor that went red
+  because somebody was on holiday is a doctor whose red people stop reading.
+- **gate-organs** — which gate organs in this checkout carry no attestation of
+  their CURRENT bytes (APRV-272). It never moves the exit code, by design. The
+  enforcement for that fact is the CI-side protected-path guard, which fails the
+  pull request; doctor's job here is to make the state visible BEFORE a pull
+  request fails on it, so a human who has just hand-edited the settings file is
+  told they owe an attestation while they are still at the terminal. A failing
+  row would also be wrong on its own terms: an unattested organ breaks nothing
+  on this machine, unlike an unattested policy, which makes every gated
+  operation refuse. A checkout with no organ files at all is a SKIP, exactly as
+  `harness-hook-wiring` treats the same absence.
 
 **`--json`** (one object on stdout):
 
