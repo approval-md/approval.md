@@ -2049,7 +2049,25 @@ The checks, at length:
 - **audit-sampling** — sampling fails open by design (SPEC.md §5.2), so an
   unconfigured sampler silently audits nothing; this states the disabled reason
   out loud. A sampler nobody configured skips; a half-configured one fails,
-  because someone intended sampling and is not getting it.
+  because someone intended sampling and is not getting it. On ONE disabled
+  reason, `secret-unset`, the row asks the running daemon over the APRV-208 draw
+  socket instead of answering from its own environment (APRV-271), and names the
+  process that answered: "enabled per the running daemon (pid N, `<socket>`)".
+  That reason is the only one that is a fact about a PROCESS rather than about
+  the policy file, and doctor's process is almost never the right one — the
+  secret lives in the single terminal the operator ran `eval "$(approval env)"`
+  in, and `APPROVAL_*` is stripped from every child, so the row was red on
+  machines where sampling had been running for a fortnight. Every other reason
+  (`rate-absent`, `rate-invalid`, `rate-zero`, `secret-env-unnamed`,
+  `policy-unreadable`) is read from the file here and no daemon's answer softens
+  it. With nothing listening the row keeps its old wording and adds that no
+  daemon answered and that the daemon's shell is what decides. The answer is
+  unauthenticated by construction, since doctor holds no secret to check a MAC
+  with; what bounds who may make the claim is the socket, which must be owned by
+  this user and unreachable by group or other, and what bounds the damage is
+  that a diagnostic authorizes nothing. The secret's VALUE appears on no path:
+  what crosses the socket is the variable's name and the rate, both of which the
+  policy file already states in the open.
 - **envelope-integrity** — every task file whose task the log registered still
   carries an `approval:` envelope. The loss this names was observed live
   (APRV-60): a task-file rewrite by a tool that did not know the key dropped it,

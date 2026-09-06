@@ -113,7 +113,7 @@ import {
   snapshotPathFor,
   snapshotSummary,
 } from "../core/verified-snapshot.js";
-import { drawSocketPathFor, liveClassesOf } from "../core/live-draw.js";
+import { askDaemonSampling, drawSocketPathFor, liveClassesOf } from "../core/live-draw.js";
 import { verifyWithRecords, type VerifyResult } from "../core/verify.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { policyWebPort } from "./channel-web.js";
@@ -948,7 +948,101 @@ function classDetail(load: PolicyLoadResult, sampler: Sampler): string {
   return `; supervised classes: ${rendered.join(", ")}`;
 }
 
-function checkSampling(load: PolicyLoadResult): DoctorCheck {
+/**
+ * The half of the sampling report that this shell cannot answer (APRV-271).
+ *
+ * `secret-unset` means "the variable the policy names is not in MY
+ * environment", and doctor's environment is almost never the one that matters.
+ * The secret lives in the single terminal the operator ran `eval "$(approval
+ * env)"` in and started the daemon from, and `core/child-env.ts` strips
+ * `APPROVAL_*` from every child, so a doctor run from an agent session, a
+ * different tab, or a hook could not see it even on a machine where sampling
+ * has been running for a fortnight. That is what this row reported as a fault
+ * on 2026-09-05, in red, beside a daemon banner confirming the secret in use.
+ *
+ * So the row asks the daemon, over the APRV-208 socket, and reports the answer
+ * WITH ITS SOURCE. Three things bound what that is allowed to do:
+ *
+ * - **Only this branch.** `secret-unset` is the one disabled reason that is a
+ *   fact about a process environment. `rate-absent`, `rate-invalid`,
+ *   `rate-zero`, `secret-env-unnamed` and `policy-unreadable` are facts about
+ *   the policy FILE, which doctor is reading for itself, and no daemon's answer
+ *   may soften one of those.
+ * - **Only an owner-only socket.** `askDaemonSampling` refuses a socket that is
+ *   not owned by this euid or is reachable by group or other, and refuses an
+ *   answer naming a pid that is gone.
+ * - **Nothing is authorized either way.** The answer moves a diagnostic row and
+ *   the exit code of a verb that appends nothing, sends nothing and repairs
+ *   nothing. It reaches no gate, no budget and no log, so SPEC.md §11.1's rule
+ *   that self-reported fields never reduce scrutiny is not in play: there is no
+ *   scrutiny here to reduce, only a report to get right.
+ */
+async function samplingFromDaemon(
+  logPath: string,
+  sampler: Sampler,
+): Promise<DoctorCheck | null> {
+  if (sampler.enabled || sampler.reason !== "secret-unset") return null;
+  const probe = await askDaemonSampling(logPath);
+  const variable = sampler.secretEnv ?? "the sampling secret's variable";
+  if (!probe.ok) {
+    return {
+      check: "audit-sampling",
+      status: "fail",
+      detail: oneLine(
+        `disabled (${sampler.reason}): ${sampler.message} No daemon answered on ${probe.socket} (${probe.reason}), so this is what THIS shell can see and the daemon's shell is what decides: a daemon started where ${variable} resolves is sampling whatever this row says.`,
+      ),
+      fix: `approval setup sampling — or set it yourself: export ${variable} with the operator-held sampling secret in the environment that runs the daemon`,
+    };
+  }
+
+  const report = probe.answer.sampling;
+  const where = `the running daemon (pid ${String(probe.answer.daemon_pid)}, ${probe.socket})`;
+  if (!report.enabled) {
+    return {
+      check: "audit-sampling",
+      status: "fail",
+      detail: oneLine(
+        `disabled (${report.reason ?? "unstated"}) per ${where}, which is the process that decides: ${variable} is unset in this shell too, and the daemon reports its own sampler off. Nothing is sampled.`,
+      ),
+      fix: `approval setup sampling — or set it yourself: export ${variable} with the operator-held sampling secret in the environment that runs the daemon, then restart it`,
+    };
+  }
+  const rate =
+    report.rate === null
+      ? "no global fallback rate: only classes declaring their own retro_rate are sampled"
+      : `fallback rate ${String(report.rate)} from audit.supervised_sample_rate`;
+  return {
+    check: "audit-sampling",
+    status: "pass",
+    detail: oneLine(
+      `enabled per ${where}; ${variable} is not exported in THIS shell, and the daemon's is the environment that decides. The value itself is never printed and never logged; ${rate}.`,
+    ),
+  };
+}
+
+/**
+ * The per-class half of the report, said in DECLARED terms (APRV-271).
+ *
+ * {@link classDetail} renders what the LOCAL sampler puts in force, which on
+ * this branch is nothing: the local reading is `secret-unset`, so every class
+ * would come out as "none (secret-unset)" beside a sentence saying sampling is
+ * enabled. The entries still carry each rule's own declared `retro_rate`, which
+ * is a fact about the policy file and true whoever is holding the secret, so
+ * they are rendered as declarations and a rule with no rate of its own is named
+ * as taking the daemon's fallback.
+ */
+function declaredClassDetail(load: PolicyLoadResult, sampler: Sampler): string {
+  const entries = classSampling(load, sampler);
+  if (entries.length === 0) return "";
+  const rendered = entries.map((entry) =>
+    entry.rate === null
+      ? `${entry.pattern} at the daemon's fallback rate`
+      : `${entry.pattern} ${String(entry.rate)} (class)`,
+  );
+  return `; supervised classes, as the policy declares them: ${rendered.join(", ")}`;
+}
+
+function checkSamplingLocally(load: PolicyLoadResult): DoctorCheck {
   const sampler = resolveSampler(load);
   if (sampler.enabled) {
     const fallback =
@@ -978,6 +1072,29 @@ function checkSampling(load: PolicyLoadResult): DoctorCheck {
         ? `approval setup sampling — or set it yourself: export ${sampler.secretEnv} with the operator-held sampling secret in the environment that runs the daemon`
         : "approval policy attest --as human:<id> — after setting audit.supervised_sample_rate and audit.sampling_secret_env in the policy; then export the named variable where the daemon runs",
   };
+}
+
+/**
+ * The row, from this shell first and from the daemon only where this shell
+ * cannot be right (APRV-271).
+ *
+ * The local reading is computed regardless, so a daemon that answers nothing
+ * leaves the row saying exactly what it said before, plus who could have
+ * answered. There is no path on which the probe makes the report weaker.
+ */
+async function checkSampling(load: PolicyLoadResult, logPath: string): Promise<DoctorCheck> {
+  const sampler = resolveSampler(load);
+  const delegated = await samplingFromDaemon(logPath, sampler);
+  if (delegated === null) return checkSamplingLocally(load);
+  // The per-class breakdown is a fact about the policy file, so it belongs on
+  // the row whichever process answered the environment half. It is said in
+  // declared terms only where the daemon says sampling is on: everywhere else
+  // the local reading IS what is in force, and the existing wording holds.
+  const classes =
+    delegated.status === "pass"
+      ? declaredClassDetail(load, sampler)
+      : classDetail(load, sampler);
+  return { ...delegated, detail: `${delegated.detail}${classes}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -2581,7 +2698,9 @@ export function commandDoctor(
       await checkTelegram(apiBase, policyLoad),
       await checkWebPort(port ?? WEB_DEFAULT_PORT),
       checkPayloadStore(logPath, verified.records),
-      checkSampling(policyLoad),
+      // APRV-271: asks the running daemon for the one half of this answer that
+      // doctor's own environment cannot hold.
+      await checkSampling(policyLoad, logPath),
       checkEnvelopeIntegrity(tasksDir, verified.records),
       // APRV-68: appended rather than inserted, for the same reason the
       // envelope check was — a reader's position-based expectations still hold.

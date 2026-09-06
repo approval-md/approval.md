@@ -81,6 +81,7 @@
 import { spawnSync } from "node:child_process";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
+import { connect } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -580,4 +581,284 @@ export function askDaemonDraw(logPath: string, question: DrawQuestion): DrawOutc
     // ownership check above has already ruled out for the socket itself.
   }
   return outcome;
+}
+
+// ---------------------------------------------------------------------------
+// The status question (APRV-271)
+// ---------------------------------------------------------------------------
+
+/**
+ * The second thing this socket answers: not "would these bytes be sampled" but
+ * "is your sampler running at all" (APRV-271).
+ *
+ * ## Why the socket, and not the asker's own environment
+ *
+ * `approval doctor`'s `audit-sampling` row read `APPROVAL_SAMPLING_SECRET` out
+ * of the shell doctor was launched in, and reported `secret-unset` whenever it
+ * was not there. It is never there: the secret lives in the ONE terminal the
+ * operator ran `eval "$(approval env)"` in and started the daemon from, and
+ * `core/child-env.ts` strips `APPROVAL_*` from every child. So the row was red
+ * on machines where sampling was running perfectly, which is the same shape of
+ * bug APRV-208 fixed for the draw itself, in the row next door.
+ *
+ * The process that legitimately knows is the daemon. This asks it.
+ *
+ * ## What it deliberately is not
+ *
+ * **Not MAC'd, and not believed the way a draw is.** A draw answer decides a
+ * verdict, so it is evidenced: recorded with a MAC an operator recomputes later
+ * (see {@link LiveDrawRecord}). This one decides nothing. It authorizes no
+ * action, spends no budget, gates nothing and is written to no log; it changes
+ * the wording and the colour of one diagnostic row. What bounds who may make
+ * the claim is the socket itself, which {@link askDaemonSampling} requires to
+ * be owner-only and owned by this euid before it will dial it.
+ *
+ * That bound is why the caller must keep the question narrow. The only sampler
+ * state another process may honestly answer for is `secret-unset`, which is a
+ * fact about a PROCESS ENVIRONMENT. Every other disabled reason (`rate-absent`,
+ * `rate-invalid`, `rate-zero`, `secret-env-unnamed`, `policy-unreadable`) is a
+ * fact about the policy FILE, which the asker is reading for itself and no
+ * daemon's answer may soften. `cli/doctor.ts` consults this on that one branch
+ * and nowhere else.
+ *
+ * **Never the secret.** The report carries the variable's NAME, which the
+ * policy file already states in the open, and the rate, which it also states.
+ * The value is in one field of one process and leaves it in nothing but a MAC.
+ */
+export const SAMPLING_QUERY = "sampling";
+
+/** A daemon's report on its OWN sampler. Values are facts, not instructions. */
+export interface SamplingReport {
+  /** Is `core/sampler.ts` enabled in the answering process? */
+  enabled: boolean;
+  /** The machine-readable disabled reason, or `null` when it is enabled. */
+  reason: string | null;
+  /** The NAME of the secret's environment variable. Never its value. */
+  secret_env: string | null;
+  /** The global fallback rate, `null` when only class rules declare one. */
+  rate: number | null;
+  /** Which class patterns the daemon's policy declares `supervised-live`. */
+  live_classes: string[];
+}
+
+/** What the daemon answers a {@link SAMPLING_QUERY} with. */
+export interface SamplingAnswer {
+  v: number;
+  sampling: SamplingReport;
+  daemon_pid: number;
+  answered_at: string;
+}
+
+/** What the asker got back, with the socket it asked, for the report. */
+export type SamplingOutcome =
+  | { ok: true; answer: SamplingAnswer; socket: string }
+  | { ok: false; reason: DrawRefusalReason; detail: string; socket: string };
+
+/** Is this line a status question rather than a draw? Used by the server. */
+export function isSamplingQuery(line: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return false;
+  }
+  if (typeof parsed !== "object" || parsed === null) return false;
+  const body = parsed as Record<string, unknown>;
+  return body["v"] === DRAW_PROTOCOL_VERSION && body["query"] === SAMPLING_QUERY;
+}
+
+/**
+ * Read one status answer.
+ *
+ * Every field is taken apart and rebuilt rather than passed through, so an
+ * answer carrying keys this protocol never defined loses them here: a report
+ * printed by a diagnostic must not be able to carry text of the answerer's
+ * choosing into an operator's terminal.
+ */
+export function parseSamplingAnswer(
+  text: string,
+): { ok: true; answer: SamplingAnswer } | { ok: false; reason: DrawRefusalReason; detail: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: false, reason: "draw-answer-invalid", detail: "the answer was not JSON" };
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return { ok: false, reason: "draw-answer-invalid", detail: "the answer was not an object" };
+  }
+  const body = parsed as Record<string, unknown>;
+  if (body["ok"] === false) {
+    // An older daemon, or one that read this line as a malformed draw. It said
+    // no, which is the safe direction: the caller reports no daemon answered.
+    return {
+      ok: false,
+      reason: "draw-answer-invalid",
+      detail:
+        typeof body["detail"] === "string"
+          ? body["detail"]
+          : "the daemon refused the status question",
+    };
+  }
+  if (body["v"] !== DRAW_PROTOCOL_VERSION) {
+    return {
+      ok: false,
+      reason: "draw-answer-invalid",
+      detail: `the answer declares protocol version ${JSON.stringify(body["v"])}, not ${String(DRAW_PROTOCOL_VERSION)}`,
+    };
+  }
+  const reported = body["sampling"];
+  if (typeof reported !== "object" || reported === null) {
+    return { ok: false, reason: "draw-answer-invalid", detail: "the answer carried no sampling report" };
+  }
+  const report = reported as Record<string, unknown>;
+  if (typeof report["enabled"] !== "boolean") {
+    return { ok: false, reason: "draw-answer-invalid", detail: "the report did not say whether sampling is enabled" };
+  }
+  const pid = body["daemon_pid"];
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
+    return { ok: false, reason: "draw-answer-invalid", detail: "the answer named no daemon pid" };
+  }
+  const classes = report["live_classes"];
+  return {
+    ok: true,
+    answer: {
+      v: DRAW_PROTOCOL_VERSION,
+      sampling: {
+        enabled: report["enabled"],
+        reason: typeof report["reason"] === "string" ? report["reason"] : null,
+        secret_env: typeof report["secret_env"] === "string" ? report["secret_env"] : null,
+        rate: typeof report["rate"] === "number" && Number.isFinite(report["rate"]) ? report["rate"] : null,
+        live_classes: Array.isArray(classes)
+          ? classes.filter((entry): entry is string => typeof entry === "string")
+          : [],
+      },
+      daemon_pid: pid,
+      answered_at: typeof body["answered_at"] === "string" ? body["answered_at"] : "",
+    },
+  };
+}
+
+/**
+ * Open the draw socket, optionally exchange one line, and hang up.
+ *
+ * ASYNCHRONOUS, unlike {@link askDaemonDraw}, and that difference is the whole
+ * reason it can exist without a relay child. The draw is asked from the gate's
+ * synchronous request path, which is why it pays for a `spawnSync`; every
+ * caller of this one is a diagnostic that is already inside an async function,
+ * so it dials the socket directly and costs no process at all.
+ *
+ * `request` of `null` connects and closes without saying anything, which is how
+ * a caller asks the only question a socket file cannot answer by existing:
+ * whether anything is listening on it.
+ */
+export async function dialDrawSocket(
+  path: string,
+  request: string | null,
+  timeoutMs: number = DRAW_TIMEOUT_MS,
+): Promise<{ ok: true; line: string | null } | { ok: false; reason: DrawRefusalReason; detail: string }> {
+  return await new Promise((settleWith) => {
+    let settled = false;
+    let buffer = "";
+    const socket = connect(path);
+    const settle = (
+      outcome:
+        | { ok: true; line: string | null }
+        | { ok: false; reason: DrawRefusalReason; detail: string },
+    ): void => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      settleWith(outcome);
+    };
+
+    socket.setEncoding("utf8");
+    socket.setTimeout(timeoutMs);
+    socket.on("connect", () => {
+      if (request === null) {
+        settle({ ok: true, line: null });
+        return;
+      }
+      socket.write(`${request}\n`);
+    });
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) {
+        if (buffer.length > 8192) {
+          settle({ ok: false, reason: "draw-answer-invalid", detail: "the answer had no line ending" });
+        }
+        return;
+      }
+      settle({ ok: true, line: buffer.slice(0, newline) });
+    });
+    socket.on("timeout", () => {
+      settle({
+        ok: false,
+        reason: "draw-daemon-stale",
+        detail: `nothing answered within ${String(timeoutMs)}ms; the socket is there and the daemon behind it is not serving`,
+      });
+    });
+    socket.on("error", (cause: Error) => {
+      settle({
+        ok: false,
+        reason: "draw-daemon-stale",
+        detail: `the socket refused the connection: ${cause.message}`,
+      });
+    });
+    socket.on("close", () => {
+      settle({
+        ok: false,
+        reason: "draw-daemon-stale",
+        detail: "the daemon closed the connection without answering",
+      });
+    });
+  });
+}
+
+/**
+ * Ask the running daemon what its own sampler is doing.
+ *
+ * The same pre-checks a draw makes, for the same reasons: a path past the
+ * address limit, an absent file, a foreign owner and a group- or world-writable
+ * mode each mean no answer from here can be attributed to this user's daemon.
+ * The pid is checked for liveness afterwards, because a socket that outlived
+ * its server is a file answering for a process that is gone.
+ */
+export async function askDaemonSampling(
+  logPath: string,
+  timeoutMs: number = DRAW_TIMEOUT_MS,
+): Promise<SamplingOutcome> {
+  const socket = drawSocketPathFor(logPath);
+  const usable = socketUsable(socket);
+  if (!usable.ok) return { ok: false, reason: usable.reason, detail: usable.detail, socket };
+
+  const dialled = await dialDrawSocket(
+    socket,
+    JSON.stringify({ v: DRAW_PROTOCOL_VERSION, query: SAMPLING_QUERY }),
+    timeoutMs,
+  );
+  if (!dialled.ok) return { ok: false, reason: dialled.reason, detail: dialled.detail, socket };
+  if (dialled.line === null) {
+    return { ok: false, reason: "draw-answer-invalid", detail: "the daemon said nothing", socket };
+  }
+
+  const parsed = parseSamplingAnswer(dialled.line);
+  if (!parsed.ok) return { ok: false, reason: parsed.reason, detail: parsed.detail, socket };
+
+  try {
+    process.kill(parsed.answer.daemon_pid, 0);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ESRCH") {
+      return {
+        ok: false,
+        reason: "draw-daemon-stale",
+        detail: `the answering daemon (pid ${String(parsed.answer.daemon_pid)}) is no longer running`,
+        socket,
+      };
+    }
+    // EPERM means it exists and belongs to someone else, which the socket's
+    // own ownership check has already ruled out.
+  }
+  return { ok: true, answer: parsed.answer, socket };
 }
