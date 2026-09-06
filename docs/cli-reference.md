@@ -438,6 +438,27 @@ non-fast-forward or opening a second one. `--pr` asks `gh pr list --head <branch
 branch whose log the working log is not a prefix of is refused with the same two
 codes the trunk is, naming the branch.
 
+**`--pr` also arms the merge (APRV-284).** After the pull request is open or
+updated, the verb runs `gh pr merge <records branch> --merge --auto`, so the day's
+records land as a merge commit the moment CI and the branch rules allow it and
+never before. A records pull request is the one shape here that never needed a
+reviewer (it carries exactly the log, `QUEUE.md` and `.approval/payloads/`, the
+three paths CI's protected-path guard exempts), so what it was waiting for at
+CLEAN was a click and not a judgement. The arm is the same command with the same
+class a session's own arm has, `vcs.push.main`, and it runs inside whatever
+authorized the advance; nothing here asks a second question.
+
+Two things it will not do. It WITHHOLDS the arm when the pushed branch carries a
+path outside those three (a commit this verb did not make, sitting on a shared
+branch), naming what it saw — the reasoning that makes a records pull request
+safe to auto-merge is a claim about the diff, so it is checked rather than
+assumed, and anything unreadable withholds too. And an arm `gh` refuses (auto-merge
+disabled on the repository, a merge queue, a pull request already mergeable) is
+reported and never fatal: the records are committed, pushed and open either way.
+`--no-auto-merge` skips the whole step. The outcome is the `auto-merge` row in the
+table and `autoMerge` (`armed` | `withheld` | `refused` | `off` | `null`) plus
+`autoMergeNote` in `--json`.
+
 Five refusals are the point of the verb.
 
 `log-advance-fetch-failed`: the base branch could not be fetched, so there is no
@@ -475,7 +496,8 @@ the record of itself, in git, where a reader can see exactly which bytes moved.
  "head":{"committed":{"seq":38,"hash":"…"},"working":{"seq":41,"hash":"…"}},
  "staged":[".approval/log/events.jsonl",".approval/QUEUE.md",".approval/payloads"],
  "message":"Log advance: seq 39..41 (main)","commit":"…","pushed":true,
- "prUrl":null,"dryRun":false}
+ "prUrl":null,"prCreated":false,"autoMerge":null,"autoMergeNote":null,
+ "dryRun":false}
 ```
 
 ## policy
@@ -3865,8 +3887,15 @@ or failed attempt is an `advance` line plus an `advance-refused` warning, and th
 next tick tries again — the cadence interval is the retry bound, so a refusal
 never loops. One records branch and ONE PULL REQUEST PER DAY: the first advance
 of the day opens it, every later one is parented on the branch and updates it in
-place. The daemon never merges; `gh pr merge` is `vcs.push.main` and stays a
-human's act or a session's.
+place. The daemon ARMS that pull request's merge and merges nothing itself
+(APRV-284): the advance runs `gh pr merge <branch> --merge --auto`, which lands
+the records when CI and the branch rules say so and never earlier. The arm is
+`vcs.push.main`, the class the same command carries in a session's hands, and it
+rides the same `log.advance` authorization the cycle already holds rather than
+opening a second question. It is withheld when the branch carries a path an
+advance may not carry, and a `gh` that refuses it is reported, not fatal.
+`--no-advance-auto-merge` turns it off and puts the merge back on a person. The
+outcome is `auto_merge` and `auto_merge_note` on the `advance` line.
 
 Two rules keep that from turning into a loop of its own (APRV-233, APRV-234).
 An advance whose outcome is not yet in the log has still HAPPENED: the daemon
@@ -4053,8 +4082,11 @@ with the log idle is a bug: file it with the `tick` line's `phases`.
 {"event":"advance","outcome":"advanced","records_pending":7,
  "records_branch":"records-log-2026-09-01","range":{"from":4,"to":10},
  "commit":"<40hex>","pr_url":"https://github.com/…","pr_created":true,
+ "auto_merge":"armed","auto_merge_note":null,
  "rebuilt":false,"rebuilt_on":null,
- "code":null,"message":"seq 4..10 is on records-log-2026-09-01","flush":false}
+ "code":null,
+ "message":"seq 4..10 is on records-log-2026-09-01 (…), auto-merge armed",
+ "flush":false}
 {"event":"watch","watcher":"log","type":"change","file":"events.jsonl",
  "action":"scheduled","reason":null}
 {"event":"watch","watcher":"log","type":"rename","file":"events.jsonl.lock",

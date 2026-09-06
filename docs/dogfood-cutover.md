@@ -486,8 +486,15 @@ file and still needs committing —
 hand, because an advance that carried it would be the mixed branch the rule
 forbids.
 
-Merge it with a **merge commit**. A branch that exists for one commit and is
-merged the moment CI passes is not a feature branch in the sense the rule
+You do not merge it either (APRV-284). `--pr` arms the merge as it opens the
+pull request (`gh pr merge <branch> --merge --auto`), so it lands as a merge
+commit when CI is green and never before; the verb's `auto-merge` row says
+whether the arm took. `--no-auto-merge` puts it back on you, and so does the
+verb itself when the branch carries a path an advance may not carry.
+
+Merge it with a **merge commit** where the arm did not take. A branch that
+exists for one commit and is merged the moment CI passes is not a feature
+branch in the sense the rule
 forbids: nothing else appends to the log while it is open, so no second chain
 is ever created, which is the property the rule protects. What the rule still
 forbids is a branch that accumulates work alongside the log commit, and two
