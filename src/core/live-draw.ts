@@ -847,7 +847,7 @@ export async function askDaemonSampling(
   timeoutMs: number = DRAW_TIMEOUT_MS,
 ): Promise<SamplingOutcome> {
   const socket = drawSocketPathFor(logPath);
-  const usable = socketUsable(socket);
+  const usable = drawSocketUsable(socket);
   if (!usable.ok) return { ok: false, reason: usable.reason, detail: usable.detail, socket };
 
   const dialled = await dialDrawSocket(
