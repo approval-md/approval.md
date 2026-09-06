@@ -446,6 +446,23 @@ const FIXTURES: readonly Fixture[] = [
   { command: "ls -la src", class: "read.shell", rule: "read-shell" },
   { command: "grep -rn TODO src", class: "read.shell", rule: "read-shell" },
 
+  // -- the read shapes an agent actually types (APRV-283) -------------------
+  // Reported as `files.write.workspace` by `approval hook classify`. The bare
+  // forms were always reads; what reclassified them was the `2>/dev/null` an
+  // agent writes on the end, pinned below in `DISCARDED_REDIRECTIONS`.
+  { command: "find . -name '*.ts'", class: "read.shell", rule: "find-read", row: "find" },
+  { command: "ls -d src/*", class: "read.shell", rule: "read-shell" },
+  { command: "grep -r TODO src", class: "read.shell", rule: "read-shell" },
+  { command: "grep -l TODO src/a.ts", class: "read.shell", rule: "read-shell" },
+  { command: "grep -o TODO src/a.ts", class: "read.shell", rule: "read-shell" },
+  // …and the primaries that make `find` act.
+  {
+    command: "find . -type f -delete",
+    class: "files.delete.out_of_scope",
+    rule: "find-delete",
+  },
+  { command: "find . -name x -fprint out.txt", class: "files.write.workspace", rule: "find-write" },
+
   // -- the overrides, split three ways (APRV-198) ---------------------------
   // policy.edit: the prose and configuration ABOUT the gate.
   { command: "cp draft.md CLAUDE.md", class: "policy.edit", rule: "protected-path" },
@@ -542,6 +559,84 @@ test("a fetch built by a write substitution is opaque", () => {
   assert.equal(result.ok, false);
   if (result.ok) return;
   assert.equal(result.code, "opaque");
+});
+
+// ---------------------------------------------------------------------------
+// Discarded output is not a write (APRV-283)
+// ---------------------------------------------------------------------------
+
+/**
+ * THE REPRODUCTION. `approval hook classify` answered `files.write.workspace`
+ * for each of these, and every one of them is a read with its stderr thrown
+ * away. The cost was not in the policy, where both classes are autonomous: it
+ * was that each of these fed the failure streak of SPEC.md §10.2 as a write and
+ * misreported the session in coverage.
+ */
+const DISCARDED_REDIRECTIONS: readonly string[] = [
+  "find . -name '*.ts' 2>/dev/null",
+  "find . -type d -name node_modules -prune -o -name '*.ts' -print 2>/dev/null",
+  "ls -d src/* 2>/dev/null",
+  "ls -d /Users/carter/dev/* 2>/dev/null",
+  "grep -r TODO src 2>/dev/null",
+  "grep -rl TODO . 2>/dev/null",
+  "grep -o TODO src/a.ts 2>/dev/null",
+  "cat missing.ts 2>/dev/null",
+  // Every discard spelling, and the append form.
+  "ls -la > /dev/null",
+  "ls -la >> /dev/null",
+  "ls -la > /dev/stdout",
+  "ls -la 2> /dev/stderr",
+  "ls -la > /dev/tty",
+  "ls -la >/dev/fd/2",
+  "find . -name x >/dev/null 2>&1",
+];
+
+for (const command of DISCARDED_REDIRECTIONS) {
+  test(`a discarded redirection is still a read: ${command}`, () => {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
+    if (!result.ok) return;
+    assert.deepEqual(result.classes, ["read.shell"]);
+  });
+}
+
+/**
+ * The other half of the same rule, and the half AC2 is about: a redirection that
+ * creates or truncates a real file still writes, whichever descriptor it moves
+ * and whatever the command in front of it was.
+ */
+const REAL_REDIRECTIONS: readonly [string, string][] = [
+  ["ls src > listing.txt", "files.write.workspace"],
+  ["find . -name x 2> errors.log", "files.write.workspace"],
+  ["grep -r TODO . >> results.txt", "files.write.workspace"],
+  // Not in the closed discard set: a device node this file does not know is a
+  // device node it cannot vouch for.
+  ["echo hi > /dev/sda", "files.write.workspace"],
+  ["echo hi > /dev/nullx", "files.write.workspace"],
+  // A protected path still takes precedence over both of the above.
+  ["echo hi > APPROVAL.md", "policy.core"],
+];
+
+for (const [command, expected] of REAL_REDIRECTIONS) {
+  test(`a redirection that creates a file still writes: ${command}`, () => {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
+    if (!result.ok) return;
+    assert.deepEqual(result.classes, [expected]);
+  });
+}
+
+test("APRV-283: a find that deletes is not a read, with or without the discard", () => {
+  // The regression the redirect relaxation would otherwise have opened. Before
+  // this task `find . -type f -delete` classified `read.shell` outright, and the
+  // `2>/dev/null` form only looked safe because the redirect override was
+  // relabelling it a workspace write for the wrong reason.
+  for (const command of ["find . -type f -delete", "find . -type f -delete 2>/dev/null"]) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
+    if (!result.ok) return;
+    assert.deepEqual(result.classes, ["files.delete.out_of_scope"], command);
+  }
 });
 
 test("a GET-shaped fetch redirected into a file is a workspace write, not a read", () => {
@@ -726,6 +821,12 @@ for (const opaque of [
   "sudo rm -rf /",
   "env FOO=1 npm test",
   "xargs rm < list.txt",
+  // APRV-283: `find` running another command is opaque for the reason `xargs`
+  // directly above it is. What it runs is not in the words this file reads.
+  "find . -name '*.tmp' -exec rm {} +",
+  "find . -name '*.ts' -exec grep -l foo {} +",
+  "find . -execdir mv {} /tmp",
+  "find . -okdir rm {}",
   "node -e 'process.exit(0)'",
   "node --eval 'x'",
   "python3 -c 'import os'",

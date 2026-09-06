@@ -224,11 +224,12 @@ an addition).
 | `workspace-write` | mkdir, cp, mv, touch, tee, ln, chmod, truncate, rmdir | (any) | files.write.workspace |
 | `rm` | rm | (any) | files.write.workspace, files.delete.out_of_scope, files.delete.scratch ‡ |
 | `sed` | sed | (any) | read.shell, files.write.workspace |
+| `find` | find | (any) | read.shell for a walk; files.delete.out_of_scope for `-delete`; files.write.workspace for `-fprint`, `-fprintf`, `-fls`; OPAQUE for `-exec`, `-execdir`, `-ok`, `-okdir`, which run a command this classifier does not read (APRV-283) |
 | `web-fetch` | curl, wget, http, httpie | (any) | read.web for a GET-shaped fetch; network.call for a body, an upload, a non-GET method, or anything ambiguous |
 | `network` | ssh, scp, sftp, rsync, nc, telnet, ftp | (any) | network.call |
 | `keychain` | security, secret-tool, keyring, pass | (any) | account.credential |
 | `printenv` | printenv | (any) | account.credential bare, or with a variable whose NAME is credential-bearing; read.shell otherwise |
-| `read-shell` | basename, cat, cd, cksum, cut, diff, dirname, du, echo, false, file, find, grep, head, jq, ls, md5sum, printf, pwd, readlink, realpath, rg, shasum, sha256sum, sort, stat, tail, test, tr, tree, true, type, uniq, wc, which | (any) | read.shell |
+| `read-shell` | basename, cat, cd, cksum, cut, diff, dirname, du, echo, false, file, grep, head, jq, ls, md5sum, printf, pwd, readlink, realpath, rg, shasum, sha256sum, sort, stat, tail, test, tr, tree, true, type, uniq, wc, which | (any) | read.shell |
 
 † These rewrites are LOCAL, and the hook refines them against the checkout it
 runs in: see [Rewriting unpublished history](#rewriting-unpublished-history).
@@ -344,7 +345,12 @@ Five overrides sit on top of the table:
   protected again, and a copy FROM credential material INTO the journal is
   still `account.credential`, because that rule reads every argument.
 - **`redirect-write` → `files.write.workspace`.** A read command with a `>` or
-  `>>` writes a file, and the class says so.
+  `>>` writes a file, and the class says so. Since APRV-283 a redirection onto a
+  DISCARD device is exempt, because it creates nothing: `/dev/null`,
+  `/dev/stdout`, `/dev/stderr`, `/dev/tty` and `/dev/fd/<n>`, exactly those.
+  `grep -r TODO src 2>/dev/null` is the read it looks like; `grep -r TODO src
+  2> errors.log` still writes. The set is closed, so any other device node is
+  read as a write.
 - **`gate.self`.** The `approval` CLI (and `node …/dist/src/cli/main.js`) is the
   enforcement path; gating it with itself would deadlock. It is allowed and
   nothing is logged.

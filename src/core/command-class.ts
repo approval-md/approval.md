@@ -1048,11 +1048,17 @@ interface RuleContext {
   context: ClassifierContext;
 }
 
-/** A refinement's answer: a class and the rule id that chose it. */
-interface Refinement {
-  class: string;
-  rule: string;
-}
+/**
+ * A refinement's answer: a class and the rule id that chose it, or a statement
+ * that this invocation cannot be read at all.
+ *
+ * The opaque arm is APRV-283's. A refinement that returns `null` is answered
+ * with the interpreter message (`runs inline source`), which is true of
+ * `node -e` and false of `find … -exec`, and a refusal that misdescribes the
+ * command it refuses sends the agent looking for a flag it did not pass. A
+ * refinement that has its own reason states it.
+ */
+type Refinement = { class: string; rule: string } | { opaque: string };
 
 /**
  * One row of the classification table.
@@ -1260,6 +1266,51 @@ function refineNpmInstall(ctx: RuleContext): Refinement {
   return packages.length === 0
     ? { class: "deps.install", rule: "npm-install-lockfile" }
     : { class: "deps.add", rule: "npm-install-package" };
+}
+
+/**
+ * `find` primaries that run another command. Opaque, for the reason `xargs` is
+ * (APRV-283): what `-exec` runs is a command line this classifier is not
+ * reading, so the segment's effect is not in the words it can see.
+ */
+const FIND_EXEC_PRIMARIES: readonly string[] = ["-exec", "-execdir", "-ok", "-okdir"];
+
+/**
+ * `find` primaries that write. `-delete` removes every match; `-fprint`,
+ * `-fprintf` and `-fls` each create or truncate the file named after them.
+ */
+const FIND_WRITE_PRIMARIES: readonly string[] = ["-fprint", "-fprintf", "-fls"];
+
+/**
+ * `find` walks and prints, until a primary makes it act (APRV-283).
+ *
+ * Until this row existed `find` sat in the read table with `ls` and `grep`, so
+ * `find . -type f -delete` and `find . -exec rm {} +` both classified
+ * `read.shell`: a recursive delete answered as a listing. It went unnoticed
+ * because a `2>/dev/null` on the end reclassified the whole segment
+ * `files.write.workspace` by the redirect override, which is the bug this task
+ * fixes; taking that override away without this row would have left the delete
+ * reading as a walk.
+ *
+ * `-delete` is `files.delete.out_of_scope` rather than a workspace write on the
+ * same reasoning `refineRm` uses for `rm -r .`: `find` is recursive by
+ * construction and its start points are usually relative, so the classifier
+ * cannot establish what a delete covers, and a delete whose scope cannot be
+ * established is the manual one.
+ */
+function refineFind(ctx: RuleContext): Refinement {
+  const running = ctx.args.find((arg) => FIND_EXEC_PRIMARIES.includes(arg));
+  if (running !== undefined) {
+    return {
+      opaque: `find ${running} runs a command this classifier does not read`,
+    };
+  }
+  if (ctx.args.includes("-delete")) {
+    return { class: "files.delete.out_of_scope", rule: "find-delete" };
+  }
+  const writing = ctx.args.find((arg) => FIND_WRITE_PRIMARIES.includes(arg));
+  if (writing !== undefined) return { class: "files.write.workspace", rule: "find-write" };
+  return { class: "read.shell", rule: "find-read" };
 }
 
 /** `sed -i` edits in place; every other `sed` reads. */
@@ -1860,6 +1911,15 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     refine: refineRm,
   },
   { id: "sed", bins: ["sed"], class: "read.shell", emits: ["files.write.workspace"], refine: refineSed },
+  // APRV-283. Its own row rather than a seat in the read table: `find` is the
+  // one reader with primaries that delete, write and run other commands.
+  {
+    id: "find",
+    bins: ["find"],
+    class: "read.shell",
+    emits: ["files.delete.out_of_scope", "files.write.workspace"],
+    refine: refineFind,
+  },
 
   // -- network -------------------------------------------------------------
   // The HTTP clients split on their flags; the transports do not. What `ssh`,
@@ -1911,7 +1971,6 @@ export const COMMAND_RULES: readonly CommandRule[] = [
       "echo",
       "false",
       "file",
-      "find",
       "grep",
       "head",
       "jq",
@@ -2041,6 +2100,34 @@ const INLINE_SOURCE_BINS: Readonly<Record<string, readonly string[]>> = {
 
 /** `VAR=value` prefixes, which are not the command. */
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
+
+/**
+ * Redirection targets that create no file (APRV-283).
+ *
+ * `> file` is a write because it creates or truncates one. `2>/dev/null` does
+ * neither: the kernel's bit bucket has no contents to lose and no directory
+ * entry to make. The same is true of the standard streams by path
+ * (`/dev/stdout`, `/dev/stderr`), of the controlling terminal, and of
+ * `/dev/fd/<n>`, which names a descriptor this process already holds.
+ *
+ * The set is EXACT and closed. Anything else under `/dev` classifies as a write,
+ * because a device node this list does not know is a device node this file
+ * cannot vouch for, and the strict reading of a redirection is that it writes.
+ */
+const DISCARD_TARGETS: ReadonlySet<string> = new Set([
+  "/dev/null",
+  "/dev/stdout",
+  "/dev/stderr",
+  "/dev/tty",
+]);
+
+/** `/dev/fd/3`, and nothing that merely starts with it. */
+const DEV_FD = /^\/dev\/fd\/\d+$/u;
+
+/** Does redirecting onto `target` create nothing? (APRV-283.) */
+function isDiscardTarget(target: string): boolean {
+  return DISCARD_TARGETS.has(target) || DEV_FD.test(target);
+}
 
 /**
  * Strictest-first, and the order is normative (APRV-198): a segment naming
@@ -2200,7 +2287,11 @@ function classifySegment(
 
   const writeTargets = segment.redirects
     .filter((redirect) => redirect.op !== "<")
-    .map((redirect) => redirect.target.text);
+    .map((redirect) => redirect.target.text)
+    // APRV-283: a redirection to a discard device creates nothing, so it is not
+    // a write. `2>/dev/null` is the suffix an agent writes on half its reads,
+    // and until this it turned every one of them into `files.write.workspace`.
+    .filter((target) => !isDiscardTarget(target));
   // A redirection onto a protected path is a write to that path, whatever the
   // command in front of it was going to do. The CLASS says which surface was
   // aimed at (APRV-198); the RULE stays `redirect-protected`, because the
@@ -2275,6 +2366,10 @@ function classifySegment(
   const refined = rule.refine === undefined ? null : rule.refine(ctx);
   if (rule.refine !== undefined && refined === null) {
     return { ok: false, code: "opaque", detail: `${basename} runs inline source` };
+  }
+  // APRV-283: a refinement that carries its own reason for being unreadable.
+  if (refined !== null && "opaque" in refined) {
+    return { ok: false, code: "opaque", detail: refined.opaque };
   }
   let cls = refined === null ? rule.class : refined.class;
   let ruleId = refined === null ? rule.id : refined.rule;
