@@ -59,6 +59,26 @@ channel the human used. For a phone grant via the Telegram listener, the token
 reaches the operator terminal running the listener; handing it to the session
 is the human's step, which is what makes the human the gate.
 
+### Before the push: run the tier CI would run (APRV-275)
+
+A lane's last step before `git push` is `npm run ci:local`. It classifies the
+branch's own diff with the classifier the workflow uses, then runs the jobs
+`.github/workflows/ci.yml` declares for that tier, so a red arrives on the
+laptop instead of in the queue. The queue is serial: a red run there costs the
+entry its slot, a re-merge, and the wait again.
+
+```sh
+npm run ci:local              # classify origin/main...HEAD and run that tier
+npm run ci:local -- --dry-run # print the plan, run nothing
+```
+
+It is not a gate and CI never consults it. A green run is a prediction, and the
+three things it cannot prove are printed rather than skipped over: the Node 20
+floor legs on a host that is not Node 20, the platform-sensitive suites on a
+host that is not Linux, and the protected-path cross-check when no merge base or
+no records branch is reachable from this checkout. See the README's "Running the
+checks" for the flags.
+
 ## The daemon, live
 
 The human runs, in the primary checkout:
