@@ -58,6 +58,28 @@
  *   rotate is a streak the subject can clear (§11.1 invariant 4).
  *
  * A command is escalated when EITHER reaches {@link LOOP_ESCALATION_THRESHOLD}.
+ *
+ * ## Only side effects accrue (APRV-280, amended SPEC.md §10.2)
+ *
+ * The streak counts failed executions of classes that DO something. A
+ * `read.*` command that exits non-zero has not failed a side effect: a `grep`
+ * that matches nothing and an `ls` of a path that is not there both exit 1, and
+ * that exit IS the command's answer. Counting those escalated whole sessions to
+ * manual over nothing, which is the incident APRV-280 was filed on: forty-eight
+ * requests queued in an hour behind three failed greps.
+ *
+ * The predicate is {@link isSideEffectingClass} and it is stated once. What it
+ * does NOT do is let a read clear anything: a tool call whose classes are all
+ * reads is transparent to the streak in both directions, so a failing write
+ * streak is not cleared by a successful `ls` in between. The strict direction is
+ * kept everywhere else too — a class this projection cannot resolve from the log
+ * counts as side-effecting, because "we could not establish what this was" is
+ * not "this was harmless".
+ *
+ * The class is read from the `execution.started` record the RUNTIME wrote for
+ * the action key (its `payload.class`), never from anything the reporter said
+ * (§11.1 invariants 1 and 4). The report chooses the outcome; it does not get to
+ * choose the bucket.
  */
 
 import type { EventRecord } from "./log.js";
@@ -69,6 +91,61 @@ import { payloadOf } from "./state.js";
  * hold three opinions about it.
  */
 export const LOOP_ESCALATION_THRESHOLD = 3;
+
+/**
+ * Does an action in this class have a side effect the loop rule is about?
+ * (APRV-280, amended SPEC.md §10.2.)
+ *
+ * THE PREDICATE, exactly: a class is side-effecting unless it is `read` itself
+ * or sits under the `read.` namespace. Everything else — `files.write.*`,
+ * `files.delete.*`, `vcs.*`, `deps.*`, `network.*`, `communicate.*`,
+ * `policy.*`, `log.*`, a routed `policy.edit.*`, and any class this build has
+ * never heard of — is side-effecting. The unknown falls on the strict side by
+ * construction, which is the whole reason the predicate is written as a
+ * carve-OUT of `read.*` rather than as a list of the namespaces that act.
+ *
+ * `core/command-class.ts` already reads `read.*` this way when it decides which
+ * command substitutions may run unattended, and this is deliberately the same
+ * sentence: one reading of "this command only looks at things", used by the
+ * classifier and by loop safety alike.
+ */
+export function isSideEffectingClass(cls: string): boolean {
+  return !(cls === "read" || cls.startsWith("read."));
+}
+
+/**
+ * The class the RUNTIME recorded for each action key, from the
+ * `execution.started` it wrote.
+ *
+ * A key with no start, or a start whose payload carries no `class` string, maps
+ * to `null`, and every caller reads `null` as side-effecting. The map is built
+ * in one forward pass and later starts overwrite earlier ones, which cannot
+ * happen for a single-use key and is the harmless reading if it ever does.
+ */
+function classByActionKey(records: EventRecord[]): Map<string, string> {
+  const classes = new Map<string, string>();
+  for (const record of records) {
+    if (record.event !== "execution.started") continue;
+    const key = record.action_key;
+    if (typeof key !== "string" || key.length === 0) continue;
+    const cls = payloadOf(record)["class"];
+    if (typeof cls === "string" && cls.length > 0) classes.set(key, cls);
+  }
+  return classes;
+}
+
+/**
+ * Does this outcome record belong to a class the streak counts?
+ *
+ * Fail closed twice over: an outcome whose key names no start, and a start that
+ * recorded no class, both answer `true`.
+ */
+function outcomeIsSideEffecting(record: EventRecord, classes: Map<string, string>): boolean {
+  const key = record.action_key;
+  if (typeof key !== "string" || key.length === 0) return true;
+  const cls = classes.get(key);
+  return cls === undefined ? true : isSideEffectingClass(cls);
+}
 
 /** One task's loop state, derived from the log. */
 export interface TaskLoopState {
@@ -90,13 +167,19 @@ export interface TaskLoopState {
  * the same log produce the same list in the same order, which is what lets
  * `approval status --json` be pinned by a `deepEqual` test.
  *
- * Tasks with executions but no failures are included with
+ * Tasks with side-effecting executions but no failures are included with
  * `consecutiveFailures: 0` — a caller rendering health wants to know the task
  * was seen and is clean, and filtering is the caller's business, not this
  * function's.
+ *
+ * APRV-280: outcomes of `read.*` actions are skipped entirely, so a task whose
+ * every execution was a read appears here not at all. That is the transparency
+ * the amended §10.2 asks for, read in both directions: a failed read accrues
+ * nothing, and a completed read clears nothing either.
  */
 export function loopEscalation(records: EventRecord[]): TaskLoopState[] {
   const states = new Map<string, TaskLoopState>();
+  const classes = classByActionKey(records);
 
   const stateFor = (task: string): TaskLoopState => {
     const existing = states.get(task);
@@ -115,6 +198,10 @@ export function loopEscalation(records: EventRecord[]): TaskLoopState[] {
   for (const record of records) {
     const task = record.task;
     if (typeof task !== "string" || task.length === 0) continue;
+    if (record.event !== "execution.failed" && record.event !== "execution.completed") continue;
+    // APRV-280. Checked before the counter moves and before the task is even
+    // registered: a read is transparent, not a zero.
+    if (!outcomeIsSideEffecting(record, classes)) continue;
     if (record.event === "execution.failed") {
       const state = stateFor(task);
       state.consecutiveFailures += 1;
@@ -222,15 +309,23 @@ interface ToolCallOutcome {
  * The outcome is placed at the seq of the task's LAST outcome record, so
  * interleaved sessions and a late-arriving counterpart order deterministically
  * in log order. Never by timestamp.
+ *
+ * APRV-280 subtracts the reads BEFORE the fold: an outcome whose class is
+ * `read.*` is not part of the tool call as loop safety sees it, so a tool call
+ * that declared nothing else produces no outcome here at all and is transparent
+ * to every streak. A mixed command still folds strictly — its side-effecting
+ * halves decide it — because the reads are simply not in the fold.
  */
 function toolCallOutcomes(records: EventRecord[]): ToolCallOutcome[] {
   const byTask = new Map<string, ToolCallOutcome>();
+  const classes = classByActionKey(records);
   for (const record of records) {
     if (record.event !== "execution.failed" && record.event !== "execution.completed") continue;
     const task = record.task;
     if (typeof task !== "string" || task.length === 0) continue;
     const session = harnessSessionOf(task);
     if (session === null) continue;
+    if (!outcomeIsSideEffecting(record, classes)) continue;
     const existing = byTask.get(task);
     const failed = record.event === "execution.failed";
     if (existing === undefined) {
@@ -255,10 +350,11 @@ function toolCallOutcomes(records: EventRecord[]): ToolCallOutcome[] {
  * pinned by a `deepEqual` test.
  *
  * What resets a streak is unchanged and deliberately not widened: only an
- * `execution.completed` in the same scope. A hook timeout, a deny, a withdrawn
- * request, a granted approval, a fresh tool call, a restarted process and
- * elapsed time all leave the streak where they found it. Silence is not evidence
- * of recovery.
+ * `execution.completed` in the same scope, of a SIDE-EFFECTING class since
+ * APRV-280. A hook timeout, a deny, a withdrawn request, a granted approval, a
+ * fresh tool call, a successful `grep`, a restarted process and elapsed time all
+ * leave the streak where they found it. Silence is not evidence of recovery, and
+ * neither is a command that did nothing.
  */
 export function harnessLoopEscalation(records: EventRecord[]): HarnessLoopState[] {
   const states = new Map<string, HarnessLoopState>();
@@ -327,6 +423,30 @@ export function harnessLoopFloor(
   if (bySession?.escalated === true) return bySession;
   const byActor = states.find((state) => state.scope === "actor" && state.key === actor);
   return byActor?.escalated === true ? byActor : null;
+}
+
+/**
+ * What clears this streak, in one sentence, for the surface that has to say so
+ * (APRV-280).
+ *
+ * Written here rather than at each call site because three surfaces print it —
+ * the gate's `loop-escalated` refusals, the hook's denies, and `approval
+ * status` — and three copies of a sentence about how to get out of a floor are
+ * three chances to tell an operator something that is not true. Everything in
+ * it is a fact of this module: a completion of a SIDE-EFFECTING class in the
+ * same scope, and nothing else, resets the counter.
+ *
+ * The gate window is named for the harness scopes only, because that is the
+ * surface it reaches: an open window routes every gated tool call through the
+ * bypass path before the floor is ever consulted (SPEC.md §5.2, APRV-214). It is
+ * named as the human's ceremony, which is what it is — it needs a terminal and a
+ * typed `understood`, and an agent may not run it.
+ */
+export function loopClearance(scope: "task" | HarnessScope, key: string): string {
+  if (scope === "task") {
+    return `an execution.completed for task ${key} in a class that has side effects clears it; a read that succeeds clears nothing (amended SPEC.md §10.2)`;
+  }
+  return `one side-effecting tool call completing in this ${scope} scope (${key}) clears it — a human granting any request this floor routes to them, and the command then running, is that completion — or a human opening the gate window (\`approval gate open\`, the human's own ceremony), which bypasses the floor entirely. A failed or successful read.* command changes nothing either way (amended SPEC.md §10.2).`;
 }
 
 /** Is this harness tool call floored to manual by either scope right now? */

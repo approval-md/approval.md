@@ -84,7 +84,7 @@ import {
   type ExecuteRefusal,
   type ResolveOutcome,
 } from "../core/execute.js";
-import { harnessLoopEscalation, harnessOutcomeCoverage } from "../core/loop.js";
+import { harnessLoopEscalation, harnessOutcomeCoverage, loopClearance } from "../core/loop.js";
 import { isPayloadHash, runPayloadHash } from "../core/payload.js";
 import { payloadStoreCensus } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
@@ -1196,6 +1196,12 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
   // non-empty string an operator can grep the log for and every pre-existing
   // consumer reads the three fields it always read. `scope` is the additive
   // field that says which derivation produced the key.
+  //
+  // APRV-280 adds `clears`, additively: an escalated scope is a repository state
+  // an operator has to get OUT of, and a row that names the scope without naming
+  // the exit is a row that sends them to the source. The sentence is
+  // `core/loop.ts`'s own, so `status`, the gate's refusals and the hook's denies
+  // cannot come to disagree about what recovery is.
   const escalations = [
     ...loopEscalation(records)
       .filter((state) => state.escalated)
@@ -1204,6 +1210,7 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
         scope: "task",
         consecutive_failures: state.consecutiveFailures,
         escalated: true,
+        clears: loopClearance("task", state.task),
       })),
     ...harnessLoopEscalation(records)
       .filter((state) => state.escalated)
@@ -1212,6 +1219,7 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
         scope: state.scope,
         consecutive_failures: state.consecutiveFailures,
         escalated: true,
+        clears: loopClearance(state.scope, state.key),
       })),
   ];
   // Informational, and deliberately outside `healthy` and the exit code, for the
@@ -1431,11 +1439,16 @@ export function commandStatus(argv: string[], streams: Streams, cwd: string): nu
         ...(escalations.length === 0
           ? {}
           : {
-              under: escalations.map((entry) =>
+              // APRV-280: the scope, then the way out. The clearing sentence is
+              // long and it earns its line — an operator reading this row is
+              // looking at a repository where a floor is routing everything to a
+              // phone, and the next thing they need is what ends that.
+              under: escalations.flatMap((entry) => [
                 entry.scope === "task"
-                  ? `${entry.task} (${entry.consecutive_failures} consecutive execution.failed, task) — escalated to manual`
-                  : `${entry.task} (${entry.consecutive_failures} consecutive failed tool calls, ${entry.scope}) — escalated to manual`,
-              ),
+                  ? `${entry.task} (${entry.consecutive_failures} consecutive failed side-effecting executions, task) — escalated to manual`
+                  : `${entry.task} (${entry.consecutive_failures} consecutive failed side-effecting tool calls, ${entry.scope}) — escalated to manual`,
+                st.muted(`  clears: ${entry.clears}`),
+              ]),
             }),
       },
       {

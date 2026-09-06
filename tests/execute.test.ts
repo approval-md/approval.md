@@ -45,7 +45,7 @@ import {
   startExecution,
 } from "./clock-adapters.js";
 import type { EventRecord } from "../src/core/log.js";
-import { isLoopEscalated } from "../src/core/loop.js";
+import { isLoopEscalated, isSideEffectingClass, loopClearance } from "../src/core/loop.js";
 import { verify } from "../src/core/verify.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "approval-md-execute-"));
@@ -1012,6 +1012,42 @@ test("an escalated task refuses a supervised start, and the gate refuses the req
   );
   assert.equal(started.ok, true, started.ok ? "" : started.message);
   assertClean(unit);
+});
+
+test("APRV-280: the side-effect predicate is a carve-out of read.*, so the unknown is strict", () => {
+  for (const cls of ["read", "read.shell", "read.files", "read.web", "read.vcs.remote"]) {
+    assert.equal(isSideEffectingClass(cls), false, `${cls} only looks at things`);
+  }
+  for (const cls of [
+    "files.write.workspace",
+    "files.delete.out_of_scope",
+    "vcs.push.main",
+    "deps.add",
+    "network.call",
+    "communicate.email.external",
+    "policy.edit.spec",
+    "log.mutate",
+    // Starts with the four letters and is not in the namespace. The predicate
+    // matches the segment, never the prefix.
+    "readme.publish",
+    // A class no build of this runtime has ever heard of falls on the strict
+    // side by construction, which is why the predicate is written this way
+    // round.
+    "something.nobody.declared",
+  ]) {
+    assert.equal(isSideEffectingClass(cls), true, `${cls} does something`);
+  }
+});
+
+test("APRV-280: the clearing sentence names a side-effecting completion, and the window for a scope", () => {
+  // One sentence, three surfaces (the gate's refusals, the hook's denies,
+  // `approval status`). It is pinned here so a rewrite that quietly widens what
+  // clears a streak has to come through a failing test.
+  assert.match(loopClearance("task", "task-042"), /execution\.completed for task task-042/u);
+  assert.match(loopClearance("task", "task-042"), /a read that succeeds clears nothing/u);
+  assert.doesNotMatch(loopClearance("task", "task-042"), /gate open/u);
+  assert.match(loopClearance("session", "hook:sess-1"), /this session scope \(hook:sess-1\)/u);
+  assert.match(loopClearance("actor", "agent:claude-code"), /approval gate open/u);
 });
 
 test("loopEscalation is per task and ignores other tasks' failures", () => {
