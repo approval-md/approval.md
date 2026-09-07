@@ -42,6 +42,7 @@ import {
 import { buildPendingQueue } from "../src/channels/tagging.js";
 import { renderTelegram } from "../src/channels/telegram.js";
 import { supervisedExecutions } from "../src/core/audit.js";
+import { startHarnessExecution } from "../src/core/gate.js";
 import { runPayloadHash } from "../src/core/payload.js";
 import { CLASSIFIER_CLASSES, COMMAND_RULES } from "../src/core/command-class.js";
 import { closeWindow, openWindow, recordGateBypass } from "../src/core/gate-window.js";
@@ -1191,11 +1192,13 @@ test("APRV-280: a floored tool call's deny names loop-escalated, the scope and w
   for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
 
   // Nobody answers, so the wait times out — the nine minutes of silence the
-  // stalled session actually saw, with the timeout cut to a second.
+  // stalled session actually saw, with the timeout cut to a second. The command
+  // is a WRITE since APRV-297: a floor routes side effects and leaves reads to
+  // the policy, so a read here would be allowed at once and never reach a wait.
   const run = runCli(
     ["hook", "claude-code", "--timeout", "1s", "--interval", "200ms"],
     dir,
-    bashEvent(READ_COMMAND, "tu-4"),
+    bashEvent(WRITE_COMMAND, "tu-4"),
   );
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "deny", verdict.reason);
@@ -1210,15 +1213,16 @@ test("an escalated session floors the next autonomous command to the human gate"
   const dir = ready();
   for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
 
-  // `read.shell` is autonomous under this policy and would have been allowed
-  // with nothing appended. Under the floor it is registered, requested and
-  // waited on like any manual class — and the human's tap authorizes it.
-  const key = "hook:sess-1:tu-4:read.shell";
+  // `files.write.workspace` is autonomous under this policy and would have been
+  // allowed with nothing appended. Under the floor it is registered, requested
+  // and waited on like any manual class — and the human's tap authorizes it.
+  // (A read would not be: APRV-297 leaves those to the policy.)
+  const key = "hook:sess-1:tu-4:files.write.workspace";
   grantWhenPending(dir, key);
   const run = runCli(
     ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
     dir,
-    bashEvent("ls -la", "tu-4"),
+    bashEvent(WRITE_COMMAND, "tu-4"),
   );
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "allow", verdict.reason);
@@ -1258,8 +1262,10 @@ test("the actor scope backstops a rotated session id", () => {
     "no single session tripped; the actor did",
   );
 
-  // A fourth, fresh session is floored all the same.
-  const key = "hook:sess-d:tu-4:read.shell";
+  // A fourth, fresh session is floored all the same. The command writes: a read
+  // is answered by the policy under any floor since APRV-297, so it would prove
+  // nothing about the actor scope.
+  const key = "hook:sess-d:tu-4:files.write.workspace";
   grantWhenPending(dir, key);
   const run = runCli(
     ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
@@ -1269,7 +1275,7 @@ test("the actor scope backstops a rotated session id", () => {
       cwd: "/repo",
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
-      tool_input: { command: "ls -la" },
+      tool_input: { command: WRITE_COMMAND },
       tool_use_id: "tu-4",
     }),
   );
@@ -1513,9 +1519,9 @@ test("a report may not be filed by a non-principal actor", () => {
 test("status reports the harness streaks by scope, and counterpart coverage", () => {
   const dir = ready();
   // One start that nobody reports on: it is not debris, it is a tool call with
-  // no outcome, and the coverage row is the only place it shows. It runs FIRST,
-  // because after the three failures below the floor sends every command to a
-  // human and this one would sit there waiting for a tap.
+  // no outcome, and the coverage row is the only place it shows. It runs first
+  // for the coverage arithmetic below to be readable; since APRV-297 a read
+  // would run under the floor too.
   assert.equal(
     verdictOf(runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-0"))).permission,
     "allow",
@@ -1544,6 +1550,13 @@ test("status reports the harness streaks by scope, and counterpart coverage", ()
       /one side-effecting tool call completing in this (session|actor) scope/u,
     );
     assert.match(String(entry["clears"]), /approval gate open/u);
+    // APRV-297: the row says reads are outside the floor in BOTH directions, so
+    // an operator reading it knows the session can still search the repository.
+    assert.match(
+      String(entry["clears"]),
+      /read\.\* commands are outside this floor in both directions/u,
+    );
+    assert.match(String(entry["clears"]), /does not route them to a human/u);
   }
   assert.deepEqual(body["harness_outcomes"], { started: 4, reported: 3, unreported: 1 });
   assert.equal(body["healthy"], false, "an escalated scope is not a healthy repo");
@@ -3883,6 +3896,173 @@ test("APRV-294: a lapsed window is named as lapsed, not as no window at all", ()
   assert.match(refused.message, /lapsed/u);
   assert.doesNotMatch(refused.message, /gate\.closed seq/u);
   assert.equal(rawLog(dir), before);
+  assertClean(dir);
+});
+
+// ===========================================================================
+// Escalation raises scrutiny on side effects only (APRV-297)
+// ===========================================================================
+
+test("APRV-297: a tripped floor leaves a read to the policy and still routes a write", () => {
+  // THE DEFECT. Once the floor tripped on 2026-09-06/07 every hook call went to
+  // the human, reads included, so a session that could not get an answer could
+  // not even grep for why. APRV-280 stopped a read ACCRUING the floor; a tripped
+  // floor still ROUTED one, and a read cannot cause the harm the floor bounds.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+  const before = rawLog(dir);
+
+  // The read: answered by the policy, at once, with nobody asked.
+  const read = runCli(["hook", "claude-code"], dir, bashEvent(READ_COMMAND, "tu-read"));
+  const verdict = verdictOf(read);
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /^autonomous: read\.shell/u);
+  assert.match(verdict.reason, /loop-escalated \(amended SPEC\.md §10\.2\) NOT APPLIED/u);
+  assert.match(verdict.reason, /session hook:sess-1 has 3 consecutive/u);
+  assert.match(verdict.reason, /every class of this command is a read/u);
+  assert.equal(
+    recordsSince(dir, before).some((record) => record["event"] === "approval.requested"),
+    false,
+    "no request was raised, so no message was sent",
+  );
+  assert.deepEqual(
+    recordsSince(dir, before).map((record) => record["event"]),
+    ["execution.started"],
+    "the read is charged like any autonomous call and nothing else is written",
+  );
+
+  // The control: a side-effecting call in the same session is still routed.
+  const mid = rawLog(dir);
+  const write = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "200ms"],
+    dir,
+    bashEvent(WRITE_COMMAND, "tu-write"),
+  );
+  const denied = verdictOf(write);
+  assert.equal(denied.permission, "deny", denied.reason);
+  assert.match(denied.reason, /^hook-timeout: /u);
+  assert.match(denied.reason, /routed to a human by loop safety/u);
+  // AC3: the refusal text says reads are exempt from routing as well as from
+  // counting, so the agent reading this deny knows it can still look at things.
+  assert.match(denied.reason, /read\.\* commands are outside this floor in both directions/u);
+  assert.match(denied.reason, /does not route them to a human/u);
+  assert.deepEqual(
+    recordsSince(dir, mid)
+      .filter((record) => record["event"] === "approval.requested")
+      .map((record) => record["action_key"]),
+    ["hook:sess-1:tu-write:files.write.workspace"],
+    "the floor still puts the session's side effects on a human's phone",
+  );
+  assertClean(dir);
+});
+
+test("APRV-297: a floor routes a mixed call as one question, and raises no read class", () => {
+  // AC2. The command looks and then writes; the floor is about the writing. The
+  // approver gets one prompt, for the class that does something, and the read
+  // inside the same command is neither counted nor separately raised.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+  const before = rawLog(dir);
+
+  const key = "hook:sess-1:tu-mixed:files.write.workspace";
+  grantWhenPending(dir, key);
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
+    dir,
+    bashEvent(`${READ_COMMAND} && ${WRITE_COMMAND}`, "tu-mixed"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /loop-escalated \(amended SPEC\.md §10\.2\)/u);
+
+  const written = recordsSince(dir, before);
+  assert.deepEqual(
+    written
+      .filter((record) => record["event"] === "approval.requested")
+      .map((record) => record["action_key"]),
+    [key],
+    "exactly one question, and it is the one about the side effect",
+  );
+  assert.equal(
+    written.some(
+      (record) =>
+        record["event"] === "approval.requested" && String(record["action_key"]).endsWith("read.shell"),
+    ),
+    false,
+    "the read class inside the command was not raised",
+  );
+  assertClean(dir);
+});
+
+test("APRV-297: the write boundary refuses a floored write and records a floored read", () => {
+  // The belt to the hook's braces, narrowed the same way (core/gate.ts). A
+  // caller that reaches startHarnessExecution without asking the hook first
+  // still cannot record an unattended side effect under a floor, and can record
+  // a read, because a read is outside the floor rather than trusted by it.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+  const refused = startHarnessExecution(
+    join(dir, LOG),
+    {
+      task: "hook:sess-1:tu-direct",
+      actionKey: "hook:sess-1:tu-direct:files.write.workspace",
+      cls: "files.write.workspace",
+      payload_hash: payloadHash({ command: WRITE_COMMAND, cwd: "/repo" }),
+    },
+    "agent:claude-code",
+    { policy: { dir } },
+  );
+  assert.equal(refused.ok, false, "a floored side effect may not be recorded unattended");
+  if (refused.ok) throw new Error("unreachable");
+  assert.equal(refused.code, "loop-escalated");
+
+  const allowed = startHarnessExecution(
+    join(dir, LOG),
+    {
+      task: "hook:sess-1:tu-direct-read",
+      actionKey: "hook:sess-1:tu-direct-read:read.shell",
+      cls: "read.shell",
+      payload_hash: payloadHash({ command: READ_COMMAND, cwd: "/repo" }),
+    },
+    "agent:claude-code",
+    { policy: { dir } },
+  );
+  assert.equal(allowed.ok, true, allowed.ok ? "" : `${allowed.code}: ${allowed.message}`);
+  assertClean(dir);
+});
+
+test("APRV-297: a read under a floor clears nothing, so the floor still stands", () => {
+  // The direction that would be a hole. The exemption is about ROUTING; a read
+  // that succeeds under a floor must not clear the streak, or a session could
+  // read its way out from under one.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+  toolCall(dir, "tu-read", "text", "sess-1", READ_COMMAND);
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records)
+      .filter((state) => state.escalated)
+      .map((state) => state.scope),
+    ["actor", "session"],
+    "the completed read cleared neither scope",
+  );
+
+  // …and the next write is still routed, which is the fact that matters.
+  const before = rawLog(dir);
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "200ms"],
+    dir,
+    bashEvent(WRITE_COMMAND, "tu-after"),
+  );
+  assert.match(verdictOf(run).reason, /^hook-timeout: /u);
+  assert.equal(
+    recordsSince(dir, before).some((record) => record["event"] === "approval.requested"),
+    true,
+  );
   assertClean(dir);
 });
 

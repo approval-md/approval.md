@@ -66,5 +66,17 @@ The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
   `gate-not-open` that claimed there had never been a window. Neither refusal
   appends anything or counts as a failed side-effecting call.
 
+- **A tripped loop floor routes side effects and leaves reads alone**
+  (APRV-297). APRV-280 stopped a failed `read.*` accruing the floor; a floor that
+  had tripped still routed every later read to a human, so a session that could
+  not get an answer could not even search the repository, at one phone message
+  and one nine-minute wait per `grep`. A tool call whose classes are all `read.*`
+  is now answered by the policy under a tripped floor, and says in its allow that
+  a floor is standing and was not applied to a read; a mixed call is still routed
+  as one question about its side effects, with its read classes neither counted
+  nor separately raised; the write boundary carves reads out with the same
+  predicate; and a read still clears nothing, so nobody reads their way out from
+  under a floor. `approval status` and the floor's own refusals say so.
+
 The publish itself is the first `release.publish` action to pass through this
 gate (APRV-199).

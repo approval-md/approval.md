@@ -880,13 +880,14 @@ to a pending request nobody is shown.
 ### What counts toward the loop floor (APRV-287)
 
 Loop safety (SPEC §10.2) counts consecutive failed side-effecting **tool calls**
-per session and per actor. Three of them route every class of the next command to
-a human. What does and does not feed it:
+per session and per actor. Three of them route the next command's side-effecting
+classes to a human (see [What a tripped floor
+routes](#what-a-tripped-floor-routes-aprv-297)). What does and does not feed it:
 
 - **An expired wait is not a failure.** It records a withdrawal, never an
   `execution.failed`, so the escalation cannot be fed by the timeouts it is
-  causing (escalation routes reads to the phone, unanswered reads time out,
-  timeouts extend the escalation).
+  causing (a floor that routed reads to the phone left unanswered reads to time
+  out, and the timeouts extended the floor).
 - **A harness-side misfire is not an execution.** A command the classifier cannot
   read, a tool call this hook denied, a tool the hook does not gate: none of them
   has an `execution.started`, so the completion counterpart refuses
@@ -899,6 +900,44 @@ a human. What does and does not feed it:
   counterpart finds it from the event reporting how that tool call went. Before
   this it did not, so a granted commit-and-push that completed cleared nothing
   and the floor stood over the rest of the session (seen 2026-09-06).
+
+### What a tripped floor routes (APRV-297)
+
+Side effects, and only side effects. A tool call whose classes are **all
+`read.*`** is answered by the policy under a tripped floor exactly as it is under
+a clear one: no request is raised, nothing reaches a phone, and the allow says in
+its own words that a floor is standing and was not applied here.
+
+```text
+allow — autonomous: read.shell (loop-escalated (amended SPEC.md §10.2) NOT
+APPLIED to this call: session hook:sess-1 has 3 consecutive failed
+side-effecting harness tool calls, and every class of this command is a read …)
+```
+
+The floor exists to stop an agent retrying a side effect that keeps failing, and
+a read cannot cause that harm, so routing one buys no safety while costing the
+thing the floor is meant to conserve: an approver's attention, one message per
+`grep`, plus the wait the session spends before being refused anyway. On
+2026-09-06/07 a floor tripped and the session that could not get an answer could
+not read a file either, which is the state this removes. APRV-280 had already
+stopped a read **counting** toward the floor; this stops a tripped floor
+**routing** one.
+
+Three edges are worth knowing:
+
+- **A mixed call is still one question.** `ls -la && mkdir build` under a floor
+  raises the write and leaves the read to the policy, so the approver sees one
+  prompt, for what the command does. The read classes inside it are neither
+  counted nor separately raised.
+- **A read still clears nothing.** The exemption is about routing. A session
+  cannot read its way out from under a floor; what clears one is a side-effecting
+  tool call completing in the same scope, or a human opening the gate window.
+- **The write boundary agrees.** `startHarnessExecution` re-checks the floor when
+  it records an unattended execution, and carves reads out with the same
+  predicate, so what the floor counts and what it routes cannot drift apart.
+
+`approval status` says all of this on the escalation row it already prints, in
+the `clears:` line.
 
 ### When the grant can follow the write (APRV-200)
 

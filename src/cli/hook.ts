@@ -125,6 +125,7 @@ import {
 import {
   harnessLoopFloor,
   isLoopEscalated,
+  isSideEffectingClass,
   loopClearance,
   UNKNOWN_SESSION,
   type HarnessLoopState,
@@ -1970,8 +1971,9 @@ function gateAndWait(
   /** The history-rewrite refinement's own words, or `""` (APRV-108). */
   note = "",
   /**
-   * The harness streak that floored every class of this invocation to `manual`
-   * (APRV-145), or `null` where policy alone sent it here.
+   * The harness streak that floors the SIDE-EFFECTING classes of this
+   * invocation to `manual` (APRV-145, narrowed by APRV-297), or `null` where
+   * policy alone sent it here.
    *
    * Passed into `request` as a boolean rather than acted on here, so the floored
    * action takes the identical path a manual class takes — same records, same
@@ -1980,10 +1982,27 @@ function gateAndWait(
    * on the phone is owed the reason and the way out in the same breath, and
    * before APRV-280 the nine-minute wait ended in a bare `hook-timeout` that
    * said neither.
+   *
+   * Since APRV-297 the caller passes `null` for a command whose classes are all
+   * reads, and {@link floorApplies} below carves the read classes out of a mixed
+   * one, so a floor never puts a question about looking on a human's phone.
    */
   floor: HarnessLoopState | null = null,
 ): number {
-  const loopFloor = floor !== null;
+  /**
+   * Does the floor route THIS class to a human? (APRV-297.)
+   *
+   * Per class rather than per command, because a MIXED tool call is one question
+   * about its side effects and no question at all about its looking. Under a
+   * floor, `ls -la && mkdir build` raises the write and leaves the read to the
+   * policy, so the approver sees one prompt for what the command DOES. Before
+   * this the read class was raised too, and a floored session put two prompts on
+   * a phone for one command, one of which nobody needed to answer.
+   *
+   * The command is still routed as a whole: the verdict waits on the classes
+   * that were raised, and an allow covers the command.
+   */
+  const floorApplies = (cls: string): boolean => floor !== null && isSideEffectingClass(cls);
   const hash = payloadHash(payload);
   const summary = truncate(headline, SUMMARY_LIMIT);
   const sayAllow = (reason: string): number => allow(streams, reason, run.harness);
@@ -2091,7 +2110,7 @@ function gateAndWait(
         payload_hash: hash,
         payload: { value: payload },
         execution: "harness",
-        ...(loopFloor ? { loopFloor: true } : {}),
+        ...(floorApplies(action.cls) ? { loopFloor: true } : {}),
       },
       run.actor,
       run.options,
@@ -3144,12 +3163,48 @@ function runHarnessHook(
   // and `core/loop.ts`'s own header), and the only thing that clears a streak is
   // an execution that completes — so a deny would leave an escalated session
   // with no way back, and a class the policy calls autonomous has no manual
-  // sibling to fall back on. Every class that would otherwise have proceeded is
-  // routed to the human gate for this invocation; a class that already resolves
-  // manual is untouched, because it was already going there.
+  // sibling to fall back on. Every SIDE-EFFECTING class that would otherwise
+  // have proceeded is routed to the human gate for this invocation (APRV-297
+  // narrowed it to those); a class that already resolves manual is untouched,
+  // because it was already going there.
   const floored = harnessFloor(logPath, task, actor, looked.records);
   if (!floored.ok) return deny(streams, "hook-io", floored.detail, adapter.kind);
-  const floor = floored.floor;
+
+  /**
+   * The streak the log shows, before the read carve-out (APRV-297).
+   *
+   * Kept separate from the floor that is APPLIED because the verdict has to be
+   * able to say "a floor is standing and it was not applied here". Collapsing
+   * the two would leave an agent reading an ordinary autonomous allow with no
+   * way to tell that the session it is in is three failed writes deep.
+   */
+  const tripped = floored.floor;
+  /**
+   * Is every class of this command a read? (APRV-297, amended SPEC.md §10.2.)
+   *
+   * The predicate is `core/loop.ts`'s own, the same one that decides what
+   * ACCRUES, so what the floor counts and what it routes cannot come apart. A
+   * class this build has never heard of is side-effecting by construction, so an
+   * unknown class is routed exactly as it is counted.
+   */
+  const readsOnly = classes.every((cls) => !isSideEffectingClass(cls));
+  /**
+   * The floor as this invocation applies it: `null` for a command that only
+   * looks, whatever the streak says.
+   *
+   * A read cannot cause the harm the floor bounds. The floor exists to stop an
+   * agent retrying a side effect that keeps failing, so routing a `grep` to a
+   * phone buys no safety and spends the two things the floor is supposed to be
+   * conserving: a human's attention, and the session's ability to find out what
+   * went wrong. On 2026-09-06/07 a tripped floor sent every read to the gate and
+   * a session that could not get an answer could not even search the repository.
+   */
+  const floor = readsOnly ? null : tripped;
+  if (tripped !== null && floor === null) {
+    notes.push(
+      `loop-escalated (amended SPEC.md §10.2) NOT APPLIED to this call: ${tripped.scope} ${tripped.key} has ${String(tripped.consecutiveFailures)} consecutive failed side-effecting harness tool calls, and every class of this command is a read (${classes.join(", ")}). Escalation raises scrutiny on side effects only, so this command is answered by the policy; the floor still routes the session's side-effecting calls to a human. ${loopClearance(tripped.scope, tripped.key)}`,
+    );
+  }
   if (floor !== null) {
     // The decision trace: the verdict this invocation prints says that a floor
     // rather than the matched rule decided it, and names the scope and the
