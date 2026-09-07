@@ -125,6 +125,7 @@ import {
 import {
   harnessLoopFloor,
   isLoopEscalated,
+  isSideEffectingClass,
   loopClearance,
   UNKNOWN_SESSION,
   type HarnessLoopState,
@@ -1970,8 +1971,9 @@ function gateAndWait(
   /** The history-rewrite refinement's own words, or `""` (APRV-108). */
   note = "",
   /**
-   * The harness streak that floored every class of this invocation to `manual`
-   * (APRV-145), or `null` where policy alone sent it here.
+   * The harness streak that floors the SIDE-EFFECTING classes of this
+   * invocation to `manual` (APRV-145, narrowed by APRV-297), or `null` where
+   * policy alone sent it here.
    *
    * Passed into `request` as a boolean rather than acted on here, so the floored
    * action takes the identical path a manual class takes — same records, same
@@ -1980,10 +1982,27 @@ function gateAndWait(
    * on the phone is owed the reason and the way out in the same breath, and
    * before APRV-280 the nine-minute wait ended in a bare `hook-timeout` that
    * said neither.
+   *
+   * Since APRV-297 the caller passes `null` for a command whose classes are all
+   * reads, and {@link floorApplies} below carves the read classes out of a mixed
+   * one, so a floor never puts a question about looking on a human's phone.
    */
   floor: HarnessLoopState | null = null,
 ): number {
-  const loopFloor = floor !== null;
+  /**
+   * Does the floor route THIS class to a human? (APRV-297.)
+   *
+   * Per class rather than per command, because a MIXED tool call is one question
+   * about its side effects and no question at all about its looking. Under a
+   * floor, `ls -la && mkdir build` raises the write and leaves the read to the
+   * policy, so the approver sees one prompt for what the command DOES. Before
+   * this the read class was raised too, and a floored session put two prompts on
+   * a phone for one command, one of which nobody needed to answer.
+   *
+   * The command is still routed as a whole: the verdict waits on the classes
+   * that were raised, and an allow covers the command.
+   */
+  const floorApplies = (cls: string): boolean => floor !== null && isSideEffectingClass(cls);
   const hash = payloadHash(payload);
   const summary = truncate(headline, SUMMARY_LIMIT);
   const sayAllow = (reason: string): number => allow(streams, reason, run.harness);
@@ -2091,7 +2110,7 @@ function gateAndWait(
         payload_hash: hash,
         payload: { value: payload },
         execution: "harness",
-        ...(loopFloor ? { loopFloor: true } : {}),
+        ...(floorApplies(action.cls) ? { loopFloor: true } : {}),
       },
       run.actor,
       run.options,
@@ -2181,6 +2200,14 @@ function gateAndWait(
   process.on("SIGTERM", onTerm);
   process.on("SIGINT", onInt);
 
+  /**
+   * Has this invocation already said, on stderr, that the verified view lags
+   * the requests it is waiting on (APRV-294)? Said once per invocation: the
+   * poll runs every second, and a line per poll would bury the one line that
+   * matters under sixty copies of itself.
+   */
+  let saidLagging = false;
+
   try {
     for (;;) {
       const read = readVerifiedRecords(run.logPath);
@@ -2199,9 +2226,52 @@ function gateAndWait(
       // from the log again would let an empty or foreign result read as
       // "nothing pending" and fall through to allow; the verified log must show
       // every one of these keys granted before the hook says yes.
-      const states = waitKeys.map((key) => requestState(read.records, key, ts, run.ttlMs).state);
+      const derived = waitKeys.map((key) => ({
+        key,
+        state: requestState(read.records, key, ts, run.ttlMs).state,
+      }));
+      const states = derived.map((entry) => entry.state);
 
-      if (!states.includes("requested")) {
+      /**
+       * Keys this process ESTABLISHED exist, that this read does not carry
+       * (APRV-294).
+       *
+       * Every key in `waitKeys` was seen in a verified read by this process:
+       * `ownKeys` because `request` appended it and returned the record,
+       * `adopted` because intake's verified read found the pending request it
+       * is adopting. So `none` here is never the terminal fact "there is no
+       * such request". A log is append-only; a request that existed does not
+       * stop existing. What `none` says is that the view this read produced
+       * does not yet carry a record this process holds, which is a fact about
+       * the view and not about the request.
+       *
+       * On 2026-09-07 02:00Z, minutes after `approval log sync` replaced the
+       * committed baseline and the daemon restarted, a hook read exactly this
+       * and denied at once: `hook-io: the verified log does not show every
+       * request as granted (states: none, none, none)`. The requests were real
+       * and reached the approver's phone; the view had not caught up. Treating
+       * that as terminal spends the human's answer on nothing and, since it is
+       * a deny, hands the agent a refusal for a question still open.
+       *
+       * So a lagging key waits, exactly as `requested` waits, bounded by the
+       * same timeout — and nothing here reads unverified bytes as verified,
+       * which is the only response to a lag that §11.1 invariant 1 leaves open.
+       * The APRV-287 withdrawal still applies at expiry, over the keys whose
+       * requests the view does carry.
+       */
+      const lagging = derived
+        .filter((entry) => entry.state === "none")
+        .map((entry) => entry.key);
+      if (lagging.length > 0 && !saidLagging) {
+        saidLagging = true;
+        streams.err(
+          `approval: the verified log does not yet carry ${lagging.join(", ")} (verified head: ${
+            read.head === null ? "empty" : `seq ${String(read.head.seq)}`
+          }). The request(s) were appended by this hook, so this is a view that lags rather than a decision; the hook keeps waiting for the verification to catch up, up to its ${String(run.timeoutMs)}ms wait. A sync or a daemon restart in the last minute is the usual cause (docs/claude-code-hook.md).\n`,
+        );
+      }
+
+      if (!states.includes("requested") && lagging.length === 0) {
         // Precedence, as `approval wait` fixes it: a human's "no" outranks a
         // lapse, and both outrank "everything was granted". A withdrawal sits
         // with the refusals: it is not a decision, but it is terminal, and it
@@ -2235,6 +2305,13 @@ function gateAndWait(
         // Not a wait outcome: the log disagrees with itself about keys this
         // process is waiting on. Nothing is retracted, because the state that
         // would justify retracting is the state that could not be established.
+        //
+        // A BACKSTOP since APRV-294, and deliberately kept. `none` no longer
+        // reaches here (it waits, above) and every remaining state is either
+        // terminal and answered above or `granted`, so this is unreachable
+        // through today's `RequestState`. It stands for the state a later
+        // member of that union would arrive as: an outcome this function has no
+        // reading for denies rather than allows.
         return sayDeny(
           "hook-io",
           `the verified log does not show every request for ${task} as granted (states: ${states.join(", ")})`,
@@ -2250,15 +2327,24 @@ function gateAndWait(
         // will adopt is taken back rather than left for a restarted listener to
         // re-deliver.
         const withdrawn = withdrawAbandoned(run, streams, read.records, ts, null, ownKeys);
+        // APRV-294: a wait that ends with the view still short of its own
+        // requests says so. The deny is the same deny — the wait ran out — and
+        // the repair is different from a queue nobody answered: the log this
+        // hook reads is behind the log it wrote to, and `approval log verify`
+        // in the checkout that owns it is where that is established.
+        const stillLagging =
+          lagging.length === 0
+            ? ""
+            : ` The verified view still does not carry ${lagging.join(", ")}, which this hook appended: the request(s) exist and the view is behind, so check the log that owns them (\`approval log verify\`, \`approval status\`) rather than reading this as an unanswered question.`;
         if (withdrawn.length > 0) {
           return sayDeny(
             "hook-timeout",
-            `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait, and the ${minutesText(run.graceMs)} retry grace has run out: ${withdrawn.join(", ")} WAS WITHDRAWN (reason timeout). A tap on it now authorizes nothing and the channel says so. Run the command again to ask the question fresh.`,
+            `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait, and the ${minutesText(run.graceMs)} retry grace has run out: ${withdrawn.join(", ")} WAS WITHDRAWN (reason timeout). A tap on it now authorizes nothing and the channel says so. Run the command again to ask the question fresh.${stillLagging}`,
           );
         }
         return sayDeny(
           "hook-timeout",
-          `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once. Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the hook takes the question back (approval.withdrawn, reason timeout), so a late retry asks again rather than adopting a question nobody is holding.`,
+          `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once. Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the hook takes the question back (approval.withdrawn, reason timeout), so a late retry asks again rather than adopting a question nobody is holding.${stillLagging}`,
         );
       }
       sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
@@ -2604,8 +2690,15 @@ interface WindowLookup {
    * `unattendedGuard` so the closed path pays for ONE verified read (APRV-209),
    * and `null` where the log could not be read or did not verify — which is
    * also, and not coincidentally, the case where there is no window.
+   *
+   * Since APRV-294 they are handed to the OPEN path too, together with
+   * {@link WindowLookup.head}: the bypass append records the window this read
+   * derived, against the head this read observed, so the decision and the record
+   * are one read rather than two that may disagree.
    */
   records: EventRecord[] | null;
+  /** The chain head that read observed, for the bypass append's precondition. */
+  head: { seq: number; hash: string } | null;
 }
 
 /**
@@ -2625,11 +2718,11 @@ interface WindowLookup {
  */
 function lookupWindow(logPath: string): WindowLookup {
   if (!existsSync(logPath) && !existsSync(dirname(logPath))) {
-    return { window: null, records: null };
+    return { window: null, records: null, head: null };
   }
   const read = readVerifiedRecords(logPath);
-  if (!read.ok) return { window: null, records: null };
-  return { window: openGateWindow(read.records), records: read.records };
+  if (!read.ok) return { window: null, records: null, head: null };
+  return { window: openGateWindow(read.records), records: read.records, head: read.head };
 }
 
 /**
@@ -2693,6 +2786,14 @@ function runBypass(
   flags: Record<string, string | boolean>,
   actor: string,
   window: OpenWindow,
+  /**
+   * The verified read `window` was derived from (APRV-294), handed on to the
+   * append so the same records answer "is a window open" and "which head does
+   * this record chain onto". `null` is not reachable from the caller — a window
+   * implies a read that produced it — and is accepted so the seam has one
+   * shape.
+   */
+  decidedOn: { records: EventRecord[]; head: { seq: number; hash: string } | null } | null,
 ): number {
   const scope = hookScope(flags, cwd);
   const load = loadPolicy(
@@ -2772,11 +2873,20 @@ function runBypass(
     },
     actor,
     {},
+    // APRV-294: the window this verdict was decided under, and the read it was
+    // decided on. The append uses both, so a window that ended in between is
+    // reported as the thing that happened rather than as "no window is open".
+    {
+      openedSeq: window.seq,
+      ...(decidedOn === null ? {} : { read: decidedOn }),
+    },
   );
   if (!recorded.ok) {
     // Invariant 8: the record lands before the allow, so a refusal here is a
     // deny even though a window is open. `append-failed` reaches the caller
-    // through the family reserved for a code the writer produced.
+    // through the family reserved for a code the writer produced, and so does
+    // `gate-window-closed` (APRV-294), which says the window stood when this
+    // process classified the command and does not stand now.
     return deny(
       streams,
       `hook-gate-refused:${recorded.code}`,
@@ -2910,7 +3020,20 @@ function runHarnessHook(
   // words. The window suspends the POLICY; it never suspends the log.
   const looked = lookupWindow(logPath);
   if (looked.window !== null) {
-    return runBypass(streams, input, adapter, cwd, logPath, parsed.flags, actor, looked.window);
+    return runBypass(
+      streams,
+      input,
+      adapter,
+      cwd,
+      logPath,
+      parsed.flags,
+      actor,
+      looked.window,
+      // APRV-294. The records this window was derived from travel with it: the
+      // bypass record is appended against the head they ended at, so the
+      // verdict and the record are one read of the log.
+      looked.records === null ? null : { records: looked.records, head: looked.head },
+    );
   }
 
   // The policy is read BEFORE the command is classified (APRV-107): the
@@ -3040,12 +3163,48 @@ function runHarnessHook(
   // and `core/loop.ts`'s own header), and the only thing that clears a streak is
   // an execution that completes — so a deny would leave an escalated session
   // with no way back, and a class the policy calls autonomous has no manual
-  // sibling to fall back on. Every class that would otherwise have proceeded is
-  // routed to the human gate for this invocation; a class that already resolves
-  // manual is untouched, because it was already going there.
+  // sibling to fall back on. Every SIDE-EFFECTING class that would otherwise
+  // have proceeded is routed to the human gate for this invocation (APRV-297
+  // narrowed it to those); a class that already resolves manual is untouched,
+  // because it was already going there.
   const floored = harnessFloor(logPath, task, actor, looked.records);
   if (!floored.ok) return deny(streams, "hook-io", floored.detail, adapter.kind);
-  const floor = floored.floor;
+
+  /**
+   * The streak the log shows, before the read carve-out (APRV-297).
+   *
+   * Kept separate from the floor that is APPLIED because the verdict has to be
+   * able to say "a floor is standing and it was not applied here". Collapsing
+   * the two would leave an agent reading an ordinary autonomous allow with no
+   * way to tell that the session it is in is three failed writes deep.
+   */
+  const tripped = floored.floor;
+  /**
+   * Is every class of this command a read? (APRV-297, amended SPEC.md §10.2.)
+   *
+   * The predicate is `core/loop.ts`'s own, the same one that decides what
+   * ACCRUES, so what the floor counts and what it routes cannot come apart. A
+   * class this build has never heard of is side-effecting by construction, so an
+   * unknown class is routed exactly as it is counted.
+   */
+  const readsOnly = classes.every((cls) => !isSideEffectingClass(cls));
+  /**
+   * The floor as this invocation applies it: `null` for a command that only
+   * looks, whatever the streak says.
+   *
+   * A read cannot cause the harm the floor bounds. The floor exists to stop an
+   * agent retrying a side effect that keeps failing, so routing a `grep` to a
+   * phone buys no safety and spends the two things the floor is supposed to be
+   * conserving: a human's attention, and the session's ability to find out what
+   * went wrong. On 2026-09-06/07 a tripped floor sent every read to the gate and
+   * a session that could not get an answer could not even search the repository.
+   */
+  const floor = readsOnly ? null : tripped;
+  if (tripped !== null && floor === null) {
+    notes.push(
+      `loop-escalated (amended SPEC.md §10.2) NOT APPLIED to this call: ${tripped.scope} ${tripped.key} has ${String(tripped.consecutiveFailures)} consecutive failed side-effecting harness tool calls, and every class of this command is a read (${classes.join(", ")}). Escalation raises scrutiny on side effects only, so this command is answered by the policy; the floor still routes the session's side-effecting calls to a human. ${loopClearance(tripped.scope, tripped.key)}`,
+    );
+  }
   if (floor !== null) {
     // The decision trace: the verdict this invocation prints says that a floor
     // rather than the matched rule decided it, and names the scope and the

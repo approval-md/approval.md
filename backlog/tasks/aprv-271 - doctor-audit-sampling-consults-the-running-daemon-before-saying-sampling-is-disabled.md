@@ -3,11 +3,11 @@ id: APRV-271
 title: >-
   doctor audit-sampling consults the running daemon before saying sampling is
   disabled
-status: In Progress
+status: Done
 assignee:
   - '@opus-doctor'
 created_date: '2026-09-05 17:58'
-updated_date: '2026-09-06 08:28'
+updated_date: '2026-09-07 06:12'
 labels: []
 dependencies: []
 priority: low
@@ -46,6 +46,8 @@ Scope decision, and the one worth reviewing. The answer is NOT MAC'd and cannot 
 Two details worth knowing from the diff. parseSamplingAnswer rebuilds every field rather than passing the object through, so an answerer cannot put text of its choosing on an operator's terminal; a test asserts a planted secret and a planted message are both dropped. And the per-class breakdown is rendered in DECLARED terms on the enabled-per-daemon branch (declaredClassDetail), because the local classSampling reading would otherwise print every class as none (secret-unset) beside a sentence saying sampling is on.
 
 Validation: npm run build; node --test dist/tests/cli-doctor.test.js 61 pass 0 fail exit 0 (57 before this task, 4 new); node --test dist/tests/live-draw.test.js 21 pass 1 fail, the failure being 'the daemon holds the secret, the asker holds none, and the draw crosses between them', which fails identically at HEAD 30e4899 with HEAD's own draw.ts and live-draw.ts rebuilt and run alone: the spawned daemon binds the socket and does not answer within the 500ms DRAW_TIMEOUT_MS. Pre-existing, untouched here, journalled, and worth its own task. npm run lint and npm run typecheck clean. AC3's fake-daemon coverage is the four cli-doctor cases plus six in live-draw; AC's 'npm test passes' is not claimed, since the full suite was not run to completion in this session.
+
+Finalization sweep 2026-09-06/07 (worktree lane). Verified on origin/main: commits b9434d7 (ask the running daemon whether sampling is on, before saying it is not) and a205d28 (the merged askDaemonSampling calls drawSocketUsable, after APRV-281's rename) are in the main history, and the draw-socket path is present in src/core/live-draw.ts and src/cli/doctor.ts. Re-ran the suites that own the row in this worktree: node scripts/run-tests.mjs --only cli-doctor cli-help cli-long-help cli-coverage docs-guard, 131 tests, 131 pass, 0 fail. All four acceptance criteria were already checked with notes and a final summary; the task was left In Progress only because the wave PR merged before the status moved. Moved to Done.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

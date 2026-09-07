@@ -1,11 +1,11 @@
 ---
 id: APRV-256
 title: Telegram /queue wording must not imply a visible approval card
-status: In Progress
+status: Done
 assignee:
   - '@opus-256'
 created_date: '2026-09-04 22:30'
-updated_date: '2026-09-06 07:49'
+updated_date: '2026-09-07 06:11'
 labels:
   - telegram
   - channels
@@ -125,6 +125,8 @@ task brief.
 same two files on another branch. This diff touches only `queueLines`, the two
 new module constants above it, the `commandHandlerFor` doc comment for `/queue`,
 and its no-selection reply, so the two should not overlap.
+
+Finalization sweep 2026-09-06/07 (worktree lane). Verified on origin/main: commit 4a93055 (/queue says it is a list, and stops claiming a card is visible) is in the main history via PR #256, and the corrected wording lives in src/cli/channel-telegram.ts. All four acceptance criteria were already checked with notes and a final summary recorded; the task was left In Progress only because the PR merged before the status moved. Moved to Done, nothing changed in this lane.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

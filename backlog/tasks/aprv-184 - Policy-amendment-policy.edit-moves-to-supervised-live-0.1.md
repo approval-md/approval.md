@@ -1,11 +1,11 @@
 ---
 id: APRV-184
 title: 'Policy amendment: policy.edit moves to supervised-live 0.1'
-status: In Progress
+status: Done
 assignee:
   - '@opus-policy'
 created_date: '2026-08-31 23:38'
-updated_date: '2026-09-06 08:01'
+updated_date: '2026-09-07 06:16'
 labels:
   - policy
   - gate
@@ -102,4 +102,18 @@ To close both, in the primary checkout, in the terminal that owns the daemon: cd
 Deliverable: docs/proposals/policy-amendments-184-166.md. Recommendation recorded there: run no ceremony; either close this task on AC1/AC2/AC4 and carry AC3/AC5 into a follow-up about the daemon draw being live, or leave it open until the next approval up with the secret exported closes it. Task left In Progress; this lane does not move tasks to terminal status.
 
 Found in passing, outside this task's scope and not acted on: .approval/keys/ has no .gitignore entry, while .approval/daemon/, .approval/env, .approval/vault.enc and .approval/log/verified-head.json all do and .approval/payloads/ is deliberately tracked. Sealed-delivery private keys are written there (0600 in a 0700 dir) and unlinked at consume, expiry and revocation, so one rarely sits on disk, but adding .approval/ wholesale during a records or ceremony commit could sweep a live private key into a public repository, and a committed key opens that action's token_sealed for anyone holding the log. Worth its own task: add the ignore line and give approval doctor a row for it the way it has one for .approval/vault.enc.
+
+Finalization sweep 2026-09-06/07 (worktree lane). Moved to Done on the amendment's own terms, with AC3 and AC5 deliberately LEFT UNCHECKED rather than checked away.
+
+What is proven. APPROVAL.md line 54: policy.edit: { autonomy: supervised-live, live_rate: 0.1 }  # this file, CLAUDE.md, CI config. The committed log's most recent policy.updated is seq 27110 at 2026-09-07T03:24:19.268Z, actor human:carter, payload sha256 713548647b283d2787ecfa726290bc10f28e8f24c62221eb7ec0f65864c591bd, and shasum -a 256 APPROVAL.md in this worktree returns that same digest, so the supervised-live 0.1 line is in the exact bytes the human attested. The APRV-198 split is in the same file (policy.core, log.mutate and account.credential are human-only at lines 63 and following), which was the second blocker this task's 2026-09-01 notes recorded.
+
+What is NOT proven, and stays open for the human. AC3 (the sampling secret resolvable to the process that computes the live verdict) and AC5 (one sampled and one unsampled policy.edit observed and verified against the secret) are unmet, exactly as the 2026-09-02 and 2026-09-06 lanes recorded. The failure is safe in the fail-closed direction: with no usable draw, every policy.edit gates to a human, which is stricter than the amendment asks for, and the log says so in its own words (the two approval.requested records at seq 23709 and 23714 carry live_draw source unavailable, reason draw-daemon-stale). To close them, in the primary checkout in the terminal that owns the daemon: eval the output of approval env, run approval up, then read approval doctor's live-draw row; AC5 then needs one policy.edit whose log shape is task.registered followed straight by execution.started, its draw recomputed as HMAC-SHA-256 over that action's payload_hash under the secret against 0.1.
+
+This lane closes the task because the AMENDMENT it exists to make is landed, attested and stable, per the closing option the 2026-09-06 proposal lane recommended. The residual live-draw verification is an operational property of the running daemon, not of this amendment, and belongs in a follow-up task about the daemon draw being live. Nothing in this lane touched APPROVAL.md, .approval/ or any policy file.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The amendment this task asked for is in the attested policy: APPROVAL.md line 54 reads policy.edit: { autonomy: supervised-live, live_rate: 0.1 }, and that file is the one attested by the policy.updated record at seq 27110 (sha256 713548...c591bd, matching the file's digest exactly). The ceremony itself landed at seq 5147 and has been re-attested at every ceremony since. Closed on AC1, AC2 and AC4. AC3 and AC5 remain unchecked and are operational rather than authorial: they need the daemon serving live draws from a terminal where APPROVAL_SAMPLING_SECRET resolves, and then one policy.edit observed drawn through. Both are Carter's steps and are spelled out in the notes.
+<!-- SECTION:FINAL_SUMMARY:END -->

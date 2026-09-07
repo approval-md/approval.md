@@ -3,11 +3,11 @@ id: APRV-242
 title: >-
   Agent SDK hook recipe: `approval hook claude-code` from a Python HookMatcher
   callback, with JSON-shape conformance tests
-status: In Progress
+status: Done
 assignee:
   - '@opus-242'
 created_date: '2026-09-02 20:55'
-updated_date: '2026-09-06 07:56'
+updated_date: '2026-09-07 06:10'
 labels:
   - enhancement
 dependencies: []
@@ -65,4 +65,12 @@ M8 gates Claude Code (approval hook claude-code) and Cursor (approval hook curso
 **Verification.** `npm run build` clean. `node scripts/run-tests.mjs --only agent-sdk-hook cli-hook cli-hook-cursor cli-hook-scope cli-hook-rewrite cli-hook-scratch docs-guard`: 162 pass, 0 fail, exit 0. Re-run after the final doc edits, `--only agent-sdk-hook docs-guard`: 25 pass, 0 fail, exit 0. `npm run lint` exit 0, `npm run typecheck` exit 0. Full `npm test` was not run (not required by the brief).
 
 **SPEC.** §14 M8 gains one sentence listing Agent SDK applications as reachable through the Claude Code hook surface, marked '(Amended APRV-242, pending sign-off.)'. It states no new behavior; the behavior is the hook that already shipped.
+
+Finalization sweep 2026-09-06/07 (worktree lane). Verified on origin/main: commit 3d09d81 (APRV-242: gate a Python Agent SDK app through approval hook claude-code) is in the main history, and docs/agent-sdk-hook.md plus docs/agent-sdk-hook.py are both present in the tree. All three acceptance criteria were already checked with notes recorded by the implementing lane; the task was left In Progress only because the wave PR merged before the status moved. Moved to Done, no code or doc change in this lane.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The Agent SDK hook recipe shipped: docs/agent-sdk-hook.md and the runnable docs/agent-sdk-hook.py wire approval hook claude-code into a Python HookMatcher callback, with a fixture pinning the PreToolUse input shape and the SPEC section 14 M8 sentence naming Agent SDK apps as reachable through the hook. Landed on origin/main at 3d09d81.
+<!-- SECTION:FINAL_SUMMARY:END -->

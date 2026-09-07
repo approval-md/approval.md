@@ -42,9 +42,10 @@ import {
 import { buildPendingQueue } from "../src/channels/tagging.js";
 import { renderTelegram } from "../src/channels/telegram.js";
 import { supervisedExecutions } from "../src/core/audit.js";
+import { startHarnessExecution } from "../src/core/gate.js";
 import { runPayloadHash } from "../src/core/payload.js";
 import { CLASSIFIER_CLASSES, COMMAND_RULES } from "../src/core/command-class.js";
-import { closeWindow, openWindow } from "../src/core/gate-window.js";
+import { closeWindow, openWindow, recordGateBypass } from "../src/core/gate-window.js";
 import { DRAW_SOCKET_PATH_LIMIT, drawSocketPathFor } from "../src/core/live-draw.js";
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
@@ -1191,11 +1192,13 @@ test("APRV-280: a floored tool call's deny names loop-escalated, the scope and w
   for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
 
   // Nobody answers, so the wait times out — the nine minutes of silence the
-  // stalled session actually saw, with the timeout cut to a second.
+  // stalled session actually saw, with the timeout cut to a second. The command
+  // is a WRITE since APRV-297: a floor routes side effects and leaves reads to
+  // the policy, so a read here would be allowed at once and never reach a wait.
   const run = runCli(
     ["hook", "claude-code", "--timeout", "1s", "--interval", "200ms"],
     dir,
-    bashEvent(READ_COMMAND, "tu-4"),
+    bashEvent(WRITE_COMMAND, "tu-4"),
   );
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "deny", verdict.reason);
@@ -1210,15 +1213,16 @@ test("an escalated session floors the next autonomous command to the human gate"
   const dir = ready();
   for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
 
-  // `read.shell` is autonomous under this policy and would have been allowed
-  // with nothing appended. Under the floor it is registered, requested and
-  // waited on like any manual class — and the human's tap authorizes it.
-  const key = "hook:sess-1:tu-4:read.shell";
+  // `files.write.workspace` is autonomous under this policy and would have been
+  // allowed with nothing appended. Under the floor it is registered, requested
+  // and waited on like any manual class — and the human's tap authorizes it.
+  // (A read would not be: APRV-297 leaves those to the policy.)
+  const key = "hook:sess-1:tu-4:files.write.workspace";
   grantWhenPending(dir, key);
   const run = runCli(
     ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
     dir,
-    bashEvent("ls -la", "tu-4"),
+    bashEvent(WRITE_COMMAND, "tu-4"),
   );
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "allow", verdict.reason);
@@ -1258,8 +1262,10 @@ test("the actor scope backstops a rotated session id", () => {
     "no single session tripped; the actor did",
   );
 
-  // A fourth, fresh session is floored all the same.
-  const key = "hook:sess-d:tu-4:read.shell";
+  // A fourth, fresh session is floored all the same. The command writes: a read
+  // is answered by the policy under any floor since APRV-297, so it would prove
+  // nothing about the actor scope.
+  const key = "hook:sess-d:tu-4:files.write.workspace";
   grantWhenPending(dir, key);
   const run = runCli(
     ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
@@ -1269,7 +1275,7 @@ test("the actor scope backstops a rotated session id", () => {
       cwd: "/repo",
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
-      tool_input: { command: "ls -la" },
+      tool_input: { command: WRITE_COMMAND },
       tool_use_id: "tu-4",
     }),
   );
@@ -1513,9 +1519,9 @@ test("a report may not be filed by a non-principal actor", () => {
 test("status reports the harness streaks by scope, and counterpart coverage", () => {
   const dir = ready();
   // One start that nobody reports on: it is not debris, it is a tool call with
-  // no outcome, and the coverage row is the only place it shows. It runs FIRST,
-  // because after the three failures below the floor sends every command to a
-  // human and this one would sit there waiting for a tap.
+  // no outcome, and the coverage row is the only place it shows. It runs first
+  // for the coverage arithmetic below to be readable; since APRV-297 a read
+  // would run under the floor too.
   assert.equal(
     verdictOf(runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-0"))).permission,
     "allow",
@@ -1544,6 +1550,13 @@ test("status reports the harness streaks by scope, and counterpart coverage", ()
       /one side-effecting tool call completing in this (session|actor) scope/u,
     );
     assert.match(String(entry["clears"]), /approval gate open/u);
+    // APRV-297: the row says reads are outside the floor in BOTH directions, so
+    // an operator reading it knows the session can still search the repository.
+    assert.match(
+      String(entry["clears"]),
+      /read\.\* commands are outside this floor in both directions/u,
+    );
+    assert.match(String(entry["clears"]), /does not route them to a human/u);
   }
   assert.deepEqual(body["harness_outcomes"], { started: 4, reported: 3, unreported: 1 });
   assert.equal(body["healthy"], false, "an escalated scope is not a healthy repo");
@@ -3601,5 +3614,477 @@ test("APRV-287: a completed carried grant clears the floor the refusal promised 
     false,
     "nothing was asked of a human",
   );
+  assertClean(dir);
+});
+
+// ===========================================================================
+// The lagging verified view (APRV-294)
+// ===========================================================================
+
+/**
+ * Serve a verified view that LAGS the requests the hook just appended, then let
+ * it catch up and grant (APRV-294).
+ *
+ * The incident, reproduced: minutes after `approval log sync` replaced the
+ * committed baseline and the daemon restarted, a hook appended its requests,
+ * re-read the log, and got a view that did not carry them. So the helper waits
+ * for the request to land, swaps in the log as it stood BEFORE this tool call,
+ * holds it there for `lagMs`, swaps the whole file back, and only then decides.
+ *
+ * Both swaps are a write-then-rename, so the hook never reads a half-written
+ * file: it sees the short log or the long one, each a clean chain, which is
+ * exactly what a lagging view is. Nothing is written by hand — the bytes put
+ * back are the bytes the real CLI wrote — and every case still ends at
+ * `approval log verify`.
+ */
+function lagThenGrant(
+  dir: string,
+  actionKey: string,
+  baseBytes: number,
+  lagMs: number,
+): { report(): Promise<Record<string, unknown> | null> } {
+  const stem = `lag-${counter}`;
+  const helper = join(dir, `${stem}.cjs`);
+  const reportPath = join(dir, `${stem}.json`);
+  writeFileSync(
+    helper,
+    [
+      'const { spawnSync } = require("node:child_process");',
+      'const { readFileSync, renameSync, writeFileSync } = require("node:fs");',
+      `const CLI = ${JSON.stringify(CLI_ENTRY)};`,
+      `const DIR = ${JSON.stringify(dir)};`,
+      `const LOG_PATH = ${JSON.stringify(join(dir, LOG))};`,
+      `const KEY = ${JSON.stringify(actionKey)};`,
+      `const BASE = ${String(baseBytes)};`,
+      `const LAG_MS = ${String(lagMs)};`,
+      `const REPORT = ${JSON.stringify(reportPath)};`,
+      "const DEADLINE = Date.now() + 25000;",
+      "const write = (fields) => {",
+      "  try {",
+      '    writeFileSync(REPORT + ".part", JSON.stringify(fields));',
+      '    renameSync(REPORT + ".part", REPORT);',
+      "  } catch (error) {",
+      "    // The test reports the report's absence; there is nowhere else to say it.",
+      "  }",
+      "};",
+      "const requested = () => {",
+      "  let raw;",
+      '  try { raw = readFileSync(LOG_PATH, "utf8"); } catch (error) { return false; }',
+      '  const lines = raw.split("\\n");',
+      '  if (!raw.endsWith("\\n")) lines.pop();',
+      "  for (const line of lines) {",
+      "    if (line.trim().length === 0) continue;",
+      "    let record;",
+      "    try { record = JSON.parse(line); } catch (error) { continue; }",
+      '    if (record.event === "approval.requested" && record.action_key === KEY) return true;',
+      "  }",
+      "  return false;",
+      "};",
+      "const swap = (bytes, suffix) => {",
+      "  writeFileSync(LOG_PATH + suffix, bytes);",
+      "  renameSync(LOG_PATH + suffix, LOG_PATH);",
+      "};",
+      "const attempt = () => {",
+      "  if (!requested()) {",
+      "    if (Date.now() >= DEADLINE) {",
+      '      write({ lagged: false, reason: "no approval.requested for " + KEY });',
+      "      return;",
+      "    }",
+      "    setTimeout(attempt, 100);",
+      "    return;",
+      "  }",
+      "  const full = readFileSync(LOG_PATH);",
+      '  swap(full.subarray(0, BASE), ".lagging");',
+      "  setTimeout(() => {",
+      '    swap(full, ".caught-up");',
+      '    const run = spawnSync(process.execPath, [CLI, "grant", KEY, "--as", "human:alice"], { cwd: DIR, encoding: "utf8" });',
+      '    write({ lagged: true, status: run.status, stderr: String(run.stderr || "").trim() });',
+      "  }, LAG_MS);",
+      "};",
+      "attempt();",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const child = spawn(process.execPath, [helper], { cwd: dir, stdio: "ignore" });
+  child.unref();
+
+  return {
+    async report(): Promise<Record<string, unknown> | null> {
+      const until = Date.now() + 30_000;
+      for (;;) {
+        if (existsSync(reportPath)) {
+          try {
+            return JSON.parse(readFileSync(reportPath, "utf8")) as Record<string, unknown>;
+          } catch {
+            // A half-written report; the rename makes this vanishingly unlikely.
+          }
+        }
+        if (Date.now() >= until) return null;
+        await delay(50);
+      }
+    },
+  };
+}
+
+test("APRV-294: a view that lags the hook's own requests is waited out, never denied", async () => {
+  // THE DEFECT. 2026-09-07 02:00Z: the hook appended its requests, re-read the
+  // verified log, found state `none` for its own keys and denied at once with
+  // `hook-io: the verified log does not show every request … as granted
+  // (states: none)`. The requests were real and reached the phone; the view had
+  // not caught up. A log is append-only, so `none` for a key this process
+  // appended is a fact about the view, and the honest answer is to keep waiting.
+  const dir = ready();
+  const key = "hook:sess-1:tu-lag:deps.add";
+  const base = Buffer.byteLength(rawLog(dir), "utf8");
+  const helper = lagThenGrant(dir, key, base, 1_500);
+
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-lag"),
+  );
+  const decided = await helper.report();
+  const trace = `helper: ${JSON.stringify(decided)} | hook stderr: ${run.stderr}`;
+  assert.equal(decided?.["lagged"], true, trace);
+  assert.equal(decided["status"], 0, trace);
+
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "allow", `${verdict.reason} | ${trace}`);
+  assert.match(verdict.reason, /^granted: /u);
+  // The hook SAW the lag and said so, rather than reading it as an answer.
+  assert.match(
+    run.stderr,
+    /the verified log does not yet carry hook:sess-1:tu-lag:deps\.add/u,
+    trace,
+  );
+  assert.match(run.stderr, /this is a view that lags rather than a decision/u, trace);
+  assert.doesNotMatch(run.stdout, /hook-io/u, "the lag is not an I/O verdict");
+
+  // The grant was spent before the allow was printed, exactly as on any other
+  // granted wait: the record is what authorizes the harness (APRV-200).
+  assert.equal(
+    allRecords(dir).some(
+      (record) => record["event"] === "execution.started" && record["action_key"] === key,
+    ),
+    true,
+    trace,
+  );
+  assertClean(dir);
+});
+
+test("APRV-294: a lag that outlives the wait times out and says the view is behind", async () => {
+  // The other ending. The view never catches up inside the wait, so the deny is
+  // the ordinary `hook-timeout` — never `hook-io` — and it names the repair:
+  // the log this hook reads is behind the log it wrote to.
+  const dir = ready();
+  const key = "hook:sess-1:tu-lag-2:deps.add";
+  const base = Buffer.byteLength(rawLog(dir), "utf8");
+  // Longer than the hook's wait below, so the whole wait runs under the lag.
+  const helper = lagThenGrant(dir, key, base, 6_000);
+
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "2s", "--interval", "200ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-lag-2"),
+  );
+  const verdict = verdictOf(run);
+  const trace = `hook stderr: ${run.stderr}`;
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /^hook-timeout: /u, trace);
+  assert.match(verdict.reason, /The verified view still does not carry /u, trace);
+  assert.match(verdict.reason, /approval log verify/u, trace);
+
+  // Let the helper finish so the case leaves a whole log behind.
+  const decided = await helper.report();
+  assert.equal(decided?.["lagged"], true, JSON.stringify(decided));
+  assertClean(dir);
+});
+
+test("APRV-294: a window that ends between the verdict and the record has its own code", () => {
+  // The second half of the same fault: one read decides and another acts. The
+  // hook derived a window, and by the time the bypass record was appended a
+  // human had closed it — which used to be reported as `gate-not-open`, "no
+  // window is open", a state that had never been true for this call.
+  const dir = ready();
+  const opened = openTestWindow(dir);
+
+  // The read the verdict is decided on, exactly as `lookupWindow` makes it.
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  const decidedOn = { records: read.records, head: read.head };
+
+  // …and the human closes the window in between.
+  const closed = closeWindow(join(dir, LOG), "human:alice");
+  assert.equal(closed.ok, true, closed.ok ? "" : closed.message);
+  if (!closed.ok) throw new Error("unreachable");
+  const before = rawLog(dir);
+
+  const refused = recordGateBypass(
+    join(dir, LOG),
+    {
+      tool: "Bash",
+      summary: "npm install left-pad",
+      classes: ["deps.add"],
+      payloadHash: payloadHash({ command: "npm install left-pad", cwd: "/repo" }),
+      sessionId: "sess-1",
+      toolUseId: "tu-window-closed",
+      cwd: "/repo",
+    },
+    "agent:claude-code",
+    {},
+    { openedSeq: opened.seq, read: decidedOn },
+  );
+  assert.equal(refused.ok, false, "a window that is gone authorizes nothing");
+  if (refused.ok) throw new Error("unreachable");
+  // Distinct from `gate-not-open`, and it names the record that ended it.
+  assert.equal(refused.code, "gate-window-closed");
+  assert.match(refused.message, new RegExp(`gate\\.closed seq ${String(closed.record.seq)}`, "u"));
+  assert.match(refused.message, new RegExp(`seq ${String(opened.seq)}`, "u"));
+  assert.equal(rawLog(dir), before, "a refused bypass appends nothing");
+
+  // …and the refusal is not a failed side-effecting call. Nothing started, so
+  // the harness's own report of the failed tool call closes nothing and the
+  // floor is exactly where it was (SPEC.md §10.2).
+  const post = runCli(
+    ["hook", "claude-code"],
+    dir,
+    postEvent(
+      "tu-window-closed",
+      { type: "error", error: "…" },
+      { hook_event_name: "PostToolUseFailure" },
+    ),
+  );
+  assert.equal(reportOf(post)["code"], "post-tool-gate-refused:not-delegated", post.stderr);
+  assert.equal(rawLog(dir), before, "the report appended nothing either");
+
+  const after = readVerifiedRecords(join(dir, LOG));
+  assert.equal(after.ok, true);
+  if (!after.ok) throw new Error("unreachable");
+  assert.deepEqual(harnessLoopEscalation(after.records), [], "no streak accrued");
+  assertClean(dir);
+});
+
+test("APRV-294: a lapsed window is named as lapsed, not as no window at all", () => {
+  // The same code, the other way a window ends. Nothing is appended when a
+  // window lapses (SPEC.md §5.2), so there is no closing seq to name and the
+  // refusal names the expiry instead.
+  const dir = ready();
+  const opened = openTestWindow(dir, {
+    durationText: "1m",
+    durationMs: 60_000,
+    at: new Date(Date.now() - 60 * 60_000).toISOString(),
+  });
+  const before = rawLog(dir);
+
+  const refused = recordGateBypass(
+    join(dir, LOG),
+    {
+      tool: "Bash",
+      summary: "npm install left-pad",
+      classes: ["deps.add"],
+      payloadHash: payloadHash({ command: "npm install left-pad", cwd: "/repo" }),
+    },
+    "agent:claude-code",
+    {},
+    { openedSeq: opened.seq },
+  );
+  assert.equal(refused.ok, false);
+  if (refused.ok) throw new Error("unreachable");
+  assert.equal(refused.code, "gate-window-closed");
+  assert.match(refused.message, /lapsed/u);
+  assert.doesNotMatch(refused.message, /gate\.closed seq/u);
+  assert.equal(rawLog(dir), before);
+  assertClean(dir);
+});
+
+// ===========================================================================
+// Escalation raises scrutiny on side effects only (APRV-297)
+// ===========================================================================
+
+test("APRV-297: a tripped floor leaves a read to the policy and still routes a write", () => {
+  // THE DEFECT. Once the floor tripped on 2026-09-06/07 every hook call went to
+  // the human, reads included, so a session that could not get an answer could
+  // not even grep for why. APRV-280 stopped a read ACCRUING the floor; a tripped
+  // floor still ROUTED one, and a read cannot cause the harm the floor bounds.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+  const before = rawLog(dir);
+
+  // The read: answered by the policy, at once, with nobody asked.
+  const read = runCli(["hook", "claude-code"], dir, bashEvent(READ_COMMAND, "tu-read"));
+  const verdict = verdictOf(read);
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /^autonomous: read\.shell/u);
+  assert.match(verdict.reason, /loop-escalated \(amended SPEC\.md §10\.2\) NOT APPLIED/u);
+  assert.match(verdict.reason, /session hook:sess-1 has 3 consecutive/u);
+  assert.match(verdict.reason, /every class of this command is a read/u);
+  assert.equal(
+    recordsSince(dir, before).some((record) => record["event"] === "approval.requested"),
+    false,
+    "no request was raised, so no message was sent",
+  );
+  assert.deepEqual(
+    recordsSince(dir, before).map((record) => record["event"]),
+    ["execution.started"],
+    "the read is charged like any autonomous call and nothing else is written",
+  );
+
+  // The control: a side-effecting call in the same session is still routed.
+  const mid = rawLog(dir);
+  const write = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "200ms"],
+    dir,
+    bashEvent(WRITE_COMMAND, "tu-write"),
+  );
+  const denied = verdictOf(write);
+  assert.equal(denied.permission, "deny", denied.reason);
+  assert.match(denied.reason, /^hook-timeout: /u);
+  assert.match(denied.reason, /routed to a human by loop safety/u);
+  // AC3: the refusal text says reads are exempt from routing as well as from
+  // counting, so the agent reading this deny knows it can still look at things.
+  assert.match(denied.reason, /read\.\* commands are outside this floor in both directions/u);
+  assert.match(denied.reason, /does not route them to a human/u);
+  assert.deepEqual(
+    recordsSince(dir, mid)
+      .filter((record) => record["event"] === "approval.requested")
+      .map((record) => record["action_key"]),
+    ["hook:sess-1:tu-write:files.write.workspace"],
+    "the floor still puts the session's side effects on a human's phone",
+  );
+  assertClean(dir);
+});
+
+test("APRV-297: a floor routes a mixed call as one question, and raises no read class", () => {
+  // AC2. The command looks and then writes; the floor is about the writing. The
+  // approver gets one prompt, for the class that does something, and the read
+  // inside the same command is neither counted nor separately raised.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+  const before = rawLog(dir);
+
+  const key = "hook:sess-1:tu-mixed:files.write.workspace";
+  grantWhenPending(dir, key);
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
+    dir,
+    bashEvent(`${READ_COMMAND} && ${WRITE_COMMAND}`, "tu-mixed"),
+  );
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /loop-escalated \(amended SPEC\.md §10\.2\)/u);
+
+  const written = recordsSince(dir, before);
+  assert.deepEqual(
+    written
+      .filter((record) => record["event"] === "approval.requested")
+      .map((record) => record["action_key"]),
+    [key],
+    "exactly one question, and it is the one about the side effect",
+  );
+  assert.equal(
+    written.some(
+      (record) =>
+        record["event"] === "approval.requested" && String(record["action_key"]).endsWith("read.shell"),
+    ),
+    false,
+    "the read class inside the command was not raised",
+  );
+  assertClean(dir);
+});
+
+test("APRV-297: the write boundary refuses a floored write and records a floored read", () => {
+  // The belt to the hook's braces, narrowed the same way (core/gate.ts). A
+  // caller that reaches startHarnessExecution without asking the hook first
+  // still cannot record an unattended side effect under a floor, and can record
+  // a read, because a read is outside the floor rather than trusted by it.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+  const refused = startHarnessExecution(
+    join(dir, LOG),
+    {
+      task: "hook:sess-1:tu-direct",
+      actionKey: "hook:sess-1:tu-direct:files.write.workspace",
+      cls: "files.write.workspace",
+      payload_hash: payloadHash({ command: WRITE_COMMAND, cwd: "/repo" }),
+    },
+    "agent:claude-code",
+    { policy: { dir } },
+  );
+  assert.equal(refused.ok, false, "a floored side effect may not be recorded unattended");
+  if (refused.ok) throw new Error("unreachable");
+  assert.equal(refused.code, "loop-escalated");
+
+  const allowed = startHarnessExecution(
+    join(dir, LOG),
+    {
+      task: "hook:sess-1:tu-direct-read",
+      actionKey: "hook:sess-1:tu-direct-read:read.shell",
+      cls: "read.shell",
+      payload_hash: payloadHash({ command: READ_COMMAND, cwd: "/repo" }),
+    },
+    "agent:claude-code",
+    { policy: { dir } },
+  );
+  assert.equal(allowed.ok, true, allowed.ok ? "" : `${allowed.code}: ${allowed.message}`);
+  assertClean(dir);
+});
+
+test("APRV-297: a read under a floor clears nothing, so the floor still stands", () => {
+  // The direction that would be a hole. The exemption is about ROUTING; a read
+  // that succeeds under a floor must not clear the streak, or a session could
+  // read its way out from under one.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+  toolCall(dir, "tu-read", "text", "sess-1", READ_COMMAND);
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records)
+      .filter((state) => state.escalated)
+      .map((state) => state.scope),
+    ["actor", "session"],
+    "the completed read cleared neither scope",
+  );
+
+  // …and the next write is still routed, which is the fact that matters.
+  const before = rawLog(dir);
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "200ms"],
+    dir,
+    bashEvent(WRITE_COMMAND, "tu-after"),
+  );
+  assert.match(verdictOf(run).reason, /^hook-timeout: /u);
+  assert.equal(
+    recordsSince(dir, before).some((record) => record["event"] === "approval.requested"),
+    true,
+  );
+  assertClean(dir);
+});
+
+test("APRV-294: with no decision stated the bypass still refuses gate-not-open", () => {
+  // The historical code is untouched, which is what "added, never repurposed"
+  // means for a frozen union: a caller that states no window still gets the
+  // refusal that says there is none.
+  const dir = ready();
+  const before = rawLog(dir);
+  const refused = recordGateBypass(
+    join(dir, LOG),
+    {
+      tool: "Bash",
+      summary: "npm install left-pad",
+      classes: ["deps.add"],
+      payloadHash: payloadHash({ command: "npm install left-pad", cwd: "/repo" }),
+    },
+    "agent:claude-code",
+  );
+  assert.equal(refused.ok, false);
+  if (refused.ok) throw new Error("unreachable");
+  assert.equal(refused.code, "gate-not-open");
+  assert.equal(rawLog(dir), before);
   assertClean(dir);
 });

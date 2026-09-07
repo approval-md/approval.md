@@ -144,7 +144,13 @@ import {
   type EventRecord,
   type LogHead,
 } from "./log.js";
-import { HARNESS_TASK_PREFIX, harnessLoopFloor, isLoopEscalated, loopClearance } from "./loop.js";
+import {
+  HARNESS_TASK_PREFIX,
+  harnessLoopFloor,
+  isLoopEscalated,
+  isSideEffectingClass,
+  loopClearance,
+} from "./loop.js";
 import { normalizeUsd, usdOrZero, type UsdInput } from "./money.js";
 import { isPayloadHash, payloadHash as hashOfPayload } from "./payload.js";
 import { loadPayload, payloadStoreDirFor, storePayload } from "./payload-store.js";
@@ -3713,8 +3719,17 @@ function attemptHarnessStart(
   // record an unattended harness execution for a session or an actor that is
   // three failed tool calls deep. A check in the hook alone is a check-then-
   // append with a window in it (§11.1 invariant 5).
+  //
+  // APRV-297 narrows it exactly as the hook narrows its own: a class that only
+  // READS is outside the floor. The floor bounds the harm of an agent retrying a
+  // side effect that keeps failing, and a read cannot cause that harm, so
+  // refusing to record one buys no safety and takes away the session's ability
+  // to find out what is wrong. The predicate is `core/loop.ts`'s own, the same
+  // one that decides what accrues, so what the floor counts and what it refuses
+  // cannot come apart; a class this build has never heard of is side-effecting
+  // by construction and is refused here as it always was.
   const floor = harnessLoopFloor(read.records, input.task, actor);
-  if (floor !== null) {
+  if (floor !== null && isSideEffectingClass(input.cls)) {
     return refuse(
       "loop-escalated",
       `loop-escalated: ${floor.scope} ${floor.key} has ${String(floor.consecutiveFailures)} consecutive failed side-effecting harness tool calls and is floored to manual (amended SPEC.md §10.2), so ${input.actionKey} may not be recorded as an unattended execution. Route the command through the human gate; ${loopClearance(floor.scope, floor.key)}`,

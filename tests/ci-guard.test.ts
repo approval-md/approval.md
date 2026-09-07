@@ -23,9 +23,10 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
@@ -785,8 +786,54 @@ test("the aggregator requires the floor leg exactly on the events that must prov
 // Node range must therefore admit the floor, checked here from the installed
 // bytes. Range shapes this parser does not recognise fail the test rather than
 // pass it: an unreadable claim about the floor is not evidence the floor holds.
+//
+// Those installed bytes are located by resolution, the way Node locates them
+// (APRV-298). Joining REPO_ROOT to a literal `node_modules` used to name a
+// directory an agent worktree does not have, so the case died with ENOENT on
+// the first dependency and reported a missing install as a violated Node floor:
+// a different claim, and an untrue one. Three lanes re-diagnosed that same ENOENT in one evening (APRV-220,
+// APRV-230, APRV-286) before reaching their own work, and a red that is never
+// the lane's fault teaches lanes to discount reds. Resolution walks up the
+// parent directories and finds the primary checkout's install from a worktree,
+// which is what `resolveDependencyManifest` below reproduces. When a dependency
+// is absent from every `node_modules` on that path the case skips by name: an
+// absent install leaves the floor unproven, which is not the same as broken.
 
-test("every production dependency's engines.node admits the Node floor", () => {
+/**
+ * The absolute path of `name`'s installed `package.json`, located the way Node
+ * would from this test file, or null when no `node_modules` on the resolution
+ * path holds it.
+ *
+ * Two steps, because one is not enough, and the first one is checked rather
+ * than trusted. `createRequire().resolve` is the honest answer where the
+ * package exports its own `package.json`. `@modelcontextprotocol/sdk` does not:
+ * its exports map ends in a `"./*"` wildcard, so the subpath resolves to
+ * `dist/cjs/package.json`, the two-key `{"type": "commonjs"}` stub the build
+ * writes. That file parses, declares no `engines`, and would have taken the
+ * dependency this guard exists for out of the check silently. So a resolved
+ * manifest counts only when it names the package it claims to be; otherwise the
+ * walk answers. The walk searches the same `node_modules` chain resolution
+ * itself searches, so where both answer they answer the same install.
+ */
+function resolveDependencyManifest(name: string): string | null {
+  try {
+    const resolved = createRequire(import.meta.url).resolve(`${name}/package.json`);
+    const named = JSON.parse(readFileSync(resolved, "utf8")) as { name?: unknown };
+    if (named.name === name) return resolved;
+  } catch {
+    // Not exported, not installed, or not JSON: fall through to the walk.
+  }
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (;;) {
+    const candidate = join(dir, "node_modules", name, "package.json");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+test("every production dependency's engines.node admits the Node floor", (t) => {
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
     engines: { node: string };
     dependencies: Record<string, string>;
@@ -812,9 +859,27 @@ test("every production dependency's engines.node admits the Node floor", () => {
   };
 
   for (const name of Object.keys(pkg.dependencies)) {
-    const depPkg = JSON.parse(
-      readFileSync(join(REPO_ROOT, "node_modules", name, "package.json"), "utf8"),
-    ) as { engines?: { node?: string } };
+    const manifest = resolveDependencyManifest(name);
+    if (manifest === null) {
+      t.skip(
+        `${name} is not installed in any node_modules on this file's resolution path, ` +
+          "so its engines.node claim cannot be read here. The floor is unproven rather than " +
+          "violated; run `npm ci` in this checkout to prove it",
+      );
+      return;
+    }
+    const depPkg = JSON.parse(readFileSync(manifest, "utf8")) as {
+      name?: string;
+      engines?: { node?: string };
+    };
+    // A manifest that does not name the package is a nested stub, not the
+    // package root, and reading `engines` from one drops the dependency out of
+    // this guard without saying so. Fail loudly instead.
+    assert.equal(
+      depPkg.name,
+      name,
+      `${manifest} is not ${name}'s own package.json; the floor claim would have gone unread`,
+    );
     const range = depPkg.engines?.node;
     if (range === undefined) continue; // no claim made; nothing to check
     const verdict = admits(range, floor);

@@ -356,12 +356,16 @@ chain.
 3. **Snapshot, not stash.** The working log is copied aside, atomically, inside
    `.approval/`. `git stash` appears nowhere in the implementation, and the log
    never routes through git state mutation.
-4. **Baseline.** The working file is set to the bytes git already has at `HEAD`,
+4. **Baseline.** The working LOG is set to the bytes git already has at `HEAD`,
    so the path is clean and a fast-forward can move over it. That is a plain
-   write of bytes we are holding, not a checkout.
-5. **Fetch, a fast-forward CHECK, then the merge.** A non-fast-forward is named
-   and refused (`log-sync-not-fast-forward`): a merge commit over the log would
-   be a merge of two hash chains, and chains do not merge.
+   write of bytes we are holding, not a checkout. The log can be baselined this
+   early because nothing can dirty it in between: sync holds the append lock,
+   and appending is the only thing that writes it. The projections cannot, and
+   are handled at the merge instead (see below).
+5. **Fetch, a fast-forward CHECK, the projections are discarded, then the
+   merge.** A non-fast-forward is named and refused
+   (`log-sync-not-fast-forward`): a merge commit over the log would be a merge
+   of two hash chains, and chains do not merge.
 6. **Untracked payload files, between the check and the merge.** `git merge
    --ff-only` refuses to write over an untracked working-tree file, and a records
    advance commits the payload store, so a checkout that already held those
@@ -381,6 +385,21 @@ chain.
    conflict. Nothing is pulled, nothing is appended, and the working tree is left
    as it was found. A local payload the incoming commit does **not** carry blocks
    nothing and is not touched.
+   **The queue projection is discarded, as the last statement before the
+   merge** (APRV-292). A records commit carries `.approval/QUEUE.md` as well as
+   the log, and the daemon re-renders that file every tick under no lock at all
+   (its TTL countdowns move even when the log does not), so a projection cleaned
+   up any earlier can be dirty again by the time `git merge --ff-only` looks at
+   it. That is the refusal of 2026-09-07:
+   "local changes to .approval/QUEUE.md would be overwritten", twice, the second
+   time straight after a hand-run `git checkout` of exactly that file. A
+   projection is a rendering of the log, rebuilt at step 8 from the reconciled
+   log, so sync throws the working copy away rather than reconciling it: no
+   proof, no comparison, nothing to weigh. Discarding late is what makes it
+   stick, and a merge that still fails with a projection dirty again is retried
+   exactly once before it refuses. A projection git neither has at `HEAD` nor
+   carries in the incoming tree can stop no merge and is left alone, which is
+   why the gitignored `.approval/index.sqlite` is never cleared here.
 7. **Reconcile.** The committed chain must be a prefix of the snapshot, equal to
    it, or an extension of it. Prefix: the snapshot goes back, because the longer
    chain contains the shorter one whole. Extension: the pulled file stays, for
@@ -390,7 +409,9 @@ chain.
 8. **Projections are REBUILT, never copied back.** `QUEUE.md` is re-rendered from
    the reconciled log and the index is reindexed from it. The direction is
    load-bearing: a projection restored from before the pull would be a
-   screenshot asserting something the log no longer says.
+   screenshot asserting something the log no longer says. `QUEUE.md` is
+   snapshotted at step 3 all the same, for the refusal path alone, so a sync
+   that refuses leaves the whole working tree as it found it.
 9. **Post-verify**, and only then is the snapshot removed.
 
 Any failure at any step restores the snapshot before exiting, so the working log
@@ -720,17 +741,20 @@ amendment) and `base-log-diverged` (the remote's log is not a prefix of yours).
 **The policy suite runs before the push.** Where the policy being amended is
 this repository's own, `--commit` resolves every pinned class against the AMENDED
 file and refuses `policy-suite-failed` when any of them moved, printing the
-expectation diff. Nothing is attested, committed or pushed on that path. The pins
-live in `src/core/policy-expectations.ts`, which the dogfood suite imports too, so
-the check on the laptop and the check in CI are one list: update the pins, run
-`npm run build`, and re-run the ceremony.
+expectation diff and each pin's note. Nothing is attested, committed or pushed on
+that path. The pins live in `src/core/policy-expectations.ts`, which the dogfood
+suite imports too, so the check on the laptop and the check in CI are one list.
 
-A class the policy DECLARES and the pins do not cover is the same refusal with a
-different remedy, so the refusal carries the remedy (APRV-274): it prints the
-exact source lines to paste into `REPO_POLICY_EXPECTATIONS`, resolved from the
-amended policy itself, in the message, in the runbook, and as
-`{"pins":{"module":"…","add":["  { actionClass: … },"]}}` beside the `--json`
-error object. The operator edits one file rather than working out a spelling.
+The pins are a SAFETY FLOOR, not an inventory (APRV-296). They name the classes
+whose loosening would be a regression (the `human-only` classes, the `manual`
+classes whose effects leave this repository or cannot be undone, and the
+fail-closed default reached through classes the policy deliberately does not
+declare), and each pin's note says what a loosening would cost. A class the
+policy declares and no pin names is ACCEPTED: declaring a new `supervised` or
+`autonomous` class is a policy amendment and not also a code change, and the
+resolution still prints in the semantic diff below for the human who attests it.
+Until APRV-296 every declared class had to be pinned, in both directions, and a
+one-line TTL amendment on 2026-09-07 took three runs to land because of it.
 
 **And then the whole dogfood suite, still before the attestation.** The pin check
 is a subset of `tests/dogfood.test.ts`, and the seq 23351 ceremony passed the pins
@@ -782,6 +806,10 @@ paths (`protected_paths`, `audit.skew_tolerance`, `channels.telegram.token_env`,
 as `before -> after`, so a spec key added tomorrow is covered without an edit
 here. A top-level key the schema does not know is listed as an UNKNOWN KEY
 whether or not its value moved, because it is what makes the policy fail closed.
+Which keys the schema knows is READ FROM `schema/policy.schema.json` (APRV-296),
+so a key the schema admits never reads as unknown: the list used to be a second,
+hand-written copy, and it warned three times about the `daemon.*` block over a
+policy that loaded cleanly.
 `no semantic change` is printed only when the probed classes AND every key
 compared equal; when a side's YAML did not parse there are no keys to walk, and
 the report says the document was not compared instead.
@@ -1054,9 +1082,10 @@ the message.
   was not written against, or carries a log this working log does not contain.
   All three are checked before the attestation; nothing was appended.
 - `policy-suite-failed` — a pinned class resolves differently under the amended
-  policy, or the policy declares a class the pins do not cover. The message
-  carries the expectation diff and, for an unpinned class, the exact pin line to
-  add. Checked before the attestation; nothing was appended.
+  policy. Every pin is a class whose loosening would be a regression, so the
+  message carries the expectation diff and the pin's note saying what that
+  loosening would cost. A declared class no pin names is not this refusal
+  (APRV-296). Checked before the attestation; nothing was appended.
 - `dogfood-suite-failed` — the built dogfood suite is red against the amended
   policy (the message names the failing test), is absent from `dist/` while
   present in `tests/`, or could not be run at all. Checked before the

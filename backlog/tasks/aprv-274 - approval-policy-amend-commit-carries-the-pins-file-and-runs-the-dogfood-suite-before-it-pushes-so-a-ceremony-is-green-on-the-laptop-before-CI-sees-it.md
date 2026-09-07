@@ -3,11 +3,11 @@ id: APRV-274
 title: >-
   approval policy amend --commit carries the pins file and runs the dogfood
   suite before it pushes, so a ceremony is green on the laptop before CI sees it
-status: In Progress
+status: Done
 assignee:
   - '@opus-274'
 created_date: '2026-09-05 21:15'
-updated_date: '2026-09-06 12:07'
+updated_date: '2026-09-07 06:13'
 labels:
   - cli
   - dogfood
@@ -27,7 +27,7 @@ The seq 23351 ceremony on 2026-09-06 took four hand steps and two red CI runs fo
 - [x] #1 A ceremony whose pins file changed produces one amendment commit carrying policy, log and pins; the PR is green in CI without a second push
 - [x] #2 A ceremony whose amended policy fails the dogfood suite refuses before attesting with a code naming the test, and nothing is attested, committed or pushed
 - [x] #3 An undeclared class reported as unpinned prints the exact pin lines to add
-- [ ] #4 docs/cli-reference.md policy amend section and docs/dogfood-cutover.md updated; npm test passes; lint clean
+- [x] #4 docs/cli-reference.md policy amend section and docs/dogfood-cutover.md updated; npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -85,4 +85,12 @@ AC4's `npm test` clause is why AC4 stays unchecked. A full run here is 3647 test
 - `every production dependency's engines.node admits the Node floor` (tests/ci-guard.test.ts) reads `<repo root>/node_modules/<dep>/package.json`. This agent worktree carries no node_modules of its own; Node resolves up to the primary checkout's, which is how build, lint and typecheck ran at all, but that test joins the path against its own repo root and finds nothing there.
 - `control: outside the sandbox, the non-routable address times out rather than being refused` (tests/sandbox-probe.test.ts) asserts the behaviour of an unsandboxed network. This session's network is sandboxed, so the address is refused rather than timed out, which is the control failing for the reason it is a control.
 Neither was re-run against a clean tree, so neither is proven pre-existing by measurement; what is measured is that both live outside the seven files this task changed. AC4's other two clauses (both documents updated, lint clean) hold on the evidence above. The box waits for a run with an install and an unsandboxed network, which is CI.
+
+Finalization sweep 2026-09-06/07 (worktree lane). AC4 checked on this evidence, gathered against origin/main. (a) docs/cli-reference.md policy amend section is updated: lines 693 to 745 describe running the dogfood suite against the amended file before the attestation, the pins living in src/core/policy-expectations.ts, the dogfood-suite-failed refusal naming the failing test, the five-minute limit and the three refusal shapes; lines 800 to 809 describe the pins riding in the amendment commit and a base's pins being left as the base carries them. (b) docs/dogfood-cutover.md is updated: lines 596 to 616 say that since APRV-274 the pins travel with the amendment, name the seq 23351 ceremony as what that replaces, and give the update-the-pins, npm run build, run-the-verb loop. (c) The implementation is on main at 4c3c540 (the pins ride in the amendment commit, and the dogfood suite runs before it attests), and src/cli/amend.ts carries the dogfood-suite-failed refusal. (d) npm run lint (oxlint src tests) exit 0 in this worktree, and node scripts/run-tests.mjs --only cli-doctor cli-help cli-long-help cli-coverage docs-guard reports 131 tests, 131 pass, 0 fail. The AC's npm test clause was proved by CI on the merge that landed 4c3c540; a full npm test cannot pass in an agent worktree, because tests/ci-guard.test.ts reads a repo-relative node_modules path that only the primary checkout has (the same environmental limit recorded in APRV-220's and APRV-230's notes).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+approval policy amend --commit now carries the pins file and runs the built dogfood suite before it attests and pushes, so a ceremony is green on the laptop before CI sees it. Landed on origin/main at 4c3c540, documented in docs/cli-reference.md's policy amend section and docs/dogfood-cutover.md's ceremony section. Verified in the finalization sweep by reading both doc sections on main, confirming the dogfood-suite-failed refusal in src/cli/amend.ts, oxlint clean and 131/131 on the doc and CLI suites.
+<!-- SECTION:FINAL_SUMMARY:END -->

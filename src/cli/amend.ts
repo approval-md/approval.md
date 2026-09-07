@@ -1524,23 +1524,19 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
       const checked = checkPolicyExpectations(liveLoad, expectations);
       progress.done();
       if (!checked.ok) {
-        // APRV-274: an undeclared class the check reports as `unpinned` carries
-        // the line that pins it, resolved from the amended policy itself. The
-        // operator edits one file; they do not work out a spelling.
-        const pinsToAdd = checked.failures
-          .map((failure) => failure.pinLine)
-          .filter((line): line is string => line !== undefined);
-        const addSentence =
-          pinsToAdd.length === 0
-            ? ""
-            : ` Add to ${EXPECTATIONS_MODULE}: ${pinsToAdd.map((line) => line.trim()).join(" ")}`;
+        // APRV-296: every failure here is a SAFETY class that moved — the pins
+        // name only classes whose loosening is a regression — so the remedy is
+        // a decision about the policy, not a line to paste. The refusal that
+        // printed a pin line went with the `unpinned` failure kind: a declared
+        // class nothing pins is accepted now, and a policy declaring a new
+        // supervised or autonomous class is no longer also a code change.
         return refuse(
           streams,
           json,
           "policy-suite-failed",
           `the amended policy does not match its pins: ${checked.failures
             .map(describeFailure)
-            .join("; ")}.${addSentence}. Nothing was attested, committed or pushed`,
+            .join("; ")}. Nothing was attested, committed or pushed`,
           EXIT_USAGE,
           runbook(st, "policy-suite-failed", "the amended policy does not match its pins", {
             state: [
@@ -1550,27 +1546,21 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
             ],
             steps: [
               {
+                command: `$EDITOR APPROVAL.md`,
+                note: "a pinned class moved: the pin says loosening it is a regression, so decide the policy first",
+              },
+              {
                 command: `$EDITOR ${EXPECTATIONS_MODULE}`,
-                note:
-                  pinsToAdd.length === 0
-                    ? "make the pins say what the amendment means them to say"
-                    : `add ${String(pinsToAdd.length)} line(s), printed below`,
+                note: "or move the pin, when the amendment means what it says and the pin is what is stale",
               },
               { command: "npm run build", note: "the ceremony reads the compiled pins" },
               { command: "approval policy amend --commit", note: "re-run; it starts over cleanly" },
             ],
             footer: [
-              ...(pinsToAdd.length === 0
-                ? []
-                : [
-                    `the lines to add to REPO_POLICY_EXPECTATIONS in ${EXPECTATIONS_MODULE}:`,
-                    ...pinsToAdd.map((line) => st.value(line)),
-                    "",
-                  ]),
+              "each pin's note says what loosening that class would cost; the refusal above prints it beside the class",
               "this is the check CI runs: failing it here costs a minute, failing it there costs a red pull request carrying an attestation",
             ],
           }),
-          pinsToAdd.length === 0 ? undefined : { pins: { module: EXPECTATIONS_MODULE, add: pinsToAdd } },
         );
       }
 

@@ -130,10 +130,29 @@ export const GATE_WINDOW_REFUSAL_CODES = [
   "gate-already-open",
   /**
    * No window is open. `close` says so rather than appending a record that
-   * closes nothing, and a bypass whose window lapsed mid-append says so rather
-   * than recording a bypass nothing authorized.
+   * closes nothing, and a bypass asked for with no window behind it at all says
+   * so rather than recording a bypass nothing authorized.
    */
   "gate-not-open",
+  /**
+   * The window a caller DECIDED under is gone by the time the bypass is
+   * recorded (APRV-294).
+   *
+   * Distinct from `gate-not-open`, and the difference is the fact each states.
+   * That one says there was no window to begin with, which is the ordinary
+   * closed gate. This one says a window stood when the verdict was formed and
+   * does not stand at the append: a human closed it, it lapsed, or a later
+   * `gate.opened` superseded the one the caller named. The refusal names the
+   * `gate.closed` seq that ended it, or the expiry it ran past, so a reviewer
+   * holding the log alone can place the boundary.
+   *
+   * The repair is a retry, and it is a retry of an ordinary gated tool call:
+   * nothing is appended here, nothing ran, and the next invocation derives the
+   * window from its own read and is answered by the policy where there is none.
+   * A refusal on this path is therefore not a failed execution and accrues no
+   * loop-safety streak (SPEC.md §10.2), because no execution was started for it.
+   */
+  "gate-window-closed",
   /**
    * Stdin is not a terminal (or `--json` was asked for). The ceremony is a
    * person typing a word, and a prompt a pipe could answer is a ceremony a
@@ -551,6 +570,40 @@ export interface GateBypassInput {
 }
 
 /**
+ * The window verdict a caller already reached, handed to the append that
+ * records it (APRV-294).
+ *
+ * ## Why the append takes the caller's read
+ *
+ * On 2026-09-07 two hook invocations disagreed about one window inside a
+ * minute: the first decided "open" from its own verified read and took the
+ * bypass path, and the append re-read, derived no window from the fresher
+ * bytes, and refused `gate-not-open`. Both reads were honest and the pair was
+ * not: the verdict was formed on one view of the log and acted on another, and
+ * the refusal named a state ("no window is open") that had never been true for
+ * the invocation being refused.
+ *
+ * So the decision travels with the write. `read` is the verified read the
+ * caller derived its window from, used by the FIRST append attempt, which makes
+ * the decision and the record one read rather than two. `openedSeq` is the
+ * window that decision named, and it outlives the seed: a `head-moved` retry
+ * re-reads (it must — the head it would chain onto has moved), and the window
+ * it then derives is compared against this seq, so a window that ended in
+ * between refuses {@link GATE_WINDOW_REFUSAL_CODES}'s `gate-window-closed`
+ * naming what ended it rather than the bare `gate-not-open`.
+ *
+ * Nothing here reads unverified bytes as verified: `read` is the caller's own
+ * verified read, and every retry past the first performs its own (§11.1
+ * invariant 1).
+ */
+export interface GateBypassDecision {
+  /** The `seq` of the `gate.opened` the caller's verdict was decided under. */
+  openedSeq: number;
+  /** The verified read that verdict was formed on. The first attempt uses it. */
+  read?: { records: readonly EventRecord[]; head: { seq: number; hash: string } | null };
+}
+
+/**
  * Record a bypassed tool call, BEFORE its allow is printed.
  *
  * The order is record-then-allow for the same reason `recordUnattended`'s is
@@ -558,16 +611,20 @@ export interface GateBypassInput {
  * one state this whole feature must not be able to reach, so an append failure
  * is the caller's deny.
  *
- * The window is re-derived on every attempt. A head that moved says the read
- * was stale, so the next attempt re-reads, re-derives, and appends against the
- * head it saw; a window that lapsed or was closed between attempts refuses
- * `gate-not-open` rather than recording a bypass nothing authorized.
+ * The window is re-derived on every attempt past the first. A head that moved
+ * says the read was stale, so the next attempt re-reads, re-derives, and appends
+ * against the head it saw; a window that lapsed or was closed refuses rather
+ * than recording a bypass nothing authorized. Which refusal depends on what the
+ * caller stated: with a {@link GateBypassDecision} in hand the refusal is
+ * `gate-window-closed` and names the record or the expiry that ended the window,
+ * and with none it is the historical `gate-not-open`.
  */
 export function recordGateBypass(
   logPath: string,
   input: GateBypassInput,
   actor: string,
   options: GateWindowOptions = {},
+  decided?: GateBypassDecision,
 ): GateWindowResult | GateWindowRefusal {
   if (!PRINCIPAL_ACTOR.test(actor)) {
     return refuse(
@@ -587,8 +644,66 @@ export function recordGateBypass(
   // the record that lets a debugging session run at all, so it is worth one
   // more attempt than the gate's writers get — and the mechanism is no longer
   // a second copy of the loop.
-  return withHeadRetry(attemptsOf(options.retryOnHeadMoved, HEAD_MOVED_ATTEMPTS), () =>
-    attemptBypass(logPath, input, actor, options),
+  //
+  // APRV-294: the caller's read seeds the FIRST attempt and no other. A
+  // `head-moved` retry exists precisely because the head it was going to chain
+  // onto has moved, so re-using the stale read would be appending against a
+  // precondition already known to be wrong.
+  let seed = decided?.read;
+  return withHeadRetry(attemptsOf(options.retryOnHeadMoved, HEAD_MOVED_ATTEMPTS), () => {
+    const use = seed;
+    seed = undefined;
+    return attemptBypass(logPath, input, actor, options, decided?.openedSeq ?? null, use);
+  });
+}
+
+/**
+ * The window a caller decided under is not the window the log now shows
+ * (APRV-294): say which of the three ways it ended, naming the record or the
+ * instant that ended it.
+ *
+ * Every branch appends nothing and every branch is the same verdict for the
+ * caller (deny, and retry through the ordinary gated path). What differs is the
+ * fact stated, and the fact is what a reviewer holding the log needs: a close is
+ * a person's act with a seq, a lapse is arithmetic over the opening record, and
+ * a supersession is a second window somebody opened.
+ */
+function windowEnded(
+  records: readonly EventRecord[],
+  openedSeq: number,
+  standing: OpenWindow | null,
+): GateWindowRefusal {
+  const retry =
+    "Nothing was appended and nothing ran, so this refusal is not a failed execution and accrues no loop-safety streak (SPEC.md §10.2); run the command again and it is answered by the policy, or by whatever window stands then.";
+
+  for (const record of records) {
+    if (record.event !== "gate.closed") continue;
+    if (seqField(payloadOf(record), "opened_seq") !== openedSeq) continue;
+    return refuse(
+      "gate-window-closed",
+      `the window opened at seq ${String(openedSeq)} was closed by ${record.actor} at gate.closed seq ${String(record.seq)}, between the read this call's verdict was decided on and the record that would have authorized it. ${retry}`,
+    );
+  }
+
+  if (standing !== null) {
+    return refuse(
+      "gate-window-closed",
+      `the window opened at seq ${String(openedSeq)} is no longer the standing one: a later window (seq ${String(standing.seq)}, opened by ${standing.openedBy}) supersedes it, and a bypass records the window it was decided under or none at all. ${retry}`,
+    );
+  }
+
+  for (const record of records) {
+    if (record.seq !== openedSeq) continue;
+    const claimed = stringField(payloadOf(record), "expires_at");
+    return refuse(
+      "gate-window-closed",
+      `the window opened at seq ${String(openedSeq)} lapsed${claimed === null ? "" : ` (expiry ${claimed})`} between the read this call's verdict was decided on and the record that would have authorized it; a lapse appends nothing when it arrives, which is why the log names no closing record. ${retry}`,
+    );
+  }
+
+  return refuse(
+    "gate-window-closed",
+    `the verified log carries no gate.opened at seq ${String(openedSeq)}, so the window this call's verdict was decided under cannot be established from the records the append read. ${retry}`,
   );
 }
 
@@ -597,12 +712,25 @@ function attemptBypass(
   input: GateBypassInput,
   actor: string,
   options: GateWindowOptions,
+  /** The window the caller decided under, or `null` when it stated none. */
+  openedSeq: number | null,
+  /** That decision's own verified read, on the first attempt only. */
+  seed: GateBypassDecision["read"],
 ): GateWindowResult | GateWindowRefusal {
-  const read = readRecords(logPath, options.schemaDir);
+  const read =
+    seed === undefined
+      ? readRecords(logPath, options.schemaDir)
+      : ({ ok: true, records: [...seed.records], head: seed.head } as WindowRead);
   if (!read.ok) return read;
 
   const now = tick(options);
   const window = openGateWindow(read.records, millis(now) ?? Date.now());
+  if (openedSeq !== null && (window === null || window.seq !== openedSeq)) {
+    // APRV-294. The caller reached a verdict under a named window, and these
+    // records do not carry it: say which window ended and how, rather than
+    // reporting the absence of any window at all.
+    return windowEnded(read.records, openedSeq, window);
+  }
   if (window === null) {
     return refuse(
       "gate-not-open",

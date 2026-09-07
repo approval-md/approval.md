@@ -51,6 +51,66 @@ The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
   bytes sent once; an expired wait and a harness-side misfire are not executions
   and accrue no loop-safety streak; and a completed command clears the floor
   even when the grant it ran on was carried by a later tool call.
+- **The CI guard's dependency floor reads the install Node would read**
+  (APRV-298). The case that proves every production dependency admits the Node
+  floor used to join the repository root to a literal `node_modules`, so running
+  the suite from an agent worktree, which has none of its own, failed with
+  ENOENT and reported a missing install as a violated floor. It now resolves
+  each dependency's `package.json` the way module resolution does, walking up
+  from the test file, and skips by name when a package is absent from every
+  `node_modules` on that path. A manifest that does not name the package it
+  claims to be fails the case, which keeps `@modelcontextprotocol/sdk` from
+  answering with the `dist/cjs` stub its wildcard export maps the subpath to.
+
+- **Amending the policy stops being a code change** (APRV-296). The pins in
+  `src/core/policy-expectations.ts` are a safety floor rather than an inventory:
+  they name the `human-only` classes, the `manual` classes whose effects leave
+  the repository or cannot be undone, and the fail-closed default reached
+  through classes the policy deliberately does not declare, and each pin's note
+  says what loosening it would cost. A class the policy declares and no pin
+  names is accepted, so declaring a `supervised` or `autonomous` class, tuning a
+  live rate or changing `approval_ttl` needs no edit to the code and no rebuild;
+  the dogfood suite pins the fail-closed defaults (`manual`, `reject`, a TTL
+  that exists and is positive) instead of the exact duration. The amend diff's
+  key vocabulary is read from `schema/policy.schema.json`, so the `daemon.*`
+  block the schema has admitted since APRV-217 no longer renders as an UNKNOWN
+  KEY warning over a policy that loads cleanly.
+
+- **A rendering of the log can no longer refuse a pull of it** (APRV-292).
+  `log sync` treats `.approval/QUEUE.md`, and the index projection when git
+  carries one, as disposable: the working copy is discarded as the last
+  statement before the fast-forward and rebuilt from the reconciled log
+  afterwards, with one retry when the renderer beats the merge to the file. An
+  upstream records commit that touches the queue no longer refuses with git's
+  "local changes to .approval/QUEUE.md would be overwritten" while the daemon
+  re-renders the projection, and the stop-the-daemon workaround is retired. The
+  working log's snapshot and restore are untouched.
+
+- **The hook waits for a lagging verified view instead of denying on it**
+  (APRV-294). Minutes after a `log sync` and a daemon restart, a hook appended
+  its requests, re-read the log, found its own keys in state `none` and denied
+  `hook-io` on the spot; the questions were live and the taps that answered them
+  authorized nothing. A log is append-only, so `none` for a key this hook
+  appended describes the view rather than the request: the hook now keeps
+  waiting, bounded by the same timeout, says on stderr that the view lags, and
+  names the repair if the wait runs out. On the same fault's other face, the
+  open-window verdict and the `gate.bypassed` record that authorizes it are one
+  verified read, and a window that ends in between refuses with its own code
+  (`gate-window-closed`) naming the closing seq or the expiry, in place of the
+  `gate-not-open` that claimed there had never been a window. Neither refusal
+  appends anything or counts as a failed side-effecting call.
+
+- **A tripped loop floor routes side effects and leaves reads alone**
+  (APRV-297). APRV-280 stopped a failed `read.*` accruing the floor; a floor that
+  had tripped still routed every later read to a human, so a session that could
+  not get an answer could not even search the repository, at one phone message
+  and one nine-minute wait per `grep`. A tool call whose classes are all `read.*`
+  is now answered by the policy under a tripped floor, and says in its allow that
+  a floor is standing and was not applied to a read; a mixed call is still routed
+  as one question about its side effects, with its read classes neither counted
+  nor separately raised; the write boundary carves reads out with the same
+  predicate; and a read still clears nothing, so nobody reads their way out from
+  under a floor. `approval status` and the floor's own refusals say so.
 
 The publish itself is the first `release.publish` action to pass through this
 gate (APRV-199).

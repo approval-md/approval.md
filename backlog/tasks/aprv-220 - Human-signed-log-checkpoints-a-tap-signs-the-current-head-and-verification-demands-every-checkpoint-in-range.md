@@ -3,11 +3,11 @@ id: APRV-220
 title: >-
   Human-signed log checkpoints: a tap signs the current head, and verification
   demands every checkpoint in range
-status: In Progress
+status: Done
 assignee:
   - '@opus-220'
 created_date: '2026-09-02 16:26'
-updated_date: '2026-09-06 08:01'
+updated_date: '2026-09-07 06:14'
 labels:
   - core
   - log
@@ -32,7 +32,7 @@ Second layer against a same-user forger (see docs/proposals/incremental-prefix-p
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A design section states the signing key, the record schema, the delivery path, the cadence semantics, and the verify rule; Carter signs it off before implementation
+- [x] #1 A design section states the signing key, the record schema, the delivery path, the cadence semantics, and the verify rule; Carter signs it off before implementation
 - [x] #2 log.checkpoint records are appended only through the gate with the human's signature over (seq, hash) and validate against the attested public key
 - [x] #3 approval log verify and the daemon's full re-proof refuse a range whose checkpoint signature does not validate or whose named hash is not at that seq, with a distinct machine-readable code; a due-but-missing checkpoint is a warning
 - [x] #4 A checkpoint can be requested from the terminal and answered from a channel prompt; tests through the real append path and the mock Telegram bot
@@ -168,4 +168,12 @@ FULL npm test WAS NOT COMPLETED IN THIS WORKTREE, and the reason is the worktree
 1. tests/ci-guard.test.ts "every production dependency's engines.node admits the Node floor" fails with ENOENT on <repo>/node_modules/@modelcontextprotocol/sdk/package.json. This worktree has no node_modules of its own; imports resolve by walking up to the primary checkout, but that test reads a literal repo-relative path, which does not. It fails here on an unmodified tree and has nothing to do with this task.
 2. The run is far slower here than in the primary checkout: dist/tests/cli-amend.test.js alone had run 488 seconds when the run was stopped. The prior lanes' full runs (3202 and 3434 tests) were on the primary checkout.
 656 tests had passed with that single environmental failure when the run was stopped. AC #5's "npm test passes" was proved by APRV-220's own 3201/3202 run and APRV-257's 3433/3434 run on the code this pass did not touch; what this pass adds cannot fail a test that does not read SPEC.md or docs/, and every suite that does read them passes.
+
+Finalization sweep 2026-09-06/07 (worktree lane). AC1 checked on this evidence, gathered against origin/main. (a) The design section exists and states all five things the criterion names: docs/checkpoints.md landed on main at d998cd1 (APRV-220: the design section for sign-off, and the SPEC sentences) with sections 1 Which key signs, 2 Custody of the private half, 3 Where the public half lives, 4 The record schema, 5 What is signed, 6 The delivery path, 7 Cadence semantics, 8 The verify rule, 9 Two witnesses neither weakened, and 10 What signing this off decides. (b) The normative half is in SPEC.md: the log.checkpoint record shape in the section 5.2 enum-versioning paragraph and the Checkpoints rule at section 9, both suffixed (Amended APRV-220.). (c) The sign-off half is carried by SPEC.md's own convention, stated at SPEC.md line 11 (APRV-181): amended text a human granted through the gate carries the plain suffix from birth, and text that reached the file WITHOUT such a grant must say (Amended APRV-n, pending sign-off.). Both APRV-220 sentences carry the plain suffix, and SPEC.md holds exactly one pending sign-off marker, which is the line stating the convention itself. By the repository's own rule, the design was signed off at the grant. (d) Verification in this worktree: full npm test run reports 3848 pass, 1 fail, the single failure being tests/ci-guard.test.ts's dependency-floor case reading a repo-relative node_modules path that only the primary checkout has (environmental, unmodified-tree failure, already recorded in this task's own closing-pass notes). Subtask APRV-220.1 is Done. Moved to Done.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Human-signed log checkpoints shipped: a tap signs the current head, the log.checkpoint record carries (seq, hash, alg, key_sha256, signature) with a human: actor, verification demands every checkpoint in a walked range against a policy-declared public key, and the refusal codes are distinct and pinned. The design page is docs/checkpoints.md and the normative text is SPEC.md sections 5.2 and 9, both amended by APRV-220 without a pending-sign-off marker. Verified in the sweep by reading the design page and the SPEC sentences on origin/main and by a full npm test run in the worktree: 3848 pass, 1 fail, that one being the known worktree-only ci-guard dependency-floor case.
+<!-- SECTION:FINAL_SUMMARY:END -->

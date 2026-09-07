@@ -3,11 +3,11 @@ id: APRV-251
 title: >-
   execution.completed carries the provider reference: AgentMail message_id
   on-chain so coverage joins by id, not by window
-status: In Progress
+status: Done
 assignee:
   - '@opus-251'
 created_date: '2026-09-04 21:13'
-updated_date: '2026-09-06 13:12'
+updated_date: '2026-09-07 06:10'
 labels: []
 dependencies:
   - APRV-245
@@ -58,6 +58,8 @@ Code slice (commit 2). core/execute.ts: FinishOptions gains providerRef (with Pr
 Design decisions worth recording. (1) The lift is by ONE conventional detail key rather than by a per-adapter callback or a guess across receipt fields: a contract that guessed would eventually lift the wrong field of some receipt onto a permanent log. (2) An unrecordable reference is DROPPED, never refused: the outcome record matters more than the join key. (3) The id join applies no window and ignores class, because an id names one effect; the pair (adapter, id) is the key so one provider's identifier is never evidence about another's effect. (4) Only execution.completed carries one; a failed execution produced no effect for a provider to file.
 
 Invariants touched (SPEC §11.1). 'Validate at the write boundary': a new payload field, constrained by the schema, with the write path declining anything the schema would reject. 'Raw secrets never appear in the log': a provider message_id is an opaque identifier the provider issues for an effect that already happened, not a credential; it authorises nothing, opens nothing and is useless without the API key that the vault holds. The path that could have made it a leak is an adapter quoting a secret inside its receipt, and that is closed twice: the id passes the same redaction sweep as the rest of the detail, and a reference the sweep touched is not recorded at all (tests/adapters-contract.test.ts pins both). 'Self-reported fields never reduce scrutiny' is untouched: nothing in the gate reads provider_ref back, no verdict, budget or grant turns on it, and coverage is informational by SPEC §10.1.
+
+Finalization sweep 2026-09-06/07 (worktree lane). Verified on origin/main: commits 65dc54e (schema: execution.completed may carry provider_ref) and 8ad222d (the contract writes the provider reference, coverage joins on it) are in the main history, and provider_ref is present in src/core/execute.ts, src/core/coverage.ts and src/adapters/agentmail.ts. All five acceptance criteria were already checked and both the notes and the final summary were written by the implementing lane; the task was left In Progress only because the wave PR merged before the status moved. Moved to Done, nothing changed in this lane.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

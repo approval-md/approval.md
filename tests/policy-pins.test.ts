@@ -24,6 +24,7 @@ import { test } from "node:test";
 import { loadPolicy } from "../src/core/policy-load.js";
 import {
   checkPolicyExpectations,
+  describeFailure,
   describePinChange,
   diffPinSources,
   pinLine,
@@ -34,7 +35,8 @@ import {
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
 // ---------------------------------------------------------------------------
-// 1. The line an unpinned class needs
+// 1. The line a new pin is written as, and what the check does and does not
+//    refuse (APRV-296: an unpinned class is no longer either)
 // ---------------------------------------------------------------------------
 
 test("a pin line is the source line the pins list already uses", () => {
@@ -51,10 +53,11 @@ test("a pin line survives the round trip back through the reader", () => {
   ]);
 });
 
-test("an unpinned class carries the line that pins the resolution it actually has", () => {
-  // The live policy plus one class nothing pins. The line the check prints has
-  // to state the resolution the AMENDED policy produces, or an operator who
-  // pastes it swaps one failure for another.
+test("a class the policy declares and no pin names is not a failure (APRV-296)", () => {
+  // The live policy, checked against a pin set with `deps.add` taken out. Until
+  // APRV-296 that was an `unpinned` refusal carrying the line to paste; the
+  // pins are a safety floor now rather than an inventory, so a class nothing
+  // pins is a class nobody claimed would be a regression to loosen.
   const load = loadPolicy({ dir: REPO_ROOT });
   assert.equal(load.ok, true, load.ok ? "" : `${load.code}: ${load.message}`);
   if (!load.ok) return;
@@ -63,29 +66,33 @@ test("an unpinned class carries the line that pins the resolution it actually ha
     (expectation) => expectation.actionClass !== "deps.add",
   );
   const checked = checkPolicyExpectations(load, withoutOne);
-  const unpinned = checked.failures.filter((failure) => failure.kind === "unpinned");
-  assert.deepEqual(
-    unpinned.map((failure) => failure.actionClass),
-    ["deps.add"],
-  );
-  assert.equal(
-    unpinned[0]?.pinLine,
-    '  { actionClass: "deps.add", autonomy: "manual", provenance: "rule" },',
-  );
+  assert.deepEqual(checked.failures, []);
+  assert.equal(checked.ok, true);
 });
 
-test("a failure that is not `unpinned` carries no pin line", () => {
+test("a pin the policy no longer honours is a `resolution` failure", () => {
+  // The direction that still refuses, and the one every remaining pin is for.
   const load = loadPolicy({ dir: REPO_ROOT });
   assert.equal(load.ok, true, load.ok ? "" : `${load.code}: ${load.message}`);
   if (!load.ok) return;
 
   const moved = REPO_POLICY_EXPECTATIONS.map((expectation) =>
-    expectation.actionClass === "deps.add" ? { ...expectation, autonomy: "autonomous" as const } : expectation,
+    expectation.actionClass === "deps.add"
+      ? { ...expectation, autonomy: "autonomous" as const }
+      : expectation,
   );
   const checked = checkPolicyExpectations(load, moved);
-  const resolution = checked.failures.filter((failure) => failure.kind === "resolution");
-  assert.equal(resolution.length > 0, true, "the moved pin produced no resolution failure");
-  for (const failure of resolution) assert.equal(failure.pinLine, undefined);
+  assert.deepEqual(
+    checked.failures.map((failure) => `${failure.kind}:${failure.actionClass}`),
+    ["resolution:deps.add"],
+  );
+  // The note travels with the failure, because the note is the argument for the
+  // pin: an operator reading the refusal is told what loosening the class costs.
+  assert.match(
+    checked.failures.map(describeFailure).join("\n"),
+    /supply chain/u,
+    "the refusal does not carry the pin's reason",
+  );
 });
 
 // ---------------------------------------------------------------------------
