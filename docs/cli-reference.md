@@ -1878,6 +1878,35 @@ a command the classifier cannot read (`hook-opaque`, `hook-unclassified`,
 `hook-unparseable`), since nothing can establish that an opaque string does not
 write into the log; and a log that cannot be read or verified.
 
+**Usage.**
+
+```
+approval gate open   [--for <duration>] --reason "<text>" [--as human:<id>]
+                     [--log <path>]                     (terminal; no --json)
+approval gate close  [--note "<text>"] [--as human:<id>] [--log <path>] [--json]
+approval gate status [--log <path>] [--json]
+```
+
+`--reason` is required, and it is recorded on the `gate.opened` record the
+window derives from: a bypass nobody stated a reason for is a bypass nobody can
+review. An absent flag is a usage error and an empty one is refused
+`gate-reason-required`; there is no minimum length beyond that, since the
+reason is for the person reading the log later. `--for` takes `5m`, `30m`,
+`2h` and the like (default 30m, cap 24h). `--as` names the human opening it and
+falls back to `APPROVAL_HUMAN`, the variable `eval "$(approval env)"` exports.
+`--note` on `close` records what the window was used to learn.
+
+A typical open, from a terminal in the primary checkout, with the confirmation
+typed at the prompt that follows:
+
+```sh
+cd /Users/carter/dev/approval-md
+approval gate open --for 2h --reason "hook denies every command: attestation drifted after the seq 7355 amend"
+understood                      # typed at the prompt the verb prints, not a command
+approval gate status --json     # the window, its reason, and what has bypassed it so far
+approval gate close --note "re-attested; hook answering again"
+```
+
 **The ceremony.** `open` needs a terminal and the word `understood`, typed in
 full and matched exactly after trimming. There is no `--yes` and no `--force`,
 and `--json` is refused: an answer shaped for a machine implies a machine asking

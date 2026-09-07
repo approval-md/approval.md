@@ -1,0 +1,1 @@
+{"command":"gh pr checks 311 2>&1 | head -20","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

@@ -49,6 +49,13 @@ Spec site: https://approval.md · Specification: [SPEC.md](SPEC.md)
 - **The harness hook covers the direct-shell path.** `approval hook claude-code`
   classifies the commands a coding agent runs on its own (`git push`, `npm
   install`, `curl`) and answers allow or deny, fail-closed.
+- **The escape hatch is a recorded ceremony.** When the gate itself is broken
+  and every command dies, a human opens a time-boxed window with `approval gate
+  open`: a terminal, a required `--reason`, and the word `understood`. Every
+  call it lets through is logged as `gate.bypassed`, human-only classes stay
+  refused, and `approval status` reports unhealthy until it closes. The
+  synopsis and a worked example are in
+  [docs/cli-reference.md#gate](docs/cli-reference.md#gate).
 
 The honest posture, from [SPEC.md](SPEC.md) section 11: this is an oversight
 layer for broadly cooperative agents, with hard enforcement at the adapter
@@ -887,7 +894,12 @@ proposal works through device-bound keys, WebAuthn on a separately controlled
 surface, per-decision signatures over the existing checkpoint machinery, and
 third-party witnesses, with the phasing, the receipt format, and the negative
 tests each would need. Nothing in it is implemented, and nothing in it amends
-SPEC.md.
+SPEC.md. Two shorter ones,
+[docs/proposals/solo-dev-quickstart.md](docs/proposals/solo-dev-quickstart.md)
+and [docs/proposals/no-daemon-mode.md](docs/proposals/no-daemon-mode.md),
+design the path for one person gating their own app: a three-question setup,
+one `guard` verb, and a runtime that lives inside the waiting command instead
+of a daemon.
 
 ## License and governance
 

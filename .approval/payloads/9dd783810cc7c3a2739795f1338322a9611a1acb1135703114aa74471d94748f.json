@@ -1,0 +1,1 @@
+{"command":"grep -rn \"does not show every request\\|gate-not-open\" /Users/carter/dev/approval-md/src/cli/hook*.ts /Users/carter/dev/approval-md/src/core/hook*.ts 2>/dev/null | head -8","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

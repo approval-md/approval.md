@@ -79,7 +79,10 @@ function loadRepoPolicy(): Extract<PolicyLoadResult, { ok: true }> {
 test("the repository's own APPROVAL.md parses as a valid policy", () => {
   const result = loadRepoPolicy();
   assert.equal(result.source.filename, "APPROVAL.md", BROKEN_POLICY_MESSAGE);
-  assert.equal(result.durations.approvalTtlMs, 86_400_000, BROKEN_POLICY_MESSAGE);
+  // 2h since the 2026-09-07 ceremony (was 24h): a hook request nobody answered in
+  // two hours is dead, and a day-long TTL kept redelivering dead requests to the
+  // phone after every daemon restart (APRV-287).
+  assert.equal(result.durations.approvalTtlMs, 7_200_000, BROKEN_POLICY_MESSAGE);
 });
 
 // ---------------------------------------------------------------------------
