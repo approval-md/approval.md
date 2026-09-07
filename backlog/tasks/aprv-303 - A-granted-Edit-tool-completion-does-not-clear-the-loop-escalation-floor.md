@@ -1,9 +1,12 @@
 ---
 id: APRV-303
-title: A granted Edit-tool completion does not clear the loop-escalation floor
+title: >-
+  Harness outcome reports do not land, so no completion clears the
+  loop-escalation floor
 status: To Do
 assignee: []
 created_date: '2026-09-07 23:36'
+updated_date: '2026-09-07 23:37'
 labels:
   - harness
 dependencies: []
@@ -22,3 +25,9 @@ On 2026-09-07, with session hook:e39a116c-09c5-4950-8958-1ae0a4de9c24 at four co
 - [ ] #2 Identify why Edit-tool calls were allowed under the standing floor (whether the floor predicate is skipped on the Edit path, or the completion was attributed to a different scope) and make the floor predicate identical for every tool kind, as SPEC §10.2 (APRV-297 text) requires.
 - [ ] #3 Implementation notes say which it was.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Widened 2026-09-07 after the fact was measured on the primary log: approval status shows harness outcomes 22062 started, 10 reported, 22052 unreported. PostToolUse is registered in .claude/settings.json with the same command as PreToolUse, yet reports almost never append, so neither Bash nor Edit completions clear a streak; escalations stood on both the session scope and the whole agent:claude-code actor scope, which is the flood every session has been producing. Diagnose the post-execution path first (what the hook receives on PostToolUse, what it refuses, and where the refusal goes), then the Edit-specific case. Release blocker.
+<!-- SECTION:NOTES:END -->
