@@ -1,11 +1,11 @@
 ---
 id: APRV-282
 title: 'doctor live-draw tests the daemon socket with a connect, not a stat'
-status: In Progress
+status: Done
 assignee:
   - '@opus-doctor'
 created_date: '2026-09-06 07:19'
-updated_date: '2026-09-06 08:44'
+updated_date: '2026-09-07 23:34'
 labels:
   - doctor
 dependencies: []

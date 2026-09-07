@@ -3,11 +3,11 @@ id: APRV-276
 title: >-
   AgentMail drift refusal spends the token: compare the live draft before
   consuming the grant
-status: In Progress
+status: Done
 assignee:
   - '@opus-276'
 created_date: '2026-09-06 01:39'
-updated_date: '2026-09-06 11:48'
+updated_date: '2026-09-07 23:13'
 labels:
   - agentmail
   - adapters

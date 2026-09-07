@@ -1,11 +1,11 @@
 ---
 id: APRV-285
 title: approval init ignores .approval/keys/ and doctor's environment row checks it
-status: In Progress
+status: Done
 assignee:
   - '@opus-285'
 created_date: '2026-09-06 08:17'
-updated_date: '2026-09-06 11:52'
+updated_date: '2026-09-07 23:35'
 labels:
   - safety
   - cli

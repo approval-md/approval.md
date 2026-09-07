@@ -3,11 +3,11 @@ id: APRV-281
 title: >-
   The hook waits nine minutes in silence when a request is on the phone; say so
   and where
-status: In Progress
+status: Done
 assignee:
   - '@opus-hook'
 created_date: '2026-09-06 07:19'
-updated_date: '2026-09-06 12:03'
+updated_date: '2026-09-07 23:34'
 labels:
   - hook
   - ux

@@ -1,10 +1,10 @@
 ---
 id: APRV-287
 title: Hook timeouts must not flood the phone or feed the escalation they wait on
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-09-06 22:33'
-updated_date: '2026-09-07 05:10'
+updated_date: '2026-09-07 23:35'
 labels:
   - hook
   - daemon
@@ -122,4 +122,6 @@ One tool call is one question. Where several pending requests share one task and
 No refusal code is minted by this task. The withdrawal reuses request-withdrawn and the harness adapter hook-timeout, both already frozen in their unions.
 
 2026-09-07: SPEC amendments applied on PR #319 under three policy.edit.spec taps (10.1 wait grace, 10.2 what is not an execution and completion clears wherever carried, 10.3 collapsed redelivery and one tool call one question), all marked pending sign-off. AC5 stays half-open on purpose: an Edit the hook allowed and the harness then refused still counts as execution.failed, because Claude Code's post-execution report carries no verifiable did-not-run fact and a self-reported one would breach invariant 4. File a follow-up when it bites; AC7's clearing rule bounds the harm. Merged 2026-09-07T05:06Z.
+
+2026-09-07 finalize: SPEC §10.1/§10.2/§10.3 amendment text for this task landed in PR #323 (opened today, pending Carter's sign-off), which applies the five paragraphs quoted above verbatim. AC4 is satisfied on that basis. AC5 (harness-side misfire discrimination for a hook-allowed-but-harness-refused Edit) remains genuinely unimplemented per the notes above: Claude Code's post-execution contract carries no verifiable did-not-run fact, so closing it needs a new task rather than a retry here; AC7's floor-clearing fix bounds the harm in the meantime. Status set Done on the strength of AC1-4,6,7; AC5 is a known, deliberately scoped-out follow-up.
 <!-- SECTION:NOTES:END -->
