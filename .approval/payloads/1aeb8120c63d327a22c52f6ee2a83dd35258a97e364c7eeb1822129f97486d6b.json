@@ -1,0 +1,1 @@
+{"command":"node --test dist/tests/conformance.test.js dist/tests/gate-window.test.js 2>&1 | grep -E \"^ℹ (tests|pass|fail)|^not ok\" | head","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

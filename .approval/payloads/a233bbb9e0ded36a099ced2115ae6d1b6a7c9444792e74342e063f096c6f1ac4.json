@@ -1,0 +1,1 @@
+{"command":"(cd /Users/carter/dev/approval-md && git worktree remove --force .claude/worktrees/agent-a49ff8f55a92a1e9b 2>&1 | tail -1; git branch -D worktree-agent-a49ff8f55a92a1e9b 2>&1 | tail -1)","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
