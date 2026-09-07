@@ -2181,6 +2181,14 @@ function gateAndWait(
   process.on("SIGTERM", onTerm);
   process.on("SIGINT", onInt);
 
+  /**
+   * Has this invocation already said, on stderr, that the verified view lags
+   * the requests it is waiting on (APRV-294)? Said once per invocation: the
+   * poll runs every second, and a line per poll would bury the one line that
+   * matters under sixty copies of itself.
+   */
+  let saidLagging = false;
+
   try {
     for (;;) {
       const read = readVerifiedRecords(run.logPath);
@@ -2199,9 +2207,52 @@ function gateAndWait(
       // from the log again would let an empty or foreign result read as
       // "nothing pending" and fall through to allow; the verified log must show
       // every one of these keys granted before the hook says yes.
-      const states = waitKeys.map((key) => requestState(read.records, key, ts, run.ttlMs).state);
+      const derived = waitKeys.map((key) => ({
+        key,
+        state: requestState(read.records, key, ts, run.ttlMs).state,
+      }));
+      const states = derived.map((entry) => entry.state);
 
-      if (!states.includes("requested")) {
+      /**
+       * Keys this process ESTABLISHED exist, that this read does not carry
+       * (APRV-294).
+       *
+       * Every key in `waitKeys` was seen in a verified read by this process:
+       * `ownKeys` because `request` appended it and returned the record,
+       * `adopted` because intake's verified read found the pending request it
+       * is adopting. So `none` here is never the terminal fact "there is no
+       * such request". A log is append-only; a request that existed does not
+       * stop existing. What `none` says is that the view this read produced
+       * does not yet carry a record this process holds, which is a fact about
+       * the view and not about the request.
+       *
+       * On 2026-09-07 02:00Z, minutes after `approval log sync` replaced the
+       * committed baseline and the daemon restarted, a hook read exactly this
+       * and denied at once: `hook-io: the verified log does not show every
+       * request as granted (states: none, none, none)`. The requests were real
+       * and reached the approver's phone; the view had not caught up. Treating
+       * that as terminal spends the human's answer on nothing and, since it is
+       * a deny, hands the agent a refusal for a question still open.
+       *
+       * So a lagging key waits, exactly as `requested` waits, bounded by the
+       * same timeout — and nothing here reads unverified bytes as verified,
+       * which is the only response to a lag that §11.1 invariant 1 leaves open.
+       * The APRV-287 withdrawal still applies at expiry, over the keys whose
+       * requests the view does carry.
+       */
+      const lagging = derived
+        .filter((entry) => entry.state === "none")
+        .map((entry) => entry.key);
+      if (lagging.length > 0 && !saidLagging) {
+        saidLagging = true;
+        streams.err(
+          `approval: the verified log does not yet carry ${lagging.join(", ")} (verified head: ${
+            read.head === null ? "empty" : `seq ${String(read.head.seq)}`
+          }). The request(s) were appended by this hook, so this is a view that lags rather than a decision; the hook keeps waiting for the verification to catch up, up to its ${String(run.timeoutMs)}ms wait. A sync or a daemon restart in the last minute is the usual cause (docs/claude-code-hook.md).\n`,
+        );
+      }
+
+      if (!states.includes("requested") && lagging.length === 0) {
         // Precedence, as `approval wait` fixes it: a human's "no" outranks a
         // lapse, and both outrank "everything was granted". A withdrawal sits
         // with the refusals: it is not a decision, but it is terminal, and it
@@ -2235,6 +2286,13 @@ function gateAndWait(
         // Not a wait outcome: the log disagrees with itself about keys this
         // process is waiting on. Nothing is retracted, because the state that
         // would justify retracting is the state that could not be established.
+        //
+        // A BACKSTOP since APRV-294, and deliberately kept. `none` no longer
+        // reaches here (it waits, above) and every remaining state is either
+        // terminal and answered above or `granted`, so this is unreachable
+        // through today's `RequestState`. It stands for the state a later
+        // member of that union would arrive as: an outcome this function has no
+        // reading for denies rather than allows.
         return sayDeny(
           "hook-io",
           `the verified log does not show every request for ${task} as granted (states: ${states.join(", ")})`,
@@ -2250,15 +2308,24 @@ function gateAndWait(
         // will adopt is taken back rather than left for a restarted listener to
         // re-deliver.
         const withdrawn = withdrawAbandoned(run, streams, read.records, ts, null, ownKeys);
+        // APRV-294: a wait that ends with the view still short of its own
+        // requests says so. The deny is the same deny — the wait ran out — and
+        // the repair is different from a queue nobody answered: the log this
+        // hook reads is behind the log it wrote to, and `approval log verify`
+        // in the checkout that owns it is where that is established.
+        const stillLagging =
+          lagging.length === 0
+            ? ""
+            : ` The verified view still does not carry ${lagging.join(", ")}, which this hook appended: the request(s) exist and the view is behind, so check the log that owns them (\`approval log verify\`, \`approval status\`) rather than reading this as an unanswered question.`;
         if (withdrawn.length > 0) {
           return sayDeny(
             "hook-timeout",
-            `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait, and the ${minutesText(run.graceMs)} retry grace has run out: ${withdrawn.join(", ")} WAS WITHDRAWN (reason timeout). A tap on it now authorizes nothing and the channel says so. Run the command again to ask the question fresh.`,
+            `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait, and the ${minutesText(run.graceMs)} retry grace has run out: ${withdrawn.join(", ")} WAS WITHDRAWN (reason timeout). A tap on it now authorizes nothing and the channel says so. Run the command again to ask the question fresh.${stillLagging}`,
           );
         }
         return sayDeny(
           "hook-timeout",
-          `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once. Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the hook takes the question back (approval.withdrawn, reason timeout), so a late retry asks again rather than adopting a question nobody is holding.`,
+          `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once. Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the hook takes the question back (approval.withdrawn, reason timeout), so a late retry asks again rather than adopting a question nobody is holding.${stillLagging}`,
         );
       }
       sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
@@ -2604,8 +2671,15 @@ interface WindowLookup {
    * `unattendedGuard` so the closed path pays for ONE verified read (APRV-209),
    * and `null` where the log could not be read or did not verify — which is
    * also, and not coincidentally, the case where there is no window.
+   *
+   * Since APRV-294 they are handed to the OPEN path too, together with
+   * {@link WindowLookup.head}: the bypass append records the window this read
+   * derived, against the head this read observed, so the decision and the record
+   * are one read rather than two that may disagree.
    */
   records: EventRecord[] | null;
+  /** The chain head that read observed, for the bypass append's precondition. */
+  head: { seq: number; hash: string } | null;
 }
 
 /**
@@ -2625,11 +2699,11 @@ interface WindowLookup {
  */
 function lookupWindow(logPath: string): WindowLookup {
   if (!existsSync(logPath) && !existsSync(dirname(logPath))) {
-    return { window: null, records: null };
+    return { window: null, records: null, head: null };
   }
   const read = readVerifiedRecords(logPath);
-  if (!read.ok) return { window: null, records: null };
-  return { window: openGateWindow(read.records), records: read.records };
+  if (!read.ok) return { window: null, records: null, head: null };
+  return { window: openGateWindow(read.records), records: read.records, head: read.head };
 }
 
 /**
@@ -2693,6 +2767,14 @@ function runBypass(
   flags: Record<string, string | boolean>,
   actor: string,
   window: OpenWindow,
+  /**
+   * The verified read `window` was derived from (APRV-294), handed on to the
+   * append so the same records answer "is a window open" and "which head does
+   * this record chain onto". `null` is not reachable from the caller — a window
+   * implies a read that produced it — and is accepted so the seam has one
+   * shape.
+   */
+  decidedOn: { records: EventRecord[]; head: { seq: number; hash: string } | null } | null,
 ): number {
   const scope = hookScope(flags, cwd);
   const load = loadPolicy(
@@ -2772,11 +2854,20 @@ function runBypass(
     },
     actor,
     {},
+    // APRV-294: the window this verdict was decided under, and the read it was
+    // decided on. The append uses both, so a window that ended in between is
+    // reported as the thing that happened rather than as "no window is open".
+    {
+      openedSeq: window.seq,
+      ...(decidedOn === null ? {} : { read: decidedOn }),
+    },
   );
   if (!recorded.ok) {
     // Invariant 8: the record lands before the allow, so a refusal here is a
     // deny even though a window is open. `append-failed` reaches the caller
-    // through the family reserved for a code the writer produced.
+    // through the family reserved for a code the writer produced, and so does
+    // `gate-window-closed` (APRV-294), which says the window stood when this
+    // process classified the command and does not stand now.
     return deny(
       streams,
       `hook-gate-refused:${recorded.code}`,
@@ -2910,7 +3001,20 @@ function runHarnessHook(
   // words. The window suspends the POLICY; it never suspends the log.
   const looked = lookupWindow(logPath);
   if (looked.window !== null) {
-    return runBypass(streams, input, adapter, cwd, logPath, parsed.flags, actor, looked.window);
+    return runBypass(
+      streams,
+      input,
+      adapter,
+      cwd,
+      logPath,
+      parsed.flags,
+      actor,
+      looked.window,
+      // APRV-294. The records this window was derived from travel with it: the
+      // bypass record is appended against the head they ended at, so the
+      // verdict and the record are one read of the log.
+      looked.records === null ? null : { records: looked.records, head: looked.head },
+    );
   }
 
   // The policy is read BEFORE the command is classified (APRV-107): the

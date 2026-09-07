@@ -666,6 +666,19 @@ early with `approval gate close`; nothing bypassed under it was charged to a
 budget or entered in the retrospective sample, because none of it was
 authorized, only recorded.
 
+**The window a call was decided under is the window it records (APRV-294).** The
+hook derives the window once, near the top of the invocation, and hands that
+verified read to the append, so the same records answer "is a window open" and
+"which head does this record chain onto". A window that ends in between (a human
+closes it, it lapses, a later `gate.opened` supersedes it) is refused
+`hook-gate-refused:gate-window-closed`, naming the `gate.closed` seq or the
+expiry that ended it. That is a different fact from
+`hook-gate-refused:gate-not-open`, which says there was no window to begin with,
+and on 2026-09-07 the second was printed for the first: a call decided under an
+open window was told that no window is open. Nothing is appended on either, the
+command did not run, and neither refusal is an execution, so no loop-safety
+streak accrues (SPEC §10.2); the retry goes down the ordinary gated path.
+
 ## Deny reasons
 
 The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen in
@@ -784,6 +797,52 @@ requester took this back and is no longer waiting; nothing was recorded.*
 The deny text says which of the two happened, in as many words: either
 `NOTHING WAS WITHDRAWN … the request(s) stay open for the 5m retry grace`, or
 `the 5m retry grace has run out: <key> WAS WITHDRAWN (reason timeout)`.
+
+### When the verified view lags its own requests (APRV-294)
+
+Every enforcement read this hook makes is a verified read: the chain is walked
+(or a proved prefix is resumed behind, see [Where the hook's reads come
+from](#where-the-hooks-reads-come-from-aprv-188)) and the records it hands back
+are the records that chain carries. Right after `approval log sync` replaces the
+committed baseline, or right after the daemon restarts, that view can be
+**behind the log this hook just wrote to**.
+
+Seen on 2026-09-07 at 02:00Z, minutes after both. The hook appended its
+requests, re-read, found every one of its own keys in state `none`, and denied
+at once:
+
+```text
+hook-io: the verified log does not show every request for hook:… as granted
+         (states: none, none, none)
+```
+
+The requests were real. They reached the approver's phone a minute later, and
+the tap authorized nothing, because the asker had already been told no.
+
+A log is append-only, so a request that exists does not stop existing. `none` for
+a key **this hook appended** is therefore a fact about the view rather than about
+the request, and the hook treats it as one: it keeps waiting, bounded by the same
+`--timeout` as any other wait, and says so once on stderr:
+
+```text
+approval: the verified log does not yet carry hook:sess-1:tu-9:deps.add
+          (verified head: seq 26931). The request(s) were appended by this hook,
+          so this is a view that lags rather than a decision; the hook keeps
+          waiting for the verification to catch up …
+```
+
+Nothing reads unverified bytes as verified to get there. Waiting is the whole
+remedy, and it is the only one SPEC §11.1 invariant 1 leaves open: the hook
+declines to treat an absence as an answer, and it still allows only on records
+the verified chain carries. If the view is still short when the wait runs out,
+the deny is the ordinary `hook-timeout` and it names the repair (`approval log
+verify`, `approval status`, in the checkout that owns the log) rather than
+reading as a question nobody answered. The APRV-287 retry grace and withdrawal
+are unchanged, and apply to the requests the view does carry.
+
+The same fault has a second face on the bypass path, and it is described under
+[Opening the gate to debug it](#opening-the-gate-to-debug-it-aprv-214): one read
+decided and another acted.
 
 ### One command is one decision (APRV-287)
 

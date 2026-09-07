@@ -44,7 +44,7 @@ import { renderTelegram } from "../src/channels/telegram.js";
 import { supervisedExecutions } from "../src/core/audit.js";
 import { runPayloadHash } from "../src/core/payload.js";
 import { CLASSIFIER_CLASSES, COMMAND_RULES } from "../src/core/command-class.js";
-import { closeWindow, openWindow } from "../src/core/gate-window.js";
+import { closeWindow, openWindow, recordGateBypass } from "../src/core/gate-window.js";
 import { DRAW_SOCKET_PATH_LIMIT, drawSocketPathFor } from "../src/core/live-draw.js";
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
@@ -3601,5 +3601,310 @@ test("APRV-287: a completed carried grant clears the floor the refusal promised 
     false,
     "nothing was asked of a human",
   );
+  assertClean(dir);
+});
+
+// ===========================================================================
+// The lagging verified view (APRV-294)
+// ===========================================================================
+
+/**
+ * Serve a verified view that LAGS the requests the hook just appended, then let
+ * it catch up and grant (APRV-294).
+ *
+ * The incident, reproduced: minutes after `approval log sync` replaced the
+ * committed baseline and the daemon restarted, a hook appended its requests,
+ * re-read the log, and got a view that did not carry them. So the helper waits
+ * for the request to land, swaps in the log as it stood BEFORE this tool call,
+ * holds it there for `lagMs`, swaps the whole file back, and only then decides.
+ *
+ * Both swaps are a write-then-rename, so the hook never reads a half-written
+ * file: it sees the short log or the long one, each a clean chain, which is
+ * exactly what a lagging view is. Nothing is written by hand — the bytes put
+ * back are the bytes the real CLI wrote — and every case still ends at
+ * `approval log verify`.
+ */
+function lagThenGrant(
+  dir: string,
+  actionKey: string,
+  baseBytes: number,
+  lagMs: number,
+): { report(): Promise<Record<string, unknown> | null> } {
+  const stem = `lag-${counter}`;
+  const helper = join(dir, `${stem}.cjs`);
+  const reportPath = join(dir, `${stem}.json`);
+  writeFileSync(
+    helper,
+    [
+      'const { spawnSync } = require("node:child_process");',
+      'const { readFileSync, renameSync, writeFileSync } = require("node:fs");',
+      `const CLI = ${JSON.stringify(CLI_ENTRY)};`,
+      `const DIR = ${JSON.stringify(dir)};`,
+      `const LOG_PATH = ${JSON.stringify(join(dir, LOG))};`,
+      `const KEY = ${JSON.stringify(actionKey)};`,
+      `const BASE = ${String(baseBytes)};`,
+      `const LAG_MS = ${String(lagMs)};`,
+      `const REPORT = ${JSON.stringify(reportPath)};`,
+      "const DEADLINE = Date.now() + 25000;",
+      "const write = (fields) => {",
+      "  try {",
+      '    writeFileSync(REPORT + ".part", JSON.stringify(fields));',
+      '    renameSync(REPORT + ".part", REPORT);',
+      "  } catch (error) {",
+      "    // The test reports the report's absence; there is nowhere else to say it.",
+      "  }",
+      "};",
+      "const requested = () => {",
+      "  let raw;",
+      '  try { raw = readFileSync(LOG_PATH, "utf8"); } catch (error) { return false; }',
+      '  const lines = raw.split("\\n");',
+      '  if (!raw.endsWith("\\n")) lines.pop();',
+      "  for (const line of lines) {",
+      "    if (line.trim().length === 0) continue;",
+      "    let record;",
+      "    try { record = JSON.parse(line); } catch (error) { continue; }",
+      '    if (record.event === "approval.requested" && record.action_key === KEY) return true;',
+      "  }",
+      "  return false;",
+      "};",
+      "const swap = (bytes, suffix) => {",
+      "  writeFileSync(LOG_PATH + suffix, bytes);",
+      "  renameSync(LOG_PATH + suffix, LOG_PATH);",
+      "};",
+      "const attempt = () => {",
+      "  if (!requested()) {",
+      "    if (Date.now() >= DEADLINE) {",
+      '      write({ lagged: false, reason: "no approval.requested for " + KEY });',
+      "      return;",
+      "    }",
+      "    setTimeout(attempt, 100);",
+      "    return;",
+      "  }",
+      "  const full = readFileSync(LOG_PATH);",
+      '  swap(full.subarray(0, BASE), ".lagging");',
+      "  setTimeout(() => {",
+      '    swap(full, ".caught-up");',
+      '    const run = spawnSync(process.execPath, [CLI, "grant", KEY, "--as", "human:alice"], { cwd: DIR, encoding: "utf8" });',
+      '    write({ lagged: true, status: run.status, stderr: String(run.stderr || "").trim() });',
+      "  }, LAG_MS);",
+      "};",
+      "attempt();",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const child = spawn(process.execPath, [helper], { cwd: dir, stdio: "ignore" });
+  child.unref();
+
+  return {
+    async report(): Promise<Record<string, unknown> | null> {
+      const until = Date.now() + 30_000;
+      for (;;) {
+        if (existsSync(reportPath)) {
+          try {
+            return JSON.parse(readFileSync(reportPath, "utf8")) as Record<string, unknown>;
+          } catch {
+            // A half-written report; the rename makes this vanishingly unlikely.
+          }
+        }
+        if (Date.now() >= until) return null;
+        await delay(50);
+      }
+    },
+  };
+}
+
+test("APRV-294: a view that lags the hook's own requests is waited out, never denied", async () => {
+  // THE DEFECT. 2026-09-07 02:00Z: the hook appended its requests, re-read the
+  // verified log, found state `none` for its own keys and denied at once with
+  // `hook-io: the verified log does not show every request … as granted
+  // (states: none)`. The requests were real and reached the phone; the view had
+  // not caught up. A log is append-only, so `none` for a key this process
+  // appended is a fact about the view, and the honest answer is to keep waiting.
+  const dir = ready();
+  const key = "hook:sess-1:tu-lag:deps.add";
+  const base = Buffer.byteLength(rawLog(dir), "utf8");
+  const helper = lagThenGrant(dir, key, base, 1_500);
+
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-lag"),
+  );
+  const decided = await helper.report();
+  const trace = `helper: ${JSON.stringify(decided)} | hook stderr: ${run.stderr}`;
+  assert.equal(decided?.["lagged"], true, trace);
+  assert.equal(decided["status"], 0, trace);
+
+  const verdict = verdictOf(run);
+  assert.equal(verdict.permission, "allow", `${verdict.reason} | ${trace}`);
+  assert.match(verdict.reason, /^granted: /u);
+  // The hook SAW the lag and said so, rather than reading it as an answer.
+  assert.match(
+    run.stderr,
+    /the verified log does not yet carry hook:sess-1:tu-lag:deps\.add/u,
+    trace,
+  );
+  assert.match(run.stderr, /this is a view that lags rather than a decision/u, trace);
+  assert.doesNotMatch(run.stdout, /hook-io/u, "the lag is not an I/O verdict");
+
+  // The grant was spent before the allow was printed, exactly as on any other
+  // granted wait: the record is what authorizes the harness (APRV-200).
+  assert.equal(
+    allRecords(dir).some(
+      (record) => record["event"] === "execution.started" && record["action_key"] === key,
+    ),
+    true,
+    trace,
+  );
+  assertClean(dir);
+});
+
+test("APRV-294: a lag that outlives the wait times out and says the view is behind", async () => {
+  // The other ending. The view never catches up inside the wait, so the deny is
+  // the ordinary `hook-timeout` — never `hook-io` — and it names the repair:
+  // the log this hook reads is behind the log it wrote to.
+  const dir = ready();
+  const key = "hook:sess-1:tu-lag-2:deps.add";
+  const base = Buffer.byteLength(rawLog(dir), "utf8");
+  // Longer than the hook's wait below, so the whole wait runs under the lag.
+  const helper = lagThenGrant(dir, key, base, 6_000);
+
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "2s", "--interval", "200ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-lag-2"),
+  );
+  const verdict = verdictOf(run);
+  const trace = `hook stderr: ${run.stderr}`;
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /^hook-timeout: /u, trace);
+  assert.match(verdict.reason, /The verified view still does not carry /u, trace);
+  assert.match(verdict.reason, /approval log verify/u, trace);
+
+  // Let the helper finish so the case leaves a whole log behind.
+  const decided = await helper.report();
+  assert.equal(decided?.["lagged"], true, JSON.stringify(decided));
+  assertClean(dir);
+});
+
+test("APRV-294: a window that ends between the verdict and the record has its own code", () => {
+  // The second half of the same fault: one read decides and another acts. The
+  // hook derived a window, and by the time the bypass record was appended a
+  // human had closed it — which used to be reported as `gate-not-open`, "no
+  // window is open", a state that had never been true for this call.
+  const dir = ready();
+  const opened = openTestWindow(dir);
+
+  // The read the verdict is decided on, exactly as `lookupWindow` makes it.
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  const decidedOn = { records: read.records, head: read.head };
+
+  // …and the human closes the window in between.
+  const closed = closeWindow(join(dir, LOG), "human:alice");
+  assert.equal(closed.ok, true, closed.ok ? "" : closed.message);
+  if (!closed.ok) throw new Error("unreachable");
+  const before = rawLog(dir);
+
+  const refused = recordGateBypass(
+    join(dir, LOG),
+    {
+      tool: "Bash",
+      summary: "npm install left-pad",
+      classes: ["deps.add"],
+      payloadHash: payloadHash({ command: "npm install left-pad", cwd: "/repo" }),
+      sessionId: "sess-1",
+      toolUseId: "tu-window-closed",
+      cwd: "/repo",
+    },
+    "agent:claude-code",
+    {},
+    { openedSeq: opened.seq, read: decidedOn },
+  );
+  assert.equal(refused.ok, false, "a window that is gone authorizes nothing");
+  if (refused.ok) throw new Error("unreachable");
+  // Distinct from `gate-not-open`, and it names the record that ended it.
+  assert.equal(refused.code, "gate-window-closed");
+  assert.match(refused.message, new RegExp(`gate\\.closed seq ${String(closed.record.seq)}`, "u"));
+  assert.match(refused.message, new RegExp(`seq ${String(opened.seq)}`, "u"));
+  assert.equal(rawLog(dir), before, "a refused bypass appends nothing");
+
+  // …and the refusal is not a failed side-effecting call. Nothing started, so
+  // the harness's own report of the failed tool call closes nothing and the
+  // floor is exactly where it was (SPEC.md §10.2).
+  const post = runCli(
+    ["hook", "claude-code"],
+    dir,
+    postEvent(
+      "tu-window-closed",
+      { type: "error", error: "…" },
+      { hook_event_name: "PostToolUseFailure" },
+    ),
+  );
+  assert.equal(reportOf(post)["code"], "post-tool-gate-refused:not-delegated", post.stderr);
+  assert.equal(rawLog(dir), before, "the report appended nothing either");
+
+  const after = readVerifiedRecords(join(dir, LOG));
+  assert.equal(after.ok, true);
+  if (!after.ok) throw new Error("unreachable");
+  assert.deepEqual(harnessLoopEscalation(after.records), [], "no streak accrued");
+  assertClean(dir);
+});
+
+test("APRV-294: a lapsed window is named as lapsed, not as no window at all", () => {
+  // The same code, the other way a window ends. Nothing is appended when a
+  // window lapses (SPEC.md §5.2), so there is no closing seq to name and the
+  // refusal names the expiry instead.
+  const dir = ready();
+  const opened = openTestWindow(dir, {
+    durationText: "1m",
+    durationMs: 60_000,
+    at: new Date(Date.now() - 60 * 60_000).toISOString(),
+  });
+  const before = rawLog(dir);
+
+  const refused = recordGateBypass(
+    join(dir, LOG),
+    {
+      tool: "Bash",
+      summary: "npm install left-pad",
+      classes: ["deps.add"],
+      payloadHash: payloadHash({ command: "npm install left-pad", cwd: "/repo" }),
+    },
+    "agent:claude-code",
+    {},
+    { openedSeq: opened.seq },
+  );
+  assert.equal(refused.ok, false);
+  if (refused.ok) throw new Error("unreachable");
+  assert.equal(refused.code, "gate-window-closed");
+  assert.match(refused.message, /lapsed/u);
+  assert.doesNotMatch(refused.message, /gate\.closed seq/u);
+  assert.equal(rawLog(dir), before);
+  assertClean(dir);
+});
+
+test("APRV-294: with no decision stated the bypass still refuses gate-not-open", () => {
+  // The historical code is untouched, which is what "added, never repurposed"
+  // means for a frozen union: a caller that states no window still gets the
+  // refusal that says there is none.
+  const dir = ready();
+  const before = rawLog(dir);
+  const refused = recordGateBypass(
+    join(dir, LOG),
+    {
+      tool: "Bash",
+      summary: "npm install left-pad",
+      classes: ["deps.add"],
+      payloadHash: payloadHash({ command: "npm install left-pad", cwd: "/repo" }),
+    },
+    "agent:claude-code",
+  );
+  assert.equal(refused.ok, false);
+  if (refused.ok) throw new Error("unreachable");
+  assert.equal(refused.code, "gate-not-open");
+  assert.equal(rawLog(dir), before);
   assertClean(dir);
 });

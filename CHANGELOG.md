@@ -52,5 +52,19 @@ The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
   and accrue no loop-safety streak; and a completed command clears the floor
   even when the grant it ran on was carried by a later tool call.
 
+- **The hook waits for a lagging verified view instead of denying on it**
+  (APRV-294). Minutes after a `log sync` and a daemon restart, a hook appended
+  its requests, re-read the log, found its own keys in state `none` and denied
+  `hook-io` on the spot; the questions were live and the taps that answered them
+  authorized nothing. A log is append-only, so `none` for a key this hook
+  appended describes the view rather than the request: the hook now keeps
+  waiting, bounded by the same timeout, says on stderr that the view lags, and
+  names the repair if the wait runs out. On the same fault's other face, the
+  open-window verdict and the `gate.bypassed` record that authorizes it are one
+  verified read, and a window that ends in between refuses with its own code
+  (`gate-window-closed`) naming the closing seq or the expiry, in place of the
+  `gate-not-open` that claimed there had never been a window. Neither refusal
+  appends anything or counts as a failed side-effecting call.
+
 The publish itself is the first `release.publish` action to pass through this
 gate (APRV-199).
