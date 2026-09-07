@@ -144,6 +144,11 @@ import {
   type TelegramConfig,
   type TelegramTerminalState,
 } from "../channels/telegram.js";
+import {
+  abandonedAfterMs,
+  HOOK_DEFAULT_WAIT_MS,
+  HOOK_RETRY_GRACE_MS,
+} from "../core/harness-wait.js";
 import { telegramDeliveryFor, type TelegramDelivery } from "../core/telegram-config.js";
 import { loadPolicy } from "../core/policy-load.js";
 import { promptLayoutFor } from "../core/prompt-layout.js";
@@ -1042,6 +1047,12 @@ export interface DispatchResult {
    */
   pruned: { action_key: string; reason: "settled" | "stale" }[];
   /**
+   * The collapsed re-delivery this cycle sent, when it sent one (APRV-287):
+   * the one message that stood in for a batch of requests nobody is waiting on
+   * any more, and the keys it covers. At most one, on a process's first cycle.
+   */
+  collapsed?: { delivery_id: DeliveryId; action_keys: string[]; oldest_ms: number };
+  /**
    * The `CHECKPOINT DUE` prompt this cycle sent, when it sent one (APRV-257):
    * the message it is on and the head it asks about. At most one per lapse.
    */
@@ -1339,9 +1350,33 @@ export async function dispatchPending(
 
   // Everything the log calls pending that this process has not put on the
   // phone. Both modes start here and differ only in how much of it they send.
-  const undecided = queue.requests.filter(
+  const allUndecided = queue.requests.filter(
     (request) => !state.delivered.has(request.action_key.value),
   );
+
+  // APRV-287. A listener that has just started or reconnected re-derives the
+  // pending set and re-delivers it. For a queue somebody is waiting on that is
+  // exactly right; for one nobody is, it is the flood of 2026-09-06 — a dozen
+  // requests whose hooks had long since given up, one message each. The ones
+  // older than the hook's wait go out as ONE message with a single reject-all,
+  // and the rest are delivered as they always were.
+  //
+  // `state.banner.sent` is this process's own "have I completed a cycle yet",
+  // and it is read here BEFORE the burst banner consumes it: the first cycle of
+  // a process is precisely the re-delivery, and a later cycle carries requests
+  // that have just been asked.
+  // `burst` only, and that is where the harm is. Under `paced` the listener
+  // already puts ONE question at a time in front of the approver behind a
+  // summary line that names the count, the classes and the oldest age
+  // (APRV-216), so a restart there is two messages rather than a dozen and
+  // there is no flood to collapse. Collapsing a paced walkthrough would also
+  // take away the thing it exists for: an approver working deliberately
+  // through an old queue can still approve an old request, and a reject-all
+  // summary offers no way to.
+  const firstCycle = !state.banner.sent && setup.delivery === "burst";
+  const undecided = firstCycle
+    ? await collapseStale(setup, streams, state, result, allUndecided, now)
+    : allUndecided;
 
   // APRV-216. Under `paced` this cycle sends at most ONE unit, and `null` means
   // it sends nothing because a question is already in front of the approver.
@@ -1488,6 +1523,136 @@ export async function dispatchPending(
   }
 
   return result;
+}
+
+/**
+ * How old a pending request must be, on a listener's first cycle, to be one
+ * nobody is waiting on (APRV-287).
+ *
+ * The hook's own wait PLUS its retry grace, read from the same module the hook
+ * reads (`core/harness-wait.ts`), because two numbers would be two answers to
+ * "is anybody still holding this". Past the wait alone a hook process has
+ * stopped blocking and a retry can still adopt the question, so those are
+ * ordinary pending requests. Past the wait and the grace together nothing will
+ * adopt it: that is the moment the hook itself takes such a request back, and a
+ * request still pending here is one whose session never came back at all —
+ * exactly the dozen that arrived on a phone behind a dead daemon on
+ * 2026-09-06.
+ *
+ * Collapsing is not deciding. These stay pending, listable by `/queue`, and
+ * decidable from any copy already delivered; what changes is how many messages
+ * it takes to say they are there.
+ */
+export const COLLAPSE_STALE_AFTER_MS = abandonedAfterMs(
+  HOOK_DEFAULT_WAIT_MS,
+  HOOK_RETRY_GRACE_MS,
+);
+
+/**
+ * How many stale requests it takes to collapse them (APRV-287).
+ *
+ * Two. A lone stale request keeps its own card, with its payload and both
+ * buttons, because collapsing it would take away the ability to approve it and
+ * save nobody a message. A flood starts at two.
+ */
+const COLLAPSE_MIN = 2;
+
+/**
+ * A DURATION in words, which is not what {@link ageText} renders.
+ *
+ * `ageText` says how long ago something happened ("5 min ago"), and these two
+ * numbers are lengths of time rather than instants: writing "older than the
+ * hook's 5 min ago retry grace" would be a sentence about the wrong kind of
+ * thing.
+ */
+function durationText(ms: number): string {
+  if (ms < 60_000) return `${String(Math.round(ms / 1000))}s`;
+  const minutes = Math.round(ms / 60_000);
+  return `${String(minutes)}m`;
+}
+
+/** The computed lines a collapsed re-delivery leads with (APRV-287). */
+export function staleLines(requests: ChannelRequest[], now: string): string[] {
+  const nowMs = Date.parse(now);
+  const ages = requests
+    .map((request) => nowMs - Date.parse(request.requested_ts.value))
+    .filter((age) => !Number.isNaN(age));
+  const oldest = ages.length === 0 ? null : Math.max(...ages);
+  const tally = new Map<string, number>();
+  for (const request of requests) {
+    const cls = request.class.value;
+    tally.set(cls, (tally.get(cls) ?? 0) + 1);
+  }
+  return [
+    `${String(requests.length)} pending requests, all older than the hook's ${durationText(HOOK_DEFAULT_WAIT_MS)} wait plus its ${durationText(HOOK_RETRY_GRACE_MS)} retry grace`,
+    `oldest: ${oldest === null ? "unknown age" : ageText(oldest)}`,
+    `classes: ${[...tally.entries()]
+      .map(([cls, count]) => (count === 1 ? cls : `${cls} ×${String(count)}`))
+      .join(", ")}`,
+    "collapsed into this one message because the tool calls that asked have stopped waiting; a decision on any of them can still authorize an identical retry",
+  ];
+}
+
+/**
+ * Put the requests nobody is waiting on into ONE message, and hand back the
+ * ones that still get a message each (APRV-287).
+ *
+ * Called on a process's first cycle only, which is exactly a daemon start or a
+ * listener reconnect. Everything it does is bookkeeping in the sense SPEC.md
+ * §10.3 fixes: the pending set is re-derived from the verified log every cycle,
+ * so a summary that fails to send, or a process that forgets it sent one,
+ * degrades to showing those requests again, and never to a pending request
+ * nobody is shown.
+ */
+async function collapseStale(
+  setup: ListenSetup,
+  streams: Streams,
+  state: DispatchState,
+  result: DispatchResult,
+  undecided: ChannelRequest[],
+  now: string,
+): Promise<ChannelRequest[]> {
+  const nowMs = Date.parse(now);
+  if (Number.isNaN(nowMs)) return undecided;
+  const age = (request: ChannelRequest): number => {
+    const at = Date.parse(request.requested_ts.value);
+    return Number.isNaN(at) ? 0 : nowMs - at;
+  };
+  const stale = undecided.filter((request) => age(request) >= COLLAPSE_STALE_AFTER_MS);
+  if (stale.length < COLLAPSE_MIN) return undecided;
+
+  let delivered: Awaited<ReturnType<TelegramChannel["notifyStale"]>> = null;
+  try {
+    delivered = await setup.channel.notifyStale(stale, { lines: staleLines(stale, now) });
+  } catch (cause) {
+    delivered = null;
+    streams.err(
+      `approval: telegram could not send the collapsed re-delivery of ${String(stale.length)} stale requests: ${
+        cause instanceof Error ? cause.message : String(cause)
+      } — they are delivered one message each instead\n`,
+    );
+  }
+  if (delivered === null || delivered.digestId === null) {
+    // Degrades to showing the requests again, which is this bookkeeping's rule.
+    return undecided;
+  }
+
+  const digestId = delivered.digestId;
+  for (const member of delivered.members) {
+    state.delivered.set(member.action_key, member.delivery_id);
+    remember(state, member.action_key, now);
+    state.attempts.delete(member.action_key);
+    result.delivered.push({ action_key: member.action_key, delivery_id: member.delivery_id });
+  }
+  result.collapsed = {
+    delivery_id: digestId,
+    action_keys: delivered.members.map((member) => member.action_key),
+    oldest_ms: Math.max(...stale.map((request) => age(request))),
+  };
+  report(setup, streams, digestId, delivered.members);
+
+  const collapsedKeys = new Set(delivered.members.map((member) => member.action_key));
+  return undecided.filter((request) => !collapsedKeys.has(request.action_key.value));
 }
 
 /**

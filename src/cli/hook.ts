@@ -53,7 +53,10 @@
  * run these bytes, here" belongs to the bytes rather than to one tool-use id.
  * A retry while the question is pending adopts it instead of asking twice; a
  * retry after a grant lands proceeds on it, once, inside the TTL. That is why
- * the wait no longer ends in a withdrawal: a late tap now authorizes something.
+ * the wait no longer ends in an immediate withdrawal: a late tap authorizes
+ * something. It ends in one once the RETRY GRACE has run out (APRV-287): past
+ * that window nothing is coming back to adopt the question, and a request left
+ * standing is one more dead message a restarted listener re-delivers.
  *
  * **An allow follows its record, and says which window it sits in (APRV-200).**
  * The harness executes and never sees this process's return value, so what
@@ -115,6 +118,11 @@ import {
   type HarnessProvenance,
 } from "../core/harness-version.js";
 import {
+  abandonedAfterMs,
+  HOOK_DEFAULT_WAIT,
+  HOOK_RETRY_GRACE_MS,
+} from "../core/harness-wait.js";
+import {
   harnessLoopFloor,
   isLoopEscalated,
   loopClearance,
@@ -127,6 +135,7 @@ import { payloadHash } from "../core/payload.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
 import { humanOnlyRefusal, resolve as resolvePolicy } from "../core/policy-match.js";
 import {
+  payloadOf,
   readVerifiedRecords,
   requestState,
   useVerifiedSnapshots,
@@ -144,8 +153,14 @@ import { usageErrorText } from "./usage.js";
 /** Identity accepted for the proposing side: a person or an agent. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
 
-/** Default wait, chosen to sit inside Claude Code's own 60s hook default. */
-const DEFAULT_TIMEOUT = "55s";
+/**
+ * Default wait, chosen to sit inside Claude Code's own 60s hook default.
+ *
+ * Spelled in `core/harness-wait.ts` since APRV-287, where the Telegram
+ * listener reads the same duration to decide which pending requests nobody is
+ * waiting on any more.
+ */
+const DEFAULT_TIMEOUT = HOOK_DEFAULT_WAIT;
 
 /** Poll interval for the decision wait. */
 const DEFAULT_INTERVAL_MS = 1_000;
@@ -210,9 +225,12 @@ export const HOOK_DENY_CODES = [
    */
   "hook-withdrawn",
   /**
-   * The wait elapsed with the request still undecided. The request STAYS OPEN
-   * until the policy's TTL (APRV-117): a decision inside that window authorizes
-   * a retry of the identical command in the identical directory, once.
+   * The wait elapsed with the request still undecided. The request stays open
+   * for the RETRY GRACE (APRV-117, bounded by APRV-287): a decision inside that
+   * window authorizes a retry of the identical command in the identical
+   * directory, once. Past the grace the hook withdraws it (reason `timeout`),
+   * because a question nothing will adopt is a message on a phone that decides
+   * nothing.
    */
   "hook-timeout",
   /** The gate refused intake; the gate's own code follows a colon. */
@@ -1389,6 +1407,14 @@ interface HookRun {
   actor: string;
   timeoutMs: number;
   intervalMs: number;
+  /**
+   * How long a request outlives the wait before this hook takes it back
+   * (APRV-287, `--retry-grace`).
+   *
+   * `core/harness-wait.ts` holds the default and the reasoning. Zero withdraws
+   * at the moment the wait expires, which is what the tests drive.
+   */
+  graceMs: number;
   /** `defaults.approval_ttl`, or `null` when the policy declares none. */
   ttlMs: number | null;
   harness: HarnessKind;
@@ -1440,12 +1466,13 @@ function registrationProvenance(run: HookRun): HarnessProvenance | null {
  *
  * Two things narrowed under APRV-117, and both are load-bearing.
  *
- * **The timeout no longer calls this.** A request keyed by payload hash can be
- * adopted by the retry, so an answer that lands after this process gave up
- * still authorizes something; retracting it would be throwing away the very
- * decision the human is about to make. What still calls this is every path
- * where nothing will retry: a signal, a thrown failure, an intake refusal that
- * dooms the whole command.
+ * **The timeout no longer calls this immediately.** A request keyed by payload
+ * hash can be adopted by the retry, so an answer that lands after this process
+ * gave up still authorizes something; retracting it at once would be throwing
+ * away the very decision the human is about to make. What still calls this is
+ * every path where nothing will retry: a signal, a thrown failure, an intake
+ * refusal that dooms the whole command, and — since APRV-287 — a wait whose
+ * retry grace has run out (see {@link withdrawAbandoned}).
  *
  * **Only keys this invocation opened.** An ADOPTED key was requested by another
  * process, and `withdraw` is requester-only by design (APRV-106 rule 1): taking
@@ -1478,6 +1505,108 @@ function withdrawPending(
     );
   }
   return withdrawn;
+}
+
+/**
+ * Pending harness requests this actor opened that nothing will ever adopt
+ * (APRV-287).
+ *
+ * ## The state this names
+ *
+ * A wait that expires leaves its question open, because a decision inside the
+ * policy's TTL still authorizes an identical retry (APRV-117). That is right
+ * for as long as a retry is plausible and wrong afterwards: on 2026-09-06 three
+ * waits expired behind a dead daemon, nothing retried them, and the requests sat
+ * live until the TTL — so the daemon's restart re-delivered a dozen dead
+ * questions to a phone, one message each. The grace window
+ * (`core/harness-wait.ts`) is where the two readings meet: inside it the
+ * question is live for the retry, past it the asker is gone.
+ *
+ * ## What it will not name
+ *
+ *  - **A request another actor opened.** `withdraw` is requester-only by design
+ *    (APRV-106 rule 1), so the filter is the same fact stated before the call:
+ *    taking back somebody else's question is the queue-clearing the gate
+ *    refuses.
+ *  - **The bytes this invocation is asking about.** `keepHash` is this
+ *    invocation's payload hash, and a request carrying it is the question this
+ *    process is adopting or waiting on. Sweeping it would be a hook withdrawing
+ *    its own live question.
+ *  - **Anything but a live `approval.requested`.** The state is derived through
+ *    `requestState` from the verified records the caller already read, so a
+ *    decided, expired or already withdrawn request is never touched.
+ *  - **A request younger than the wait plus the grace**, measured from the
+ *    `approval.requested` record's own runtime-assigned timestamp.
+ *
+ * Nothing here appends: the caller decides what to do with the list, and the
+ * append happens through {@link withdrawPending} like every other withdrawal on
+ * this surface.
+ */
+function abandonedRequests(
+  run: HookRun,
+  records: EventRecord[],
+  now: string,
+  keepHash: string | null,
+): { actionKey: string; cls: string; ageMs: number }[] {
+  const nowMs = Date.parse(now);
+  if (Number.isNaN(nowMs)) return [];
+  const limit = abandonedAfterMs(run.timeoutMs, run.graceMs);
+  const found = new Map<string, { actionKey: string; cls: string; ageMs: number }>();
+  for (const record of records) {
+    if (record.event !== "approval.requested") continue;
+    if (record.actor !== run.actor) continue;
+    const key = record.action_key;
+    if (typeof key !== "string" || key.length === 0) continue;
+    const payload = payloadOf(record);
+    if (payload["execution"] !== "harness") continue;
+    if (keepHash !== null && payload["payload_hash"] === keepHash) continue;
+    const at = Date.parse(record.ts);
+    if (Number.isNaN(at) || nowMs - at < limit) continue;
+    if (requestState(records, key, now, run.ttlMs).state !== "requested") continue;
+    const cls = payload["class"];
+    found.set(key, {
+      actionKey: key,
+      cls: typeof cls === "string" ? cls : "(no class)",
+      ageMs: nowMs - at,
+    });
+  }
+  return [...found.values()];
+}
+
+/** Minutes, for a sentence a human reads. */
+function minutesText(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes >= 1) return `${String(minutes)}m`;
+  return `${String(Math.max(1, Math.round(ms / 1000)))}s`;
+}
+
+/**
+ * Take back every question this actor opened that the grace window has run out
+ * on (APRV-287).
+ *
+ * Best effort, exactly as {@link withdrawPending} is: a withdrawal that refuses
+ * changes nothing, and `already-decided` — a human answering while this ran —
+ * is passed over in silence there. Returns the keys actually withdrawn.
+ */
+function withdrawAbandoned(
+  run: HookRun,
+  streams: Streams,
+  records: EventRecord[],
+  now: string,
+  keepHash: string | null,
+  only: readonly string[] | null = null,
+): string[] {
+  const abandoned = abandonedRequests(run, records, now, keepHash).filter(
+    (entry) => only === null || only.includes(entry.actionKey),
+  );
+  if (abandoned.length === 0) return [];
+  return withdrawPending(
+    run,
+    streams,
+    abandoned.map((entry) => entry.actionKey),
+    `no retry adopted this question within ${minutesText(abandonedAfterMs(run.timeoutMs, run.graceMs))} of the hook's wait opening it (APRV-287); the asking tool call is gone, so the request is taken back rather than left for a listener to re-deliver`,
+    "timeout",
+  );
 }
 
 /**
@@ -1769,7 +1898,7 @@ function announceWait(
         ? " The question was already open for these exact bytes, so this tool call adopts it rather than asking a second time."
         : "";
     streams.err(
-      `approval: ${action.actionKey} (${action.cls}) is waiting for a human on ${where}; a decision on the phone releases it, and this hook blocks for up to ${String(run.timeoutMs)}ms before denying with hook-timeout and leaving the request open.${adopted}\n`,
+      `approval: ${action.actionKey} (${action.cls}) is waiting for a human on ${where}; a decision on the phone releases it, and this hook blocks for up to ${String(run.timeoutMs)}ms before denying with hook-timeout and leaving the request open for a ${minutesText(run.graceMs)} retry grace.${adopted}\n`,
     );
   }
 
@@ -1883,6 +2012,18 @@ function gateAndWait(
   const intake = readVerifiedRecords(run.logPath);
   if (!intake.ok) return sayDeny("hook-io", intake.message);
   const intakeTs = new Date().toISOString();
+
+  // APRV-287. Before this invocation adds a question of its own, the questions
+  // earlier invocations of this actor left behind are taken back — every one
+  // whose grace window has run out, and never the bytes this one is about to
+  // ask about. The hook is the only writer that can do this: `withdraw` is
+  // requester-only, and the requester of a harness request is this actor.
+  const swept = withdrawAbandoned(run, streams, intake.records, intakeTs, hash);
+  if (swept.length > 0) {
+    streams.err(
+      `approval: withdrew ${String(swept.length)} abandoned harness request(s) nothing retried (${swept.join(", ")}); a tap on one of them now authorizes nothing and the channel says so\n`,
+    );
+  }
 
   const actions: GatedAction[] = classes.map((cls) => {
     const carry = findHarnessCarry(intake.records, hash, cls, intakeTs, run.ttlMs);
@@ -2101,14 +2242,23 @@ function gateAndWait(
       }
 
       if (Date.now() >= deadline) {
-        // APRV-117, the behaviour APRV-106 had to get wrong for want of
-        // carryover. The request STAYS OPEN: a decision inside the policy's TTL
-        // authorizes the retry of this exact command in this exact directory,
-        // once. Withdrawing here would discard the answer the human is about to
-        // give.
+        // APRV-117, narrowed by APRV-287. The request stays open for the RETRY
+        // GRACE: a decision inside that window authorizes the retry of this
+        // exact command in this exact directory, once, and withdrawing at the
+        // first expiry would discard the answer the human is about to give.
+        // Past the grace nobody is coming back for it, and a question nothing
+        // will adopt is taken back rather than left for a restarted listener to
+        // re-deliver.
+        const withdrawn = withdrawAbandoned(run, streams, read.records, ts, null, ownKeys);
+        if (withdrawn.length > 0) {
+          return sayDeny(
+            "hook-timeout",
+            `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait, and the ${minutesText(run.graceMs)} retry grace has run out: ${withdrawn.join(", ")} WAS WITHDRAWN (reason timeout). A tap on it now authorizes nothing and the channel says so. Run the command again to ask the question fresh.`,
+          );
+        }
         return sayDeny(
           "hook-timeout",
-          `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open until the policy's approval TTL, and a decision inside that window authorizes a retry of this exact command in this exact directory, once. Retry it after the approver answers; the retry adopts the same question rather than asking a second one.`,
+          `no decision on ${waitKeys.join(", ")} within the hook's ${String(run.timeoutMs)}ms wait. This tool call is denied and NOTHING WAS WITHDRAWN: the request(s) stay open for the ${minutesText(run.graceMs)} retry grace, and a decision inside that window authorizes a retry of this exact command in this exact directory, once. Retry it after the approver answers; the retry adopts the same question rather than asking a second one. Past the grace the hook takes the question back (approval.withdrawn, reason timeout), so a late retry asks again rather than adopting a question nobody is holding.`,
         );
       }
       sleepSync(Math.min(run.intervalMs, Math.max(0, deadline - Date.now())));
@@ -2658,6 +2808,7 @@ function runHarnessHook(
     "--as": "string",
     "--timeout": "string",
     "--interval": "string",
+    "--retry-grace": "string",
   });
   if (!parsed.ok) return usageError(streams, parsed.message);
   if (boolFlag(parsed.flags, "--help") || boolFlag(parsed.flags, "-h")) {
@@ -2692,6 +2843,17 @@ function runHarnessHook(
     return usageError(
       streams,
       `--interval expects a duration like 500ms, 2s, got ${JSON.stringify(intervalText)}`,
+    );
+  }
+  // APRV-287. How long the question outlives the wait, for the retry that
+  // adopts it. The duration grammar has no zero, so the shortest window is
+  // `1ms`, which withdraws as the wait expires.
+  const graceText = stringFlag(parsed.flags, "--retry-grace");
+  const graceMs = graceText === null ? HOOK_RETRY_GRACE_MS : parseDuration(graceText);
+  if (graceMs === null) {
+    return usageError(
+      streams,
+      `--retry-grace expects a duration like 5m, 30s, 1ms, got ${JSON.stringify(graceText)}`,
     );
   }
 
@@ -2820,6 +2982,7 @@ function runHarnessHook(
     actor,
     timeoutMs,
     intervalMs,
+    graceMs,
     ttlMs: load.durations.approvalTtlMs,
     harness: adapter.kind,
     originApp: adapter.originApp,

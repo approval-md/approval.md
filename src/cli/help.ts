@@ -1409,8 +1409,8 @@ ${why("init")}`;
 export const HOOK_HELP = `approval hook — put the gate in front of an agent harness
 
 Usage:
-  approval hook claude-code|cursor [--as agent:<id>] [--timeout <d>]
-                            [--interval <d>] [--policy <p>] [--dir <p>] [--log <p>]
+  approval hook claude-code|cursor [--as agent:<id>] [--timeout <d>] [--interval <d>]
+              [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
   approval hook classify [--json] [--policy <p>] [--dir <p>] -- <command…>
 
 Commands:
@@ -1420,7 +1420,7 @@ Commands:
 
 Flags (claude-code, cursor):
   --as <id>        proposing identity (default agent:claude-code / agent:cursor)
-  --timeout/--interval <d>   wait for a decision / poll it (default 55s / 1s)
+  --timeout/--interval/--retry-grace <d>  wait / poll / hold for a retry (55s/1s/5m)
   --dir/--policy/--log <p>   policy+log root; --dir sets BOTH, default primary
   -h, --help       this text
 

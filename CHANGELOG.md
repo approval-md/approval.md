@@ -41,6 +41,16 @@ The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
 - **Diagnostics.** `doctor`, `status`, `coverage`, `policy check`, `policy
   test`, and machine-readable `--json` on every verb with the schemas printed
   by `instructions --schemas`.
+- **A hook timeout neither floods the phone nor feeds the escalation**
+  (APRV-287). An expired wait keeps its question open for a retry grace
+  (`--retry-grace`, default 5 minutes) and then withdraws it with reason
+  `timeout`, so a tap on it authorizes nothing and says so; a listener starting
+  or reconnecting collapses the requests older than that line into one message
+  with a single reject-all instead of one message each; the several classes of
+  one command are delivered as one card with one approve, with the command's
+  bytes sent once; an expired wait and a harness-side misfire are not executions
+  and accrue no loop-safety streak; and a completed command clears the floor
+  even when the grant it ran on was carried by a later tool call.
 
 The publish itself is the first `release.publish` action to pass through this
 gate (APRV-199).

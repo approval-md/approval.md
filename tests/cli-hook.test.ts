@@ -31,7 +31,7 @@ import { after, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import type { ChannelRequest } from "../src/channels/contract.js";
+import { refusedDecisionLine, type ChannelRequest } from "../src/channels/contract.js";
 import {
   CANONICAL_JSON_HEADING,
   DIFF_BEGIN,
@@ -1807,10 +1807,15 @@ test("a grant landing after the wait authorizes an identical retry, with no seco
   assert.match(verdict.reason, /carried: hook:sess-1:tu-late:deps\.add/u);
 
   // No second question was ever asked: exactly one approval.requested exists,
-  // and the retry opened no request of its own.
+  // and the retry opened no request and registered no task of its own.
   const log = rawLog(dir);
   assert.equal(log.match(/"event":"approval\.requested"/gu)?.length, 1);
-  assert.doesNotMatch(log, /hook:sess-1:tu-retry/u);
+  assert.doesNotMatch(log, /"task":"hook:sess-1:tu-retry"/u);
+  assert.doesNotMatch(log, /"idempotency_key":"hook:sess-1:tu-retry/u);
+  // APRV-287: the ONE place the retry is named is the spend, which records
+  // which tool call carried the grant so its outcome can close this start. It
+  // is a second name for the same execution, never a second question.
+  assert.match(log, /"spent_by_task":"hook:sess-1:tu-retry"/u);
 
   // The grant was spent, once, through the ordinary execution vocabulary.
   assert.match(log, /"event":"execution\.started"/u);
@@ -3328,4 +3333,273 @@ test("the harness hook mints no new deny codes for the window (APRV-214)", () =>
     false,
     "the window introduced no code of its own",
   );
+});
+
+// ===========================================================================
+// APRV-287: the timeout takes its question back, and what a timeout is not
+// ===========================================================================
+
+/**
+ * A wait that expires with the retry grace already spent.
+ *
+ * `--retry-grace 1ms` is the shortest window the duration grammar has, and it
+ * puts the abandonment line at the moment the wait ends: the same code path a
+ * five-minute grace reaches five minutes later, driven in a second.
+ */
+function timedOut(dir: string, command: string, toolUseId: string): Verdict {
+  const run = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms", "--retry-grace", "1ms"],
+    dir,
+    bashEvent(command, toolUseId),
+  );
+  return verdictOf(run);
+}
+
+test("APRV-287: a wait whose retry grace has run out withdraws its own request", () => {
+  const dir = ready();
+  const verdict = timedOut(dir, "npm install left-pad", "tu-grace");
+  assert.equal(verdict.permission, "deny", verdict.reason);
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(verdict.reason, /WAS WITHDRAWN \(reason timeout\)/u);
+
+  const written = allRecords(dir);
+  const withdrawn = written.filter((record) => record["event"] === "approval.withdrawn");
+  assert.equal(withdrawn.length, 1, JSON.stringify(written.map((r) => r["event"])));
+  const only = withdrawn[0] as Record<string, unknown>;
+  assert.equal(only["action_key"], "hook:sess-1:tu-grace:deps.add");
+  assert.equal(payloadOf(only)["reason"], "timeout");
+  // The requester took it back: the actor is the hook's own identity, which is
+  // the only actor `withdraw` accepts for it.
+  assert.equal(only["actor"], "agent:claude-code");
+
+  // Nothing is on the human's queue any more, because nothing is waiting.
+  const queue = runCli(["queue", "--json"], dir);
+  assert.equal(queue.code, 0, queue.stderr);
+  assert.doesNotMatch(queue.stdout, /hook:sess-1:tu-grace/u);
+  assertClean(dir);
+});
+
+test("APRV-287: a tap on a withdrawn request authorizes nothing, and the channel says so", () => {
+  const dir = ready();
+  timedOut(dir, "npm install left-pad", "tu-late-tap");
+  const key = "hook:sess-1:tu-late-tap:deps.add";
+
+  const late = runCli(["grant", key, "--as", "human:carter", "--json"], dir);
+  assert.notEqual(late.code, 0, "a grant on a withdrawn request must refuse");
+  assert.match(`${late.stdout}${late.stderr}`, /request-withdrawn/u);
+  // Nothing was recorded: no grant, and no execution to spend it.
+  const events = allRecords(dir).map((record) => record["event"]);
+  assert.equal(events.includes("approval.granted"), false);
+  assert.equal(events.includes("execution.started"), false);
+
+  // The words the approver reads on the channel that collected the tap. One
+  // sentence, one source (APRV-235), and it says the answer did nothing.
+  const line = refusedDecisionLine("request-withdrawn");
+  assert.match(line, /Withdrawn/u);
+  assert.match(line, /nothing was recorded/u);
+  assertClean(dir);
+});
+
+test("APRV-287: inside the grace nothing is withdrawn and the retry adopts the question", () => {
+  // The APRV-117 property this task must not break: a wait that expires with
+  // the grace still open leaves the question in front of the human, and the
+  // retry of the identical command adopts it rather than asking again.
+  const dir = ready();
+  const first = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-inside-1"),
+  );
+  const verdict = verdictOf(first);
+  assert.match(verdict.reason, /NOTHING WAS WITHDRAWN/u);
+  assert.match(verdict.reason, /retry grace/u);
+
+  const retry = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent("npm install left-pad", "tu-inside-2"),
+  );
+  assert.match(verdictOf(retry).reason, /^hook-timeout: /u);
+
+  const log = rawLog(dir);
+  assert.doesNotMatch(log, /"event":"approval\.withdrawn"/u);
+  assert.equal(log.match(/"event":"approval\.requested"/gu)?.length, 1, "the retry asked again");
+  assertClean(dir);
+});
+
+test("APRV-287: a later tool call sweeps the questions an earlier one abandoned", () => {
+  // The flood at its source. Three commands time out; the fourth invocation
+  // takes back every one of them whose grace has run out, and leaves its own
+  // question standing.
+  const dir = ready();
+  for (const id of ["tu-a", "tu-b", "tu-c"]) {
+    assert.match(timedOut(dir, `npm install pkg-${id}`, id).reason, /^hook-timeout: /u);
+  }
+  const sweeper = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms", "--retry-grace", "1ms"],
+    dir,
+    bashEvent("npm install pkg-last", "tu-d"),
+  );
+  assert.match(verdictOf(sweeper).reason, /^hook-timeout: /u);
+
+  const withdrawn = allRecords(dir)
+    .filter((record) => record["event"] === "approval.withdrawn")
+    .map((record) => String(record["action_key"]));
+  assert.deepEqual(
+    withdrawn.sort(),
+    [
+      "hook:sess-1:tu-a:deps.add",
+      "hook:sess-1:tu-b:deps.add",
+      "hook:sess-1:tu-c:deps.add",
+      "hook:sess-1:tu-d:deps.add",
+    ],
+    "every abandoned question was taken back",
+  );
+  const queue = runCli(["queue", "--json"], dir);
+  assert.equal(queue.code, 0, queue.stderr);
+  assert.doesNotMatch(queue.stdout, /hook:sess-1:tu-/u, "nothing is left on the human's queue");
+  assertClean(dir);
+});
+
+test("APRV-287: three expired waits leave the loop floor closed", () => {
+  // The feedback loop this task cuts. An expired wait records a WITHDRAWAL and
+  // never an execution.failed, so the escalation that routes commands to a
+  // phone cannot be fed by the timeouts it is causing.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) {
+    assert.match(timedOut(dir, `npm install pkg-${id}`, id).reason, /^hook-timeout: /u);
+  }
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.equal(
+    read.records.some(
+      (record) => record.event === "execution.failed" || record.event === "execution.completed",
+    ),
+    false,
+    "an expired wait wrote an execution outcome",
+  );
+  assert.deepEqual(harnessLoopEscalation(read.records), [], "no scope accrued anything");
+  assert.deepEqual(loopEscalation(read.records), []);
+
+  // The verdict that matters: the next command is answered by the policy.
+  const verdict = verdictOf(runCli(["hook", "claude-code"], dir, bashEvent(READ_COMMAND, "tu-4")));
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /^autonomous: read\.shell/u);
+  assertClean(dir);
+});
+
+test("APRV-287: three execution.failed still open the floor", () => {
+  // The control for the case above: the streak the escalation exists for is
+  // untouched, and three failed side-effecting tool calls still floor a session.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records)
+      .filter((state) => state.escalated)
+      .map((state) => state.scope),
+    ["actor", "session"],
+  );
+  assertClean(dir);
+});
+
+test("APRV-287: harness-side misfires are not executions and accrue nothing", () => {
+  // A command the classifier cannot read is denied before anything is
+  // appended, so the tool never ran and there is no start for its outcome to
+  // close. Three of them used to look like a stalled session; they leave the
+  // floor exactly where they found it.
+  const dir = ready();
+  for (const id of ["mis-1", "mis-2", "mis-3"]) {
+    const run = runCli(["hook", "claude-code"], dir, bashEvent('echo "unterminated', id));
+    const verdict = verdictOf(run);
+    assert.equal(verdict.permission, "deny", verdict.reason);
+    assert.match(verdict.reason, /^hook-unparseable: /u);
+
+    // The harness reports the failed tool call, as it does for any failure.
+    const post = runCli(
+      ["hook", "claude-code"],
+      dir,
+      postEvent(id, { type: "error", error: "…" }, { hook_event_name: "PostToolUseFailure" }),
+    );
+    assert.equal(
+      reportOf(post)["code"],
+      "post-tool-gate-refused:not-delegated",
+      "a report may only close an execution this runtime authorized",
+    );
+  }
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.equal(
+    read.records.some((record) => record.event.startsWith("execution.")),
+    false,
+    "a refused tool call is not an execution",
+  );
+  assert.deepEqual(harnessLoopEscalation(read.records), []);
+
+  const verdict = verdictOf(runCli(["hook", "claude-code"], dir, bashEvent(WRITE_COMMAND, "tu-4")));
+  assert.equal(verdict.permission, "allow", verdict.reason);
+  assert.match(verdict.reason, /^autonomous: /u);
+  assertClean(dir);
+});
+
+test("APRV-287: a completed carried grant clears the floor the refusal promised it would", () => {
+  // The defect of 2026-09-06. A granted commit-and-push completed and the next
+  // command was still escalated, because the grant was CARRIED: the
+  // execution.started went under the requesting tool call, and the completion
+  // counterpart rebuilds the task from the reporting event, found no start
+  // under it and refused. Nothing ever cleared, so the floor stood.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+  // The floored write asks a human (the floor routes it to the gate), the wait
+  // expires, and the answer lands afterwards.
+  const key = "hook:sess-1:tu-4:files.write.workspace";
+  const first = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent(WRITE_COMMAND, "tu-4"),
+  );
+  assert.match(verdictOf(first).reason, /^hook-timeout: /u);
+  const granted = runCli(["grant", key, "--as", "human:alice"], dir);
+  assert.equal(granted.code, 0, granted.stderr);
+
+  // The retry carries the grant, runs the command, and reports that it worked.
+  const retry = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent(WRITE_COMMAND, "tu-5"),
+  );
+  assert.equal(verdictOf(retry).permission, "allow", verdictOf(retry).reason);
+  const post = runCli(["hook", "claude-code"], dir, postEvent("tu-5", { type: "text", text: "…" }));
+  const report = reportOf(post);
+  assert.equal(report["code"], "post-tool-reported", post.stderr);
+  assert.equal(report["outcome"], "completed");
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records).filter((state) => state.escalated),
+    [],
+    "the completion cleared both scopes",
+  );
+
+  // The verdict the refusal text promised: the next command is routed by
+  // policy, not by loop safety.
+  const before = rawLog(dir);
+  const next = verdictOf(runCli(["hook", "claude-code"], dir, bashEvent(WRITE_COMMAND, "tu-6")));
+  assert.equal(next.permission, "allow", next.reason);
+  assert.match(next.reason, /^autonomous: files\.write\.workspace/u);
+  assert.equal(
+    recordsSince(dir, before).some((record) => record["event"] === "approval.requested"),
+    false,
+    "nothing was asked of a human",
+  );
+  assertClean(dir);
 });

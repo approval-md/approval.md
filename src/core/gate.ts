@@ -3237,6 +3237,31 @@ export type HarnessGrantOrigin = "direct" | "carried";
 /** The payload field {@link HarnessGrantOrigin} is recorded under. */
 export const HARNESS_GRANT_ORIGIN = "grant_origin";
 
+/**
+ * The payload field naming the TOOL CALL that spent a carried grant (APRV-287).
+ *
+ * A carried grant's `execution.started` names the task of the request, because
+ * that is the task the log holds the approval lifecycle under. The tool call
+ * that actually ran the command is a different one, and until this field the
+ * runtime had no way back to it: the completion counterpart rebuilds a task id
+ * from the reporting event's session and tool-use id, found no start under it,
+ * and refused `not-delegated`. The consequence was the one an operator saw on
+ * 2026-09-06 — a granted commit-and-push completed, no `execution.completed`
+ * was ever written, and the loop floor the refusal text promises would clear on
+ * a completion stayed shut over the rest of the session.
+ *
+ * DERIVED, never declared: the value is the task id the runtime minted for the
+ * spending invocation from the harness's session and tool-use ids, the same one
+ * {@link HARNESS_GRANT_ORIGIN} is computed against. A reporter cannot name a
+ * bucket with it, because the only thing it can reach is a start this runtime
+ * wrote for that same tool call.
+ *
+ * Absent where the spend is `direct` (the record's own `task` already names the
+ * tool call) and on every record written before this field existed, which is why
+ * every reader treats absence as "no second name" rather than as a fault.
+ */
+export const HARNESS_SPENDING_TASK = "spent_by_task";
+
 export type ConsumeHarnessResult = { ok: true; record: EventRecord } | GateRefusal;
 
 /**
@@ -3506,6 +3531,18 @@ function attemptHarnessConsume(
       ? "direct"
       : "carried") satisfies HarnessGrantOrigin,
   };
+  // APRV-287. A carried spend records WHICH tool call spent it, so the
+  // completion counterpart can find this start from the event that reports how
+  // that tool call went. Written only where the two differ: on a direct spend
+  // the record's own `task` already names it, and a duplicate field would be a
+  // second place for the same fact to be read from.
+  if (
+    options.spendingTask !== undefined &&
+    options.spendingTask.length > 0 &&
+    options.spendingTask !== derivation.task
+  ) {
+    payload[HARNESS_SPENDING_TASK] = options.spendingTask;
+  }
   if (derivation.decisionSeq !== null) payload["grant_seq"] = derivation.decisionSeq;
 
   const appended = append(
@@ -3860,6 +3897,23 @@ export type HarnessFinishResult =
  * as it is found. It over-counts failures and under-counts completions, and both
  * are the strict direction.
  */
+/**
+ * Was this `execution.started` written for the tool call `task` names?
+ * (APRV-287.)
+ *
+ * Two ways to be that tool call, and both are the runtime's own writing. The
+ * record's `task` is the ordinary one. {@link HARNESS_SPENDING_TASK} is the
+ * carried spend: the start sits under the REQUESTING tool call, because that is
+ * where the approval lifecycle lives, and the field names the later tool call
+ * that spent the grant and ran the command. Without the second reading a
+ * granted retry could never be closed, so its completion could never clear the
+ * loop floor the refusal text promises it clears.
+ */
+function startsToolCall(record: EventRecord, task: string): boolean {
+  if (record.task === task) return true;
+  return payloadOf(record)[HARNESS_SPENDING_TASK] === task;
+}
+
 export function finishHarnessExecution(
   logPath: string,
   input: HarnessFinishInput,
@@ -3883,7 +3937,7 @@ export function finishHarnessExecution(
     const key = record.action_key;
     if (typeof key !== "string" || key.length === 0) continue;
     if (record.event === "execution.started") {
-      if (record.task !== task) {
+      if (!startsToolCall(record, task)) {
         started.delete(key);
         continue;
       }
@@ -3985,7 +4039,7 @@ function attemptFinishOne(
   for (const record of read.records) {
     if (record.action_key !== actionKey) continue;
     if (record.event === "execution.started") {
-      harness = record.task === task && payloadOf(record)["execution"] === "harness";
+      harness = startsToolCall(record, task) && payloadOf(record)["execution"] === "harness";
       stillOpen = harness;
       continue;
     }
