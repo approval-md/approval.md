@@ -17,7 +17,7 @@ version: "0.1"
 defaults:
   autonomy: manual
   channel: telegram        # cli remains a fallback per approvers
-  approval_ttl: 24h
+  approval_ttl: 2h
   on_expiry: reject
   token_delivery: sealed   # APRV-166: grant seals to the requester's ephemeral
                            # key; the channel never carries a usable token and
@@ -53,6 +53,10 @@ classes:
   release.publish:           { autonomy: manual }       # npm, tags, versions
   policy.edit:               { autonomy: supervised-live, live_rate: 0.1 }       # this file, CLAUDE.md, CI config
   policy.edit.design:        { autonomy: supervised }   # design docs: read in the PR, sampled after
+  policy.edit.spec:          { autonomy: supervised-live, live_rate: 0.2 }
+    # today it is undeclared, so it falls to the default manual: every SPEC amendment
+    # in every task is a tap. The guard, the sign-off convention and retrospective
+    # review already cover SPEC prose; one in five live is plenty.
   policy.edit.ci:            { autonomy: manual }       # CI and release config: always a tap
   files.delete.scratch:      { autonomy: autonomous }   # rm confined to the system temp root (APRV-267)
   vcs.remote.meta:           { autonomy: supervised }   # gh graphql query, pr update-branch, run rerun (APRV-268)
@@ -85,6 +89,7 @@ love:
   - honest thoughts on what we are building, including when you think I am wrong
   - a journal entry of about five points at the end of each milestone
   - "a tight ship loop: task, plan, diff, tests, PR, merge armed, all in one session"
+  - suggestions for changes to APPROVAL.md, tightening or loosening, with the cost you saw that prompted them
 
 like:
   - success reported first, caveats after, in a message that stands on its own
