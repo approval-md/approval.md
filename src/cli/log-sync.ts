@@ -33,13 +33,15 @@
  *  3. **Snapshot, not stash.** The working log is copied aside, atomically, to
  *     a file inside `.approval/`. `git stash` is never used, and the log never
  *     routes through git state mutation.
- *  4. **Baseline.** The working file is set to the bytes git has at `HEAD`, so
+ *  4. **Baseline.** The working LOG is set to the bytes git has at `HEAD`, so
  *     the path is clean and a fast-forward merge can move over it. This is a
  *     plain write of bytes we already hold, not a checkout: the snapshot from
- *     step 3 is the only copy that matters and it is already safe.
- *  5. **Fetch, then a fast-forward CHECK, then the merge.** A non-fast-forward
- *     is named and refused rather than merged; a merge commit over a log is a
- *     merge of two hash chains, which is not a thing that exists.
+ *     step 3 is the only copy that matters and it is already safe. The queue
+ *     projection is deliberately NOT baselined here; see the section below.
+ *  5. **Fetch, then a fast-forward CHECK, then the projections are discarded,
+ *     then the merge.** A non-fast-forward is named and refused rather than
+ *     merged; a merge commit over a log is a merge of two hash chains, which is
+ *     not a thing that exists.
  *  6. **Payload reconciliation, between the check and the merge.** See the
  *     section below: untracked payload files the incoming tree also carries are
  *     proved byte-identical and then removed, so the fast-forward has a clean
@@ -93,6 +95,41 @@
  * A local payload the incoming tree does **not** carry is not this verb's
  * business and is not touched: it blocks nothing, and it is very likely a
  * payload this checkout has recorded and not yet advanced.
+ *
+ * ## The queue projection is disposable, and discarded LATE (APRV-292)
+ *
+ * On 2026-09-07, after a records pull request that carried `.approval/QUEUE.md`
+ * as well as the log, `log sync` refused twice with git's "local changes to
+ * .approval/QUEUE.md would be overwritten", the second time immediately after a
+ * hand-run `git checkout -- .approval/QUEUE.md`. The hand step was not wrong,
+ * it was just early: the running daemon re-rendered the projection again before
+ * the fast-forward reached it.
+ *
+ * The two files are exposed to different writers, which is why they are handled
+ * differently. Nothing can append to the log while this verb runs — sync holds
+ * the append lock for the whole ceremony, and every appender takes it. Nothing
+ * at all holds the projection: `channels/render-queue.ts`'s `writeQueue` renders
+ * and renames `QUEUE.md` on every daemon tick, under no lock, by design (the
+ * TTL countdowns in it move even when the log does not, so the file is rewritten
+ * whether or not anything was appended). A
+ * projection baselined at step 4 can therefore be dirty again by the time `git
+ * merge --ff-only` looks at it, and a stale render is enough to stop a pull of
+ * the log.
+ *
+ * So the projection is not baselined with the log. It is **discarded** as the
+ * last statement before the merge, which is the narrowest window this verb can
+ * offer, and when the merge fails with a projection dirty again the discard and
+ * the merge are retried exactly once. What is discarded is a rendering of the
+ * log, rebuilt at step 8 from the reconciled log, so there is nothing here to
+ * weigh: a projection carries no truth of its own and losing the last render
+ * costs nothing but the render. A projection git neither has at `HEAD` nor
+ * carries in the incoming tree is left alone, because it can stop no merge —
+ * `.approval/index.sqlite` is gitignored, and clearing a cache that blocks
+ * nothing would only make the next reader rebuild it.
+ *
+ * The snapshot the queue still gets is for the REFUSAL path alone: a refusal
+ * leaves the whole working tree as it was found, log and projection together.
+ * No success path ever copies it back — see step 8.
  *
  * ## This verb appends no event
  *
@@ -193,6 +230,16 @@ export interface LogSyncHooks {
    * flag on purpose: the shipped surface has no way to ask for a failure.
    */
   failBefore?: LogSyncStep;
+  /**
+   * Run `run` just before `step`, as a concurrent writer would (APRV-292).
+   *
+   * The daemon rewrites `QUEUE.md` under no lock, so "the projection is dirty
+   * again between the baseline and the merge" is a real interleaving and not a
+   * hypothesis. A test that cannot produce it can only assert that the code
+   * looks right. Like {@link failBefore} this is a parameter of the function and
+   * never a CLI flag: the shipped surface has no way to ask for interference.
+   */
+  interfere?: { step: LogSyncStep; run: () => void };
 }
 
 export interface LogSyncOptions {
@@ -286,6 +333,15 @@ interface Guarded {
   snapshot: string;
   /** True when the file existed when the snapshot was taken. */
   existed: boolean;
+  /**
+   * True for a derived projection (APRV-292).
+   *
+   * A disposable file is snapshotted for the refusal path and nothing else: it
+   * is not baselined with the log, it is discarded immediately before the
+   * merge, and on the way out it is rebuilt from the reconciled log rather than
+   * copied back from the snapshot.
+   */
+  disposable: boolean;
 }
 
 /**
@@ -298,10 +354,18 @@ export function logSync(options: LogSyncOptions): LogSyncResult {
   const { cwd, hooks } = options;
   const remote = options.remote ?? "origin";
 
-  const fails = (step: LogSyncStep): boolean => hooks?.failBefore === step;
+  /**
+   * Arrive at a step: run any injected interference for it, and answer whether
+   * a failure was injected before it. Both seams are test-only and both are
+   * inert unless a caller passed `hooks`.
+   */
+  const enter = (step: LogSyncStep): boolean => {
+    if (hooks?.interfere?.step === step) hooks.interfere.run();
+    return hooks?.failBefore === step;
+  };
 
   // ---- step 1: the primary checkout, before anything is read ----
-  if (fails("primary")) {
+  if (enter("primary")) {
     return {
       ok: false,
       code: "log-sync-io",
@@ -339,7 +403,7 @@ export function logSync(options: LogSyncOptions): LogSyncResult {
   // Everything from here runs under the append lock: no daemon, no hook, and no
   // other CLI verb can append while the working log is moved aside.
   const held = withAppendLock<LogSyncResult>(logPath, () =>
-    syncUnderLock({ cwd, root, logPath, queuePath, indexPath, remote, branch, fails }),
+    syncUnderLock({ cwd, root, logPath, queuePath, indexPath, remote, branch, enter }),
   );
   if (held.ok) return held.value;
   return {
@@ -362,7 +426,7 @@ interface UnderLock {
   indexPath: string;
   remote: string;
   branch: string;
-  fails: (step: LogSyncStep) => boolean;
+  enter: (step: LogSyncStep) => boolean;
 }
 
 /**
@@ -372,10 +436,10 @@ interface UnderLock {
  * would hide the ordering, and the ordering IS the safety property.
  */
 function syncUnderLock(ctx: UnderLock): LogSyncResult {
-  const { root, logPath, queuePath, indexPath, remote, branch, fails } = ctx;
+  const { root, logPath, queuePath, indexPath, remote, branch, enter } = ctx;
 
   // ---- step 2: verify before touching anything ----
-  if (fails("verify")) {
+  if (enter("verify")) {
     return refuseBefore("verify", "log-sync-io", "injected failure before the pre-verify");
   }
   const before = verify(logPath);
@@ -396,12 +460,15 @@ function syncUnderLock(ctx: UnderLock): LogSyncResult {
   const headBefore = before.head;
 
   // ---- step 3: the snapshot ----
-  if (fails("snapshot")) {
+  if (enter("snapshot")) {
     return refuseBefore("snapshot", "log-sync-io", "injected failure before the snapshot");
   }
   const guarded: Guarded[] = [];
   try {
-    for (const path of [logPath, queuePath]) {
+    for (const { path, disposable } of [
+      { path: logPath, disposable: false },
+      { path: queuePath, disposable: true },
+    ]) {
       const snapshot = snapshotPathFor(path);
       rmSync(snapshot, { force: true });
       const existed = existsSync(path);
@@ -409,7 +476,7 @@ function syncUnderLock(ctx: UnderLock): LogSyncResult {
       // the baseline step deliberately replaces it, so a crash between the two
       // leaves the working file untouched rather than absent.
       if (existed) copyFileSync(path, snapshot);
-      guarded.push({ path, snapshot, existed });
+      guarded.push({ path, snapshot, existed, disposable });
     }
   } catch (cause) {
     restoreAll(guarded);
@@ -456,12 +523,18 @@ function syncUnderLock(ctx: UnderLock): LogSyncResult {
     return { ok: false, code, message, step, restored: true, ...extra };
   };
 
-  // ---- step 4: the baseline, so a fast-forward can move over these paths ----
-  if (fails("baseline")) {
+  // ---- step 4: the baseline, so a fast-forward can move over the log ----
+  //
+  // The LOG only. It can be baselined this early because nothing can dirty it
+  // between here and the merge: this verb holds the append lock, and appending
+  // is the only thing that writes it. The projections have no such protection
+  // and are discarded at the merge instead (APRV-292).
+  if (enter("baseline")) {
     return abort("baseline", "log-sync-io", "injected failure before the baseline");
   }
   try {
     for (const entry of guarded) {
+      if (entry.disposable) continue;
       const blob = showBlob(root, "HEAD", repoPath(root, entry.path));
       if (blob === null) rmSync(entry.path, { force: true });
       else placeAtomically(entry.path, blob);
@@ -470,14 +543,14 @@ function syncUnderLock(ctx: UnderLock): LogSyncResult {
     return abort(
       "baseline",
       "log-sync-io",
-      `the working files could not be set to their committed bytes: ${detail(cause)}. Nothing was pulled.`,
+      `the working log could not be set to its committed bytes: ${detail(cause)}. Nothing was pulled.`,
     );
   }
 
   const commitBefore = revision(root, "HEAD");
 
   // ---- step 5a: fetch ----
-  if (fails("fetch")) {
+  if (enter("fetch")) {
     return abort("fetch", "log-sync-git-failed", "injected failure before the fetch");
   }
   const fetched = git(["fetch", remote, branch], root);
@@ -491,7 +564,7 @@ function syncUnderLock(ctx: UnderLock): LogSyncResult {
   }
 
   // ---- step 5b: the fast-forward CHECK, before the merge is attempted ----
-  if (fails("ff-check")) {
+  if (enter("ff-check")) {
     return abort("ff-check", "log-sync-git-failed", "injected failure before the fast-forward check");
   }
   const target = revision(root, "FETCH_HEAD");
@@ -510,7 +583,7 @@ function syncUnderLock(ctx: UnderLock): LogSyncResult {
   // a file the merge is about to write is a step towards a merge that WILL run.
   // Here and not later: `git merge --ff-only` is what stops on these, so they
   // have to be gone before it is asked.
-  if (fails("payloads")) {
+  if (enter("payloads")) {
     return abort("payloads", "log-sync-io", "injected failure before the payload reconciliation");
   }
   const overlapping = overlappingPayloads(root, logPath, "FETCH_HEAD");
@@ -544,23 +617,46 @@ function syncUnderLock(ctx: UnderLock): LogSyncResult {
   }
   const payloadsReconciled = confirmed.length;
 
-  // ---- step 5c: the merge itself ----
-  if (fails("merge")) {
+  // ---- step 5c: the projections are discarded, and then the merge ----
+  //
+  // The discard is the last statement before the merge, and that placement is
+  // the fix APRV-292 is: a projection has no lock, so the daemon can re-render
+  // it at any instant, and every statement between the discard and the merge is
+  // a window in which a stale render stops a pull of the log.
+  if (enter("merge")) {
     return abort("merge", "log-sync-git-failed", "injected failure before the merge");
   }
-  const merged = git(["merge", "--ff-only", "FETCH_HEAD"], root);
+  const disposable = disposableProjections(root, [queuePath, indexPath]);
+  const discarded = discardProjections(root, disposable);
+  if (!discarded.ok) return abort("merge", "log-sync-io", discarded.message);
+  let merged = git(["merge", "--ff-only", "FETCH_HEAD"], root);
+  let retried = false;
+  if (!merged.ok && dirtyProjections(root, disposable)) {
+    // The renderer beat the merge to the file. One retry, and only for this
+    // reason: any other failure is a real one, and repeating it would refuse
+    // twice as slowly.
+    retried = true;
+    const again = discardProjections(root, disposable);
+    if (!again.ok) return abort("merge", "log-sync-io", again.message);
+    merged = git(["merge", "--ff-only", "FETCH_HEAD"], root);
+  }
   if (!merged.ok) {
+    const racing = retried && dirtyProjections(root, disposable);
     return abort(
       "merge",
       "log-sync-git-failed",
-      `\`git merge --ff-only FETCH_HEAD\` failed: ${failureText(merged)}. The working log is back as it was.`,
+      `\`git merge --ff-only FETCH_HEAD\` failed: ${failureText(merged)}. The working log is back as it was.${
+        racing
+          ? ` ${disposable.join(", ")} was dirty again on both attempts: something is rewriting the projection faster than the fast-forward can run. Stop the writer (usually the daemon) and run this again.`
+          : ""
+      }`,
       { quote: outputLines(merged.stderr, merged.stdout) },
     );
   }
   const commitAfter = revision(root, "HEAD");
 
   // ---- step 6: reconcile ----
-  if (fails("reconcile")) {
+  if (enter("reconcile")) {
     return abort("reconcile", "log-sync-io", "injected failure before the reconcile");
   }
   const snapshotText = textOf(snapshotPathFor(logPath));
@@ -620,7 +716,11 @@ function syncUnderLock(ctx: UnderLock): LogSyncResult {
   }
 
   // ---- step 7: projections, REBUILT from the reconciled log ----
-  if (fails("projections")) {
+  //
+  // Rebuilt, never copied back from the snapshot taken at step 3: that snapshot
+  // is the refusal path's, and a projection restored on a SUCCESS would be a
+  // screenshot asserting something the log no longer says.
+  if (enter("projections")) {
     return abort("projections", "log-sync-projection-failed", "injected failure before the projection rebuild");
   }
   const rendered = writeQueue(logPath, queuePath, { policy: { dir: root } }, new Date().toISOString());
@@ -645,7 +745,7 @@ function syncUnderLock(ctx: UnderLock): LogSyncResult {
   }
 
   // ---- step 8: post-verify, and only then is the snapshot let go ----
-  if (fails("post-verify")) {
+  if (enter("post-verify")) {
     return abort("post-verify", "log-sync-unverified", "injected failure before the post-verify");
   }
   const after = verify(logPath);
@@ -713,6 +813,88 @@ function restorePayloads(removed: readonly RemovedPayload[]): void {
       // refusal that brought us here.
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// The projections in the fast-forward's way (APRV-292)
+// ---------------------------------------------------------------------------
+
+/**
+ * The projections a fast-forward could collide with, as repo-relative paths.
+ *
+ * A projection git neither has at `HEAD` nor carries in the incoming tree can
+ * stop no merge, so it is not in this list and nothing below touches it. That
+ * is the whole reason `.approval/index.sqlite` — gitignored, a cache, and
+ * potentially large — is passed in here rather than special-cased: whether it
+ * is disposable in the git sense is a question about the repository, and the
+ * repository is asked.
+ */
+function disposableProjections(root: string, paths: readonly string[]): string[] {
+  const found: string[] = [];
+  for (const path of paths) {
+    const relative = repoPath(root, path);
+    // A projection outside the repository is not something a fast-forward can
+    // collide with either.
+    if (relative.startsWith("..")) continue;
+    if (!carries(root, "HEAD", relative) && !carries(root, "FETCH_HEAD", relative)) continue;
+    found.push(relative);
+  }
+  return found;
+}
+
+/** Does `rev` carry a blob at `relative`? `-e` asks and reads nothing. */
+function carries(root: string, rev: string, relative: string): boolean {
+  return git(["cat-file", "-e", `${rev}:${relative}`], root).ok;
+}
+
+/**
+ * Throw the working copy of every disposable projection away.
+ *
+ * "Throw away" is a projection's whole relationship to this verb. It is a
+ * rendering of the log, it is rebuilt from the reconciled log two steps later,
+ * and whatever the renderer wrote into it a millisecond ago says nothing the
+ * log does not. So there is nothing to weigh here and no proof to demand — the
+ * opposite of the payload reconciliation above, where every byte is evidence
+ * and every removal is proved first.
+ *
+ * The bytes written are the ones git has at `HEAD`, which leaves the path clean
+ * for the merge. A projection only the incoming tree carries has no `HEAD`
+ * bytes and is removed instead: an existing untracked file is the other thing
+ * `git merge --ff-only` refuses to write over.
+ */
+function discardProjections(
+  root: string,
+  relatives: readonly string[],
+): { ok: true } | { ok: false; message: string } {
+  for (const relative of relatives) {
+    const path = join(root, relative);
+    try {
+      const blob = showBlob(root, "HEAD", relative);
+      if (blob === null) rmSync(path, { force: true });
+      else placeAtomically(path, blob);
+    } catch (cause) {
+      return {
+        ok: false,
+        message: `the projection ${relative} could not be moved out of the fast-forward's way: ${detail(
+          cause,
+        )}. Nothing was pulled and the working log is back as it was.`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * Is any disposable projection dirty in the working tree right now?
+ *
+ * Asked after a failed merge, to tell the one failure worth retrying (the
+ * renderer wrote the file again in the microseconds since the discard) from
+ * every other failure, which a retry would only repeat.
+ */
+function dirtyProjections(root: string, relatives: readonly string[]): boolean {
+  if (relatives.length === 0) return false;
+  const status = git(["status", "--porcelain", "-z", "--", ...relatives], root);
+  return status.ok && pathLines(status.stdout).length > 0;
 }
 
 /**

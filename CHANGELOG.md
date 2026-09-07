@@ -52,5 +52,15 @@ The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
   and accrue no loop-safety streak; and a completed command clears the floor
   even when the grant it ran on was carried by a later tool call.
 
+- **A rendering of the log can no longer refuse a pull of it** (APRV-292).
+  `log sync` treats `.approval/QUEUE.md`, and the index projection when git
+  carries one, as disposable: the working copy is discarded as the last
+  statement before the fast-forward and rebuilt from the reconciled log
+  afterwards, with one retry when the renderer beats the merge to the file. An
+  upstream records commit that touches the queue no longer refuses with git's
+  "local changes to .approval/QUEUE.md would be overwritten" while the daemon
+  re-renders the projection, and the stop-the-daemon workaround is retired. The
+  working log's snapshot and restore are untouched.
+
 The publish itself is the first `release.publish` action to pass through this
 gate (APRV-199).

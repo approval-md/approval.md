@@ -548,6 +548,28 @@ versions of one is a question about which bytes were approved, and no verb here
 will pick. A payload you hold that the incoming commit does not carry (recorded
 and not yet advanced, usually) blocks nothing and is left alone.
 
+**Neither does the queue projection, and you no longer stop the daemon for it.**
+A records commit carries `.approval/QUEUE.md` as well as the log, and the daemon
+re-renders that file every tick, under no lock, whether or not anything was
+appended (the TTL countdowns move on their own). So on 2026-09-07,
+after the records pull request merged, sync refused twice:
+
+```
+error: Your local changes to the following files would be overwritten by merge:
+        .approval/QUEUE.md
+```
+
+The second refusal came straight after a hand-run `git checkout --
+.approval/QUEUE.md`, because the next tick landed in the same window. The
+workaround was to stop the daemon, check the file out, sync, and start it again.
+That is retired (APRV-292): sync now throws the working projection away as the
+last thing it does before the fast-forward, and rebuilds it from the reconciled
+log afterwards, so a rendering can no longer refuse a pull of the truth it is a
+rendering of. A merge that still fails with the projection dirty again is
+retried once and then refuses, naming the file and telling you to stop whatever
+is writing it. Nothing here weighs the old bytes: unlike a payload, a projection
+is not evidence, and losing the last render costs one render.
+
 Neither verb appends an event. Both move the file the log lives in, and the log
 records decisions rather than its own housekeeping.
 

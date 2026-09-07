@@ -37,6 +37,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { renderQueue } from "../src/channels/render-queue.js";
 import { appendAttestation } from "../src/core/attest.js";
 import { compareChains } from "../src/core/log-reconcile.js";
 import { storePayload } from "../src/core/payload-store.js";
@@ -592,6 +593,117 @@ test("sync: --json reports the payload count", () => {
   const parsed = JSON.parse(run.stdout) as { ok: boolean; payloads: { reconciled: number } };
   assert.equal(parsed.ok, true);
   assert.deepEqual(parsed.payloads, { reconciled: 1 });
+});
+
+// ===========================================================================
+// APRV-292 — the queue projection, rewritten by the daemon mid-sync
+// ===========================================================================
+
+/**
+ * A rendered queue without the one line that carries the evaluation instant.
+ *
+ * The renderer is a pure function of (verified log, policy, `now`), so two
+ * renders of one log agree on every line except the evaluated-at line — the
+ * only line whose content comes from the clock rather than from the log. What
+ * is left is exactly "this projection is a rendering of this log", which is the
+ * claim these assertions are about.
+ */
+function queueWithoutClock(markdown: string): string[] {
+  return markdown.split("\n").filter((line) => !line.startsWith("- **Evaluated at**"));
+}
+
+test("sync: a records commit carrying the queue survives the daemon rewriting the projection mid-sync", () => {
+  const repo = newRepo();
+  const peer = secondClone(repo);
+
+  // The upstream commit is a records commit: it moves the log AND the queue,
+  // which is the shape of the pull request that refused twice on 2026-09-07.
+  appendRecord(peer, "records-1");
+  appendRecord(peer, "records-2");
+  writeFileSync(join(peer, QUEUE_RELATIVE), "# queue, as the records commit carries it\n", "utf8");
+  push(peer, "records: two decisions and the queue");
+
+  const before = bytes(repo.logPath);
+
+  // The daemon re-renders QUEUE.md between the snapshot and the merge, holding
+  // no append lock, exactly as `writeQueue` does on a tick. Before APRV-292
+  // this is the refusal: `git merge --ff-only` will not write over a locally
+  // modified tracked file, so a pull of the LOG stopped on a stale rendering
+  // of it — and re-running the hand `git checkout` first did not help, because
+  // the next tick landed in the same window.
+  const daemonWrote = "# rewritten by the daemon between the snapshot and the merge\n";
+  const result = logSync({
+    cwd: repo.dir,
+    hooks: {
+      interfere: {
+        step: "merge",
+        run: () => {
+          writeFileSync(join(repo.dir, QUEUE_RELATIVE), daemonWrote, "utf8");
+        },
+      },
+    },
+  });
+
+  assert.equal(result.ok, true, result.ok ? "" : result.message);
+  if (!result.ok) throw new Error("unreachable");
+
+  // The log was pulled, and it grew by extension rather than by a rewind.
+  assert.equal(result.report.relation, "behind");
+  assert.equal(result.report.behind, 2);
+  const after = bytes(repo.logPath);
+  assert.ok(
+    after.subarray(0, before.length).equals(before),
+    "the adopted chain does not start with the chain that was there: that is a rewind",
+  );
+  assert.ok(after.length > before.length, "the chain did not grow");
+  assert.equal(verify(repo.logPath).status, "clean");
+
+  // And the projection on disk is a rebuild of the MERGED log: neither the
+  // bytes the daemon wrote mid-sync nor the ones the records commit carried.
+  const queue = readFileSync(join(repo.dir, QUEUE_RELATIVE), "utf8");
+  assert.notEqual(queue, daemonWrote, "the daemon's mid-sync render survived the rebuild");
+  assert.equal(
+    queue.includes("as the records commit carries it"),
+    false,
+    "the pulled queue was kept instead of being rebuilt from the reconciled log",
+  );
+
+  const rebuilt = renderQueue(repo.logPath, { policy: { dir: repo.dir } }, new Date().toISOString());
+  assert.equal(rebuilt.ok, true, rebuilt.ok ? "" : rebuilt.message);
+  if (!rebuilt.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    queueWithoutClock(queue),
+    queueWithoutClock(rebuilt.markdown),
+    "the queue on disk is not a rendering of the log the sync left behind",
+  );
+  assert.equal(rebuilt.head?.seq, result.report.headAfter?.seq);
+  assert.equal(result.report.queue.bytes, Buffer.byteLength(queue, "utf8"));
+  assert.deepEqual(snapshots(repo.dir), [], "a snapshot survived a successful sync");
+});
+
+test("sync: the mid-sync rewrite is what the old code refused, and the log is what was blocked", () => {
+  // The same interleaving, reproduced with plain git, so the refusal this task
+  // removes is a fact in the suite rather than a claim in a comment.
+  const repo = newRepo();
+  const peer = secondClone(repo);
+  appendRecord(peer, "records-1");
+  writeFileSync(join(peer, QUEUE_RELATIVE), "# queue, from the records commit\n", "utf8");
+  push(peer, "records: one decision and the queue");
+
+  // Baseline both paths, as the pre-APRV-292 sequence did, and then let the
+  // renderer write the queue again before the merge is asked for.
+  for (const relative of [LOG_RELATIVE, QUEUE_RELATIVE]) {
+    writeFileSync(join(repo.dir, relative), git(["show", `HEAD:${relative}`], repo.dir).stdout, "utf8");
+  }
+  writeFileSync(join(repo.dir, QUEUE_RELATIVE), "# a tick later\n", "utf8");
+  assert.equal(git(["fetch", "-q", "origin", "main"], repo.dir).code, 0);
+  const blocked = git(["merge", "--ff-only", "FETCH_HEAD"], repo.dir);
+  assert.notEqual(blocked.code, 0, "git fast-forwarded over a dirty projection");
+  assert.match(`${blocked.stderr}${blocked.stdout}`, /QUEUE\.md/u);
+
+  // And what did not move is the LOG: the projection stopped a pull of the
+  // truth, which is the whole reason a stale rendering may not refuse a sync.
+  assert.equal(cleanHead(repo.logPath)?.seq, 2, "the log advanced despite the refused merge");
 });
 
 // ===========================================================================
