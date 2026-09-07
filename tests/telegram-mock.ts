@@ -55,6 +55,15 @@ export interface MockRequest {
   raw: string;
   /** The parsed body, or `{}` when it did not parse. */
   body: Record<string, unknown>;
+  /**
+   * The `message_id` this mock assigned, for a `sendMessage` it answered
+   * (APRV-299).
+   *
+   * A real bot learns a message's id from the response, and a test driving the
+   * ForceReply note prompt needs the same thing: a reply names the message it
+   * answers, so the suite has to know which id the prompt got.
+   */
+  messageId?: number;
 }
 
 interface Waiter {
@@ -130,6 +139,14 @@ export interface MockBotApi {
   digestAllDataFor(decision: "grant" | "reject"): string;
   /** Every `text` the bot has sent, in order. */
   sentTexts(): string[];
+  /**
+   * Every `sendMessage`, with the id this mock assigned it (APRV-299).
+   *
+   * What {@link MockBotApi.sentTexts} gives, plus the two things a review card
+   * needs: the id (so a reply can name it) and the markup (so a test can find
+   * the ForceReply prompt among the ordinary messages).
+   */
+  sentMessages(): { messageId: number; text: string; replyMarkup: unknown }[];
   /** Every `answerCallbackQuery` text, in order. */
   answerTexts(): string[];
   /**
@@ -222,7 +239,8 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
     } catch {
       /* recorded raw either way */
     }
-    requests.push({ path, method, raw, body });
+    const received: MockRequest = { path, method, raw, body };
+    requests.push(received);
 
     if (failure === "drop") {
       request.socket.destroy();
@@ -279,6 +297,7 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
 
     if (method === "sendMessage") {
       messageId += 1;
+      received.messageId = messageId;
       send(response, {
         ok: true,
         result: {
@@ -500,6 +519,15 @@ export async function startMockBotApi(token: string): Promise<MockBotApi> {
         .filter((entry) => entry.method === "sendMessage")
         .map((entry) => String(entry.body["text"] ?? ""));
     },
+    sentMessages() {
+      return requests
+        .filter((entry) => entry.method === "sendMessage" && entry.messageId !== undefined)
+        .map((entry) => ({
+          messageId: entry.messageId as number,
+          text: String(entry.body["text"] ?? ""),
+          replyMarkup: entry.body["reply_markup"],
+        }));
+    },
     answerTexts() {
       return requests
         .filter((entry) => entry.method === "answerCallbackQuery")
@@ -558,6 +586,14 @@ export function messageUpdate(options: {
   username?: string;
   firstName?: string;
   title?: string;
+  /**
+   * The `message_id` this message is a reply to (APRV-299).
+   *
+   * Telegram puts the whole replied-to message in `reply_to_message`; the only
+   * field anything here reads is its id, and the shape is otherwise the same
+   * message shape above.
+   */
+  replyToMessageId?: number;
 }): Record<string, unknown> {
   const chat: Record<string, unknown> = {
     id: options.chatId,
@@ -566,15 +602,21 @@ export function messageUpdate(options: {
   if (options.title !== undefined) chat["title"] = options.title;
   if (options.username !== undefined) chat["username"] = options.username;
   if (options.firstName !== undefined) chat["first_name"] = options.firstName;
-  return {
-    message: {
-      message_id: 1,
-      from: { id: 42, is_bot: false, username: options.username ?? "approver" },
+  const message: Record<string, unknown> = {
+    message_id: 1,
+    from: { id: 42, is_bot: false, username: options.username ?? "approver" },
+    chat,
+    date: 1_700_000_000,
+    text: options.text ?? "hello",
+  };
+  if (options.replyToMessageId !== undefined) {
+    message["reply_to_message"] = {
+      message_id: options.replyToMessageId,
       chat,
       date: 1_700_000_000,
-      text: options.text ?? "hello",
-    },
-  };
+    };
+  }
+  return { message };
 }
 
 /** A `callback_query` update, as Telegram would deliver one. */

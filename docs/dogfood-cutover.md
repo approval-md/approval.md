@@ -301,6 +301,51 @@ decisions run. The digest is then redrawn once, member by member, and that
 redraw is where you read what landed; the tally (`Approved 3 — one log event
 each.`) goes to the listener's stderr for the operator.
 
+### The review card: the other half of "supervised" (APRV-299)
+
+Most of what this repository's agents do is `supervised`, which is the bargain
+"execute now, a fraction is reviewed after". The daemon draws that fraction and
+writes `audit.sampled`. On 2026-09-07 sixty of them were waiting in `QUEUE.md`
+and none had ever reached the phone, which means the after-the-fact half of the
+bargain was not being kept.
+
+They arrive as **review cards** now, on the same channel and under the same
+pacing rules. What to expect:
+
+- A summary line (`4 awaiting review — oldest ran 3h ago — files.write.local
+  ×3, network.call`), then ONE card, and never while a request card is in front
+  of you. A request is somebody waiting on you; a sample is work that already
+  finished, so it always yields.
+- The card says `REVIEW — THIS ALREADY RAN`. It has no payload block and no
+  approve button, because there is nothing left to authorize. It shows what ran
+  (class, the command breakdown, task, the agent's summary), when it ran, and
+  that the runtime allowed it without asking.
+- **One tap finishes it.** `OK` records "a person looked and was content". A
+  reaction alone records OK and that grade. `Deny` takes two taps — the first
+  arms the card and writes nothing — and the second records the denial and
+  names the reconciliation obligation it opens. With deny armed, a reaction
+  records the denial *with* that grade, and `liked`/`loved` are refused: those
+  two say opposite things about one action.
+- `loved` and `disliked` ask for a reply first. Reply to the prompt with why;
+  nothing is appended until you do, and a blank reply appends nothing.
+
+The card is the values loop made real: the reactions of APRV-237/239 hang off
+this verb, and `approval feedback` shows a grade given on the phone exactly as
+one given at a terminal — same record, same `human:carter`, same everything.
+Nothing on the card reaches enforcement (SPEC section 11.1, invariant 10): a
+reaction moves no verdict, no sample, no budget.
+
+**Nothing here can lose a review.** A card you never see, scroll past, `/skip`,
+`/next` past, or lose to a restart leaves the sample open in the log. It stays
+in `approval audit list` and in `.approval/QUEUE.md`, and the terminal verb is
+always available:
+
+```sh
+approval audit list                                     # what is awaiting review
+approval audit review <sample-seq> --reaction liked     # or --deny, --note "…"
+approval audit obligations                              # what a denial opened
+```
+
 ### When the phone channel misbehaves, decide at the CLI
 
 The phone is one channel, not the gate. Every decision the Telegram listener

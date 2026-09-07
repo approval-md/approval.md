@@ -1726,6 +1726,7 @@ Flags:
   -h, --help       this text
 Config is ENVIRONMENT-ONLY and the policy names the variables. Delivery is per cycle;
 a new request reaches the phone without restart. THE TOKEN IS PRINTED HERE, NEVER SENT TO TELEGRAM.
+Open audit samples arrive as REVIEW CARDS: no payload, no approve, no token; one at a time.
 
 JSON shape: docs/cli-reference.md#channel-telegram-listen
 ${EXIT_CODES_POINTER}

@@ -112,5 +112,22 @@ The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
   predicate; and a read still clears nothing, so nobody reads their way out from
   under a floor. `approval status` and the floor's own refusals say so.
 
+- **The retrospective sample reaches the approver's phone** (APRV-299). Each
+  `audit.sampled` with no later `audit.reviewed` is delivered by the Telegram
+  channel as a review card: what ran (class, command breakdown, task, the
+  agent's summary), when it ran, and that the runtime allowed it without
+  asking. It carries no payload block and no approve button, because the action
+  has already happened and nothing on the card authorizes anything. Six buttons
+  record the verdict and the grade — OK, Deny, and the four reactions — with a
+  reaction alone implying OK, Deny taking two taps and naming the reconciliation
+  obligation it opens, `loved` and `disliked` asking for the human's words as a
+  reply before anything is appended, and every refusal in
+  `audit_refusal_codes` rendered on the card. Delivery is paced like requests: a
+  summary line, then one card, and never while a request is in front of the
+  approver; navigation decides nothing and a card nobody sees leaves its sample
+  open and reviewable with `approval audit review`. Every append goes through
+  the same `reviewSample` the CLI verb calls, so `approval feedback` shows a
+  grade given on a phone exactly as one given at a terminal.
+
 The publish itself is the first `release.publish` action to pass through this
 gate (APRV-199).
