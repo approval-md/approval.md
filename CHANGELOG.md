@@ -52,5 +52,19 @@ The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
   and accrue no loop-safety streak; and a completed command clears the floor
   even when the grant it ran on was carried by a later tool call.
 
+- **Amending the policy stops being a code change** (APRV-296). The pins in
+  `src/core/policy-expectations.ts` are a safety floor rather than an inventory:
+  they name the `human-only` classes, the `manual` classes whose effects leave
+  the repository or cannot be undone, and the fail-closed default reached
+  through classes the policy deliberately does not declare, and each pin's note
+  says what loosening it would cost. A class the policy declares and no pin
+  names is accepted, so declaring a `supervised` or `autonomous` class, tuning a
+  live rate or changing `approval_ttl` needs no edit to the code and no rebuild;
+  the dogfood suite pins the fail-closed defaults (`manual`, `reject`, a TTL
+  that exists and is positive) instead of the exact duration. The amend diff's
+  key vocabulary is read from `schema/policy.schema.json`, so the `daemon.*`
+  block the schema has admitted since APRV-217 no longer renders as an UNKNOWN
+  KEY warning over a policy that loads cleanly.
+
 The publish itself is the first `release.publish` action to pass through this
 gate (APRV-199).

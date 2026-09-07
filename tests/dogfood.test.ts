@@ -22,6 +22,12 @@ import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 
 import { CLASSIFIER_CLASSES, emittableClass } from "../src/core/command-class.js";
+import {
+  diffPolicies,
+  policyTopLevelKeys,
+  renderDiff,
+  SPEC_NAMESPACES,
+} from "../src/core/policy-diff.js";
 import { loadPolicy, loadPolicyText, type PolicyLoadResult } from "../src/core/policy-load.js";
 import { loadValuesText } from "../src/core/values.js";
 import { resolve } from "../src/core/policy-match.js";
@@ -79,10 +85,26 @@ function loadRepoPolicy(): Extract<PolicyLoadResult, { ok: true }> {
 test("the repository's own APPROVAL.md parses as a valid policy", () => {
   const result = loadRepoPolicy();
   assert.equal(result.source.filename, "APPROVAL.md", BROKEN_POLICY_MESSAGE);
-  // 2h since the 2026-09-07 ceremony (was 24h): a hook request nobody answered in
-  // two hours is dead, and a day-long TTL kept redelivering dead requests to the
-  // phone after every daemon restart (APRV-287).
-  assert.equal(result.durations.approvalTtlMs, 7_200_000, BROKEN_POLICY_MESSAGE);
+  // A TTL exists and is positive, and that is the whole assertion (APRV-296).
+  // The exact value used to be pinned here — 24h, then 2h after the 2026-09-07
+  // ceremony — and pinning it made a one-line duration change a code change
+  // too: the ceremony ran the built suite, the built suite carried the old
+  // number, and Carter's tuning was refused twice by a test that was defending
+  // nothing. What fail-closed actually needs is that a request cannot sit
+  // actionable forever, and that when it does expire it expires to a refusal;
+  // the second half is the defaults test below. How long is an operator's call,
+  // and the amendment ceremony prints the change in its defaults section for
+  // the human who attests it.
+  const ttl = result.durations.approvalTtlMs;
+  assert.notEqual(
+    ttl,
+    null,
+    `${BROKEN_POLICY_MESSAGE} [defaults.approval_ttl is unset, so a pending request never expires]`,
+  );
+  assert.ok(
+    ttl !== null && ttl > 0,
+    `${BROKEN_POLICY_MESSAGE} [defaults.approval_ttl must be a positive duration]`,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -90,6 +112,10 @@ test("the repository's own APPROVAL.md parses as a valid policy", () => {
 // ---------------------------------------------------------------------------
 
 test("APPROVAL.md defaults are fail-closed: manual, expiry rejects", () => {
+  // The two defaults that are not an operator's to tune, and the reason the TTL
+  // above is asserted only as "positive" (APRV-296): a request that ages out
+  // must age out into a refusal, and an action nobody wrote a rule for must
+  // reach a human. The DURATION is a preference; these two are the property.
   const { policy } = loadRepoPolicy();
   assert.equal(policy.defaults?.autonomy, "manual");
   assert.equal(policy.defaults?.on_expiry, "reject");
@@ -141,6 +167,50 @@ test("the shared expectation check passes against the live policy (APRV-203)", (
     "the live policy no longer matches its pins; update src/core/policy-expectations.ts in the same ceremony that changed the policy",
   );
   assert.equal(checked.ok, true);
+});
+
+test("a class the policy declares and no pin names is accepted (APRV-296)", () => {
+  // The property the trimmed pin set exists for: declaring a supervised or
+  // autonomous class is a policy amendment, not also a code change. Before
+  // APRV-296 every literal class the policy declared had to appear in the pins
+  // or the ceremony refused `policy-suite-failed`, which turned the 2026-09-07
+  // TTL amendment into three failed runs.
+  const load = loadRepoPolicy();
+  const pinned = new Set(REPO_POLICY_EXPECTATIONS.map((expectation) => expectation.actionClass));
+  const unpinned = Object.keys(load.policy.classes ?? {})
+    .filter((pattern) => !pattern.includes("*"))
+    .filter((actionClass) => !pinned.has(actionClass));
+  assert.ok(
+    unpinned.length > 0,
+    "the live policy pins every class it declares, so this test proves nothing; the pin set is meant to be the safety classes alone",
+  );
+  assert.deepEqual(
+    checkPolicyExpectations(load, REPO_POLICY_EXPECTATIONS).failures.map(describeFailure),
+    [],
+    `an unpinned declared class was refused: ${unpinned.join(", ")}`,
+  );
+});
+
+test("the pins still catch a pinned class turned looser (APRV-296)", () => {
+  // The other direction, which is why the remaining pins are there at all. A
+  // policy that grants `log.mutate` to agents resolves cleanly, parses cleanly,
+  // and is a regression; the pin is what says so. Proved against a SCRATCH
+  // string, never against the live file, which this suite may not write.
+  const live = readFileSync(APPROVAL_MD, "utf8");
+  const loosened = live.replace(
+    "log.mutate:                { autonomy: human-only }",
+    "log.mutate:                { autonomy: autonomous }",
+  );
+  assert.notEqual(loosened, live, "the live policy no longer carries the log.mutate line as written");
+
+  const load = loadPolicyText(APPROVAL_MD, loosened);
+  assert.equal(load.ok, true, load.ok ? "" : `${load.code}: ${load.message}`);
+  const checked = checkPolicyExpectations(load, REPO_POLICY_EXPECTATIONS);
+  assert.equal(checked.ok, false, "a human-only class turned autonomous passed the pins");
+  assert.deepEqual(
+    checked.failures.filter((failure) => failure.kind === "resolution").map((failure) => failure.actionClass),
+    ["log.mutate"],
+  );
 });
 
 test("this repository's own policy file resolves to this repository's pins", () => {
@@ -231,7 +301,46 @@ test("the classifier's read.* classes are covered by the policy's read.* rule", 
 });
 
 // ---------------------------------------------------------------------------
-// 5. Read-only proof (the `after` hook above is the enforcement)
+// 5. The amendment diff describes the live policy without crying wolf (APRV-296)
+// ---------------------------------------------------------------------------
+
+test("the amend diff calls no key of the live APPROVAL.md an UNKNOWN KEY", () => {
+  // The 2026-09-07 ceremony printed, for three UNCHANGED keys:
+  //   daemon.full_reproof_after: 60s -> 60s (UNKNOWN KEY: not part of the
+  //   policy vocabulary, so the policy FAILS CLOSED to all-manual until it is
+  //   removed)
+  // ...over a policy the same ceremony then loaded cleanly and resolved every
+  // pin against. The renderer's vocabulary was a hand-written copy of the
+  // schema's top-level keys and `daemon` had been in the schema since APRV-217.
+  // A false fail-closed warning in a ceremony's output teaches an operator that
+  // the warnings are noise, so the live file is fed through the real diff here.
+  //
+  // Diffed against ITSELF, which is the shape the incident had: an unrecognised
+  // key is reported whether or not its value moved, so a vocabulary behind the
+  // schema shows up even in a diff with no changes at all.
+  const load = loadRepoPolicy();
+  const rendered = renderDiff(diffPolicies(load, load, SPEC_NAMESPACES)).join("\n");
+  assert.equal(
+    /UNKNOWN KEY/u.test(rendered),
+    false,
+    `the amend diff calls a key of the live policy unknown, and the policy loads:\n${rendered}`,
+  );
+  assert.match(rendered, /no semantic change/u);
+});
+
+test("the diff's key vocabulary is the policy schema's own top-level keys", () => {
+  // Derived, not copied (APRV-296). `daemon` is the key the copy was missing,
+  // and asserting the whole set means the next key a spec amendment adds is
+  // covered on the day the schema admits it.
+  const schema = JSON.parse(
+    readFileSync(join(REPO_ROOT, "schema", "policy.schema.json"), "utf8"),
+  ) as { properties: Record<string, unknown> };
+  assert.deepEqual([...policyTopLevelKeys()], Object.keys(schema.properties).sort());
+  assert.ok(policyTopLevelKeys().includes("daemon"), "the daemon block reads as an unknown key");
+});
+
+// ---------------------------------------------------------------------------
+// 6. Read-only proof (the `after` hook above is the enforcement)
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

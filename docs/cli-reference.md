@@ -720,17 +720,20 @@ amendment) and `base-log-diverged` (the remote's log is not a prefix of yours).
 **The policy suite runs before the push.** Where the policy being amended is
 this repository's own, `--commit` resolves every pinned class against the AMENDED
 file and refuses `policy-suite-failed` when any of them moved, printing the
-expectation diff. Nothing is attested, committed or pushed on that path. The pins
-live in `src/core/policy-expectations.ts`, which the dogfood suite imports too, so
-the check on the laptop and the check in CI are one list: update the pins, run
-`npm run build`, and re-run the ceremony.
+expectation diff and each pin's note. Nothing is attested, committed or pushed on
+that path. The pins live in `src/core/policy-expectations.ts`, which the dogfood
+suite imports too, so the check on the laptop and the check in CI are one list.
 
-A class the policy DECLARES and the pins do not cover is the same refusal with a
-different remedy, so the refusal carries the remedy (APRV-274): it prints the
-exact source lines to paste into `REPO_POLICY_EXPECTATIONS`, resolved from the
-amended policy itself, in the message, in the runbook, and as
-`{"pins":{"module":"…","add":["  { actionClass: … },"]}}` beside the `--json`
-error object. The operator edits one file rather than working out a spelling.
+The pins are a SAFETY FLOOR, not an inventory (APRV-296). They name the classes
+whose loosening would be a regression (the `human-only` classes, the `manual`
+classes whose effects leave this repository or cannot be undone, and the
+fail-closed default reached through classes the policy deliberately does not
+declare), and each pin's note says what a loosening would cost. A class the
+policy declares and no pin names is ACCEPTED: declaring a new `supervised` or
+`autonomous` class is a policy amendment and not also a code change, and the
+resolution still prints in the semantic diff below for the human who attests it.
+Until APRV-296 every declared class had to be pinned, in both directions, and a
+one-line TTL amendment on 2026-09-07 took three runs to land because of it.
 
 **And then the whole dogfood suite, still before the attestation.** The pin check
 is a subset of `tests/dogfood.test.ts`, and the seq 23351 ceremony passed the pins
@@ -782,6 +785,10 @@ paths (`protected_paths`, `audit.skew_tolerance`, `channels.telegram.token_env`,
 as `before -> after`, so a spec key added tomorrow is covered without an edit
 here. A top-level key the schema does not know is listed as an UNKNOWN KEY
 whether or not its value moved, because it is what makes the policy fail closed.
+Which keys the schema knows is READ FROM `schema/policy.schema.json` (APRV-296),
+so a key the schema admits never reads as unknown: the list used to be a second,
+hand-written copy, and it warned three times about the `daemon.*` block over a
+policy that loaded cleanly.
 `no semantic change` is printed only when the probed classes AND every key
 compared equal; when a side's YAML did not parse there are no keys to walk, and
 the report says the document was not compared instead.
@@ -1054,9 +1061,10 @@ the message.
   was not written against, or carries a log this working log does not contain.
   All three are checked before the attestation; nothing was appended.
 - `policy-suite-failed` — a pinned class resolves differently under the amended
-  policy, or the policy declares a class the pins do not cover. The message
-  carries the expectation diff and, for an unpinned class, the exact pin line to
-  add. Checked before the attestation; nothing was appended.
+  policy. Every pin is a class whose loosening would be a regression, so the
+  message carries the expectation diff and the pin's note saying what that
+  loosening would cost. A declared class no pin names is not this refusal
+  (APRV-296). Checked before the attestation; nothing was appended.
 - `dogfood-suite-failed` — the built dogfood suite is red against the amended
   policy (the message names the failing test), is absent from `dist/` while
   present in `tests/`, or could not be run at all. Checked before the

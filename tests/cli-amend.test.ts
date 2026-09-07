@@ -2705,6 +2705,9 @@ test("APRV-203: the dogfood pins are checked against the amended file, and a fai
   assert.notEqual(failed.code, 0);
   assert.equal(errorOf(failed).code, "policy-suite-failed");
   assert.match(errorOf(failed).message, /deps\.add: expected manual\/rule, got autonomous\/rule/u);
+  // APRV-296: the pin's note is the argument for the pin, so the refusal
+  // carries it — an operator is told what loosening this class would cost.
+  assert.match(errorOf(failed).message, /supply chain/u);
   assert.match(errorOf(failed).message, /Nothing was attested, committed or pushed/u);
   assert.equal(logRecords(dir).length, recordsBefore, "the ceremony attested over a failing suite");
   assert.equal(
@@ -3043,51 +3046,37 @@ test("APRV-274: a dogfood suite present in source and absent from the build is r
   assert.equal(logRecords(dir).length, recordsBefore);
 });
 
-test("APRV-274: an unpinned class is refused with the exact pin lines to add", () => {
+test("APRV-296: a class the policy declares and no pin names runs the ceremony clean", () => {
   // A class the policy declares, the classifier can emit, and nothing pins.
+  // Until APRV-296 this was `policy-suite-failed` with a line to paste into the
+  // pins, so declaring a class was a policy amendment AND a code change built
+  // before the ceremony would take it — three failed runs on 2026-09-07 for one
+  // TTL line and one new class. The pins now name only the classes whose
+  // loosening is a regression, and this one is `manual` already.
   const withUnpinned = REPO_POLICY.replace(
     "  deps.add:                  { autonomy: manual }",
     "  deps.add:                  { autonomy: manual }\n  deps.remove:               { autonomy: manual }",
   );
   assert.notEqual(withUnpinned, REPO_POLICY, "the fixture policy no longer carries the deps.add line");
-  const { dir } = repoAsPackage();
+  const { dir } = repoAsPackage({ suite: "green" });
   const stub = ghStub({ protection: "protected", prUrl: "https://github.test/o/r/pull/79" });
   writeFileSync(join(dir, "APPROVAL.md"), withUnpinned, "utf8");
 
-  const recordsBefore = logRecords(dir).length;
   const run = runCli(
-    ["policy", "amend", "--as", "human:carter", "--yes", "--commit", "--json"],
-    dir,
-    {},
-    pathWith(stub.dir),
-  );
-  assert.notEqual(run.code, 0);
-  assert.equal(errorOf(run).code, "policy-suite-failed");
-  assert.match(errorOf(run).message, /deps\.remove: expected a pin in REPO_POLICY_EXPECTATIONS/u);
-  assert.match(
-    errorOf(run).message,
-    /\{ actionClass: "deps\.remove", autonomy: "manual", provenance: "rule" \},/u,
-    "the refusal does not print the line to add",
-  );
-  assert.deepEqual((JSON.parse(run.stderr) as { pins: { add: string[] } }).pins.add, [
-    '  { actionClass: "deps.remove", autonomy: "manual", provenance: "rule" },',
-  ]);
-  assert.equal(logRecords(dir).length, recordsBefore);
-
-  // And on a terminal: the runbook prints the same line, copyable as it stands.
-  const human = runCli(
     ["policy", "amend", "--as", "human:carter", "--yes", "--commit"],
     dir,
     {},
     pathWith(stub.dir),
   );
-  assert.notEqual(human.code, 0);
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stderr, /^running the policy suite against the amended file/mu);
   assert.match(
-    human.stderr,
-    /the lines to add to REPO_POLICY_EXPECTATIONS in src\/core\/policy-expectations\.ts/u,
+    git(["ls-remote", "--heads", "origin"], dir).stdout,
+    /policy-amend-/u,
+    "the ceremony did not publish the amendment",
   );
-  assert.match(
-    human.stderr,
-    /^\s+\{ actionClass: "deps\.remove", autonomy: "manual", provenance: "rule" \},$/mu,
-  );
+
+  // The other direction is unchanged and tested above ("the dogfood pins are
+  // checked against the amended file"): loosening a class the pins DO name is
+  // still `policy-suite-failed`, before the attestation.
 });
