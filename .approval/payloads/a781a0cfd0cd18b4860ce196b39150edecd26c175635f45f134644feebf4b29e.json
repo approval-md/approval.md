@@ -1,0 +1,1 @@
+{"command":"tail -c 700 /Users/carter/dev/approval-md/.approval/log/events.jsonl | tail -n 2 | cut -c1-220; ls -la /Users/carter/dev/approval-md/.approval/daemon/ | head; cat /Users/carter/dev/approval-md/.approval/daemon/*.pid 2>/dev/null","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
