@@ -3240,8 +3240,12 @@ policy decision" above for what a layout may not touch.
 
 `channels.telegram.delivery: burst` restores the pre-APRV-216 behaviour: every
 pending request this process has not sent yet, on every cycle, behind the
-re-delivery banner. Bot commands are not read in that mode, and the listener
-asks Telegram for callback updates only.
+re-delivery banner. Bot commands are not read in that mode. The listener still
+asks Telegram for `message` updates, because a review card's note prompt (below)
+collects the human's words as a reply; a message that is not such a reply is
+ignored under `burst`, exactly as an unrecognised `/command` is. As
+`setup channel telegram` already says, stop the listener before running it —
+two processes long-polling one bot compete for the same updates.
 
 A callback from any chat other than the configured one is ignored: counted as an
 anomaly, answered with a refusal, never turned into a decision and never written
@@ -3291,6 +3295,70 @@ the rest, and the toast says how many landed. Annotation is per member too: a
 decided, expired or withdrawn request marks its own line and loses its own
 buttons, so a partially decided digest shows mixed state.
 
+**The retrospective backlog arrives here too** (APRV-299). The daemon draws
+supervised actions for after-the-fact review (`audit.sampled`, SPEC section
+5.2), and until this the only place to answer one was `approval audit review` in
+a terminal — so sixty of them sat in `QUEUE.md` while the phone showed nothing.
+Each `audit.sampled` with no later `audit.reviewed` now arrives as a **review
+card**.
+
+A card is not a prompt and says so. Its headline is `REVIEW — THIS ALREADY RAN`,
+it carries no payload region and no approve button, and it accepts no token: the
+action has happened, and a card offering an approve would present a settled fact
+as a live authorization. What it carries is the same rows a prompt would show
+for the same action — class, the command breakdown, task, the agent's claimed
+summary, the model gloss where one is attached — plus two the card adds: `ran
+at` (the `execution.started` the sample named) and `verdict` (that the runtime
+allowed this without asking, which autonomy said so, the rate it was drawn at,
+and how the log says it ended). Everything computed is derived from the verified
+log, the payload store and the classifier; the claimed rows sit under the same
+"NOT verified by the runtime" heading a prompt gives them.
+
+Six buttons: `OK`, `Deny`, and the four reactions (`disliked`, `indifferent`,
+`liked`, `loved`).
+
+| Tap | What is recorded |
+| --- | --- |
+| `OK` | `audit.reviewed` with verdict `ok` and no reaction. |
+| a reaction | verdict `ok` and that grade — a reaction alone implies OK. |
+| `Deny` once | **Nothing.** It arms the card, which says `DENY ARMED` on itself. |
+| `Deny` twice | verdict `denied`, and the reconciliation obligation it opens is named on the reply. |
+| a reaction with deny armed | verdict `denied` with that grade. |
+
+Deny takes two taps because a retrospective denial cannot undo anything: what it
+does is open an obligation a human must later discharge (SPEC section 5.2), and
+a gesture with that consequence should not be one thumb-width from a grade. The
+arming is process memory and appends nothing; losing it to a restart costs a
+tap.
+
+`loved` and `disliked` ask for the human's own words first. The bot sends a
+reply prompt, nothing is appended until the reply arrives, and a blank one is
+refused `note-required` — an inline keyboard has no text input, so the note is
+collected as a reply message and bound to its card by the message id the
+listener issued. A denied review that says `liked` or `loved` is refused
+`reaction-conflicts-verdict` before anything is written, and no note is asked
+for: the two fields say opposite things about one action. Every refusal in
+`audit_refusal_codes` reaches the card as itself — the code on its own line, the
+message under it — and a refused tap leaves the buttons in place, because the
+reviewer has to be able to say which half they meant.
+
+Every append goes through the same `reviewSample` that `approval audit review`
+calls, recorded against the human identity this listener was configured with
+(`--as` / `APPROVAL_HUMAN`), never anything the callback carried. So `approval
+feedback` shows a reaction given on a card exactly as one given at a terminal:
+same record, same `human:<id>`, same everything.
+
+**Review delivery is paced in both modes.** A summary line first (`N awaiting
+review — oldest ran …`) and then one card, and never while a request card is in
+front of you: a pending request is somebody waiting, a sample is work that has
+already finished. `/queue` lists the review backlog under the pending one;
+`/skip` sends the shown card to the back of the review order and a fresh card
+comes round later; `/next` passes over it and sends no further card. Neither
+decides anything, and a card you never see, scroll past, or lose to a restart
+leaves the sample exactly where it was: open, listed by `approval audit list`,
+and reviewable with `approval audit review <seq>`. Nothing in this channel can
+empty the backlog, which is the property a sampled-audit backlog exists to have.
+
 **A settled request stops looking live.** Every terminal state the listener
 observes for a message it sent edits that message: the text becomes the outcome
 (`✓ APPROVED`, `✗ REJECTED`, `✗ REVOKED`, `✗ EXPIRED`, `WITHDRAWN`) with the
@@ -3320,6 +3388,11 @@ rather than a query:
  "ok":true,"seq":7,"state":"granted","token_issued":true}
 {"event":"decision","action_key":"...","decision":"grant","ok":false,
  "code":"already-decided","token_issued":false}
+{"event":"review_offered","sample_seq":12,"action_key":"task-042:draft",
+ "delivery_id":"57"}
+{"event":"review","ok":true,"seq":19,"sample_seq":12,
+ "action_key":"task-042:draft","verdict":"ok","reaction":"liked",
+ "obligation_seq":null}
 {"event":"stopped","notified":1,"updates":1,"decisions":1,"pollErrors":0,
  "anomalies":{"foreign-chat":0,"malformed-callback":0,"unknown-callback":0,
  "key-mismatch":0}}
