@@ -51,6 +51,16 @@ The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
   bytes sent once; an expired wait and a harness-side misfire are not executions
   and accrue no loop-safety streak; and a completed command clears the floor
   even when the grant it ran on was carried by a later tool call.
+- **The CI guard's dependency floor reads the install Node would read**
+  (APRV-298). The case that proves every production dependency admits the Node
+  floor used to join the repository root to a literal `node_modules`, so running
+  the suite from an agent worktree, which has none of its own, failed with
+  ENOENT and reported a missing install as a violated floor. It now resolves
+  each dependency's `package.json` the way module resolution does, walking up
+  from the test file, and skips by name when a package is absent from every
+  `node_modules` on that path. A manifest that does not name the package it
+  claims to be fails the case, which keeps `@modelcontextprotocol/sdk` from
+  answering with the `dist/cjs` stub its wildcard export maps the subpath to.
 
 The publish itself is the first `release.publish` action to pass through this
 gate (APRV-199).
