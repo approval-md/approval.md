@@ -4,11 +4,11 @@ title: >-
   Pre-push CI parity: one script runs the CI tier the classifier would select
   for the current diff, so a lane sees red on the laptop before the merge queue
   does
-status: In Progress
+status: Done
 assignee:
   - '@opus-275'
 created_date: '2026-09-05 21:16'
-updated_date: '2026-09-06 08:33'
+updated_date: '2026-09-07 06:12'
 labels:
   - ci
   - dx
@@ -52,4 +52,12 @@ WORKFLOW NOT EDITED. .github/workflows is policy.edit.ci and manual, and nothing
 VERIFICATION. npm run build clean. npm run lint exit 0. npm run typecheck exit 0. Targeted suites run through the CI runner, ci-local plus ci-guard plus classify-tier plus docs-guard plus milestones-guard plus backlog-fixtures, 129 tests, 129 pass, 0 fail, 0 skipped, runner exit 0. The new suite is 21 of those 129 and covers the three fixture diffs the criterion names, docs-only, src and mixed, plus a records fixture for the third tier, each built as a throwaway git repository with the two scripts copied in and a real two-commit diff, each classified through both the new script and the classifier the workflow runs, asserted to agree. END TO END IN THIS REPOSITORY. node scripts/ci-local.mjs README.md docs/dogfood-cutover.md selected light, built, ran the docs guard 16 of 16 and printed that every step this host can run is green, exit 0. Dry runs print light for a docs-only path set, full with three shards and lint for a src path set, and full for the mixed set. A red run is proven in the suite end to end, exit 1 with the failing source file named, and a failed build stops the run rather than reporting on a stale tree. npm ci was needed first because this worktree carried no node_modules, which is what the one ci-guard case that reads dependency manifests needs.
 
 ON THE FULL SUITE. A full npm test was started in this worktree and was still running at hand-off, so criterion 3's npm test clause rests on the targeted 129 of 129 above plus the real light-tier end-to-end run, not on a completed full matrix. This lane's brief waived the full run. Two suites in this repository are known load flakes under a loaded machine, the daemon TTL sweep and the up.test expiry case, per the notes on APRV-241, and this change touches no source that either reads. CI runs the full gate on the pull request regardless.
+
+Finalization sweep 2026-09-06/07 (worktree lane). Verified on origin/main: commit 5afaf26 (ci:local runs the CI tier the classifier picks for this diff) is in the main history, and package.json line 31 declares the ci:local script pointing at scripts/ci-local.mjs. All three acceptance criteria were already checked with notes recorded; the task was left In Progress only because the wave PR merged before the status moved. Moved to Done, nothing changed in this lane.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+npm run ci:local (scripts/ci-local.mjs) runs the CI tier the classifier would select for the current diff, so a lane sees red on the laptop before the merge queue does. Landed on origin/main at 5afaf26; the script is wired as the ci:local entry in package.json.
+<!-- SECTION:FINAL_SUMMARY:END -->

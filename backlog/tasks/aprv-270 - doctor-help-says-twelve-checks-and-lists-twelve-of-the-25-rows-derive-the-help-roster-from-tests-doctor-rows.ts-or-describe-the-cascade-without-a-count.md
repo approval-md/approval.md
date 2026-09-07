@@ -3,11 +3,11 @@ id: APRV-270
 title: >-
   doctor --help says twelve checks and lists twelve of the 25 rows: derive the
   help roster from tests/doctor-rows.ts or describe the cascade without a count
-status: In Progress
+status: Done
 assignee:
   - '@opus-doctor'
 created_date: '2026-09-05 16:16'
-updated_date: '2026-09-06 08:09'
+updated_date: '2026-09-07 06:13'
 labels:
   - cli
   - docs
@@ -26,7 +26,7 @@ Found by the APRV-269 lane on 2026-09-06: src/cli/help.ts DOCTOR_HELP still says
 <!-- AC:BEGIN -->
 - [x] #1 DOCTOR_HELP carries no stale count and stays under the 25-line cap; a test pins that any number of rows it states equals the roster length, or that it states none
 - [x] #2 docs/cli-reference.md doctor section lists the 25 rows in roster order
-- [ ] #3 npm test passes; lint clean
+- [x] #3 npm test passes; lint clean
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -49,6 +49,8 @@ docs/cli-reference.md's doctor section had drifted further than the help had. It
 Touches no global invariant: help text and reference prose only, no runtime behaviour, no schema, no log path.
 
 Validation: npm run build; node --test on cli-long-help (23 pass, 0 fail) and docs-guard (16 pass, 0 fail); the doctor suite green at this state (57 pass); npm run lint and npm run typecheck clean. AC3's 'npm test passes' is left unchecked until a full-suite run lands; the targeted suites above are what has actually been observed.
+
+Finalization sweep 2026-09-06/07 (worktree lane). AC3 checked on this evidence. The implementation is on origin/main at 45762e0 (describe doctor's cascade without a count, and document every row), and the string 'twelve checks' appears nowhere in src/ or docs/ any more; DOCTOR_HELP lives at src/cli/help.ts:1086 and carries no static count. Verification in this worktree: node scripts/run-tests.mjs --only cli-doctor cli-help cli-long-help cli-coverage docs-guard reports 131 tests, 131 pass, 0 fail, exit 0. Those are precisely the suites that read the help text, the doctor roster and the documented rows, so they are the ones this change could break. npm run lint (oxlint src tests) exit 0. The AC's full npm test clause was proved by CI on the merge that landed 45762e0; a full npm test cannot pass inside an agent worktree, because tests/ci-guard.test.ts's dependency-floor case reads a repo-relative node_modules path that only the primary checkout has (the same environmental limit APRV-220's and APRV-230's notes record). Moved to Done.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

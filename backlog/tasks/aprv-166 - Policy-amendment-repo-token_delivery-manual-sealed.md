@@ -1,11 +1,11 @@
 ---
 id: APRV-166
 title: 'Policy amendment: repo token_delivery manual -> sealed'
-status: In Progress
+status: Done
 assignee:
   - '@opus-policy'
 created_date: '2026-08-30 22:31'
-updated_date: '2026-09-06 08:23'
+updated_date: '2026-09-07 06:15'
 labels:
   - policy
 dependencies: []
@@ -56,4 +56,12 @@ Task left In Progress: the amendment needs no ceremony and this lane does not mo
 2026-09-06 verification addendum (@opus-policy). The 'no human token relay' half of AC3 has stronger corroboration than the note above credited it with: tests/sealed-delivery.test.ts passes 10/10 (exit 0) and two of its cases are exactly the property in question. 'request on A, grant on B, wait and run on A: the token never crosses in clear' exercises the split-machine shape this repo's ceremony actually uses (agent session requests, human grants from the phone/listener, agent waits and runs), and 'a machine that did not open the request gets no token from wait' is its negative. A third, 'the human render never prints the token, whatever the delivery mode is', bounds what a relay could even have copied from a --json-free surface. Combined with the 17 sealed request/grant pairs observed in the committed log, the mechanism is proven both in the suite and in production traffic; what stays unprovable from the log alone is only the negative for any one specific action, which is a property of the event schema rather than a gap in the feature.
 
 Also verified this session: node dist/tests/dogfood.test.js 39/39 exit 0 against the live APPROVAL.md, npm run lint exit 0.
+
+Finalization sweep 2026-09-06/07 (worktree lane). Evidence that the amendment is live and attested, rather than merely drafted. APPROVAL.md line 22 reads: token_delivery: sealed   # APRV-166: grant seals to the requester's ephemeral. The committed log's most recent policy.updated is seq 27110 at 2026-09-07T03:24:19.268Z, actor human:carter, payload {policy_path: APPROVAL.md, sha256: 713548647b283d2787ecfa726290bc10f28e8f24c62221eb7ec0f65864c591bd}. shasum -a 256 APPROVAL.md in this worktree returns exactly that digest, so the file carrying the sealed default is byte-for-byte the file the human attested at seq 27110; earlier ceremonies (seq 23351 and before) carried it too. All three acceptance criteria were already checked with notes recorded; the task was left In Progress after the ceremony landed. Moved to Done, nothing changed in this lane.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The amendment this task asked for is in the attested policy: APPROVAL.md's defaults carry token_delivery: sealed (line 22, annotated APRV-166), and that file is the one attested by the policy.updated record at seq 27110. All three acceptance criteria were already checked by the implementing lane; the sweep re-derived the evidence and moved the task to Done.
+<!-- SECTION:FINAL_SUMMARY:END -->
