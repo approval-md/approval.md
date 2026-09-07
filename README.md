@@ -49,6 +49,13 @@ Spec site: https://approval.md · Specification: [SPEC.md](SPEC.md)
 - **The harness hook covers the direct-shell path.** `approval hook claude-code`
   classifies the commands a coding agent runs on its own (`git push`, `npm
   install`, `curl`) and answers allow or deny, fail-closed.
+- **The escape hatch is a recorded ceremony.** When the gate itself is broken
+  and every command dies, a human opens a time-boxed window with `approval gate
+  open`: a terminal, a required `--reason`, and the word `understood`. Every
+  call it lets through is logged as `gate.bypassed`, human-only classes stay
+  refused, and `approval status` reports unhealthy until it closes. The
+  synopsis and a worked example are in
+  [docs/cli-reference.md#gate](docs/cli-reference.md#gate).
 
 The honest posture, from [SPEC.md](SPEC.md) section 11: this is an oversight
 layer for broadly cooperative agents, with hard enforcement at the adapter
