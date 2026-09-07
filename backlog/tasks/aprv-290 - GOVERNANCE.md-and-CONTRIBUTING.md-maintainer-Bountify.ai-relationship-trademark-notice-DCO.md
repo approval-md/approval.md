@@ -3,11 +3,11 @@ id: APRV-290
 title: >-
   GOVERNANCE.md and CONTRIBUTING.md: maintainer, Bountify.ai relationship,
   trademark notice, DCO
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-07 00:59'
-updated_date: '2026-09-07 01:08'
+updated_date: '2026-09-07 01:10'
 labels:
   - licensing
 dependencies:
@@ -25,9 +25,9 @@ Adopters (labs, safety researchers, indie developers) need one page that says wh
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 GOVERNANCE.md exists and covers: spec-is-the-product, maintainer and copyright holder, Bountify.ai relationship, neutral-body commitment, trademark notice, AI-authorship provenance, defensive publication
-- [ ] #2 CONTRIBUTING.md exists with the DCO requirement, the reason for it, and the per-area licence statement
-- [ ] #3 Neither file grants Bountify.ai any right an ordinary Apache 2.0 licensee lacks
+- [x] #1 GOVERNANCE.md exists and covers: spec-is-the-product, maintainer and copyright holder, Bountify.ai relationship, neutral-body commitment, trademark notice, AI-authorship provenance, defensive publication
+- [x] #2 CONTRIBUTING.md exists with the DCO requirement, the reason for it, and the per-area licence statement
+- [x] #3 Neither file grants Bountify.ai any right an ordinary Apache 2.0 licensee lacks
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -35,3 +35,15 @@ Adopters (labs, safety researchers, indie developers) need one page that says wh
 <!-- SECTION:PLAN:BEGIN -->
 1. Write GOVERNANCE.md (one page, sections: the spec is the product; maintainer and copyright; Bountify.ai; neutral body; trademark; provenance; defensive publication). 2. Write CONTRIBUTING.md (workflow pointer, DCO 1.1, per-area licence). 3. Commit.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+GOVERNANCE.md: seven sections as specified. Trademark stated as common-law, unregistered as of 2026-09-06 (Carter declined the paid filing; revisit at hosted-arm revenue). Neutral-body trigger kept loose on purpose. CONTRIBUTING.md: DCO 1.1 via git commit -s, no CLA, per-area licence statement, note that AI-authored commits carry the tool trailer and the maintainer's sign-off responsibility. No DCO enforcement bot wired; that is a follow-up if outside PRs arrive.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Wrote GOVERNANCE.md and CONTRIBUTING.md per the task description. Verified by reading both files against the AC list; Bountify.ai is described only as an Apache 2.0 licensee.
+<!-- SECTION:FINAL_SUMMARY:END -->
