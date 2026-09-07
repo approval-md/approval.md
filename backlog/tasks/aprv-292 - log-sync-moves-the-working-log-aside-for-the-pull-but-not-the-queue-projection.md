@@ -1,10 +1,10 @@
 ---
 id: APRV-292
 title: log sync moves the working log aside for the pull but not the queue projection
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-09-07 02:16'
-updated_date: '2026-09-07 06:47'
+updated_date: '2026-09-07 23:35'
 labels:
   - daemon
   - log

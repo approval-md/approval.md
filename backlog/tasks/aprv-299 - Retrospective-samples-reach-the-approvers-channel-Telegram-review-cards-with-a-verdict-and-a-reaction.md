@@ -3,10 +3,10 @@ id: APRV-299
 title: >-
   Retrospective samples reach the approver's channel: Telegram review cards with
   a verdict and a reaction
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-09-07 06:35'
-updated_date: '2026-09-07 07:30'
+updated_date: '2026-09-07 23:35'
 labels:
   - telegram
   - audit
@@ -91,4 +91,6 @@ No 11.2 row is needed: the card adds no refusal code, and every code it renders 
 ## Docs
 
 docs/cli-reference.md (the telegram listen section, the --json stream, the burst paragraph), docs/dogfood-cutover.md (a new review-card section in the phone runbook), CHANGELOG.md under 0.1.0 unreleased, and one line in TELEGRAM_LISTEN_HELP.
+
+2026-09-07 finalize: SPEC §10.3 amendment text for this task ('Review delivered through a channel (amended APRV-299)') landed in PR #323 (opened today, pending Carter's sign-off), applying the paragraph quoted above verbatim. AC4 is satisfied on that basis.
 <!-- SECTION:NOTES:END -->

@@ -3,11 +3,11 @@ id: APRV-277
 title: >-
   AgentMail runbook: the draft edit is PATCH, and the listener's post-grant
   annotate 400 is noise
-status: In Progress
+status: Done
 assignee:
   - '@opus-277'
 created_date: '2026-09-06 01:39'
-updated_date: '2026-09-06 07:28'
+updated_date: '2026-09-07 23:16'
 labels:
   - agentmail
   - docs

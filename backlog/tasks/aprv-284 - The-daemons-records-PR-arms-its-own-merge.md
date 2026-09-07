@@ -1,11 +1,11 @@
 ---
 id: APRV-284
 title: The daemon's records PR arms its own merge
-status: In Progress
+status: Done
 assignee:
   - '@opus-284'
 created_date: '2026-09-06 07:19'
-updated_date: '2026-09-06 12:10'
+updated_date: '2026-09-07 23:34'
 labels:
   - daemon
   - records

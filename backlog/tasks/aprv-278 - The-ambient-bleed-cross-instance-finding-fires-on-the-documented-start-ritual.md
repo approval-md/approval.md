@@ -1,11 +1,11 @@
 ---
 id: APRV-278
 title: The ambient-bleed cross-instance finding fires on the documented start ritual
-status: In Progress
+status: Done
 assignee:
   - '@opus-278'
 created_date: '2026-09-06 01:47'
-updated_date: '2026-09-06 08:11'
+updated_date: '2026-09-07 23:34'
 labels:
   - doctor
   - env

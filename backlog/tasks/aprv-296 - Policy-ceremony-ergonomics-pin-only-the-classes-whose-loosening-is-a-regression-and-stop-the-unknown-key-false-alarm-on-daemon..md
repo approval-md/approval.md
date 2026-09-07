@@ -3,10 +3,10 @@ id: APRV-296
 title: >-
   Policy ceremony ergonomics: pin only the classes whose loosening is a
   regression, and stop the unknown-key false alarm on daemon.*
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-09-07 03:25'
-updated_date: '2026-09-07 06:35'
+updated_date: '2026-09-07 23:35'
 labels:
   - policy
   - dogfood
