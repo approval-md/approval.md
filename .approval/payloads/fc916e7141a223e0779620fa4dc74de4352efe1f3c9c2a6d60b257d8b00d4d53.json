@@ -1,0 +1,1 @@
+{"command":"grep -n \"read\\.\\|approval_ttl\\|ttl\\|autonomy\\|sample\\|escalat\\|timeout\\|policy.edit\\|vcs\\.\" /Users/carter/dev/approval-md/APPROVAL.md | grep -v \"^.*#\" | head -60","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

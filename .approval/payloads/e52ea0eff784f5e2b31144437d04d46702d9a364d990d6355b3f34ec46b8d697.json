@@ -1,0 +1,1 @@
+{"command":"git fetch -q origin main && git checkout -q -b proposals/solo-quickstart origin/main && git log --oneline -1 && ls docs/proposals/","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

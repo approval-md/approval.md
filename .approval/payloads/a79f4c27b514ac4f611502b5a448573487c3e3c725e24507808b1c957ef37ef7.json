@@ -1,0 +1,1 @@
+{"command":"(cd /Users/carter/dev/approval-md/.claude/worktrees/lane-signoff && sed -i '' -E '9!s/, pending sign-off//g' SPEC.md && grep -c \"pending sign-off\" SPEC.md && git diff --stat)","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

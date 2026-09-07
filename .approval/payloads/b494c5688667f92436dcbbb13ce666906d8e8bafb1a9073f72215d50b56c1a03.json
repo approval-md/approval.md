@@ -1,0 +1,1 @@
+{"command":"grep -rln \"does not show every request\" /Users/carter/dev/approval-md/src | head -3; grep -rln \"gate-not-open\" /Users/carter/dev/approval-md/src | head -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
