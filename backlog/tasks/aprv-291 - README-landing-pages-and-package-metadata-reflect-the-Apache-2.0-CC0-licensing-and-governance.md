@@ -3,9 +3,11 @@ id: APRV-291
 title: >-
   README, landing pages and package metadata reflect the Apache 2.0 / CC0
   licensing and governance
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-09-07 01:00'
+updated_date: '2026-09-07 01:08'
 labels:
   - licensing
 dependencies:
@@ -28,3 +30,9 @@ Every reader-facing surface that says MIT must say the new terms, and the README
 - [ ] #3 README carries one sentence on the optional Bountify.ai hosted offering, outside the hero
 - [ ] #4 grep for MIT across the repo (excluding package-lock.json, backlog/, .approval/) returns no licence claim
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. README License section -> License and governance. 2. One Bountify.ai sentence in How this compares. 3. index.html and rsi/index.html footers. 4. grep MIT sweep. 5. Commit.
+<!-- SECTION:PLAN:END -->

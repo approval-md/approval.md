@@ -1,9 +1,11 @@
 ---
 id: APRV-289
 title: Dedicate SPEC.md and schema/ to the public domain under CC0 1.0
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-09-07 00:59'
+updated_date: '2026-09-07 01:01'
 labels:
   - licensing
 dependencies:
@@ -27,3 +29,9 @@ The format is the standard; the runtime is one implementation. A CC0 1.0 dedicat
 - [ ] #4 Every schema/*.schema.json carries "$comment": "CC0 1.0. See schema/LICENSE." and the schema loader ignores it
 - [ ] #5 npm test and npm run lint pass
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. SPEC.md header: License field lists CC0 1.0 (document) / Apache 2.0 (runtime). 2. Add CC0 dedication paragraph under the header, marked (Amended APRV-289.). 3. schema/LICENSE gets the CC0 1.0 Universal text. 4. Each schema/*.schema.json gets a top-level $comment pointing at it. 5. npm test, npm run lint. 6. Commit.
+<!-- SECTION:PLAN:END -->

@@ -3,9 +3,11 @@ id: APRV-290
 title: >-
   GOVERNANCE.md and CONTRIBUTING.md: maintainer, Bountify.ai relationship,
   trademark notice, DCO
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-09-07 00:59'
+updated_date: '2026-09-07 01:08'
 labels:
   - licensing
 dependencies:
@@ -27,3 +29,9 @@ Adopters (labs, safety researchers, indie developers) need one page that says wh
 - [ ] #2 CONTRIBUTING.md exists with the DCO requirement, the reason for it, and the per-area licence statement
 - [ ] #3 Neither file grants Bountify.ai any right an ordinary Apache 2.0 licensee lacks
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Write GOVERNANCE.md (one page, sections: the spec is the product; maintainer and copyright; Bountify.ai; neutral body; trademark; provenance; defensive publication). 2. Write CONTRIBUTING.md (workflow pointer, DCO 1.1, per-area licence). 3. Commit.
+<!-- SECTION:PLAN:END -->
