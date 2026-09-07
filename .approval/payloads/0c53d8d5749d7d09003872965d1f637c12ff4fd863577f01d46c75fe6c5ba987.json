@@ -1,0 +1,1 @@
+{"command":"find schema -maxdepth 2 -name \"*.json\" 2>/dev/null; echo \"---\"; find docs -maxdepth 1 -name \"*.md\" 2>/dev/null; echo \"---backlog---\"; find backlog/tasks -name \"*.md\" 2>/dev/null | sort -V | tail -3; echo \"---github---\"; find .github -maxdepth 3 2>/dev/null","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

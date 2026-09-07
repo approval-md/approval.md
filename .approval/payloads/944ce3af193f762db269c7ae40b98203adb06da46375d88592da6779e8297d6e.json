@@ -1,0 +1,1 @@
+{"command":"grep -n \"^function capture\\|^function setupFor\\|^function staged\\|^function requestAt\\|^function assertClean\\|^function live\\|^function at\" tests/channels-telegram.test.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-aa554a09466c9d647"}

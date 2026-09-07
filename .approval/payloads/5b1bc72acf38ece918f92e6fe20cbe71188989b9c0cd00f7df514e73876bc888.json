@@ -1,0 +1,1 @@
+{"command":"grep -n \"export function readVerifiedRecords\" -A 12 src/core/state.ts","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
