@@ -4,6 +4,7 @@ title: Hook timeouts must not flood the phone or feed the escalation they wait o
 status: To Do
 assignee: []
 created_date: '2026-09-06 22:33'
+updated_date: '2026-09-07 00:57'
 labels:
   - hook
   - daemon
@@ -33,4 +34,13 @@ SPEC: §10.1 hook timeout paragraph and §10.2 escalation counting, both marked 
 - [ ] #2 Daemon start and listener reconnect deliver requests older than the hook wait as one summary message with a reject-all action; tests/channels-telegram.test.ts covers the collapsed and the fresh case, and losing the summary degrades to re-showing requests
 - [ ] #3 An expired wait does not advance the loop-escalation counter; tests/loop-escalation (or the APRV-280 suite) proves three expired waits leave the floor closed while three execution.failed still open it
 - [ ] #4 SPEC §10.1 and §10.2 amended with pending-sign-off markers; docs/claude-code-hook.md documents the grace window and the withdrawal; CHANGELOG entry
+- [ ] #5 A harness-side misfire (a hook-unparseable command, an Edit refused before it ran, a tool-input validation error) is not an execution and does not advance the loop-escalation counter; only a command that started and exited non-zero counts. Test: three unparseable commands leave the floor closed
+- [ ] #6 One command is one decision: a shell command that classifies into several classes raises ONE request carrying all of them (or one grouped delivery with a single approve), so the human taps once; tests/cli-hook.test.ts and tests/channels-telegram.test.ts cover a five-class command. Seen 2026-09-06: a commit-and-push raised five separate Telegram messages and needed three rounds of taps
+- [ ] #7 A completed side-effecting command clears the floor, as the refusal text promises: after a granted retry completes, the next command is routed by policy, not by loop safety. Seen 2026-09-06: a granted commit-and-push completed and the very next command was still loop-escalated
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Added AC5-AC7 after the escalation re-tripped on two harness misfires (an unread-file Edit refusal and a hook-unparseable command substitution), after one commit-and-push produced five separate phone messages, and after a completed granted push failed to clear the floor.
+<!-- SECTION:NOTES:END -->
