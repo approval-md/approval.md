@@ -70,6 +70,12 @@ export const REPO_POLICY_EXPECTATIONS: readonly PolicyExpectation[] = [
     note: "routed from design/ at the 2026-09-06 ceremony (APRV-266): design documents and decision records are read in the pull request and sampled after the fact",
   },
   {
+    actionClass: "policy.edit.spec",
+    autonomy: "supervised",
+    provenance: "rule",
+    note: "declared supervised-live 0.2 at the 2026-09-07 ceremony: routed from SPEC.md since APRV-266 but undeclared, so every SPEC amendment fell to the manual default and tapped; the protected-path guard, the sign-off convention (SPEC line 11) and retrospective review cover spec prose, one edit in five blocks live",
+  },
+  {
     actionClass: "policy.edit.ci",
     autonomy: "manual",
     provenance: "rule",
