@@ -356,12 +356,16 @@ chain.
 3. **Snapshot, not stash.** The working log is copied aside, atomically, inside
    `.approval/`. `git stash` appears nowhere in the implementation, and the log
    never routes through git state mutation.
-4. **Baseline.** The working file is set to the bytes git already has at `HEAD`,
+4. **Baseline.** The working LOG is set to the bytes git already has at `HEAD`,
    so the path is clean and a fast-forward can move over it. That is a plain
-   write of bytes we are holding, not a checkout.
-5. **Fetch, a fast-forward CHECK, then the merge.** A non-fast-forward is named
-   and refused (`log-sync-not-fast-forward`): a merge commit over the log would
-   be a merge of two hash chains, and chains do not merge.
+   write of bytes we are holding, not a checkout. The log can be baselined this
+   early because nothing can dirty it in between: sync holds the append lock,
+   and appending is the only thing that writes it. The projections cannot, and
+   are handled at the merge instead (see below).
+5. **Fetch, a fast-forward CHECK, the projections are discarded, then the
+   merge.** A non-fast-forward is named and refused
+   (`log-sync-not-fast-forward`): a merge commit over the log would be a merge
+   of two hash chains, and chains do not merge.
 6. **Untracked payload files, between the check and the merge.** `git merge
    --ff-only` refuses to write over an untracked working-tree file, and a records
    advance commits the payload store, so a checkout that already held those
@@ -381,6 +385,21 @@ chain.
    conflict. Nothing is pulled, nothing is appended, and the working tree is left
    as it was found. A local payload the incoming commit does **not** carry blocks
    nothing and is not touched.
+   **The queue projection is discarded, as the last statement before the
+   merge** (APRV-292). A records commit carries `.approval/QUEUE.md` as well as
+   the log, and the daemon re-renders that file every tick under no lock at all
+   (its TTL countdowns move even when the log does not), so a projection cleaned
+   up any earlier can be dirty again by the time `git merge --ff-only` looks at
+   it. That is the refusal of 2026-09-07:
+   "local changes to .approval/QUEUE.md would be overwritten", twice, the second
+   time straight after a hand-run `git checkout` of exactly that file. A
+   projection is a rendering of the log, rebuilt at step 8 from the reconciled
+   log, so sync throws the working copy away rather than reconciling it: no
+   proof, no comparison, nothing to weigh. Discarding late is what makes it
+   stick, and a merge that still fails with a projection dirty again is retried
+   exactly once before it refuses. A projection git neither has at `HEAD` nor
+   carries in the incoming tree can stop no merge and is left alone, which is
+   why the gitignored `.approval/index.sqlite` is never cleared here.
 7. **Reconcile.** The committed chain must be a prefix of the snapshot, equal to
    it, or an extension of it. Prefix: the snapshot goes back, because the longer
    chain contains the shorter one whole. Extension: the pulled file stays, for
@@ -390,7 +409,9 @@ chain.
 8. **Projections are REBUILT, never copied back.** `QUEUE.md` is re-rendered from
    the reconciled log and the index is reindexed from it. The direction is
    load-bearing: a projection restored from before the pull would be a
-   screenshot asserting something the log no longer says.
+   screenshot asserting something the log no longer says. `QUEUE.md` is
+   snapshotted at step 3 all the same, for the refusal path alone, so a sync
+   that refuses leaves the whole working tree as it found it.
 9. **Post-verify**, and only then is the snapshot removed.
 
 Any failure at any step restores the snapshot before exiting, so the working log
