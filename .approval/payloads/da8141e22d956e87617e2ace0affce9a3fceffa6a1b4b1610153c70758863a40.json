@@ -1,0 +1,1 @@
+{"command":"(cd /Users/carter/dev/approval-md && gh pr view 320 --json state,mergedAt -q '.state + \" \" + (.mergedAt // \"-\")' && git log --oneline -1 origin/main)","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

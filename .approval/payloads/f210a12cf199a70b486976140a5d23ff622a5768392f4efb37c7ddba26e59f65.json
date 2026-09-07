@@ -1,0 +1,1 @@
+{"command":"backlog instructions overview 2>/dev/null | head -30; echo ---; ls ~/.claude/projects/ | grep -i approval; echo ---; ls ~/.claude/projects/-Users-carter-dev-approval-md/*.jsonl 2>/dev/null | wc -l; du -sh ~/.claude/projects/-Users-carter-dev-approval-md/ 2>/dev/null","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}

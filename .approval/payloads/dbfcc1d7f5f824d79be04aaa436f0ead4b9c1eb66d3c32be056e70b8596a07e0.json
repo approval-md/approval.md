@@ -1,0 +1,1 @@
+{"command":"npm run build 2>&1 | tail -3","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
