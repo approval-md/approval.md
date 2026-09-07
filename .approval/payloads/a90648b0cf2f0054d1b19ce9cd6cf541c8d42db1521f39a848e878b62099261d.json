@@ -1,0 +1,1 @@
+{"command":"node --experimental-strip-types --check src/adapters/agentmail.ts; echo \"AGENTMAIL_SYNTAX=$?\"; node --experimental-strip-types --check src/adapters/contract.ts; echo \"CONTRACT_SYNTAX=$?\"","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

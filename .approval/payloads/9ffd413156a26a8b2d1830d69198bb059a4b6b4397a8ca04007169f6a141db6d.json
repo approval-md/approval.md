@@ -1,0 +1,1 @@
+{"command":"ls -la /Users/carter/dev/approval-md/.claude/worktrees/agent-a38e5ac36e6e871ae/backlog/tasks/ 2>/dev/null | grep -E \"aprv-27[6-9]\"; echo \"--- a51 ---\"; ls -la /Users/carter/dev/approval-md/.claude/worktrees/agent-a51450b1ed19a5c36/backlog/tasks/ 2>/dev/null | grep -E \"aprv-27[6-9]\"","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-aa554a09466c9d647"}

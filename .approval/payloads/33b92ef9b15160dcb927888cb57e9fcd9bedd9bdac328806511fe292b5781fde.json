@@ -1,0 +1,1 @@
+{"command":"ls | grep -i licen; grep -n '\"license\"' package.json; head -5 LICENSE* 2>/dev/null; git log --oneline -1 -- LICENSE* 2>/dev/null","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/open-source-licensing-658620"}
