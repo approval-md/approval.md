@@ -80,6 +80,32 @@
  * the action key (its `payload.class`), never from anything the reporter said
  * (§11.1 invariants 1 and 4). The report chooses the outcome; it does not get to
  * choose the bucket.
+ *
+ * ## Escalation raises scrutiny on side effects only (APRV-297, amended §10.2)
+ *
+ * APRV-280 above says what a read does not ACCRUE. This says what a tripped
+ * floor does not ROUTE, and it is the same sentence read forward: a tool call
+ * whose classes are all `read.*` is answered by the policy under a tripped floor
+ * exactly as it is under a clear one.
+ *
+ * The floor bounds a harm a read cannot cause. It exists to stop an agent
+ * retrying a side effect that keeps failing, so routing a `grep` to a phone buys
+ * no safety at all, and it costs the thing the floor is spending: a human's
+ * attention, once per read, plus the wait the agent spends before it is refused.
+ * On 2026-09-06/07 a floor tripped and a session that could not get an answer
+ * could not read a file either, which is the state this removes.
+ *
+ * Two edges, both narrow. A MIXED tool call is routed whole, as one question,
+ * because the side-effecting half of it is exactly what the floor is for; its
+ * read classes are neither counted nor separately raised, so the approver sees
+ * one prompt for the command's effects and none for its looking. And the
+ * exemption is about ROUTING alone: a read still clears nothing, so a session
+ * cannot read its way out from under a floor.
+ *
+ * This module states the fact; the two surfaces that apply it are the harness
+ * adapter's verdict (`cli/hook.ts`) and the write boundary that re-checks it
+ * (`core/gate.ts`'s `startHarnessExecution`), and both use
+ * {@link isSideEffectingClass} so neither can drift from the other.
  */
 
 import type { EventRecord } from "./log.js";
@@ -441,12 +467,17 @@ export function harnessLoopFloor(
  * bypass path before the floor is ever consulted (SPEC.md §5.2, APRV-214). It is
  * named as the human's ceremony, which is what it is — it needs a terminal and a
  * typed `understood`, and an agent may not run it.
+ *
+ * The harness sentence also states the routing exemption of APRV-297, and states
+ * it here for the same reason the clearance is here: the operator reading it in
+ * `approval status` and the agent reading it in a deny need the same account of
+ * what a floor does and does not reach, and two copies would eventually give two.
  */
 export function loopClearance(scope: "task" | HarnessScope, key: string): string {
   if (scope === "task") {
     return `an execution.completed for task ${key} in a class that has side effects clears it; a read that succeeds clears nothing (amended SPEC.md §10.2)`;
   }
-  return `one side-effecting tool call completing in this ${scope} scope (${key}) clears it — a human granting any request this floor routes to them, and the command then running, is that completion — or a human opening the gate window (\`approval gate open\`, the human's own ceremony), which bypasses the floor entirely. A failed or successful read.* command changes nothing either way (amended SPEC.md §10.2).`;
+  return `one side-effecting tool call completing in this ${scope} scope (${key}) clears it — a human granting any request this floor routes to them, and the command then running, is that completion — or a human opening the gate window (\`approval gate open\`, the human's own ceremony), which bypasses the floor entirely. read.* commands are outside this floor in both directions (amended SPEC.md §10.2): the floor does not route them to a human, so reading and searching keep working while it stands, and a read that succeeds clears nothing.`;
 }
 
 /** Is this harness tool call floored to manual by either scope right now? */

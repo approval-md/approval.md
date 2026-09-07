@@ -464,6 +464,10 @@ test("the gate-window refusal codes are a frozen union (SPEC.md §11.1 invariant
       "gate-duration-too-long",
       "gate-already-open",
       "gate-not-open",
+      // APRV-294. Added, never repurposed: `gate-not-open` still means "there
+      // was no window", and this one means "the window this verdict was decided
+      // under is gone".
+      "gate-window-closed",
       "gate-stdin-not-tty",
       "gate-confirmation-mismatch",
       "log-unreadable",

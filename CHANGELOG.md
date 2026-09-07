@@ -86,5 +86,31 @@ The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
   re-renders the projection, and the stop-the-daemon workaround is retired. The
   working log's snapshot and restore are untouched.
 
+- **The hook waits for a lagging verified view instead of denying on it**
+  (APRV-294). Minutes after a `log sync` and a daemon restart, a hook appended
+  its requests, re-read the log, found its own keys in state `none` and denied
+  `hook-io` on the spot; the questions were live and the taps that answered them
+  authorized nothing. A log is append-only, so `none` for a key this hook
+  appended describes the view rather than the request: the hook now keeps
+  waiting, bounded by the same timeout, says on stderr that the view lags, and
+  names the repair if the wait runs out. On the same fault's other face, the
+  open-window verdict and the `gate.bypassed` record that authorizes it are one
+  verified read, and a window that ends in between refuses with its own code
+  (`gate-window-closed`) naming the closing seq or the expiry, in place of the
+  `gate-not-open` that claimed there had never been a window. Neither refusal
+  appends anything or counts as a failed side-effecting call.
+
+- **A tripped loop floor routes side effects and leaves reads alone**
+  (APRV-297). APRV-280 stopped a failed `read.*` accruing the floor; a floor that
+  had tripped still routed every later read to a human, so a session that could
+  not get an answer could not even search the repository, at one phone message
+  and one nine-minute wait per `grep`. A tool call whose classes are all `read.*`
+  is now answered by the policy under a tripped floor, and says in its allow that
+  a floor is standing and was not applied to a read; a mixed call is still routed
+  as one question about its side effects, with its read classes neither counted
+  nor separately raised; the write boundary carves reads out with the same
+  predicate; and a read still clears nothing, so nobody reads their way out from
+  under a floor. `approval status` and the floor's own refusals say so.
+
 The publish itself is the first `release.publish` action to pass through this
 gate (APRV-199).
