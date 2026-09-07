@@ -12,11 +12,14 @@
     "schema",
     "docs/cli-reference.md",
     "SPEC.md",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "NOTICE"
   ],
   "repository": "github:approval-md/approval.md",
   "homepage": "https://approval.md",
-  "license": "MIT",
+  "author": "Carter Crouch",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=20"
   },

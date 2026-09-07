@@ -2,9 +2,11 @@
 
 **Human approval for agent actions.**
 
-Version: 0.1.0-draft · Status: Draft · License: MIT · Canonical URL: https://approval.md
+Version: 0.1.0-draft · Status: Draft · License: CC0 1.0 (this document) / Apache 2.0 (reference runtime) · Canonical URL: https://approval.md
 
 > Your AGENTS.md says "require approval first." approval.md enforces it, and puts the approve button on your phone.
+
+To the extent possible under law, Carter Crouch has waived all copyright and related rights to the text of this specification and to the JSON schemas under `schema/`, under the CC0 1.0 Universal Public Domain Dedication (https://creativecommons.org/publicdomain/zero/1.0/, text in `schema/LICENSE`). Anyone may implement, copy, or adapt the format without permission. The reference runtime in this repository is separately licensed under Apache 2.0 (`LICENSE`). Use of the name is governed by the trademark notice in `GOVERNANCE.md`. (Amended APRV-289.)
 
 Amended text names the task that changed it, `(Amended APRV-n.)`. An amendment whose exact text a human granted through the gate (a `policy.edit` grant on this file whose prompt showed the change whole, worktree proposals included) is signed off at that grant and carries the plain suffix from birth; the log records the grant, and the suffix MAY cite it (`granted seq N`) when the author wants the trail inline. Text that reached the file without such a grant says so, `(Amended APRV-n, pending sign-off.)`, and carries no more authority than a proposal until a human ratifies it; that covers an edit applied where the hook was silent and text drafted for a review that has not happened. Doubt resolves to pending. (Amended APRV-181.)
 
