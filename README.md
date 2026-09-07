@@ -599,7 +599,9 @@ reads, `approval env`, whose output is an export block a human evaluates.
 ## How this compares
 
 Three kinds of thing already exist in this space, and each solves a different
-part of the problem.
+part of the problem. (A hosted daemon and reviewer layer is operated by
+Bountify.ai; it is optional, and nothing in the format depends on it. See
+[GOVERNANCE.md](GOVERNANCE.md).)
 
 **Harness-native permission prompts** (Claude Code permission rules and hooks,
 Cursor auto-run, Codex CLI approval modes) enforce inside the one harness they
@@ -887,6 +889,11 @@ third-party witnesses, with the phasing, the receipt format, and the negative
 tests each would need. Nothing in it is implemented, and nothing in it amends
 SPEC.md.
 
-## License
+## License and governance
 
-MIT. See [LICENSE](LICENSE).
+Code: Apache 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE). Specification
+and schemas: CC0 1.0, so any language can implement the format without asking.
+Who holds the specification and the name, the relationship to Bountify.ai's
+hosted offering, and the plan for neutral governance:
+[GOVERNANCE.md](GOVERNANCE.md). How to contribute, including the DCO sign-off:
+[CONTRIBUTING.md](CONTRIBUTING.md).
