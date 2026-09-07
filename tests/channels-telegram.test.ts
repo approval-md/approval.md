@@ -4876,7 +4876,12 @@ test("delivery: burst restores the banner and the whole pending set (APRV-216)",
 
   const keys = [requestAt(world, 0, at(1)), requestAt(world, 1, at(2)), requestAt(world, 2, at(3))];
 
-  const cycle = await dispatchPending(setup, streams, state, at(63));
+  // Delivered while the requests are FRESH (APRV-287): past the hook's wait
+  // plus its retry grace a first cycle collapses them into one message
+  // instead, which is that task's own case and has its own tests below. What
+  // this one pins is unchanged — burst restores the banner and the whole
+  // pending set for a queue somebody is still waiting on.
+  const cycle = await dispatchPending(setup, streams, state, at(4));
   assert.notEqual(cycle.banner, undefined, "the burst banner is gone");
   assert.equal(cycle.banner?.pending, 3);
   assert.equal(cycle.summary, undefined, "burst delivery sent the paced summary");
@@ -5106,4 +5111,268 @@ test("/queue calls itself a list and never claims a card is visible (APRV-256)",
   for (const banned of ["card", "button", "shown now", "message above", "/skip", "/next"]) {
     assert.equal(empty.includes(banned), false, `an empty queue mentioned ${banned}: ${empty}`);
   }
+});
+
+// ===========================================================================
+// APRV-287: one command is one card, and a dead queue is one message
+// ===========================================================================
+
+/**
+ * The button labels on the last message whose text contains `needle`.
+ *
+ * A keyboard is not in `sentTexts()`: it rides in `reply_markup`, which is
+ * where a phone reads it from and where these cases have to look.
+ */
+function buttonsOnMessageContaining(needle: string): string[] {
+  let labels: string[] = [];
+  for (const entry of mock.requests) {
+    if (entry.method !== "sendMessage") continue;
+    if (!String(entry.body["text"] ?? "").includes(needle)) continue;
+    const markup = entry.body["reply_markup"] as
+      | { inline_keyboard?: { text: string }[][] }
+      | undefined;
+    labels = (markup?.inline_keyboard ?? []).flat().map((button) => button.text);
+  }
+  return labels;
+}
+
+/** The bytes a five-class shell command binds to: one command, one payload. */
+const ONE_COMMAND = {
+  command: "git add -A && git commit -m ship && git push origin main",
+  cwd: "/repo",
+};
+
+/**
+ * One tool call's worth of requests: one task, one payload, several classes.
+ *
+ * The shape `cli/hook.ts` produces for a shell command that touches more than
+ * one class — a key per class, all under the tool call's task id, all bound to
+ * the same bytes.
+ */
+function oneCommandWorld(classes: string[]): Live {
+  fixtureCounter += 1;
+  const prefix = `command${fixtureCounter}`;
+  const unit = newScenario(scratch.root, POLICY);
+  attest(unit, T0);
+
+  const hash = payloadHash(ONE_COMMAND);
+  const payloads = new Map<string, unknown>();
+  const keys: string[] = [];
+  const actions = classes.map((cls) => {
+    const key = `${TASK}:${prefix}-${cls}`;
+    keys.push(key);
+    payloads.set(key, ONE_COMMAND);
+    return {
+      class: cls,
+      idempotency_key: key,
+      summary: ONE_COMMAND.command,
+      reversible: false,
+      est_cost_usd: "0.02",
+      payload_hash: hash,
+    };
+  });
+
+  const registered = register(
+    unit.logPath,
+    {
+      task: TASK,
+      envelope: { origin: { app: "manual", created_by: ACTOR }, state: "awaiting", actions },
+    },
+    T0,
+    ACTOR,
+    unit.options,
+  );
+  assert.equal(registered.ok, true, `registration failed: ${JSON.stringify(registered)}`);
+
+  return {
+    unit,
+    keys,
+    payloads,
+    tagOptions: { policy: { file: unit.policyPath }, payload: (key) => payloads.get(key) },
+  };
+}
+
+/** Request one member of {@link oneCommandWorld}, under its own class. */
+function requestClassAt(world: Live, index: number, cls: string, ts: string): string {
+  const key = world.keys[index] as string;
+  const result = request(
+    world.unit.logPath,
+    {
+      task: TASK,
+      actionKey: key,
+      cls,
+      est_cost_usd: "0.02",
+      reversible: false,
+      summary: ONE_COMMAND.command,
+    },
+    ts,
+    ACTOR,
+    world.unit.options,
+  );
+  assert.equal(result.ok, true, `request failed: ${JSON.stringify(result)}`);
+  return key;
+}
+
+test("APRV-287: the five classes of one command are one card with one approve", async () => {
+  // Seen 2026-09-06: a commit-and-push raised five separate Telegram messages
+  // and took three rounds of taps. One tool call is one question, and the log
+  // still records a decision per class.
+  const classes = [
+    "vcs.commit.branch",
+    "vcs.push.main",
+    "files.write.workspace",
+    "network.call",
+    "deps.add",
+  ];
+  const world = oneCommandWorld(classes);
+  const setup = setupFor(world, channelFor());
+  const state = newDispatchState();
+  const { streams, err } = capture();
+  classes.forEach((cls, index) => requestClassAt(world, index, cls, at(1)));
+
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(setup, streams, state, at(2));
+
+  assert.equal(cycle.digests.length, 1, JSON.stringify(cycle.digests));
+  assert.deepEqual(
+    [...(cycle.digests[0] as { action_keys: string[] }).action_keys].sort(),
+    [...world.keys].sort(),
+    "the five classes did not become one delivery",
+  );
+
+  const sent = mock.sentTexts().slice(from);
+  assert.equal(
+    sent.filter((text) => text.includes("THE COMMAND ALL 5 REQUESTS ARE ABOUT")).length,
+    1,
+    "the shared payload was not sent once",
+  );
+  assert.equal(
+    sent.filter((text) => text.includes("REQUEST 1 OF 5")).length,
+    0,
+    "the members were prompted one by one",
+  );
+  const digest = sent[sent.length - 1] as string;
+  // ONE gesture decides the command: the all-row is on the one card.
+  const buttons = buttonsOnMessageContaining("REQUESTS AWAITING APPROVAL");
+  assert.equal(
+    buttons.some((label) => label.includes("Approve all (5)")),
+    true,
+    `no approve-all on the card: ${buttons.join(", ")}`,
+  );
+  assert.match(digest, /one payload, shared by all 5 requests/u);
+  assert.match(digest, /one tool call: one task, one payload, 5 class\(es\)/u);
+  for (const cls of classes) {
+    assert.equal(digest.includes(cls), true, `the digest hid the class ${cls}`);
+  }
+  // The whole command reached the approver before any button did: five classes,
+  // one set of bytes, sent above the card that decides them.
+  assert.equal(
+    sent.some((text) => text.includes("git push origin main")),
+    true,
+  );
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("APRV-287: a restarted listener collapses the stale queue into one message", async () => {
+  // The flood of 2026-09-06: a daemon restarted behind a stale socket and
+  // re-delivered a dozen requests whose hooks had long since given up, one
+  // message each. They go out as ONE message now, and a request somebody may
+  // still be waiting on keeps its own.
+  const world = staged(3, distinctPayloadFor);
+  const setup = setupFor(world, channelFor());
+  const state = newDispatchState();
+  const { streams, err } = capture();
+
+  const old = [requestAt(world, 0, at(1)), requestAt(world, 1, at(2))];
+  const fresh = requestAt(world, 2, at(60));
+
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(setup, streams, state, at(61));
+
+  assert.notEqual(cycle.collapsed, undefined, "nothing was collapsed");
+  assert.deepEqual(
+    [...(cycle.collapsed as { action_keys: string[] }).action_keys].sort(),
+    [...old].sort(),
+  );
+  assert.deepEqual(
+    cycle.delivered.map((entry) => entry.action_key).sort(),
+    [...old, fresh].sort(),
+    "every pending request is accounted for, collapsed or not",
+  );
+
+  const sent = mock.sentTexts().slice(from);
+  const summary = sent.find((text) => text.includes("STALE REQUEST")) as string;
+  assert.ok(summary !== undefined, `no collapsed message: ${sent.join(" | ")}`);
+  assert.match(summary, /2 STALE REQUESTS/u);
+  // One action, and it is a rejection: nothing here shows the payloads, so
+  // nothing here may collect an approval.
+  const buttons = buttonsOnMessageContaining("STALE REQUEST");
+  assert.deepEqual(
+    buttons.map((label) => label.replace(/^\S+\s/u, "")),
+    ["Reject all (2)"],
+    `the collapsed message offered ${buttons.join(", ")}`,
+  );
+  for (const key of old) assert.equal(summary.includes(key), true, `${key} is not named`);
+  assert.equal(summary.includes(fresh), false, "the fresh request was collapsed too");
+  // It carries no payload, and says so where it says why there is no approve.
+  assert.match(summary, /carries NO payload/u);
+  // One message for the two of them, not two.
+  assert.equal(
+    sent.filter((text) => text.includes("STALE REQUEST")).length,
+    1,
+    "more than one collapsed message",
+  );
+  // The fresh one is delivered the ordinary way, buttons and all.
+  assert.equal(
+    sent.some((text) => text.includes(fresh)),
+    true,
+    "the fresh request was not delivered",
+  );
+
+  // Losing the summary degrades to showing the requests again (SPEC.md §10.3):
+  // a listener that forgets everything re-derives the pending set from the
+  // verified log and puts it back in front of the approver.
+  const restarted = await dispatchPending(setup, capture().streams, newDispatchState(), at(62));
+  assert.notEqual(restarted.collapsed, undefined, "a restart showed nothing at all");
+  assert.deepEqual(
+    [...(restarted.collapsed as { action_keys: string[] }).action_keys].sort(),
+    [...old].sort(),
+  );
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("APRV-287: a collapsed send that fails leaves every request to be shown again", async () => {
+  const world = staged(2, distinctPayloadFor);
+  const setup = setupFor(world, channelFor());
+  const { streams, err } = capture();
+  const old = [requestAt(world, 0, at(1)), requestAt(world, 1, at(2))];
+
+  mock.fail("500");
+  const failed = await dispatchPending(setup, streams, newDispatchState(), at(61));
+  mock.fail(null);
+
+  assert.equal(failed.collapsed, undefined, "a failed send reported a collapse");
+  assert.deepEqual(failed.delivered, [], "a failed send marked requests as delivered");
+  assert.deepEqual(
+    failed.failed.map((entry) => entry.action_key).sort(),
+    [...old].sort(),
+    "the requests were not left for the next cycle",
+  );
+  assert.equal(
+    err.some((line) => line.includes("collapsed re-delivery")),
+    true,
+    `the operator was not told: ${err.join("")}`,
+  );
+
+  // The next listener puts them back in front of the approver.
+  const again = await dispatchPending(setup, capture().streams, newDispatchState(), at(62));
+  assert.deepEqual(
+    again.delivered.map((entry) => entry.action_key).sort(),
+    [...old].sort(),
+  );
+  assertClean(world.unit);
 });

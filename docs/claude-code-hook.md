@@ -696,9 +696,11 @@ command out, or to run the effect through `approval run` with a granted token.
 
 ### When the wait runs out (APRV-106, revised by APRV-117)
 
-A `hook-timeout` leaves the request **open**. The tool call is denied, nothing is
-withdrawn, and a decision that lands inside the policy's approval TTL authorizes
-a retry of the same command in the same directory, once.
+A `hook-timeout` leaves the request **open** for the retry grace below. The tool
+call is denied, nothing is withdrawn yet, and a decision that lands inside the
+policy's approval TTL authorizes a retry of the same command in the same
+directory, once. Past the grace the hook takes the question back: see [How long
+the question outlives the wait](#how-long-the-question-outlives-the-wait-aprv-287).
 
 This is a change on a change, and both halves are worth saying.
 
@@ -753,6 +755,91 @@ reads `requested 4 min ago · expires 10:34 UTC` — the policy's TTL, which is 
 deadline that actually governs. Hook requests no longer declare a `wait_until`,
 because "requester waits until 10:10 UTC" stopped being true the moment a late
 answer started authorizing a retry.
+
+### How long the question outlives the wait (APRV-287)
+
+The open request above is open for a **retry grace**, not forever. `--retry-grace`
+sets it and the default is **5 minutes**, measured from the `approval.requested`
+record's own timestamp; `core/harness-wait.ts` holds the number and the reasoning.
+
+- **Inside the grace** nothing changes: the request stays pending, the prompt
+  keeps its buttons, and a retry of the identical command in the identical
+  directory adopts it or carries its grant exactly as APRV-117 describes.
+- **Past the grace** the hook takes it back. The invocation that runs out of both
+  its wait and the grace appends `approval.withdrawn` with reason `timeout` for
+  the requests it opened, and any later invocation of the same actor sweeps the
+  ones earlier tool calls left behind — the requests it is not itself asking
+  about, whose grace has run out, and which the verified log still shows as
+  pending. Withdrawal stays requester-only, so a hook only ever withdraws
+  questions this actor asked.
+
+The reason is what a stale request costs. On 2026-09-06 three waits expired
+behind a dead daemon, nothing retried them, and a dozen requests sat live until
+the TTL — so the daemon's restart re-delivered every one of them to a phone, one
+message each, and each tap answered a question no tool call was holding. A tap on
+a withdrawn request is refused `request-withdrawn`, authorizes nothing, appends
+nothing, and the channel says so in the approver's own terms: *Withdrawn — the
+requester took this back and is no longer waiting; nothing was recorded.*
+
+The deny text says which of the two happened, in as many words: either
+`NOTHING WAS WITHDRAWN … the request(s) stay open for the 5m retry grace`, or
+`the 5m retry grace has run out: <key> WAS WITHDRAWN (reason timeout)`.
+
+### One command is one decision (APRV-287)
+
+A shell command that touches several classes raises one request per class,
+because the log records a decision per class and audit granularity depends on it.
+It is still **one question**, and the Telegram channel now delivers it as one:
+requests sharing a task id and a payload hash are one tool call, they go out as a
+single card with one `Approve all`, and the command's bytes are sent once above
+it rather than once per class. Seen on 2026-09-06: a commit-and-push produced
+five separate messages and took three rounds of taps.
+
+### A dead queue is one message (APRV-287)
+
+A listener that starts or reconnects re-derives the pending set from the verified
+log and re-delivers it (SPEC §10.3). On its **first cycle**, under `burst`
+delivery, requests older than the hook's wait plus its retry grace — the point at
+which no tool call can still be holding the answer — are delivered as ONE summary
+message: how many, how old the oldest is, which classes, and a single
+`Reject all`. Fresh requests keep one message each.
+
+The summary carries **no payload and no approve button**, deliberately. SPEC
+§10.3 requires the canonical rendering of a manual action's payload in front of
+the approver before a decision is collected, and an approve-all here would
+collect one for bytes nobody was shown; a rejection authorizes nothing, so it
+needs no such showing. Any of those requests can still be approved on its own
+card or with `approval grant <action key>`, and `/queue` lists them all.
+
+Under `paced` delivery nothing is collapsed: that mode already puts one question
+at a time in front of the approver behind a summary line, so a restart is two
+messages rather than a dozen, and collapsing would take away the approve an
+approver walking an old queue deliberately came for. Losing the summary — a
+failed send, a restarted process — degrades to showing the requests again, never
+to a pending request nobody is shown.
+
+### What counts toward the loop floor (APRV-287)
+
+Loop safety (SPEC §10.2) counts consecutive failed side-effecting **tool calls**
+per session and per actor. Three of them route every class of the next command to
+a human. What does and does not feed it:
+
+- **An expired wait is not a failure.** It records a withdrawal, never an
+  `execution.failed`, so the escalation cannot be fed by the timeouts it is
+  causing (escalation routes reads to the phone, unanswered reads time out,
+  timeouts extend the escalation).
+- **A harness-side misfire is not an execution.** A command the classifier cannot
+  read, a tool call this hook denied, a tool the hook does not gate: none of them
+  has an `execution.started`, so the completion counterpart refuses
+  `not-delegated` and nothing accrues. A report may only ever close an execution
+  this runtime authorized, and the task and the action key are read from the log
+  rather than from the report.
+- **A completion clears the floor, including a carried one.** The grant a later
+  tool call carries is spent under the REQUESTING tool call's task, so the
+  `execution.started` records `spent_by_task: <spending task id>` and the
+  counterpart finds it from the event reporting how that tool call went. Before
+  this it did not, so a granted commit-and-push that completed cleared nothing
+  and the floor stood over the rest of the session (seen 2026-09-06).
 
 ### When the grant can follow the write (APRV-200)
 

@@ -1197,6 +1197,32 @@ export function digestKeyOf(request: ChannelRequest): string {
  * one is returned as a group of one, and the caller sends it as an ordinary
  * prompt.
  */
+/**
+ * The key that makes ONE tool call one question (APRV-287), or `null` for a
+ * request that names no task or no payload.
+ *
+ * A shell command that touches several classes raises one request per class
+ * (`cli/hook.ts` mints `<task>:<class>` keys), and every one of them carries the
+ * same task and the same payload hash: they are one command, asked about once,
+ * with the log keeping a record per class because that is what audit granularity
+ * requires. Grouping them by class the way {@link digestKeyOf} does put five
+ * separate cards on a phone for one `git commit && git push` on 2026-09-06, and
+ * the approver had to tap through three rounds of them.
+ *
+ * The pair is enough on its own. A task id is one tool call, and a payload hash
+ * is the bytes it is about, so two requests sharing both are two classes of one
+ * command and can never be two commands. Both are computed: the task id is
+ * minted by the runtime and the hash is recomputed from the payload bytes
+ * (`channels/contract.ts`), so nothing an agent authors chooses this grouping.
+ */
+function toolCallKeyOf(request: ChannelRequest): string | null {
+  const task = request.task.value;
+  const hash = request.payload_hash.value;
+  if (task === null || task.length === 0) return null;
+  if (typeof hash !== "string" || hash.length === 0) return null;
+  return [task, hash].join("\0");
+}
+
 export function groupForDigest(
   requests: ChannelRequest[],
   max: number = TELEGRAM_DIGEST_MAX_MEMBERS,
@@ -1204,8 +1230,30 @@ export function groupForDigest(
   const groups: ChannelRequest[][] = [];
   const byKey = new Map<string, ChannelRequest[]>();
 
+  // APRV-287, before the class grouping and never instead of it. The classes of
+  // one tool call are one question however many they are; everything else is
+  // grouped as it always was, so a burst of forty separate `network.call`s from
+  // forty tool calls still digests by class.
+  // Only where the classes DIFFER: members of one tool call that share a class
+  // are grouped by the class key already, and the two groupings then agree.
+  // Narrowing it this way keeps every existing grouping exactly as it was and
+  // changes only the case this task is about, the one command a human was asked
+  // about once per class.
+  const oneCall = new Set<string>();
+  const seen = new Map<string, Set<string>>();
   for (const request of requests) {
-    const key = digestKeyOf(request);
+    const key = toolCallKeyOf(request);
+    if (key === null) continue;
+    const classes = seen.get(key) ?? new Set<string>();
+    classes.add(request.class.value);
+    seen.set(key, classes);
+    if (classes.size > 1) oneCall.add(key);
+  }
+
+  for (const request of requests) {
+    const call = toolCallKeyOf(request);
+    const key =
+      call !== null && oneCall.has(call) ? `tool-call\0${call}` : digestKeyOf(request);
     let group = byKey.get(key);
     // A group that has reached the cap is closed and a fresh one opened under
     // the same key: a burst of twenty becomes three digests, never one wall.
@@ -1242,6 +1290,29 @@ export interface DigestMemberState {
   settled: { headline: string; detail: string[] } | null;
 }
 
+/**
+ * The lines a COLLAPSED delivery leads with, and the fact it is one (APRV-287).
+ *
+ * A listener starting or reconnecting re-derives the pending set from the
+ * verified log and re-delivers it, which is right for a queue somebody is
+ * waiting on and was a flood for a queue nobody is: on 2026-09-06 a restarted
+ * daemon put a dozen requests whose hooks had long since given up in front of
+ * an approver, one message each. Those go out as ONE message instead, and this
+ * is what distinguishes it from an ordinary digest.
+ *
+ * It carries a REJECT-ALL button and deliberately no approve. The payloads are
+ * not in this message, and SPEC.md §10.3 requires the canonical rendering of a
+ * manual action's payload in front of the approver before a decision is
+ * collected: an approve-all here would collect a decision for bytes nobody was
+ * shown. A rejection authorizes nothing, so it needs no such showing, and every
+ * one of these requests can still be approved on its own card or from a
+ * terminal.
+ */
+export interface StaleSummary {
+  /** Computed lines: how many, how old the oldest is, which classes. */
+  lines: string[];
+}
+
 /** One digest message, as the delivering process remembers it. */
 export interface DigestState {
   /** The digest message's own id: what every member's annotation edits. */
@@ -1252,6 +1323,11 @@ export interface DigestState {
   allNonce: string;
   /** The computed facts every member shares, already rendered as text. */
   facts: { label: string; text: string; origin: string }[];
+  /**
+   * The collapsed re-delivery this message is, or `null` for an ordinary digest
+   * (APRV-287). See {@link StaleSummary}.
+   */
+  stale?: StaleSummary | null;
   /** Who authored the claimed lines below. */
   author: string;
   members: DigestMemberState[];
@@ -1278,21 +1354,124 @@ export function digestFacts(
 ): { label: string; text: string; origin: string }[] {
   const first = members[0];
   if (first === undefined) return [];
+  // APRV-287. A digest may now carry the several classes of ONE tool call, so
+  // the class line states the set rather than the first member's, and the
+  // grouping line says which of the two groupings put this set together. A
+  // digest whose members share one class reads exactly as it did.
+  const classes = [...new Set(members.map((member) => member.class.value))];
+  const shared = sharedPayload(members);
+  const autonomies = [...new Set(members.map((member) => member.autonomy.value))];
   return [
-    { label: "class", text: first.class.value, origin: originOf(first.class) },
-    { label: "autonomy", text: first.autonomy.value, origin: originOf(first.autonomy) },
+    { label: "class", text: classes.join(", "), origin: originOf(first.class) },
+    { label: "autonomy", text: autonomies.join(", "), origin: originOf(first.autonomy) },
     { label: "task", text: first.task.value ?? "(none)", origin: originOf(first.task) },
     {
       label: "grouped by",
-      text: `one class, one task, one payload shape (${payloadShapeKey(first.fullPayload.value?.value)})`,
+      text:
+        shared === null
+          ? `one class, one task, one payload shape (${payloadShapeKey(first.fullPayload.value?.value)})`
+          : `one tool call: one task, one payload, ${String(classes.length)} class(es) of the same command`,
       origin: "grouping",
     },
     {
       label: "payloads",
-      text: `${members.length} full payloads, one per request, in the ${members.length} prompts above this message`,
+      text:
+        shared === null
+          ? `${members.length} full payloads, one per request, in the ${members.length} prompts above this message`
+          : `one payload, shared by all ${members.length} requests, in the prompt above this message`,
       origin: originOf(first.fullPayload),
     },
   ];
+}
+
+/**
+ * The one payload every member is about, or `null` when they differ
+ * (APRV-287).
+ *
+ * The computed hash decides it, never the rendering: two members share a
+ * payload when the bytes the grants bind to are the same bytes. A member whose
+ * full payload the channel was not given in full is not a shared payload
+ * either, because "they are all this one, which you have read" is a claim about
+ * something the approver was shown.
+ */
+function sharedPayload(members: ChannelRequest[]): ChannelRequest | null {
+  const first = members[0];
+  if (first === undefined || members.length < 2) return null;
+  const hash = first.payload_hash.value;
+  if (typeof hash !== "string" || hash.length === 0) return null;
+  if (!members.every((member) => member.payload_hash.value === hash)) return null;
+  const rendering = first.fullPayload.value;
+  if (rendering === null || rendering.truncated) return null;
+  return first;
+}
+
+/**
+ * The collapsed re-delivery's own message: what is waiting, and one way to
+ * clear it (APRV-287).
+ *
+ * Everything above the buttons is computed by the runtime from the verified log
+ * — the count, the ages, the classes — and the per-member lines carry the
+ * agent's own summaries under a heading that says so, exactly as an ordinary
+ * digest does. What it does NOT carry is any payload, and the message says so
+ * in the same breath as it explains why the only button rejects: a decision is
+ * bound to the bytes the approver was shown, and nothing here shows them.
+ */
+function renderStaleSummary(
+  digest: DigestState,
+  stale: StaleSummary,
+  open: number,
+  total: number,
+): { text: string; keyboard: { inline_keyboard: InlineButton[][] } | null } {
+  const lines: string[] = [
+    `<b>${escapeHtml(
+      open === 0
+        ? `ALL ${total} STALE REQUESTS DECIDED`
+        : `${open} STALE REQUEST${open === 1 ? "" : "S"} — NOBODY IS WAITING ON ${open === 1 ? "IT" : "THEM"}`,
+    )}</b>`,
+    "",
+    "<b>COMPUTED — derived by the runtime from the log and the policy</b>",
+    ...stale.lines.map((line) => `• ${escapeHtml(line)}`),
+    ...digest.facts.map(
+      (fact) =>
+        `• <b>${escapeHtml(fact.label)}:</b> ${escapeHtml(fact.text)} <i>(${escapeHtml(fact.origin)})</i>`,
+    ),
+    "",
+    `<b>CLAIMED — authored by ${escapeHtml(digest.author)}, NOT verified by the runtime</b>`,
+  ];
+
+  for (const [index, member] of digest.members.entries()) {
+    lines.push(
+      `${index + 1}. <code>${escapeHtml(member.actionKey)}</code> — ${escapeHtml(member.summary)}`,
+    );
+    if (member.settled !== null) {
+      lines.push(`   <b>${escapeHtml(member.settled.headline)}</b>`);
+      for (const detail of member.settled.detail) lines.push(`   ${escapeHtml(detail)}`);
+    }
+  }
+
+  lines.push(
+    "",
+    escapeHtml(
+      "These asked while a hook waited, and the wait is long over: no tool call is holding the answer. This message carries NO payload, so it offers no approve button — a decision is bound to the bytes you were shown, and nothing here shows them. Rejecting is one log event per request and authorizes nothing. To approve one instead, decide it on its own card or run `approval grant <action key>`; the requests stay listed by /queue either way.",
+    ),
+  );
+
+  const rows: InlineButton[][] =
+    open === 0
+      ? []
+      : [
+          [
+            {
+              text: `🛑 Reject all (${open})`,
+              callback_data: digestCallbackData("R", digest.allNonce),
+            },
+          ],
+        ];
+
+  return {
+    text: lines.join("\n"),
+    keyboard: rows.length === 0 ? null : { inline_keyboard: rows },
+  };
 }
 
 /** The digest's headline, given how much of it is still open. */
@@ -1322,6 +1501,9 @@ export function renderDigest(digest: DigestState): {
 } {
   const open = digest.members.filter((member) => member.settled === null);
   const total = digest.members.length;
+  const stale = digest.stale ?? null;
+
+  if (stale !== null) return renderStaleSummary(digest, stale, open.length, total);
 
   const lines: string[] = [
     `<b>${escapeHtml(digestHeadline(open.length, total))}</b>`,
@@ -1912,16 +2094,37 @@ export class TelegramChannel implements TestableChannel {
   }
 
   /**
+   * Deliver a set of stale pending requests as ONE message with a reject-all
+   * button (APRV-287).
+   *
+   * Returns `null` when the message would not fit, and the caller then leaves
+   * the members undelivered so the next cycle shows them the ordinary way:
+   * SPEC.md §10.3's rule for this bookkeeping is that losing it degrades to
+   * showing a request again, never to a pending request nobody is shown.
+   */
+  async notifyStale(
+    members: ChannelRequest[],
+    stale: StaleSummary,
+  ): Promise<TelegramBatchDelivery | null> {
+    if (members.length === 0) return null;
+    return this.deliverDigest(members, `tg-batch-${this.makeNonce()}`, stale);
+  }
+
+  /**
    * The digest itself: every member's prompt and payload, then the one message
    * that carries the buttons.
    *
    * Returns `null` when the digest message would not fit, so the caller falls
    * back — and it decides that BEFORE sending anything, because a fallback
    * discovered after four member prompts had gone out would double them.
+   *
+   * `stale` (APRV-287) makes it the collapsed re-delivery instead: no member
+   * prompts, no payload, one reject-all button. See {@link StaleSummary}.
    */
   private async deliverDigest(
     members: ChannelRequest[],
     batchDeliveryId: DeliveryId,
+    stale: StaleSummary | null = null,
   ): Promise<TelegramBatchDelivery | null> {
     const allNonce = this.makeNonce();
     const deliveredAtMs = this.now();
@@ -1931,7 +2134,8 @@ export class TelegramChannel implements TestableChannel {
       deliveryId: "",
       batchDeliveryId,
       allNonce,
-      facts: digestFacts(members),
+      stale,
+      facts: stale === null ? digestFacts(members) : [],
       author: originOf((members[0] as ChannelRequest).summary),
       members: members.map((member) => ({
         actionKey: member.action_key.value,
@@ -1945,14 +2149,41 @@ export class TelegramChannel implements TestableChannel {
     const drawn = renderDigest(state);
     if (drawn.text.length > TELEGRAM_MAX_MESSAGE_CHARS) return null;
 
+    // APRV-287. When every member binds to the SAME payload — the several
+    // classes of one tool call — the payload is sent once instead of once per
+    // member. The approver still reads every byte they are deciding about
+    // before any button appears (SPEC.md §10.3), because there is one set of
+    // bytes and it is above the digest; what goes away is five copies of one
+    // command, which was five messages of the flood this task is about.
+    // A collapsed re-delivery sends no payload at all, which is the whole of
+    // what makes it one message; its own text says so and offers no approve, so
+    // it renders no request and claims none.
+    const shared = sharedPayload(members);
     const rendered: RenderedRequest[] = [];
-    for (const [index, member] of members.entries()) {
+    if (stale !== null) {
+      // Nothing to render: no prompt goes out for a member here.
+    } else if (shared === null) {
+      for (const [index, member] of members.entries()) {
+        const one = await this.sendPrompt(
+          member,
+          `REQUEST ${index + 1} OF ${members.length} — decide it on the digest below`,
+          null,
+        );
+        rendered.push({ ...one.rendered, batchDeliveryId });
+      }
+    } else {
       const one = await this.sendPrompt(
-        member,
-        `REQUEST ${index + 1} OF ${members.length} — decide it on the digest below`,
+        shared,
+        `THE COMMAND ALL ${members.length} REQUESTS ARE ABOUT — decide it on the digest below`,
         null,
       );
-      rendered.push({ ...one.rendered, batchDeliveryId });
+      for (const member of members) {
+        rendered.push({
+          ...one.rendered,
+          action_key: member.action_key.value,
+          batchDeliveryId,
+        });
+      }
     }
 
     const result = await this.call<{ message_id: number }>("sendMessage", {
