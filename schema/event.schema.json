@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://approval.md/schema/event.schema.json",
+  "$comment": "CC0 1.0. See schema/LICENSE.",
   "title": "Event log record",
   "description": "One line of `.approval/log/events.jsonl` (SPEC.md §8). The log is append-only and is the truth; projections are caches. Every record MUST validate against this schema before append (SPEC.md §8: validation at the write boundary is itself a control). Structural shape only: hash-chain linkage, first-record semantics, and monotonic `seq` are verified by the chain verifier (M1), not expressible here.",
   "type": "object",

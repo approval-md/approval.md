@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://approval.md/schema/policy.schema.json",
+  "$comment": "CC0 1.0. See schema/LICENSE.",
   "title": "APPROVAL.md policy block",
   "description": "SPEC.md §5: the parsed YAML of the single ```yaml approval-policy``` fenced block inside APPROVAL.md (or APPROVALS.md). Surrounding prose is ignored by the parser and never reaches this schema. SPEC.md §5.2 requires implementations to fail closed: a document rejected here means the runtime treats every class as `manual`, so this schema is deliberately closed (additionalProperties: false at every level) — an unrecognised key is a policy the author believed was in force and the runtime did not understand, which must be a hard error rather than a silent no-op.",
   "type": "object",
