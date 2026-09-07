@@ -576,9 +576,45 @@ both files, run the verb, tap.
 ```sh
 cd /Users/carter/dev/approval-md
 $EDITOR APPROVAL.md
-$EDITOR src/core/policy-expectations.ts   # only when a class resolution moved
+$EDITOR src/core/policy-expectations.ts   # only when a PINNED class moved
 npm run build                             # the ceremony runs the BUILT suite
 approval policy amend --commit
+```
+
+### Which classes are pinned, and why (APRV-296)
+
+`src/core/policy-expectations.ts` is a safety floor, not an inventory of the
+policy. A pin exists where LOOSENING the class would be a security regression,
+and every pin's note says what that loosening would cost. Three families, twelve
+pins:
+
+| family | classes | what a loosening would cost |
+| --- | --- | --- |
+| human-only | `vcs.history.rewrite`, `policy.core`, `log.mutate`, `account.credential` | agent authority over shared history, the policy file itself, the log, or the credentials that decide (SPEC.md §11.1 invariant 9) |
+| manual | `deps.add`, `network.call`, `release.publish`, `policy.edit.ci`, `files.delete.out_of_scope` | an effect that leaves this repository or cannot be undone, taken with no human in the path |
+| the fail-closed default | `communicate.email.external`, `deps.upgrade`, bare `read` | the classes nobody wrote a rule for stop reaching a human; these three are pinned at `manual/default` precisely because the policy does not declare them |
+
+Everything else the policy declares carries NO pin, and the ceremony accepts it.
+Declaring a new `supervised` or `autonomous` class, tuning a live rate, or
+changing `approval_ttl` is an amendment and nothing more: no code change, no
+rebuild. The 2026-09-07 ceremony is why. Every declared class was pinned in both
+directions and `tests/dogfood.test.ts` pinned `approval_ttl` at its exact value,
+so a one-line TTL change plus one newly declared class became three failed runs
+against pins that were defending nothing (`vcs.pr.create` as supervised,
+`log.advance` as sampled, a 24h TTL). What still holds without those pins: every
+resolution change prints in the ceremony's semantic diff before you attest it,
+the irreversibility floor keeps `vcs.push.main` manual for an irreversible
+action, and the dogfood suite still asserts the fail-closed defaults
+(`defaults.autonomy: manual`, `on_expiry: reject`, and a TTL that exists and is
+positive).
+
+Adding a pin is a human decision that a class has joined that floor. The line
+takes the shape the list already uses, and it needs a note saying why loosening
+the class would be a regression:
+
+```ts
+{ actionClass: "deps.remove", autonomy: "manual", provenance: "rule",
+  note: "loosened, an agent could uninstall a package the build depends on …" },
 ```
 
 No `git fetch` and no `git reset --keep origin/main` first. That instruction used
@@ -612,9 +648,10 @@ attestation, so nothing is ever half-done: `fetch-failed`,
 began; bring the checkout up to origin and re-apply the edit),
 `base-log-diverged` (run `approval log sync` first), `policy-suite-failed`
 (the amended policy no longer resolves the way `src/core/policy-expectations.ts`
-pins it: update the pins, `npm run build`, run the verb again; and where the
-policy declares a class nothing pins, the refusal prints the exact line to
-paste), and `dogfood-suite-failed` (the whole of `tests/dogfood.test.ts` is red
+pins it: every pin is a class whose loosening is a regression, so read the note
+the refusal prints beside the class, then decide whether the policy or the pin
+is the thing that is wrong; a pin that has to move needs `npm run build` before
+the verb runs again), and `dogfood-suite-failed` (the whole of `tests/dogfood.test.ts` is red
 against the amended file, and the refusal names the failing test; it is also
 what you get from a `dist/` the last edit did not rebuild, because an unrun
 suite is not a green one).

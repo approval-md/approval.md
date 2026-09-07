@@ -70,7 +70,10 @@
  *   all-manual. That key is reported (marked `recognised: false`) whether or
  *   not its value changed: the display side fails closed too, and an edit this
  *   module cannot describe must be called out rather than summarised as no
- *   change.
+ *   change. Which keys are known is READ FROM THAT SCHEMA since APRV-296 (see
+ *   {@link policyTopLevelKeys}), because the hand-written copy that stood here
+ *   fell behind it and warned an operator about three `daemon.*` keys the
+ *   schema had admitted for a month.
  * - **A side whose YAML never parsed has no vocabulary to read.** Then
  *   {@link PolicyDiff.vocabularyComparable} is `false` and the renderer says the
  *   rest of the document was not compared, instead of printing "no semantic
@@ -98,9 +101,15 @@
  * {@link PolicyDiff.beforeFailure} / {@link PolicyDiff.afterFailure} carrying
  * the codes a renderer prints as "everything manual (fail-closed: <code>)".
  *
- * Pure and deterministic: no I/O, no clock, no randomness. Probe order is
- * sorted, so the same two loads always produce a byte-identical diff.
+ * Deterministic: no clock, no randomness, and probe order is sorted, so the
+ * same two loads always produce a byte-identical diff. The one read of the
+ * filesystem is the policy SCHEMA, once per process, for the key vocabulary
+ * described above; nothing here reads a policy file, and no answer depends on
+ * anything but the two loads it was handed.
  */
+
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import type { Autonomy, Policy, PolicyLoadErrorCode, PolicyLoadResult } from "./policy-load.js";
 import { resolve, type Provenance } from "./policy-match.js";
@@ -248,15 +257,31 @@ const DEFAULT_FIELDS: ReadonlyArray<DefaultsChange["field"]> = [
 ];
 
 /**
- * SPEC.md §5.2's top-level policy keys, as `policy.schema.json` declares them.
+ * The policy schema on disk, the file `core/validate.ts` validates against.
  *
- * Used for ONE decision: whether a key the document carries is part of the
- * vocabulary at all. It is not used to decide what to walk (the documents' own
- * keys decide that), so a key added to the schema and forgotten here is
- * reported as unknown — loud and wrong-in-the-safe-direction — rather than
- * silently skipped.
+ * Derived here rather than imported from `DEFAULT_SCHEMA_DIR` so this module
+ * keeps its empty runtime dependency graph: importing `validate.ts` would pull
+ * Ajv into every process that renders a diff, the Telegram channel included.
+ * The two derivations are the same walk from the same directory, and
+ * `tests/policy-vocabulary.test.ts` asserts they name one file, so a schema
+ * directory that ever moves fails there rather than drifting quietly.
  */
-export const POLICY_TOP_LEVEL_KEYS: readonly string[] = [
+export const POLICY_SCHEMA_PATH = fileURLToPath(
+  new URL("../../../schema/policy.schema.json", import.meta.url),
+);
+
+/**
+ * The vocabulary as it stood when it was written by hand, kept as the FALLBACK
+ * for a schema that cannot be read or parsed.
+ *
+ * It is deliberately the stale list rather than an empty one or a wildcard: an
+ * unreadable schema must leave the renderer erring loud (an unrecognised key is
+ * NAMED as unknown), and a list that is missing keys over-reports rather than
+ * under-reports. An empty list would name every key unknown, which is louder
+ * still but tells a reader nothing; a permissive one would silence the warning
+ * the APRV-111 incident added.
+ */
+const FALLBACK_TOP_LEVEL_KEYS: readonly string[] = [
   "approvers",
   "audit",
   "budgets",
@@ -268,6 +293,53 @@ export const POLICY_TOP_LEVEL_KEYS: readonly string[] = [
   "vault",
   "version",
 ];
+
+/** Memoised across a process; see {@link policyTopLevelKeys}. */
+let topLevelKeys: readonly string[] | null = null;
+
+/**
+ * SPEC.md §5.2's top-level policy keys, READ FROM `policy.schema.json`
+ * (APRV-296).
+ *
+ * Used for ONE decision: whether a key the document carries is part of the
+ * vocabulary at all. It is not used to decide what to walk — the documents' own
+ * keys decide that — so this list only ever changes what a key is CALLED in the
+ * report.
+ *
+ * It used to be a second, hand-written copy of the schema's top-level
+ * `properties`, and the 2026-09-07 ceremony is what a hand-written copy costs:
+ * the amend diff printed `daemon.full_reproof_after: 60s -> 60s (UNKNOWN KEY:
+ * … the policy FAILS CLOSED to all-manual until it is removed)` for three
+ * `daemon.*` keys the schema had admitted since APRV-217, which the same
+ * ceremony then loaded cleanly and resolved every pin against. A false
+ * fail-closed warning in a ceremony's output is worse than no warning: it
+ * teaches the operator reading it that the warnings are noise.
+ *
+ * Reading the schema is the fix that cannot go stale, because the schema is
+ * what actually decides whether the key loads. The read is memoised for the
+ * life of the process, which `core/validate.ts` deliberately does not do for
+ * validation: this is DISPLAY vocabulary over a file shipped with the package,
+ * not a verdict, and a schema edited under a running process changes what the
+ * next diff CALLS a key rather than whether that key was validated.
+ */
+export function policyTopLevelKeys(): readonly string[] {
+  if (topLevelKeys !== null) return topLevelKeys;
+  topLevelKeys = readTopLevelKeys();
+  return topLevelKeys;
+}
+
+function readTopLevelKeys(): readonly string[] {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(POLICY_SCHEMA_PATH, "utf8"));
+    if (!isRecord(parsed)) return FALLBACK_TOP_LEVEL_KEYS;
+    const properties = parsed["properties"];
+    if (!isRecord(properties)) return FALLBACK_TOP_LEVEL_KEYS;
+    const keys = Object.keys(properties).sort();
+    return keys.length === 0 ? FALLBACK_TOP_LEVEL_KEYS : keys;
+  } catch {
+    return FALLBACK_TOP_LEVEL_KEYS;
+  }
+}
 
 /**
  * The one key the vocabulary walk skips: the classes map is the classes
@@ -355,9 +427,10 @@ function diffVocabulary(
   const afterTable = vocabularyTable(after);
   if (beforeTable === null || afterTable === null) return { comparable: false, changes: [] };
 
+  const vocabulary = policyTopLevelKeys();
   const changes: VocabularyChange[] = [];
   for (const key of union([...beforeTable.keys()], [...afterTable.keys()])) {
-    const recognised = POLICY_TOP_LEVEL_KEYS.includes(key.split(".")[0] ?? key);
+    const recognised = vocabulary.includes(key.split(".")[0] ?? key);
     const previous = beforeTable.get(key) ?? null;
     const next = afterTable.get(key) ?? null;
     // An unrecognised key is reported whether or not it moved: it is why the
