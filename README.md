@@ -887,7 +887,12 @@ proposal works through device-bound keys, WebAuthn on a separately controlled
 surface, per-decision signatures over the existing checkpoint machinery, and
 third-party witnesses, with the phasing, the receipt format, and the negative
 tests each would need. Nothing in it is implemented, and nothing in it amends
-SPEC.md.
+SPEC.md. Two shorter ones,
+[docs/proposals/solo-dev-quickstart.md](docs/proposals/solo-dev-quickstart.md)
+and [docs/proposals/no-daemon-mode.md](docs/proposals/no-daemon-mode.md),
+design the path for one person gating their own app: a three-question setup,
+one `guard` verb, and a runtime that lives inside the waiting command instead
+of a daemon.
 
 ## License and governance
 
