@@ -4,7 +4,7 @@ title: Hook timeouts must not flood the phone or feed the escalation they wait o
 status: In Progress
 assignee: []
 created_date: '2026-09-06 22:33'
-updated_date: '2026-09-07 03:38'
+updated_date: '2026-09-07 05:10'
 labels:
   - hook
   - daemon
@@ -33,7 +33,7 @@ SPEC: §10.1 hook timeout paragraph and §10.2 escalation counting, both marked 
 - [x] #1 An expired hook wait appends approval.withdrawn (reason timeout) for its request unless the same command from the same cwd retries within the grace window; tests/cli-hook.test.ts covers withdrawn, adopted-by-retry, and tap-after-withdraw (authorizes nothing, channel reply says so)
 - [x] #2 Daemon start and listener reconnect deliver requests older than the hook wait as one summary message with a reject-all action; tests/channels-telegram.test.ts covers the collapsed and the fresh case, and losing the summary degrades to re-showing requests
 - [x] #3 An expired wait does not advance the loop-escalation counter; tests/loop-escalation (or the APRV-280 suite) proves three expired waits leave the floor closed while three execution.failed still open it
-- [ ] #4 SPEC §10.1 and §10.2 amended with pending-sign-off markers; docs/claude-code-hook.md documents the grace window and the withdrawal; CHANGELOG entry
+- [x] #4 SPEC §10.1 and §10.2 amended with pending-sign-off markers; docs/claude-code-hook.md documents the grace window and the withdrawal; CHANGELOG entry
 - [ ] #5 A harness-side misfire (a hook-unparseable command, an Edit refused before it ran, a tool-input validation error) is not an execution and does not advance the loop-escalation counter; only a command that started and exited non-zero counts. Test: three unparseable commands leave the floor closed
 - [x] #6 One command is one decision: a shell command that classifies into several classes raises ONE request carrying all of them (or one grouped delivery with a single approve), so the human taps once; tests/cli-hook.test.ts and tests/channels-telegram.test.ts cover a five-class command. Seen 2026-09-06: a commit-and-push raised five separate Telegram messages and needed three rounds of taps
 - [x] #7 A completed side-effecting command clears the floor, as the refusal text promises: after a granted retry completes, the next command is routed by policy, not by loop safety. Seen 2026-09-06: a granted commit-and-push completed and the very next command was still loop-escalated
@@ -120,4 +120,6 @@ One tool call is one question. Where several pending requests share one task and
 ### 11.2, no new rows
 
 No refusal code is minted by this task. The withdrawal reuses request-withdrawn and the harness adapter hook-timeout, both already frozen in their unions.
+
+2026-09-07: SPEC amendments applied on PR #319 under three policy.edit.spec taps (10.1 wait grace, 10.2 what is not an execution and completion clears wherever carried, 10.3 collapsed redelivery and one tool call one question), all marked pending sign-off. AC5 stays half-open on purpose: an Edit the hook allowed and the harness then refused still counts as execution.failed, because Claude Code's post-execution report carries no verifiable did-not-run fact and a self-reported one would breach invariant 4. File a follow-up when it bites; AC7's clearing rule bounds the harm. Merged 2026-09-07T05:06Z.
 <!-- SECTION:NOTES:END -->
