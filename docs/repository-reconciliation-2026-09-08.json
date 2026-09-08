@@ -1,0 +1,2229 @@
+{
+  "task": "APRV-318",
+  "date": "2026-09-08",
+  "base": "2e5fc1897638975c14d8bcc09c480672765e71f3",
+  "scope": "Snapshot at the start of the compatibility wave; remote deletion candidates remain pending the primary gate. Preserved refs are not claimed permanently active.",
+  "closed_prs": [
+    {
+      "number": 167,
+      "reason": "Superseded by PR183, merge73c9fea, implementation693cf79",
+      "outcome_seq": 29974
+    },
+    {
+      "number": 281,
+      "reason": "Log is an exact 20921-record prefix of main; closed without log mutation",
+      "outcome_seq": 29977
+    },
+    {
+      "number": 282,
+      "reason": "Log is an exact 20944-record prefix of main; closed without log mutation",
+      "outcome_seq": 29980
+    },
+    {
+      "number": 283,
+      "reason": "Log is an exact 20975-record prefix of main; closed without log mutation",
+      "outcome_seq": 29983
+    },
+    {
+      "number": 285,
+      "reason": "Log is an exact 20999-record prefix of main; closed without log mutation",
+      "outcome_seq": 29986
+    }
+  ],
+  "remaining_prs": [
+    {
+      "number": 289,
+      "task": "APRV-265",
+      "disposition": "Resume existing site design and verify actual Pages deployment"
+    }
+  ],
+  "issues": [
+    {
+      "number": 141,
+      "disposition": "Resolved by APRV-105/APRV-127 and PR132; close awaits manual network.call grant"
+    },
+    {
+      "number": 140,
+      "task": "APRV-321",
+      "disposition": "Public API exports remain pending; npm0.1.0 already published"
+    },
+    {
+      "number": 139,
+      "task": "APRV-322",
+      "disposition": "Verified resumable subscription remains pending"
+    },
+    {
+      "number": 138,
+      "task": "APRV-323",
+      "disposition": "Concurrent quorum remains pending, depends APRV-249"
+    },
+    {
+      "number": 137,
+      "task": "APRV-324",
+      "disposition": "Authenticated sender identity remains pending, depends APRV-249"
+    }
+  ],
+  "local_removed": [
+    {
+      "name": "aprv-276-278-agentmail-release-stack",
+      "sha": "8246896ee499aecb2db8b721ee27d2b6ddcb6570",
+      "exit": 0,
+      "reason": "Exact merged unowned tip removed with git branch -d"
+    },
+    {
+      "name": "claude/rsi-demo-restyle-combined",
+      "sha": "ac90682cd0f0eba8d7801393021b6ba00a1562a7",
+      "exit": 0,
+      "reason": "Exact merged unowned tip removed with git branch -d"
+    },
+    {
+      "name": "demo-paper-restyle",
+      "sha": "4ef3f4377d92d2d54718c8fd90b6cffef337dab3",
+      "exit": 0,
+      "reason": "Exact merged unowned tip removed with git branch -d"
+    },
+    {
+      "name": "rsi-page",
+      "sha": "e359031290fcc66f53bd52f0ebd0da96c39b1e3e",
+      "exit": 0,
+      "reason": "Exact merged unowned tip removed with git branch -d"
+    }
+  ],
+  "remote_refs": [
+    {
+      "name": "adapter-credentials",
+      "sha": "d73367704321da0b0798a7b9b1b7a02c8ab242ef",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-100-payload-view",
+      "sha": "419ab1f130aeb27a6f39b00fcd2803d3acc55429",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-101-hook-log-scope",
+      "sha": "596118ccb147cbc780721e57432a026ba98b572b",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-102-legibility-followups",
+      "sha": "d65704a6a6a4a653d54461c1b41ec2542e808b0e",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-103-spec-amendments",
+      "sha": "ef2cecc599bd0e6238400298090113220af73ae1",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-106-withdrawn",
+      "sha": "696d372ef44c6a91e90b3a05cedc8d070dafa7ec",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-107-protected-paths",
+      "sha": "ae4016d136a90c182948b4dfd8d66f11c0f7d446",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-108-rewrite-unpublished",
+      "sha": "b7b4b827fb862eea8fcc620e1d1ea37e474a3dd4",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-109-attest-from-phone",
+      "sha": "610709620fa10475797c033e101043a8f7e771b9",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-110-ambient-runtime",
+      "sha": "b64ad90f9fef592092310e98a2574dc83123dd66",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-111-amend-differ",
+      "sha": "955deb557c8711229a55bafd899ddda7331ec724",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-112-ci-records-tier",
+      "sha": "4255f8e46eb7af5e86774ed1718f52555507945a",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-113-decided-prompts",
+      "sha": "f1fe5d1808a25e4ffdd7d05b4dbc6941edfc814b",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-114-classifier-readweb",
+      "sha": "c685580590dd51bb818ff4bb1f7857c9a5c5178c",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-116-readme-v2",
+      "sha": "17c7322618db505d12e25d8d2164547d0fba0a01",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-117-grant-carryover",
+      "sha": "6c1179dc027f863d436ce5a191835beacb1abb7f",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-118-policy-pin",
+      "sha": "630116b71e8f93c61e1e918cb90e241121ea5d11",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-119-135-channels",
+      "sha": "e6032046666bba33e16bd2ab15e6301cb1b9dab2",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-121-122-vectors",
+      "sha": "dbda56d5409c81c6d11c398532a2b5840c43ba39",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-124-edit-payloads",
+      "sha": "5e4923aa2da574e1b74d42ba940dc5aa7d85a933",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-125-log-verbs",
+      "sha": "27b9ae128111e8449a40528f2bb47388def08050",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-126-telegram-bytes",
+      "sha": "a9a68dc1325925c7ff057a03126db82df0494d0c",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-127-105-autonomy",
+      "sha": "79a1dfb22872771be96a6334ed0e62a35963a7ba",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-128-quotepath-queue-tier",
+      "sha": "b19e9738b9a38c7c40c41030de40c097dd35e8e3",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-129-recovery-refusals",
+      "sha": "9df32e585b71a5c8e87b24af1cf481f9d89b0936",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-130-amend-publishes",
+      "sha": "5708e246a642b160058ddf756b01b6c998470c59",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-136-specificity-criterion",
+      "sha": "b7ddca0c8bd5f4121b0cf06d55b952fa8d15dc1f",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-137-normative",
+      "sha": "8fb29d78820f838af821d68e9b82425c375b4054",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-139-141-134-hook",
+      "sha": "229143845017bc2ec483b5813db943b752a6ec03",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-140-120-execute",
+      "sha": "5079472964ba5ad40dce106f180fdd955a6da243",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-142-123-gate",
+      "sha": "5211d3340fd5488e6aeb8bfea4491e91f05960d0",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-143-144-legibility",
+      "sha": "e85c372328bb69e6d832656de140f8bfe6dadbdd",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-145-loop-streak-spec",
+      "sha": "02d6ba13d358486088980c5a1ba09be7f65637bf",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-145-streak",
+      "sha": "41d2c9f76ee05d5fdc8836ed60d81292ceaf8e53",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-146-harness-binding",
+      "sha": "cf6c393df671b4a8cd8942ee3e7d9fb7a4524295",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-147-intake-registration",
+      "sha": "9737e3d85fc147e30258cf38cd6137a19c7774ee",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-148-envelope-historical",
+      "sha": "7c8a3fbcfb6ae1198bf241a3312c6e5244331de6",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-149-ci-wallclock",
+      "sha": "e7b7ada6767e7128bfd68f8681a3bf518dc0db83",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-151-guard",
+      "sha": "5b74b330e39e2ce693671f1451e31067f69993c3",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-151-protected-path-worktree",
+      "sha": "210d8428560afec764d052af0a1a030e592eae76",
+      "merged": false,
+      "reason": "unique-or-unavailable-tip",
+      "disposition": "preserved"
+    },
+    {
+      "name": "aprv-152-hook-docs",
+      "sha": "4ef5f3bf052d3dd3e036368adbbef5a45d8d443d",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-159-floor-shard",
+      "sha": "2dd92ed8c3206bbb50982a13d02cba1b488da10f",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-167-amend-progress",
+      "sha": "52a689be988e55066743d5b1d250ea5829f43c4f",
+      "merged": false,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "aprv-173-intake-limits",
+      "sha": "62c9965df6c1b810cbce6b25cd9f5aa17946cf70",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-174-175-mcp",
+      "sha": "81b740095da7978beefe0606dd7f956435c7327c",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-177-demo-child-config",
+      "sha": "895b19434cb3bbfb98ffb1292330e6d22e0b2978",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-178-167-operator",
+      "sha": "693cf7939207147ab6cb83965eab3447a93dd5d1",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-188-hook-via-daemon",
+      "sha": "8628583c6f0cd07cebc16ba37441359b37187186",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-192-dark-session",
+      "sha": "0af782276f158573371c51c6615e2456f4a3b527",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-193-design",
+      "sha": "c8f11268d6b33a5ba3f79d46772c188e7dc18ae2",
+      "merged": true,
+      "reason": "active-task-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "aprv-195-journal",
+      "sha": "5012085ef9834b5f2a512aea8c5f4ed586f01dac",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-196-listener-acks",
+      "sha": "19bcdc654abcabb85422256b15f821a1a995b6ef",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-197-gloss",
+      "sha": "0e25bec894242deb966321a138637076a560c42d",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-198-194-classifier",
+      "sha": "ba08cf866411149b2d92754e02564054e3b5e0d8",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-199-envelope-2",
+      "sha": "f425457878e1bb278b66751247b7b2419ae189f4",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    },
+    {
+      "name": "aprv-200-grant-order",
+      "sha": "601241ea4f55670e17347efd7d0a4e318dd4dacc",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-201-decidelater",
+      "sha": "3d56bb0e991c9459d977f74f335d8adb6d299d2f",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-202-guard-hunks",
+      "sha": "4cc3c95829e69f5f020e5175e2a4f7f1141ad7a0",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-203-self-syncing",
+      "sha": "9f02b09d8c9b37ad24c664ecf3e92dda11f59a7f",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-203-spec",
+      "sha": "a6820d81f65ede4f779e242d1341ca35ebeb4063",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-204-daemon-advance",
+      "sha": "3969e0923982608371310fd2fb98773d168e8fdb",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-205-env-scrub",
+      "sha": "9e2f32c8b037b280962325dcf53abaa9af280f0d",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-206-tap-latency",
+      "sha": "2feac5870788c39d17f4d29ccfff37553badc9b7",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-207-gloss-env",
+      "sha": "3a16a9583a3a9d49a7f87e5635427296a5c3ffed",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-208-daemon-draw",
+      "sha": "1bb403a7f0a2b2c0f56947d4cd5a3fa2c74e5a37",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-209-hook-entry",
+      "sha": "8cfa7f3d0d8647df239884ca8151dfdfb2e74c33",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-211-daemon-advance-adopt",
+      "sha": "f7e8fd1292d3ddcc813c17d0bab5415a8761de4d",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-211-daemon-tick-cpu",
+      "sha": "147fc9fc61fc6d3839d86cfbf9e3cd4d1565cf5d",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-215-up-preflight",
+      "sha": "a7e6b66a934753c19acb068b65f4e0e7570dc15b",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-216-telegram-paced",
+      "sha": "dcfc5a57a65f968e1e837f476acc90776d9f59e8",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-217-build",
+      "sha": "94e8eaaffbc5cd35880d26b7cb79652f7c7109b4",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-217-design",
+      "sha": "a76cf4dbc5f2a2dfa497b3c0252e2923207f66ab",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-218-prompt-rows",
+      "sha": "f362f9d2e6e6f658363d7a7d198989116c2378f8",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-219-log-anchor",
+      "sha": "7ef56097dee3a0e8ebe9d7f5b37ca24ffd1bcf9d",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-220-signed-checkpoints",
+      "sha": "937d405515b758ebb385a743bd9f9427578fb4b9",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-224-e2e-rerun",
+      "sha": "95ec617592aca12dd4ab8701ae6be27a18e42353",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    },
+    {
+      "name": "aprv-225-sync-payloads",
+      "sha": "f620a62fc32392bb3923d29fac1cb8cc2abacb9d",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-226-backlog-example",
+      "sha": "48f17d7b620895fd2e3106ad1966a1fcb7f55a96",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-227-harness-version",
+      "sha": "d95ab0bc381dacdaf1a3027df9ec83f5e95c4ab3",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-228-harness-update-class",
+      "sha": "3fb62c1b65174c2f93ea51eb86afd3d82a9fcd22",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-231-conformance-pin",
+      "sha": "fd8029b6afda6413388a5e54aeb56bb32a432821",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-232-rulesets-probe",
+      "sha": "edff4a157c1ee9fec770a98d7ea6ce6b75f06964",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-233-234-advance",
+      "sha": "bc9b1eb40cc4cf02bf4ef317163c9b70a84458ca",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-235-refused-decision",
+      "sha": "fef662b248f621cabd337db579a99a28d3e3e76d",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-236-writer-retry",
+      "sha": "3d47cbebef8796aa796d322e876f2951149cb1a0",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-245-coverage",
+      "sha": "904a5dda68153ee7b9603217fa184617695a05ee",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-247-telegram-demo-doc",
+      "sha": "79768b212db7b9676f7964896ad20ae36804fa73",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-248-timing-tests",
+      "sha": "2b978726ec05df0314f9045427db77a92a5d1225",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-257-checkpoint-tap",
+      "sha": "74af3d37acba07c7aa369122f0fe0512687796b5",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-259-finish-race-test",
+      "sha": "b8f05e2bcb364d9cfbf43b8472b6bf6ff541267c",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-260-guard-log-lag",
+      "sha": "5444d57c26b727aea5e1710bf332faea0c46f5b3",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-264-dangling-sweep",
+      "sha": "7cc8511605b72fa33428c50980a256e8d0681c21",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-266-path-routing",
+      "sha": "baaee00057e0ecdf48f3b87a352b0e8423b5f1b8",
+      "merged": false,
+      "reason": "unique-or-unavailable-tip",
+      "disposition": "preserved"
+    },
+    {
+      "name": "aprv-267-268-classifier",
+      "sha": "607df0075b66eab431af255dbbb6a7e79dabeebe",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-276-278-agentmail-release-stack",
+      "sha": "8246896ee499aecb2db8b721ee27d2b6ddcb6570",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-284-claude-md",
+      "sha": "d64c8d8e87c7953f0d42333a2bb9e59c9e47d0e1",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    },
+    {
+      "name": "aprv-288-done",
+      "sha": "e08bc9e3e195a54c6fec6d7ca4362d927b88a392",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    },
+    {
+      "name": "aprv-306-publish-retry",
+      "sha": "4640f807286aa23eb55e39430b23b18dac8f4e5b",
+      "merged": true,
+      "reason": "active-task-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "aprv-307-trusted-publishing",
+      "sha": "467171ea3a07463118f4eb4a82cd724349d69ac5",
+      "merged": true,
+      "reason": "active-task-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "aprv-309-quickstart",
+      "sha": "df98ef7886eb9e72e4256c87032fa9d083243e30",
+      "merged": true,
+      "reason": "active-worktree",
+      "disposition": "preserved"
+    },
+    {
+      "name": "aprv-39-daemon-core",
+      "sha": "a60c368ca399ce7e1f0aaef828a8e2213c23a50a",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-41-retention-pruning",
+      "sha": "907b1d4c72056ce3a529a946de2f4f149205f5d9",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-42-git-evidence",
+      "sha": "bf4c263db25b06524714bd6a2437f92ad5148647",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-43-head-caching",
+      "sha": "b64b51bba98c581257a3c8c005de177364924d60",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-55-channel-dispatch",
+      "sha": "88070098d3f8160cb984279656cde0d274bd28ce",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-56-59-chores",
+      "sha": "59c6126da8ae349b25e94e7e5ed21f3e51aef56d",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-57-58-daemon-events-skew-knob",
+      "sha": "795e7c21c21db5ff82be847956e6d8f1be7b426d",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-61-task-file-writer",
+      "sha": "be21432fffd90badaf905284269e6956f2d5c312",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-62-write-back",
+      "sha": "5ff1a1a24ba8cc2683ab9300fdbf1286acc88c96",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-63-envelope-loss",
+      "sha": "c63f48162de435fe7eafe0f710b65caddca04165",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-64-agents-md-import",
+      "sha": "a2ca04fc8a4d9f26dca6cf2bb0e63f9eb74222ac",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-65-backlog-fixtures",
+      "sha": "2fe6aeb2f346d94b2714cc0daddb8d4045c5181b",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-66-filed",
+      "sha": "6b30bad4a6ee72a9dab6b034b2500dbd0aef50e0",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-66-upstream-issues",
+      "sha": "22ccc05f24ba8cac8d5b25945a603a15307f68b1",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-67-adapter-contract",
+      "sha": "6874411cd711b5d4ac08cc8af696c940747bf433",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-68-vault",
+      "sha": "4510d63ed8abbdff67d151b572b2ad52e86dfc6c",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-69-email-adapter",
+      "sha": "be40a499f16c95b81084311165981ee211d6a425",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-70-m7-email-demo",
+      "sha": "47e99405d35892fce7fb7b36005e820f12caa0e6",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-71-init",
+      "sha": "0e16d05e72194b5859803dc35da4b6e2540be2da",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-72-telegram-env-names",
+      "sha": "328f564e601458483a2483eaa00f99fd12f6a7d7",
+      "merged": false,
+      "reason": "unique-or-unavailable-tip",
+      "disposition": "preserved"
+    },
+    {
+      "name": "aprv-73-env-source-map",
+      "sha": "a8a6204208346d91a3db80a88ab645dc621c3f25",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-74-setup-verbs",
+      "sha": "b94eca3c6889aaeef9e3a8a56aeeca5cbe37ff7b",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-75-doctor-fixes",
+      "sha": "a785e6fe6b35d96c880da59fab7e8ed72f1f7dbe",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-76-docs-cutover",
+      "sha": "0670656d6615fc76306dc313fef3df66152a947e",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-77-probe-smtp",
+      "sha": "affb42032cccda51170bf24741d05ed43da73c50",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-78-setup-adapter",
+      "sha": "6bf511cbc8fb0960f97a6a881fc95aaacb5ce11e",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-79-setup-channel",
+      "sha": "116a92a015d5b02da85921b840c95c3d03873b62",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-80-record-example",
+      "sha": "578839176959f18c5be0204a107fba29ca0b1ba9",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-85-instructions",
+      "sha": "6ef25fde4c1d1d78d1d1d5bfdd2448323b09e804",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-86-envelope",
+      "sha": "f34835e9a0ca5498f084d9159d42ba36de5a4be5",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-86-sdk-add",
+      "sha": "2376c202810af080fffd74f2a9ae8b44908703b8",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-87-mcp-server",
+      "sha": "28905c8a3e4d1df1caa850f1c6fe4d8316c9bd93",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-88-mcp-e2e-demo",
+      "sha": "9567b37591b2466c3c649d3c7fd399eea6cdb729",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-89-readme-pass",
+      "sha": "2d1c6639b72285ead20f04ad13fed6d2ec506a09",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-90-setup-reprompt",
+      "sha": "0529ed1dbf6f6bc78ef84cded88196e9b1911544",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-91-verbosity",
+      "sha": "dffb4ac3611198b0c20077a53427792094db36ef",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-92-amend-protected",
+      "sha": "5a0bf60c77a8a39a40ded13d4a91112441b9b58f",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-93-legibility",
+      "sha": "ec7801e18b3c6e8b92f1f108ad1375ff69f082b4",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-96-telegram-longpoll",
+      "sha": "b37a067c9bcde46fd7c80eaa50d3a628564b4bb8",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-99-setup-email-probe",
+      "sha": "456a4c115f2f18c31877569d78b417ea63e1bf7f",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "aprv-anchor-resolution-fix",
+      "sha": "e26c39a6fe877c75c5967bc2d0571cf92c108e20",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "backlog-aprv-39-43",
+      "sha": "043b886ffb8d0a69b70607623372d16bafcca31e",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "backlog-aprv-40-41-42",
+      "sha": "5a10f1e1ce4d6fd853bd696ea9fb41469f441451",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "backlog-aprv-49-51-final",
+      "sha": "383bc21cf44fa40b3e1da13e2c9ac8578e2873f6",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "backlog-m6-close",
+      "sha": "cc9df2f62d3c0f1da6265ac77dddac072e96cfa8",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "backlog-m71-close",
+      "sha": "0479d3c8229e1d1ad01f261734ae1bba56a03f30",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "backlog-m71b-close",
+      "sha": "2d017ed3061d5f1a8beee08fd8b5fabab74bcd8e",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "ci-merge-group-trigger",
+      "sha": "35d571bc1e10d7674c84bedefb86e6891670cfb0",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/agentmail-integration-readiness-020611",
+      "sha": "b1e3c657ae1b0146a9dcad4815bf6c54f3997d70",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/approval-gate-onoff-command-34cbfb",
+      "sha": "b24bb0b70635944f4632447ed01f422a932ccabe",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/approval-md-cleanroom-setup-bacfdb",
+      "sha": "7eb6a292450e147239f482f604ed1705407df65c",
+      "merged": false,
+      "reason": "unique-or-unavailable-tip",
+      "disposition": "preserved"
+    },
+    {
+      "name": "claude/approval-md-comparable-projects-20a190",
+      "sha": "7e4c6c99138b5be49f3001fbe86c4d0d99fd54c0",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/approval-md-personal-name-39de30",
+      "sha": "bc63f49d31a06e0a35dbca3852897f4a4163af20",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/approval-message-ui-37ea86",
+      "sha": "e189315c063da928f589671783d4f51995b40532",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/approval-signals-human-values-f0cf71",
+      "sha": "b7ed4763c584614865f2f8cbd4b72fa27142c330",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/approval-up-troubleshooting-8e9577",
+      "sha": "08f7073fbbc2c9a11d424a14bfaa802839bc84e5",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/aprv-40-audit-sampling",
+      "sha": "9b51a5968db973886c8f299bfe6be752e469a950",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/backlog-fork-strategy-ce4e7f",
+      "sha": "a23cbb523ad93b14d4f7fe660ef650aaf6131743",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/code-credential-exposure-22abc9",
+      "sha": "45ffff5eb5755073d4e2c4e0936b11fe9c4bc598",
+      "merged": false,
+      "reason": "unique-or-unavailable-tip",
+      "disposition": "preserved"
+    },
+    {
+      "name": "claude/commerce-agents-adapter-9946b5",
+      "sha": "cee8294ad14d93b174b7a59e582ac1ec986f125e",
+      "merged": true,
+      "reason": "worktree-tip",
+      "disposition": "preserved"
+    },
+    {
+      "name": "claude/email-demo-security-review-e52795",
+      "sha": "a6d188cb4dca7e05657eac89957b9daae3be328e",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/gated-messages-approval-60aa72",
+      "sha": "059546b24f09e079911e0da4d65f658c565ff41b",
+      "merged": true,
+      "reason": "worktree-tip",
+      "disposition": "preserved"
+    },
+    {
+      "name": "claude/gateway-approval-adapter-8d6dc2",
+      "sha": "70a14891b73c1c1aa816834ab4ca02484cfe021d",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/hook-cpu-spinning-a9e503",
+      "sha": "89987cfa8892cba34c24babeb289f557ff92593a",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/open-source-licensing-658620",
+      "sha": "4853132a481d875c529924c5feda9614f3cd00a1",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    },
+    {
+      "name": "claude/pre-launch-adapter-integration-beb12d",
+      "sha": "6df28b6c199ff4cfc2a7a86e5550e9176b5f1408",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/pre-launch-backlog-adapter-1db640",
+      "sha": "78e13ff04d89da9ea75abb228e0500540a153b22",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/project-luma-event-relevance-3d2cb0",
+      "sha": "3df09a3fc8e83a1bfc375677ecd579efd4d9e72e",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/remote-control-f54e71",
+      "sha": "4f258b100d8ed2226eac1fd2fc2664b055488e20",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "claude/rsi-demo-restyle-combined",
+      "sha": "ac90682cd0f0eba8d7801393021b6ba00a1562a7",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "codex/aprv-249-hardened-authorization",
+      "sha": "8732bcaaafd662adc0710115342f69404bf8c7fe",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "codex/aprv-250-delivery-instructions",
+      "sha": "058b8a39707bd9d5290323da93962275f9c1bc41",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "codex/codex-hook",
+      "sha": "ff455012fde28b2545fe1ede576da19333b64f0a",
+      "merged": true,
+      "reason": "active-worktree",
+      "disposition": "preserved"
+    },
+    {
+      "name": "codex/codex-hook-closeout",
+      "sha": "53198425f683b218f311f43e6d986d8bd6744fac",
+      "merged": true,
+      "reason": "active-worktree",
+      "disposition": "preserved"
+    },
+    {
+      "name": "codex/completion-records",
+      "sha": "ceb879642de4b1a0a4cd534fe044a895e475f4b7",
+      "merged": true,
+      "reason": "active-worktree",
+      "disposition": "preserved"
+    },
+    {
+      "name": "codex/gloss-provider-stack",
+      "sha": "dbbd8384e57e08e233ed9021c0239cd592fbd1d2",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "codex/irreversible-policy-backlog",
+      "sha": "7f266c8feec163260b2a54b7ecae7fdcca6a28e6",
+      "merged": true,
+      "reason": "active-worktree",
+      "disposition": "preserved"
+    },
+    {
+      "name": "codex/telegram-queue-wording",
+      "sha": "fb309c3eaa81631d253fe9c5f63a7d1c5b709f7f",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "codex/workflow-checkpoint",
+      "sha": "fb4ad5fd398493370f859b0c6f031379a09c11f2",
+      "merged": true,
+      "reason": "active-worktree",
+      "disposition": "preserved"
+    },
+    {
+      "name": "cursor-agent-orchestration",
+      "sha": "ee58cfa4b591b58f601546ef91870589d802f130",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "cutover-claude-md",
+      "sha": "c632b010e1eac74acefbd40a831cd0b070a3ce93",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "demo-paper-restyle",
+      "sha": "4ef3f4377d92d2d54718c8fd90b6cffef337dab3",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "demo-polish-records",
+      "sha": "b8c504c22a1e5e2d4382944f8b99ee52b11c0dc1",
+      "merged": false,
+      "reason": "unique-or-unavailable-tip",
+      "disposition": "preserved"
+    },
+    {
+      "name": "docs-doctor-wiring",
+      "sha": "d5a71440b6d07a744445275bc427bd31fc12eba4",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "docs/hook-cpu-postmortem",
+      "sha": "cd0b48df66e40f8f3958e9683379f975c55badc7",
+      "merged": false,
+      "reason": "unique-or-unavailable-tip",
+      "disposition": "preserved"
+    },
+    {
+      "name": "fix-dogfood-values-live-block",
+      "sha": "6c5e0a1d15e7a2f2a0c51e584c3ac90d0a23f2b1",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "fix/telegram-mock-keepalive",
+      "sha": "670937a25ae3df0ce4472ba11efcb2a2fb5db8c4",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "followups-launch-md",
+      "sha": "fdd2d00abe4e25e9871753c85e4a319f2a408757",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "gh-readonly-queue/main/pr-95-d7f9c5b491c0224d1bfadf64b5f1f3890c3bc953",
+      "sha": "131ebf2165b83194e284307d0f85cb8c64e6df0b",
+      "merged": false,
+      "reason": "unique-or-unavailable-tip",
+      "disposition": "preserved"
+    },
+    {
+      "name": "handover-2026-08-19",
+      "sha": "9c9fed3c0cd15ff63f8b02712aff69ed664bdf1c",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "hook-post-events",
+      "sha": "5ceb75e2d0c0cb64404f2a7c09f5d4e17767cc48",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "launch-to-private",
+      "sha": "14c37e2b38388359ac9b3eb7c368bc5c11b37f2e",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "m6-decomposition",
+      "sha": "b542575509f77ebecb1efa84a5d289285c34e4eb",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "m7-decomposition",
+      "sha": "3fb80b77617b5e4b48c129f7a711a23c536992bc",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "m71-decomposition",
+      "sha": "2cfe16b7e8ef3994fc4d87a8868713cee46ff153",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "m71b-tasks",
+      "sha": "e90dfe30b6a9a7cd22a60dd1e8cd2d0bb6b30bf7",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "m8-decomposition",
+      "sha": "dfe89c6821d254a391534d7b44e024a3d17ad73e",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "m8-fold-82",
+      "sha": "9200a2f6d9365bfd5da9af1e44710b8f6b786c3f",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "main",
+      "sha": "2e5fc1897638975c14d8bcc09c480672765e71f3",
+      "merged": true,
+      "reason": "active-worktree",
+      "disposition": "preserved"
+    },
+    {
+      "name": "organ-attestation",
+      "sha": "357f36fce0fa2edf6ddb9e0ef6799c2d4f1ebfb5",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "overnight-backlog-wave",
+      "sha": "95335655dab58c01e001ce7a66ae838ac547adeb",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "overnight-wave-2",
+      "sha": "181ba35e16ddf246151a44b8840455f0712496ee",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    },
+    {
+      "name": "pins-ceremony-2026-09-06",
+      "sha": "a7a12960403fc94b112783e96b283b5549cab6ce",
+      "merged": false,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "policy-amend-1056",
+      "sha": "fbee1a1dff3f22a49bb03e4b10481dd2a3691fed",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "policy-amend-13704",
+      "sha": "49fd69de40c9c9c8c42c7bdcd58e4574212ded0e",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "policy-amend-21093",
+      "sha": "88a924816dbb3a488d3b630bc0d0f7de000dcb3d",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "policy-amend-23351",
+      "sha": "775ce23188086bd1f00fb42b749f7e732f71f85b",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "policy-amend-27110",
+      "sha": "585a53505a6d25c349a64e00a92eb2cda9f429c9",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "policy-amend-29285",
+      "sha": "ccb1c62b2c0016314868a97b241274a8653420f8",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "policy-amend-293",
+      "sha": "6950afe5ec59e882462f728542230998a5eccad0",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "policy-amend-3067",
+      "sha": "a77eabb016125c9e39e7a162bc55c7ddd5a0d347",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "policy-amend-513",
+      "sha": "78b9283989aad48692524597c4d30b6e135dfc67",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "policy-amend-5147",
+      "sha": "4c7a25abdcf21b5a2968b4228a7f6c51d47dcb4a",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "policy-amend-5977",
+      "sha": "ded65c8d1ea94e1882c5fcfb540403d9a768d9c9",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "policy-amend-7355",
+      "sha": "50733c0b5ae3024a01d27d70fb3ff3199bb865b1",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "policy-amend-7413",
+      "sha": "10ce6adbd0e8ba9a6122efc70f2a7aaf7f8ce6c0",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "policy-protected-paths-spec",
+      "sha": "3edfb021cc79c20790449343fb12b6497365ecff",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "proposals/solo-quickstart",
+      "sha": "1479c9d1a861ce2ee0d7b11bdd2858c14b0a0693",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "protected-batch-2",
+      "sha": "ce13e419f20a3cee71b5db8fc2b4a9ed6ca48295",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "readme-copy-pass",
+      "sha": "15dd8960010d847c0809e5cf6e37206f3f4f0456",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    },
+    {
+      "name": "readme-dictionary-refresh",
+      "sha": "22b0784769e49956937e13decf956c86bc5894f2",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "record-example-private",
+      "sha": "ebea4de9d1335a6408695f3457861a405cde5470",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-124-125-signoffs",
+      "sha": "56f77cc732168cb096586a15b454e6be9617f0bf",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-151-envelope",
+      "sha": "ec7cb60847891745b0d6e175456144e04dfe3559",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-198-197",
+      "sha": "a71ff3f435dbe902b3f417ece3ff139448dfbe4e",
+      "merged": false,
+      "reason": "unique-or-unavailable-tip",
+      "disposition": "preserved"
+    },
+    {
+      "name": "records-199-envelope",
+      "sha": "cd654969723e98712cd682cfabc2f276424da61a",
+      "merged": true,
+      "reason": "active-task-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "records-201",
+      "sha": "091ad94958d13faa31072b8632f345185eb7ffea",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-203-204",
+      "sha": "d69a01d0339520008b85b14d7a42108cce8c3fd9",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-203-note",
+      "sha": "103a7c9c2e76ce95cd3ad63746bc60ae4ffe8d5f",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-205",
+      "sha": "8d5aa158cce968418de28fcddee7b55a229e6271",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-206",
+      "sha": "cf002267fae1f3ab7a59aad1aaf479dfd73db59c",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-207",
+      "sha": "5650c0d037f42ba4b31e9ee7bdf196c5363b27dd",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-208",
+      "sha": "63c079bb012188a9df3d8a1fa7770c16e1b69444",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-209b",
+      "sha": "384afe858384052517700e7b5d15d883b92c4984",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-210",
+      "sha": "38fdbca47a2222ec34e0cd19cc2e0199c0766092",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-211",
+      "sha": "32964706d746838f0fc55325ce249de16a6c33c1",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-211-216-231",
+      "sha": "c1054514ce74120f5700d0dd90b13f040696bc43",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-215-216",
+      "sha": "9e29cdff5e0d389d95b53f7f4b87b3d410a2e16e",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-217-218",
+      "sha": "69515b06e54a29b9a45cb4b987aa03c40b9f03cf",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-219-220",
+      "sha": "8910d5087b26d86d4acc9a9c2d204a59e80884f7",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-225",
+      "sha": "587bb3fb84ee6c7f24e292e02f5d71bb62866216",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-225-209",
+      "sha": "285903bc05e0182f8bb7744659defc46c50e6696",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-230",
+      "sha": "1e5334c25713eca824146de236735294fb290fa7",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-262-266",
+      "sha": "c725ed651bb3c4fb0f60ea7bbdeab478e8dd0c08",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-264",
+      "sha": "9b8948a7e2ff14cfc87ab0a0a28e968dc2c538e0",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-266-268",
+      "sha": "70a7aa1d6991458a701fd1db21009644abd28883",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-267-268",
+      "sha": "5c831acef84401f7ab9b2a372da984adacf8ecb7",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-269-270",
+      "sha": "0e19d37db9716987dd2f299cb3cc8acf354e1a49",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-274-275",
+      "sha": "835e9af4a53a290ee97508e69d549e12f0d98fa9",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-aprv-105",
+      "sha": "8809ce973edc65ffdf4e78492da59abe2ab82dbd",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-aprv-192-193",
+      "sha": "5d954d01f9d9180526e4914445e4e75c04a386ce",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-attention",
+      "sha": "b606d84cc0390675bc580e7f730bfa3da2cec03f",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-attest-channel",
+      "sha": "80c6056c2b630a3d6154637d79d0834516e81edd",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-build-wave",
+      "sha": "9947e1ed74cfa7d87ad6bb2309baad9abd7b8299",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-day-wave-0825",
+      "sha": "ea1613fce227f0d697f0022aef1ef55f199143ce",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-evening-wave",
+      "sha": "7c58976a59785d860b3bdcf8d43db0f24e482f12",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-log-2026-08-26",
+      "sha": "a075050c4fda0cb56fea8637a4ecabcd11e133e8",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "records-log-2026-08-30",
+      "sha": "0747759bd30bdde579f4ef155e25332895863c25",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "records-log-2026-09-01",
+      "sha": "fc4c3bf36f127d7576db12f18e0e93ec5119a53e",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "records-log-2026-09-02",
+      "sha": "1af796c954f22a940973445e3223a300154d950c",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "records-log-2026-09-04",
+      "sha": "715fd84f7f3b7bd28fc5c9e0275747b4066f2b8b",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "records-log-2026-09-05",
+      "sha": "8df74fee8ca3c7de5cd421163f338896e2f9c7aa",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "records-log-2026-09-05-2",
+      "sha": "d0a582a7e44bdfb09c311c8509783e094e77e58e",
+      "merged": false,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "records-log-2026-09-05-3",
+      "sha": "cae84b3e6606436ddcf428b712b8cd5efaf0c8e5",
+      "merged": false,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "records-log-2026-09-05-4",
+      "sha": "b949fc8823bc918113c012a6041898e5de9b65c9",
+      "merged": false,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "records-log-2026-09-05-5",
+      "sha": "2d385baaa631ea3c4eef22986800d329f1ffbf82",
+      "merged": false,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "records-log-2026-09-07",
+      "sha": "b5e9606ecb0a2dd6f59a5d32e130080707684997",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "records-log-2026-09-08",
+      "sha": "f8d31aa7aeae7a1cb28464527f8f7d6dfb87ae9a",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "records-log-and-policy",
+      "sha": "5fcaba3fc7d1a6f9a647fda9deba3e060a25555d",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "records-m7-close-w1",
+      "sha": "faebc4580f7fae22aa7c757781c4fff7ebb0f253",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-m8-57-58",
+      "sha": "d6e2a0878ce70a7a41f84a91ceb477c7c1e4988f",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-m8-89-104",
+      "sha": "ddd9e6870f80f66ecf08f15f00129dd3fefa3c9d",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-m8-93-91",
+      "sha": "040fc8b3edcc54ba9c87da237f2f6a5f6a3540f9",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-m8-close",
+      "sha": "ede92bbee1854044139ecc959fd0457601f84793",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-m8-wave2",
+      "sha": "a359e2c1b08d33deef795dcffb8095d843749d61",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-m8-wave3",
+      "sha": "b82bae5a883ec550d49384f314ee54c6430168f3",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-readme-task",
+      "sha": "3fea28de596d4ebcbda600c32e6318e3ee90ffa0",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-v02-and-111",
+      "sha": "a0eaf08642e544aa48cce71bed79eb2200081655",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-wave-c",
+      "sha": "79692f7ef087f3fe4dd74ebc2fdc0ae7ce9ba047",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-wave-d",
+      "sha": "8286c27c513f5b59b3859d6e8ed483d4d349e540",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-wave-e",
+      "sha": "ed22f7f93a6a642800a3c8cd0cccb915a05fd915",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-wave-f",
+      "sha": "0c7ef9fe00f92b013bd5cd21e6088fbcc1e6c093",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-wave-g",
+      "sha": "f981fd8c5a4dcab9f2ce46ed3444a96bc5eed70d",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "records-wave1",
+      "sha": "52e8ddf44e9e0f7017c6e8e88ead8b43f3975aa7",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "release-0.1.0-records",
+      "sha": "957e9f26ffee8545214af40a9390558010727707",
+      "merged": true,
+      "reason": "active-task-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "release/0.1.0",
+      "sha": "2e0f38e488f6eb5a776b2eedbcd7f6785ef430fa",
+      "merged": true,
+      "reason": "protected-or-active-delivery",
+      "disposition": "preserved"
+    },
+    {
+      "name": "rsi-page",
+      "sha": "e359031290fcc66f53bd52f0ebd0da96c39b1e3e",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "site-level-up",
+      "sha": "6060671f392a41030caa2ed7df2a3584bb46c163",
+      "merged": false,
+      "reason": "active-worktree",
+      "disposition": "preserved"
+    },
+    {
+      "name": "spec-7-workstation",
+      "sha": "81ebf909a10e6a87f6405dcbd52ce3b12ba429fc",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "spec-batch-3",
+      "sha": "5030af89b1ca2e8ec02958de75cfc225b2e12287",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "spec-pending-suffixes",
+      "sha": "3de321bd47ee8eb7d79b33083ec0a077c6ab0e35",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "spec-signoff",
+      "sha": "8b209d58534a91fd48c91ae70572291057dc9fe6",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "task-287-notes",
+      "sha": "c76eb7e84c68420c5a37efd2467d905f99c0d077",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    },
+    {
+      "name": "task-296",
+      "sha": "a0e29a437599ca2bab0353dbb888e6e3cbbae0d6",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    },
+    {
+      "name": "tasks-292-294",
+      "sha": "5807d41905a0ca3535a57dcbe86bb7d5f88554e8",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    },
+    {
+      "name": "verify-184-168",
+      "sha": "66de8cbe4801464d11e63f6964c38e76f8f4f0fa",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "wave0-records",
+      "sha": "3c21d105cad3cfd1f23ab0077c0ba2512bd37091",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "wave1-batch",
+      "sha": "956d0b42a18ac43182396720b0fe2e86992096ec",
+      "merged": true,
+      "reason": "merged-unowned",
+      "disposition": "pending-gated-deletion"
+    },
+    {
+      "name": "worktree-agent-a49ff8f55a92a1e9b",
+      "sha": "14cac971e1e3ad333bbbc34344c616cbd076cac6",
+      "merged": false,
+      "reason": "unique-or-unavailable-tip",
+      "disposition": "preserved"
+    },
+    {
+      "name": "worktree-agent-a4a8675187125a707",
+      "sha": "12b214f7f683c29f919e1522446cb2627122c8dd",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    },
+    {
+      "name": "worktree-agent-a903041ba5389f67d",
+      "sha": "844e0aa37e3177bd249df129b8e375b9f4440edc",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    },
+    {
+      "name": "worktree-agent-a9e56290a63c321ad",
+      "sha": "944be41476cd9e45889aa9b949fc33a451436107",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    },
+    {
+      "name": "worktree-agent-ac300d26e18dfa686",
+      "sha": "b244620043dac137f020ec521bafe8633d07622d",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    },
+    {
+      "name": "worktree-agent-ad1606527b3bf8a47",
+      "sha": "5c374351f792071fba7db2e4eb18845ad4d9a5c8",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    },
+    {
+      "name": "worktree-agent-adfc0f54dc3111def",
+      "sha": "98aab6901e140a12ead8c3fa68b1fc8db2e22fbe",
+      "merged": true,
+      "reason": "recent-tip-preserved",
+      "disposition": "preserved"
+    }
+  ]
+}
