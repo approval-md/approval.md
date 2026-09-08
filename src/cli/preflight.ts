@@ -45,6 +45,13 @@
  * `git reset --hard` appears in none of them, and never will: it is the command
  * that turns "your checkout is confusing" into "your work is gone".
  *
+ * A fourth refusal reports a write that failed rather than a judgment:
+ * `up-preflight-failed` carries the step and, for the build, the exit code
+ * `npm run build` came back with. The runtime does not start after it, because the whole point
+ * of the rebuild is that a daemon and a hook running compiled-away code is the
+ * defect being fixed (APRV-301); `--no-build` is how an operator says they
+ * meant to run the stale build anyway.
+ *
  * ## A fetch that fails is weather
  *
  * A laptop on a train has no origin to compare against. That is not a reason to
@@ -134,6 +141,55 @@ function newestMtime(path: string): number | null {
   return newest;
 }
 
+/** The four paths a freshness question is asked about. One definition. */
+function installationPaths(root: string): {
+  loader: string;
+  marker: string;
+  sources: string;
+  tsconfig: string;
+} {
+  return {
+    loader: join(root, "cli.js"),
+    marker: join(root, "dist", "src", "cli", "main.js"),
+    sources: join(root, "src"),
+    tsconfig: join(root, "tsconfig.json"),
+  };
+}
+
+/** What the disk says about those four paths. `null` means "not there". */
+interface InstallationDates {
+  loaderMtime: number | null;
+  markerMtime: number | null;
+  sourceMtime: number | null;
+  /** `max(src/, tsconfig.json)`, or `null` when there are no sources at all. */
+  newestSource: number | null;
+}
+
+/**
+ * Date one installation: the single measurement both freshness answers read.
+ *
+ * {@link checkBuildFreshness} (doctor's row) and {@link distStale} (the boolean
+ * the preflight rebuilds on) interpret this differently, because a missing bin
+ * loader is a fault to report and not a reason to compile anything. What they
+ * must never do is disagree about WHAT WAS MEASURED, which is what a second
+ * copy of these four paths would eventually cause: a source added to one list
+ * and not the other means doctor calling a build stale that `approval up` had
+ * just declared fresh, or worse, the other way round (APRV-301).
+ *
+ * Raises {@link ScanError} the way {@link newestMtime} does. Doctor turns that
+ * into an I/O error; the preflight turns it into "cannot tell".
+ */
+function dateInstallation(root: string): InstallationDates {
+  const { loader, marker, sources, tsconfig } = installationPaths(root);
+  const sourceMtime = newestMtime(sources);
+  return {
+    loaderMtime: newestMtime(loader),
+    markerMtime: newestMtime(marker),
+    sourceMtime,
+    newestSource: sourceMtime === null ? null : Math.max(sourceMtime, newestMtime(tsconfig) ?? 0),
+  };
+}
+
 /**
  * Is the built CLI at least as new as the sources it was built from?
  *
@@ -159,13 +215,8 @@ function newestMtime(path: string): number | null {
  * exactly the confusion it exists to name.
  */
 export function checkBuildFreshness(root: string): DoctorCheck {
-  const loader = join(root, "cli.js");
-  const marker = join(root, "dist", "src", "cli", "main.js");
-  const sources = join(root, "src");
-  const tsconfig = join(root, "tsconfig.json");
-
-  const loaderMtime = newestMtime(loader);
-  const markerMtime = newestMtime(marker);
+  const { loader, marker, sources } = installationPaths(root);
+  const { loaderMtime, markerMtime, sourceMtime, newestSource } = dateInstallation(root);
 
   if (markerMtime === null) {
     return {
@@ -188,17 +239,13 @@ export function checkBuildFreshness(root: string): DoctorCheck {
     };
   }
 
-  const sourceMtime = newestMtime(sources);
-  if (sourceMtime === null) {
+  if (sourceMtime === null || newestSource === null) {
     return {
       check: "build-freshness",
       status: "skip",
       detail: `${sources} is absent (a published install carries no sources), so the build cannot be dated against them; ${marker} is present`,
     };
   }
-
-  const configMtime = newestMtime(tsconfig) ?? 0;
-  const newestSource = Math.max(sourceMtime, configMtime);
 
   if (newestSource > markerMtime) {
     return {
@@ -226,29 +273,24 @@ export function checkBuildFreshness(root: string): DoctorCheck {
  * would rebuild a tree it has no business compiling.
  */
 export function distStale(root: string): boolean | null {
-  let loader: number | null;
-  let marker: number | null;
-  let sources: number | null;
-  let config: number | null;
+  let dates: InstallationDates;
   try {
-    loader = newestMtime(join(root, "cli.js"));
-    marker = newestMtime(join(root, "dist", "src", "cli", "main.js"));
-    sources = newestMtime(join(root, "src"));
-    config = newestMtime(join(root, "tsconfig.json"));
+    dates = dateInstallation(root);
   } catch (cause) {
     if (cause instanceof ScanError) return null;
     throw cause;
   }
-  // No sources to date the build against — a published install, or a tree that
+  const { loaderMtime, markerMtime, sourceMtime, newestSource } = dates;
+  // No sources to date the build against: a published install, or a tree that
   // is not an installation at all. Either way "stale" is not a claim that can
   // be made, and a preflight that read "cannot tell" as "stale" would compile a
   // directory nobody asked it to compile.
-  if (sources === null) return null;
-  if (loader === null && marker === null) return null;
+  if (sourceMtime === null || newestSource === null) return null;
+  if (loaderMtime === null && markerMtime === null) return null;
   // A loader with no build behind it: the placeholder-binary shape. `npm run
   // build` is exactly the repair.
-  if (marker === null) return true;
-  return Math.max(sources, config ?? 0) > marker;
+  if (markerMtime === null) return true;
+  return newestSource > markerMtime;
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +307,10 @@ export type PreflightAction =
   | "fast-forward"
   /** Both. The ordinary shape after a few days away. */
   | "fast-forward+rebuild"
+  /** The build was older than the sources and `--no-build` said to leave it. */
+  | "build-skipped"
+  /** The checkout was behind, the build is now stale, and `--no-build` said so. */
+  | "fast-forward+build-skipped"
   /** A refusal: nothing was touched. */
   | "refused"
   /** `--no-preflight`, or a checkout git cannot answer questions about. */
@@ -339,6 +385,18 @@ export interface PreflightInput {
   remote?: string;
   /** Defaults to the checked-out branch, or `main` on a detached HEAD. */
   branch?: string;
+  /**
+   * Run the package's build when `dist/` is older than the sources. Defaults to
+   * `true`, which is the whole point of the preflight; `false` is `--no-build`.
+   *
+   * Opting out changes what the preflight DOES, never what it SAYS: the
+   * fast-forward still happens, `dist_stale` still reports the truth, and the
+   * action settles on `build-skipped` so neither the human line nor a machine
+   * caller can read "started" as "started on the code that was merged".
+   *
+   * {@link inspectPreflight} ignores it, because inspection builds nothing.
+   */
+  build?: boolean;
 }
 
 const ZERO: Omit<PreflightFacts, "action"> = {
@@ -668,24 +726,40 @@ export function runPreflight(
   // would leave the operator running a binary older than the code just pulled.
   // Doctor's row keeps the pre-merge answer because doctor merges nothing.
   const stale = (report.root === null ? facts.dist_stale : distStale(input.root)) ?? facts.dist_stale;
-  const settled: PreflightFacts = {
-    ...facts,
-    dist_stale: stale,
-    action:
-      facts.behind_by > 0
-        ? stale
-          ? "fast-forward+rebuild"
-          : "fast-forward"
-        : stale
-          ? "rebuild"
-          : "none",
-  };
+  const build = input.build ?? true;
+  const behind = facts.behind_by > 0;
+  const action: PreflightAction = !stale
+    ? behind
+      ? "fast-forward"
+      : "none"
+    : build
+      ? behind
+        ? "fast-forward+rebuild"
+        : "rebuild"
+      : behind
+        ? "fast-forward+build-skipped"
+        : "build-skipped";
+  const settled: PreflightFacts = { ...facts, dist_stale: stale, action };
+
+  // `--no-build` is the only path that starts the runtime on a build it has just
+  // dated as stale, so it is the only path that has to say so. The sentence goes
+  // on the warning channel rather than into `detail`, because it is not what the
+  // preflight found; it is what the operator asked it not to do about it.
+  const warning =
+    stale && !build
+      ? [
+          report.warning,
+          `${join(input.root, "dist")} is older than the sources and --no-build was given: starting on a STALE BUILD, so verbs added since it was compiled are absent`,
+        ]
+          .filter((line): line is string => line !== null)
+          .join("; ")
+      : report.warning;
 
   // Built in the INSTALLATION root, which is the tree whose `dist/` was dated —
   // not in the repository root, which is where the fast-forward happened. In the
   // primary checkout they are the same directory; anywhere they are not, dating
   // one tree and compiling another would be the preflight lying about its work.
-  if (stale) {
+  if (stale && build) {
     const built = spawnBuild(input.root);
     if (!built.ok) {
       return {
@@ -703,12 +777,12 @@ export function runPreflight(
   // this task exists to remove. Hand the caller a plan to re-exec into the
   // fresh build instead. See {@link reexecPlan} for why it is a plan rather
   // than a spawn.
-  const plan = stale ? reexecPlan(input.root) : null;
+  const plan = stale && build ? reexecPlan(input.root) : null;
   return {
     ok: true,
     facts: { ...settled, reexec: plan !== null },
     detail: report.detail,
-    warning: report.warning,
+    warning,
     ...(plan === null ? {} : { reexec: plan }),
   };
 }
@@ -815,6 +889,8 @@ export function describePreflightEvent(event: PreflightEvent): { text: string; s
     rebuild: "rebuilt a stale build",
     "fast-forward": `fast-forwarded ${commits}`,
     "fast-forward+rebuild": `fast-forwarded ${commits} and rebuilt`,
+    "build-skipped": "left a stale build alone (--no-build)",
+    "fast-forward+build-skipped": `fast-forwarded ${commits} and left a stale build alone (--no-build)`,
     refused: "refused",
     skipped: "skipped",
     "fetch-failed": "could not reach the remote, so this is the build it already had",
@@ -837,6 +913,8 @@ export interface StartupPreflightInput {
   root: string | null;
   remote: string | null;
   branch: string | null;
+  /** `false` is `--no-build`: fast-forward, but leave a stale `dist/` alone. */
+  build: boolean;
   emit: PreflightEmit;
   /** Where a refusal is written. One line under `--json`, a runbook otherwise. */
   refuse: (text: string) => void;
@@ -858,6 +936,7 @@ export function startupPreflight(
     queuePath: input.queuePath,
     root: input.root ?? installationRoot(),
     fetch: true,
+    build: input.build,
     ...(input.remote === null ? {} : { remote: input.remote }),
     ...(input.branch === null ? {} : { branch: input.branch }),
   });
@@ -919,12 +998,32 @@ export function renderPreflightRefusal(
         preflight: outcome.facts,
       })}\n`;
     }
+    // A failed build is its own shape of this refusal: the fast-forward may
+    // already have landed, so the checkout is current and the BUILD is not, and
+    // the runtime refuses rather than starting the daemon and the hook on the
+    // stale code the rebuild existed to replace. The compiler's own output has
+    // already gone to this terminal (see `npmBuild`), so the runbook quotes the
+    // exit code and points at the command that reproduces it.
+    const build = outcome.failed.step === "npm run build";
     return `${runbook(style({ json }), "up-preflight-failed", message, {
-      state: ["the preflight stopped part-way; nothing was reset and nothing was stashed"],
-      steps: [
-        { command: "git status --short", note: "what this checkout looks like now" },
-        { command: "approval up --no-preflight", note: "start on the current build" },
-      ],
+      state: build
+        ? [
+            "the build failed, so nothing was started: a daemon on a stale build is the defect this preflight exists to remove",
+            "the fast-forward, if there was one, stands; nothing was reset and nothing was stashed",
+          ]
+        : ["the preflight stopped part-way; nothing was reset and nothing was stashed"],
+      steps: build
+        ? [
+            { command: "npm run build", note: "the same build, with the whole error" },
+            {
+              command: "approval up --no-build",
+              note: "ONLY if you mean it: starts on the stale build",
+            },
+          ]
+        : [
+            { command: "git status --short", note: "what this checkout looks like now" },
+            { command: "approval up --no-preflight", note: "start on the current build" },
+          ],
     })}\n`;
   }
   const { refusal } = outcome;
@@ -941,17 +1040,35 @@ export function renderPreflightRefusal(
   })}\n`;
 }
 
+/**
+ * `npm run build`, in the installation root, with its output on the terminal.
+ *
+ * The compile is watched rather than swallowed: a build the operator cannot see
+ * is a pause of unknown length, and a build that FAILS is a compiler error they
+ * need in front of them, not three trimmed lines quoted back inside a runbook.
+ * So both of the child's streams go to this process's stderr — inherited, so
+ * the child writes to the terminal directly and a `tsc` progress line is not
+ * buffered until the end.
+ *
+ * Stdout is deliberately not inherited: under `--json` this process's stdout is
+ * the event stream, and a compiler that printed one line into it would break
+ * every consumer parsing it. Sending the build's stdout to fd 2 keeps the
+ * machine surface exactly as it was while the human still sees the whole build.
+ *
+ * The exit code is the message. `npm run` exits with the script's own status,
+ * so it is the number the operator would have seen running the build by hand,
+ * and it is what the refusal quotes.
+ */
 function npmBuild(root: string): { ok: boolean; message: string } {
-  const result = spawnSync("npm", ["run", "build"], { cwd: root, encoding: "utf8" });
+  const result = spawnSync("npm", ["run", "build"], { cwd: root, stdio: ["ignore", 2, 2] });
   if (result.error !== undefined || result.status === null) {
     return { ok: false, message: detailOf(result.error ?? "npm did not run") };
   }
   if (result.status === 0) return { ok: true, message: "" };
-  const output = `${result.stderr}\n${result.stdout}`
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  return { ok: false, message: output.slice(-3).join(" | ") || "npm run build failed" };
+  return {
+    ok: false,
+    message: `npm run build exited ${String(result.status)} in ${root} (its output is above)`,
+  };
 }
 
 // ---------------------------------------------------------------------------

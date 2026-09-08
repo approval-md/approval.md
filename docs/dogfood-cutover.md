@@ -161,6 +161,47 @@ above are the same behaviour, reached on a timer instead of by your hand.
 every page load, so a refresh shows what is pending now. `approval channel cli`
 is one-shot by design; running the verb again is its refresh.
 
+### Starting the runtime is the deploy (APRV-215, APRV-301)
+
+Every merge to `main` used to leave the primary's daemon and hook running the
+previous build until somebody remembered `npm run build`. The symptom was never
+legible as "stale build". It was phone weirdness: reads routing oddly, taps that
+seemed to land on nothing, a verb the session had just shipped answering as
+though it had never been written.
+
+So `approval up` does it for you. Before anything starts, it fetches,
+fast-forwards when that is safe, and then dates `dist/src/cli/main.js` against
+`src/` and `tsconfig.json` using the same predicate `approval doctor`'s
+`build-freshness` row reports. When the build is older, it runs `npm run build`
+in the checkout with the compiler's output on your terminal, and the startup
+line says which of the two things it did:
+
+```
+up: preflight — fast-forwarded 3 commits and rebuilt; now running 8246896fd0f1, in a fresh process on the new build
+up: preflight — rebuilt a stale build; now running 8246896fd0f1, in a fresh process on the new build
+```
+
+A merge is not the only way `dist/` falls behind, so staleness alone is enough:
+the second line is a checkout already at the remote tip whose build was old. A
+rebuild always re-execs, because the process that ran the build had already
+loaded the code the build replaced. `approval daemon run` runs the identical
+preflight from the identical module.
+
+Two ways out, both of them explicit:
+
+- `approval up --no-build` fast-forwards and starts on the stale build anyway.
+  It warns on stderr every time, and the `--json` line reports
+  `"action":"build-skipped"` (or `"fast-forward+build-skipped"`) alongside
+  `"dist_stale":true`, so neither a human nor a supervisor can read that start
+  as a clean one.
+- a build that *fails* refuses: `up-preflight-failed`, the exit code `npm run
+  build` came back with, and no daemon. Starting there would put the writer on
+  the exact code the rebuild existed to replace.
+
+The hook runs the same `dist/`, so this covers it too. A session whose commands
+start classifying strangely shortly after a merge is usually a primary that has
+not been restarted since.
+
 ### `supervised-live` needs this process up (APRV-208)
 
 A `supervised-live` class puts a declared fraction of its actions through the

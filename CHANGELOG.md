@@ -162,5 +162,20 @@ The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
   the same `reviewSample` the CLI verb calls, so `approval feedback` shows a
   grade given on a phone exactly as one given at a terminal.
 
+- **Starting the runtime rebuilds a stale build, so a merge never leaves the
+  daemon and the hook on compiled-away code** (APRV-301). `approval up` and
+  `approval daemon run` already fetched and fast-forwarded; they now also date
+  `dist/src/cli/main.js` against `src/` and `tsconfig.json` with the very
+  predicate `approval doctor`'s `build-freshness` row reports, and run `npm run
+  build` in the installation root when the build is older, with the compiler's
+  output on the terminal and the startup line saying what it did. Staleness alone
+  is enough, so a checkout already at the remote tip is covered too. `--no-build`
+  opts out of the rebuild alone: the fast-forward still happens, `dist_stale`
+  still reports the truth, the action reads `build-skipped` or
+  `fast-forward+build-skipped`, and a warning names the stale build. A build that
+  fails refuses with `up-preflight-failed` and the exit code `npm run build` came
+  back with, and nothing starts, because starting there would put the writer on
+  exactly the code the rebuild existed to replace.
+
 The publish itself is the first `release.publish` action to pass through this
 gate (APRV-199).
