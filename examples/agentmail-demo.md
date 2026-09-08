@@ -89,7 +89,7 @@ directory of this demo's own, and come back here.
 export APPROVAL_MD=~/dev/approval-md
 approval() { node "$APPROVAL_MD/dist/src/cli/main.js" "$@"; }
 
-mkdir -p /tmp/approval-agentmail-demo && cd /tmp/approval-agentmail-demo
+mkdir -p ~/dev/demos/agentmail && cd ~/dev/demos/agentmail
 # … init, policy, attest, setup identity / vault / channel telegram, approval env
 ```
 
@@ -124,7 +124,10 @@ prefix rides into a child on a declaration either.
 
 ### Step 5: the agent composes a draft
 
-With AgentMail's own SDK, or with curl:
+With AgentMail's own SDK, or with curl. Put a mailbox you own in `to` before
+running it: the recipient is bound into the approved payload at Step 7, so a
+placeholder left in place cannot be corrected later without a fresh draft and a
+fresh approval, and Step 10 would send to it.
 
 ```sh
 curl -sS -X POST "https://api.agentmail.to/v0/inboxes/$INBOX/drafts" \
@@ -287,12 +290,18 @@ echo "exit=$?"
 ```
 
 ```
-✗ token-consumed  action task-042:chaser:2026-09-02 already executed: execution.started at seq 6 spent this token. A token is single-use and the log is the proof.
+✗ adapter-precheck-refused (agentmail-draft-missing)  agentmail refused action task-042:chaser:2026-09-02 before the token was spent (agentmail-draft-missing): the draft 67799b7c-… in inbox [redacted] no longer exists. A grant is over a snapshot of a draft, and the draft it named is gone; nothing was sent.
 exit=1
 ```
 
-The refusal happens before any HTTP request: a retried agent cannot double-send,
-and it does not need AgentMail's cooperation not to.
+Nothing is sent twice, and two independent checks each guarantee it. The one
+you see here is the adapter's precheck, which runs before the token is
+examined (APRV-276) and finds no draft, because AgentMail deleted it when it
+sent. Had the draft still existed, the token check behind it would have refused
+`token-consumed`: `execution.started` at seq 6 spent this token, a token is
+single-use, and the log is the proof. Either way the refusal happens before any
+sending request: a retried agent cannot double-send, and it does not need
+AgentMail's cooperation not to.
 
 ### Step 12: read the log out
 
@@ -363,7 +372,7 @@ composing surface and the approver's reading surface are the same object.
 ## Cleaning up
 
 ```sh
-cd .. && rm -rf /tmp/approval-agentmail-demo
+cd .. && rm -rf ~/dev/demos/agentmail
 unset AGENTMAIL_API_KEY INBOX DRAFT TOKEN HASH
 ```
 
