@@ -24,6 +24,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -33,7 +34,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -511,6 +512,189 @@ test("preflight: no refusal on any path prints reset --hard", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Untracked task files in the fast-forward's way (APRV-300)
+// ---------------------------------------------------------------------------
+
+/**
+ * The 2026-09-07 shape, built with plain git: a lane files a Backlog.md task on
+ * its branch and the pull request merges, while the primary checkout holds the
+ * same path untracked from its own `backlog task create`. `git merge --ff-only`
+ * will not write over an untracked file, so the preflight refused and pointed at
+ * `git status`, which cannot say whether the local copy holds anything the
+ * incoming one does not.
+ *
+ * The file name carries a space, as every Backlog.md task file does. That is not
+ * decoration: the collision paths are parsed out of git's own English sentence,
+ * and a parser that split on whitespace would lose exactly these files.
+ */
+const TASK_RELATIVE = "backlog/tasks/aprv-900 - probe.md";
+
+const INCOMING_TASK = [
+  "---",
+  "id: APRV-900",
+  "title: probe",
+  "status: To Do",
+  "---",
+  "",
+  "## Description",
+  "",
+  "Filed by the lane.",
+  "",
+  "## Implementation Plan",
+  "",
+  "1. Read the code first",
+  "",
+].join("\n");
+
+/** The stub a hand filing produces: every line of it is in {@link INCOMING_TASK}. */
+const LOCAL_STUB = [
+  "---",
+  "id: APRV-900",
+  "title: probe",
+  "status: To Do",
+  "---",
+  "",
+  "## Description",
+  "",
+  "Filed by the lane.",
+  "",
+].join("\n");
+
+/** Two lines the incoming copy has never carried. Nobody but a human may choose. */
+const LOCAL_DIVERGED = [
+  "---",
+  "id: APRV-900",
+  "title: probe",
+  "status: To Do",
+  "---",
+  "",
+  "## Description",
+  "",
+  "Filed by hand in the primary, and worded differently.",
+  "",
+  "## Notes only this copy has",
+  "",
+].join("\n");
+
+/** Where a moved-aside file goes: a sibling of the checkout, dated. */
+function asideDir(repo: Repo): string {
+  const day = new Date().toISOString().slice(0, 10);
+  return join(scratch, `${basename(repo.dir)}-preflight-aside-${day}`);
+}
+
+/** The preflight's warning line, which is where what-was-cleared is printed. */
+function warningOf(run: Run): string {
+  const line = run.stderr
+    .split("\n")
+    .filter((candidate) => candidate.trim().startsWith("{"))
+    .map((candidate) => JSON.parse(candidate) as { event?: string; message?: string })
+    .find((entry) => entry.event === "preflight_warning");
+  assert.ok(line !== undefined, `no preflight_warning in:\n${run.stderr}`);
+  return line.message ?? "";
+}
+
+test("preflight: an untracked task file identical to the incoming copy is removed, and the merge runs", () => {
+  const repo = newRepo();
+  const target = upstreamCommit(repo, TASK_RELATIVE, INCOMING_TASK, "the lane's task lands");
+  writeFileSync(join(repo.dir, TASK_RELATIVE), INCOMING_TASK, "utf8");
+
+  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.equal(preflightLineOf(run).action, "fast-forward");
+  assert.equal(head(repo.dir), target);
+  assert.equal(readFileSync(join(repo.dir, TASK_RELATIVE), "utf8"), INCOMING_TASK);
+  assert.match(warningOf(run), /byte-identical to the incoming copy/u);
+  // Nothing is carried out of the checkout for a file that said nothing new.
+  assert.equal(existsSync(asideDir(repo)), false);
+});
+
+test("preflight: a task file whose every line the incoming copy carries is moved aside, and the path is printed", () => {
+  const repo = newRepo();
+  const target = upstreamCommit(repo, TASK_RELATIVE, INCOMING_TASK, "the lane's task lands");
+  writeFileSync(join(repo.dir, TASK_RELATIVE), LOCAL_STUB, "utf8");
+
+  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.equal(head(repo.dir), target);
+  assert.equal(readFileSync(join(repo.dir, TASK_RELATIVE), "utf8"), INCOMING_TASK);
+
+  const printed = /moved to (.+), and the fast-forward was retried/u.exec(warningOf(run));
+  assert.ok(printed !== null, `no destination printed in: ${warningOf(run)}`);
+  const kept = printed[1] as string;
+  // Outside the repository, so the next fast-forward cannot collide with it
+  // again, and named in the output rather than left to be found.
+  assert.equal(kept.startsWith(`${repo.dir}/`), false);
+  assert.equal(kept, join(asideDir(repo), TASK_RELATIVE));
+  assert.equal(readFileSync(kept, "utf8"), LOCAL_STUB);
+});
+
+test("preflight: a task file with lines the incoming copy lacks refuses, naming both paths and the count", () => {
+  const repo = newRepo();
+  upstreamCommit(repo, TASK_RELATIVE, INCOMING_TASK, "the lane's task lands");
+  writeFileSync(join(repo.dir, TASK_RELATIVE), LOCAL_DIVERGED, "utf8");
+  const before = head(repo.dir);
+
+  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  const refused = refusalOf(run);
+  assert.equal(refused.error.code, "up-preflight-task-file-conflict");
+  assert.match(refused.error.message, /2 lines the incoming copy does not/u);
+  assert.equal(refused.preflight.action, "refused");
+
+  // Refused means refused: HEAD stands, the bytes stand, and nothing was moved.
+  assert.equal(head(repo.dir), before);
+  assert.equal(readFileSync(join(repo.dir, TASK_RELATIVE), "utf8"), LOCAL_DIVERGED);
+  assert.equal(existsSync(asideDir(repo)), false);
+
+  const human = upOnce(repo, ["--root", fixtureRoot(false)]);
+  assert.equal(human.code, 1, `${human.stdout}${human.stderr}`);
+  assert.match(human.stderr, /up-preflight-task-file-conflict/u);
+  assert.match(human.stderr, /YOUR STATE/u);
+  assert.ok(human.stderr.includes(join(repo.dir, TASK_RELATIVE)), human.stderr);
+  assert.ok(human.stderr.includes(`:${TASK_RELATIVE}`), human.stderr);
+  assert.match(human.stderr, /2 lines only yours has/u);
+  assert.doesNotMatch(human.stderr, /reset --hard/u);
+});
+
+test("preflight: an untracked collision outside backlog/tasks/ keeps the old refusal", () => {
+  const repo = newRepo();
+  upstreamCommit(repo, "docs/note.md", "# upstream\n", "upstream adds a doc");
+  mkdirSync(join(repo.dir, "docs"), { recursive: true });
+  writeFileSync(join(repo.dir, "docs", "note.md"), "# mine\n", "utf8");
+  const before = head(repo.dir);
+
+  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(refusalOf(run).error.code, "up-preflight-failed");
+  assert.equal(head(repo.dir), before);
+  assert.equal(readFileSync(join(repo.dir, "docs", "note.md"), "utf8"), "# mine\n");
+});
+
+/**
+ * One path outside the prefix and the whole set is declined, including the task
+ * file that would have been cleared on its own. A reconciliation that cleared
+ * what it understood and then refused anyway would have moved an operator's
+ * files for a merge that was never going to run.
+ */
+test("preflight: a mixed collision clears nothing at all", () => {
+  const repo = newRepo();
+  const path = join(repo.peer, TASK_RELATIVE);
+  writeFileSync(path, INCOMING_TASK, "utf8");
+  upstreamCommit(repo, "docs/note.md", "# upstream\n", "a doc and a task in one commit");
+  writeFileSync(join(repo.dir, TASK_RELATIVE), INCOMING_TASK, "utf8");
+  mkdirSync(join(repo.dir, "docs"), { recursive: true });
+  writeFileSync(join(repo.dir, "docs", "note.md"), "# mine\n", "utf8");
+  const before = head(repo.dir);
+
+  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(refusalOf(run).error.code, "up-preflight-failed");
+  assert.equal(head(repo.dir), before);
+  assert.equal(readFileSync(join(repo.dir, TASK_RELATIVE), "utf8"), INCOMING_TASK);
+  assert.equal(existsSync(asideDir(repo)), false);
+});
+
+// ---------------------------------------------------------------------------
 // Weather, opt-out, and the other spelling
 // ---------------------------------------------------------------------------
 
@@ -610,14 +794,19 @@ test("preflight: approval daemon run shares it, and --no-preflight opts out ther
 
 /**
  * SPEC.md §11.1 invariant 6 in its own small way: the union is frozen public
- * API and is pinned by a test, so a fourth code cannot appear without a line
+ * API and is pinned by a test, so a fifth code cannot appear without a line
  * changing here. These are not gate refusals and do not join one of §11.2's six
  * unions; they are this verb's, and they are distinct by repair.
  */
 test("preflight: the refusal-code union is frozen", () => {
   assert.deepEqual(
     [...PREFLIGHT_REFUSAL_CODES],
-    ["up-preflight-behind-ahead", "up-preflight-log-diverged", "up-preflight-dirty-protected"],
+    [
+      "up-preflight-behind-ahead",
+      "up-preflight-log-diverged",
+      "up-preflight-dirty-protected",
+      "up-preflight-task-file-conflict",
+    ],
   );
 });
 

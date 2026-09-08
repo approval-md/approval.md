@@ -615,6 +615,31 @@ retried once and then refuses, naming the file and telling you to stop whatever
 is writing it. Nothing here weighs the old bytes: unlike a payload, a projection
 is not evidence, and losing the last render costs one render.
 
+**And neither does an untracked task file, in `approval up`'s preflight.** The
+same class of collision, one directory over. A lane files
+`backlog/tasks/aprv-299` on its branch, its pull request merges, and the primary
+checkout is holding that path untracked from its own `backlog task create`, so
+on 2026-09-07 the preflight refused its fast-forward:
+
+```
+error: The following untracked working tree files would be overwritten by merge:
+        backlog/tasks/aprv-299 - ...md
+```
+
+The refusal pointed at `git status`, which cannot say whether the local copy
+holds anything the incoming one does not, and that is the only question worth
+asking. It is asked now (APRV-300). When every path the merge names sits under
+`backlog/tasks/`, each is read against `git show FETCH_HEAD:<path>`: a
+byte-identical copy is removed, a copy whose every line the incoming file
+already carries is moved to a sibling of the checkout named
+`approval-md-preflight-aside-<YYYY-MM-DD>` with the destination printed, and the
+merge is retried once. A copy with lines main lacks refuses
+`up-preflight-task-file-conflict`, naming your path, the incoming spelling and
+how many lines only yours has, and that one is yours to settle. Every file is
+judged before any file is touched, as with the payloads above, and one path
+outside `backlog/tasks/` declines the whole set: the old refusal stands and
+nothing is cleared. Nothing under `.approval/` is ever in scope here.
+
 Neither verb appends an event. Both move the file the log lives in, and the log
 records decisions rather than its own housekeeping.
 
