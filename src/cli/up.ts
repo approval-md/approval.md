@@ -300,6 +300,12 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--no-preflight": "boolean",
   "--preflight-remote": "string",
   "--preflight-base": "string",
+  // The rebuild half of it, alone (APRV-301): fetch and fast-forward as usual,
+  // but leave a stale `dist/` where it is. The preflight then says so on stderr
+  // and reports `"action":"build-skipped"`, because starting on a build older
+  // than the sources is a thing an operator may mean and must never be told is
+  // fine.
+  "--no-build": "boolean",
   // Test-only, spelled exactly as doctor's: retarget the build-freshness half of
   // the preflight at a fixture tree. It moves nothing else, and a wrong value
   // can only make the rebuild decision wrong — never the fast-forward.
@@ -424,6 +430,7 @@ export function commandUp(
       root: rootFlag === null ? null : absolute(rootFlag, cwd),
       remote: stringFlag(flags, "--preflight-remote"),
       branch: stringFlag(flags, "--preflight-base"),
+      build: !boolFlag(flags, "--no-build"),
       json,
       emit: (event) => {
         if (json) {

@@ -41,6 +41,17 @@ The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
 - **Diagnostics.** `doctor`, `status`, `coverage`, `policy check`, `policy
   test`, and machine-readable `--json` on every verb with the schemas printed
   by `instructions --schemas`.
+- **A review card fits on a phone** (APRV-302). The first live cards carried a
+  labelled button per choice and four sentences of rules under every one of
+  them, so the rows a review is about were off the first screen. The buttons are
+  bare emoji now, in the same two rows (✅ 🛑 over 👎 😐 👍 ❤️), and the rule
+  block is gone rather than reworded: `REVIEW — THIS ALREADY RAN` says a review
+  is not a request, and the deny latch says itself through the arm toast and the
+  `DENY ARMED` headline. A tap that records is answered `Heard — recording your
+  review`, its own toast, because a request card's `Heard — deciding` tells a
+  reviewer something is pending when nothing is. Unchanged, and checked in the
+  tests: no payload region, no approve button, no token, the COMPUTED/CLAIMED
+  split, the per-row origins, and every refusal rendered on the card.
 - **A hook timeout neither floods the phone nor feeds the escalation**
   (APRV-287). An expired wait keeps its question open for a retry grace
   (`--retry-grace`, default 5 minutes) and then withdraws it with reason
@@ -175,6 +186,21 @@ The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
   open and reviewable with `approval audit review`. Every append goes through
   the same `reviewSample` the CLI verb calls, so `approval feedback` shows a
   grade given on a phone exactly as one given at a terminal.
+
+- **Starting the runtime rebuilds a stale build, so a merge never leaves the
+  daemon and the hook on compiled-away code** (APRV-301). `approval up` and
+  `approval daemon run` already fetched and fast-forwarded; they now also date
+  `dist/src/cli/main.js` against `src/` and `tsconfig.json` with the very
+  predicate `approval doctor`'s `build-freshness` row reports, and run `npm run
+  build` in the installation root when the build is older, with the compiler's
+  output on the terminal and the startup line saying what it did. Staleness alone
+  is enough, so a checkout already at the remote tip is covered too. `--no-build`
+  opts out of the rebuild alone: the fast-forward still happens, `dist_stale`
+  still reports the truth, the action reads `build-skipped` or
+  `fast-forward+build-skipped`, and a warning names the stale build. A build that
+  fails refuses with `up-preflight-failed` and the exit code `npm run build` came
+  back with, and nothing starts, because starting there would put the writer on
+  exactly the code the rebuild existed to replace.
 
 The publish itself is the first `release.publish` action to pass through this
 gate (APRV-199).

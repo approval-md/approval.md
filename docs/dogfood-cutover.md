@@ -161,6 +161,47 @@ above are the same behaviour, reached on a timer instead of by your hand.
 every page load, so a refresh shows what is pending now. `approval channel cli`
 is one-shot by design; running the verb again is its refresh.
 
+### Starting the runtime is the deploy (APRV-215, APRV-301)
+
+Every merge to `main` used to leave the primary's daemon and hook running the
+previous build until somebody remembered `npm run build`. The symptom was never
+legible as "stale build". It was phone weirdness: reads routing oddly, taps that
+seemed to land on nothing, a verb the session had just shipped answering as
+though it had never been written.
+
+So `approval up` does it for you. Before anything starts, it fetches,
+fast-forwards when that is safe, and then dates `dist/src/cli/main.js` against
+`src/` and `tsconfig.json` using the same predicate `approval doctor`'s
+`build-freshness` row reports. When the build is older, it runs `npm run build`
+in the checkout with the compiler's output on your terminal, and the startup
+line says which of the two things it did:
+
+```
+up: preflight — fast-forwarded 3 commits and rebuilt; now running 8246896fd0f1, in a fresh process on the new build
+up: preflight — rebuilt a stale build; now running 8246896fd0f1, in a fresh process on the new build
+```
+
+A merge is not the only way `dist/` falls behind, so staleness alone is enough:
+the second line is a checkout already at the remote tip whose build was old. A
+rebuild always re-execs, because the process that ran the build had already
+loaded the code the build replaced. `approval daemon run` runs the identical
+preflight from the identical module.
+
+Two ways out, both of them explicit:
+
+- `approval up --no-build` fast-forwards and starts on the stale build anyway.
+  It warns on stderr every time, and the `--json` line reports
+  `"action":"build-skipped"` (or `"fast-forward+build-skipped"`) alongside
+  `"dist_stale":true`, so neither a human nor a supervisor can read that start
+  as a clean one.
+- a build that *fails* refuses: `up-preflight-failed`, the exit code `npm run
+  build` came back with, and no daemon. Starting there would put the writer on
+  the exact code the rebuild existed to replace.
+
+The hook runs the same `dist/`, so this covers it too. A session whose commands
+start classifying strangely shortly after a merge is usually a primary that has
+not been restarted since.
+
 ### `supervised-live` needs this process up (APRV-208)
 
 A `supervised-live` class puts a declared fraction of its actions through the
@@ -320,14 +361,22 @@ pacing rules. What to expect:
   approve button, because there is nothing left to authorize. It shows what ran
   (class, the command breakdown, task, the agent's summary), when it ran, and
   that the runtime allowed it without asking.
-- **One tap finishes it.** `OK` records "a person looked and was content". A
-  reaction alone records OK and that grade. `Deny` takes two taps — the first
-  arms the card and writes nothing — and the second records the denial and
-  names the reconciliation obligation it opens. With deny armed, a reaction
-  records the denial *with* that grade, and `liked`/`loved` are refused: those
-  two say opposite things about one action.
-- `loved` and `disliked` ask for a reply first. Reply to the prompt with why;
-  nothing is appended until you do, and a blank reply appends nothing.
+- **Six buttons, bare emoji, two rows.** Verdict on top (✅, 🛑), grade
+  underneath, worst to best (👎, 😐, 👍, ❤️). No words on the buttons and no
+  block of rules under the card: it said the same four sentences every time and
+  pushed what ran off the first screen.
+- **One tap finishes it.** ✅ records "a person looked and was content". A
+  reaction alone records OK and that grade. 🛑 takes two taps: the first arms
+  the card, writes nothing, and puts `DENY ARMED` in its headline, and the
+  second records the denial and names the reconciliation obligation it opens.
+  With deny armed, a reaction records the denial *with* that grade, and
+  👍/❤️ are refused, because those two say opposite things about one action.
+- ❤️ and 👎 ask for a reply first. Reply to the prompt with why; nothing is
+  appended until you do, and a blank reply appends nothing.
+- Every tap that records answers `Heard — recording your review`, and like the
+  request card's toast it means the tap arrived and nothing more. What the log
+  actually took is on the card, which edits itself to say so. The first 🛑 tap
+  is the exception, and says `Deny armed — nothing recorded`.
 
 The card is the values loop made real: the reactions of APRV-237/239 hang off
 this verb, and `approval feedback` shows a grade given on the phone exactly as

@@ -3343,22 +3343,36 @@ and how the log says it ended). Everything computed is derived from the verified
 log, the payload store and the classifier; the claimed rows sit under the same
 "NOT verified by the runtime" heading a prompt gives them.
 
-Six buttons: `OK`, `Deny`, and the four reactions (`disliked`, `indifferent`,
-`liked`, `loved`).
+Six buttons, bare emoji and no words (APRV-302), in two rows: the verdict on the
+first (✅ OK, 🛑 Deny) and the grade on the second, worst to best (👎 disliked,
+😐 indifferent, 👍 liked, ❤️ loved).
 
 | Tap | What is recorded |
 | --- | --- |
-| `OK` | `audit.reviewed` with verdict `ok` and no reaction. |
+| ✅ | `audit.reviewed` with verdict `ok` and no reaction. |
 | a reaction | verdict `ok` and that grade — a reaction alone implies OK. |
-| `Deny` once | **Nothing.** It arms the card, which says `DENY ARMED` on itself. |
-| `Deny` twice | verdict `denied`, and the reconciliation obligation it opens is named on the reply. |
+| 🛑 once | **Nothing.** It arms the card, which says `DENY ARMED` on itself. |
+| 🛑 twice | verdict `denied`, and the reconciliation obligation it opens is named on the reply. |
 | a reaction with deny armed | verdict `denied` with that grade. |
+
+The card does not print this table under itself. It used to, and the paragraph
+of rules pushed the rows a review is actually about off the first screen for a
+reader who had read them on the card before. The two things a tap could get
+wrong say themselves: the first 🛑 is answered `Deny armed — nothing recorded`
+and puts `DENY ARMED` in the card's own headline until it is spent, and a grade
+that wants words sends the prompt that asks for them.
 
 Deny takes two taps because a retrospective denial cannot undo anything: what it
 does is open an obligation a human must later discharge (SPEC section 5.2), and
 a gesture with that consequence should not be one thumb-width from a grade. The
 arming is process memory and appends nothing; losing it to a restart costs a
 tap.
+
+Every other review tap is answered `Heard — recording your review. The card will
+say what the log recorded.`, its own toast, because a request card's `Heard —
+deciding` would tell a reviewer something was pending when nothing is. Like that
+one it claims only that the tap arrived: at the moment it is sent nothing has
+been appended, and a refusal below may mean nothing ever is.
 
 `loved` and `disliked` ask for the human's own words first. The bot sends a
 reply prompt, nothing is appended until the reply arrives, and a blank one is
@@ -3977,7 +3991,8 @@ daemonizer would.
 
 **It runs `approval up`'s startup preflight first** (APRV-215) — same module,
 same two `--json` lines, same three refusal codes, same `--no-preflight`,
-`--preflight-remote` and `--preflight-base` flags. It is here as well as there
+`--no-build`, `--preflight-remote` and `--preflight-base` flags. It is here as
+well as there
 because the daemon is the writer: a daemon started against a stale checkout is
 exactly what the preflight exists to catch, and `--with-channels` is not the only
 way an operator reaches one. The full description is under [up](#up).
@@ -4328,6 +4343,7 @@ running. When it is not, it refuses, and changes nothing:
 | `up-preflight-log-diverged` | the upstream range rewrites `.approval/log/events.jsonl` or `.approval/QUEUE.md`, and this working copy has uncommitted changes to one of them. The judgment a human could not make by eye. | `approval log sync` |
 | `up-preflight-dirty-protected` | some other path the upstream range changes is locally modified, so `git merge --ff-only` would refuse rather than overwrite it. | look at the diff, or `approval up --no-preflight` |
 | `up-preflight-task-file-conflict` | an untracked file under `backlog/tasks/` stopped the fast-forward and it holds lines the incoming copy does not. Which version is wanted is a question, and no verb here will pick. | read the two copies, move yours aside, run `approval up` again |
+| `up-preflight-failed` | a write the preflight attempted did not complete: the fast-forward, or the rebuild. Not a judgment, so it is not in the union above; the message names the step, and for a build it names the exit code `npm run build` came back with. | `npm run build` to see the whole error, or `approval up --no-build` if you mean to run the stale one |
 
 **An untracked task file no longer stops it (APRV-300).** A lane files
 `backlog/tasks/aprv-299` on its branch and its pull request merges, while the
@@ -4383,7 +4399,28 @@ origin here" is a property of the deployment, not an event in it, and a log-only
 install would otherwise open every start with it. `approval doctor`'s
 `main-behind-origin` row is where that state is visible.
 
-`--no-preflight` opts out, on both spellings of the verb.
+**The rebuild is the deploy (APRV-301).** The freshness question is the same one
+`approval doctor`'s `build-freshness` row answers, from the same predicate in the
+same module, so the two cannot disagree: is `dist/src/cli/main.js` at least as
+new as everything under `src/` and `tsconfig.json`? When it is not, the preflight
+runs `npm run build` in the installation root, with the compiler's output on the
+terminal so a slow build is visible and a failing one is readable. (The build's
+stdout is written to stderr, because under `--json` this process's stdout is the
+event stream and a compiler line in it would break every consumer.) A build that
+fails refuses with `up-preflight-failed` and the exit code `npm run build` came
+back with; nothing starts, since starting would put the writer on exactly the
+code the rebuild existed to replace. Staleness alone is enough, with or without a
+fast-forward: an editor, a branch switch or a half-finished build leaves `dist/`
+behind `src/` just as a merge does, and the daemon and the harness hook run the
+compiled code either way.
+
+`--no-build` opts out of the rebuild alone. The fetch and the fast-forward still
+happen; `dist_stale` still reports the truth; the action reads `build-skipped` or
+`fast-forward+build-skipped`; and a warning on stderr names the stale build in
+words. An operator can mean this. Nothing in the output lets it pass for a clean
+start.
+
+`--no-preflight` opts out of all of it, on both spellings of the verb.
 `--preflight-remote` and `--preflight-base` default to `origin` and the
 checked-out branch. The `--json` stream gains two additive lines and no field on
 any shape that already existed:
@@ -4396,9 +4433,12 @@ any shape that already existed:
 ```
 
 `action` is one of `none`, `rebuild`, `fast-forward`, `fast-forward+rebuild`,
-`refused`, `skipped`, `fetch-failed`. The commit now running is named here rather
-than on `up_started`, so a consumer that already parses `up_started` does not
-have to learn a new key to keep working. A refusal writes one object to stderr
+`build-skipped`, `fast-forward+build-skipped`, `refused`, `skipped`,
+`fetch-failed`. The two `build-skipped` spellings are `--no-build` and only
+`--no-build`: without it, a `dist_stale` of `true` always ends in a rebuild or a
+refusal. The commit now running is named here rather than on `up_started`, so a
+consumer that already parses `up_started` does not have to learn a new key to
+keep working. A refusal writes one object to stderr
 instead: `{"error":{"code":…,"message":…,"next":…},"preflight":{…}}`.
 
 **A rebuild re-execs, so the writer that ends up running is the code that was

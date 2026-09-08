@@ -53,6 +53,14 @@ after(() => {
 const LOG_RELATIVE = ".approval/log/events.jsonl";
 const QUEUE_RELATIVE = ".approval/QUEUE.md";
 
+/** Written by the fixture package's build script, and by nothing else. */
+const BUILT_SENTINEL = "built.sentinel";
+
+/** Did `npm run build` actually run in this fixture root? */
+function didBuild(root: string): boolean {
+  return existsSync(join(root, BUILT_SENTINEL));
+}
+
 const POLICY = [
   "# Policy",
   "",
@@ -149,11 +157,19 @@ function head(dir: string): string {
 /**
  * An installation root whose `dist/` is or is not older than its `src/`.
  *
- * `npm run build` here touches the marker rather than compiling anything: the
- * question this suite asks is whether the preflight RUNS the build and reports
- * it, and a real `tsc` would be testing the compiler.
+ * `npm run build` here touches the marker and writes a sentinel rather than
+ * compiling anything: the question this suite asks is whether the preflight
+ * RUNS the build and reports it, and a real `tsc` would be testing the
+ * compiler. The sentinel is what lets a case assert the build did NOT run —
+ * a marker whose mtime moved forward is indistinguishable from one that was
+ * already fresh, and a file that is not there is not ambiguous at all.
+ *
+ * `fails` builds the fourth shape: a build script that exits non-zero, which is
+ * the case where the runtime must refuse rather than start on the stale build
+ * (APRV-301). Exit 7 rather than 1 so the assertion is about THIS script's
+ * status rather than about any failure at all.
  */
-function fixtureRoot(stale: boolean): string {
+function fixtureRoot(stale: boolean, fails = false): string {
   counter += 1;
   const root = join(scratch, `root-${String(counter)}`);
   mkdirSync(join(root, "dist", "src", "cli"), { recursive: true });
@@ -162,13 +178,12 @@ function fixtureRoot(stale: boolean): string {
   writeFileSync(join(root, "src", "a.ts"), "export const a = 1;\n", "utf8");
   const marker = join(root, "dist", "src", "cli", "main.js");
   writeFileSync(marker, "// build\n", "utf8");
+  const build = fails
+    ? "exit 7"
+    : `touch ${JSON.stringify(marker)} && touch ${JSON.stringify(join(root, BUILT_SENTINEL))}`;
   writeFileSync(
     join(root, "package.json"),
-    `${JSON.stringify(
-      { name: "fixture", private: true, scripts: { build: `touch ${JSON.stringify(marker)}` } },
-      null,
-      2,
-    )}\n`,
+    `${JSON.stringify({ name: "fixture", private: true, scripts: { build } }, null, 2)}\n`,
     "utf8",
   );
   // Explicit times rather than write order: two writes a millisecond apart can
@@ -298,8 +313,10 @@ test("preflight: fast-forwards a behind checkout, rebuilds a stale dist, and nam
   const target = upstreamCommit(repo, "README.md", "# fixture v2\n", "upstream edit");
   assert.notEqual(head(repo.dir), target);
 
-  const run = upOnce(repo, ["--json", "--root", fixtureRoot(true)]);
+  const root = fixtureRoot(true);
+  const run = upOnce(repo, ["--json", "--root", root]);
   assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.equal(didBuild(root), true, "the fixture's build script ran");
 
   const line = preflightLineOf(run);
   assert.equal(line.behind_by, 1);
@@ -418,7 +435,8 @@ test("preflight: a clean working copy plus an upstream change to a protected pat
 test("preflight: an up-to-date checkout with a fresh build does nothing at all", () => {
   const repo = newRepo();
   const before = head(repo.dir);
-  const run = upOnce(repo, ["--json", "--root", fixtureRoot(false)]);
+  const root = fixtureRoot(false);
+  const run = upOnce(repo, ["--json", "--root", root]);
   assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
   const line = preflightLineOf(run);
   assert.deepEqual(
@@ -426,6 +444,119 @@ test("preflight: an up-to-date checkout with a fresh build does nothing at all",
     { behind: 0, ahead: 0, stale: false, action: "none" },
   );
   assert.equal(head(repo.dir), before);
+  // Nothing means nothing: a fresh build is not rebuilt "just to be sure",
+  // which on the real package is a `tsc` run at every start.
+  assert.equal(didBuild(root), false);
+});
+
+// ---------------------------------------------------------------------------
+// The build (APRV-301)
+// ---------------------------------------------------------------------------
+
+/**
+ * The case the task is named for, minus the fast-forward.
+ *
+ * A merge is not the only way `dist/` falls behind `src/` — an editor, a
+ * `git checkout` of a branch, a half-finished build — and the primary's daemon
+ * and hook run the compiled code either way. So staleness alone is enough: the
+ * checkout is already at the remote tip here, and the build still runs.
+ */
+test("preflight: at the tip with a stale dist, the build runs and the line says so", () => {
+  const repo = newRepo();
+  const before = head(repo.dir);
+  const root = fixtureRoot(true);
+
+  const run = upOnce(repo, ["--json", "--root", root]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+
+  const line = preflightLineOf(run);
+  assert.deepEqual(
+    { behind: line.behind_by, stale: line.dist_stale, action: line.action },
+    { behind: 0, stale: true, action: "rebuild" },
+  );
+  assert.equal(didBuild(root), true, "the fixture's build script ran");
+  assert.equal(head(repo.dir), before, "no fast-forward was needed or made");
+});
+
+test("preflight: the human line for a rebuild alone names the reason", () => {
+  const repo = newRepo();
+  const run = upOnce(repo, ["--root", fixtureRoot(true)]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.match(run.stdout, /up: preflight — rebuilt a stale build/u);
+});
+
+/**
+ * `--no-build` is the opt-out, and it opts out of the BUILD, not of the truth:
+ * the fast-forward still lands, `dist_stale` still says `true`, the action says
+ * the build was skipped rather than that nothing was wrong, and the warning
+ * names the stale build in words. An operator who asked for this gets it; an
+ * operator reading the output afterwards cannot mistake it for a clean start.
+ */
+test("preflight: --no-build fast-forwards, keeps the stale build, and says so", () => {
+  const repo = newRepo();
+  const target = upstreamCommit(repo, "README.md", "# fixture v2\n", "upstream edit");
+  const root = fixtureRoot(true);
+
+  const run = upOnce(repo, ["--json", "--no-build", "--root", root]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+
+  const line = preflightLineOf(run);
+  assert.deepEqual(
+    { stale: line.dist_stale, action: line.action, reexec: line.reexec },
+    { stale: true, action: "fast-forward+build-skipped", reexec: false },
+  );
+  assert.equal(didBuild(root), false, "the build must not have run");
+  assert.equal(head(repo.dir), target, "the fast-forward is not what was opted out of");
+  assert.match(run.stderr, /"preflight_warning"/u);
+  assert.match(run.stderr, /STALE BUILD/u);
+});
+
+test("preflight: --no-build at the tip is build-skipped, and the human line admits it", () => {
+  const repo = newRepo();
+  const root = fixtureRoot(true);
+
+  const run = upOnce(repo, ["--no-build", "--root", root]);
+  assert.equal(run.code, 0, `${run.stdout}${run.stderr}`);
+  assert.match(run.stdout, /left a stale build alone \(--no-build\)/u);
+  assert.match(run.stderr, /--no-build was given: starting on a STALE BUILD/u);
+  assert.equal(didBuild(root), false);
+});
+
+/**
+ * A build that fails is a refusal, not a warning.
+ *
+ * Starting here would put the daemon and the hook on exactly the code the
+ * rebuild existed to replace, which is the defect (APRV-301). So: exit 1, the
+ * machine-readable `up-preflight-failed`, the script's own exit status in the
+ * message, and no `up_started` line anywhere.
+ */
+test("preflight: a failing build refuses with its exit code, and nothing starts", () => {
+  const repo = newRepo();
+  const target = upstreamCommit(repo, "README.md", "# fixture v2\n", "upstream edit");
+  const root = fixtureRoot(true, true);
+
+  const run = upOnce(repo, ["--json", "--root", root]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+
+  const refused = refusalOf(run);
+  assert.equal(refused.error.code, "up-preflight-failed");
+  assert.match(refused.error.message, /npm run build/u);
+  assert.match(refused.error.message, /exited 7/u);
+  assert.equal(refused.preflight.action, "refused");
+  assert.equal(refused.preflight.dist_stale, true);
+  // The fast-forward stands — it succeeded — and the runtime still did not start.
+  assert.equal(head(repo.dir), target);
+  assert.doesNotMatch(run.stdout, /up_started/u);
+});
+
+test("preflight: the failing build's runbook names the build, not git status", () => {
+  const repo = newRepo();
+  const run = upOnce(repo, ["--root", fixtureRoot(true, true)]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.match(run.stderr, /up-preflight-failed/u);
+  assert.match(run.stderr, /1\. npm run build/u);
+  assert.match(run.stderr, /approval up --no-build/u);
+  assert.doesNotMatch(run.stderr, /reset --hard/u);
 });
 
 // ---------------------------------------------------------------------------
@@ -439,7 +570,8 @@ test("preflight: a checkout ahead of the remote is refused, and nothing moves", 
   git(["commit", "-qm", "local work"], repo.dir);
   const before = head(repo.dir);
 
-  const run = upOnce(repo, ["--json", "--root", fixtureRoot(true)]);
+  const root = fixtureRoot(true);
+  const run = upOnce(repo, ["--json", "--root", root]);
   assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
   const refused = refusalOf(run);
   assert.equal(refused.error.code, "up-preflight-behind-ahead");
@@ -449,6 +581,7 @@ test("preflight: a checkout ahead of the remote is refused, and nothing moves", 
   // Refused BEFORE the build: a preflight that compiled the tree it was
   // declining to reason about would have acted on a state it did not accept.
   assert.equal(run.stdout, "");
+  assert.equal(didBuild(root), false);
 });
 
 test("preflight: an upstream log change over a dirty working log names approval log sync", () => {
