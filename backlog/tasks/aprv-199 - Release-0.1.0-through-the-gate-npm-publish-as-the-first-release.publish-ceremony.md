@@ -3,7 +3,7 @@ id: APRV-199
 title: >-
   Release 0.1.0 through the gate: npm publish as the first release.publish
   ceremony
-status: In Progress
+status: Done
 assignee:
   - '@fable'
 created_date: '2026-09-01 18:46'
@@ -56,7 +56,7 @@ Every SPEC section 14 milestone (M0 to M8) has shipped, package.json already rea
 <!-- AC:BEGIN -->
 - [x] #1 Preflight recorded: npm pack --dry-run contents reviewed (files and bin fields; no .approval, backlog, or private material shipped), README front page current, LAUNCH.md or CHANGELOG carries the 0.1.0 line
 - [x] #2 Envelope on this task: register, request, wait, run for npm publish from the primary checkout; grant seq and execution seq recorded in the notes; no human relayed a token (APRV-166 AC3 evidence)
-- [ ] #3 v0.1.0 tag pushed through its own gated action and the package installs on a clean machine under the published name; verified and recorded
+- [x] #3 v0.1.0 tag pushed through its own gated action and the package installs on a clean machine under the published name; verified and recorded
 - [x] #4 The human decides go or no-go; the agent prepares and never triggers the publish
 <!-- AC:END -->
 
@@ -82,4 +82,6 @@ The ceremony, 2026-09-08 (all requests by agent:fable, all grants by human:carte
 - aprv-199:tag-push: requested 29708, granted 29713, execution.started 29719, execution.completed 29720. refs/tags/v0.1.0 on origin at 94d19b7.
 - approval log verify after the push: clean, 29727 records; the one standing anomaly is the long-known seq 2957 timestamp regression.
 Decided along the way: the bypass token is a one-release measure and is deleted after the tag push; APRV-307 (Trusted Publishing) retires it. The Backlog CLI strips an approval: envelope from a task file, so this file and APRV-306's are edited directly from here on. Global invariants touched: none weakened; §11.1 invariant 7 held (the OTP path was rejected precisely because a code in argv would have been shown on the phone and written to the log).
+
+AC3 closed 2026-09-08: from /tmp, `npx -y approval-md@0.1.0 --version` fetched the package from the registry and ran the `approval` binary (it printed the usage, since the CLI has no --version command; APRV-308 filed for that). Task Done.
 <!-- SECTION:NOTES:END -->
