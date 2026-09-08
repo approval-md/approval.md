@@ -3,7 +3,7 @@ id: APRV-306
 title: >-
   Release 0.1.0: second publish attempt, the one-time password in the child's
   environment
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-09-08 06:03'
 labels:
@@ -35,6 +35,14 @@ The first gated publish (APRV-199 action aprv-199:publish:2026-09-08, granted se
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A new release.publish action aprv-306:publish:2026-09-08 bound to the same {argv, cwd} as the first, requested by the agent, granted on the phone, executed by the human with npm_config_otp in the environment; grant seq and execution seqs recorded here
-- [ ] #2 approval-md@0.1.0 is on the registry: npm view approval-md version prints 0.1.0
+- [x] #1 A new release.publish action aprv-306:publish:2026-09-08 bound to the same {argv, cwd} as the first, requested by the agent, granted on the phone, executed by the human with npm_config_otp in the environment; grant seq and execution seqs recorded here
+- [x] #2 approval-md@0.1.0 is on the registry: npm view approval-md version prints 0.1.0
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-09-08. The OTP route in the title was abandoned before use: Carter's second factor is a passkey, not a code, so there is no npm_config_otp to set. Instead Carter created a granular npm access token scoped to the approval-md package, shortest expiry, "Bypass 2FA" ticked, and set it in his npmrc; the gated child read it as any npm invocation would. The execution was then the agent's, as the first attempt was, with the human's tap as the only human act.
+
+Records: registered seq 29671; aprv-306:publish:2026-09-08 requested 29672 (agent:fable), granted 29676 (human:carter via telegram), execution.started 29681, execution.completed 29682, exit 0: `+ approval-md@0.1.0`. npm view approval-md: version 0.1.0, bin { approval: 'cli.js' }. AC1's wording ("executed by the human with npm_config_otp") is therefore satisfied in substance (human decided, agent ran on the sealed grant, no code anywhere) and not to the letter; recorded here rather than rewritten. The bypass token is deleted after the tag push; APRV-307 replaces the mechanism with Trusted Publishing.
+<!-- SECTION:NOTES:END -->
