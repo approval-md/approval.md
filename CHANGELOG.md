@@ -41,6 +41,17 @@ The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
 - **Diagnostics.** `doctor`, `status`, `coverage`, `policy check`, `policy
   test`, and machine-readable `--json` on every verb with the schemas printed
   by `instructions --schemas`.
+- **A review card fits on a phone** (APRV-302). The first live cards carried a
+  labelled button per choice and four sentences of rules under every one of
+  them, so the rows a review is about were off the first screen. The buttons are
+  bare emoji now, in the same two rows (✅ 🛑 over 👎 😐 👍 ❤️), and the rule
+  block is gone rather than reworded: `REVIEW — THIS ALREADY RAN` says a review
+  is not a request, and the deny latch says itself through the arm toast and the
+  `DENY ARMED` headline. A tap that records is answered `Heard — recording your
+  review`, its own toast, because a request card's `Heard — deciding` tells a
+  reviewer something is pending when nothing is. Unchanged, and checked in the
+  tests: no payload region, no approve button, no token, the COMPUTED/CLAIMED
+  split, the per-row origins, and every refusal rendered on the card.
 - **A hook timeout neither floods the phone nor feeds the escalation**
   (APRV-287). An expired wait keeps its question open for a retry grace
   (`--retry-grace`, default 5 minutes) and then withdraws it with reason

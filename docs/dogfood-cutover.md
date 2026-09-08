@@ -320,14 +320,22 @@ pacing rules. What to expect:
   approve button, because there is nothing left to authorize. It shows what ran
   (class, the command breakdown, task, the agent's summary), when it ran, and
   that the runtime allowed it without asking.
-- **One tap finishes it.** `OK` records "a person looked and was content". A
-  reaction alone records OK and that grade. `Deny` takes two taps — the first
-  arms the card and writes nothing — and the second records the denial and
-  names the reconciliation obligation it opens. With deny armed, a reaction
-  records the denial *with* that grade, and `liked`/`loved` are refused: those
-  two say opposite things about one action.
-- `loved` and `disliked` ask for a reply first. Reply to the prompt with why;
-  nothing is appended until you do, and a blank reply appends nothing.
+- **Six buttons, bare emoji, two rows.** Verdict on top (✅, 🛑), grade
+  underneath, worst to best (👎, 😐, 👍, ❤️). No words on the buttons and no
+  block of rules under the card: it said the same four sentences every time and
+  pushed what ran off the first screen.
+- **One tap finishes it.** ✅ records "a person looked and was content". A
+  reaction alone records OK and that grade. 🛑 takes two taps: the first arms
+  the card, writes nothing, and puts `DENY ARMED` in its headline, and the
+  second records the denial and names the reconciliation obligation it opens.
+  With deny armed, a reaction records the denial *with* that grade, and
+  👍/❤️ are refused, because those two say opposite things about one action.
+- ❤️ and 👎 ask for a reply first. Reply to the prompt with why; nothing is
+  appended until you do, and a blank reply appends nothing.
+- Every tap that records answers `Heard — recording your review`, and like the
+  request card's toast it means the tap arrived and nothing more. What the log
+  actually took is on the card, which edits itself to say so. The first 🛑 tap
+  is the exception, and says `Deny armed — nothing recorded`.
 
 The card is the values loop made real: the reactions of APRV-237/239 hang off
 this verb, and `approval feedback` shows a grade given on the phone exactly as

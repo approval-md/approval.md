@@ -1797,22 +1797,19 @@ export const TELEGRAM_REVIEW_DENIED = "✗ REVIEWED — DENIED";
 export const TELEGRAM_REVIEW_ARMED = "DENY ARMED — nothing is recorded yet";
 
 /**
- * What the card says about its own buttons, in words, on every card.
+ * What a review tap's single answer says (APRV-302).
  *
- * The two-tap deny is the part that has to be stated rather than discovered. A
- * retrospective denial cannot undo anything; what it does is open a
- * reconciliation obligation a human must later discharge (SPEC.md §5.2), and a
- * gesture with that consequence should not be one thumb-width away from a
- * grade. The first tap arms and writes nothing, the second records — and while
- * it is armed a reaction lands on the denial instead of on an `ok`, which is
- * how "this should not have happened, and I disliked it" gets said in one card.
+ * {@link TELEGRAM_ACK_HEARD}'s "deciding" is a request card's word: something is
+ * pending, and the tap just settled it. A review decides nothing — the action
+ * ran, and what the tap does is record what a person thought of it — so a
+ * reviewer told they were "deciding" is being told the wrong thing about the
+ * card in front of them. The load-bearing half is carried over unchanged: this
+ * claims only that the tap ARRIVED, never that anything was appended, because at
+ * the moment it is sent nothing has been and `core/audit.ts` may still refuse.
+ * What became of it is on the card edit that follows.
  */
-export const TELEGRAM_REVIEW_RULE = [
-  "Nothing here is pending and no button on this card authorizes anything: the action already ran.",
-  "OK records that a person looked and was content. A reaction alone records OK and that grade.",
-  "Deny takes two taps: the first arms it and records nothing, the second records the denial and opens the reconciliation obligation it owes. While deny is armed a reaction records the denial WITH that grade, and liked and loved are refused.",
-  "Loved and disliked ask for a note first — reply to the prompt. Nothing is appended until the reply arrives, and a blank note records nothing.",
-].join(" ");
+export const TELEGRAM_REVIEW_ACK =
+  "Heard — recording your review. The card will say what the log recorded.";
 
 /** The toast a first Deny tap gets: it says plainly that nothing was written. */
 export const TELEGRAM_REVIEW_ARM_TOAST =
@@ -1986,14 +1983,23 @@ export function parseReviewCallback(
   return found === undefined ? null : { nonce, choice: found };
 }
 
-/** The label each button carries. Emoji live here and never in message text. */
+/**
+ * The label each button carries. Emoji live here and never in message text.
+ *
+ * Bare emoji, no words (APRV-302). The first live cards put a word beside every
+ * glyph, which bought nothing: six labelled buttons on a phone wrap, and the
+ * words repeated what the card had already said in full sentences above them.
+ * The layout is what carries the meaning now: row one is the verdict (record it
+ * as fine, or arm the denial), row two is the grade, worst to best, in the same
+ * order `REACTIONS` gives everywhere else.
+ */
 const REVIEW_BUTTON_LABELS: Record<ReviewChoice, string> = {
-  ok: "✅ OK",
-  deny: "🛑 Deny",
-  disliked: "👎 disliked",
-  indifferent: "😐 indifferent",
-  liked: "👍 liked",
-  loved: "❤️ loved",
+  ok: "✅",
+  deny: "🛑",
+  disliked: "👎",
+  indifferent: "😐",
+  liked: "👍",
+  loved: "❤️",
 };
 
 /**
@@ -2014,8 +2020,16 @@ function trimNotice(text: string): string {
 }
 
 /**
- * The card's message: the rows, whatever notice the last tap produced, the
- * rule, and the keyboard.
+ * The card's message: the rows, whatever notice the last tap produced, and the
+ * keyboard.
+ *
+ * No paragraph explaining the buttons (APRV-302). The heading
+ * ({@link TELEGRAM_REVIEW_HEADING}) is what says a review is not a request, and
+ * the deny latch says itself: the first tap is answered by
+ * {@link TELEGRAM_REVIEW_ARM_TOAST} and the card's own heading becomes
+ * {@link TELEGRAM_REVIEW_ARMED} until it is spent. Four sentences of rules under
+ * every card said the same thing to a reader who had already read them once, and
+ * pushed the rows a review is actually about off the first screen.
  *
  * Pure. Two things it deliberately does NOT carry, and both are the same rule
  * read twice: no payload region, and no approve button. SPEC.md §10.3 requires
@@ -2079,8 +2093,6 @@ export function renderReviewCard(state: ReviewCardState): {
       ...state.notice.lines.map((entry) => escapeHtml(trimNotice(entry))),
     );
   }
-
-  lines.push("", escapeHtml(TELEGRAM_REVIEW_RULE));
 
   const button = (choice: ReviewChoice): InlineButton => ({
     text: REVIEW_BUTTON_LABELS[choice],
@@ -3817,7 +3829,7 @@ export class TelegramChannel implements TestableChannel {
       // between for the change of mind to contradict.
       const chosen: ReviewVerdict = tap.choice === "deny" ? "denied" : "ok";
       state.denyArmed = chosen === "denied";
-      await this.safeAnswer(callbackId, TELEGRAM_ACK_HEARD);
+      await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ACK);
       await this.recordReview(state, { sampleSeq: state.card.sampleSeq, verdict: chosen }, result);
       return;
     }
@@ -3836,7 +3848,7 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
-    await this.safeAnswer(callbackId, TELEGRAM_ACK_HEARD);
+    await this.safeAnswer(callbackId, TELEGRAM_REVIEW_ACK);
     await this.recordReview(
       state,
       { sampleSeq: state.card.sampleSeq, verdict, reaction },
