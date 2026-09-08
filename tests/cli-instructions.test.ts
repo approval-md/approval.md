@@ -499,6 +499,7 @@ const AGENT_FACING: readonly string[] = [
   "adapter agentmail",
   "hook claude-code",
   "hook cursor",
+  "hook codex",
   "hook classify",
   // APRV-214. Reporting the window establishes no authority and changes
   // nothing; an agent that can see a bypass window is standing is better placed
@@ -553,6 +554,7 @@ test("registry: a human_only decision that needed an argument carries its note",
     "payload agentmail-draft",
     "hook claude-code",
     "hook cursor",
+    "hook codex",
     "consume",
   ]) {
     const spec = findVerb(label);

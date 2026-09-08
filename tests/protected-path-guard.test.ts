@@ -22,7 +22,18 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { appendAttestation, appendOrganAttestation } from "../src/core/attest.js";
-import { consumeHarnessGrant, decide, register, request } from "../src/core/gate.js";
+import {
+  executeThroughAdapter,
+  type Adapter,
+  type JsonValue,
+} from "../src/adapters/contract.js";
+import {
+  consumeHarnessGrant,
+  decide,
+  register,
+  request,
+  startHarnessExecution,
+} from "../src/core/gate.js";
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
 import {
@@ -107,9 +118,14 @@ interface World {
   store: Map<string, unknown>;
 }
 
-/** A scenario with the policy attested, ready for grants. */
-function world(root: string): World {
-  const unit = newScenario(root, POLICY);
+const UNATTENDED_POLICY = POLICY.replace(
+  "policy:\n  protected_paths:\n    - SPEC.md",
+  "protected_paths:\n  - SPEC.md",
+).replace("  policy.edit:\n    autonomy: manual", "  policy.edit:\n    autonomy: autonomous");
+
+/** A scenario with the policy attested, ready for evidence records. */
+function world(root: string, policy = POLICY): World {
+  const unit = newScenario(root, policy);
   const attested = appendAttestation(unit.logPath, unit.policyPath, HUMAN, {
     clock: fixedClock(at(0)),
   });
@@ -117,11 +133,96 @@ function world(root: string): World {
   return { unit, store: new Map() };
 }
 
+/** Register exact file material through the real gate writer. */
+function registerEdit(
+  world: World,
+  key: string,
+  material: unknown,
+  minute: number,
+  overrides: { task?: string; cls?: string } = {},
+): { task: string; actionKey: string; cls: string; hash: string } {
+  const hash = payloadHash(material);
+  const task = overrides.task ?? `hook:${key}`;
+  const actionKey = `${task}:policy.edit`;
+  const cls = overrides.cls ?? "policy.edit";
+  const registered = register(
+    world.unit.logPath,
+    {
+      task,
+      envelope: {
+        origin: { app: "claude-code", created_by: AGENT },
+        state: "proposed",
+        actions: [{
+          class: cls,
+          summary: `Edit ${key}`,
+          reversible: true,
+          est_cost_usd: "0",
+          idempotency_key: actionKey,
+          payload_hash: hash,
+        }],
+      },
+    },
+    AGENT,
+    { ...world.unit.options, clock: fixedClock(at(minute)) },
+  );
+  assert.equal(registered.ok, true, registered.ok ? "" : registered.message);
+  world.store.set(hash, material);
+  return { task, actionKey, cls, hash };
+}
+
+/** Register and record a genuine policy-authorized harness start. */
+function authorizeEdit(
+  world: World,
+  key: string,
+  material: unknown,
+  minute: number,
+  overrides: {
+    task?: string;
+    startTask?: string;
+    cls?: string;
+    startCls?: string;
+    startHash?: string;
+  } = {},
+): EventRecord {
+  const binding = registerEdit(world, key, material, minute, overrides);
+  const started = startHarnessExecution(
+    world.unit.logPath,
+    {
+      task: overrides.startTask ?? binding.task,
+      actionKey: binding.actionKey,
+      cls: overrides.startCls ?? binding.cls,
+      payload_hash: overrides.startHash ?? binding.hash,
+      est_cost_usd: "0",
+    },
+    AGENT,
+    { ...world.unit.options, clock: fixedClock(at(minute + 1)) },
+  );
+  assert.equal(started.ok, true, JSON.stringify(started));
+  if (!started.ok) throw new Error("unreachable");
+  return started.record;
+}
+
+/** Replace and attest the scenario policy, as a real policy transition. */
+function attestPolicy(world: World, policy: string, minute: number): void {
+  writeFileSync(world.unit.policyPath, policy, "utf8");
+  const attested = appendAttestation(world.unit.logPath, world.unit.policyPath, HUMAN, {
+    ...world.unit.options,
+    clock: fixedClock(at(minute)),
+  });
+  assert.equal(attested.ok, true, JSON.stringify(attested));
+}
+
 /**
  * Register, request and grant one `policy.edit` action bound to `material`,
  * entirely through the gate. Returns the grant record.
  */
-function grantEdit(world: World, key: string, material: unknown, minute: number): EventRecord {
+function grantEdit(
+  world: World,
+  key: string,
+  material: unknown,
+  minute: number,
+  cls = "policy.edit",
+): EventRecord {
   const hash = payloadHash(material);
   const task = `hook:${key}`;
   const actionKey = `${task}:policy.edit`;
@@ -135,7 +236,7 @@ function grantEdit(world: World, key: string, material: unknown, minute: number)
         state: "proposed",
         actions: [
           {
-            class: "policy.edit",
+            class: cls,
             summary: `Edit ${key}`,
             reversible: true,
             est_cost_usd: "0",
@@ -155,7 +256,7 @@ function grantEdit(world: World, key: string, material: unknown, minute: number)
     {
       task,
       actionKey,
-      cls: "policy.edit",
+      cls,
       est_cost_usd: "0",
       summary: `Edit ${key}`,
       payload_hash: hash,
@@ -310,6 +411,504 @@ test("a file-tool grant naming the path is path-level evidence", () => {
   }
 });
 
+test("an unattended policy-authorized Edit or Write covers its exact change", () => {
+  const { root, cleanup } = scratchRoot("guard-policy-authorized");
+  try {
+    for (const [key, material] of [
+      ["edit", fileMaterial("SPEC.md")],
+      ["write", writeMaterial("SPEC.md", "new\n")],
+    ] as const) {
+      const unit = world(join(root, key), UNATTENDED_POLICY);
+      const start = authorizeEdit(unit, key, material, 1);
+      const report = evaluateProtectedPaths(inputFor(unit, ["SPEC.md"]));
+      assert.equal(report.ok, true, JSON.stringify(report.findings));
+      assert.equal(report.findings[0]?.evidence, "policy-authorized-file");
+      assert.equal(report.findings[0]?.seq, start.seq);
+      assert.match(report.findings[0]?.detail ?? "", /authorized by policy for execution/u);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("a real core adapter start is policy-authorized exact-file evidence", async () => {
+  const { root, cleanup } = scratchRoot("guard-policy-adapter");
+  try {
+    const unit = world(root, UNATTENDED_POLICY);
+    // This is the minimal shape emitted by the real file adapter. `rule` is
+    // optional metadata and cannot be required for runtime authorization.
+    const material = { tool: "Edit", file: "SPEC.md", before: "old", after: "new" };
+    const binding = registerEdit(unit, "adapter", material, 1);
+    const adapter: Adapter = {
+      name: "guard-test",
+      classes: ["policy.edit"],
+      act: () => ({ ok: true }),
+    };
+    const result = await executeThroughAdapter(
+      adapter,
+      {
+        logPath: unit.unit.logPath,
+        actionKey: binding.actionKey,
+        payload: material as JsonValue,
+        actor: AGENT,
+      },
+      { ...unit.unit.options, clock: fixedClock(at(2)) },
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], { changeTsFor: () => at(3) }),
+    );
+    assert.equal(report.ok, true, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.evidence, "policy-authorized-file");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a pending or rejected human request cannot become policy-authorized evidence", () => {
+  const { root, cleanup } = scratchRoot("guard-policy-requested");
+  try {
+    for (const decision of ["pending", "rejected"] as const) {
+      const unit = world(join(root, decision), POLICY);
+      const material = fileMaterial("SPEC.md");
+      const binding = registerEdit(unit, decision, material, 1);
+      const requested = request(
+        unit.unit.logPath,
+        {
+          task: binding.task,
+          actionKey: binding.actionKey,
+          cls: binding.cls,
+          est_cost_usd: "0",
+          summary: `Edit ${decision}`,
+          payload_hash: binding.hash,
+          payload: { value: material },
+          execution: "harness",
+        },
+        AGENT,
+        { ...unit.unit.options, clock: fixedClock(at(2)) },
+      );
+      assert.equal(requested.ok, true, JSON.stringify(requested));
+      if (decision === "rejected") {
+        const rejected = decide(unit.unit.logPath, binding.actionKey, "reject", HUMAN, {
+          ...unit.unit.options,
+          clock: fixedClock(at(3)),
+        });
+        assert.equal(rejected.ok, true, JSON.stringify(rejected));
+      }
+      attestPolicy(unit, UNATTENDED_POLICY, decision === "rejected" ? 4 : 3);
+      const started = startHarnessExecution(
+        unit.unit.logPath,
+        {
+          task: binding.task,
+          actionKey: binding.actionKey,
+          cls: binding.cls,
+          payload_hash: binding.hash,
+        },
+        AGENT,
+        {
+          ...unit.unit.options,
+          clock: fixedClock(at(decision === "rejected" ? 5 : 4)),
+        },
+      );
+      assert.equal(started.ok, true, JSON.stringify(started));
+      const report = evaluateProtectedPaths(
+        inputFor(unit, ["SPEC.md"], {
+          changeTsFor: () => at(decision === "rejected" ? 6 : 5),
+        }),
+      );
+      assert.equal(report.ok, false, `${decision}: ${JSON.stringify(report.findings)}`);
+      assert.equal(report.findings[0]?.code, "no-evidence");
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("policy-authorized evidence requires the preceding registration task and payload hash", () => {
+  const { root, cleanup } = scratchRoot("guard-policy-binding");
+  try {
+    const wrongTask = world(join(root, "task"), UNATTENDED_POLICY);
+    authorizeEdit(wrongTask, "task", fileMaterial("SPEC.md"), 1, {
+      startTask: "hook:some-other-task",
+    });
+    assert.equal(evaluateProtectedPaths(inputFor(wrongTask, ["SPEC.md"])).ok, false);
+
+    const wrongHash = world(join(root, "hash"), UNATTENDED_POLICY);
+    authorizeEdit(wrongHash, "hash", fileMaterial("SPEC.md"), 1, {
+      startHash: payloadHash(fileMaterial("SPEC.md", "old", "other")),
+    });
+    assert.equal(evaluateProtectedPaths(inputFor(wrongHash, ["SPEC.md"])).ok, false);
+
+    const wrongStoredBytes = world(join(root, "store"), UNATTENDED_POLICY);
+    const original = fileMaterial("SPEC.md");
+    authorizeEdit(wrongStoredBytes, "store", original, 1);
+    wrongStoredBytes.store.set(payloadHash(original), fileMaterial("SPEC.md", "old", "other"));
+    assert.equal(evaluateProtectedPaths(inputFor(wrongStoredBytes, ["SPEC.md"])).ok, false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a later registration cannot backfill an earlier unattended start", () => {
+  const { root, cleanup } = scratchRoot("guard-policy-post-registration");
+  try {
+    const unit = world(root, UNATTENDED_POLICY);
+    const material = fileMaterial("SPEC.md");
+    const hash = payloadHash(material);
+    const task = "hook:post-registration";
+    const actionKey = `${task}:policy.edit`;
+    const started = startHarnessExecution(
+      unit.unit.logPath,
+      { task, actionKey, cls: "policy.edit", payload_hash: hash },
+      AGENT,
+      { ...unit.unit.options, clock: fixedClock(at(1)) },
+    );
+    assert.equal(started.ok, true, JSON.stringify(started));
+    registerEdit(unit, "post-registration", material, 2, { task });
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], { changeTsFor: () => at(3) }),
+    );
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "no-evidence");
+  } finally {
+    cleanup();
+  }
+});
+
+test("policy-authorized evidence requires the path's exact routed class", () => {
+  const { root, cleanup } = scratchRoot("guard-policy-route");
+  try {
+    const routedPolicy = UNATTENDED_POLICY.replace(
+      "  - SPEC.md",
+      "  - path: SPEC.md\n    class: policy.edit.spec",
+    ).replace(
+      "  policy.edit:\n    autonomy: autonomous",
+      "  policy.edit:\n    autonomy: autonomous\n  policy.edit.docs:\n    autonomy: autonomous\n  policy.edit.spec:\n    autonomy: autonomous",
+    );
+    const unit = world(root, routedPolicy);
+    authorizeEdit(unit, "wrong-route", fileMaterial("SPEC.md"), 1, {
+      cls: "policy.edit.docs",
+    });
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], {
+        policyProtectedPaths: [{ path: "SPEC.md", class: "policy.edit.spec" }],
+      }),
+    );
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "no-evidence");
+
+    const classMismatch = world(join(root, "registration-mismatch"), routedPolicy);
+    authorizeEdit(classMismatch, "class-mismatch", fileMaterial("SPEC.md"), 1, {
+      cls: "policy.edit.docs",
+      startCls: "policy.edit.spec",
+    });
+    const mismatch = evaluateProtectedPaths(
+      inputFor(classMismatch, ["SPEC.md"], {
+        policyProtectedPaths: [{ path: "SPEC.md", class: "policy.edit.spec" }],
+      }),
+    );
+    assert.equal(mismatch.ok, false, JSON.stringify(mismatch.findings));
+
+    const ambiguous = world(join(root, "ambiguous-route"), routedPolicy);
+    authorizeEdit(ambiguous, "ambiguous", fileMaterial("SPEC.md"), 1, {
+      cls: "policy.edit.docs",
+    });
+    const ambiguousReport = evaluateProtectedPaths(
+      inputFor(ambiguous, ["SPEC.md"], {
+        policyProtectedPaths: [
+          { path: "SPEC.md", class: "policy.edit.docs" },
+          { path: "SPEC.md", class: "policy.edit.spec" },
+        ],
+      }),
+    );
+    assert.equal(ambiguousReport.ok, false, JSON.stringify(ambiguousReport.findings));
+
+    const differentDepth = world(join(root, "different-depth-route"), routedPolicy);
+    authorizeEdit(differentDepth, "different-depth", fileMaterial("dir/SPEC.md"), 1, {
+      cls: "policy.edit.spec",
+    });
+    const differentDepthReport = evaluateProtectedPaths(
+      inputFor(differentDepth, ["dir/SPEC.md"], {
+        policyProtectedPaths: [
+          "SPEC.md",
+          { path: "dir/SPEC.md", class: "policy.edit.spec" },
+        ],
+      }),
+    );
+    assert.equal(differentDepthReport.ok, false, JSON.stringify(differentDepthReport.findings));
+  } finally {
+    cleanup();
+  }
+});
+
+test("policy-authorized evidence must precede and closely match the changed commit", () => {
+  const { root, cleanup } = scratchRoot("guard-policy-time");
+  try {
+    const posthoc = world(join(root, "posthoc"), UNATTENDED_POLICY);
+    authorizeEdit(posthoc, "posthoc", fileMaterial("SPEC.md"), 1);
+    assert.equal(
+      evaluateProtectedPaths(
+        inputFor(posthoc, ["SPEC.md"], { changeTsFor: () => at(1) }),
+      ).ok,
+      false,
+    );
+
+    const stale = world(join(root, "stale"), UNATTENDED_POLICY);
+    authorizeEdit(stale, "stale", fileMaterial("SPEC.md"), 1);
+    assert.equal(
+      evaluateProtectedPaths(
+        inputFor(stale, ["SPEC.md"], { changeTsFor: () => at(8 * 24 * 60) }),
+      ).ok,
+      false,
+    );
+
+    const undated = world(join(root, "undated"), UNATTENDED_POLICY);
+    authorizeEdit(undated, "undated", fileMaterial("SPEC.md"), 1);
+    assert.equal(
+      evaluateProtectedPaths(
+        inputFor(undated, ["SPEC.md"], { changeTsFor: () => null }),
+      ).ok,
+      false,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("policy-authorized exact material cannot cover a different hunk", () => {
+  const { root, cleanup } = scratchRoot("guard-policy-hunk");
+  try {
+    const unit = world(root, UNATTENDED_POLICY);
+    authorizeEdit(unit, "hunk", fileMaterial("SPEC.md"), 1);
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], {
+        blobsFor: () => ({ base: "old\n", head: "different\n" }),
+      }),
+    );
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "uncovered-hunk");
+  } finally {
+    cleanup();
+  }
+});
+
+test("exact replay composes fragmented policy and manual edits in execution order", () => {
+  const { root, cleanup } = scratchRoot("guard-exact-replay-mixed");
+  try {
+    const unit = world(root, UNATTENDED_POLICY);
+    const first = { tool: "Edit", file: "SPEC.md", before: "old-one", after: "new-one" };
+    const second = { tool: "Edit", file: "SPEC.md", before: "old-two", after: "new-two" };
+    authorizeEdit(unit, "replay-policy", first, 1);
+    attestPolicy(unit, POLICY, 3);
+    grantEdit(unit, "replay-grant", second, 4);
+    spendGrant(unit, "replay-grant", second, 6);
+
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], {
+        blobsFor: () => ({
+          base: "prefix old-one middle old-two suffix\n",
+          head: "prefix new-one middle new-two suffix\n",
+        }),
+        changeTsFor: () => at(8),
+      }),
+    );
+    assert.equal(report.ok, true, JSON.stringify(report.findings));
+    assert.match(report.findings[0]?.detail ?? "", /exact BASE-to-HEAD replay/u);
+    assert.deepEqual(report.findings[0]?.coveredBy, [3, 7]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("exact replay refuses unrelated bytes, duplicate anchors, missing steps, and wrong order", () => {
+  const { root, cleanup } = scratchRoot("guard-exact-replay-refusals");
+  try {
+    const cases = [
+      {
+        label: "unrelated",
+        edits: [["old", "new"]] as const,
+        base: "prefix old suffix\n",
+        head: "prefix new suffix plus-unapproved\n",
+      },
+      {
+        label: "duplicate",
+        edits: [["old", "new"]] as const,
+        base: "old middle old\n",
+        head: "new middle old\n",
+      },
+      {
+        label: "overlapping-duplicate",
+        edits: [["aa", "b"]] as const,
+        base: "aaa\n",
+        head: "ba\n",
+      },
+      {
+        label: "missing",
+        edits: [["old-one", "new-one"]] as const,
+        base: "old-one and old-two\n",
+        head: "new-one and new-two\n",
+      },
+      {
+        label: "reordered",
+        edits: [["middle", "final"], ["start", "middle"]] as const,
+        base: "prefix start suffix\n",
+        head: "prefix final suffix\n",
+      },
+      {
+        label: "replacement-character",
+        edits: [["old", "new"]] as const,
+        base: "prefix \uFFFD old\n",
+        head: "prefix \uFFFD new\n",
+      },
+    ];
+    for (const scenario of cases) {
+      const unit = world(join(root, scenario.label), UNATTENDED_POLICY);
+      scenario.edits.forEach(([before, after], index) => {
+        authorizeEdit(
+          unit,
+          `${scenario.label}-${String(index)}`,
+          { tool: "Edit", file: "SPEC.md", before, after },
+          1 + index * 2,
+        );
+      });
+      const report = evaluateProtectedPaths(
+        inputFor(unit, ["SPEC.md"], {
+          blobsFor: () => ({ base: scenario.base, head: scenario.head }),
+          changeTsFor: () => at(10),
+        }),
+      );
+      assert.equal(report.ok, false, `${scenario.label}: ${JSON.stringify(report.findings)}`);
+      assert.equal(report.findings[0]?.code, "uncovered-hunk", scenario.label);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("exact replay refuses hybrid, tampered, or wrong-class manual evidence", () => {
+  const { root, cleanup } = scratchRoot("guard-exact-replay-manual-refusals");
+  try {
+    const hybrid = {
+      tool: "Edit",
+      file: "SPEC.md",
+      before: "old",
+      after: "new",
+      content: "new whole file",
+    };
+    const hybridUnit = world(join(root, "hybrid"));
+    grantEdit(hybridUnit, "hybrid", hybrid, 1);
+    spendGrant(hybridUnit, "hybrid", hybrid, 3);
+    assert.equal(
+      evaluateProtectedPaths(
+        inputFor(hybridUnit, ["SPEC.md"], {
+          blobsFor: () => ({ base: "prefix old suffix\n", head: "prefix new suffix\n" }),
+          changeTsFor: () => at(5),
+        }),
+      ).ok,
+      false,
+    );
+
+    const original = { tool: "Edit", file: "SPEC.md", before: "old", after: "new" };
+    const tamperedUnit = world(join(root, "tampered"));
+    grantEdit(tamperedUnit, "tampered", original, 1);
+    spendGrant(tamperedUnit, "tampered", original, 3);
+    tamperedUnit.store.set(payloadHash(original), {
+      ...original,
+      after: "tampered",
+    });
+    assert.equal(
+      evaluateProtectedPaths(
+        inputFor(tamperedUnit, ["SPEC.md"], {
+          blobsFor: () => ({ base: "prefix old suffix\n", head: "prefix tampered suffix\n" }),
+          changeTsFor: () => at(5),
+        }),
+      ).ok,
+      false,
+    );
+
+    const wrongClassPolicy = POLICY.replace(
+      "  policy.edit:\n    autonomy: manual",
+      "  policy.edit:\n    autonomy: manual\n  policy.edit.docs:\n    autonomy: manual",
+    );
+    const wrongClassUnit = world(join(root, "wrong-class"), wrongClassPolicy);
+    grantEdit(wrongClassUnit, "wrong-class", original, 1, "policy.edit.docs");
+    spendGrant(wrongClassUnit, "wrong-class", original, 3);
+    assert.equal(
+      evaluateProtectedPaths(
+        inputFor(wrongClassUnit, ["SPEC.md"], {
+          blobsFor: () => ({ base: "prefix old suffix\n", head: "prefix new suffix\n" }),
+          changeTsFor: () => at(5),
+        }),
+      ).ok,
+      false,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("exact replay rehashes a policy payload returned by a changing reader", () => {
+  const { root, cleanup } = scratchRoot("guard-exact-replay-changing-reader");
+  try {
+    const unit = world(root, UNATTENDED_POLICY);
+    const original = { tool: "Edit", file: "SPEC.md", before: "old", after: "new" };
+    const tampered = { ...original, after: "tampered" };
+    authorizeEdit(unit, "changing-reader", original, 1);
+    let reads = 0;
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], {
+        payloadFor: () => reads++ === 0 ? original : tampered,
+        blobsFor: () => ({
+          base: "prefix old suffix\n",
+          head: "prefix tampered suffix\n",
+        }),
+        changeTsFor: () => at(3),
+      }),
+    );
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "uncovered-hunk");
+  } finally {
+    cleanup();
+  }
+});
+
+test("policy-authorized file evidence rejects ambiguous paths and tool shapes", () => {
+  const { root, cleanup } = scratchRoot("guard-policy-shape");
+  try {
+    const materials = [
+      fileMaterial("/repo/SPEC.md"),
+      fileMaterial("dry/SPEC.md"),
+      fileMaterial("dir/../SPEC.md"),
+      fileMaterial("dir\\SPEC.md"),
+      { ...fileMaterial("SPEC.md"), content: "new\n" },
+      { ...writeMaterial("SPEC.md", "new\n"), before: "old", after: "new" },
+    ];
+    for (const [index, material] of materials.entries()) {
+      const unit = world(join(root, String(index)), UNATTENDED_POLICY);
+      authorizeEdit(unit, `shape-${String(index)}`, material, 1);
+      const report = evaluateProtectedPaths(inputFor(unit, ["SPEC.md"]));
+      assert.equal(report.ok, false, `${String(index)}: ${JSON.stringify(report.findings)}`);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("a policy-authorized file start cannot carry a metadata-only change", () => {
+  const { root, cleanup } = scratchRoot("guard-policy-quiet");
+  try {
+    const unit = world(root, UNATTENDED_POLICY);
+    authorizeEdit(unit, "quiet", fileMaterial("SPEC.md", "same", "same"), 1);
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], { blobsFor: () => ({ base: "same\n", head: "same\n" }) }),
+    );
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "uncovered-hunk");
+  } finally {
+    cleanup();
+  }
+});
+
 test("a grant whose bound path is a DIFFERENT file is not evidence", () => {
   const { root, cleanup } = scratchRoot("guard-other");
   try {
@@ -360,6 +959,27 @@ test("a granted command that only MENTIONS the path is not evidence", () => {
       assert.equal(report.ok, false, `${label}: ${JSON.stringify(report.findings)}`);
       assert.equal(report.findings[0]?.code, "no-evidence", label);
     }
+  } finally {
+    cleanup();
+  }
+});
+
+test("a tagged apply_patch is naming-only file evidence and never a time-attributed command", () => {
+  const { root, cleanup } = scratchRoot("guard-apply-patch");
+  try {
+    const unit = world(root);
+    const patch = {
+      tool: "apply_patch",
+      command: "*** Begin Patch\n*** Update File: SPEC.md\n@@\n-old\n+new\n*** End Patch",
+      cwd: CHECKOUT,
+    };
+    grantEdit(unit, "patch", patch, 1);
+    spendGrant(unit, "patch", patch, 2);
+    const report = evaluateProtectedPaths(inputFor(unit, ["SPEC.md"]));
+    assert.equal(report.ok, false);
+    assert.equal(report.findings[0]?.code, "uncovered-hunk");
+    assert.match(report.findings[0]?.detail ?? "", /apply_patch operation naming SPEC\.md/u);
+    assert.doesNotMatch(report.findings[0]?.detail ?? "", /granted-command|attributed/u);
   } finally {
     cleanup();
   }

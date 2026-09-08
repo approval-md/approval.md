@@ -133,6 +133,7 @@ import {
 import { drawSocketPathFor, drawSocketUsable } from "../core/live-draw.js";
 import type { EventRecord } from "../core/log.js";
 import { payloadHash } from "../core/payload.js";
+import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
 import { humanOnlyRefusal, resolve as resolvePolicy } from "../core/policy-match.js";
 import {
@@ -150,6 +151,12 @@ import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
 import { refusal as renderRefusal, style, table, type Style } from "./style.js";
 import { usageErrorText } from "./usage.js";
+import {
+  checkCodexHookInput,
+  codexBinding,
+  CODEX_POST_TOOL_EVENT,
+  readCodexReportedOutcome,
+} from "./hook-codex.js";
 
 /** Identity accepted for the proposing side: a person or an agent. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
@@ -375,6 +382,8 @@ interface HarnessAdapter {
   defaultActor: string;
   shellTool: string;
   fileTools: readonly string[];
+  /** Include the native tool name in the bytes a grant binds. */
+  bindToolName?: boolean;
 }
 
 const CLAUDE_ADAPTER: HarnessAdapter = {
@@ -393,6 +402,15 @@ const CURSOR_ADAPTER: HarnessAdapter = {
   fileTools: ["Write", "Delete"],
 };
 
+const CODEX_ADAPTER: HarnessAdapter = {
+  kind: "codex",
+  originApp: "codex-hook",
+  defaultActor: "agent:codex",
+  shellTool: "Bash",
+  fileTools: ["apply_patch"],
+  bindToolName: true,
+};
+
 /**
  * The decision object the harness reads from stdout.
  *
@@ -400,7 +418,12 @@ const CURSOR_ADAPTER: HarnessAdapter = {
  * `{permission, user_message, agent_message}`. One construction site per
  * harness, still never `ask`.
  */
-function decision(permission: Permission, reason: string, harness: HarnessKind): string {
+function decision(
+  permission: Permission,
+  reason: string,
+  harness: HarnessKind,
+  codexCommand?: string,
+): string {
   if (harness === "cursor") {
     return `${JSON.stringify({
       permission,
@@ -408,17 +431,32 @@ function decision(permission: Permission, reason: string, harness: HarnessKind):
       agent_message: reason,
     })}\n`;
   }
-  return `${JSON.stringify({
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: permission,
-      permissionDecisionReason: reason,
-    },
-  })}\n`;
+  const hookSpecificOutput: Record<string, unknown> = {
+    hookEventName: "PreToolUse",
+    permissionDecision: permission,
+    permissionDecisionReason: reason,
+  };
+  if (harness === "codex" && permission === "allow") {
+    if (codexCommand !== undefined) hookSpecificOutput["updatedInput"] = { command: codexCommand };
+  }
+  return `${JSON.stringify({ hookSpecificOutput })}\n`;
 }
 
-function allow(streams: Streams, reason: string, harness: HarnessKind): number {
-  streams.out(decision("allow", reason, harness));
+function allow(
+  streams: Streams,
+  reason: string,
+  harness: HarnessKind,
+  codexCommand?: string,
+): number {
+  if (harness === "codex" && codexCommand === undefined) {
+    return deny(
+      streams,
+      "hook-io",
+      "the Codex allow lost its exact bound tool_input.command",
+      harness,
+    );
+  }
+  streams.out(decision("allow", reason, harness, codexCommand));
   return EXIT_OK;
 }
 
@@ -433,6 +471,8 @@ function deny(streams: Streams, code: string, detail: string, harness: HarnessKi
 
 interface HookInput {
   sessionId: string;
+  /** Whether the event supplied the session id, distinct from the strict unknown bucket. */
+  sessionIdPresent: boolean;
   cwd: string;
   toolName: string;
   toolInput: Record<string, unknown>;
@@ -456,6 +496,8 @@ interface HookInput {
    * {@link readReportedOutcome}) — never the text inside it.
    */
   toolResponse: Record<string, unknown> | null;
+  /** `tool_response` verbatim, including strings, for harness-specific readers. */
+  toolResponseRaw: unknown;
   /**
    * `is_interrupt`, the post-execution events' own word for "a person stopped
    * this" (APRV-303).
@@ -522,13 +564,15 @@ function parseHookInput(raw: string): ParsedInput {
       ? (toolInputValue as Record<string, unknown>)
       : {};
   const responseValue = fields["tool_response"];
+  const sessionId = readString(fields, "session_id");
   return {
     ok: true,
     input: {
       // The ONE shared bucket for an unreadable session (`core/loop.ts`'s
       // `UNKNOWN_SESSION`): absence accrues faster than a readable id and never
       // slower, which is the fail-closed direction.
-      sessionId: readString(fields, "session_id") ?? UNKNOWN_SESSION,
+      sessionId: sessionId ?? UNKNOWN_SESSION,
+      sessionIdPresent: sessionId !== null,
       cwd: readString(fields, "cwd") ?? "",
       toolName,
       toolInput,
@@ -540,6 +584,7 @@ function parseHookInput(raw: string): ParsedInput {
         typeof responseValue === "object" && responseValue !== null && !Array.isArray(responseValue)
           ? (responseValue as Record<string, unknown>)
           : null,
+      toolResponseRaw: responseValue,
     },
   };
 }
@@ -1467,6 +1512,8 @@ interface HookRun {
   ttlMs: number | null;
   harness: HarnessKind;
   originApp: string;
+  /** Exact native command bytes required in a Codex allow's identity update. */
+  codexCommand?: string;
   /**
    * The version the hook event stated, or `null` (APRV-227).
    *
@@ -2052,7 +2099,8 @@ function gateAndWait(
   const floorApplies = (cls: string): boolean => floor !== null && isSideEffectingClass(cls);
   const hash = payloadHash(payload);
   const summary = truncate(headline, SUMMARY_LIMIT);
-  const sayAllow = (reason: string): number => allow(streams, reason, run.harness);
+  const sayAllow = (reason: string): number =>
+    allow(streams, reason, run.harness, run.codexCommand);
   /**
    * Every deny this function can print, with the floor's own sentence appended
    * when a floor is what routed the command here (APRV-280). One wrapper rather
@@ -2579,7 +2627,8 @@ type OutcomeReading =
  * whether two enumerated fields are present and what kind of value they hold.
  * No text from any of them reaches the log or this function's return.
  */
-function readReportedOutcome(input: HookInput): OutcomeReading {
+function readReportedOutcome(input: HookInput, adapter: HarnessAdapter): OutcomeReading {
+  if (adapter.kind === "codex") return readCodexReportedOutcome(input);
   const event = input.hookEventName;
   if (event !== "PostToolUse" && event !== "PostToolUseFailure") {
     return {
@@ -2647,7 +2696,7 @@ function runPostToolUse(
     );
   }
 
-  const reading = readReportedOutcome(input);
+  const reading = readReportedOutcome(input, adapter);
   if (!reading.ok) {
     return report(streams, "post-tool-unreadable-outcome", `${reading.detail}; nothing was appended`);
   }
@@ -2664,8 +2713,10 @@ function runPostToolUse(
   const finished = finishHarnessExecution(
     logPath,
     {
-      sessionId: input.sessionId,
-      toolUseId: input.toolUseId,
+      sessionId:
+        adapter.kind === "codex" ? codexBinding(input, cwd).finishSessionId : input.sessionId,
+      toolUseId:
+        adapter.kind === "codex" ? codexBinding(input, cwd).finishToolUseId : input.toolUseId,
       outcome: reading.outcome,
       // The one member of the closed set at v0.1. It names the untrusted
       // reporter and reduces nothing.
@@ -2738,6 +2789,25 @@ function describeToolCall(
   protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
 ): ToolDescription {
+  if (adapter.kind === "codex" && input.toolName === "apply_patch") {
+    const raw = readString(input.toolInput, "command");
+    if (raw === null) {
+      return { kind: "deny", code: "hook-io", detail: "apply_patch tool_input carries no command string" };
+    }
+    const parsed = parseApplyPatch(raw);
+    if (!parsed.ok) return { kind: "deny", code: "hook-io", detail: parsed.detail };
+    const classified = classifyApplyPatch(parsed, cwd, protectedPaths);
+    if (!classified.ok) return { kind: "deny", code: "hook-io", detail: classified.detail };
+    return {
+      kind: "gated",
+      classes: classified.classes,
+      payload: codexBinding(input, cwd).payload,
+      headline: `apply_patch ${classified.operations.length} operation(s)`,
+      notes: classified.targets.map(
+        (target) => `${target.role} ${target.path} (${target.classes.join(", ")})`,
+      ),
+    };
+  }
   if (input.toolName === adapter.shellTool) {
     const raw = readString(input.toolInput, "command");
     if (raw === null) {
@@ -2750,7 +2820,9 @@ function describeToolCall(
     // Unchanged since APRV-117, deliberately: the payload is the WHOLE command
     // and the directory it runs in, so the FULL PAYLOAD block on the phone
     // carries every byte the harness will execute. Only `summary` is shortened.
-    const payload = { command: raw, cwd: input.cwd };
+    const payload = adapter.bindToolName
+      ? codexBinding(input, cwd).payload
+      : { command: raw, cwd: input.cwd };
     // APRV-108: a local rewrite of history this checkout never published is a
     // commit. APRV-267: a delete confined to the agent's own scratch is not a
     // decision. Both run in the hook's own cwd, after classification and never
@@ -2764,9 +2836,84 @@ function describeToolCall(
         detail: `${classified.detail} (segment: ${classified.segment}). Rewrite it as a command the classifier can read, or run the effect through \`approval run\` with a granted token.`,
       };
     }
+    const classes = classified.classes.filter((cls) => cls !== GATE_SELF_CLASS);
+    if (adapter.kind === "codex") {
+      // The pure shell classifier sees each segment independently. Preserve
+      // Codex hook organs when an earlier simple `cd` changes the directory or
+      // when the hook itself runs inside an organ directory by resolving every
+      // later side-effecting segment's words from the effective directory.
+      const possibleCwds = new Set([cwd]);
+      for (const segment of classified.segments) {
+        const parsedWords = commandSegmentWords(segment.text)?.[0];
+        if (parsedWords?.bin === "cd" && parsedWords.args.length !== 1) {
+          return {
+            kind: "deny",
+            code: "hook-io",
+            detail: "Codex Bash cwd changes must use exact `cd <directory>` with no additional words",
+          };
+        }
+        if (
+          parsedWords?.bin === "cd" &&
+          (parsedWords.args[0] === "-" ||
+            (!isAbsolute(parsedWords.args[0] ?? "") &&
+              parsedWords.args[0] !== "." &&
+              parsedWords.args[0] !== ".." &&
+              !(parsedWords.args[0] ?? "").startsWith("./") &&
+              !(parsedWords.args[0] ?? "").startsWith("../")))
+        ) {
+          return {
+            kind: "deny",
+            code: "hook-io",
+            detail: "Codex Bash cwd changes must name an absolute path, `.`, `..`, `./...`, or `../...`; OLDPWD and CDPATH-dependent operands are unsupported",
+          };
+        }
+        if (isSideEffectingClass(segment.class)) {
+          for (const possibleCwd of possibleCwds) {
+            const cwdSegments = possibleCwd.split(/[/\\]+/u);
+            const cwdClass = cwdSegments.includes(".codex")
+              ? "policy.core"
+              : protectedPathClass(possibleCwd, protectedPaths);
+            if (cwdClass !== null && !classes.includes(cwdClass)) classes.push(cwdClass);
+            for (const word of parsedWords === undefined ? [] : [parsedWords.bin, ...parsedWords.args]) {
+              const cls = protectedPathClass(
+                resolvePathSegments(possibleCwd, word),
+                protectedPaths,
+              );
+              if (cls !== null && !classes.includes(cls)) classes.push(cls);
+            }
+          }
+        }
+        if (parsedWords?.bin === "cd" && parsedWords.args.length === 1) {
+          // Lists and conditionals may skip a cd. Retain every prior directory
+          // and add each directory the cd could establish; later writes are
+          // checked against their union.
+          const priorCwds = Array.from(possibleCwds);
+          for (const possibleCwd of priorCwds) {
+            const lexical = resolvePathSegments(possibleCwd, parsedWords.args[0] ?? "");
+            possibleCwds.add(lexical);
+            try {
+              possibleCwds.add(realpathSync(lexical));
+            } catch {
+              return {
+                kind: "deny",
+                code: "hook-io",
+                detail: `Codex Bash cd target ${JSON.stringify(parsedWords.args[0])} could not be resolved`,
+              };
+            }
+            if (possibleCwds.size > 64) {
+              return {
+                kind: "deny",
+                code: "hook-io",
+                detail: "Codex Bash command has more than 64 possible working directories",
+              };
+            }
+          }
+        }
+      }
+    }
     return {
       kind: "gated",
-      classes: classified.classes.filter((cls) => cls !== GATE_SELF_CLASS),
+      classes,
       payload,
       headline: raw,
       notes: refined.notes,
@@ -2955,6 +3102,8 @@ function runBypass(
    */
   decidedOn: { records: EventRecord[]; head: { seq: number; hash: string } | null } | null,
 ): number {
+  const codexCommand =
+    adapter.kind === "codex" ? codexBinding(input, cwd).payload.command : undefined;
   const scope = hookScope(flags, cwd);
   const load = loadPolicy(
     scope.options.policy?.file === undefined
@@ -2975,7 +3124,9 @@ function runBypass(
       adapter.kind,
     );
   }
-  if (described.kind === "allow") return allow(streams, described.reason, adapter.kind);
+  if (described.kind === "allow") {
+    return allow(streams, described.reason, adapter.kind, codexCommand);
+  }
   if (described.passthrough !== undefined) {
     // APRV-303. An ordinary workspace edit is allowed by the policy on its own
     // merits, so there is nothing here for the window to suspend and nothing
@@ -2983,7 +3134,7 @@ function runBypass(
     // this call a question is a §10.2 floor, and a window bypasses the floor
     // outright. Answered here rather than below so the bypass log stays a
     // record of calls the window actually let through.
-    return allow(streams, described.passthrough, adapter.kind);
+    return allow(streams, described.passthrough, adapter.kind, codexCommand);
   }
 
   const classes = described.classes;
@@ -2996,6 +3147,7 @@ function runBypass(
       streams,
       "the approval CLI is the gate itself and is not gated by it",
       adapter.kind,
+      codexCommand,
     );
   }
 
@@ -3070,6 +3222,7 @@ function runBypass(
     streams,
     `gate-open: ${classes.join(", ")} bypassed by the window opened at seq ${String(window.seq)} by ${window.openedBy} (expires ${window.expiresAt}); recorded as gate.bypassed seq ${String(recorded.record.seq)}${notes.length === 0 ? "" : ` (${notes.join("; ")})`}`,
     adapter.kind,
+    codexCommand,
   );
 }
 
@@ -3080,6 +3233,8 @@ function runHarnessHook(
   readStdin: () => string,
   adapter: HarnessAdapter,
 ): number {
+  const configurationError = (message: string): number =>
+    adapter.kind === "codex" ? deny(streams, "hook-io", message, adapter.kind) : usageError(streams, message);
   const parsed = parseFlags(argv, {
     ...COMMON_FLAGS,
     ...POLICY_FLAGS,
@@ -3089,21 +3244,20 @@ function runHarnessHook(
     "--interval": "string",
     "--retry-grace": "string",
   });
-  if (!parsed.ok) return usageError(streams, parsed.message);
+  if (!parsed.ok) return configurationError(parsed.message);
   if (boolFlag(parsed.flags, "--help") || boolFlag(parsed.flags, "-h")) {
     streams.out(`${HOOK_HELP}\n`);
     return EXIT_OK;
   }
   const extra = parsed.positionals[0];
   if (extra !== undefined) {
-    return usageError(streams, `unexpected argument ${JSON.stringify(extra)}`);
+    return configurationError(`unexpected argument ${JSON.stringify(extra)}`);
   }
 
   const asFlag = stringFlag(parsed.flags, "--as");
   const actor = asFlag ?? adapter.defaultActor;
   if (!PRINCIPAL_ACTOR.test(actor)) {
-    return usageError(
-      streams,
+    return configurationError(
       `--as expects agent:<id> or human:<id>, got ${JSON.stringify(asFlag)}`,
     );
   }
@@ -3111,16 +3265,14 @@ function runHarnessHook(
   const timeoutText = stringFlag(parsed.flags, "--timeout") ?? DEFAULT_TIMEOUT;
   const timeoutMs = parseDuration(timeoutText);
   if (timeoutMs === null) {
-    return usageError(
-      streams,
+    return configurationError(
       `--timeout expects a duration like 30s, 9m, got ${JSON.stringify(timeoutText)}`,
     );
   }
   const intervalText = stringFlag(parsed.flags, "--interval");
   const intervalMs = intervalText === null ? DEFAULT_INTERVAL_MS : parseDuration(intervalText);
   if (intervalMs === null) {
-    return usageError(
-      streams,
+    return configurationError(
       `--interval expects a duration like 500ms, 2s, got ${JSON.stringify(intervalText)}`,
     );
   }
@@ -3130,8 +3282,7 @@ function runHarnessHook(
   const graceText = stringFlag(parsed.flags, "--retry-grace");
   const graceMs = graceText === null ? HOOK_RETRY_GRACE_MS : parseDuration(graceText);
   if (graceMs === null) {
-    return usageError(
-      streams,
+    return configurationError(
       `--retry-grace expects a duration like 5m, 30s, 1ms, got ${JSON.stringify(graceText)}`,
     );
   }
@@ -3139,6 +3290,13 @@ function runHarnessHook(
   const parsedInput = parseHookInput(readStdin());
   if (!parsedInput.ok) return deny(streams, "hook-io", parsedInput.detail, adapter.kind);
   const input = parsedInput.input;
+
+  if (adapter.kind === "codex") {
+    const checked = checkCodexHookInput(input, cwd);
+    if (!checked.ok) return deny(streams, "hook-io", checked.detail, adapter.kind);
+  }
+  const codexCommand =
+    adapter.kind === "codex" ? codexBinding(input, cwd).payload.command : undefined;
 
   // APRV-145: WHICH EVENT THIS IS, read first and read at all. One command is
   // registered for two events, and they do opposite things — one answers before
@@ -3150,7 +3308,11 @@ function runHarnessHook(
   // harness whose event this runtime does not recognize is a harness about to
   // run a command, and treating an unknown name as a no-op would be an ungated
   // one.
-  if (input.hookEventName !== null && POST_TOOL_EVENTS.includes(input.hookEventName)) {
+  const postToolEvent =
+    adapter.kind === "codex"
+      ? input.hookEventName === CODEX_POST_TOOL_EVENT
+      : input.hookEventName !== null && POST_TOOL_EVENTS.includes(input.hookEventName);
+  if (postToolEvent) {
     // APRV-303. `commandHarnessHook`'s catch turns a throw into a DENY, which is
     // the right answer for a call that has not run yet and exactly the wrong one
     // here: it would print a verdict object about a tool call the harness has
@@ -3168,8 +3330,23 @@ function runHarnessHook(
     }
   }
 
+  // Codex 0.152.1 can execute Bash in a per-call working directory that is
+  // absent from tool_input while both the event cwd and this hook process stay
+  // at the session root (APRV-310 native v6). A decision over the visible
+  // `{command, cwd}` would therefore bind different bytes from the action the
+  // harness executes. Refuse before the open-window, gate-self, carry, or
+  // registration paths; none of those can supply the missing directory fact.
+  if (adapter.kind === "codex" && input.toolName === "Bash") {
+    return deny(
+      streams,
+      "hook-io",
+      "Codex Bash is disabled because the native hook contract does not expose the effective per-call working directory; no policy or open window can authorize bytes the hook cannot bind",
+      adapter.kind,
+    );
+  }
+
   if (input.toolName !== adapter.shellTool && !adapter.fileTools.includes(input.toolName)) {
-    return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind);
+    return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
   }
 
   // APRV-188. From here on this process may resume a verified read behind the
@@ -3250,7 +3427,9 @@ function runHarnessHook(
   if (described.kind === "deny") {
     return deny(streams, described.code, described.detail, adapter.kind);
   }
-  if (described.kind === "allow") return allow(streams, described.reason, adapter.kind);
+  if (described.kind === "allow") {
+    return allow(streams, described.reason, adapter.kind, codexCommand);
+  }
   const { classes, payload, headline } = described;
   /** What the history-rewrite refinement did, for the decision reason. */
   const notes: string[] = [...described.notes];
@@ -3260,6 +3439,7 @@ function runHarnessHook(
       streams,
       "the approval CLI is the gate itself and is not gated by it",
       adapter.kind,
+      codexCommand,
     );
   }
 
@@ -3280,7 +3460,10 @@ function runHarnessHook(
 
   // Minted once, here, and carried into `gateAndWait`: the loop-escalation
   // check below and any registration that follows must name the same task.
-  const task = `hook:${input.sessionId}:${input.toolUseId ?? randomBytes(8).toString("hex")}`;
+  const task =
+    adapter.kind === "codex"
+      ? codexBinding(input, cwd).task
+      : `hook:${input.sessionId}:${input.toolUseId ?? randomBytes(8).toString("hex")}`;
 
   const run: HookRun = {
     logPath,
@@ -3292,6 +3475,7 @@ function runHarnessHook(
     ttlMs: load.durations.approvalTtlMs,
     harness: adapter.kind,
     originApp: adapter.originApp,
+    ...(codexCommand === undefined ? {} : { codexCommand }),
     eventVersion: input.harnessVersion,
     // Off the policy this function already loaded and validated, so the names
     // printed are the names a channel process would serve (APRV-281). Sorted
@@ -3415,7 +3599,7 @@ function runHarnessHook(
   // and the floored path routes an Edit exactly as it routes an `echo >`,
   // because both are `files.write.workspace` and one predicate decides.
   if (described.passthrough !== undefined && floor === null) {
-    return allow(streams, `${described.passthrough}${note}`, adapter.kind);
+    return allow(streams, `${described.passthrough}${note}`, adapter.kind, codexCommand);
   }
 
   /** No class here needs a human, so nothing downstream will ask for one. */
@@ -3435,7 +3619,12 @@ function runHarnessHook(
     if (charged !== null) {
       return deny(streams, `hook-gate-refused:${charged.code}`, charged.message, adapter.kind);
     }
-    return allow(streams, `autonomous: ${classes.join(", ")}${note}`, adapter.kind);
+    return allow(
+      streams,
+      `autonomous: ${classes.join(", ")}${note}`,
+      adapter.kind,
+      codexCommand,
+    );
   }
 
   // Past here the hook appends. It writes to a log that already exists and
@@ -3510,6 +3699,8 @@ export function commandHook(
       return commandHarnessHook(rest, streams, cwd, readStdin, CLAUDE_ADAPTER);
     case "cursor":
       return commandHarnessHook(rest, streams, cwd, readStdin, CURSOR_ADAPTER);
+    case "codex":
+      return commandHarnessHook(rest, streams, cwd, readStdin, CODEX_ADAPTER);
     case "classify":
       return commandClassify(rest, streams, cwd);
     default:

@@ -112,7 +112,8 @@
           "type": "string",
           "enum": [
             "claude-code",
-            "cursor"
+            "cursor",
+            "codex"
           ],
           "description": "SPEC.md §10.1 (amended, APRV-227): which harness hook wrote this record. A closed set, extended only by a task that adds the case, because it is the discriminator a reader scopes `harness_version` by: one log holds the records of every harness that ever wrote to it, and a version with no binary named beside it is a string nobody can compare against anything. OPTIONAL and additive — every record written before the field existed still validates and still verifies, and the two fields travel together or not at all."
         },

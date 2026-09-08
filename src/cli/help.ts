@@ -1409,25 +1409,24 @@ ${why("init")}`;
 export const HOOK_HELP = `approval hook — put the gate in front of an agent harness
 
 Usage:
-  approval hook claude-code|cursor [--as agent:<id>] [--timeout <d>] [--interval <d>]
-              [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
+  approval hook claude-code|cursor|codex [--as agent:<id>] [--timeout <d>] [--interval <d>] [--retry-grace <d>] [--policy <p>] [--dir <p>] [--log <p>]
   approval hook classify [--json] [--policy <p>] [--dir <p>] -- <command…>
 
 Commands:
   claude-code  Claude Pre/PostToolUse JSON in; decision JSON out. REGISTER BOTH
   cursor       Cursor preToolUse JSON in; native {permission} JSON out
+  codex        Codex synchronous Pre/Post JSON; Bash denied, direct apply_patch experimentally gated
   classify     print what the classifier makes of a command line and exit
 
-Flags (claude-code, cursor):
-  --as <id>        proposing identity (default agent:claude-code / agent:cursor)
-  --timeout/--interval/--retry-grace <d>  wait / poll / hold for a retry (55s/1s/5m)
+  --as <id>        proposing identity (default agent:claude-code / agent:cursor / agent:codex)
+  --timeout/--interval/--retry-grace <d>  wait / poll / hold for a retry (9m/1s/5m)
   --dir/--policy/--log <p>   policy+log root; --dir sets BOTH, default primary
   -h, --help       this text
 
-Deny: hook-unclassified, hook-class-human-only, hook-opaque, hook-unparseable,
-hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout,
-hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required,
-hook-policy-unavailable, hook-log-unreachable, hook-io.
+Codex opt-in: register exact Bash|apply_patch synchronously with timeout 600s (default wait 9m). Bash is denied because native events hide per-call workdir; direct apply_patch is experimental. PostToolUse is diagnostic.
+
+Deny: hook-unclassified, hook-class-human-only, hook-opaque, hook-unparseable, hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout,
+hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required, hook-policy-unavailable, hook-log-unreachable, hook-io.
 
 ${EXIT_CODES_POINTER} (harness verbs use 0 and 2 only; 0 is a verdict, never "ask")
 ${why("hook")}`;

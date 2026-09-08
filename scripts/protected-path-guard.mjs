@@ -124,7 +124,7 @@ function parseArgs(argv) {
  * edit, and it does not get to take effect before it is approved.
  */
 function protectedPathsFrom(repo, refs, parsePolicy) {
-  const found = new Set();
+  const found = new Map();
   for (const ref of refs) {
     const text = showBlob(repo, ref, POLICY_PATH);
     if (text === null) continue;
@@ -134,9 +134,14 @@ function protectedPathsFrom(repo, refs, parsePolicy) {
     } catch {
       continue;
     }
-    for (const entry of load) found.add(entry);
+    for (const entry of load) {
+      const key = typeof entry === "string"
+        ? `string:${entry}`
+        : `routed:${entry.path}\0${entry.class}`;
+      found.set(key, entry);
+    }
   }
-  return [...found];
+  return [...found.values()];
 }
 
 /**
@@ -347,7 +352,18 @@ async function main() {
     const load = policyModule.loadPolicyText(POLICY_PATH, text);
     if (load.ok !== true) return [];
     const entries = load.policy.protected_paths;
-    return Array.isArray(entries) ? entries.filter((entry) => typeof entry === "string") : [];
+    return Array.isArray(entries)
+      ? entries.filter((entry) =>
+          typeof entry === "string" ||
+          (
+            typeof entry === "object" &&
+            entry !== null &&
+            !Array.isArray(entry) &&
+            typeof entry.path === "string" &&
+            typeof entry.class === "string"
+          ),
+        )
+      : [];
   };
   let policyProtectedPaths = [];
   try {

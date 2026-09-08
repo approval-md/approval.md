@@ -286,6 +286,19 @@ export const UNKNOWN_SESSION = "unknown-session";
 export function harnessSessionOf(task: string): string | null {
   if (!task.startsWith(HARNESS_TASK_PREFIX)) return null;
   const parts = task.split(":");
+  // APRV-311: Codex native ids may themselves contain colons, so the adapter
+  // writes fixed-width digests as `hook:codex:<session-digest>:<call-digest>`.
+  // Preserve the session digest as the loop bucket. This arm is deliberately
+  // exact; malformed Codex-shaped tasks fall through to the legacy unknown
+  // bucket rather than selecting a scope from attacker-authored fragments.
+  if (
+    parts.length === 4 &&
+    parts[1] === "codex" &&
+    /^[a-f0-9]{64}$/u.test(parts[2] ?? "") &&
+    /^[a-f0-9]{64}$/u.test(parts[3] ?? "")
+  ) {
+    return `${HARNESS_TASK_PREFIX}codex:${parts[2]}`;
+  }
   if (parts.length !== 3) return `${HARNESS_TASK_PREFIX}${UNKNOWN_SESSION}`;
   const session = parts[1];
   if (session === undefined || session.length === 0) {

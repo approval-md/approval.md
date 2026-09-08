@@ -117,6 +117,9 @@ export const DOCTOR_ROW_ORDER = [
   // an operator adds from, and this is the one path under it whose contents are
   // raw private keys.
   "sealed-keys",
+  // APRV-313: project-local Codex hook wiring, append-only like every doctor
+  // row. File presence never stands in for Codex trust or observed execution.
+  "codex-hook-wiring",
 ] as const;
 
 /**
@@ -149,4 +152,5 @@ export const DOCTOR_FRESH_SKIPS: readonly string[] = [
   "checkpoint",
   "gate-organs",
   "sealed-keys",
+  "codex-hook-wiring",
 ];

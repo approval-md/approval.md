@@ -1,0 +1,14 @@
+{
+  "session_id": "synthetic-session",
+  "transcript_path": "/synthetic/transcript.jsonl",
+  "cwd": "/tmp/codex-hook-fixture",
+  "hook_event_name": "PostToolUse",
+  "model": "synthetic-model",
+  "turn_id": "synthetic-turn",
+  "tool_name": "Bash",
+  "tool_use_id": "synthetic-tool-use",
+  "tool_input": {
+    "command": "printf 'nonzero\\n' > shell-nonzero.txt; exit 7 # codex-hook-probe:nonzero"
+  },
+  "tool_response": "nonzero"
+}

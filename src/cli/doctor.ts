@@ -64,7 +64,7 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, resolve as resolvePathSegments } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve as resolvePathSegments } from "node:path";
 
 import { WEB_DEFAULT_PORT } from "../channels/web.js";
 import {
@@ -2192,6 +2192,118 @@ function checkHarnessWiring(dir: string): DoctorCheck {
   };
 }
 
+/** The project-local Codex hook files doctor can observe without asking Codex. */
+const CODEX_HOOKS = join(".codex", "hooks.json");
+const CODEX_CONFIG = join(".codex", "config.toml");
+const CODEX_MATCHER = "Bash|apply_patch";
+const CODEX_HOOK_TIMEOUT_SECONDS = 600;
+
+function isDirectCodexHookCommand(command: string): boolean {
+  const match = command.match(
+    /^(?:"([^"$`\\\r\n;&|<>]+)"|'([^'\\\r\n;&|<>]+)'|([^\s"'$`\\\r\n;&|<>]+)) hook codex --dir (?:"([^"$`\\\r\n;&|<>]+)"|'([^'\\\r\n;&|<>]+)'|([^\s"'$`\\\r\n;&|<>]+)) --as agent:codex --timeout 9m$/u,
+  );
+  if (match === null) return false;
+  const executable = match[1] ?? match[2] ?? match[3] ?? "";
+  const primaryDir = match[4] ?? match[5] ?? match[6] ?? "";
+  return isAbsolute(executable) && basename(executable) === "approval" && isAbsolute(primaryDir);
+}
+
+function codexEventConfigured(hooks: unknown, event: "PreToolUse" | "PostToolUse"): boolean {
+  if (typeof hooks !== "object" || hooks === null || Array.isArray(hooks)) return false;
+  const groups = (hooks as Record<string, unknown>)[event];
+  if (!Array.isArray(groups)) return false;
+  return groups.some((group) => {
+    if (typeof group !== "object" || group === null || Array.isArray(group)) return false;
+    const fields = group as Record<string, unknown>;
+    if (fields["matcher"] !== CODEX_MATCHER || !Array.isArray(fields["hooks"])) return false;
+    return fields["hooks"].some((handler) => {
+      if (typeof handler !== "object" || handler === null || Array.isArray(handler)) return false;
+      const entry = handler as Record<string, unknown>;
+      return (
+        entry["type"] === "command" &&
+        typeof entry["command"] === "string" &&
+        isDirectCodexHookCommand(entry["command"]) &&
+        entry["timeout"] === CODEX_HOOK_TIMEOUT_SECONDS &&
+        (entry["async"] === undefined || entry["async"] === false)
+      );
+    });
+  });
+}
+
+/**
+ * Report only project configuration visible on disk.
+ *
+ * Codex owns hook trust and runtime loading. Neither is inferable from a file,
+ * and no historical log record proves what the current desktop session loaded.
+ */
+export function checkCodexHookWiring(dir: string): DoctorCheck {
+  const check = "codex-hook-wiring";
+  const root = repoRoot(dir);
+  const where = root ?? dir;
+  const hooksPath = join(where, CODEX_HOOKS);
+  const configPath = join(where, CODEX_CONFIG);
+  const hasHooks = existsSync(hooksPath);
+  const hasConfig = existsSync(configPath);
+
+  if (!hasHooks && !hasConfig) {
+    return {
+      check,
+      status: "skip",
+      detail: `NOT CONFIGURED on disk: ${where} carries neither ${CODEX_HOOKS} nor ${CODEX_CONFIG}. Codex hook trust and observed execution are separate and remain unknown.`,
+    };
+  }
+  if (!hasHooks) {
+    return {
+      check,
+      status: "skip",
+      detail: `${configPath} exists. Doctor does not interpret inline TOML hook tables, so Codex hook configuration, trust and observed execution are undetermined.`,
+      fix: "approval hook codex --help — compare the documented PreToolUse and PostToolUse entries with .codex/config.toml",
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(hooksPath, "utf8")) as unknown;
+  } catch (cause) {
+    return {
+      check,
+      status: "fail",
+      detail: `${hooksPath} cannot be read as JSON (${oneLine(detailOf(cause))}); configured wiring cannot be established, and trust or execution cannot be inferred.`,
+      fix: "approval hook codex --help — compare and repair the project-local hook JSON after human review",
+    };
+  }
+  const hooks =
+    typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)["hooks"]
+      : null;
+  const pre = codexEventConfigured(hooks, "PreToolUse");
+  const post = codexEventConfigured(hooks, "PostToolUse");
+  if (!pre || !post) {
+    const missing = [!pre ? "PreToolUse" : null, !post ? "PostToolUse" : null]
+      .filter((value): value is string => value !== null)
+      .join(" and ");
+    return {
+      check,
+      status: "skip",
+      detail: `${hooksPath} is present but does not match the expected APRV-313 profile for ${missing}: synchronous command hooks with matcher ${JSON.stringify(CODEX_MATCHER)}, command \`approval hook codex\`, and timeout ${String(CODEX_HOOK_TIMEOUT_SECONDS)} seconds. Other Codex hook configurations may be valid; this integration's coverage is undetermined. File presence proves neither trust nor observed execution.`,
+      fix: "approval hook codex --help — install the documented pair only after human review",
+    };
+  }
+  if (hasConfig) {
+    return {
+      check,
+      status: "skip",
+      detail: `CONFIGURED in ${hooksPath}: the required PreToolUse and PostToolUse entries are present. ${configPath} also exists and Codex merges hook sources; doctor does not interpret its TOML tables, so the effective configuration is not fully established. Trust and observed execution remain unknown.`,
+      fix: "approval hook codex --help — compare .codex/config.toml with the reviewed hooks.json and keep one representation per layer",
+    };
+  }
+  return {
+    check,
+    status: "pass",
+    detail: `CONFIGURED on disk: ${hooksPath} carries synchronous PreToolUse and PostToolUse \`approval hook codex\` entries for ${CODEX_MATCHER}, each with a ${String(CODEX_HOOK_TIMEOUT_SECONDS)} second outer timeout. This does not establish Codex trust, loading, or observed execution; inspect and trust the exact hook with \`/hooks\`, then run the bounded smoke test.`,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // harness version provenance (APRV-227)
 // ---------------------------------------------------------------------------
@@ -2200,10 +2312,10 @@ function checkHarnessWiring(dir: string): DoctorCheck {
 const CURSOR_HOOKS = join(".cursor", "hooks.json");
 
 /** Where a harness hook registration can be written, one file per harness. */
-const HARNESS_SETTINGS: readonly string[] = [CLAUDE_SETTINGS, CURSOR_HOOKS];
+const HARNESS_SETTINGS: readonly string[] = [CLAUDE_SETTINGS, CURSOR_HOOKS, CODEX_HOOKS];
 
 /** `approval hook <kind>` inside a command string, whichever file shape holds it. */
-const HOOK_COMMAND = /\bapproval\s+hook\s+(claude-code|cursor)\b/u;
+const HOOK_COMMAND = /\bapproval["']?\s+hook\s+(claude-code|cursor|codex)\b/u;
 
 /**
  * Every harness this checkout registers an `approval hook` command for.
@@ -2217,7 +2329,7 @@ const HOOK_COMMAND = /\bapproval\s+hook\s+(claude-code|cursor)\b/u;
  * searched. The row this feeds can only SKIP when the answer is empty, so a
  * miss costs a skip and never a false red.
  */
-function registeredHarnesses(dir: string): HarnessKind[] {
+export function registeredHarnesses(dir: string): HarnessKind[] {
   const found = new Set<HarnessKind>();
   for (const relative of HARNESS_SETTINGS) {
     const path = join(dir, relative);
@@ -2233,7 +2345,13 @@ function registeredHarnesses(dir: string): HarnessKind[] {
       const node = stack.pop();
       if (typeof node === "string") {
         const match = HOOK_COMMAND.exec(node);
-        if (match !== null && isHarnessKind(match[1])) found.add(match[1]);
+        if (
+          match !== null &&
+          isHarnessKind(match[1]) &&
+          (match[1] !== "codex" || isDirectCodexHookCommand(node))
+        ) {
+          found.add(match[1]);
+        }
         continue;
       }
       if (Array.isArray(node)) {
@@ -2948,6 +3066,9 @@ export function commandDoctor(
       // `.approval/` is a directory people `git add` from, and the key store had
       // nothing telling them it must not come along.
       checkSealedKeys(logPath, dir),
+      // APRV-313: appended, nineteenth time, same reason. Configuration on
+      // disk is distinct from Codex trust, loading and observed execution.
+      checkCodexHookWiring(dir),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

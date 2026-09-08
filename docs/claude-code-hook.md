@@ -1316,8 +1316,9 @@ such a session is indistinguishable from one that never existed.
 
 The guard asks the same question where the answer cannot depend on session
 wiring: it takes two commits, asks git which protected paths changed between
-them, and requires for each one evidence in the committed hash-chained log that
-a human decided it.
+them, and requires evidence in the committed hash-chained log for each change.
+Human approval follows `APPROVAL.md`: a policy-permitted unattended edit does
+not need an extra human grant merely to satisfy CI.
 
 ```sh
 node scripts/protected-path-guard.mjs --base "$(git merge-base origin/main HEAD)" --head HEAD
@@ -1330,8 +1331,8 @@ read the checkout could be told a different story than the pull request carries.
 
 ### What counts as evidence
 
-Three kinds of verdict pass, ordered by how much they prove, with attestation
-covering two different surfaces.
+Verdicts distinguish human attestation, human grants and policy-authorized file
+execution. Attestation covers two different surfaces.
 
 | verdict | what it establishes |
 |---|---|
@@ -1339,6 +1340,39 @@ covering two different surfaces.
 | `attested` (a gate ORGAN, APRV-272) | CONTENT-level, and PATH-bound. The organ's bytes at the head commit hash to a digest a `gate.organ.attested` record carries **for that same path**, which is what `approval policy attest --organ <path>` writes. A digest attested for another organ is not evidence for this one. The organs need this more than the policy file does: they are `policy.core`, `policy.core` is human-only, and the gate mints nothing for a human-only class, so `granted-file` and `granted-command` cannot exist for one however carefully a human edited it. PR #300 is that case: hand-committed `PostToolUse` entries that no evidence in the world could have passed. A deleted organ has no bytes at head and so cannot be attested; that fails, which is the fail-closed direction. |
 | `granted-file` | HUNK-level. An `approval.granted` of class `policy.edit`, `policy.core` or (since APRV-266) any `policy.edit` sub-class, whose `payload_hash` resolves in the committed payload store to material whose `file` names this path. Since APRV-124 the hook binds the CHANGE rather than the touch, so the payload carries the exact edit, and since APRV-202 that is what is checked: the granted `after` bytes must occur verbatim in the blob at head, the `before` bytes in the blob at base, and the lines they contain are the ones they cover. |
 | `granted-command` | ATTRIBUTED, one notch weaker. The granted command is re-run through this runtime's own `classifyCommand`, and it counts only when a segment classifies as a granting class BECAUSE of a word naming this path (`ClassifiedSegment.path`, or another word of that same segment that resolves exactly to this checkout's copy of the path — a batch names several files and the field holds one). A mention is not a grant: `cat SPEC.md` is `read.shell` and proves nothing. A command payload describes no bytes, so it covers the whole path only with the three tests below. |
+
+APRV-316 adds `policy-authorized-file` evidence from a verified
+`execution.started`. It requires a preceding unique registration matching the
+task, action, protected-path class and payload hash, then recomputes that hash
+from the stored Edit or Write payload. The same exact before/after anchors and
+hunk coverage apply. The payload must name the exact repository-relative path;
+an absolute path or another directory's file cannot establish that relationship.
+Backslashes are rejected, and conflicting applicable path classes in the
+base/head policy entries leave this evidence tier unavailable, including
+conflicts between directory and file rules.
+The start must precede the change within the permitted
+window, and an unresolved approval cycle cannot become unattended evidence.
+Registration alone, a current policy allowance, an unrelated class, shell
+attribution, raw patch text and changes limited to whitespace or file metadata
+cannot supply this evidence. Human-only organs
+retain their existing protection.
+
+Inline edits can share a line or depend on an earlier approved edit. When
+line coverage is insufficient, the guard can replay eligible exact `Edit`
+records in execution order from the committed base file. Each applied edit
+must have one unique, nonempty before-state match. The result must equal the
+entire committed head file byte for byte. The guard tries no alternative edit
+orders and accepts no input hybrids or replace-all edits. A human grant also needs its
+matching execution start and registered payload binding; the grant alone is
+insufficient for replay. The same class, path, hash and timing restrictions
+apply. An extra unapproved change on an otherwise approved line still fails.
+Replay also refuses decoded text containing Unicode replacement characters,
+where the original bytes cannot be established from the decoded blobs.
+
+This verdict records authorization by the gate, not a human decision or proof
+that execution completed. CI trusts the verified runtime record; it does not
+independently repeat the secret live-sampling calculation. Missing evidence
+still fails closed.
 
 There is deliberately **no class-level pass**. A `policy.edit` grant that exists
 but names some other file is not evidence that anybody saw this edit, and

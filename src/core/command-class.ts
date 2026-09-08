@@ -361,6 +361,17 @@ export function protectedPathClass(
       const next = segments[index + 1];
       if (next === "hooks.json" || next === "hooks" || next === "agents") return "policy.core";
     }
+    // Codex installs its hook through these configuration and script paths.
+    if (segment === ".codex") {
+      const next = segments[index + 1];
+      if (
+        next === undefined ||
+        next === "config.toml" ||
+        next === "hooks.json" ||
+        next === "hooks" ||
+        segments.slice(index + 1).includes("..")
+      ) return "policy.core";
+    }
   }
 
   // 3. The policy's own routed entries (APRV-266), above the built-in
