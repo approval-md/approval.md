@@ -14,6 +14,10 @@ a gate refusal is exit 1 and not 2, approval events are exclusive to the manual
 path, the raw token is shown once, a channel is transport — are stated once at
 the top of `approval --help` and are not repeated here.
 
+`approval --version`, `approval -v`, and `approval version` print the package
+version and exit 0. These aliases apply only at the top level; a version-looking
+flag after a verb remains that verb's argument.
+
 Each section below is what the corresponding `--help` points at with its
 `why: docs/cli-reference.md#…` footer.
 
