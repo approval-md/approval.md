@@ -977,12 +977,26 @@ function postEvent(
   });
 }
 
-/** The single JSON line the counterpart prints on stderr. */
+/**
+ * The single JSON line the counterpart prints on stderr, with its exit code
+ * checked against what the code means (APRV-303).
+ *
+ * Claude Code discards a hook's stderr when the hook exits 0 and shows it when
+ * a post-execution hook exits 2. So the counterpart exits 0 for the one code
+ * that means it landed and 2 for every code that means a tool call's outcome
+ * went unrecorded, and this helper pins that for every case in the file at
+ * once. Neither exit is a verdict: stdout is empty on both.
+ */
 function reportOf(run: Run): Record<string, unknown> {
-  assert.equal(run.code, 0, `the counterpart always exits 0: ${run.stderr}`);
   assert.equal(run.stdout, "", "a post-execution hook prints no verdict on stdout");
   const parsed = JSON.parse(run.stderr.trim()) as Record<string, unknown>;
-  return (parsed["approval"] ?? {}) as Record<string, unknown>;
+  const report = (parsed["approval"] ?? {}) as Record<string, unknown>;
+  assert.equal(
+    run.code,
+    report["code"] === "post-tool-reported" ? 0 : 2,
+    `a counterpart that did not land must exit 2 so its line is seen: ${run.stderr}`,
+  );
+  return report;
 }
 
 /** Every record in the log, parsed. */
@@ -1243,6 +1257,255 @@ test("an escalated session floors the next autonomous command to the human gate"
   assertClean(dir);
 });
 
+/**
+ * The Bash tool's own output object, verbatim from `BashOutput` in
+ * `@anthropic-ai/claude-code/sdk-tools.d.ts` (APRV-303).
+ *
+ * This is what a real `PostToolUse` carries under `tool_response`, and the
+ * point of the fixture is what it does NOT carry: no `type`, no exit code, no
+ * `is_error`. Every counterpart this project has ever run in anger arrived
+ * shaped like this and was reported unreadable.
+ */
+const BASH_OUTPUT = { stdout: "total 0", stderr: "", interrupted: false, isImage: false };
+
+/** `FileEditOutput`, verbatim from the same declarations. No `type` field. */
+const FILE_EDIT_OUTPUT = {
+  filePath: "/repo/SPEC.md",
+  oldString: "old",
+  newString: "new",
+  originalFile: "old\n",
+  structuredPatch: [],
+  userModified: false,
+  replaceAll: false,
+};
+
+/** `FileWriteOutput`. It HAS a `type`, and its values are `create` and `update`. */
+const FILE_WRITE_OUTPUT = {
+  type: "create",
+  filePath: "/repo/SPEC.md",
+  content: "new\n",
+  structuredPatch: [],
+  originalFile: null,
+};
+
+test("APRV-303: the payload Claude Code actually sends closes the start it opened", () => {
+  const dir = ready();
+  const before = rawLog(dir);
+  assert.equal(
+    verdictOf(runCli(["hook", "claude-code"], dir, bashEvent(WRITE_COMMAND, "tu-real"))).permission,
+    "allow",
+  );
+
+  const post = runCli(["hook", "claude-code"], dir, postEvent("tu-real", BASH_OUTPUT));
+  const report = reportOf(post);
+  assert.equal(report["code"], "post-tool-reported", post.stderr);
+  assert.equal(report["outcome"], "completed");
+  assert.deepEqual(
+    recordsSince(dir, before).map((record) => record["event"]),
+    ["execution.started", "execution.completed"],
+  );
+  // §11.1 invariant 3, re-pinned for the new reading: the fields are inspected
+  // for shape and none of their text is carried.
+  assert.ok(!rawLog(dir).includes("total 0"), "the tool's output must never reach the log");
+  assertClean(dir);
+
+  // The failure half, with the payload the failure event actually carries:
+  // `error` and no `tool_response` at all.
+  const other = ready();
+  const otherBefore = rawLog(other);
+  assert.equal(
+    verdictOf(runCli(["hook", "claude-code"], other, bashEvent(WRITE_COMMAND, "tu-bad"))).permission,
+    "allow",
+  );
+  const failed = runCli(
+    ["hook", "claude-code"],
+    other,
+    JSON.stringify({
+      session_id: "sess-1",
+      transcript_path: "/dev/null",
+      cwd: "/repo",
+      hook_event_name: "PostToolUseFailure",
+      tool_name: "Bash",
+      tool_input: { command: WRITE_COMMAND },
+      tool_use_id: "tu-bad",
+      error: "Exit code 1\nmkdir: build: Permission denied",
+      is_interrupt: false,
+      duration_ms: 12,
+    }),
+  );
+  assert.equal(reportOf(failed)["outcome"], "failed", failed.stderr);
+  assert.deepEqual(
+    recordsSince(other, otherBefore).map((record) => record["event"]),
+    ["execution.started", "execution.failed"],
+  );
+  assert.ok(
+    !rawLog(other).includes("Permission denied"),
+    "the failure text must never reach the log either",
+  );
+  assertClean(other);
+});
+
+test("APRV-303: a granted Bash completion clears a tripped floor", () => {
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+  // The floor routes the next write to a human. The human grants it, the
+  // command runs, and the counterpart reports what happened — which is exactly
+  // the sequence the refusal text promises clears the escalation.
+  const key = "hook:sess-1:tu-4:files.write.workspace";
+  grantWhenPending(dir, key);
+  const pre = runCli(
+    ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
+    dir,
+    bashEvent(WRITE_COMMAND, "tu-4"),
+  );
+  assert.equal(verdictOf(pre).permission, "allow", verdictOf(pre).reason);
+  assert.match(verdictOf(pre).reason, /loop-escalated \(amended SPEC\.md §10\.2\)/u);
+
+  const post = runCli(["hook", "claude-code"], dir, postEvent("tu-4", BASH_OUTPUT));
+  assert.equal(reportOf(post)["outcome"], "completed", post.stderr);
+
+  const read = readVerifiedRecords(join(dir, LOG));
+  assert.equal(read.ok, true);
+  if (!read.ok) throw new Error("unreachable");
+  assert.deepEqual(
+    harnessLoopEscalation(read.records).filter((state) => state.escalated),
+    [],
+    "one completion in the scope clears every standing escalation",
+  );
+
+  // And the proof an agent can observe: the next write is answered by the
+  // policy, with a short timeout that would have failed under a floor.
+  const next = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    bashEvent(WRITE_COMMAND, "tu-5"),
+  );
+  assert.equal(verdictOf(next).permission, "allow", verdictOf(next).reason);
+  assert.doesNotMatch(verdictOf(next).reason, /loop-escalated/u);
+  assertClean(dir);
+});
+
+test("APRV-303: a granted Edit or Write completion clears a tripped floor too", () => {
+  for (const [tool, toolInput, response] of [
+    ["Edit", { file_path: "SPEC.md", old_string: "old", new_string: "new" }, FILE_EDIT_OUTPUT],
+    ["Write", { file_path: "SPEC.md", content: "new\n" }, FILE_WRITE_OUTPUT],
+  ] as const) {
+    const dir = readyWithProtectedPaths();
+    for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+    const key = "hook:sess-1:tu-edit:policy.edit";
+    grantWhenPending(dir, key);
+    const pre = runCli(
+      ["hook", "claude-code", "--timeout", "40s", "--interval", "200ms"],
+      dir,
+      event({ tool_name: tool, tool_input: toolInput, tool_use_id: "tu-edit" }),
+    );
+    assert.equal(verdictOf(pre).permission, "allow", `${tool}: ${verdictOf(pre).reason}`);
+
+    const post = runCli(
+      ["hook", "claude-code"],
+      dir,
+      postEvent("tu-edit", response, { tool_name: tool, tool_input: toolInput }),
+    );
+    assert.equal(reportOf(post)["outcome"], "completed", post.stderr);
+
+    const read = readVerifiedRecords(join(dir, LOG));
+    assert.equal(read.ok, true);
+    if (!read.ok) throw new Error("unreachable");
+    assert.deepEqual(
+      harnessLoopEscalation(read.records).filter((state) => state.escalated),
+      [],
+      `${tool}: a file tool's completion clears the floor exactly as a shell tool's does`,
+    );
+
+    const next = runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+      dir,
+      bashEvent(WRITE_COMMAND, "tu-next"),
+    );
+    assert.equal(verdictOf(next).permission, "allow", `${tool}: ${verdictOf(next).reason}`);
+    assert.doesNotMatch(verdictOf(next).reason, /loop-escalated/u);
+    assertClean(dir);
+  }
+});
+
+test("APRV-303: an ordinary edit is floored exactly as an ordinary shell write is", () => {
+  // AC #2. The predicate is one predicate over one class: `files.write.workspace`
+  // reaches the floor whether it was typed as a redirect or performed by the
+  // Edit tool. Until APRV-303 the file path answered `allow` from above the
+  // floor lookup, so a floored session went on editing unrouted and uncounted.
+  const dir = ready();
+  for (const id of ["tu-1", "tu-2", "tu-3"]) toolCall(dir, id, "error");
+
+  const floored = runCli(
+    ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    event({
+      tool_name: "Edit",
+      tool_input: { file_path: "src/core/x.ts", old_string: "a", new_string: "b" },
+      tool_use_id: "tu-edit",
+    }),
+  );
+  const verdict = verdictOf(floored);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-timeout: /u);
+  assert.match(
+    verdict.reason,
+    /routed to a human by loop safety rather than by policy — loop-escalated: session hook:sess-1 has 3 consecutive failed side-effecting harness tool calls/u,
+  );
+  assert.match(rawLog(dir), /"hook:sess-1:tu-edit:files\.write\.workspace"/u);
+  assertClean(dir);
+
+  // With no floor standing, the same edit is answered as it always was: an
+  // outright allow that appends nothing at all.
+  const clear = ready();
+  const before = rawLog(clear);
+  const ordinary = runCli(
+    ["hook", "claude-code"],
+    clear,
+    event({
+      tool_name: "Edit",
+      tool_input: { file_path: "src/core/x.ts", old_string: "a", new_string: "b" },
+      tool_use_id: "tu-edit",
+    }),
+  );
+  assert.equal(verdictOf(ordinary).permission, "allow");
+  assert.match(verdictOf(ordinary).reason, /is not a gated edit/u);
+  assert.equal(rawLog(clear), before, "an ungated edit must not touch the log");
+});
+
+test("APRV-303: a report that closes nothing is machine-readable and is not exit 0", () => {
+  // The refusal must reach somebody. Claude Code discards a hook's stderr when
+  // the hook exits 0, so a refusal at exit 0 is a refusal nobody receives.
+  const dir = ready();
+  const before = rawLog(dir);
+  const run = runCli(["hook", "claude-code"], dir, postEvent("tu-never-started", BASH_OUTPUT));
+
+  assert.equal(run.code, 2, "a report that did not land exits 2 so its line is shown");
+  assert.equal(run.stdout, "", "and it is still not a verdict");
+  const line = JSON.parse(run.stderr.trim()) as Record<string, unknown>;
+  const report = line["approval"] as Record<string, unknown>;
+  assert.equal(report["hook"], "post-tool-use");
+  assert.equal(report["code"], "post-tool-gate-refused:not-delegated");
+  assert.match(String(report["detail"]), /no execution\.started record names task/u);
+  assert.equal(rawLog(dir), before, "a refused report appends nothing");
+
+  // The unreadable arm says why, on the same stream and at the same exit code.
+  assert.equal(
+    verdictOf(runCli(["hook", "claude-code"], dir, bashEvent(WRITE_COMMAND, "tu-i"))).permission,
+    "allow",
+  );
+  const unreadable = runCli(
+    ["hook", "claude-code"],
+    dir,
+    postEvent("tu-i", { stdout: "", stderr: "", interrupted: true, isImage: false }),
+  );
+  assert.equal(unreadable.code, 2);
+  assert.equal(reportOf(unreadable)["code"], "post-tool-unreadable-outcome");
+  assertClean(dir);
+});
+
 test("the actor scope backstops a rotated session id", () => {
   // The reason the second scope exists: a session id is authored by the party
   // under oversight, and a scope key the subject can rotate is a streak the
@@ -1440,31 +1703,44 @@ test("the counterpart refuses a start that carries no harness marker", () => {
   assertClean(dir);
 });
 
-test("an unreadable outcome appends nothing, and a second report is refused", () => {
+test("an interrupted tool call is unreadable and appends nothing, and a second report is refused", () => {
   const dir = ready();
   assert.equal(verdictOf(runCli(["hook", "claude-code"], dir, bashEvent("ls -la", "tu-x"))).permission, "allow");
 
-  // Unreadable: the pinned readings are text, base64 and error, and nothing else.
-  for (const response of [{ type: "diagnostic" }, {}, "a bare string", null]) {
+  // APRV-303. The one thing that unreads an event of either name: a call
+  // somebody stopped neither completed nor failed on its own terms. Both
+  // spellings, since PostToolUseFailure carries `is_interrupt` and has no
+  // `tool_response` at all.
+  const interrupts: [unknown, Record<string, unknown>][] = [
+    [{ stdout: "", stderr: "", interrupted: true, isImage: false }, {}],
+    [null, { hook_event_name: "PostToolUseFailure", error: "…", is_interrupt: true }],
+  ];
+  for (const [response, extra] of interrupts) {
     const before = rawLog(dir);
-    const run = runCli(["hook", "claude-code"], dir, postEvent("tu-x", response));
+    const run = runCli(["hook", "claude-code"], dir, postEvent("tu-x", response, extra));
+    const report = reportOf(run);
     assert.equal(
-      reportOf(run)["code"],
+      report["code"],
       "post-tool-unreadable-outcome",
-      `${JSON.stringify(response)}: ${run.stderr}`,
+      `${JSON.stringify(extra)}: ${run.stderr}`,
     );
+    assert.match(String(report["detail"]), /interrupted/u, "the line says why nothing was appended");
     assert.equal(rawLog(dir), before, "an unreadable outcome appends nothing");
   }
 
   // Readable: it closes, once.
   assert.equal(
-    reportOf(runCli(["hook", "claude-code"], dir, postEvent("tu-x", { type: "text", text: "" })))[
-      "code"
-    ],
+    reportOf(
+      runCli(
+        ["hook", "claude-code"],
+        dir,
+        postEvent("tu-x", { stdout: "total 0", stderr: "", interrupted: false, isImage: false }),
+      ),
+    )["code"],
     "post-tool-reported",
   );
   const settled = rawLog(dir);
-  const second = runCli(["hook", "claude-code"], dir, postEvent("tu-x", { type: "error", error: "" }));
+  const second = runCli(["hook", "claude-code"], dir, postEvent("tu-x", { type: "error", error: "x" }));
   assert.equal(reportOf(second)["code"], "post-tool-gate-refused:already-finished");
   assert.equal(rawLog(dir), settled, "an execution has exactly one outcome");
   assertClean(dir);

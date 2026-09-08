@@ -51,6 +51,39 @@ The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
   bytes sent once; an expired wait and a harness-side misfire are not executions
   and accrue no loop-safety streak; and a completed command clears the floor
   even when the grant it ran on was carried by a later tool call.
+- **The harness counterpart reads the payload Claude Code actually sends, so a
+  completion can clear a floor again** (APRV-303). The post-execution hook asked
+  `tool_response.type` to be `text`, `base64` or `error`, which is the shape of
+  an API content block and is not what any gated tool emits: `BashOutput` and
+  `FileEditOutput` carry no `type` at all and `FileWriteOutput`'s is `create` or
+  `update`. Every successful tool call was therefore reported
+  `post-tool-unreadable-outcome` and appended nothing, while every failure landed
+  through `PostToolUseFailure`, so the loop streak of SPEC section 10.2 could
+  only ever count up and every long session escalated itself to manual and stayed
+  there. Measured on this project's own log before the fix: 22062 harness starts,
+  10 reports, and not one completion from the Claude Code adapter. The reading is
+  now the event name, which is the harness saying which of its own two code paths
+  ran, refined only in the strict direction: an interrupted call is unreadable
+  and appends nothing, and an `error` field or `type: "error"` is a failure
+  whatever the event claimed. The report still chooses neither the bucket nor the
+  execution it closes; both come from the `execution.started` this runtime wrote.
+- **A report that does not land is seen** (APRV-303). Claude Code discards a
+  hook's stderr when the hook exits 0, so the counterpart's machine-readable
+  refusal lines were written to a debug log nobody opens, which is how 22052
+  unreported starts accumulated without a visible complaint. The counterpart now
+  exits 0 for `post-tool-reported` and 2, the harness protocol's "show this
+  line", for every code that means an outcome went unrecorded. Exit 2 blocks
+  nothing on a post-execution event, and a throw on that path reports
+  `post-tool-io` instead of printing a permission verdict about a tool call that
+  has already run.
+- **The loop floor sees every tool kind** (APRV-303). An edit the policy does not
+  protect now carries the class it always deserved, `files.write.workspace`, and
+  reaches the floor by the same predicate a shell write does. With no floor
+  standing it is allowed outright with nothing appended, as before; with a floor
+  standing it is routed like any other write, and its completion clears the floor
+  like any other write's. Until this, the file path answered `allow` from above
+  the floor lookup, so a session whose Bash calls were all going to a phone went
+  on editing files unrouted and uncounted.
 - **The CI guard's dependency floor reads the install Node would read**
   (APRV-298). The case that proves every production dependency admits the Node
   floor used to join the repository root to a literal `node_modules`, so running
