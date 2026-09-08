@@ -17,6 +17,33 @@ dependencies:
   - APRV-224
 priority: high
 ordinal: 165000
+approval:
+  origin:
+    app: manual
+    created_by: 'agent:fable'
+  route:
+    assignee: 'agent:fable'
+    rationale: 'the 0.1.0 release ceremony Carter ordered on 2026-09-08: the agent prepares, requests and executes on a grant; the human decides go or no-go on the phone (APRV-199 AC2..AC4)'
+  state: proposed
+  actions:
+    - class: release.publish
+      summary: 'npm publish approval-md@0.1.0 from /Users/carter/dev/approval-md (payload is the argv and cwd; run recomputes the hash before it spawns)'
+      reversible: false
+      est_cost_usd: '0'
+      idempotency_key: 'aprv-199:publish:2026-09-08'
+      payload_hash: '3d2fb7d3e8b83e223c134f1b9ae1ec17e8bd9c8cd6886a6cb3220e1b7b70d4bd'
+    - class: release.publish
+      summary: 'git tag -a v0.1.0 -m "approval-md 0.1.0" in /Users/carter/dev/approval-md, after the publish succeeds'
+      reversible: true
+      est_cost_usd: '0'
+      idempotency_key: 'aprv-199:tag:2026-09-08'
+      payload_hash: 'e9660ec161a65dafc0c6be47e92a68ba115e091cb37654eaaff8af34a648617e'
+    - class: release.publish
+      summary: 'git push origin v0.1.0 from /Users/carter/dev/approval-md (declared release.publish: the classifier reads a tag push as vcs.push.branch, APRV-305)'
+      reversible: false
+      est_cost_usd: '0'
+      idempotency_key: 'aprv-199:tag-push:2026-09-08'
+      payload_hash: '633b1e302bc890c2ebff7cfb12716f1ca47616b1fc3ea2bba07f39905f2820a8'
 ---
 
 ## Description
