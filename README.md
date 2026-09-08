@@ -140,6 +140,10 @@ close that gap: a PreToolUse hook for Claude Code and an MCP server for any
 harness that speaks MCP. Both resolve against the same policy and append to the
 same log as the CLI.
 
+Codex support is opt-in while native compatibility and everyday activation are
+still being verified. See the bounded [Codex hook operator
+runbook](docs/codex-hook.md) before installing or trusting it.
+
 **1. See how a command classifies.** This touches nothing.
 
 ```
@@ -689,7 +693,7 @@ npm run check:tier -- <path> # classify the given paths and print the tier
 approval doctor              # the other check: this machine, not the code
 ```
 
-`approval doctor` prints **27 rows** and a tally, in the order their failures
+`approval doctor` prints **28 rows** and a tally, in the order their failures
 cascade: build freshness, identity, attestation, the log chain, the channels
 (`telegram`, `web-port`), the payload store, audit sampling, envelope
 integrity, the vault, the environment source map, then the rows that ask git
@@ -697,17 +701,18 @@ and the harness what happened (`log-drift`, `reconciliation`,
 `harness-hook-outcomes`, `harness-hook-wiring`, `keychain-scope`,
 `log-advance-cadence`, `dark-sessions`, `verified-snapshot`, `read-proof`,
 `main-behind-origin`, `harness-version-unverified`, `live-draw`,
-`values-block`, `checkpoint`, `gate-organs`, `sealed-keys`). Each failure
+`values-block`, `checkpoint`, `gate-organs`, `sealed-keys`,
+`codex-hook-wiring`). Each failure
 carries a `fix:` line you run yourself. Doctor appends nothing, sends nothing
 and repairs nothing, and no credential value appears in its output. Three
-of the 27 lines from a fresh directory, plus the tally:
+of the 28 lines from a fresh directory, plus the tally:
 
 ```
 ✓ identity            APPROVAL_HUMAN=human:alice (config-declared: the trust boundary is this machine, not cryptography)
 ✓ log                 /your/project/.approval/log/events.jsonl verifies: 1 record(s), head seq 1 0f3c4a19187a…
 ✗ audit-sampling      disabled (secret-env-unnamed): APPROVAL.md sets audit.supervised_sample_rate to 0.1 but names no audit.sampling_secret_env. …
     fix: approval policy attest --as human:<id> — after setting audit.supervised_sample_rate and audit.sampling_secret_env in the policy; then export the named variable where the daemon runs
-9 ok · 17 not applicable · 1 failed
+9 ok · 18 not applicable · 1 failed
 ```
 
 That one failure is expected on the scaffolded policy: it samples supervised
@@ -716,13 +721,14 @@ names, and a control that looks on while the party under oversight could steer
 it is worse than one that is visibly off. Name the secret when you want
 sampling, or delete the `audit` block if one person's gate has no use for it.
 
-**17 of the 27 report `not applicable` in a fresh directory**, and each names
+**18 of the 28 report `not applicable` in a fresh directory**, and each names
 the absence it skipped on: `telegram` (no bot variables), `envelope-integrity`
 (no task folder), `vault` (no vault file), `environment` (no `.approval/env`),
 `read-proof` (no `daemon` block), `live-draw` (no `supervised-live` class),
 `checkpoint` (no `audit.checkpoint_keys`), `harness-hook-outcomes`,
-`harness-hook-wiring`, `harness-version-unverified` and `gate-organs` (no
-harness settings file), `verified-snapshot` (no daemon has run), and
+`harness-hook-wiring`, `codex-hook-wiring`, `harness-version-unverified` and
+`gate-organs` (no harness settings file), `verified-snapshot` (no daemon has
+run), and
 `log-drift`, `log-advance-cadence`, `dark-sessions`, `main-behind-origin` and
 `sealed-keys` (not a git checkout). `sealed-keys` asks git what it tracks:
 `.approval/payloads/` is tracked on purpose, and a sealed-delivery private key

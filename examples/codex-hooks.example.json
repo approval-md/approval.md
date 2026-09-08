@@ -1,0 +1,29 @@
+{
+  "description": "Opt-in approval.md hooks for Codex. Replace both absolute paths before installing this reviewed file as .codex/hooks.json.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/absolute/path/to/approval\" hook codex --dir \"/absolute/path/to/primary-checkout\" --as agent:codex --timeout 9m",
+            "timeout": 600
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/absolute/path/to/approval\" hook codex --dir \"/absolute/path/to/primary-checkout\" --as agent:codex --timeout 9m",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}
