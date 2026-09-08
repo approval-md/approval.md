@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-08 07:25'
-updated_date: '2026-09-08 08:39'
+updated_date: '2026-09-08 08:58'
 labels: []
 dependencies:
   - APRV-312
@@ -22,8 +22,8 @@ User-authorized overnight Codex integration. SPEC 6.3,7,9,10,11.1 bind. Isolated
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Help/examples/runbook specify opt-in shell/patch coverage, failure gaps, ten-minute outer timeout and nine-minute gate wait.
-- [ ] #2 Doctor distinguishes configured wiring from trusted/observed operation and checks Codex provenance.
+- [x] #1 Help/examples/runbook specify opt-in shell/patch coverage, failure gaps, ten-minute outer timeout and nine-minute gate wait.
+- [x] #2 Doctor distinguishes configured wiring from trusted/observed operation and checks Codex provenance.
 - [ ] #3 Narrow SPEC edits follow the gate; no live installation, daemon restart, dependencies or release.
 <!-- AC:END -->
 
@@ -55,4 +55,6 @@ Other proposed narrow edits: add Codex hook/config gate organs to section5.2; ad
 Operator slice reviewed: separate Codex wiring row; strict quoted absolute direct command profile, malformed async and echo/compound negative controls; TOML presence remains undetermined, no trust/execution inference. Inert example and human install/rollback runbook plus local POST witness prepared; README/count pins updated. Sol tsc/lint/focused doctor6 and docs guard22 exit0; parent full cli-doctor outside socket restriction passed70/70 exit0 (46.4s), resolving earlier inconclusive manually cancelled restricted runs. Loopback witness readiness/POST204/one marker/server exit0 verified. SPEC remains unchanged and proposed exact amendment is recorded above; native trust/outcome and morning activation remain pending.
 
 Integration review added the missing codex-hook-wiring CLI reference roster row and prominent native-unverified/PostToolUse diagnostic status. Runbook now states exact input/cwd/patch restrictions and conservative cd syntax. No SPEC or live configuration edit. Final full-suite verification follows.
+
+Final code/docs df570ea passed full npm test3920pass/1skip, lint/typecheck, conformance293/293 and complete CI parity, all exit0. Doctor roster/profile and help/runbook regressions pass. AC3 remains pending: SPEC is unchanged; exact proposed amendment remains in this task. Everyday configuration/trust and daemon deployment were not performed.
 <!-- SECTION:NOTES:END -->
