@@ -1787,7 +1787,7 @@ Flags:
   --log <p> / --out <p> / --tasks <d>  log / queue / task folder (backlog/tasks)
   --policy <path> / --dir <path>   the policy file, or where to discover it
   --interval <d> / --debounce <d>  tick period (30s) / event settle time (250ms)
-  --once / --json / --no-preflight  one tick / JSON lines / skip the git check
+  --once / --json / --no-preflight / --no-build  one tick / JSON lines / skip the git check / keep a stale dist/
   --git-evidence / --advance / --dark-sessions  three OPT-INs, off by default
   --read-proof full|incremental (default full) / --trace-watch (watch events)
   --with-channels  the channels in this process too: SAME VERB as "approval up"
@@ -1810,7 +1810,7 @@ export const UP_HELP = `approval up — the daemon and every configured channel,
 Usage:
   approval up [every "daemon run" flag] [--as human:<id>] [--port <n>]
               [--payloads <f>] [--payload-dir <d>] [--api-base <url>] [--poll-timeout <s>] [--no-gloss]
-              [--gloss-provider <claude|codex>] [--gloss-model <id>] [--no-telegram] [--no-web] [--no-preflight]
+              [--gloss-provider <claude|codex>] [--gloss-model <id>] [--no-telegram] [--no-web] [--no-preflight] [--no-build]
 
 Flags (every "daemon run" flag, unchanged, plus):
   --as human:<id>  the approver every decision is recorded against
@@ -1822,8 +1822,8 @@ Flags (every "daemon run" flag, unchanged, plus):
   --gloss-provider <p> / --gloss-model <id>   choose claude|codex (default claude); Codex requires model; no fallback
   -h, --help       this text
 BEFORE START the preflight ("daemon run" runs it too) fetches, then fast-forwards
-and rebuilds when safe, else refuses and TOUCHES NOTHING;
-opt out with --no-preflight. Credentials come from THE LAUNCH ENVIRONMENT and
+and rebuilds when safe (--no-build keeps a stale dist/), else refuses and TOUCHES
+NOTHING; --no-preflight opts out. Credentials come from THE LAUNCH ENVIRONMENT and
 nowhere else: a channel whose credential is unset is skipped in doctor's words.
 
 ${EXIT_CODES_POINTER} (a clean stop is 0; the daemon's outcome chooses it)

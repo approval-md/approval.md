@@ -118,6 +118,8 @@ const RUN_FLAGS: Record<string, FlagKind> = {
   "--no-preflight": "boolean",
   "--preflight-remote": "string",
   "--preflight-base": "string",
+  // The rebuild half of it, alone (APRV-301), spelled identically on `up`.
+  "--no-build": "boolean",
   // Test-only, spelled exactly as doctor's and `up`'s.
   "--root": "string",
   "--json": "boolean",
@@ -532,6 +534,7 @@ export function commandDaemonRun(
       root: rootFlag === null ? null : absolute(rootFlag, cwd),
       remote: stringFlag(flags, "--preflight-remote"),
       branch: stringFlag(flags, "--preflight-base"),
+      build: !boolFlag(flags, "--no-build"),
       json,
       emit: (event) => {
         if (json) {
