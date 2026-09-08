@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-astra'
 created_date: '2026-09-08 07:25'
-updated_date: '2026-09-08 08:42'
+updated_date: '2026-09-08 08:58'
 labels: []
 dependencies:
   - APRV-311
@@ -24,7 +24,7 @@ User-authorized overnight Codex integration. SPEC 6.3,7,9,10,11.1 bind. Isolated
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Astra reviews security-sensitive diffs; focused/full tests lint typecheck conformance and CI parity have recorded results.
+- [x] #1 Astra reviews security-sensitive diffs; focused/full tests lint typecheck conformance and CI parity have recorded results.
 - [ ] #2 Per-task reviewed commits are pushed in feature PR, merge armed under policy and actual GitHub state verified.
 - [ ] #3 Handoff has worktree branch commits PR checks gaps and morning instructions; no log artifacts in feature commits.
 <!-- AC:END -->
@@ -39,4 +39,6 @@ User-authorized overnight Codex integration. SPEC 6.3,7,9,10,11.1 bind. Isolated
 
 <!-- SECTION:NOTES:BEGIN -->
 Integration baseline refreshed: origin/main remains2391b02; primary checkout untouched. First npm test exit1:3921tests,3913pass,7fail,1skip. Fixed new corrupt-log expectation, short-hook help cap and doctor reference roster. Existing macOS scratch test now uses an outside cwd so isolated /private/tmp checkout is supported. Inherited APPROVAL_HUMAN invalidated two no-identity fixtures; clean rerun removes it. Color-positive runbook fixture now supplies env:{} instead of inheriting NO_COLOR/TERM=dumb; dedicated veto tests unchanged. Second full run progressing with only that pre-fix color assertion red; fresh final checks will follow. Source lint/typecheck exit0. Native probe/trust and SPEC evidence path remain unresolved; prepare draft PR, do not arm merge until acceptance can be established.
+
+Final local verification at df570ea32546b7606947126ea695788acace4454: npm test exit0 (3920pass,1skip,3921total); lint/typecheck exit0; conformance exit0 (293vectors,142controls); ci:local --parallel exit0 (build,protected-path guard,3full shards,lint all0). Logs /private/tmp/aprv-314-{npm-test,conformance,ci-local}-verified.log; results /private/tmp/aprv-314-check-results.json. Node24.2.0/macOS; Linux/Node20 remain GitHub evidence. Worktree /private/tmp/approval-codex-hook branch codex/codex-hook, primary and existing worktrees preserved; no .approval artifacts in feature commits. Source commits629d52c/65e16e9/43eed40/c41537f/3b13c9a and integrationdf570ea reviewed. Next push reviewed branch and open draft PR, verify remote checks; do not arm merge while native hook/trust/outcome and protected SPEC evidence remain incomplete. APRV315 stays To Do; no activation/deployment.
 <!-- SECTION:NOTES:END -->
