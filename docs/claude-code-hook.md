@@ -1357,6 +1357,18 @@ attribution, raw patch text and changes limited to whitespace or file metadata
 cannot supply this evidence. Human-only organs
 retain their existing protection.
 
+Inline edits can share a line or depend on an earlier approved edit. When
+line coverage is insufficient, the guard can replay eligible exact `Edit`
+records in execution order from the committed base file. Each applied edit
+must have one unique, nonempty before-state match. The result must equal the
+entire committed head file byte for byte. The guard tries no alternative edit
+orders and accepts no input hybrids or replace-all edits. A human grant also needs its
+matching execution start and registered payload binding; the grant alone is
+insufficient for replay. The same class, path, hash and timing restrictions
+apply. An extra unapproved change on an otherwise approved line still fails.
+Replay also refuses decoded text containing Unicode replacement characters,
+where the original bytes cannot be established from the decoded blobs.
+
 This verdict records authorization by the gate, not a human decision or proof
 that execution completed. CI trusts the verified runtime record; it does not
 independently repeat the secret live-sampling calculation. Missing evidence

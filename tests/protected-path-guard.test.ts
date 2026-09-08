@@ -216,7 +216,13 @@ function attestPolicy(world: World, policy: string, minute: number): void {
  * Register, request and grant one `policy.edit` action bound to `material`,
  * entirely through the gate. Returns the grant record.
  */
-function grantEdit(world: World, key: string, material: unknown, minute: number): EventRecord {
+function grantEdit(
+  world: World,
+  key: string,
+  material: unknown,
+  minute: number,
+  cls = "policy.edit",
+): EventRecord {
   const hash = payloadHash(material);
   const task = `hook:${key}`;
   const actionKey = `${task}:policy.edit`;
@@ -230,7 +236,7 @@ function grantEdit(world: World, key: string, material: unknown, minute: number)
         state: "proposed",
         actions: [
           {
-            class: "policy.edit",
+            class: cls,
             summary: `Edit ${key}`,
             reversible: true,
             est_cost_usd: "0",
@@ -250,7 +256,7 @@ function grantEdit(world: World, key: string, material: unknown, minute: number)
     {
       task,
       actionKey,
-      cls: "policy.edit",
+      cls,
       est_cost_usd: "0",
       summary: `Edit ${key}`,
       payload_hash: hash,
@@ -677,6 +683,186 @@ test("policy-authorized exact material cannot cover a different hunk", () => {
     const report = evaluateProtectedPaths(
       inputFor(unit, ["SPEC.md"], {
         blobsFor: () => ({ base: "old\n", head: "different\n" }),
+      }),
+    );
+    assert.equal(report.ok, false, JSON.stringify(report.findings));
+    assert.equal(report.findings[0]?.code, "uncovered-hunk");
+  } finally {
+    cleanup();
+  }
+});
+
+test("exact replay composes fragmented policy and manual edits in execution order", () => {
+  const { root, cleanup } = scratchRoot("guard-exact-replay-mixed");
+  try {
+    const unit = world(root, UNATTENDED_POLICY);
+    const first = { tool: "Edit", file: "SPEC.md", before: "old-one", after: "new-one" };
+    const second = { tool: "Edit", file: "SPEC.md", before: "old-two", after: "new-two" };
+    authorizeEdit(unit, "replay-policy", first, 1);
+    attestPolicy(unit, POLICY, 3);
+    grantEdit(unit, "replay-grant", second, 4);
+    spendGrant(unit, "replay-grant", second, 6);
+
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], {
+        blobsFor: () => ({
+          base: "prefix old-one middle old-two suffix\n",
+          head: "prefix new-one middle new-two suffix\n",
+        }),
+        changeTsFor: () => at(8),
+      }),
+    );
+    assert.equal(report.ok, true, JSON.stringify(report.findings));
+    assert.match(report.findings[0]?.detail ?? "", /exact BASE-to-HEAD replay/u);
+    assert.deepEqual(report.findings[0]?.coveredBy, [3, 7]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("exact replay refuses unrelated bytes, duplicate anchors, missing steps, and wrong order", () => {
+  const { root, cleanup } = scratchRoot("guard-exact-replay-refusals");
+  try {
+    const cases = [
+      {
+        label: "unrelated",
+        edits: [["old", "new"]] as const,
+        base: "prefix old suffix\n",
+        head: "prefix new suffix plus-unapproved\n",
+      },
+      {
+        label: "duplicate",
+        edits: [["old", "new"]] as const,
+        base: "old middle old\n",
+        head: "new middle old\n",
+      },
+      {
+        label: "overlapping-duplicate",
+        edits: [["aa", "b"]] as const,
+        base: "aaa\n",
+        head: "ba\n",
+      },
+      {
+        label: "missing",
+        edits: [["old-one", "new-one"]] as const,
+        base: "old-one and old-two\n",
+        head: "new-one and new-two\n",
+      },
+      {
+        label: "reordered",
+        edits: [["middle", "final"], ["start", "middle"]] as const,
+        base: "prefix start suffix\n",
+        head: "prefix final suffix\n",
+      },
+      {
+        label: "replacement-character",
+        edits: [["old", "new"]] as const,
+        base: "prefix \uFFFD old\n",
+        head: "prefix \uFFFD new\n",
+      },
+    ];
+    for (const scenario of cases) {
+      const unit = world(join(root, scenario.label), UNATTENDED_POLICY);
+      scenario.edits.forEach(([before, after], index) => {
+        authorizeEdit(
+          unit,
+          `${scenario.label}-${String(index)}`,
+          { tool: "Edit", file: "SPEC.md", before, after },
+          1 + index * 2,
+        );
+      });
+      const report = evaluateProtectedPaths(
+        inputFor(unit, ["SPEC.md"], {
+          blobsFor: () => ({ base: scenario.base, head: scenario.head }),
+          changeTsFor: () => at(10),
+        }),
+      );
+      assert.equal(report.ok, false, `${scenario.label}: ${JSON.stringify(report.findings)}`);
+      assert.equal(report.findings[0]?.code, "uncovered-hunk", scenario.label);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("exact replay refuses hybrid, tampered, or wrong-class manual evidence", () => {
+  const { root, cleanup } = scratchRoot("guard-exact-replay-manual-refusals");
+  try {
+    const hybrid = {
+      tool: "Edit",
+      file: "SPEC.md",
+      before: "old",
+      after: "new",
+      content: "new whole file",
+    };
+    const hybridUnit = world(join(root, "hybrid"));
+    grantEdit(hybridUnit, "hybrid", hybrid, 1);
+    spendGrant(hybridUnit, "hybrid", hybrid, 3);
+    assert.equal(
+      evaluateProtectedPaths(
+        inputFor(hybridUnit, ["SPEC.md"], {
+          blobsFor: () => ({ base: "prefix old suffix\n", head: "prefix new suffix\n" }),
+          changeTsFor: () => at(5),
+        }),
+      ).ok,
+      false,
+    );
+
+    const original = { tool: "Edit", file: "SPEC.md", before: "old", after: "new" };
+    const tamperedUnit = world(join(root, "tampered"));
+    grantEdit(tamperedUnit, "tampered", original, 1);
+    spendGrant(tamperedUnit, "tampered", original, 3);
+    tamperedUnit.store.set(payloadHash(original), {
+      ...original,
+      after: "tampered",
+    });
+    assert.equal(
+      evaluateProtectedPaths(
+        inputFor(tamperedUnit, ["SPEC.md"], {
+          blobsFor: () => ({ base: "prefix old suffix\n", head: "prefix tampered suffix\n" }),
+          changeTsFor: () => at(5),
+        }),
+      ).ok,
+      false,
+    );
+
+    const wrongClassPolicy = POLICY.replace(
+      "  policy.edit:\n    autonomy: manual",
+      "  policy.edit:\n    autonomy: manual\n  policy.edit.docs:\n    autonomy: manual",
+    );
+    const wrongClassUnit = world(join(root, "wrong-class"), wrongClassPolicy);
+    grantEdit(wrongClassUnit, "wrong-class", original, 1, "policy.edit.docs");
+    spendGrant(wrongClassUnit, "wrong-class", original, 3);
+    assert.equal(
+      evaluateProtectedPaths(
+        inputFor(wrongClassUnit, ["SPEC.md"], {
+          blobsFor: () => ({ base: "prefix old suffix\n", head: "prefix new suffix\n" }),
+          changeTsFor: () => at(5),
+        }),
+      ).ok,
+      false,
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("exact replay rehashes a policy payload returned by a changing reader", () => {
+  const { root, cleanup } = scratchRoot("guard-exact-replay-changing-reader");
+  try {
+    const unit = world(root, UNATTENDED_POLICY);
+    const original = { tool: "Edit", file: "SPEC.md", before: "old", after: "new" };
+    const tampered = { ...original, after: "tampered" };
+    authorizeEdit(unit, "changing-reader", original, 1);
+    let reads = 0;
+    const report = evaluateProtectedPaths(
+      inputFor(unit, ["SPEC.md"], {
+        payloadFor: () => reads++ === 0 ? original : tampered,
+        blobsFor: () => ({
+          base: "prefix old suffix\n",
+          head: "prefix tampered suffix\n",
+        }),
+        changeTsFor: () => at(3),
       }),
     );
     assert.equal(report.ok, false, JSON.stringify(report.findings));

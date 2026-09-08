@@ -588,6 +588,21 @@ interface NamingMatch {
   cwd?: string;
 }
 
+interface EvidenceCandidate {
+  record: EventRecord;
+  match: NamingMatch;
+  source: "grant" | "policy";
+  material: unknown;
+  payloadHash: string;
+}
+
+interface ExactEditStep {
+  candidate: EvidenceCandidate;
+  start: EventRecord;
+  before: string;
+  after: string;
+}
+
 /**
  * Does this granted command write THIS repository's copy of the path?
  *
@@ -902,6 +917,173 @@ function policyAuthorizedEvidence(
     return null;
   }
   return policyFileEvidence(material, path, policyProtectedPaths);
+}
+
+/** The closed, repository-relative Edit shape eligible for byte replay. */
+function exactReplayEdit(material: unknown, path: string): { before: string; after: string } | null {
+  if (typeof material !== "object" || material === null || Array.isArray(material)) return null;
+  const map = material as Record<string, unknown>;
+  const keys = Object.keys(map);
+  const allowed = ["tool", "rule", "file", "before", "after", "replace_all"];
+  if (keys.some((key) => !allowed.includes(key))) return null;
+  if (
+    map["tool"] !== "Edit" ||
+    typeof map["file"] !== "string" ||
+    map["file"].startsWith("/") ||
+    map["file"].includes("\\") ||
+    (map["rule"] !== undefined && typeof map["rule"] !== "string") ||
+    typeof map["before"] !== "string" ||
+    map["before"].length === 0 ||
+    typeof map["after"] !== "string" ||
+    map["before"] === map["after"] ||
+    (map["replace_all"] !== undefined && map["replace_all"] !== false)
+  ) return null;
+  const named = segmentsOf(map["file"]);
+  const changed = segmentsOf(path);
+  if (
+    named.includes("..") ||
+    named.length !== changed.length ||
+    !named.every((segment, index) => segment === changed[index])
+  ) return null;
+  return { before: map["before"], after: map["after"] };
+}
+
+/** The one token or harness spend that proves this manual grant actually ran. */
+function startForReplayGrant(
+  candidate: EvidenceCandidate,
+  records: readonly EventRecord[],
+  anchorMs: number | null,
+  lookbackMs: number,
+  path: string,
+  policyProtectedPaths: readonly ProtectedPathEntry[],
+): EventRecord | null {
+  if (anchorMs === null) return null;
+  const grant = candidate.record;
+  const task = grant.task;
+  const actionKey = grant.action_key;
+  if (task === undefined || actionKey === undefined) return null;
+  const granted = payloadOf(grant);
+  const cls = granted["class"];
+  const hash = granted["payload_hash"];
+  if (typeof cls !== "string" || typeof hash !== "string" || hash !== candidate.payloadHash) return null;
+  if (hasAmbiguousRoute(path, policyProtectedPaths)) return null;
+  const routed = protectedPathClass(path, policyProtectedPaths);
+  if (routed === null || routed === "policy.core" || routed === "log.mutate" || cls !== routed) {
+    return null;
+  }
+
+  try {
+    if (payloadHash(candidate.material) !== hash) return null;
+  } catch {
+    return null;
+  }
+
+  const grantToken = granted["token_sha256"];
+  const starts = records.filter((record) => {
+    if (
+      record.event !== "execution.started" ||
+      record.seq <= grant.seq ||
+      record.task !== task ||
+      record.action_key !== actionKey
+    ) return false;
+    const started = payloadOf(record);
+    if (started["class"] !== cls || started["payload_hash"] !== hash) return false;
+    if (Object.hasOwn(started, "execution") && started["execution"] !== "harness") return false;
+    const hasGrantLink = Object.hasOwn(started, "grant_seq");
+    const hasTokenLink = Object.hasOwn(started, "token_sha256");
+    if (!hasGrantLink && !hasTokenLink) return false;
+    if (hasGrantLink && started["grant_seq"] !== grant.seq) return false;
+    if (
+      hasTokenLink &&
+      (typeof grantToken !== "string" || started["token_sha256"] !== grantToken)
+    ) return false;
+    const at = Date.parse(record.ts);
+    return !Number.isNaN(at) && at <= anchorMs && anchorMs - at <= lookbackMs;
+  });
+  if (starts.length !== 1) return null;
+  const start = starts[0] as EventRecord;
+
+  const bindings = precedingBindings(records, start);
+  if (bindings.length !== 1) return null;
+  const binding = bindings[0] as RegisteredBinding;
+  if (
+    binding.record.seq >= grant.seq ||
+    binding.task !== task ||
+    binding.actionKey !== actionKey ||
+    binding.cls !== cls ||
+    binding.payloadHash !== hash
+  ) return null;
+  const requested = records.some((record) => {
+    if (
+      record.event !== "approval.requested" ||
+      record.seq <= binding.record.seq ||
+      record.seq >= grant.seq ||
+      record.task !== task ||
+      record.action_key !== actionKey
+    ) return false;
+    const payload = payloadOf(record);
+    return payload["class"] === cls && payload["payload_hash"] === hash;
+  });
+  return requested ? start : null;
+}
+
+/**
+ * Replay authorized exact edits in execution order and demand byte equality.
+ *
+ * A missing `before` is an unrelated historical edit and is skipped once. Two
+ * occurrences are ambiguous and refuse the whole fallback. There is no search,
+ * reordering, substring credit, or partial result: only BASE transformed into
+ * HEAD byte for byte is evidence.
+ */
+function exactEditReplay(
+  candidates: readonly EvidenceCandidate[],
+  records: readonly EventRecord[],
+  base: string | null,
+  head: string | null,
+  anchorMs: number | null,
+  lookbackMs: number,
+  path: string,
+  policyProtectedPaths: readonly ProtectedPathEntry[],
+): ExactEditStep[] | null {
+  if (
+    base === null ||
+    head === null ||
+    base.includes("\uFFFD") ||
+    head.includes("\uFFFD")
+  ) return null;
+  const steps: ExactEditStep[] = [];
+  for (const candidate of candidates) {
+    try {
+      if (payloadHash(candidate.material) !== candidate.payloadHash) continue;
+    } catch {
+      continue;
+    }
+    const edit = exactReplayEdit(candidate.material, path);
+    if (edit === null) continue;
+    const start = candidate.source === "policy"
+      ? candidate.record
+      : startForReplayGrant(
+          candidate,
+          records,
+          anchorMs,
+          lookbackMs,
+          path,
+          policyProtectedPaths,
+        );
+    if (start !== null) steps.push({ candidate, start, ...edit });
+  }
+  steps.sort((left, right) => left.start.seq - right.start.seq);
+
+  let replayed = base;
+  const applied: ExactEditStep[] = [];
+  for (const step of steps) {
+    const first = replayed.indexOf(step.before);
+    if (first === -1) continue;
+    if (replayed.indexOf(step.before, first + 1) !== -1) return null;
+    replayed = `${replayed.slice(0, first)}${step.after}${replayed.slice(first + step.before.length)}`;
+    applied.push(step);
+  }
+  return applied.length > 0 && replayed === head ? applied : null;
 }
 
 /** A blob's lines, with the empty tail a trailing newline leaves dropped. */
@@ -1290,11 +1472,7 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
     // the stronger evidence kind first, then the grant nearest the change.
     const unresolved: string[] = [];
     const stale: EventRecord[] = [];
-    const candidates: {
-      record: EventRecord;
-      match: NamingMatch;
-      source: "grant" | "policy";
-    }[] = [];
+    const candidates: EvidenceCandidate[] = [];
     for (const grant of grants) {
       const hash = payloadOf(grant)["payload_hash"];
       if (typeof hash !== "string") continue;
@@ -1309,7 +1487,7 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
         stale.push(grant);
         continue;
       }
-      candidates.push({ record: grant, match: found, source: "grant" });
+      candidates.push({ record: grant, match: found, source: "grant", material, payloadHash: hash });
     }
     for (const start of records) {
       const found = policyAuthorizedEvidence(
@@ -1321,7 +1499,13 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
         anchorMs,
         lookbackMs,
       );
-      if (found !== null) candidates.push({ record: start, match: found, source: "policy" });
+      const hash = payloadOf(start)["payload_hash"];
+      if (found !== null && typeof hash === "string") {
+        const material = input.payloadFor(hash);
+        if (material !== null) {
+          candidates.push({ record: start, match: found, source: "policy", material, payloadHash: hash });
+        }
+      }
     }
     const evidenceNoun = candidates.every((candidate) => candidate.source === "grant")
       ? `grant${candidates.length === 1 ? "" : "s"}`
@@ -1448,6 +1632,45 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
       if (contributed !== null) {
         contributors.push({ record, kind: match.kind, why: contributed, whole: wholeHere, source });
       }
+    }
+
+    // Exact Edit payloads may bind fragments within a line, including several
+    // independent fragments of the same long line. Whole-line set membership
+    // cannot express that safely. Replay is the bounded fallback: genuine
+    // starts, execution order, unique anchors, and final byte equality.
+    const needsReplay =
+      !whole &&
+      !hunks.identical &&
+      (
+        hunks.reordered ||
+        hunks.added.some((line) => !addedCover.has(line)) ||
+        hunks.removed.some((line) => !removedCover.has(line))
+      );
+    const replay = needsReplay
+      ? exactEditReplay(
+          candidates,
+          records,
+          blobs.base,
+          blobs.head,
+          anchorMs,
+          lookbackMs,
+          path,
+          input.policyProtectedPaths,
+        )
+      : null;
+    if (replay !== null) {
+      whole = true;
+      contributors.splice(
+        0,
+        contributors.length,
+        ...replay.map((step) => ({
+          record: step.candidate.record,
+          kind: step.candidate.match.kind,
+          why: `${step.candidate.match.detail}, applied at execution.started seq ${step.start.seq} in an exact BASE-to-HEAD replay`,
+          whole: true,
+          source: step.candidate.source,
+        })),
+      );
     }
 
     // What the bytes alone cover, before any whole-file attribution. If this is
