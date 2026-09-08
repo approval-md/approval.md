@@ -412,8 +412,10 @@ export function commandUp(
   //
   // First, before the log is even opened, because its whole subject is which
   // code and which log this process is about to run against. It reads git, and
-  // at most fast-forwards and rebuilds; it never resets, never stashes, and
-  // never touches the working log. A refusal exits without starting anything.
+  // at most fast-forwards, rebuilds, and clears an untracked `backlog/tasks/`
+  // file the incoming commit already contains out of the merge's way
+  // (APRV-300); it never resets, never stashes, and never touches the working
+  // log. A refusal exits without starting anything.
   //
   // `--json` emission goes through the same `UpEvent` union as everything else,
   // so the stream stays one union of additive shapes. The refusal does NOT: it

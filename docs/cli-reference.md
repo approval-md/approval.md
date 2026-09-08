@@ -4324,7 +4324,9 @@ because `git status` does not say what the upstream range changed. So the verb
 does all four, and `approval daemon run` runs the identical preflight from the
 identical module, printing the identical two lines.
 
-It is allowed exactly two writes: a `--ff-only` merge, and `npm run build`. It
+It is allowed exactly three writes: a `--ff-only` merge, `npm run build`, and
+clearing an untracked `backlog/tasks/` file the incoming commit already contains
+out of the merge's way (APRV-300, described below). It
 never resets, never stashes, never checks anything out, and never touches the
 working log. That list is not caution for its own sake: a working `events.jsonl`
 rewound through git underneath a live appender is fork 2 of 2026-08-20, the
@@ -4340,7 +4342,41 @@ running. When it is not, it refuses, and changes nothing:
 | `up-preflight-behind-ahead` | `origin/<branch>..HEAD` is non-empty: this checkout carries commits the remote has never seen. A fast-forward is not the operation for that state, and choosing a side is a decision. | look at them (`git log --oneline origin/main..HEAD`), then push them or `git reset --keep` |
 | `up-preflight-log-diverged` | the upstream range rewrites `.approval/log/events.jsonl` or `.approval/QUEUE.md`, and this working copy has uncommitted changes to one of them. The judgment a human could not make by eye. | `approval log sync` |
 | `up-preflight-dirty-protected` | some other path the upstream range changes is locally modified, so `git merge --ff-only` would refuse rather than overwrite it. | look at the diff, or `approval up --no-preflight` |
+| `up-preflight-task-file-conflict` | an untracked file under `backlog/tasks/` stopped the fast-forward and it holds lines the incoming copy does not. Which version is wanted is a question, and no verb here will pick. | read the two copies, move yours aside, run `approval up` again |
 | `up-preflight-failed` | a write the preflight attempted did not complete: the fast-forward, or the rebuild. Not a judgment, so it is not in the union above; the message names the step, and for a build it names the exit code `npm run build` came back with. | `npm run build` to see the whole error, or `approval up --no-build` if you mean to run the stale one |
+
+**An untracked task file no longer stops it (APRV-300).** A lane files
+`backlog/tasks/aprv-299` on its branch and its pull request merges, while the
+primary checkout holds the same path untracked from its own `backlog task
+create`. `git merge --ff-only` will not write over an untracked file, so on
+2026-09-07 the preflight refused, and its next-steps text pointed at `git
+status`, which cannot say whether the local copy holds anything the incoming one
+does not. That question is answerable, so it is answered. When the merge fails
+over untracked files and every path git names sits under `backlog/tasks/`, each
+one is read alongside `git show <target>:<path>` and given one of three
+verdicts:
+
+- **byte-identical** — the local copy says nothing the incoming copy does not,
+  so it is removed and the merge is retried once;
+- **every line also in the incoming copy** — the ordinary shape, a hand-filed
+  stub against a lane copy that added a plan and criteria. Nothing is lost by
+  letting the incoming copy land, but that is a judgment about an operator's
+  file, so the bytes are moved to a sibling of the checkout named
+  `<repo>-preflight-aside-<YYYY-MM-DD>` (outside the repository, so the next
+  fast-forward cannot collide with it again), the destination is printed on the
+  `preflight_warning` line, and the merge is retried once;
+- **anything else** — `up-preflight-task-file-conflict`, naming your path, the
+  incoming spelling, and how many lines only yours has.
+
+Every file is judged before any file is touched, the same two-pass shape as
+`approval log sync`'s payload reconciliation, so a refusal over the last
+collision cannot have already removed the first. One path outside
+`backlog/tasks/` and the whole set is declined: the merge keeps its old
+`up-preflight-failed` refusal and nothing is cleared, because clearing what was
+understood and then refusing anyway would have moved files for a merge that was
+never going to run. A path git chose to quote (`core.quotePath`) is declined for
+the same reason: guessing the spelling of a file about to be moved is the
+mistake the whole check exists to avoid.
 
 **`git reset --hard` is printed on no path, ever**, and a test asserts it. The
 one reset that appears is `--keep`, which refuses rather than discarding

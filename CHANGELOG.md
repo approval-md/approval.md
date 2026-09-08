@@ -134,6 +134,20 @@ The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
   re-renders the projection, and the stop-the-daemon workaround is retired. The
   working log's snapshot and restore are untouched.
 
+- **An untracked task file no longer stops `approval up`'s fast-forward**
+  (APRV-300). A lane files `backlog/tasks/aprv-299` on its branch and its pull
+  request merges while the primary checkout holds that path untracked from its
+  own `backlog task create`, and `git merge --ff-only` will not write over an
+  untracked file. The preflight now reads each collision against the incoming
+  blob: byte-identical is removed, a copy whose every line the incoming file
+  already carries is moved to a dated sibling of the checkout with the
+  destination printed on the warning line, and the merge is retried once.
+  Anything else refuses `up-preflight-task-file-conflict` (a fourth member of
+  the frozen refusal union) with both paths and the count of lines only the
+  local copy has. Every file is judged before any file is touched, as in
+  APRV-225's payload reconciliation, and a collision anywhere but
+  `backlog/tasks/` declines the whole set and keeps the old refusal.
+
 - **The hook waits for a lagging verified view instead of denying on it**
   (APRV-294). Minutes after a `log sync` and a daemon restart, a hook appended
   its requests, re-read the log, found its own keys in state `none` and denied
