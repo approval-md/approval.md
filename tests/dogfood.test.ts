@@ -123,7 +123,9 @@ test("APPROVAL.md defaults are fail-closed: manual, expiry rejects", () => {
 
 test("APPROVAL.md declares the audit sample rate and global budget", () => {
   const { policy } = loadRepoPolicy();
-  assert.equal(policy.audit?.supervised_sample_rate, 0.15);
+  // 0.15 → 0.01 at the 2026-09-08 ceremony (seq 29285): review cards reached
+  // the phone for the first time (APRV-299) and one in seven was too many.
+  assert.equal(policy.audit?.supervised_sample_rate, 0.01);
   assert.equal(policy.budgets?.global?.daily_actions, 20000);
 });
 
