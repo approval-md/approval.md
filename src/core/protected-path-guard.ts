@@ -815,7 +815,14 @@ function policyFileEvidence(
   }
   const match = evidenceFor(material, path, policyProtectedPaths);
   if (match === null || match.command || (match.after === null && match.before === null)) return null;
-  return { ...match, kind: "policy-authorized-file" };
+  return {
+    ...match,
+    kind: "policy-authorized-file",
+    detail: match.detail.replace(
+      /^the granted material is/u,
+      "the policy-authorized material is",
+    ),
+  };
 }
 
 /** Differing applicable routes in an unlabeled policy union carry no single class. */
@@ -1726,17 +1733,19 @@ export function evaluateProtectedPaths(input: GuardInput): GuardReport {
         ts: record.ts,
         actor: record.actor,
         coveredBy: contributors.map((one) => one.record.seq),
-        detail: `${path} was ${kind === "policy-authorized-file" ? "authorized by policy for execution" : "granted"} by ${record.actor} at seq ${record.seq} (${record.ts}), ${boundText}: ${why}. ${
-          hunks.identical
-            ? "there are no substantive hunks to cover"
-            : whole
-              ? "the whole change is attributed to that authorization record"
-              : `${hunks.added.length} added and ${hunks.removed.length} removed line(s) all trace to authorized material`
-        }${
-          contributors.length > 1
-            ? ` (assembled from ${contributors.length} ${contributors.every((one) => one.source === "grant") ? "grants" : "evidence records"}: seq ${contributors.map((one) => one.record.seq).join(", ")}; the strongest and nearest leads)`
-            : ""
-        }`,
+        detail: replay !== null
+          ? `${path}'s full change was reconstructed byte-for-byte from ${contributors.length} replayed authorization record${contributors.length === 1 ? "" : "s"} in execution order, ${boundText}. Evidence records in that order: seq ${contributors.map((one) => one.record.seq).join(", ")}. The first record, ${record.actor} at seq ${record.seq} (${record.ts}), leads the finding: ${why}.`
+          : `${path} was ${kind === "policy-authorized-file" ? "authorized by policy for execution" : "granted"} by ${record.actor} at seq ${record.seq} (${record.ts}), ${boundText}: ${why}. ${
+              hunks.identical
+                ? "there are no substantive hunks to cover"
+                : whole
+                  ? "the whole change is attributed to that authorization record"
+                  : `${hunks.added.length} added and ${hunks.removed.length} removed line(s) all trace to authorized material`
+            }${
+              contributors.length > 1
+                ? ` (assembled from ${contributors.length} ${contributors.every((one) => one.source === "grant") ? "grants" : "evidence records"}: seq ${contributors.map((one) => one.record.seq).join(", ")}; the strongest and nearest leads)`
+                : ""
+            }`,
       });
       continue;
     }
