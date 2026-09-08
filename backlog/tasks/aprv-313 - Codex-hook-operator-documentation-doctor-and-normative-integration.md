@@ -1,11 +1,11 @@
 ---
 id: APRV-313
 title: Codex hook operator documentation doctor and normative integration
-status: In Progress
+status: Done
 assignee:
   - '@codex-sol'
 created_date: '2026-09-08 07:25'
-updated_date: '2026-09-08 19:36'
+updated_date: '2026-09-08 21:13'
 labels: []
 dependencies:
   - APRV-312
@@ -24,7 +24,7 @@ User-authorized overnight Codex integration. SPEC 6.3,7,9,10,11.1 bind. Isolated
 <!-- AC:BEGIN -->
 - [x] #1 Help/examples/runbook specify opt-in shell/patch coverage, failure gaps, ten-minute outer timeout and nine-minute gate wait.
 - [x] #2 Doctor distinguishes configured wiring from trusted/observed operation and checks Codex provenance.
-- [ ] #3 Narrow SPEC edits follow the gate; no live installation, daemon restart, dependencies or release.
+- [x] #3 Narrow SPEC edits follow the gate; no live installation, daemon restart, dependencies or release.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -69,4 +69,12 @@ CLI help/registry and operator docs now state experimental direct-patch support 
 2026-09-08 policy-authoritative continuation: Carter explicitly confirmed APPROVAL.md governs human approval. Reviewed temporary driver /private/tmp/aprv-313-spec-policy-driver.mjs calls primary request for each exact bound Edit payload, proceeds only on explicit proceed:true/requested:false, otherwise waits for a real grant; executeThroughAdapter remains the binding/budget/execution authority. Policy bytes are checked unchanged across request and act. Registration seq29911; steps1–4 executed under unchanged policy with starts29912/29914/29916/29918 and successful completions29913/29915/29917/29919. Step5 request29920 awaits real policy-required human decision; steps5–7 remain unapplied. Target complete digest is the manifest before-step5 digest; readonly bundle check exit0. No policy edit or invented approval. APRV316 fixes CI recognition of policy-authorized file evidence.
 
 Final checkpoint this turn: all seven exact SPEC edits applied through the primary gate. Steps1–4 and6 were permitted without human grants; steps5 and7 received real human grants and executed through the token-only reviewed driver. Completions29913/29915/29917/29919/29923/29925/29929; full target SHA afbf2ac0cc85ad8360b479b41512e064f96e8f8e2368ad51789be08aee50a965; readonly bundle check exit0. SPEC changes remain uncommitted pending APRV316 CI evidence alignment and final checks. Policy unchanged. Feature HEAD d33d24a; reviewed Codex source/probe/docs commits b780c01,994f86c,76c9cf7,d33d24a are local, PR344 still draft at8ad3eb1. Earlier source validation:3928 tests pass/1skip, lint/typecheck/conformance exit0; no claim these are new APRV316 tests.
+
+The seven exact narrow SPEC edits executed through the primary gate: five policy-permitted starts and two actual human grants. Final protected-path verification reconstructs committed SPEC byte-for-byte from those records and passes. Records delivery PR345 and PR347 merged. No live Codex installation/trust, daemon restart, dependency or release changes were made. Current feature commit8be51ad includes the reviewed exact-replay evidence verifier; full final validation and PR344 delivery are tracked in APRV314/316.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Delivered opt-in examples, help, doctor configuration-versus-operation diagnostics, native probe limits and activation/rollback runbook. Seven narrow SPEC edits executed through primary policy, with five policy-authorized starts and two real human grants. Actual guard verifies exact replay to committed SPEC; recordsPR345/347 merged. Full3951pass/1skip,lint,typecheck,conformance all exit0. PR344 final delivery tracked in APRV314; live installation remains APRV315.
+<!-- SECTION:FINAL_SUMMARY:END -->
