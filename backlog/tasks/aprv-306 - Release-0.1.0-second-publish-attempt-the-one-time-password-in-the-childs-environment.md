@@ -15,7 +15,7 @@ approval:
     app: manual
     created_by: 'agent:fable'
   route:
-    assignee: 'human:carter'
+    assignee: 'human'
     rationale: 'second attempt at the 0.1.0 publish after npm refused the first with EOTP (APRV-199 seq 29613/29614); same bytes, new key, the human runs the granted execution with the one-time password in its environment'
   state: proposed
   actions:
