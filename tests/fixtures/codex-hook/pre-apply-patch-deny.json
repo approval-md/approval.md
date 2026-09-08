@@ -1,0 +1,13 @@
+{
+  "session_id": "synthetic-session",
+  "transcript_path": "/synthetic/transcript.jsonl",
+  "cwd": "/tmp/codex-hook-fixture",
+  "hook_event_name": "PreToolUse",
+  "model": "synthetic-model",
+  "turn_id": "synthetic-turn",
+  "tool_name": "apply_patch",
+  "tool_use_id": "synthetic-tool-use-denied-patch",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Add File: patch-denied.txt\n+denied patch # codex-hook-probe:patch-deny\n*** End Patch"
+  }
+}
