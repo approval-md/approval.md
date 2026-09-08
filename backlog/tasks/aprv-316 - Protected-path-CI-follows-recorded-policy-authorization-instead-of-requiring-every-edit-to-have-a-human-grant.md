@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-09-08 19:25'
-updated_date: '2026-09-08 21:02'
+updated_date: '2026-09-08 21:27'
 labels: []
 dependencies: []
 priority: high
@@ -57,4 +57,10 @@ Sol verified the seven original genuine Edit starts replay in execution sequence
 Exact-replay implementation and parent security review: require supported exact Edit shape, canonical material hash, exact routed class/path, unique preceding registration, real matching execution start and manual grant/request linkage, bounded pre-change timestamp, execution-sequence order and unique anchors including overlapping matches. Existing valid coverage and metadata-only behavior remain unchanged; fallback must reconstruct full committed HEAD. Focused build0,guard51/51,wrapper11/11,routed6/6,ci-local21/21,lint0,diffcheck0. Actual SPEC guard exit0 using origin/main seq29952, coveredBy29912/29914/29916/29918/29921/29924/29927 and corresponding genuine starts29912/29914/29916/29918/29922/29924/29928. Final review is tightening rehash at replay use to avoid relying on repeated payloadFor reads being stable. Full suite running at prior replay snapshot; final CI parity will test the committed result.
 
 Final rehash-at-use regression passed: every replay candidate is independently rehashed before deriving an Edit, including a stateful payloadFor callback that changes its second answer. Final focused build0,guard52/52,lint0,diffcheck0; actual SPEC guard exit0 again, saved /private/tmp/aprv-316-actual-guard-final.json. Parent reviewed final code and docs. Implementation frozen for final committed CI parity; no new protected edit, approval event type or dependency.
+
+Full npm test completed exit0:3952total,3951pass,1skip,0fail; lint0,typecheck0,conformance0. Logs /private/tmp/aprv-316-replay-final-*.log and result manifest /private/tmp/aprv-316-replay-final-check-results.json. Final implementation commit8be51ad carries Codex co-author; committed CI parity now running separately on the frozen result. Actual SPEC guard already passed using merged primary records.
+
+Committed CI parity at8be51ad: build0, actual protected-path guard0, shards1/2 exit0, lint0; shard3 exit1 from one daemon draw exceeding500ms. Correctly escalated isolated live-draw suite then passed22/22; standalone shard3 retry is running. Two intervening sandboxed probe attempts were invalid socket diagnostics (chmod ENOENT), not evidence of source failure or concurrent load. No runtime timeout or policy changes. Diagnostic-only commitf1daf38 clarifies replay provenance and policy-authorized versus human-granted material; focused guard52/52 and build exit0.
+
+The correctly escalated standalone shard 3 retry passed: 1,629/1,629, exit 0, 211.72 seconds. The isolated live-draw suite passed 22/22. The original 500 ms timeout did not reproduce; its cause is not established. All CI-parity steps now have passing evidence after that failed-shard retry. Production deadlines, policy and test code were unchanged. Final diagnostic wording at f1daf38 passed build and all 52 focused guard tests. Next: push final reviewed commits and verify PR 344 checks and merge state.
 <!-- SECTION:NOTES:END -->
