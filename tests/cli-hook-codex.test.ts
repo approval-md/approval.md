@@ -10,7 +10,6 @@ import {
   realpathSync,
   rmSync,
   writeFileSync,
-  symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,7 +17,10 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { codexBinding, type CodexHookInput } from "../src/cli/hook-codex.js";
+import { decide, register, request } from "../src/core/gate.js";
+import { openWindow } from "../src/core/gate-window.js";
 import { harnessSessionOf } from "../src/core/loop.js";
+import { payloadHash } from "../src/core/payload.js";
 
 /** dist/tests/cli-hook-codex.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -101,6 +103,7 @@ function event(
 interface Verdict {
   permission: string;
   reason: string;
+  updatedInput?: unknown;
 }
 
 function verdictOf(run: Run): Verdict {
@@ -108,17 +111,34 @@ function verdictOf(run: Run): Verdict {
   const body = JSON.parse(run.stdout) as Record<string, unknown>;
   const output = body["hookSpecificOutput"] as Record<string, unknown>;
   assert.equal(output["hookEventName"], "PreToolUse");
+  const permission = String(output["permissionDecision"]);
+  if (permission === "deny") {
+    assert.equal(Object.hasOwn(output, "updatedInput"), false, "a deny must not rewrite input");
+  } else if (permission === "allow") {
+    assert.equal(typeof (output["updatedInput"] as Record<string, unknown>)?.["command"], "string");
+  }
   return {
-    permission: String(output["permissionDecision"]),
+    permission,
     reason: String(output["permissionDecisionReason"]),
+    ...(Object.hasOwn(output, "updatedInput") ? { updatedInput: output["updatedInput"] } : {}),
   };
 }
 
-test("Codex Bash uses the nested verdict and a harness-namespaced stable task", () => {
-  const dir = ready();
-  const run = runCli(["hook", "codex"], dir, event(dir));
-  const verdict = verdictOf(run);
+function assertIdentityAllow(verdict: Verdict, command: string): void {
   assert.equal(verdict.permission, "allow");
+  assert.deepEqual(verdict.updatedInput, { command });
+}
+
+test("Codex apply_patch uses the nested verdict and a harness-namespaced stable task", () => {
+  const dir = ready();
+  const command = "*** Begin Patch\n*** Add File: ordinary.txt\n+x\n*** End Patch";
+  const run = runCli(
+    ["hook", "codex"],
+    dir,
+    event(dir, { tool_name: "apply_patch", tool_input: { command } }),
+  );
+  const verdict = verdictOf(run);
+  assertIdentityAllow(verdict, command);
   assert.match(verdict.reason, /^autonomous: /u);
 
   const log = rawLog(dir);
@@ -175,11 +195,20 @@ test("Codex correlation is injective over native ids, tool bytes, cwd, and sessi
 });
 
 test("Codex manual intake reuses the gate and binds tool, command, and actual cwd", () => {
-  const dir = ready();
+  const dir = ready(
+    POLICY.replace(
+      "files.write.workspace: { autonomy: autonomous }",
+      "files.write.workspace: { autonomy: manual }",
+    ),
+  );
+  const command = "*** Begin Patch\n*** Add File: manual.txt\n+x\n*** End Patch";
   const run = runCli(
     ["hook", "codex", "--timeout", "1ms", "--interval", "1ms", "--retry-grace", "1ms"],
     dir,
-    event(dir, { tool_input: { command: "npm install left-pad", description: "ignore me" } }),
+    event(dir, {
+      tool_name: "apply_patch",
+      tool_input: { command, description: "ignore me" },
+    }),
   );
   const verdict = verdictOf(run);
   assert.equal(verdict.permission, "deny");
@@ -201,7 +230,7 @@ test("Codex manual intake reuses the gate and binds tool, command, and actual cw
   const value = JSON.parse(
     readFileSync(join(dir, ".approval", "payloads", `${hash}.json`), "utf8"),
   ) as Record<string, unknown>;
-  assert.deepEqual(value, { tool: "Bash", command: "npm install left-pad", cwd: dir });
+  assert.deepEqual(value, { tool: "apply_patch", command, cwd: dir });
   assert.doesNotMatch(rawLog(dir), /ignore me/u);
   assert.equal(runCli(["log", "verify"], dir).code, 0);
 });
@@ -236,11 +265,13 @@ test("Codex denies malformed, mismatched, and unsupported pre-tool input", () =>
   for (const [name, input] of cases) {
     const verdict = verdictOf(runCli(["hook", "codex"], dir, input));
     assert.equal(verdict.permission, "deny", name);
+    assert.equal(verdict.updatedInput, undefined, name);
     assert.match(verdict.reason, /^hook-io: /u, name);
   }
 
   const badFlag = verdictOf(runCli(["hook", "codex", "--bogus"], dir, event(dir)));
   assert.equal(badFlag.permission, "deny");
+  assert.equal(badFlag.updatedInput, undefined);
   assert.match(badFlag.reason, /^hook-io: /u);
   assert.equal(rawLog(dir), before, "strict intake failures append nothing");
 });
@@ -255,7 +286,7 @@ test("Codex apply_patch gates the full raw patch and unions ordinary and protect
     dir,
     event(dir, { tool_name: "apply_patch", tool_input: { command: ordinaryPatch } }),
   ));
-  assert.equal(allowed.permission, "allow");
+  assertIdentityAllow(allowed, ordinaryPatch);
   assert.match(allowed.reason, /^autonomous: /u);
 
   const mixedPatch = [
@@ -323,8 +354,13 @@ test("Codex applies supervised and human-only policy to Bash and apply_patch", (
       dir,
       event(dir, { tool_name: tool, tool_input: { command } }),
     ));
-    assert.equal(result.permission, "allow", tool);
-    assert.match(result.reason, /files\.write\.workspace needs no approval/u, tool);
+    if (tool === "Bash") {
+      assert.equal(result.permission, "deny");
+      assert.match(result.reason, /^hook-io: Codex Bash is disabled/u);
+    } else {
+      assertIdentityAllow(result, command);
+      assert.match(result.reason, /files\.write\.workspace needs no approval/u, tool);
+    }
     assert.doesNotMatch(rawLog(dir), /"event":"approval\.requested"/u);
   }
 
@@ -345,112 +381,144 @@ test("Codex applies supervised and human-only policy to Bash and apply_patch", (
       event(dir, { tool_name: tool, tool_input: { command } }),
     ));
     assert.equal(result.permission, "deny", tool);
-    assert.match(result.reason, /^hook-class-human-only: /u, tool);
+    assert.match(
+      result.reason,
+      tool === "Bash" ? /^hook-io: Codex Bash is disabled/u : /^hook-class-human-only: /u,
+      tool,
+    );
     assert.equal(rawLog(dir), before, `${tool} human-only refusal appends nothing`);
   }
 });
 
-test("Codex Bash protects hook organs across a simple cwd change", () => {
-  const humanOnlyPolicy = POLICY.replace(
-    "  deps.add: { autonomy: manual }",
-    "  deps.add: { autonomy: manual }\n  policy.core: { autonomy: human-only }\n  log.mutate: { autonomy: human-only }",
-  );
-  for (const command of [
-    "cd ./.codex && printf x > hooks.json",
-    "cd ./.codex/foo && printf x > ../config.toml",
-    "cd ./.codex/hooks && printf x > script.sh",
-    "cd ./.codex && > hooks.json",
-  ]) {
-    const dir = ready(humanOnlyPolicy);
-    mkdirSync(join(dir, ".codex", "foo"), { recursive: true });
-    mkdirSync(join(dir, ".codex", "hooks"), { recursive: true });
+test("Codex Bash refuses before every policy and window path without appending", () => {
+  const policies = [
+    POLICY,
+    POLICY.replace(
+      "  files.write.workspace: { autonomy: autonomous }",
+      "  files.write.workspace: { autonomy: supervised }",
+    ),
+    POLICY.replace(
+      "  files.write.workspace: { autonomy: autonomous }",
+      "  files.write.workspace: { autonomy: manual }",
+    ),
+    POLICY.replace(
+      "  deps.add: { autonomy: manual }",
+      "  deps.add: { autonomy: manual }\n  policy.core: { autonomy: human-only }",
+    ),
+  ];
+  for (const [index, policy] of policies.entries()) {
+    const dir = ready(policy);
     const before = rawLog(dir);
-    const result = verdictOf(runCli(["hook", "codex"], dir, event(dir, { tool_input: { command } })));
-    assert.equal(result.permission, "deny", command);
-    assert.match(result.reason, /^hook-class-human-only: /u, command);
-    assert.equal(rawLog(dir), before, command);
-  }
-
-  const dir = ready(humanOnlyPolicy);
-  const nested = join(dir, ".codex");
-  mkdirSync(nested, { recursive: true });
-  for (const [tool, command] of [
-    ["Bash", "printf x > hooks.json"],
-    ["apply_patch", "*** Begin Patch\n*** Add File: hooks.json\n+x\n*** End Patch"],
-  ] as const) {
-    const result = verdictOf(runCli(
-      ["hook", "codex", "--dir", dir],
-      nested,
-      event(nested, { tool_name: tool, tool_input: { command }, tool_use_id: `nested-${tool}` }),
-    ));
-    assert.equal(result.permission, "deny", tool);
-    assert.match(result.reason, /^hook-class-human-only: /u, tool);
-  }
-
-  for (const [index, command] of [
-    "> hooks.json",
-    "cd /tmp > hooks.json",
-    "true || cd /tmp; printf x > hooks.json",
-  ].entries()) {
-    const result = verdictOf(runCli(
-      ["hook", "codex", "--dir", dir],
-      nested,
-      event(nested, { tool_input: { command }, tool_use_id: `nested-shell-${index}` }),
-    ));
-    assert.equal(result.permission, "deny", command);
-    assert.match(result.reason, /^hook-class-human-only: /u, command);
-  }
-
-  const redirectedCd = verdictOf(runCli(
-    ["hook", "codex", "--dir", dir],
-    dir,
-    event(dir, {
-      tool_input: { command: "cd ./.codex > ordinary.txt; printf x > hooks.json" },
-      tool_use_id: "redirected-cd",
-    }),
-  ));
-  assert.equal(redirectedCd.permission, "deny");
-  assert.match(redirectedCd.reason, /^hook-(?:io|class-human-only):/u);
-
-  for (const [index, operand] of ["-", ".foo", ".codex"].entries()) {
-    const unsupportedCd = verdictOf(runCli(
+    const command = index === 3 ? "printf x > .codex/hooks.json" : "printf x > ordinary.txt";
+    const verdict = verdictOf(runCli(
       ["hook", "codex"],
       dir,
-      event(dir, {
-        tool_input: { command: `cd ${operand}; printf x > ordinary.txt` },
-        tool_use_id: `unsupported-cd-${index}`,
-      }),
+      event(dir, { tool_input: { command }, tool_use_id: `bash-policy-${index}` }),
     ));
-    assert.equal(unsupportedCd.permission, "deny", operand);
-    assert.match(unsupportedCd.reason, /^hook-io:/u, operand);
+    assert.equal(verdict.permission, "deny");
+    assert.match(verdict.reason, /^hook-io: Codex Bash is disabled/u);
+    assert.equal(rawLog(dir), before);
   }
 
-  mkdirSync(join(dir, "ordinary"), { recursive: true });
-  symlinkSync(join(dir, "ordinary"), join(nested, "alias"));
-  const logicalParent = verdictOf(runCli(
+  const dir = ready();
+  const opened = openWindow(
+    join(dir, LOG),
+    { durationText: "30m", durationMs: 30 * 60_000, reason: "Bash cwd contract test" },
+    "human:alice",
+  );
+  assert.equal(opened.ok, true, opened.ok ? "" : `${opened.code}: ${opened.message}`);
+  const before = rawLog(dir);
+  for (const [toolUse, command] of [
+    ["gate-open", "npm install left-pad"],
+    ["gate-self", "approval status"],
+  ]) {
+    const verdict = verdictOf(runCli(
+      ["hook", "codex"],
+      dir,
+      event(dir, { tool_input: { command }, tool_use_id: toolUse }),
+    ));
+    assert.equal(verdict.permission, "deny");
+    assert.match(verdict.reason, /^hook-io: Codex Bash is disabled/u);
+    assert.equal(rawLog(dir), before, `${toolUse} must not append`);
+  }
+});
+
+test("Codex Bash refusal cannot consume an existing exact grant", () => {
+  const dir = ready(
+    POLICY.replace(
+      "  files.write.workspace: { autonomy: autonomous }",
+      "  files.write.workspace: { autonomy: manual }",
+    ),
+  );
+  const command = "printf x > ordinary.txt";
+  const nativeInput: CodexHookInput = {
+    sessionId: "codex-session-1",
+    sessionIdPresent: true,
+    cwd: dir,
+    toolName: "Bash",
+    toolInput: { command },
+    toolUseId: "bash-existing-grant",
+    hookEventName: "PreToolUse",
+    toolResponseRaw: undefined,
+  };
+  const binding = codexBinding(nativeInput, dir);
+  const actionKey = `${binding.task}:files.write.workspace`;
+  const hash = payloadHash(binding.payload);
+  const options = { policy: { dir } };
+  const registered = register(
+    join(dir, LOG),
+    {
+      task: binding.task,
+      envelope: {
+        origin: { app: "codex-hook", created_by: "agent:codex" },
+        state: "proposed",
+        actions: [{
+          class: "files.write.workspace",
+          summary: "Existing Bash grant must stay unspent",
+          idempotency_key: actionKey,
+          payload_hash: hash,
+        }],
+      },
+    },
+    "agent:codex",
+    options,
+  );
+  assert.equal(registered.ok, true, registered.ok ? "" : registered.message);
+  const requested = request(
+    join(dir, LOG),
+    {
+      task: binding.task,
+      actionKey,
+      cls: "files.write.workspace",
+      summary: "Existing Bash grant must stay unspent",
+      payload_hash: hash,
+      payload: { value: binding.payload },
+      execution: "harness",
+    },
+    "agent:codex",
+    options,
+  );
+  assert.equal(requested.ok, true, requested.ok ? "" : requested.message);
+  const granted = decide(join(dir, LOG), actionKey, "grant", "human:alice", options);
+  assert.equal(granted.ok, true, granted.ok ? "" : granted.message);
+
+  const before = rawLog(dir);
+  const verdict = verdictOf(runCli(
     ["hook", "codex"],
     dir,
-    event(dir, {
-      tool_input: { command: "cd ./.codex/alias; cd ..; printf x > hooks.json" },
-      tool_use_id: "logical-parent",
-    }),
+    event(dir, { tool_input: { command }, tool_use_id: nativeInput.toolUseId }),
   ));
-  assert.equal(logicalParent.permission, "deny");
-  assert.match(logicalParent.reason, /^hook-class-human-only:/u);
-
-  const logCwd = join(dir, ".approval", "log");
-  const logWrite = verdictOf(runCli(
-    ["hook", "codex", "--dir", dir],
-    logCwd,
-    event(logCwd, { tool_input: { command: "printf x > events.jsonl" }, tool_use_id: "log-cwd" }),
-  ));
-  assert.equal(logWrite.permission, "deny");
-  assert.match(logWrite.reason, /^hook-class-human-only:/u);
+  assert.equal(verdict.permission, "deny");
+  assert.match(verdict.reason, /^hook-io: Codex Bash is disabled/u);
+  assert.equal(rawLog(dir), before);
+  assert.equal(before.match(/"event":"approval\.granted"/gu)?.length, 1);
+  assert.doesNotMatch(before, /"event":"execution\.started"/u);
 });
 
 test("Codex duplicate pre delivery refuses a second execution", () => {
   const dir = ready();
-  const input = event(dir);
+  const command = "*** Begin Patch\n*** Add File: duplicate.txt\n+x\n*** End Patch";
+  const input = event(dir, { tool_name: "apply_patch", tool_input: { command } });
   assert.equal(verdictOf(runCli(["hook", "codex"], dir, input)).permission, "allow");
   const duplicate = verdictOf(runCli(["hook", "codex"], dir, input));
   assert.equal(duplicate.permission, "deny");
@@ -492,6 +560,7 @@ test("Codex carryover binds the exact patch bytes", () => {
     event(dir, { tool_name: "apply_patch", tool_input: { command }, tool_use_id: "carry-b" }),
   ));
   assert.equal(carried.permission, "allow");
+  assert.deepEqual(carried.updatedInput, { command });
   assert.match(carried.reason, /^granted: /u);
   assert.equal(runCli(["log", "verify"], dir).code, 0);
 });
@@ -499,19 +568,29 @@ test("Codex carryover binds the exact patch bytes", () => {
 test("Codex budgets and unreachable logs fail closed", () => {
   const budgetPolicy = POLICY.replace("```\n", "budgets:\n  global:\n    daily_actions: 1\n```\n");
   const dir = ready(budgetPolicy);
-  assert.equal(verdictOf(runCli(["hook", "codex"], dir, event(dir))).permission, "allow");
+  const command = "*** Begin Patch\n*** Add File: budget.txt\n+x\n*** End Patch";
+  const native = (toolUseId: string) => event(dir, {
+    tool_name: "apply_patch",
+    tool_input: { command },
+    tool_use_id: toolUseId,
+  });
+  assert.equal(verdictOf(runCli(["hook", "codex"], dir, native("budget-one"))).permission, "allow");
   const budget = verdictOf(runCli(
-    ["hook", "codex"], dir, event(dir, { tool_use_id: "budget-two" }),
+    ["hook", "codex"], dir, native("budget-two"),
   ));
   assert.equal(budget.permission, "deny");
   assert.match(budget.reason, /^hook-gate-refused:/u);
 
   const unreachableDir = ready();
   const before = rawLog(unreachableDir);
+  const unreachableCommand = "*** Begin Patch\n*** Add File: unreachable.txt\n+x\n*** End Patch";
   const unavailable = verdictOf(runCli(
     ["hook", "codex", "--log", join(unreachableDir, "missing", "events.jsonl")],
     unreachableDir,
-    event(unreachableDir),
+    event(unreachableDir, {
+      tool_name: "apply_patch",
+      tool_input: { command: unreachableCommand },
+    }),
   ));
   assert.equal(unavailable.permission, "deny");
   assert.match(unavailable.reason, /^hook-log-unreachable:/u);
@@ -523,7 +602,11 @@ test("Codex budgets and unreachable logs fail closed", () => {
   const corrupt = verdictOf(runCli(
     ["hook", "codex", "--log", packageJson],
     unreachableDir,
-    event(unreachableDir, { tool_use_id: "corrupt-log" }),
+    event(unreachableDir, {
+      tool_name: "apply_patch",
+      tool_input: { command: unreachableCommand },
+      tool_use_id: "corrupt-log",
+    }),
   ));
   assert.equal(corrupt.permission, "deny");
   assert.match(corrupt.reason, /^hook-io:/u);

@@ -144,10 +144,11 @@ export type CodexOutcomeReading =
 /**
  * Read a Codex outcome only from a native-observed, closed contract.
  *
- * The documented event name is identical for zero and non-zero Bash exits,
- * and `tool_response` is arbitrary JSON with no stable status key. Its raw
- * value is intentionally accepted and ignored. Until the native probe records
- * a discriminating contract, appending either outcome would fabricate it.
+ * The native 0.152.1 probe observed the same empty-string `tool_response` for
+ * successful and non-zero Bash calls, and the documented value remains
+ * arbitrary JSON with no stable status key. Its raw value is intentionally
+ * accepted and ignored. Until a native probe records a discriminating
+ * contract, appending either outcome would fabricate it.
  */
 export function readCodexReportedOutcome(_input: CodexHookInput): CodexOutcomeReading {
   return {

@@ -418,7 +418,12 @@ const CODEX_ADAPTER: HarnessAdapter = {
  * `{permission, user_message, agent_message}`. One construction site per
  * harness, still never `ask`.
  */
-function decision(permission: Permission, reason: string, harness: HarnessKind): string {
+function decision(
+  permission: Permission,
+  reason: string,
+  harness: HarnessKind,
+  codexCommand?: string,
+): string {
   if (harness === "cursor") {
     return `${JSON.stringify({
       permission,
@@ -426,17 +431,32 @@ function decision(permission: Permission, reason: string, harness: HarnessKind):
       agent_message: reason,
     })}\n`;
   }
-  return `${JSON.stringify({
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: permission,
-      permissionDecisionReason: reason,
-    },
-  })}\n`;
+  const hookSpecificOutput: Record<string, unknown> = {
+    hookEventName: "PreToolUse",
+    permissionDecision: permission,
+    permissionDecisionReason: reason,
+  };
+  if (harness === "codex" && permission === "allow") {
+    if (codexCommand !== undefined) hookSpecificOutput["updatedInput"] = { command: codexCommand };
+  }
+  return `${JSON.stringify({ hookSpecificOutput })}\n`;
 }
 
-function allow(streams: Streams, reason: string, harness: HarnessKind): number {
-  streams.out(decision("allow", reason, harness));
+function allow(
+  streams: Streams,
+  reason: string,
+  harness: HarnessKind,
+  codexCommand?: string,
+): number {
+  if (harness === "codex" && codexCommand === undefined) {
+    return deny(
+      streams,
+      "hook-io",
+      "the Codex allow lost its exact bound tool_input.command",
+      harness,
+    );
+  }
+  streams.out(decision("allow", reason, harness, codexCommand));
   return EXIT_OK;
 }
 
@@ -1492,6 +1512,8 @@ interface HookRun {
   ttlMs: number | null;
   harness: HarnessKind;
   originApp: string;
+  /** Exact native command bytes required in a Codex allow's identity update. */
+  codexCommand?: string;
   /**
    * The version the hook event stated, or `null` (APRV-227).
    *
@@ -2077,7 +2099,8 @@ function gateAndWait(
   const floorApplies = (cls: string): boolean => floor !== null && isSideEffectingClass(cls);
   const hash = payloadHash(payload);
   const summary = truncate(headline, SUMMARY_LIMIT);
-  const sayAllow = (reason: string): number => allow(streams, reason, run.harness);
+  const sayAllow = (reason: string): number =>
+    allow(streams, reason, run.harness, run.codexCommand);
   /**
    * Every deny this function can print, with the floor's own sentence appended
    * when a floor is what routed the command here (APRV-280). One wrapper rather
@@ -3079,6 +3102,8 @@ function runBypass(
    */
   decidedOn: { records: EventRecord[]; head: { seq: number; hash: string } | null } | null,
 ): number {
+  const codexCommand =
+    adapter.kind === "codex" ? codexBinding(input, cwd).payload.command : undefined;
   const scope = hookScope(flags, cwd);
   const load = loadPolicy(
     scope.options.policy?.file === undefined
@@ -3099,7 +3124,9 @@ function runBypass(
       adapter.kind,
     );
   }
-  if (described.kind === "allow") return allow(streams, described.reason, adapter.kind);
+  if (described.kind === "allow") {
+    return allow(streams, described.reason, adapter.kind, codexCommand);
+  }
   if (described.passthrough !== undefined) {
     // APRV-303. An ordinary workspace edit is allowed by the policy on its own
     // merits, so there is nothing here for the window to suspend and nothing
@@ -3107,7 +3134,7 @@ function runBypass(
     // this call a question is a §10.2 floor, and a window bypasses the floor
     // outright. Answered here rather than below so the bypass log stays a
     // record of calls the window actually let through.
-    return allow(streams, described.passthrough, adapter.kind);
+    return allow(streams, described.passthrough, adapter.kind, codexCommand);
   }
 
   const classes = described.classes;
@@ -3120,6 +3147,7 @@ function runBypass(
       streams,
       "the approval CLI is the gate itself and is not gated by it",
       adapter.kind,
+      codexCommand,
     );
   }
 
@@ -3194,6 +3222,7 @@ function runBypass(
     streams,
     `gate-open: ${classes.join(", ")} bypassed by the window opened at seq ${String(window.seq)} by ${window.openedBy} (expires ${window.expiresAt}); recorded as gate.bypassed seq ${String(recorded.record.seq)}${notes.length === 0 ? "" : ` (${notes.join("; ")})`}`,
     adapter.kind,
+    codexCommand,
   );
 }
 
@@ -3266,6 +3295,8 @@ function runHarnessHook(
     const checked = checkCodexHookInput(input, cwd);
     if (!checked.ok) return deny(streams, "hook-io", checked.detail, adapter.kind);
   }
+  const codexCommand =
+    adapter.kind === "codex" ? codexBinding(input, cwd).payload.command : undefined;
 
   // APRV-145: WHICH EVENT THIS IS, read first and read at all. One command is
   // registered for two events, and they do opposite things — one answers before
@@ -3299,8 +3330,23 @@ function runHarnessHook(
     }
   }
 
+  // Codex 0.152.1 can execute Bash in a per-call working directory that is
+  // absent from tool_input while both the event cwd and this hook process stay
+  // at the session root (APRV-310 native v6). A decision over the visible
+  // `{command, cwd}` would therefore bind different bytes from the action the
+  // harness executes. Refuse before the open-window, gate-self, carry, or
+  // registration paths; none of those can supply the missing directory fact.
+  if (adapter.kind === "codex" && input.toolName === "Bash") {
+    return deny(
+      streams,
+      "hook-io",
+      "Codex Bash is disabled because the native hook contract does not expose the effective per-call working directory; no policy or open window can authorize bytes the hook cannot bind",
+      adapter.kind,
+    );
+  }
+
   if (input.toolName !== adapter.shellTool && !adapter.fileTools.includes(input.toolName)) {
-    return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind);
+    return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
   }
 
   // APRV-188. From here on this process may resume a verified read behind the
@@ -3381,7 +3427,9 @@ function runHarnessHook(
   if (described.kind === "deny") {
     return deny(streams, described.code, described.detail, adapter.kind);
   }
-  if (described.kind === "allow") return allow(streams, described.reason, adapter.kind);
+  if (described.kind === "allow") {
+    return allow(streams, described.reason, adapter.kind, codexCommand);
+  }
   const { classes, payload, headline } = described;
   /** What the history-rewrite refinement did, for the decision reason. */
   const notes: string[] = [...described.notes];
@@ -3391,6 +3439,7 @@ function runHarnessHook(
       streams,
       "the approval CLI is the gate itself and is not gated by it",
       adapter.kind,
+      codexCommand,
     );
   }
 
@@ -3426,6 +3475,7 @@ function runHarnessHook(
     ttlMs: load.durations.approvalTtlMs,
     harness: adapter.kind,
     originApp: adapter.originApp,
+    ...(codexCommand === undefined ? {} : { codexCommand }),
     eventVersion: input.harnessVersion,
     // Off the policy this function already loaded and validated, so the names
     // printed are the names a channel process would serve (APRV-281). Sorted
@@ -3549,7 +3599,7 @@ function runHarnessHook(
   // and the floored path routes an Edit exactly as it routes an `echo >`,
   // because both are `files.write.workspace` and one predicate decides.
   if (described.passthrough !== undefined && floor === null) {
-    return allow(streams, `${described.passthrough}${note}`, adapter.kind);
+    return allow(streams, `${described.passthrough}${note}`, adapter.kind, codexCommand);
   }
 
   /** No class here needs a human, so nothing downstream will ask for one. */
@@ -3569,7 +3619,12 @@ function runHarnessHook(
     if (charged !== null) {
       return deny(streams, `hook-gate-refused:${charged.code}`, charged.message, adapter.kind);
     }
-    return allow(streams, `autonomous: ${classes.join(", ")}${note}`, adapter.kind);
+    return allow(
+      streams,
+      `autonomous: ${classes.join(", ")}${note}`,
+      adapter.kind,
+      codexCommand,
+    );
   }
 
   // Past here the hook appends. It writes to a log that already exists and
