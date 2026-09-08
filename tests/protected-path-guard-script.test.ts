@@ -69,6 +69,14 @@ const POLICY = [
   "",
 ].join("\n");
 
+const ROUTED_POLICY = POLICY.replace(
+  "  - SPEC.md",
+  "  - { path: SPEC.md, class: policy.edit.spec }",
+).replace(
+  "  policy.edit:\n    autonomy: manual",
+  "  policy.edit:\n    autonomy: manual\n  policy.edit.spec:\n    autonomy: manual",
+);
+
 const roots: Array<() => void> = [];
 after(() => {
   for (const cleanup of roots) cleanup();
@@ -122,10 +130,10 @@ function minutesAgo(minutes: number): string {
  * candidate that disagrees at seq 2 while agreeing at seq 1 is exactly the
  * shape "a different history that is longer" takes.
  */
-function newFixture(label: string): Fixture {
+function newFixture(label: string, policy = POLICY): Fixture {
   const { root, cleanup } = scratchRoot(`guard-script-${label}`);
   roots.push(cleanup);
-  const unit = newScenario(root, POLICY);
+  const unit = newScenario(root, policy);
   for (const minutes of [30, 29]) {
     const attested = appendAttestation(unit.logPath, unit.policyPath, HUMAN, {
       clock: fixedClock(minutesAgo(minutes)),
@@ -291,6 +299,29 @@ test("head alone: the grant in the log the pull request carries still passes", (
   // Discovery is harmless where the refs do not exist: this fixture has no
   // remote at all, and the absent candidate neither fails the run nor is read.
   assert.equal(candidate(run, "origin/main").status, "missing");
+});
+
+test("a routed protected-path object is enforced by the script", () => {
+  const fixture = newFixture("routed-object", ROUTED_POLICY);
+  editSpec(fixture);
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  assert.equal(run.report.findings[0]?.path, "SPEC.md");
+  assert.equal(run.report.findings[0]?.code, "no-evidence");
+});
+
+test("a routed protected path removed at head remains enforced from base", () => {
+  const fixture = newFixture("routed-object-removed", ROUTED_POLICY);
+  const withoutProtectedPaths = POLICY.replace("protected_paths:\n  - SPEC.md\n", "");
+  writeFileSync(fixture.unit.policyPath, withoutProtectedPaths, "utf8");
+  editSpec(fixture);
+
+  const run = runGuard(fixture, ["--head", "HEAD"]);
+  assert.equal(run.code, 1, `${run.stdout}${run.stderr}`);
+  const spec = run.report.findings.find((finding) => finding.path === "SPEC.md");
+  assert.ok(spec !== undefined, JSON.stringify(run.report.findings));
+  assert.equal(spec.code, "no-evidence");
 });
 
 // ---------------------------------------------------------------------------
