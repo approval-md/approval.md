@@ -109,7 +109,7 @@
  * the marker is `execution.started` and why no completion ever follows it.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import {
@@ -153,7 +153,7 @@ import {
 } from "./loop.js";
 import { normalizeUsd, usdOrZero, type UsdInput } from "./money.js";
 import { isPayloadHash, payloadHash as hashOfPayload } from "./payload.js";
-import { loadPayload, payloadStoreDirFor, storePayload } from "./payload-store.js";
+import { loadPayload, payloadPath, payloadStoreDirFor, storePayload } from "./payload-store.js";
 import {
   loadPolicyText,
   policyUnreadable,
@@ -1802,9 +1802,11 @@ function displayHashField(
  *    reaches a human's queue, never has the live fraction drawn over a hash it
  *    chose for itself, and hears the real reason rather than
  *    `payload-hash-required`.
- * 4. **Off the manual path, stop — unless the live fraction says otherwise.**
- *    `supervised`/`autonomous` append **no event** (amended SPEC.md §6.3) and
- *    return `proceed: true`. Their budget is charged at `execution.started`,
+ * 4. **Off the manual path, retain supplied bound material, then stop — unless
+ *    the live fraction says otherwise.** `supervised`/`autonomous` append **no
+ *    event** (amended SPEC.md §6.3) and return `proceed: true`. When the caller
+ *    supplies payload material, it is checked against the registered declaration
+ *    and retained for the later execution evidence. Their budget is charged at `execution.started`,
  *    which APRV-18 appends — checking budgets here as well would charge them
  *    twice or, worse, pass here and fail there. A `supervised-live` class
  *    (APRV-127) draws its declared fraction here: an action the draw selects
@@ -2005,6 +2007,84 @@ function attemptRequest(
       // An UNSAMPLED supervised-live action leaves by exactly this door, so it
       // proceeds as a supervised action always has and enters the retrospective
       // pool on its `execution.started` like any other.
+      //
+      // APRV-316: when exact material is present, retain it before returning.
+      // The verified registration is the declaration; caller fields cannot
+      // substitute for a missing hash or change its class. Existing valid bytes
+      // are left alone, while a corrupt, unreadable, or external-reference entry
+      // is refused rather than overwritten. This writes no approval record and
+      // does not imply that execution later starts or completes.
+      if (input.payload !== undefined) {
+        const registered = registeredAction(read.records, input.task, input.actionKey);
+        if (!registered.ok) return registered;
+        if (registered.action.class !== input.cls) {
+          return refuse(
+            "action-not-registered",
+            `action ${input.actionKey} is registered in class ${registered.action.class}, but this request presents ${input.cls}. The nonmanual payload is retained only for the exact registered action; nothing was stored and nothing was appended.`,
+          );
+        }
+        const declaredHash = registered.action.payload_hash;
+        if (declaredHash === undefined) {
+          return refuse(
+            "payload-hash-required",
+            `action ${input.actionKey} has supplied payload material but its registered declaration carries no payload_hash. Nonmanual material is retained only under the declaration's exact binding; nothing was stored and nothing was appended.`,
+          );
+        }
+        let materialHash: string;
+        try {
+          materialHash = hashOfPayload(input.payload.value);
+        } catch (cause) {
+          return refuse(
+            "payload-store-failed",
+            `the payload material for ${input.actionKey} could not be canonicalized: ${
+              cause instanceof Error ? cause.message : String(cause)
+            }. A payload that cannot be serialized cannot be retained as execution evidence, so nothing was stored and nothing was appended.`,
+          );
+        }
+        if (materialHash !== declaredHash) {
+          return refuse(
+            "payload-mismatch",
+            `the payload material supplied for ${input.actionKey} hashes to ${materialHash} but the registered action declares ${declaredHash}. Nonmanual execution evidence binds to the registered bytes, so nothing was stored and nothing was appended.`,
+          );
+        }
+
+        const storeDir = options.payloadStoreDir ?? payloadStoreDirFor(logPath);
+        const existing = loadPayload(storeDir, declaredHash);
+        if (!existing.ok && existing.code !== "absent") {
+          return refuse(
+            "payload-store-failed",
+            `${existing.message}. Existing invalid payload material is not replaced on the nonmanual path; nothing was stored and nothing was appended.`,
+          );
+        }
+        if (!existing.ok) {
+          // `readFileSync` reports ENOENT for a dangling symlink too. Preserve
+          // every existing store object, including one whose target vanished;
+          // only a true lstat ENOENT is an empty address we may fill.
+          try {
+            lstatSync(payloadPath(storeDir, declaredHash));
+            return refuse(
+              "payload-store-failed",
+              `payload ${declaredHash} has an existing store entry that could not be verified. Existing invalid payload material is not replaced on the nonmanual path; nothing was stored and nothing was appended.`,
+            );
+          } catch (cause) {
+            if ((cause as NodeJS.ErrnoException).code !== "ENOENT") {
+              return refuse(
+                "payload-store-failed",
+                `payload ${declaredHash}'s store address could not be inspected: ${
+                  cause instanceof Error ? cause.message : String(cause)
+                }. Nothing was stored and nothing was appended.`,
+              );
+            }
+          }
+          const stored = storePayload(storeDir, input.payload.value);
+          if (!stored.ok) {
+            return refuse(
+              "payload-store-failed",
+              `${stored.message} Nothing was appended and the nonmanual action was not admitted.`,
+            );
+          }
+        }
+      }
       return {
         ok: true,
         autonomy: resolution.autonomy,

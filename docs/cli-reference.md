@@ -1155,6 +1155,13 @@ hash must equal the declared `payload_hash` and it is filed in
 bytes from. Supply it here once and no channel needs `--payload-dir` or
 `--payloads` at all.
 
+When the policy permits an unattended action, supplied material is still checked
+against the registered action's task, class and payload hash and retained before
+`proceed:true` is returned. This creates no approval event and does not require
+an extra human grant. The retained bytes let later audits match the execution
+record to the actual edit. Missing bindings, mismatched material or a storage
+failure refuse the request; an existing valid payload is preserved.
+
 **`--json`** (one object on stdout):
 
 ```
