@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-08 07:25'
-updated_date: '2026-09-08 19:21'
+updated_date: '2026-09-08 19:36'
 labels: []
 dependencies:
   - APRV-312
@@ -65,4 +65,8 @@ Resumed read-only review by Sol and Astra found an existing exact-file execution
 Prepared but did not register/apply the revised narrow SPEC amendment: /private/tmp/aprv-313-spec-bundle/SPEC.patch, manifest SHA45cf410ed781c989fef3312ff2ee5bfbf064226f6d8ab7fdc7cd44657d5305e0, driver /private/tmp/aprv-313-spec-driver.mjs SHA16bc6c3e3719f771f7c3762e0a6010bb1b997d38079764f4903fef6231d3008d. Seven exact before/after payloads, whole-file digest chain, primary-context/grant-only execution and no invented harness/provider evidence. Syntax/read-only drycheck/envelope validation exit0. Amendment now states experimental direct patch, mandatory early Bash refusal, diagnostic outcomes and observed fail-open limits. Current SPEC bytes remain unchanged; no grant exists, and policy/CI mismatch remains unresolved. Broader everyday activation is separately blocked by native contract.
 
 CLI help/registry and operator docs now state experimental direct-patch support with every matched Bash call refused, retain full matcher, and mark normal installation/phone ceremony unavailable on0.152.1. Removed obsolete cwd advice; corrected v7 observation to native identity allow+nested effect+no Post, distinct from production refusal. Astra prose/source review clear; full npm3928 pass/1skip plus lint/typecheck/conformance exit0. Normative SPEC remains unapplied and unregistered.
+
+2026-09-08 policy-authoritative continuation: Carter explicitly confirmed APPROVAL.md governs human approval. Reviewed temporary driver /private/tmp/aprv-313-spec-policy-driver.mjs calls primary request for each exact bound Edit payload, proceeds only on explicit proceed:true/requested:false, otherwise waits for a real grant; executeThroughAdapter remains the binding/budget/execution authority. Policy bytes are checked unchanged across request and act. Registration seq29911; steps1–4 executed under unchanged policy with starts29912/29914/29916/29918 and successful completions29913/29915/29917/29919. Step5 request29920 awaits real policy-required human decision; steps5–7 remain unapplied. Target complete digest is the manifest before-step5 digest; readonly bundle check exit0. No policy edit or invented approval. APRV316 fixes CI recognition of policy-authorized file evidence.
+
+Final checkpoint this turn: all seven exact SPEC edits applied through the primary gate. Steps1–4 and6 were permitted without human grants; steps5 and7 received real human grants and executed through the token-only reviewed driver. Completions29913/29915/29917/29919/29923/29925/29929; full target SHA afbf2ac0cc85ad8360b479b41512e064f96e8f8e2368ad51789be08aee50a965; readonly bundle check exit0. SPEC changes remain uncommitted pending APRV316 CI evidence alignment and final checks. Policy unchanged. Feature HEAD d33d24a; reviewed Codex source/probe/docs commits b780c01,994f86c,76c9cf7,d33d24a are local, PR344 still draft at8ad3eb1. Earlier source validation:3928 tests pass/1skip, lint/typecheck/conformance exit0; no claim these are new APRV316 tests.
 <!-- SECTION:NOTES:END -->
