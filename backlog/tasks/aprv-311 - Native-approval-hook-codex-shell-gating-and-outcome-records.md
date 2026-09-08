@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-08 07:24'
-updated_date: '2026-09-08 07:58'
+updated_date: '2026-09-08 08:58'
 labels: []
 dependencies:
   - APRV-310
@@ -24,9 +24,9 @@ User-authorized overnight Codex integration. Binding SPEC 6.3,7,9,10,11.1. Isola
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Bash reuses verified gate policy, budgets, waits and grant carryover with Codex actor/harness provenance.
+- [x] #1 Bash reuses verified gate policy, budgets, waits and grant carryover with Codex actor/harness provenance.
 - [ ] #2 Malformed/unexpected input denies; stable ids correlate success/failure reports, duplicates refuse and unknown outcomes append nothing.
-- [ ] #3 Runtime/schema/registry/MCP exclusion support codex; Claude and Cursor regression tests pass.
+- [x] #3 Runtime/schema/registry/MCP exclusion support codex; Claude and Cursor regression tests pass.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -39,4 +39,6 @@ User-authorized overnight Codex integration. Binding SPEC 6.3,7,9,10,11.1. Isola
 
 <!-- SECTION:NOTES:BEGIN -->
 Infrastructure reviewed: strict Bash validation and explicit denies; Codex tool/command/cwd payload plus domain-separated session/call digests preserve loop scope and avoid delimiter/cross-tool collisions; codex provenance/schema/registry/MCP exclusion. Sol focused regression 227/227 exit0 outside socket/sandbox restrictions; latest build and Codex/schema34/34 exit0; lint/typecheck exit0. Native hook outcomes remain unverified; current PostToolUse emits diagnostic and appends nothing. Task and outcome acceptance remain open while APRV-312 proceeds.
+
+Final code df570ea passed npm test3920/3921 with1skip, lint/typecheck,293 conformance vectors, and all3 CI-parity shards plus protected-path guard (all exit0). Codex provenance/schema/MCP exclusion and shared Claude/Cursor regressions verified. AC2 remains pending: success/failure outcome parsing has no native-verified contract; PostToolUse remains diagnostic and append-free.
 <!-- SECTION:NOTES:END -->
