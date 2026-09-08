@@ -365,6 +365,27 @@ test("a granted command that only MENTIONS the path is not evidence", () => {
   }
 });
 
+test("a tagged apply_patch is naming-only file evidence and never a time-attributed command", () => {
+  const { root, cleanup } = scratchRoot("guard-apply-patch");
+  try {
+    const unit = world(root);
+    const patch = {
+      tool: "apply_patch",
+      command: "*** Begin Patch\n*** Update File: SPEC.md\n@@\n-old\n+new\n*** End Patch",
+      cwd: CHECKOUT,
+    };
+    grantEdit(unit, "patch", patch, 1);
+    spendGrant(unit, "patch", patch, 2);
+    const report = evaluateProtectedPaths(inputFor(unit, ["SPEC.md"]));
+    assert.equal(report.ok, false);
+    assert.equal(report.findings[0]?.code, "uncovered-hunk");
+    assert.match(report.findings[0]?.detail ?? "", /apply_patch operation naming SPEC\.md/u);
+    assert.doesNotMatch(report.findings[0]?.detail ?? "", /granted-command|attributed/u);
+  } finally {
+    cleanup();
+  }
+});
+
 test("the policy file passes on its attestation record, with no policy.edit grant", () => {
   const { root, cleanup } = scratchRoot("guard-attest");
   try {

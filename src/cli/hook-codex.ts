@@ -70,14 +70,14 @@ export function checkCodexHookInput(input: CodexHookInput, processCwd: string): 
   const toolUse = stableId("tool_use_id", input.toolUseId);
   if (toolUse !== null) return { ok: false, detail: toolUse };
 
-  if (input.toolName !== "Bash") {
+  if (input.toolName !== "Bash" && input.toolName !== "apply_patch") {
     return {
       ok: false,
-      detail: `${JSON.stringify(input.toolName)} is not a supported Codex tool; APRV-311 gates exact Bash only`,
+      detail: `${JSON.stringify(input.toolName)} is not a supported Codex tool; expected exact Bash or apply_patch`,
     };
   }
   if (typeof input.toolInput["command"] !== "string" || input.toolInput["command"].length === 0) {
-    return { ok: false, detail: "Bash tool_input.command must be a non-empty string" };
+    return { ok: false, detail: `${input.toolName} tool_input.command must be a non-empty string` };
   }
 
   const knownInput = new Set(["command", "description", "cwd", "workdir"]);
@@ -85,7 +85,7 @@ export function checkCodexHookInput(input: CodexHookInput, processCwd: string): 
   if (unexpected !== undefined) {
     return {
       ok: false,
-      detail: `Bash tool_input contains unsupported execution-affecting field ${JSON.stringify(unexpected)}`,
+      detail: `${input.toolName} tool_input contains unsupported execution-affecting field ${JSON.stringify(unexpected)}`,
     };
   }
   if (
@@ -159,7 +159,7 @@ export function readCodexReportedOutcome(_input: CodexHookInput): CodexOutcomeRe
 
 export interface CodexBinding {
   /** Exact bytes the gate and a future counterpart both bind. */
-  payload: { tool: "Bash"; command: string; cwd: string };
+  payload: { tool: "Bash" | "apply_patch"; command: string; cwd: string };
   /** Passed to the legacy finish helper; reconstructs the four-segment task. */
   finishSessionId: string;
   finishToolUseId: string;
@@ -177,11 +177,12 @@ export interface CodexBinding {
  */
 export function codexBinding(input: CodexHookInput, processCwd: string): CodexBinding {
   const command = input.toolInput["command"];
-  if (input.toolName !== "Bash" || typeof command !== "string") {
-    throw new Error("codexBinding requires a validated Bash input");
+  if ((input.toolName !== "Bash" && input.toolName !== "apply_patch") || typeof command !== "string") {
+    throw new Error("codexBinding requires a validated Bash or apply_patch input");
   }
   if (input.toolUseId === null) throw new Error("codexBinding requires a validated tool_use_id");
-  const payload = { tool: "Bash" as const, command, cwd: realpathSync(processCwd) };
+  const tool: "Bash" | "apply_patch" = input.toolName;
+  const payload = { tool, command, cwd: realpathSync(processCwd) };
   const sessionDigest = payloadHash({
     domain: "approval.md/codex-hook-session/v1",
     harness: "codex",

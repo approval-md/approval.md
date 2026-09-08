@@ -2517,10 +2517,10 @@ const VERBS: VerbSpec[] = [
     name: "hook",
     subcommand: "codex",
     purpose:
-      "Put the verified gate in front of Codex Bash: read one Codex PreToolUse or PostToolUse event on stdin, strictly validate its stable ids, tool and working directory, resolve Bash against APPROVAL.md, and answer nested allow or deny JSON on PreToolUse. Manual classes wait on a log-backed decision; PostToolUse records an outcome only when a native-verified closed reading exists. THE VERDICT IS NEVER 'ask'. Exit 0 carries a pre-tool verdict, while a post-tool diagnostic uses the post-hook status contract.",
+      "Put the verified gate in front of Codex Bash and apply_patch: read one Codex PreToolUse or PostToolUse event on stdin, strictly validate its stable ids, tool and working directory, resolve the exact tool payload against APPROVAL.md, and answer nested allow or deny JSON on PreToolUse. Manual classes wait on a log-backed decision; PostToolUse records an outcome only when a native-verified closed reading exists. THE VERDICT IS NEVER 'ask'. Exit 0 carries a pre-tool verdict, while a post-tool diagnostic uses the post-hook status contract.",
     human_only: false,
     human_only_note:
-      "The agent harness surface, so agent-facing by construction: Codex invokes it around the agent's own Bash calls. It records the agent's proposal and waits for a human; it never records a decision.",
+      "The agent harness surface, so agent-facing by construction: Codex invokes it around the agent's own Bash and apply_patch calls. It records the agent's proposal and waits for a human; it never records a decision.",
     input: input({
       flags: {
         ...AS_FLAG,

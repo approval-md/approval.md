@@ -133,6 +133,7 @@ import {
 import { drawSocketPathFor, drawSocketUsable } from "../core/live-draw.js";
 import type { EventRecord } from "../core/log.js";
 import { payloadHash } from "../core/payload.js";
+import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
 import { loadPolicy, parseDuration } from "../core/policy-load.js";
 import { humanOnlyRefusal, resolve as resolvePolicy } from "../core/policy-match.js";
 import {
@@ -406,7 +407,7 @@ const CODEX_ADAPTER: HarnessAdapter = {
   originApp: "codex-hook",
   defaultActor: "agent:codex",
   shellTool: "Bash",
-  fileTools: [],
+  fileTools: ["apply_patch"],
   bindToolName: true,
 };
 
@@ -2765,6 +2766,25 @@ function describeToolCall(
   protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
 ): ToolDescription {
+  if (adapter.kind === "codex" && input.toolName === "apply_patch") {
+    const raw = readString(input.toolInput, "command");
+    if (raw === null) {
+      return { kind: "deny", code: "hook-io", detail: "apply_patch tool_input carries no command string" };
+    }
+    const parsed = parseApplyPatch(raw);
+    if (!parsed.ok) return { kind: "deny", code: "hook-io", detail: parsed.detail };
+    const classified = classifyApplyPatch(parsed, cwd, protectedPaths);
+    if (!classified.ok) return { kind: "deny", code: "hook-io", detail: classified.detail };
+    return {
+      kind: "gated",
+      classes: classified.classes,
+      payload: codexBinding(input, cwd).payload,
+      headline: `apply_patch ${classified.operations.length} operation(s)`,
+      notes: classified.targets.map(
+        (target) => `${target.role} ${target.path} (${target.classes.join(", ")})`,
+      ),
+    };
+  }
   if (input.toolName === adapter.shellTool) {
     const raw = readString(input.toolInput, "command");
     if (raw === null) {
@@ -2793,9 +2813,84 @@ function describeToolCall(
         detail: `${classified.detail} (segment: ${classified.segment}). Rewrite it as a command the classifier can read, or run the effect through \`approval run\` with a granted token.`,
       };
     }
+    const classes = classified.classes.filter((cls) => cls !== GATE_SELF_CLASS);
+    if (adapter.kind === "codex") {
+      // The pure shell classifier sees each segment independently. Preserve
+      // Codex hook organs when an earlier simple `cd` changes the directory or
+      // when the hook itself runs inside an organ directory by resolving every
+      // later side-effecting segment's words from the effective directory.
+      const possibleCwds = new Set([cwd]);
+      for (const segment of classified.segments) {
+        const parsedWords = commandSegmentWords(segment.text)?.[0];
+        if (parsedWords?.bin === "cd" && parsedWords.args.length !== 1) {
+          return {
+            kind: "deny",
+            code: "hook-io",
+            detail: "Codex Bash cwd changes must use exact `cd <directory>` with no additional words",
+          };
+        }
+        if (
+          parsedWords?.bin === "cd" &&
+          (parsedWords.args[0] === "-" ||
+            (!isAbsolute(parsedWords.args[0] ?? "") &&
+              parsedWords.args[0] !== "." &&
+              parsedWords.args[0] !== ".." &&
+              !(parsedWords.args[0] ?? "").startsWith("./") &&
+              !(parsedWords.args[0] ?? "").startsWith("../")))
+        ) {
+          return {
+            kind: "deny",
+            code: "hook-io",
+            detail: "Codex Bash cwd changes must name an absolute path, `.`, `..`, `./...`, or `../...`; OLDPWD and CDPATH-dependent operands are unsupported",
+          };
+        }
+        if (isSideEffectingClass(segment.class)) {
+          for (const possibleCwd of possibleCwds) {
+            const cwdSegments = possibleCwd.split(/[/\\]+/u);
+            const cwdClass = cwdSegments.includes(".codex")
+              ? "policy.core"
+              : protectedPathClass(possibleCwd, protectedPaths);
+            if (cwdClass !== null && !classes.includes(cwdClass)) classes.push(cwdClass);
+            for (const word of parsedWords === undefined ? [] : [parsedWords.bin, ...parsedWords.args]) {
+              const cls = protectedPathClass(
+                resolvePathSegments(possibleCwd, word),
+                protectedPaths,
+              );
+              if (cls !== null && !classes.includes(cls)) classes.push(cls);
+            }
+          }
+        }
+        if (parsedWords?.bin === "cd" && parsedWords.args.length === 1) {
+          // Lists and conditionals may skip a cd. Retain every prior directory
+          // and add each directory the cd could establish; later writes are
+          // checked against their union.
+          const priorCwds = Array.from(possibleCwds);
+          for (const possibleCwd of priorCwds) {
+            const lexical = resolvePathSegments(possibleCwd, parsedWords.args[0] ?? "");
+            possibleCwds.add(lexical);
+            try {
+              possibleCwds.add(realpathSync(lexical));
+            } catch {
+              return {
+                kind: "deny",
+                code: "hook-io",
+                detail: `Codex Bash cd target ${JSON.stringify(parsedWords.args[0])} could not be resolved`,
+              };
+            }
+            if (possibleCwds.size > 64) {
+              return {
+                kind: "deny",
+                code: "hook-io",
+                detail: "Codex Bash command has more than 64 possible working directories",
+              };
+            }
+          }
+        }
+      }
+    }
     return {
       kind: "gated",
-      classes: classified.classes.filter((cls) => cls !== GATE_SELF_CLASS),
+      classes,
       payload,
       headline: raw,
       notes: refined.notes,

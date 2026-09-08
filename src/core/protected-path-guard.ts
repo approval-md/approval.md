@@ -192,6 +192,7 @@
  */
 
 import { organAttestationOf } from "./attest.js";
+import { parseApplyPatch } from "./apply-patch.js";
 import {
   classifyCommand,
   isGateOrganPath,
@@ -610,6 +611,35 @@ function evidenceFor(
 ): NamingMatch | null {
   if (typeof material !== "object" || material === null || Array.isArray(material)) return null;
   const map = material as Record<string, unknown>;
+
+  // Codex apply_patch is tagged explicitly. Parse it before the generic
+  // command fallback so patch text is never mistaken for a shell command and
+  // never receives time-based command attribution. Until a patch-to-blob
+  // proof exists, this is deliberately naming-only evidence and covers no
+  // bytes; it remains useful diagnosis without weakening the guard.
+  if (map["tool"] === "apply_patch" && typeof map["command"] === "string") {
+    const parsed = parseApplyPatch(map["command"]);
+    if (parsed.ok) {
+      const operation = parsed.operations.find(
+        (candidate) =>
+          endsWithSegments(candidate.path, path) ||
+          (candidate.kind === "update" &&
+            candidate.moveTo !== undefined &&
+            endsWithSegments(candidate.moveTo, path)),
+      );
+      if (operation !== undefined) {
+        return {
+          kind: "granted-file",
+          detail: `the granted material is a Codex apply_patch operation naming ${path}; patch bytes are not yet guard coverage`,
+          after: null,
+          before: null,
+          whole: false,
+          command: false,
+        };
+      }
+    }
+    return null;
+  }
 
   const file = map["file"];
   if (typeof file === "string" && endsWithSegments(file, path)) {
