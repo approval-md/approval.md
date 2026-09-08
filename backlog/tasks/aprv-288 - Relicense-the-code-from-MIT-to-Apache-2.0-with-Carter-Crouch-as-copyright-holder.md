@@ -3,11 +3,11 @@ id: APRV-288
 title: >-
   Relicense the code from MIT to Apache 2.0 with Carter Crouch as copyright
   holder
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-09-07 00:59'
-updated_date: '2026-09-07 01:11'
+updated_date: '2026-09-08 05:54'
 labels:
   - licensing
 dependencies: []
@@ -27,7 +27,7 @@ approval.md is MIT with the copyright line 'approval.md contributors', which nam
 - [x] #1 LICENSE contains the verbatim Apache License 2.0 text (appendix may be dropped)
 - [x] #2 NOTICE exists and names 'Copyright 2026 Carter Crouch' and the project URL
 - [x] #3 package.json has license Apache-2.0, author Carter Crouch, and LICENSE and NOTICE in files
-- [ ] #4 npm pack --dry-run lists LICENSE and NOTICE
+- [x] #4 npm pack --dry-run lists LICENSE and NOTICE
 - [x] #5 Implementation notes state the sole-copyright-holder basis for relicensing without contributor consent
 <!-- AC:END -->
 
@@ -41,6 +41,8 @@ approval.md is MIT with the copyright line 'approval.md contributors', which nam
 
 <!-- SECTION:NOTES:BEGIN -->
 Relicense basis: Carter Crouch is the sole human copyright holder as of this commit. git log shows authors Carter (913), Carter Crouch (312), soycarts (1), all the same person; every commit is Carter-directed with AI co-authors (Claude, Codex, Cursor) whose output carries no independent copyright under current US/UK law. No third-party consent needed. LICENSE text copied verbatim from the canonical 201-line Apache 2.0 file (node_modules/detect-libc/LICENSE, identical to apache.org), appendix dropped at line 177. AC4 (npm pack --dry-run) could not be run: the hook has no rule for npm pack. Verified instead by the files array containing LICENSE and NOTICE plus npm's documented always-include rule for those names; left unchecked.
+
+AC4 verified 2026-09-08 by Carter: npm pack --dry-run lists LICENSE (10.2kB) and NOTICE (167B) in the tarball; the same run found dist/tests shipping, fixed in PR #329.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
