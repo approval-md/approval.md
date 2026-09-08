@@ -150,6 +150,12 @@ import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
 import { refusal as renderRefusal, style, table, type Style } from "./style.js";
 import { usageErrorText } from "./usage.js";
+import {
+  checkCodexHookInput,
+  codexBinding,
+  CODEX_POST_TOOL_EVENT,
+  readCodexReportedOutcome,
+} from "./hook-codex.js";
 
 /** Identity accepted for the proposing side: a person or an agent. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
@@ -375,6 +381,8 @@ interface HarnessAdapter {
   defaultActor: string;
   shellTool: string;
   fileTools: readonly string[];
+  /** Include the native tool name in the bytes a grant binds. */
+  bindToolName?: boolean;
 }
 
 const CLAUDE_ADAPTER: HarnessAdapter = {
@@ -391,6 +399,15 @@ const CURSOR_ADAPTER: HarnessAdapter = {
   defaultActor: "agent:cursor",
   shellTool: "Shell",
   fileTools: ["Write", "Delete"],
+};
+
+const CODEX_ADAPTER: HarnessAdapter = {
+  kind: "codex",
+  originApp: "codex-hook",
+  defaultActor: "agent:codex",
+  shellTool: "Bash",
+  fileTools: [],
+  bindToolName: true,
 };
 
 /**
@@ -433,6 +450,8 @@ function deny(streams: Streams, code: string, detail: string, harness: HarnessKi
 
 interface HookInput {
   sessionId: string;
+  /** Whether the event supplied the session id, distinct from the strict unknown bucket. */
+  sessionIdPresent: boolean;
   cwd: string;
   toolName: string;
   toolInput: Record<string, unknown>;
@@ -456,6 +475,8 @@ interface HookInput {
    * {@link readReportedOutcome}) — never the text inside it.
    */
   toolResponse: Record<string, unknown> | null;
+  /** `tool_response` verbatim, including strings, for harness-specific readers. */
+  toolResponseRaw: unknown;
   /**
    * `is_interrupt`, the post-execution events' own word for "a person stopped
    * this" (APRV-303).
@@ -522,13 +543,15 @@ function parseHookInput(raw: string): ParsedInput {
       ? (toolInputValue as Record<string, unknown>)
       : {};
   const responseValue = fields["tool_response"];
+  const sessionId = readString(fields, "session_id");
   return {
     ok: true,
     input: {
       // The ONE shared bucket for an unreadable session (`core/loop.ts`'s
       // `UNKNOWN_SESSION`): absence accrues faster than a readable id and never
       // slower, which is the fail-closed direction.
-      sessionId: readString(fields, "session_id") ?? UNKNOWN_SESSION,
+      sessionId: sessionId ?? UNKNOWN_SESSION,
+      sessionIdPresent: sessionId !== null,
       cwd: readString(fields, "cwd") ?? "",
       toolName,
       toolInput,
@@ -540,6 +563,7 @@ function parseHookInput(raw: string): ParsedInput {
         typeof responseValue === "object" && responseValue !== null && !Array.isArray(responseValue)
           ? (responseValue as Record<string, unknown>)
           : null,
+      toolResponseRaw: responseValue,
     },
   };
 }
@@ -2579,7 +2603,8 @@ type OutcomeReading =
  * whether two enumerated fields are present and what kind of value they hold.
  * No text from any of them reaches the log or this function's return.
  */
-function readReportedOutcome(input: HookInput): OutcomeReading {
+function readReportedOutcome(input: HookInput, adapter: HarnessAdapter): OutcomeReading {
+  if (adapter.kind === "codex") return readCodexReportedOutcome(input);
   const event = input.hookEventName;
   if (event !== "PostToolUse" && event !== "PostToolUseFailure") {
     return {
@@ -2647,7 +2672,7 @@ function runPostToolUse(
     );
   }
 
-  const reading = readReportedOutcome(input);
+  const reading = readReportedOutcome(input, adapter);
   if (!reading.ok) {
     return report(streams, "post-tool-unreadable-outcome", `${reading.detail}; nothing was appended`);
   }
@@ -2664,8 +2689,10 @@ function runPostToolUse(
   const finished = finishHarnessExecution(
     logPath,
     {
-      sessionId: input.sessionId,
-      toolUseId: input.toolUseId,
+      sessionId:
+        adapter.kind === "codex" ? codexBinding(input, cwd).finishSessionId : input.sessionId,
+      toolUseId:
+        adapter.kind === "codex" ? codexBinding(input, cwd).finishToolUseId : input.toolUseId,
       outcome: reading.outcome,
       // The one member of the closed set at v0.1. It names the untrusted
       // reporter and reduces nothing.
@@ -2750,7 +2777,9 @@ function describeToolCall(
     // Unchanged since APRV-117, deliberately: the payload is the WHOLE command
     // and the directory it runs in, so the FULL PAYLOAD block on the phone
     // carries every byte the harness will execute. Only `summary` is shortened.
-    const payload = { command: raw, cwd: input.cwd };
+    const payload = adapter.bindToolName
+      ? codexBinding(input, cwd).payload
+      : { command: raw, cwd: input.cwd };
     // APRV-108: a local rewrite of history this checkout never published is a
     // commit. APRV-267: a delete confined to the agent's own scratch is not a
     // decision. Both run in the hook's own cwd, after classification and never
@@ -3080,6 +3109,8 @@ function runHarnessHook(
   readStdin: () => string,
   adapter: HarnessAdapter,
 ): number {
+  const configurationError = (message: string): number =>
+    adapter.kind === "codex" ? deny(streams, "hook-io", message, adapter.kind) : usageError(streams, message);
   const parsed = parseFlags(argv, {
     ...COMMON_FLAGS,
     ...POLICY_FLAGS,
@@ -3089,21 +3120,20 @@ function runHarnessHook(
     "--interval": "string",
     "--retry-grace": "string",
   });
-  if (!parsed.ok) return usageError(streams, parsed.message);
+  if (!parsed.ok) return configurationError(parsed.message);
   if (boolFlag(parsed.flags, "--help") || boolFlag(parsed.flags, "-h")) {
     streams.out(`${HOOK_HELP}\n`);
     return EXIT_OK;
   }
   const extra = parsed.positionals[0];
   if (extra !== undefined) {
-    return usageError(streams, `unexpected argument ${JSON.stringify(extra)}`);
+    return configurationError(`unexpected argument ${JSON.stringify(extra)}`);
   }
 
   const asFlag = stringFlag(parsed.flags, "--as");
   const actor = asFlag ?? adapter.defaultActor;
   if (!PRINCIPAL_ACTOR.test(actor)) {
-    return usageError(
-      streams,
+    return configurationError(
       `--as expects agent:<id> or human:<id>, got ${JSON.stringify(asFlag)}`,
     );
   }
@@ -3111,16 +3141,14 @@ function runHarnessHook(
   const timeoutText = stringFlag(parsed.flags, "--timeout") ?? DEFAULT_TIMEOUT;
   const timeoutMs = parseDuration(timeoutText);
   if (timeoutMs === null) {
-    return usageError(
-      streams,
+    return configurationError(
       `--timeout expects a duration like 30s, 9m, got ${JSON.stringify(timeoutText)}`,
     );
   }
   const intervalText = stringFlag(parsed.flags, "--interval");
   const intervalMs = intervalText === null ? DEFAULT_INTERVAL_MS : parseDuration(intervalText);
   if (intervalMs === null) {
-    return usageError(
-      streams,
+    return configurationError(
       `--interval expects a duration like 500ms, 2s, got ${JSON.stringify(intervalText)}`,
     );
   }
@@ -3130,8 +3158,7 @@ function runHarnessHook(
   const graceText = stringFlag(parsed.flags, "--retry-grace");
   const graceMs = graceText === null ? HOOK_RETRY_GRACE_MS : parseDuration(graceText);
   if (graceMs === null) {
-    return usageError(
-      streams,
+    return configurationError(
       `--retry-grace expects a duration like 5m, 30s, 1ms, got ${JSON.stringify(graceText)}`,
     );
   }
@@ -3139,6 +3166,11 @@ function runHarnessHook(
   const parsedInput = parseHookInput(readStdin());
   if (!parsedInput.ok) return deny(streams, "hook-io", parsedInput.detail, adapter.kind);
   const input = parsedInput.input;
+
+  if (adapter.kind === "codex") {
+    const checked = checkCodexHookInput(input, cwd);
+    if (!checked.ok) return deny(streams, "hook-io", checked.detail, adapter.kind);
+  }
 
   // APRV-145: WHICH EVENT THIS IS, read first and read at all. One command is
   // registered for two events, and they do opposite things — one answers before
@@ -3150,7 +3182,11 @@ function runHarnessHook(
   // harness whose event this runtime does not recognize is a harness about to
   // run a command, and treating an unknown name as a no-op would be an ungated
   // one.
-  if (input.hookEventName !== null && POST_TOOL_EVENTS.includes(input.hookEventName)) {
+  const postToolEvent =
+    adapter.kind === "codex"
+      ? input.hookEventName === CODEX_POST_TOOL_EVENT
+      : input.hookEventName !== null && POST_TOOL_EVENTS.includes(input.hookEventName);
+  if (postToolEvent) {
     // APRV-303. `commandHarnessHook`'s catch turns a throw into a DENY, which is
     // the right answer for a call that has not run yet and exactly the wrong one
     // here: it would print a verdict object about a tool call the harness has
@@ -3280,7 +3316,10 @@ function runHarnessHook(
 
   // Minted once, here, and carried into `gateAndWait`: the loop-escalation
   // check below and any registration that follows must name the same task.
-  const task = `hook:${input.sessionId}:${input.toolUseId ?? randomBytes(8).toString("hex")}`;
+  const task =
+    adapter.kind === "codex"
+      ? codexBinding(input, cwd).task
+      : `hook:${input.sessionId}:${input.toolUseId ?? randomBytes(8).toString("hex")}`;
 
   const run: HookRun = {
     logPath,
@@ -3510,6 +3549,8 @@ export function commandHook(
       return commandHarnessHook(rest, streams, cwd, readStdin, CLAUDE_ADAPTER);
     case "cursor":
       return commandHarnessHook(rest, streams, cwd, readStdin, CURSOR_ADAPTER);
+    case "codex":
+      return commandHarnessHook(rest, streams, cwd, readStdin, CODEX_ADAPTER);
     case "classify":
       return commandClassify(rest, streams, cwd);
     default:

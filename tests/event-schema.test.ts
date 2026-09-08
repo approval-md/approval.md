@@ -143,6 +143,19 @@ test("every v0.1 event type has an accepted fixture", () => {
   }
 });
 
+test("Codex harness provenance is accepted and unknown harnesses still fail closed", () => {
+  const base = fixture("task.registered");
+  const accepted = {
+    ...base,
+    payload: { ...((base["payload"] ?? {}) as Record<string, unknown>), harness: "codex", harness_version: "1.2.3" },
+  };
+  assert.equal(validate("event", accepted).ok, true);
+  assert.equal(
+    validate("event", { ...accepted, payload: { ...accepted.payload, harness: "acme" } }).ok,
+    false,
+  );
+});
+
 test("per-type required fields are enforced", () => {
   for (const event of EVENT_TYPES) {
     for (const field of EXTRA_REQUIRED[event] ?? []) {

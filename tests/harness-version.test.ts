@@ -107,7 +107,7 @@ test("readHarnessProvenance needs both halves and a kind this build knows", () =
 });
 
 test("the harness kind set and the binary map are the same list", () => {
-  assert.deepEqual([...HARNESS_KINDS], ["claude-code", "cursor"]);
+  assert.deepEqual([...HARNESS_KINDS], ["claude-code", "cursor", "codex"]);
   assert.deepEqual(Object.keys(HARNESS_BINARY).sort(), [...HARNESS_KINDS].sort());
   for (const kind of HARNESS_KINDS) assert.ok(isHarnessKind(kind));
   assert.ok(!isHarnessKind("acme"));

@@ -2515,6 +2515,33 @@ const VERBS: VerbSpec[] = [
 
   {
     name: "hook",
+    subcommand: "codex",
+    purpose:
+      "Put the verified gate in front of Codex Bash: read one Codex PreToolUse or PostToolUse event on stdin, strictly validate its stable ids, tool and working directory, resolve Bash against APPROVAL.md, and answer nested allow or deny JSON on PreToolUse. Manual classes wait on a log-backed decision; PostToolUse records an outcome only when a native-verified closed reading exists. THE VERDICT IS NEVER 'ask'. Exit 0 carries a pre-tool verdict, while a post-tool diagnostic uses the post-hook status contract.",
+    human_only: false,
+    human_only_note:
+      "The agent harness surface, so agent-facing by construction: Codex invokes it around the agent's own Bash calls. It records the agent's proposal and waits for a human; it never records a decision.",
+    input: input({
+      flags: {
+        ...AS_FLAG,
+        "--timeout": "string",
+        "--interval": "string",
+        "--retry-grace": "string",
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: null,
+    error: ERROR_SCHEMA,
+    exit_codes: [
+      { code: 0, meaning: "the PreToolUse verdict (allow OR deny) is the JSON object on stdout, or a reported PostToolUse counterpart landed" },
+      { code: 2, meaning: "the hook is misconfigured or a PostToolUse outcome was not recorded; the diagnostic is on stderr" },
+    ],
+  },
+
+  {
+    name: "hook",
     subcommand: "classify",
     purpose:
       "Print what the classifier makes of a command line: the segments it split it into, the class it assigned each, and the rule that decided. Reads no log, resolves no policy, writes nothing. The classifier is best effort and is not scheming-robust; it reads the command text and never the agent's own description of it.",

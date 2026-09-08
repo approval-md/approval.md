@@ -2459,6 +2459,7 @@ test("hook --help and the subcommand helps exit 0", () => {
     ["hook", "--help"],
     ["hook", "claude-code", "--help"],
     ["hook", "cursor", "--help"],
+    ["hook", "codex", "--help"],
     ["hook", "classify", "--help"],
   ]) {
     const run = runCli(args, dir);
@@ -2469,7 +2470,7 @@ test("hook --help and the subcommand helps exit 0", () => {
 
 test("an unknown subcommand and an unknown flag are usage errors, not verdicts", () => {
   const dir = caseDir();
-  const unknownSub = runCli(["hook", "codex"], dir);
+  const unknownSub = runCli(["hook", "no-such-harness"], dir);
   assert.equal(unknownSub.code, 2);
   assert.equal(unknownSub.stdout, "");
 
