@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-08 07:25'
-updated_date: '2026-09-08 08:58'
+updated_date: '2026-09-08 19:21'
 labels: []
 dependencies:
   - APRV-312
@@ -33,6 +33,8 @@ User-authorized overnight Codex integration. SPEC 6.3,7,9,10,11.1 bind. Isolated
 1. After adapter interfaces settle, add opt-in example outside live .codex paths and an activation/rollback runbook; document exact tested CLI and desktop pending separately. 2. Add doctor diagnostics for Codex Pre/Post configuration and harness provenance, explicitly not claiming trust or execution from file presence. 3. Parent prepares narrow SPEC changes for Codex verb, gate organs, MCP exclusion, patch/outcome contract and bounded coverage; route exact edits through primary gate before applying. 4. Focused doctor/help/docs checks, then final integration verification; leave APRV-315 pending.
 
 The public verb, Pre/Post registration and 9m/600s timing are now settled in APRV-311. Begin disjoint doctor/examples/runbook work while APRV-312 patch internals proceed; keep native outcomes and desktop proof explicitly pending until observed.
+
+Update operator wording around reviewed bounded behavior: experimental direct apply_patch gate, unconditional Bash refusal because native effective cwd is omitted, PostToolUse diagnostic-only, and observed crash/timeout/malformed failure continuation. Retain Bash|apply_patch matcher so shell-dispatched patches are refused rather than silently ungated. Keep CLI help and registry descriptions accurate; no live configuration. SPEC amendment remains unapplied and must be revised to this actual boundary before any request or approval.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -57,4 +59,10 @@ Operator slice reviewed: separate Codex wiring row; strict quoted absolute direc
 Integration review added the missing codex-hook-wiring CLI reference roster row and prominent native-unverified/PostToolUse diagnostic status. Runbook now states exact input/cwd/patch restrictions and conservative cd syntax. No SPEC or live configuration edit. Final full-suite verification follows.
 
 Final code/docs df570ea passed full npm test3920pass/1skip, lint/typecheck, conformance293/293 and complete CI parity, all exit0. Doctor roster/profile and help/runbook regressions pass. AC3 remains pending: SPEC is unchanged; exact proposed amendment remains in this task. Everyday configuration/trust and daemon deployment were not performed.
+
+Resumed read-only review by Sol and Astra found an existing exact-file execution route through executeThroughAdapter with {tool:Edit,file:SPEC.md,before,after}; normal primary core appends share locking/compare-and-append with the daemon. This supplies truthful hunk evidence only after a real grant. Current policy.edit.spec is supervised-live at 1%; request has no explicit force-human option and CI requires approval.granted, so an unsampled request cannot satisfy protected-path evidence. Do not falsify reversibility/loop floors, manipulate draws, impersonate another harness, or fabricate records. User has been offered a temporary human-operated manual SPEC policy setting; no policy or SPEC change performed.
+
+Prepared but did not register/apply the revised narrow SPEC amendment: /private/tmp/aprv-313-spec-bundle/SPEC.patch, manifest SHA45cf410ed781c989fef3312ff2ee5bfbf064226f6d8ab7fdc7cd44657d5305e0, driver /private/tmp/aprv-313-spec-driver.mjs SHA16bc6c3e3719f771f7c3762e0a6010bb1b997d38079764f4903fef6231d3008d. Seven exact before/after payloads, whole-file digest chain, primary-context/grant-only execution and no invented harness/provider evidence. Syntax/read-only drycheck/envelope validation exit0. Amendment now states experimental direct patch, mandatory early Bash refusal, diagnostic outcomes and observed fail-open limits. Current SPEC bytes remain unchanged; no grant exists, and policy/CI mismatch remains unresolved. Broader everyday activation is separately blocked by native contract.
+
+CLI help/registry and operator docs now state experimental direct-patch support with every matched Bash call refused, retain full matcher, and mark normal installation/phone ceremony unavailable on0.152.1. Removed obsolete cwd advice; corrected v7 observation to native identity allow+nested effect+no Post, distinct from production refusal. Astra prose/source review clear; full npm3928 pass/1skip plus lint/typecheck/conformance exit0. Normative SPEC remains unapplied and unregistered.
 <!-- SECTION:NOTES:END -->

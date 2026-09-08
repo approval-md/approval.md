@@ -1415,7 +1415,7 @@ Usage:
 Commands:
   claude-code  Claude Pre/PostToolUse JSON in; decision JSON out. REGISTER BOTH
   cursor       Cursor preToolUse JSON in; native {permission} JSON out
-  codex        Codex synchronous Pre/Post JSON for exact Bash or apply_patch; nested allow/deny, no native ask
+  codex        Codex synchronous Pre/Post JSON; Bash denied, direct apply_patch experimentally gated
   classify     print what the classifier makes of a command line and exit
 
   --as <id>        proposing identity (default agent:claude-code / agent:cursor / agent:codex)
@@ -1423,7 +1423,7 @@ Commands:
   --dir/--policy/--log <p>   policy+log root; --dir sets BOTH, default primary
   -h, --help       this text
 
-Codex opt-in: register both events synchronously with timeout 600s (default wait 9m). PostToolUse is diagnostic until a native-verified outcome reading exists.
+Codex opt-in: register exact Bash|apply_patch synchronously with timeout 600s (default wait 9m). Bash is denied because native events hide per-call workdir; direct apply_patch is experimental. PostToolUse is diagnostic.
 
 Deny: hook-unclassified, hook-class-human-only, hook-opaque, hook-unparseable, hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout,
 hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required, hook-policy-unavailable, hook-log-unreachable, hook-io.

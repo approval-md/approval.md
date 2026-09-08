@@ -10,15 +10,26 @@ Codex defines the event envelope, matcher, command-handler, trust, timeout, and
 tool-coverage contracts in its [official hooks
 documentation](https://learn.chatgpt.com/docs/hooks).
 
-> **Status for Codex CLI 0.152.1:** native hook loading and the deny, timeout,
-> crash, and malformed-output paths remain unverified. `PostToolUse` is
-> diagnostic only for now and does not close execution outcomes. Everyday
-> activation remains pending the reviewed trust and phone checks below.
+> **Status for Codex CLI 0.152.1:** a bounded scratch run verified hook loading,
+> shell denial, and the observed fail-open crash, timeout, and malformed-output
+> paths. `PostToolUse` is diagnostic only and does not close execution outcomes.
+> The follow-up run verified identity allow responses, stable Pre/Post
+> correlation, and shell and patch denial. It also found that a non-default Bash
+> working directory is absent from the hook event. Scope-safe activation is
+> blocked until the adapter can bind or constrain the real execution directory.
 
-The adapter uses the same policy, verified log, budget, and approval core as
+This integration is not ready for normal Codex sessions. Its current supported
+use is experimental direct-patch evaluation: the required full
+`Bash|apply_patch` matcher refuses every matched Bash call, including gate-self
+shell commands. Everyday activation remains blocked.
+
+The direct-patch path uses the same policy, verified log, budget, and approval core as
 the other harness hooks. Codex's own sandbox and approval mode remain an
 independent control. Installing this hook does not widen that sandbox or grant
 Codex any permission.
+
+The autonomy table describes direct `apply_patch`; Bash always takes the
+contract refusal described below.
 
 | resolved autonomy | PreToolUse result | log effect |
 |---|---|---|
@@ -40,12 +51,32 @@ hook process's actual cwd. Patch input must use strict `*** Begin Patch` and
 `*** End Patch` framing, and every changed path must be relative and confined
 to that cwd.
 
-For compound shell commands, cwd tracking accepts absolute paths, `.`, `..`,
-and paths beginning `./` or `../`. It follows at most 64 conservative cwd
-candidates. An unsupported or ambiguous `cd` denies the command. Prefer an
-explicit form such as `cd ./dir`.
+Every Codex allow repeats the exact gated command bytes as
+`updatedInput.command`, as required by the native hook contract. A deny does not
+include an input update. Configure no other hook that rewrites input for the
+covered tools: concurrently matching native hooks can transform tool input, and
+an additional rewrite would invalidate the bytes approval.md classified and
+bound.
 
-## Install by human review
+Codex 0.152.1 does not include an explicitly selected Bash tool working
+directory in `tool_input`, and both the event cwd and hook process cwd remain
+the session root. The bounded native probe observed the effect run in that
+hidden nested directory. The current adapter cannot distinguish that call from
+one executed at the session root, so it is not safe to activate for sessions
+that can select a different per-call working directory.
+
+The adapter therefore denies every native Bash PreToolUse before policy,
+open-window, gate-self, carryover, or execution-start handling. A native focus
+run sent an `apply_patch` heredoc through `exec_command`; Codex reported that
+route as Bash, so it receives the same denial. Direct `apply_patch` remains a
+separate bounded surface and does not make shell execution available.
+
+## Future installation by human review
+
+Do not run this installation procedure with Codex 0.152.1. It is retained for
+a future native contract that exposes the effective working directory and a
+reliable success/failure outcome. The checked-in example remains useful for
+reviewing the intended configuration without activating it.
 
 The checked-in [example](../examples/codex-hooks.example.json) is inert. Codex
 does not load it from `examples/`. Installation writes a gate configuration and
@@ -102,12 +133,16 @@ longer active. The rename does not alter the approval log and does not change
 Codex's sandbox. If `.codex/config.toml` or a user, managed, or plugin layer also
 defines hooks, remove or disable that separately after reviewing its source.
 
-## Morning phone smoke test
+## Future morning phone smoke test
 
-Run this only after the primary daemon and Telegram channel are healthy and
-after `/hooks` shows the reviewed definitions as trusted. This ceremony uses a
-loopback-only HTTP witness so denial and one granted side effect can be checked
-without external network access.
+This procedure is unavailable on Codex 0.152.1 because the current adapter
+refuses every Bash call. Retain it for a future Codex version only after native
+evidence verifies both the effective working-directory input and a reliable
+success/failure outcome contract. At that point, run it only after the primary
+daemon and Telegram channel are healthy and `/hooks` shows the reviewed
+definitions as trusted. The ceremony uses a loopback-only HTTP witness so
+denial and one granted side effect can be checked without external network
+access.
 
 In terminal one, start the dependency-free witness. Wait for its `ready` line
 and leave it running. It prints the random loopback port, exact Codex command,
@@ -157,11 +192,13 @@ path. Connectors, browser or computer-use paths, and specialized tools may be
 outside it. Nested code-mode local tool calls are documented to receive hook
 decisions, but still require a native compatibility check for this adapter.
 
-A command-hook crash, timeout, launch failure, or malformed stdout may fail
-open in Codex. `PostToolUse` cannot undo an effect. The native APRV-310 probe is
-the evidence source for exact behavior in the supported CLI version; until it
-passes, errors, timeouts, outcome parsing, desktop trust, and phone behavior
-remain pending. Coverage is limited to the named local paths. It does not
+A command-hook crash, timeout, or malformed stdout proceeded in the bounded
+Codex 0.152.1 native run; a launch failure was not exercised. `PostToolUse`
+cannot undo an effect. The native APRV-310 probe is the evidence source for
+exact behavior in the supported CLI version. Identity allow and denial passed;
+execution-directory binding failed. Activation, outcome parsing, desktop trust,
+and phone behavior remain pending. Coverage is limited to the named
+local paths. It does not
 establish strict Claude parity or an exhaustive security boundary.
 
 `approval doctor` checks the on-disk JSON for both events, the exact
