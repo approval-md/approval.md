@@ -1,0 +1,1 @@
+{"command":"npm view approval-md version bin dist.tarball 2>&1 | head -8","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}

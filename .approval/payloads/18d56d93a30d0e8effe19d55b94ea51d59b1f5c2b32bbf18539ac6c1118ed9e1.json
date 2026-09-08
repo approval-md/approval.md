@@ -1,0 +1,1 @@
+{"command":"backlog task edit --help 2>&1 | head -60","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/agent-aad7942c3ef44894c"}
