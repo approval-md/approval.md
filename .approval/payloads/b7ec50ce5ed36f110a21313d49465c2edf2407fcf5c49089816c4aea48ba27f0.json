@@ -1,0 +1,1 @@
+{"command":"cd /Users/carter/dev/approval-md && approval run aprv-199:tag:2026-09-08 --as agent:fable -- git tag -a v0.1.0 -m \"approval-md 0.1.0\" 2>&1 | tail -3 && git tag -l v0.1.0 && git log --oneline -1 v0.1.0","cwd":"/Users/carter/dev/approval-md/.claude/worktrees/emilia-protocol-comparison-af4ffb"}
