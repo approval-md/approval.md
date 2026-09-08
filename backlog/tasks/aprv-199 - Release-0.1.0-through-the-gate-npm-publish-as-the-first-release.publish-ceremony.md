@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@fable'
 created_date: '2026-09-01 18:46'
-updated_date: '2026-09-06 02:07'
+updated_date: '2026-09-08 04:38'
 labels:
   - release
   - dogfood
@@ -27,7 +27,7 @@ Every SPEC section 14 milestone (M0 to M8) has shipped, package.json already rea
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Preflight recorded: npm pack --dry-run contents reviewed (files and bin fields; no .approval, backlog, or private material shipped), README front page current, LAUNCH.md or CHANGELOG carries the 0.1.0 line
+- [x] #1 Preflight recorded: npm pack --dry-run contents reviewed (files and bin fields; no .approval, backlog, or private material shipped), README front page current, LAUNCH.md or CHANGELOG carries the 0.1.0 line
 - [ ] #2 Envelope on this task: register, request, wait, run for npm publish from the primary checkout; grant seq and execution seq recorded in the notes; no human relayed a token (APRV-166 AC3 evidence)
 - [ ] #3 v0.1.0 tag pushed through its own gated action and the package installs on a clean machine under the published name; verified and recorded
 - [ ] #4 The human decides go or no-go; the agent prepares and never triggers the publish
@@ -45,4 +45,6 @@ Every SPEC section 14 milestone (M0 to M8) has shipped, package.json already rea
 
 <!-- SECTION:NOTES:BEGIN -->
 Preflight (fable, 2026-09-06, branch aprv-276-278-agentmail-release-stack): package.json ships by whitelist only (cli.js, dist, schema, docs/cli-reference.md, SPEC.md, README.md), no .npmignore needed; .approval, backlog, .claude, .approval-journal and docs/proposals cannot ship. npm pack --dry-run is unclassified by the hook for an agent, so Carter runs it once by hand before the tap and pastes the file list. CHANGELOG.md created with the 0.1.0 line (unreleased until the tag). README front page gains a section on approval values / approval feedback; tests/docs-guard passes. Riding the same PR as APRV-276/277/278 so one merge precedes the publish.
+
+AC1 closed 2026-09-08: Carter's npm pack --dry-run reviewed (LICENSE and NOTICE present; dist/tests was shipping, fixed in PR #329 so the whitelist is dist/src); CHANGELOG carries the 0.1.0 line; README current. Envelope added to this file with three release.publish actions: aprv-199:publish (npm publish), aprv-199:tag (git tag -a v0.1.0), aprv-199:tag-push (git push origin v0.1.0, declared release.publish because the classifier reads a tag push as vcs.push.branch, APRV-305). Payloads are {argv, cwd} with cwd /Users/carter/dev/approval-md; hashes in the envelope.
 <!-- SECTION:NOTES:END -->
