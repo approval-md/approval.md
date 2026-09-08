@@ -3343,22 +3343,36 @@ and how the log says it ended). Everything computed is derived from the verified
 log, the payload store and the classifier; the claimed rows sit under the same
 "NOT verified by the runtime" heading a prompt gives them.
 
-Six buttons: `OK`, `Deny`, and the four reactions (`disliked`, `indifferent`,
-`liked`, `loved`).
+Six buttons, bare emoji and no words (APRV-302), in two rows: the verdict on the
+first (✅ OK, 🛑 Deny) and the grade on the second, worst to best (👎 disliked,
+😐 indifferent, 👍 liked, ❤️ loved).
 
 | Tap | What is recorded |
 | --- | --- |
-| `OK` | `audit.reviewed` with verdict `ok` and no reaction. |
+| ✅ | `audit.reviewed` with verdict `ok` and no reaction. |
 | a reaction | verdict `ok` and that grade — a reaction alone implies OK. |
-| `Deny` once | **Nothing.** It arms the card, which says `DENY ARMED` on itself. |
-| `Deny` twice | verdict `denied`, and the reconciliation obligation it opens is named on the reply. |
+| 🛑 once | **Nothing.** It arms the card, which says `DENY ARMED` on itself. |
+| 🛑 twice | verdict `denied`, and the reconciliation obligation it opens is named on the reply. |
 | a reaction with deny armed | verdict `denied` with that grade. |
+
+The card does not print this table under itself. It used to, and the paragraph
+of rules pushed the rows a review is actually about off the first screen for a
+reader who had read them on the card before. The two things a tap could get
+wrong say themselves: the first 🛑 is answered `Deny armed — nothing recorded`
+and puts `DENY ARMED` in the card's own headline until it is spent, and a grade
+that wants words sends the prompt that asks for them.
 
 Deny takes two taps because a retrospective denial cannot undo anything: what it
 does is open an obligation a human must later discharge (SPEC section 5.2), and
 a gesture with that consequence should not be one thumb-width from a grade. The
 arming is process memory and appends nothing; losing it to a restart costs a
 tap.
+
+Every other review tap is answered `Heard — recording your review. The card will
+say what the log recorded.`, its own toast, because a request card's `Heard —
+deciding` would tell a reviewer something was pending when nothing is. Like that
+one it claims only that the tap arrived: at the moment it is sent nothing has
+been appended, and a refusal below may mean nothing ever is.
 
 `loved` and `disliked` ask for the human's own words first. The bot sends a
 reply prompt, nothing is appended until the reply arrives, and a blank one is

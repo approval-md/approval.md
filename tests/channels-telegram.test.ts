@@ -94,8 +94,11 @@ import {
   parseReviewCallback,
   REVIEW_CHOICES,
   TELEGRAM_COMMANDS,
+  TELEGRAM_REVIEW_ACK,
   TELEGRAM_REVIEW_ARMED,
+  TELEGRAM_REVIEW_ARM_TOAST,
   TELEGRAM_REVIEW_DENIED,
+  TELEGRAM_REVIEW_NOTE_TOAST,
   TELEGRAM_REVIEW_HEADING,
   TELEGRAM_REVIEW_RECORDED,
   type ReviewCard,
@@ -5671,8 +5674,22 @@ test("APRV-299: the card shows what ran, and offers no approval", async () => {
   assert.ok(message.text.includes("rate 1"), "the card does not state the rate it was drawn at");
   assert.ok(message.text.includes("outcome completed"), "the card does not state the outcome");
 
-  // The rule, in words, including the deny latch.
-  assert.ok(message.text.includes("Deny takes two taps"));
+  // APRV-302: no paragraph of rules under the card. The heading carries "this
+  // already ran", the arm toast and the armed heading carry the deny latch, and
+  // the prose that used to say both is gone rather than reworded.
+  for (const banned of [
+    "Deny takes two taps",
+    "Nothing here is pending",
+    "no button on this card authorizes anything",
+    "A reaction alone records OK",
+    "ask for a note first",
+  ]) {
+    assert.equal(
+      message.text.includes(banned),
+      false,
+      `the footer rule block survived (${banned}): ${message.text}`,
+    );
+  }
 
   // Six buttons and not one of them approves anything.
   const rows = (message.replyMarkup as {
@@ -5680,6 +5697,15 @@ test("APRV-299: the card shows what ran, and offers no approval", async () => {
   }).inline_keyboard;
   const buttons = rows.flat();
   assert.equal(buttons.length, REVIEW_CHOICES.length);
+
+  // APRV-302: bare emoji, in two rows — verdict above, grade below.
+  assert.deepEqual(
+    rows.map((row) => row.map((button) => button.text)),
+    [
+      ["✅", "🛑"],
+      ["👎", "😐", "👍", "❤️"],
+    ],
+  );
   assert.deepEqual(
     buttons.map((button) => parseReviewCallback(button.callback_data)?.choice),
     [...REVIEW_CHOICES],
@@ -6043,6 +6069,68 @@ test("APRV-299: approval feedback shows a card reaction exactly as a CLI one", a
     parsed.entries.map((entry) => entry.reaction),
     ["liked", "liked"],
   );
+  assertClean(world.unit);
+});
+
+test("APRV-302: a review tap is acked as a review, not as a decision", async () => {
+  const world = sampledWorld(4);
+  const { channel } = reviewChannelFor(world);
+  const cards = cardsFor(world) as ReviewCard[];
+  // The mock accumulates across this file, so every claim below is about the
+  // answers THIS test produced.
+  const from = mock.answerTexts().length;
+  const since = (): string[] => mock.answerTexts().slice(from);
+
+  // `ok`, and every path that records straight off a tap, says "recording your
+  // review". TELEGRAM_ACK_HEARD's "deciding" belongs to a card with something
+  // pending on it, and a review has nothing pending by construction.
+  await channel.offerReview(cards[0] as ReviewCard);
+  await tapReview(channel, "ok");
+  assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
+
+  await channel.offerReview(cards[1] as ReviewCard);
+  await tapReview(channel, "indifferent");
+  assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
+
+  await channel.offerReview(cards[2] as ReviewCard);
+  await tapReview(channel, "liked");
+  assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
+
+  // The toast that says something the ack does not is untouched: the first deny
+  // tap still says plainly that nothing was written.
+  await channel.offerReview(cards[3] as ReviewCard);
+  await tapReview(channel, "deny");
+  assert.equal(since().at(-1), TELEGRAM_REVIEW_ARM_TOAST);
+  await tapReview(channel, "deny");
+  assert.equal(since().at(-1), TELEGRAM_REVIEW_ACK);
+
+  assert.equal(reviewsIn(world).length, 4);
+  assert.equal(
+    since().includes(TELEGRAM_ACK_HEARD),
+    false,
+    `a review tap was acked with the request card's toast: ${since().join(" | ")}`,
+  );
+  assertClean(world.unit);
+});
+
+test("APRV-302: the note prompt keeps its toast, and its reply answers no callback", async () => {
+  const world = sampledWorld(1);
+  const { channel } = reviewChannelFor(world);
+  await channel.offerReview(cardsFor(world)[0] as ReviewCard);
+
+  await tapReview(channel, "disliked");
+  assert.equal(
+    mock.answerTexts().at(-1),
+    TELEGRAM_REVIEW_NOTE_TOAST,
+    "the note prompt lost the toast that says nothing is recorded yet",
+  );
+
+  // The reply is a message, not a callback, so it answers nothing at all: what
+  // the log took is on the card edit that follows.
+  const answers = mock.answerTexts().length;
+  await replyWithNote(channel, "it renamed a file the task never named");
+  assert.equal(mock.answerTexts().length, answers, "a note reply answered a callback");
+  assert.equal(reviewsIn(world).length, 1);
   assertClean(world.unit);
 });
 
