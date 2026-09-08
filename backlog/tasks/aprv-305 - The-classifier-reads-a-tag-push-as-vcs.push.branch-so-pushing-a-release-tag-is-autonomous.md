@@ -3,9 +3,11 @@ id: APRV-305
 title: >-
   The classifier reads a tag push as vcs.push.branch, so pushing a release tag
   is autonomous
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@codex-sol'
 created_date: '2026-09-08 04:37'
+updated_date: '2026-09-08 23:00'
 labels:
   - harness
 dependencies: []
@@ -24,3 +26,9 @@ approval hook classify -- 'git push origin v0.1.0' answers vcs.push.branch (auto
 - [ ] #2 tests/command-class.test.ts covers the tag forms and the branch control
 - [ ] #3 docs/cli-reference.md classifier section lists the rule
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Inspect git push parsing and preserve force/history and main/deletion precedence. 2. Route explicit refs/tags destinations, bare v-prefixed semantic-version refs, --tags and --follow-tags to release.publish conservatively while preserving explicit branch controls. 3. Test mixed branch/tag refspecs, tag deletion, force cases, options and lookalike branch names. 4. Update classifier docs, parent reviews security and focused/full evidence, then merge through policy.
+<!-- SECTION:PLAN:END -->
