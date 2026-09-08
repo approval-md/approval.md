@@ -640,7 +640,12 @@ test("runbook: a headline, indented remote output, YOUR STATE, numbered steps", 
 });
 
 test("runbook: colour dresses the code and the comment, never the command", () => {
-  const painted = runbook(makeStyle({ tty: true }), "push-rejected", "the remote REJECTED the push", RUNBOOK);
+  const painted = runbook(
+    makeStyle({ tty: true, env: {} }),
+    "push-rejected",
+    "the remote REJECTED the push",
+    RUNBOOK,
+  );
 
   const steps = painted.split("\n").filter((line) => /^ {4}\d+\. /u.test(line));
   assert.equal(steps.length, 2);

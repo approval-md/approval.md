@@ -77,9 +77,12 @@ test(
   { skip: process.platform !== "darwin" ? "darwin-only symlink layout" : false },
   () => {
     // Kept as the proof that resolution happens at all: `/tmp` is a symlink to
-    // `/private/tmp` here, and the resolved name is the one that lands.
+    // `/private/tmp` here, and the resolved name is the one that lands. Use a
+    // real cwd outside that tree so this assertion remains about symlink
+    // resolution when the repository itself is checked out under
+    // `/private/tmp`; a candidate containing cwd is intentionally excluded.
     assert.equal(realpathSync("/tmp"), "/private/tmp");
-    const roots = resolveScratchRoots(process.cwd(), {});
+    const roots = resolveScratchRoots("/", {});
     assert.ok(!roots.includes("/tmp"), `/tmp appeared unresolved among ${roots.join(", ")}`);
     assert.ok(roots.includes("/private/tmp"), `/private/tmp is not among ${roots.join(", ")}`);
   },
