@@ -51,9 +51,9 @@ classes:
   deps.install:              { autonomy: autonomous }   # bare npm install / npm ci from the lockfile
   network.call:              { autonomy: manual }       # mutating/ambiguous only; reads classify read.* and flow
   release.publish:           { autonomy: manual }       # npm, tags, versions
-  policy.edit:               { autonomy: supervised-live, live_rate: 0.1 }       # this file, CLAUDE.md, CI config
+  policy.edit:               { autonomy: supervised-live, live_rate: 0.01 }       # this file, CLAUDE.md, CI config
   policy.edit.design:        { autonomy: supervised }   # design docs: read in the PR, sampled after
-  policy.edit.spec:          { autonomy: supervised-live, live_rate: 0.2 }
+  policy.edit.spec:          { autonomy: supervised-live, live_rate: 0.01 }
     # today it is undeclared, so it falls to the default manual: every SPEC amendment
     # in every task is a tap. The guard, the sign-off convention and retrospective
     # review already cover SPEC prose; one in five live is plenty.
@@ -70,7 +70,7 @@ budgets:
   global: { daily_actions: 20000 }
 
 audit:
-  supervised_sample_rate: 0.15
+  supervised_sample_rate: 0.01
   sampling_secret_env: APPROVAL_SAMPLING_SECRET   # name only; secret in the env
 
 daemon:
