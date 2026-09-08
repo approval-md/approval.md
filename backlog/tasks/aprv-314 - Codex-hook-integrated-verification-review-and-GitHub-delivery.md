@@ -1,11 +1,11 @@
 ---
 id: APRV-314
 title: Codex hook integrated verification review and GitHub delivery
-status: In Progress
+status: Done
 assignee:
   - '@codex-astra'
 created_date: '2026-09-08 07:25'
-updated_date: '2026-09-08 21:27'
+updated_date: '2026-09-08 21:47'
 labels: []
 dependencies:
   - APRV-311
@@ -25,8 +25,8 @@ User-authorized overnight Codex integration. SPEC 6.3,7,9,10,11.1 bind. Isolated
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Astra reviews security-sensitive diffs; focused/full tests lint typecheck conformance and CI parity have recorded results.
-- [ ] #2 Per-task reviewed commits are pushed in feature PR, merge armed under policy and actual GitHub state verified.
-- [ ] #3 Handoff has worktree branch commits PR checks gaps and morning instructions; no log artifacts in feature commits.
+- [x] #2 Per-task reviewed commits are pushed in feature PR, merge armed under policy and actual GitHub state verified.
+- [x] #3 Handoff has worktree branch commits PR checks gaps and morning instructions; no log artifacts in feature commits.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -52,3 +52,9 @@ Delivery checkpoint: wrapper bypass confirmed and covered by expected-red focuse
 
 Final local delivery checkpoint: full npm test passed 3,951 tests with 1 skip and 0 failures; lint, typecheck and conformance exited 0. Committed CI parity passed build, real SPEC evidence, shards 1 and 2, and lint; shard 3 had one 500 ms daemon timeout, then passed all 1,629 tests in an isolated retry. Live-draw also passed 22/22. No timeout, permission or test weakening was used. Reviewed commits 8be51ad (exact replay) and f1daf38 (accurate evidence wording) carry Codex co-author credit. Actual SPEC proof reconstructs the file from seven original authorization records in merged records PRs 345 and 347. Probe, patch protection and operator-support criteria are complete. Native Bash/outcome limitations remain APRV-311, everyday activation remains APRV-315. Publish final branch, make PR 344 ready and arm its merge under policy; verify actual GitHub results before final handoff.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Delivered experimental Codex direct-patch gating, configuration protection, operator documentation and policy-aligned CI in PR #344, merged 2026-09-08T21:45:42Z as b17d138cb279f37d6b44c5971dbb6d6787e57540 from ff455012fde28b2545fe1ede576da19333b64f0a. All PR checks and all six Node 20/22 merge-queue shards passed (runs 34280831799 and 34281532341); protected-path verification passed. Local npm test: 3951 passed, 1 skipped, exit 0; lint/typecheck/conformance exit 0. Initial CI-parity shard 3 timeout and successful isolated 1629-test retry remain documented above. Codex co-author trailers verified on GitHub. Feature worktree /private/tmp/approval-codex-hook, branch codex/codex-hook, clean at ff45501. Approval evidence delivered separately through merged PRs #345 and #347; no approval-home artifacts in feature commits. APRV-311 remains pending for trustworthy native working-directory and outcome contracts; APRV-315 remains To Do for desktop trust and real Telegram rejection/once-approval verification after those contracts exist. Bash is refused, direct patch coverage is experimental, native hook failures can fail open, and PostToolUse records no outcomes. No everyday activation or deployment occurred. Runbook: docs/codex-hook.md. Closeout records are delivered from /private/tmp/approval-codex-closeout on codex/codex-hook-closeout.
+<!-- SECTION:FINAL_SUMMARY:END -->

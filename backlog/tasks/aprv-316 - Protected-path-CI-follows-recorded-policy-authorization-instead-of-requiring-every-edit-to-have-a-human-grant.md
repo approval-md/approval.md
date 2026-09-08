@@ -3,11 +3,11 @@ id: APRV-316
 title: >-
   Protected-path CI follows recorded policy authorization instead of requiring
   every edit to have a human grant
-status: In Progress
+status: Done
 assignee:
   - '@codex'
 created_date: '2026-09-08 19:25'
-updated_date: '2026-09-08 21:27'
+updated_date: '2026-09-08 21:47'
 labels: []
 dependencies: []
 priority: high
@@ -26,7 +26,7 @@ Carter confirmed that human approval requirements must follow APPROVAL.md. The p
 - [x] #1 Exact protected edits authorized by the real gate without a required human grant can pass CI using verified bound evidence.
 - [x] #2 Manual or sampled-live actions still require the policy-required grant; human-only organs retain their attestation requirements.
 - [x] #3 Missing, corrupt, mismatched, stale or caller-invented authorization evidence fails closed; existing hunk and command-attribution protections remain covered.
-- [ ] #4 Regression tests, full required checks, documentation and GitHub delivery record the policy alignment and its limits.
+- [x] #4 Regression tests, full required checks, documentation and GitHub delivery record the policy alignment and its limits.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -64,3 +64,9 @@ Committed CI parity at8be51ad: build0, actual protected-path guard0, shards1/2 e
 
 The correctly escalated standalone shard 3 retry passed: 1,629/1,629, exit 0, 211.72 seconds. The isolated live-draw suite passed 22/22. The original 500 ms timeout did not reproduce; its cause is not established. All CI-parity steps now have passing evidence after that failed-shard retry. Production deadlines, policy and test code were unchanged. Final diagnostic wording at f1daf38 passed build and all 52 focused guard tests. Next: push final reviewed commits and verify PR 344 checks and merge state.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged in PR #344 at b17d138cb279f37d6b44c5971dbb6d6787e57540. CI now accepts genuine exact-file policy-authorized execution evidence while preserving required human grants, human-only protection and full-change binding. Fixed routed protected-path entries being discarded by the wrapper, then added conservative exact full-file Edit replay for original inline fragments. APPROVAL.md was unchanged. Real SPEC evidence passed using seven original authorizations from separately merged records PRs #345 and #347. Focused guard 52/52 and wrapper 11/11 passed; full npm test 3951 passed, 1 skipped, exit 0; lint/typecheck/conformance exit 0. The initial local parity timeout and successful affected-shard retry are retained above. PR CI and all six Node 20/22 merge-queue shards passed, including protected-path verification, in runs 34280831799 and 34281532341. Final source head ff455012fde28b2545fe1ede576da19333b64f0a carries Codex co-author credit. No fabricated grants, policy edits, new event types or dependencies.
+<!-- SECTION:FINAL_SUMMARY:END -->
