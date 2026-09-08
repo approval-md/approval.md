@@ -193,7 +193,11 @@ test("the reference ships with the package, or --long is a lie", async () => {
     PACKAGE.files.includes("docs/cli-reference.md"),
     'package.json "files" must ship docs/cli-reference.md: --long reads it at runtime',
   );
-  assert.ok(PACKAGE.files.includes("dist"), 'package.json "files" must ship the build output');
+  // dist/src, not dist: the compiled tests stay out of the tarball (APRV-199).
+  assert.ok(
+    PACKAGE.files.includes("dist/src"),
+    'package.json "files" must ship the build output (dist/src)',
+  );
 });
 
 // ---------------------------------------------------------------------------
