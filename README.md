@@ -2,36 +2,106 @@
 
 [![ci](https://github.com/approval-md/approval.md/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/approval-md/approval.md/actions/workflows/ci.yml)
 
-**Human approval for agent actions.**
+**A harness-agnostic, open-source framework for approving agent actions with a
+human in the loop.**
 
-Your agent is about to send the email, spend the money, delete the folder, or
-publish the post. A bad diff is revertible, so coding agents have a safety net.
-Once an agent leaves the repository that net disappears: a sent message has no
-revert, and the action carries your name.
+Your agent is about to send the email, push to main, spend the money, delete
+the folder, or publish the post. A bad diff can be reverted. A sent message
+cannot, and it carries your name.
 
-The permissions section in an AGENTS.md file is prose: two lists, one headed
-"allowed without prompting" and one headed "require approval first", written for
-an agent trusted to obey them. Nothing checks. approval.md is the layer that
-checks:
+approval.md puts a button between the agent and that action. You write a
+short policy file saying which kinds of action need you. The agent runs freely
+inside those lines. When it reaches one, a message arrives on your phone with
+exactly what is about to happen, and nothing happens until you tap.
 
-- **A policy file you wrote.** `APPROVAL.md` is human-authored markdown at the
-  root of your project, declaring which classes of side effect an agent may take
-  on its own, which need you, and under what budgets.
-- **The approve button on your phone.** A request arrives over Telegram (the
-  reference channel) carrying what the runtime computed, what the agent claimed,
-  and the exact bytes about to leave. You tap Approve or Reject.
-- **A single-use execution token**, minted at one site in the codebase, only as a
-  human decision is recorded, spent once, stored nowhere. Adapters holding real
-  credentials answer to nothing else.
-- **A log that cannot be quietly rewritten.** Every proposal, decision, and
-  execution is an append-only, hash-chained JSONL record, and `approval log
-  verify` answers for the chain.
+Two things people use it for first:
 
-Not everything is worth a tap: a class declared `supervised` runs immediately,
-and a policy-declared fraction of those runs is sampled for your retrospective
-review, using a secret the agent cannot read.
+- **Signing off an email.** The agent drafts, you read the recipients, subject
+  and body on your phone, you tap Approve, and the adapter sends it once with a
+  credential the agent never held.
+- **Watching a coding agent.** A hook classifies every command Claude Code or
+  Cursor runs. Reads and edits go through; `git push origin main`, `npm
+  install`, `curl -d`, `rm -rf` come to your phone first, and every decision is
+  in a log you can verify.
 
-Spec site: https://approval.md · Specification: [SPEC.md](SPEC.md)
+Spec site: https://approval.md · Specification: [SPEC.md](SPEC.md) · Package:
+`approval-md` on npm.
+
+## Five minutes to a working gate
+
+**1. Install.**
+
+```sh
+npm install -g approval-md
+```
+
+**2. Make a gate.** Three commands in the project directory. `init` writes a
+starting policy that names an approver called alice; make it you, then sign for
+the bytes.
+
+```sh
+approval init
+sed -i '' 's/alice/yourname/g' APPROVAL.md     # Linux: drop the ''
+approval policy attest --as human:yourname
+```
+
+```
+attested /your/project/APPROVAL.md at seq 1: sha256 cff55216c7be9bfbf35a7d980b6a0c75d250ebc039d7584cb9b3aa3bf25b2f91
+```
+
+The gate is operative. Open `APPROVAL.md`: it is a page of YAML you can read in
+a minute, and the classes marked `manual` are the ones that will ask you.
+
+**3. Put the button on your phone.** Message **@BotFather** on Telegram with
+`/newbot`, then:
+
+```sh
+approval setup channel telegram   # token into the keystore, chat discovery
+eval "$(approval env)"            # the resolved variables, in this shell
+approval up                       # the runtime: one foreground process
+```
+
+Leave `approval up` running. Everything below that needs a decision now
+reaches your phone.
+
+**4. Pick your first experience.**
+
+- *A coding agent*: [gate your coding agent](#gate-your-coding-agent) is two
+  more steps, a classification you can try immediately and a hook you paste
+  into `.claude/settings.json`.
+- *An email*: [hand a grant to a real credential](#hand-a-grant-to-a-real-credential)
+  adds an SMTP or AgentMail credential to the vault, and
+  [examples/email-demo.md](examples/email-demo.md) walks the whole send.
+
+When something does not work, `approval doctor` prints one line per check with
+a `fix:` line under each failure. It is described under [Running the
+checks](#running-the-checks), and it is not a step you need on the way in.
+
+## What it is made of
+
+- **A policy file you wrote.** `APPROVAL.md` is markdown at the root of your
+  project with one YAML block declaring which classes of side effect an agent
+  may take on its own, which need you, and under what budgets. A human signs
+  for its exact bytes; an edit makes it inoperative until someone signs again.
+- **A message on your phone.** A request arrives over Telegram carrying what
+  the runtime computed, what the agent claimed, and the exact bytes about to
+  leave. You tap Approve or Reject. A local web page and the terminal are the
+  other two channels.
+- **A single-use execution token.** Minted at one place in the code, only as a
+  human decision is recorded, spent once, stored nowhere. An adapter holding a
+  real credential opens it only inside a verified token window.
+- **A log nobody can quietly rewrite.** Every proposal, decision and execution
+  is an append-only, hash-chained JSONL record. `approval log verify` answers
+  for the chain.
+
+Not everything is worth a tap. A class declared `supervised` runs at once, and
+a fraction of those runs is sampled for your retrospective review using a
+secret the agent cannot read, so you see one in a hundred `gh pr merge` calls
+rather than all of them.
+
+The design rule is **files are the interface, the log is the truth, the
+database is a cache**. Routing, gating, budget math and chain verification are
+deterministic code. Models propose; the runtime decides.
 
 ## How the gate holds
 
@@ -39,95 +109,38 @@ Spec site: https://approval.md · Specification: [SPEC.md](SPEC.md)
   in the agent's environment. `APPROVAL.md` carries the *name* of an environment
   variable, and there is no `approval vault get`.
 - **Adapters answer only to tokens.** The email adapter opens the vault inside a
-  verified token window, sends, closes it. An agent without a token reaches no
-  credential.
+  verified token window, sends, and closes it. An agent without a token reaches
+  no credential.
 - **Tokens are minted at one site**, in the path that records a human decision,
   and the log holds only their SHA-256. A second spend is refused
   `token-consumed`.
-- **The log makes tampering evident.** Each record chains to the previous one,
-  and projections rebuild from it and never write back.
+- **The log makes tampering evident.** Each record chains to the previous one.
+  Projections rebuild from the log and never write back.
 - **The harness hook covers the direct-shell path.** `approval hook claude-code`
-  classifies the commands a coding agent runs on its own (`git push`, `npm
-  install`, `curl`) and answers allow or deny, fail-closed.
-- **The escape hatch is a recorded ceremony.** When the gate itself is broken
-  and every command dies, a human opens a time-boxed window with `approval gate
-  open`: a terminal, a required `--reason`, and the word `understood`. Every
-  call it lets through is logged as `gate.bypassed`, human-only classes stay
-  refused, and `approval status` reports unhealthy until it closes. The
-  synopsis and a worked example are in
-  [docs/cli-reference.md#gate](docs/cli-reference.md#gate).
+  classifies the commands a coding agent runs on its own and answers allow or
+  deny, fail-closed.
+- **The escape hatch is a recorded ceremony.** When the gate itself is broken, a
+  human opens a time-boxed window with `approval gate open`: a terminal, a
+  required `--reason`, and the typed word `understood`. Every call it lets
+  through is logged as `gate.bypassed`, human-only classes stay refused, and
+  `approval status` reports unhealthy until it closes
+  ([docs/cli-reference.md#gate](docs/cli-reference.md#gate)).
 
-The honest posture, from [SPEC.md](SPEC.md) section 11: this is an oversight
-layer for broadly cooperative agents, with hard enforcement at the adapter
-boundaries that hold the credentials. Identity in v0.1 is config-declared, so
-the trust boundary is the machine rather than cryptography.
-["Can't the agent just go around it?"](#cant-the-agent-just-go-around-it) works
-through each evasion and says where the boundary actually is.
-
-The design mantra is **files are the interface, the log is the truth, the
-database is a cache**. Routing, gating, budget math, and chain verification are
-deterministic code. Models propose, and the runtime decides.
-
-## Install
-
-```sh
-npm install -g approval-md
-```
-
-(Publishing is imminent. Until it lands, `git clone`, `npm ci`, `npm run build`,
-`npm link` in the checkout gives you the same `approval` binary.)
-
-Six commands take an empty directory to a machine that will tell you what it is
-missing. `init` authorizes nothing, `policy attest` is what makes a policy
-operative, and `doctor` reports and repairs nothing.
-
-```sh
-mkdir -p /tmp/approval-demo && cd /tmp/approval-demo
-approval init                    # APPROVAL.md, .approval/log/, QUEUE.md, .gitignore
-approval setup identity          # writes where APPROVAL_HUMAN comes from
-eval "$(approval env)"           # put the resolved variables in this shell
-approval policy attest           # a human signs for these exact policy bytes
-approval doctor                  # can this machine run the system at all?
-```
-
-```
-attested /tmp/approval-demo/APPROVAL.md at seq 1: sha256 cff55216c7be9bfbf35a7d980b6a0c75d250ebc039d7584cb9b3aa3bf25b2f91
-```
-
-`doctor` prints one line per check and a tally. Three of the 27 lines from a
-fresh directory, plus that tally:
-
-```
-✓ identity            APPROVAL_HUMAN=human:alice (config-declared: the trust boundary is this machine, not cryptography)
-✓ log                 /tmp/approval-demo/.approval/log/events.jsonl verifies: 1 record(s), head seq 1 0f3c4a19187a…
-✗ audit-sampling      disabled (secret-env-unnamed): APPROVAL.md sets audit.supervised_sample_rate to 0.1 but names no audit.sampling_secret_env. …
-    fix: approval policy attest --as human:<id> — after setting audit.supervised_sample_rate and audit.sampling_secret_env in the policy; then export the named variable where the daemon runs
-9 ok · 17 not applicable · 1 failed
-```
-
-The checks run in the order their failures cascade, from build freshness through
-identity, attestation, the log chain, the channels, the payload store, audit
-sampling, envelope integrity, the vault, and the environment source map behind
-`approval env`, then the rows that ask git and the harness what happened. The
-full roster and what a fresh directory skips are under [Running the
-checks](#running-the-checks). Each carries a `fix:` line you run yourself, and
-that one failure is real and intended: the scaffolded policy samples supervised
-actions for audit, sampling needs an operator-held secret the policy only names,
-and a control that looks like it is running while the party under oversight can
-steer it is worse than one that is visibly off. What `init` scaffolds is the
-canonical example policy of SPEC.md section 5.1, which names an approver you are
-probably not. Read every class before you sign for it, then attest again.
+This is an oversight layer for broadly cooperative agents, with hard
+enforcement at the adapter boundaries that hold the credentials (SPEC.md
+section 11). Identity in v0.1 is config-declared, so the trust boundary is the
+machine rather than cryptography. ["Can't the agent just go around
+it?"](#cant-the-agent-just-go-around-it) works through each evasion.
 
 ## Gate your coding agent
 
 `approval run` gates the commands an agent hands to the runtime. It cannot gate
 the ones the harness runs directly, and those are most of them. Two surfaces
-close that gap, a PreToolUse hook for Claude Code and an MCP server for any
-harness that speaks MCP, both resolving against the same policy and appending to
-the same log as the CLI.
+close that gap: a PreToolUse hook for Claude Code and an MCP server for any
+harness that speaks MCP. Both resolve against the same policy and append to the
+same log as the CLI.
 
-**1. See how a command classifies.** This touches nothing, and it is the fastest
-way to understand a verdict.
+**1. See how a command classifies.** This touches nothing.
 
 ```
 $ approval hook classify -- npm install left-pad
@@ -137,23 +150,12 @@ deps.add  npm-install-package  npm install left-pad
 classes: deps.add
 ```
 
-Every segment of a command line is classified and the command takes the union, so
-`git status && curl -d … ` is gated as `network.call`.
+Every segment of a command line is classified and the command takes the union,
+so `git status && curl -d …` is gated as `network.call`.
 
-The taxonomy grows where the log shows a class asking for a decision nobody was
-making. `files.delete.scratch` (APRV-267) is the sibling of
-`files.delete.out_of_scope` for a delete whose every target sits strictly under a
-scratch root the agent made itself; everything not provably scratch keeps the old
-class. `vcs.remote.meta` (APRV-268) is exactly three `gh` forms against the
-checkout's own origin, `gh api graphql`, `gh pr update-branch` and `gh run
-rerun`, split out of `network.call` because asking a forge about the repository
-it already tracks is not the send that `network.call` exists for. Any flag
-pointing `gh` at another repository or another host falls back to today's class,
-since the classifier is pure and cannot resolve `origin`.
-
-**2. Install the hook.** It lives in `.claude/settings.json`, and a human commits
-that file: an agent that could write its own hook entry could write itself out
-of it.
+**2. Install the hook.** It lives in `.claude/settings.json`, and a human
+commits that file: an agent that could write its own hook entry could write
+itself out of it.
 
 ```json
 { "hooks": { "PreToolUse": [ {
@@ -163,29 +165,28 @@ of it.
 } ] } }
 ```
 
-`--dir` resolves the policy and the log together, so a session inside a linked
-worktree still writes to the one log. Keep `--timeout` (how long the hook waits
-for a human) comfortably below `timeout` (Claude Code's cap on the process). The
-harness now asks before it acts.
+Register the same command under `PostToolUse` as well, without `--timeout`, so
+the runtime learns how each command ended. `--dir` resolves the policy and the
+log together, so a session inside a linked worktree still writes to the one
+log. Keep `--timeout` (how long the hook waits for you) below `timeout` (Claude
+Code's cap on the process).
 
-**3. Watch a verdict.** An `autonomous` class allows and logs nothing, a
-`supervised` class allows and records `task.registered`, a `manual` class waits
-for your decision, and anything the classifier cannot read denies. There is no
-"ask" answer by design: a decision taken outside the log is a decision nothing
-can audit. The deny reason is `<code>: <detail>`, the codes frozen
-(`hook-unclassified`, `hook-opaque`, `hook-rejected`, `hook-timeout`, and kin).
+**3. Watch a verdict.** An `autonomous` class allows and logs nothing. A
+`supervised` class allows and records the action for sampling. A `manual` class
+waits for your tap. Anything the classifier cannot read denies. There is no
+"ask" answer: a decision taken outside the log is a decision nothing can audit.
+The deny reason is `<code>: <detail>`, and the codes are frozen
+(`hook-unclassified`, `hook-opaque`, `hook-rejected`, `hook-timeout` and the
+rest in [docs/claude-code-hook.md](docs/claude-code-hook.md)).
 
-**4. Know the three sharp edges.** The hook never creates a log: pointed at a
-path with no log it denies `hook-log-unreachable` rather than forking a second
-chain, because hash chains do not survive a merge. A wait that runs out withdraws
-its request, so nobody is pinged about a question whose asker has left. And a
-hook grant mints no token: the harness runs the command, `approval token` reports
-`none minted: harness-executed`, and `approval run` refuses with the same code.
-Full account: [docs/claude-code-hook.md](docs/claude-code-hook.md).
+**4. Know the sharp edges.** The hook never creates a log: pointed at a path
+with no log it denies `hook-log-unreachable` rather than forking a second
+chain. A wait that runs out keeps its question open for a short grace and then
+withdraws it, so nobody is pinged about a question whose asker has left. A hook
+grant mints no token: the harness runs the command itself.
 
-**5. Or connect the MCP server instead.** `approval mcp serve` is a foreground
-stdio server publishing the agent's verbs as tools, built from the same registry
-`approval instructions --schemas` prints.
+**5. Or connect the MCP server.** `approval mcp serve` is a stdio server
+publishing the agent's verbs as tools.
 
 ```sh
 claude mcp add approval -- \
@@ -194,46 +195,34 @@ claude mcp add approval -- \
     --dir /path/to/project
 ```
 
-Ask the client for its tool list. `register`, `request`, `wait`, `run`, `queue`,
-`status`, `log_verify` and the rest of the agent's surface are there; `grant`,
-`reject`, `revoke`, `policy attest` and `vault set` are not, and their absence is
-the design. SPEC.md section 11 makes the agent the untrusted policy and the human
-the trusted overseer, an MCP client is the agent's harness, and a `grant` tool on
-it would hand the untrusted policy the overseer's pen. **Grant never travels over
-MCP**, and neither does the token it mints. The identity is fixed at startup and
-`--as` is deleted from every published input schema, so a tool call cannot name
-an actor. Provoke `unknown tool "grant"` once, deliberately, so you have seen it.
-Walkthrough: [examples/mcp-demo.md](examples/mcp-demo.md).
+`register`, `request`, `wait`, `run`, `queue`, `status` and the rest of the
+agent's surface are there. `grant`, `reject`, `revoke`, `policy attest` and
+`vault set` are not: an MCP client is the agent's harness, and a `grant` tool
+on it would hand the agent the overseer's pen. Grant never travels over MCP,
+and neither does the token it mints. The identity is fixed at startup and
+`--as` is removed from every published schema, so a tool call cannot name an
+actor. Walkthrough: [examples/mcp-demo.md](examples/mcp-demo.md).
 
-A harness that can simply run commands needs neither surface: `request`, `wait`,
-`run` is how sessions in this repository take manual-class actions
-([docs/dogfood-cutover.md](docs/dogfood-cutover.md)). The task-file side of that
-flow, on a Backlog.md board with a policy of its own, is the worked example in
-[examples/backlog-md-project/README.md](examples/backlog-md-project/README.md):
-one envelope on one task file, then `register`, `request`, `wait`, `run`, with
-what each prints. There is no Backlog.md adapter, and the example says why.
+A harness that can run commands needs neither surface: `request`, `wait`, `run`
+is how sessions in this repository take manual-class actions
+([docs/dogfood-cutover.md](docs/dogfood-cutover.md)). The task-file side of
+that flow, on a Backlog.md board, is
+[examples/backlog-md-project/README.md](examples/backlog-md-project/README.md).
 
 ## Put approvals on your phone
 
-**1. Create a bot and let setup do the rest.** Message **@BotFather** with
-`/newbot`, then:
+**1. Setup writes the environment map, not the secrets.** `approval setup
+channel telegram` puts the bot token in the OS keystore (macOS Keychain, or
+`secret-tool` on Linux) and records in `.approval/env` only where it lives. The
+verbs are interactive by refusal: a pipe or `--json` exits 2 and prints the
+non-interactive commands, because a setup a CI job could drive would let a CI
+job declare a human identity. `approval env` is the only command that reads
+that file, and evaluating it is a step a human takes. Full walkthrough:
+[examples/telegram-demo.md](examples/telegram-demo.md).
 
-```sh
-approval setup identity          # APPROVAL_HUMAN, validated
-approval setup channel telegram  # token into the keystore, getMe, chat discovery
-eval "$(approval env)"           # put them in this shell
-```
-
-`setup` writes `.approval/env`, the environment source map: the secret goes into
-the OS keystore (macOS Keychain, or `secret-tool` on Linux) and the file records
-only where it lives. It is interactive by refusal (a pipe or `--json` exits 2 and
-prints the non-interactive commands), because a setup a CI job could drive would
-be a way for a CI job to declare a human identity. `approval env` is the only
-command that reads that file, and evaluating it is a step a human takes. Full
-walkthrough: [examples/telegram-demo.md](examples/telegram-demo.md).
-
-**2. Bind a request to exact bytes.** The payload lives in a file, the envelope
-declares its `payload_hash`, and `--payload` supplies the bytes at request time:
+**2. A request binds to exact bytes.** The payload lives in a file, the
+envelope declares its `payload_hash`, and `--payload` supplies the bytes at
+request time:
 
 ```sh
 approval payload hash payload.json    # the binding the envelope declares
@@ -246,46 +235,38 @@ registered task-demo at seq 2: 1 action(s)
 requested task-demo task-demo:chaser at seq 3 (manual)
 ```
 
-Material that hashes to something else is refused `payload-mismatch`, and nothing
-is stored and nothing is appended. Class, cost, and reversibility come from the
+Material that hashes to something else is refused `payload-mismatch`, and
+nothing is stored or appended. Class, cost and reversibility come from the
 registered envelope rather than from flags, so an agent cannot rename its own
-class between registering and asking. An approval is about specific bytes, never
-about a description of them.
+class between registering and asking. An approval is about specific bytes,
+never about a description of them.
 
-**3. Start the runtime and read the message.** `approval up` prints
-`notified task-demo:chaser (message 501)` and your phone has it. That one
-foreground process is the whole gate: the daemon loop that records envelope
-drift, expires what lapsed and regenerates the queue, plus every channel the
-policy configures. A channel whose credential variable is unset is not started,
-says so in the words `approval doctor` uses, and the daemon runs anyway; a
-channel that falls over is restarted with a doubling backoff while the loop keeps
-ticking. `approval daemon run` and `approval channel telegram listen` still run
-the halves separately and behave identically, and `approval setup service` writes
-the launchd or systemd user unit that starts the runtime at login (printing the
-whole unit for you to read first, naming variables and never copying a value).
+**3. The runtime delivers it.** `approval up` prints `notified
+task-demo:chaser (message 501)` and your phone has it. That one foreground
+process is the daemon loop (envelope drift, expiry, queue regeneration,
+retrospective sampling) plus every channel the policy configures. A channel
+whose credential is unset is not started and says so; a channel that falls over
+is restarted with backoff while the loop keeps ticking. `approval setup service`
+writes the launchd or systemd user unit that starts it at login, and prints the
+whole unit for you to read first.
 
-To use the signed-in Codex CLI for the optional unverified gloss, name both the
-provider and model:
+The message shows the action key, a **COMPUTED** block the runtime derived
+(class, task, binding, budget verdicts, chain head), a **CLAIMED** block naming
+the agent and marked unverified, the **FULL PAYLOAD**, and two buttons. It says
+how long an answer still has: `waiting: requested 4 min ago · expires 13:07
+UTC`, or, for a request a process is blocked on, `requester waits until 13:07
+UTC`. An email-shaped payload is rendered field by field with real line
+breaks, with the canonical JSON and its hash underneath. Detection is
+structural and never reads a self-declared type. Agent-authored text is
+HTML-escaped, so markup stays inert.
+
+An optional gloss, a one-line plain-English reading of the payload by a model,
+can sit above the computed block. It is marked unverified, it never changes a
+verdict, and a failed gloss is omitted while delivery continues:
 
 ```sh
-approval up --gloss-provider codex --gloss-model gpt-5.4-mini
+approval up --gloss-provider codex --gloss-model gpt-5.4-mini   # or the default, claude/haiku
 ```
-
-Claude with model `haiku` remains the default. The runtime never falls back
-between providers; a failed gloss is omitted and approval delivery continues.
-The message shows the action key, a **COMPUTED** block the runtime derived (class,
-task, state, binding, budget verdicts, chain head), a **CLAIMED** block naming the
-agent and marked unverified, the **FULL PAYLOAD**, and two buttons. It also says
-how long an answer still has: `waiting: requested 4 min ago · expires 13:07 UTC
-(clock)`, or, for a request some process is blocked on, `requester waits until
-13:07 UTC`, the deadline that actually applies to you.
-
-A payload the runtime recognises by shape is laid out so a human can read it: an
-email-shaped payload (recipients, subject, body) is rendered field by field with
-real line breaks, and the canonical JSON and its bound hash sit underneath
-unchanged. Detection is structural and never reads a self-declared type, because
-a field the requesting agent authored must not choose its own presentation.
-Agent-authored text is HTML-escaped, so markup stays inert.
 
 **4. Tap Approve.** The prompt rewrites itself in place. The buttons go away and
 the text becomes the outcome:
@@ -297,16 +278,16 @@ task-demo:chaser
 by human:alice at 10:20 UTC (seq 4)
 ```
 
-One edit call carries the annotation and the disarming together, so there is no
-window in which the message reads "approved" and still offers a tap. Rejections,
-revocations, expiries and withdrawals settle the same way with their own
-headline, a decision taken at another surface annotates the prompt on the next
-poll cycle, and a tap on a stale button is answered with a toast and records
-nothing.
+One edit carries the annotation and the disarming together, so there is no
+moment when the message reads "approved" and still offers a tap. Rejections,
+revocations, expiries and withdrawals settle the same way, and a tap on a stale
+button records nothing.
 
-**5. Take the token from the terminal, not the chat.** The grant mints a
-single-use execution token, printed once, in a panel, at whichever surface
-recorded the decision:
+**5. The token stays off the chat.** The grant mints a single-use execution
+token. With `defaults.token_delivery: sealed` the requesting process opens it
+itself and no human ever sees it, which is how this repository releases. With
+the default `manual` delivery it is printed once, in a panel, at the surface
+that recorded the decision:
 
 ```
 granted task-demo:chaser at seq 4 by human:alice
@@ -317,30 +298,27 @@ granted task-demo:chaser at seq 4 by human:alice
 ─────────────────────────────────────────────────────────────
 ```
 
-For a tap on your phone the same panel appears on the terminal running the
-runtime, and its last line reads `not sent to Telegram`. Delivery differs per channel on
-purpose: a chat transcript lives on servers you do not control and is readable by
-anyone later added to that chat, so a credential does not go there, while the
-local **web** channel shows the raw token once in the response page for the grant
-that minted it, served over loopback, generated per request, persisted nowhere,
-and gone on reload: there the browser is already the surface the human is looking
-at. In both cases the log holds only the token's SHA-256, it never appears in a
-URL, and nothing can recover it. Lose it, revoke the grant, and request again.
+For a tap on your phone that panel appears on the terminal running the
+runtime, and its last line reads `not sent to Telegram`: a chat transcript
+lives on servers you do not control, so a credential does not go there. The
+local **web** channel shows the token once in the response page for the grant
+that minted it, served over loopback, gone on reload, because there the browser
+is already the surface you are looking at. In every case the log holds only the
+token's SHA-256. Lose it, revoke the grant, and request again.
 
 **6. Spend it.** `approval run <action> --token "$TOKEN" -- <command>` appends
-`execution.started` before spawning the child and
-`execution.completed` after, and exits with the child's own exit code, so it
-composes with `make`, CI, and `&&` as an unwrapped command would. Run it before
-the approval and it refuses `token-required` at exit 5, writing nothing. Run it
-twice and it refuses:
+`execution.started` before spawning the child and `execution.completed` after,
+and exits with the child's own exit code, so it composes with `make`, CI and
+`&&`. Run it before the approval and it refuses `token-required` at exit 5.
+Run it twice and it refuses:
 
 ```
 ✗ token-consumed  action task-demo:chaser already executed: execution.started at seq 5 spent this token. A token is single-use and the log is the proof.
 ```
 
-A request is not owed an answer forever, either. `approval withdraw` lets the
-party that opened one take it back while it is pending, and `approval wait
---withdraw-on-timeout` does it for you when your own wait elapsed.
+A request is not owed an answer forever. `approval withdraw` lets the party
+that opened one take it back while it is pending, and `approval wait
+--withdraw-on-timeout` does it when your own wait elapses.
 
 **7. Read the whole story.** Two actors, one clean chain:
 
@@ -353,16 +331,22 @@ party that opened one take it back while it is pending, and `approval wait
 6	2026-08-19T19:04:41.499Z	execution.completed	agent:drafter	task-demo
 ```
 
-That is `approval log tail` piped, fields tab-separated for `cut` and its kin; on
-a terminal it aligns and colours its columns. `approval log verify` answers for
-the chain: `clean: 6 record(s), head seq 6 843705c6bbea…`.
+That is `approval log tail`, tab-separated for `cut` when piped, aligned and
+coloured on a terminal. `approval log verify` answers for the chain: `clean: 6
+record(s), head seq 6 843705c6bbea…`.
+
+**8. Review what ran without you.** Supervised actions the sampler picks arrive
+on the same chat as review cards, after the fact: what ran, when, and that the
+runtime allowed it unasked. ✅ records that you looked, 🛑 twice records a
+denial and opens a reconciliation obligation, and 👎 😐 👍 ❤️ leave a graded
+reaction. `approval audit list` and `approval audit review` are the same
+backlog at the terminal.
 
 ## The other half of the word
 
-Everything above is control: what an agent may do, who decides, what is
-sampled. From 0.1.0 the file carries the human's voice too. Below the policy
-block, `APPROVAL.md` may hold one optional `yaml approval-values` block:
-what you love, like and dislike in the work, what you want from an agent as
+Everything above is control. The file carries your voice too. Below the policy
+block, `APPROVAL.md` may hold one optional `yaml approval-values` block: what
+you love, like and dislike in the work, what you want from an agent as
 behaviour, and how you read and answer.
 
 ```sh
@@ -371,26 +355,24 @@ approval feedback    # the reactions and notes humans left on this log's actions
 ```
 
 A retrospective review or a grant can carry a graded reaction (`disliked`,
-`indifferent`, `liked`, `loved`; the two extremes need a note), and
-`approval feedback` reads them back to the agent whose work they were about.
-Both verbs print human-authored guidance behind a banner that says so, and
-neither reaches enforcement: no verdict, sample, budget or token is moved by
-anything in them (SPEC.md section 11.1, invariant 10). They are the mirror of
-`approval journal write`, the agent's outlet the gate does not stand in front
-of. The importer drafts the block too: `approval import agents-md` turns a
-"What I value" heading into a `wants` list for you to grade.
+`indifferent`, `liked`, `loved`; the two extremes need a note), and `approval
+feedback` reads them back to the agent whose work they were about. Both verbs
+print human-authored guidance behind a banner that says so, and neither reaches
+enforcement: no verdict, sample, budget or token moves because of them (SPEC.md
+section 11.1, invariant 10). They mirror `approval journal write`, the agent's
+outlet the gate does not stand in front of. `approval import agents-md` drafts
+the block from a "What I value" heading in an AGENTS.md.
 
 ## Define what needs approval
 
 A policy is a fenced `yaml approval-policy` block inside a markdown file named
 `APPROVAL.md`. The prose around the block is for you; the runtime parses the
-block and ignores the rest. That is the point of the format: the thing you sign
-for is text you read.
+block and ignores the rest. The thing you sign for is text you read.
 
 **1. Name the classes.** A class is a dotted path from the side-effect taxonomy
 of SPEC.md section 7 (`communicate.email.external`, `financial.spend`,
-`public.post`, `data.delete`, `read.*`). Matching is most-specific-first, `*` is
-a single-segment wildcard, a trailing `.*` matches any depth, and at equal
+`public.post`, `data.delete`, `read.*`). Matching is most-specific-first, `*`
+is a single-segment wildcard, a trailing `.*` matches any depth, and at equal
 specificity the strictest rule wins.
 
 **2. Pick an autonomy for each.** Six values, strictest first: `human-only` (a
@@ -399,8 +381,7 @@ an agent with `class-human-only`), `manual` (a human decides before execution),
 `supervised-live` (a policy-declared fraction blocks on the gate exactly as
 `manual` does, and the rest proceed, so the rule carries a `live_rate`),
 `supervised-retro` (executes immediately, a sampled fraction escalated for
-retrospective review), `supervised` (the pre-split spelling, an alias of
-`supervised-retro`, and the runtime records a load-time note naming the alias),
+retrospective review), `supervised` (an alias of `supervised-retro`), and
 `autonomous` (executes freely). An email is `reversible: false`, which engages
 section 7's irreversibility floor: the class resolves to `manual` even where the
 policy says `supervised`, because retrospective sampling cannot un-send a
@@ -408,67 +389,57 @@ message.
 
 **3. Set the budgets.** Class `limits` and the `budgets` scopes are conjunctive,
 so an action must pass both, and consumption is computed from the log over
-rolling windows rather than from a mutable counter. An action whose class matches
-no rule takes `defaults.autonomy`, and a policy that does not parse resolves every
-class to `manual`: unattested and unparseable are both strict, never permissive.
+rolling windows rather than from a mutable counter. An action whose class
+matches no rule takes `defaults.autonomy`, and a policy that does not parse
+resolves every class to `manual`: unattested and unparseable are both strict.
 
 **4. Widen the protected paths.** `APPROVAL.md`, the agent instruction files,
-`.approval/`, the harness settings and the release configuration are protected by
-the runtime whatever a policy says. `protected_paths` adds repo-relative literals
-(an exact file, `SPEC.md`, or a directory prefix, `design/`), so a project can put
-its own governing documents behind the gate that already stands in front of its
-policy. The key can only widen, and globs are a schema violation.
+`.approval/`, the harness settings and the release configuration are protected
+by the runtime whatever a policy says. `protected_paths` adds repo-relative
+literals (an exact file, `SPEC.md`, or a directory prefix, `design/`), so a
+project can put its own governing documents behind the same gate. The key can
+only widen, and globs are a schema violation.
 
-An entry can also be an object, `{path, class}`, which routes that path family to
-a named `policy.edit` sub-class so it carries its own autonomy and its own live
-rate. Four names are reserved with fixed meanings, so two policies mean the same
-thing by them: `policy.edit.spec` (the governing specification),
-`policy.edit.harness` (agent instruction files and harness configuration that is
-not the hook itself), `policy.edit.ci` (continuous-integration and release
-configuration), `policy.edit.design` (design documents and decision records). Any
-other lowercase word may be minted beside them, and nothing outside `policy.edit`
-may be named: a route to `policy.core` or `log.mutate` is refused, since a policy
-that could widen its own protected surface mints no authority over the gate's own
-organs. A route aimed at a built-in protected path must land at least as strictly
-as the `policy.edit` line itself, and a policy that breaks that floor is refused
-at load with `protected-route-floor`.
+An entry can also be an object, `{path, class}`, routing that path family to a
+named `policy.edit` sub-class with its own autonomy and live rate. Four names
+are reserved: `policy.edit.spec` (the governing specification),
+`policy.edit.harness` (agent instruction files and harness configuration),
+`policy.edit.ci` (continuous-integration and release configuration),
+`policy.edit.design` (design documents and decision records). Any other
+lowercase word may be minted beside them, and nothing outside `policy.edit` may
+be named: a route to `policy.core` or `log.mutate` is refused. A route aimed at
+a built-in protected path must land at least as strictly as the `policy.edit`
+line itself, or the policy is refused at load with `protected-route-floor`.
 
 **5. Attest it.** `approval policy attest` is what makes a policy operative. An
-attestation records that a human saw these exact bytes, and it records their
-SHA-256 rather than their text. Edit `APPROVAL.md` afterwards and every gated
-operation refuses `hash-mismatch` until you attest again. Attestation is
-human-only, and identity in v0.1 is config-declared, so what one proves is that
-*someone with local control* signed off.
+attestation records that a human saw these exact bytes, as their SHA-256. Edit
+`APPROVAL.md` afterwards and every gated operation refuses `hash-mismatch`
+until you attest again. Attestation is human-only, and identity in v0.1 is
+config-declared, so what one proves is that someone with local control signed
+off.
 
 **6. Amend it with the verb, not by hand.** Changing a policy is two facts that
 have to land together, the new bytes and a human's attestation of them, and
-`approval policy amend` owns the whole ceremony (`--dry-run` reports only,
-`--require-load` refuses to attest a policy that does not load, `--commit` lands
-the two files as one commit). It prints a **semantic diff** (class resolutions,
-approver changes, defaults, limits) rather than a text diff, so you see what
-changed in meaning; the baseline comes from `HEAD:<policy>` and is used only when
-its SHA-256 equals the attested hash, and otherwise the verb drops loudly to
-hash-only mode. Then it prints a **load advisory**: whether the edited policy
-actually parses. Attesting one that does not is still allowed, since attestation
-records bytes and not correctness, but such a policy fails closed to all-manual.
+`approval policy amend` owns the ceremony (`--dry-run` reports only,
+`--require-load` refuses to attest a policy that does not load, `--commit`
+lands the two files as one commit and opens the pull request). It prints a
+semantic diff (class resolutions, approver changes, defaults, limits) rather
+than a text diff, then a load advisory saying whether the edited policy parses.
+Attesting one that does not parse is allowed, since attestation records bytes
+rather than correctness, and such a policy fails closed to all-manual.
 
 ### Why this verb exists: seq 2
 
 Read this repository's own log. At **seq 2** a policy amendment was attested at
-11:56:07. It was **superseded** seven minutes later, at seq 3 at 12:03:35,
-because the edit broke a pinned assertion and nobody found out until the test
-suite ran against it. The operator attested bytes whose consequences had never
-been shown to them.
+11:56:07. It was **superseded** seven minutes later, at seq 3, because the edit
+broke a pinned assertion and nobody found out until the test suite ran against
+it. The operator attested bytes whose consequences had never been shown to
+them. (This account originally said eleven minutes. The log says seven, and
+the log won.)
 
-This account originally said eleven minutes. The log says seven, and the log
-won: the figure was corrected against the chain after being misremembered, which
-is the whole thesis of keeping one.
-
-That is the failure the load advisory is for. Had `approval policy amend` existed
-that morning, the load failure would have been on screen while the human was
-deciding, and `--require-load` would have refused to attest at all. The incident
-is cited by number on purpose: it is in the log, it is checkable, and the log is
-the truth.
+That is the failure the load advisory is for. Had `approval policy amend`
+existed that morning, the load failure would have been on screen while the
+human was deciding, and `--require-load` would have refused to attest at all.
 
 ## Hand a grant to a real credential
 
@@ -485,43 +456,42 @@ approval adapter email task-042:chaser --token "$TOKEN" \
   --payload message.json --as agent:claude-admin
 ```
 
-**1. The two stores divide cleanly.** `.approval/env` says where the values that
-unlock the machine come from, and `approval setup vault` writes the passphrase
-line under whatever name `vault.passphrase_env` declares. The SMTP password is an
-adapter credential, so it goes in the vault instead, where a gated adapter spends
-it inside a verified token window.
+**1. Two stores.** `.approval/env` says where the values that unlock the
+machine come from, and `approval setup vault` writes the passphrase line under
+whatever name `vault.passphrase_env` declares. The SMTP password is an adapter
+credential, so it goes in the vault, where a gated adapter spends it inside a
+verified token window.
 
 **2. Setup fills the vault and proves it.** `approval setup adapter email` reads
 the credential manifest the adapter declares, then probes the server without
-sending anything; a partial re-run probes the **merged** configuration.
+sending anything.
 
 **3. A credential's only journey is into an adapter.** `approval vault set`
-stores one credential in `.approval/vault.enc`, encrypted under a passphrase the
-policy names and never carries. The value comes from stdin or `--value-env
+stores one credential in `.approval/vault.enc`, encrypted under a passphrase
+the policy names and never carries. The value comes from stdin or `--value-env
 <VAR>`; there is no `--value` flag, because a secret on a command line is a
-secret in the shell history and in `ps` output. There is no `approval vault get`
-and will not be; `approval vault list` shows the names.
+secret in the shell history. There is no `approval vault get`; `approval vault
+list` shows the names.
 
-**4. The send happens inside the token window.** `approval adapter email` verifies
-the token, re-hashes `message.json` against the binding the grant recorded,
-appends `execution.started`, opens the vault, reads the five SMTP settings inside
-the window, sends over STARTTLS, closes the window, and appends
+**4. The send happens inside the token window.** `approval adapter email`
+verifies the token, re-hashes `message.json` against the binding the grant
+recorded, appends `execution.started`, opens the vault, reads the SMTP
+settings, sends over STARTTLS, closes the window, and appends
 `execution.completed`. The credential exists for one send and appears in no
-event, no output, no error message. Nothing about the vault is ever a log entry:
-a list of the credentials an operator holds is a map of the machine's reach.
+event, output or error message.
 
 **5. Check two properties in your own mailbox.** The bytes that left are the
 bytes you approved, since the hash the token spend verified is the hash of the
 payload your phone displayed. And the `Message-ID` is derived from the action
-key, the payload hash and the sender, so the header in a mailbox and the binding
-in the chain identify each other months later.
+key, the payload hash and the sender, so the header in a mailbox and the
+binding in the chain identify each other months later.
 
 ### The same grant over AgentMail
 
-`communicate.email.external` has a second adapter. Where the email adapter opens
-an SMTP session, `approval adapter agentmail` calls the AgentMail API, and the
-mail an agent has already composed as a Draft leaves only when a grant says so.
-The walkthrough is [examples/agentmail-demo.md](examples/agentmail-demo.md).
+`communicate.email.external` has a second adapter. Where the email adapter
+opens an SMTP session, `approval adapter agentmail` calls the AgentMail API, and
+a mail the agent has already composed as a Draft leaves only when a grant says
+so. Walkthrough: [examples/agentmail-demo.md](examples/agentmail-demo.md).
 
 ```sh
 approval setup adapter agentmail                  # inbox id + sending key, into the vault
@@ -534,22 +504,19 @@ approval adapter agentmail task-042:chaser --token "$TOKEN" \
 per-permission booleans, and `draft_create`, `draft_update` and `draft_read` are
 separate from `draft_send` and `message_send`. Give the agent a key holding the
 first three and none of the last two, and put a key holding the send permissions
-in the vault, where the adapter reads it inside the verified token window. The
-agent then composes all day and cannot send at all: an ungated send attempt is
-refused by AgentMail itself, `agentmail-unauthorized`, before this runtime is
-involved. Without that split, an AgentMail key sitting in the agent's
-environment is a full bypass of the gate, which is why `AGENTMAIL_` is withheld
-from every child `approval run` spawns.
+in the vault. The agent composes all day and cannot send at all: an ungated
+send is refused by AgentMail itself, `agentmail-unauthorized`, before this
+runtime is involved. `AGENTMAIL_` is withheld from every child `approval run`
+spawns, so a key in the agent's environment cannot ride into a command.
 
 **A draft is mutable, so the grant binds its bytes.** `approval payload
 agentmail-draft` snapshots the draft's recipients, subject and text at request
-time, and that snapshot is what the payload hash binds and what your phone
-displays. Before it sends, the adapter re-fetches the draft and compares; a
-draft edited after the grant refuses `agentmail-draft-drifted`, sends nothing,
-and names which fields differ without quoting text nobody approved. That
-comparison runs before the token is spent, so the refusal costs no authority:
-restore the approved text and the same token still sends. Approving a draft id
-alone would be approving whatever the agent wrote into it last.
+time, and that snapshot is what the hash binds and what your phone displays.
+Before it sends, the adapter re-fetches the draft and compares; a draft edited
+after the grant refuses `agentmail-draft-drifted`, sends nothing, and names
+which fields differ without quoting text nobody approved. That comparison runs
+before the token is spent, so the refusal costs no authority: restore the
+approved text and the same token still sends.
 
 ## The APPROVAL.md dictionary
 
@@ -600,27 +567,26 @@ believed was in force. Full semantics: SPEC.md section 5.
 
 Every key ending in `_env` carries a variable's *name* and never its value:
 agents may read `APPROVAL.md`, so a secret it carried would be a secret they
-hold. Where those values live is recorded in `.approval/env`, which a single verb
-reads, `approval env`, whose output is an export block a human evaluates.
+hold. Where those values live is recorded in `.approval/env`, which a single
+verb reads, `approval env`, whose output is an export block a human evaluates.
 
 ## How this compares
 
 Three kinds of thing already exist in this space, and each solves a different
-part of the problem. (A hosted daemon and reviewer layer is operated by
-Bountify.ai; it is optional, and nothing in the format depends on it. See
-[GOVERNANCE.md](GOVERNANCE.md).)
+part of the problem. A hosted daemon and reviewer layer is operated by
+Bountify.ai; it is optional, and nothing in the format depends on it
+([GOVERNANCE.md](GOVERNANCE.md)).
 
 **Harness-native permission prompts** (Claude Code permission rules and hooks,
 Cursor auto-run, Codex CLI approval modes) enforce inside the one harness they
 ship with. That enforcement is real: a Claude Code PreToolUse deny holds even
-under its bypass mode, and Codex backs its gate with an OS-level sandbox, a
-defense layer this project does not attempt. What they lack is a durable record
-and portability. None writes an append-only log of what was asked, who decided,
-and what ran; the decision reaches a human only as a synchronous terminal
-prompt; and the mechanism does not travel to any other harness. approval.md's
-own Claude Code hook is built on top of that PreToolUse mechanism and adds the
-two missing pieces: the decision comes from an attested policy file rather than
-the session, and it lands in a verifiable log.
+under its bypass mode, and Codex backs its gate with an OS-level sandbox, which
+this project does not attempt. What they lack is a durable record and
+portability. None writes an append-only log of what was asked, who decided and
+what ran; the decision reaches a human only as a terminal prompt; and the
+mechanism does not travel to another harness. approval.md's Claude Code hook is
+built on that PreToolUse mechanism and adds the two missing pieces: the
+decision comes from an attested policy file, and it lands in a verifiable log.
 
 **AGENTS.md permissions prose** states the policy in English and trusts the
 agent to obey. Nothing parses it, nothing blocks a call against it, and no
@@ -631,62 +597,54 @@ this repository's own CLAUDE.md is the first import fixture.
 **Framework interrupts** (LangGraph `interrupt()`, CrewAI human input, AutoGen
 `UserProxyAgent`, the OpenAI Agents SDK's `needsApproval`, Temporal signal
 approvals) give a developer a pause-and-resume primitive and leave policy,
-audit format, the human channel, and the credential boundary entirely to them.
-They also require adopting the framework. Temporal deserves its credit: its
-event history is a genuine append-only execution record with crash recovery
-this project does not claim, though it lives in Temporal's storage as a replay
-log rather than as policy-attested files in your repo.
+audit format, the human channel and the credential boundary to them. They also
+require adopting the framework. Temporal's event history is a real append-only
+execution record with crash recovery this project does not claim, though it
+lives in Temporal's storage rather than as policy-attested files in your repo.
 
 **Hosted approval platforms** (HumanLayer, gotoHuman, Permit.io's access
 requests) are the closest relatives: multi-channel human routing, review UIs,
 and in Permit.io's case a real authorization engine richer than autonomy
 classes. Their model is a third-party service in the decision path, with the
 audit trail in the platform's backend, and the agent's own process still
-choosing to honor the returned verdict. They bring things a file convention
-cannot: hosted infrastructure, escalation and team routing, compliance
-certifications.
+choosing to honor the returned verdict. They bring hosted infrastructure,
+escalation and team routing, and compliance certifications.
 
-The differentiation is the combination rather than any single feature: policy
-as a hash-attested markdown file in your repo; an append-only, hash-chained log
-you can verify locally with one command; and an execution boundary where the
-credential is inert until a single-use token is minted at the moment a human
-decides. Every framework primitive and every hosted API above ultimately relies
-on the agent's process honoring a returned decision. Here the thing the agent
-needs (the credential) answers only to the thing it cannot make (the token).
-The tradeoffs are equally plain: you run the daemon and listener yourself,
-there is no OS-level sandbox, no compliance certification, and the reference
-phone channel is one app, Telegram.
+The difference is the combination: policy as a hash-attested markdown file in
+your repo; an append-only, hash-chained log you verify locally with one
+command; and an execution boundary where the credential is inert until a
+single-use token is minted at the moment a human decides. Every framework
+primitive and hosted API above relies on the agent's process honoring a
+returned decision. Here the thing the agent needs, the credential, answers only
+to the thing it cannot make, the token. The tradeoffs: you run the daemon and
+listener yourself, there is no OS-level sandbox, no compliance certification,
+and the reference phone channel is one app, Telegram.
 
 ## Can't the agent just go around it?
 
 **Edit the policy?** An attestation records the SHA-256 of the policy's bytes,
 and every gated operation refuses `hash-mismatch` when the live file disagrees
-with it. An unattested policy refuses too, and attesting is human-only. Under the
-harness hook the edit itself is classified `policy.edit` before it happens,
-because `APPROVAL.md` is in the built-in protected set no policy can narrow. A
-`protected_paths` entry may route a path family to a `policy.edit` sub-class
-(`policy.edit.spec`, `policy.edit.harness`, `policy.edit.ci`,
-`policy.edit.design`) so each carries its own autonomy, and the routing floor
-keeps a built-in path from landing anywhere looser than `policy.edit` itself.
+with it. An unattested policy refuses too, and attesting is human-only. Under
+the harness hook the edit itself is classified `policy.edit` before it happens,
+because `APPROVAL.md` is in the built-in protected set no policy can narrow.
 
-**Fabricate or rewrite the log?** Each record chains to the previous one's hash,
-so an edited or reordered record breaks the chain and `approval log verify` says
-so. Appends go through compare-and-append against the head, and projections
-(`QUEUE.md`, the SQLite index) rebuild from the log and never write back to it.
-Tampering is made evident, which is what an audit trail is for.
+**Fabricate or rewrite the log?** Each record chains to the previous one's
+hash, so an edited or reordered record breaks the chain and `approval log
+verify` says so. Appends go through compare-and-append against the head, and
+projections (`QUEUE.md`, the SQLite index) rebuild from the log and never write
+back to it.
 
 **Mint its own token, or reuse one?** Tokens are minted at one site, inside the
-path that records a human decision, and the log stores only the hash. No verb and
-no tool returns a token for a grant it did not just record, and a hook grant
-mints none at all. A token is single-use: the second spend is refused
-`token-consumed`, naming the seq of the `execution.started` that spent it, and no
-second record is appended.
+path that records a human decision, and the log stores only the hash. No verb
+and no tool returns a token for a grant it did not just record, and a hook
+grant mints none at all. The second spend is refused `token-consumed`, naming
+the seq of the `execution.started` that spent it.
 
 **Call the adapter or the credential directly?** Credentials live in
-`.approval/vault.enc` under a passphrase the policy names and never carries, and
-an adapter opens the vault only inside a verified token window. There is no
+`.approval/vault.enc` under a passphrase the policy names and never carries,
+and an adapter opens the vault only inside a verified token window. There is no
 `approval vault get`. An agent that never held a token never reaches a
-credential, which is where the hard enforcement in this system lives.
+credential. This is where the hard enforcement lives.
 
 **Run the side effect from its own shell?** That is what the PreToolUse hook is
 for: it classifies the command text, resolves the class, and answers allow or
@@ -697,30 +655,30 @@ stricter class. `bash -c`, `eval`, `sudo`, `xargs` and `node -e` deny as
 `hook-opaque`.
 
 **POST straight at the web queue?** It can. `approval channel web` binds
-`127.0.0.1` with the host hard-coded and no `--host` flag, because with no
-authentication the loopback interface is the entire access control, and every
-decision the page collects is recorded against the human the runtime was started
-with: it proves "someone with access to this machine approved" and never "that
-specific person approved". The page says so on itself. There is no CSRF token in
-v0.1, deliberately: a CSRF token defends a session, and with no session and
-nothing to authenticate against, anything that can open a socket to
-`127.0.0.1:4680` can POST with or without one. The same-origin check that rejects
-a POST naming a non-loopback `Origin` allows one carrying neither header, since
-`curl` and older browsers send neither: treat it as a speed bump rather than a
-control. A session, or a wider bind address, would need a real anti-CSRF token.
+`127.0.0.1` with no `--host` flag, because with no authentication the loopback
+interface is the entire access control, and every decision the page collects is
+recorded against the human the runtime was started with: it proves "someone
+with access to this machine approved". There is no CSRF token in v0.1,
+deliberately: a CSRF token defends a session, and with no session anything that
+can open a socket to `127.0.0.1:4680` can POST with or without one. The
+same-origin check that rejects a POST naming a non-loopback `Origin` allows one
+carrying neither header, since `curl` sends neither: treat it as a speed bump
+rather than a control. A session, or a wider bind address, would need a real
+anti-CSRF token.
 
 **Lie in its self-report?** Self-reported fields never reduce scrutiny (SPEC.md
 section 11.1, invariant 4). They may raise it, inform display, or feed
-retrospective analysis, and they can never downgrade a resolved autonomy level or
-shortcut a refusal path. The approval prompt keeps them visually apart: a
-COMPUTED block the runtime derived, and a CLAIMED block marked unverified.
+retrospective analysis, and they can never downgrade a resolved autonomy level
+or shortcut a refusal path. The prompt keeps them apart: a COMPUTED block the
+runtime derived, and a CLAIMED block marked unverified.
 
-**So what is left?** A fully adversarial agent on a machine it controls. Identity
-in v0.1 is config-declared, so anyone who can set that variable and write to the
-log is inside the trust boundary, and cryptographic identity is future work
-rather than a v0.1 claim. What holds regardless of what the harness believes it
-is running: the vault, the adapter boundary, and the single-use token. Keep
-`manual` floors on irreversible classes, which SPEC.md section 7 does for you.
+**So what is left?** A fully adversarial agent on a machine it controls.
+Identity in v0.1 is config-declared, so anyone who can set that variable and
+write to the log is inside the trust boundary; cryptographic identity is future
+work ([docs/proposals/hardened-authorization.md](docs/proposals/hardened-authorization.md)).
+What holds regardless of what the harness believes it is running: the vault,
+the adapter boundary, and the single-use token. Keep `manual` floors on
+irreversible classes, which SPEC.md section 7 does for you.
 
 ## Running the checks
 
@@ -733,32 +691,45 @@ approval doctor              # the other check: this machine, not the code
 
 `approval doctor` prints **27 rows** and a tally, in the order their failures
 cascade: build freshness, identity, attestation, the log chain, the channels
-(`telegram`, `web-port`), the payload store, audit sampling, envelope integrity,
-the vault, the environment source map, then the rows that ask git and the harness
-what happened (`log-drift`, `reconciliation`, `harness-hook-outcomes`,
-`harness-hook-wiring`, `keychain-scope`, `log-advance-cadence`, `dark-sessions`,
-`verified-snapshot`, `read-proof`, `main-behind-origin`,
-`harness-version-unverified`, `live-draw`, `values-block`, `checkpoint`,
-`gate-organs`, `sealed-keys`).
+(`telegram`, `web-port`), the payload store, audit sampling, envelope
+integrity, the vault, the environment source map, then the rows that ask git
+and the harness what happened (`log-drift`, `reconciliation`,
+`harness-hook-outcomes`, `harness-hook-wiring`, `keychain-scope`,
+`log-advance-cadence`, `dark-sessions`, `verified-snapshot`, `read-proof`,
+`main-behind-origin`, `harness-version-unverified`, `live-draw`,
+`values-block`, `checkpoint`, `gate-organs`, `sealed-keys`). Each failure
+carries a `fix:` line you run yourself. Doctor appends nothing, sends nothing
+and repairs nothing, and no credential value appears in its output. Three
+of the 27 lines from a fresh directory, plus the tally:
 
-**17 of the 27 report `not applicable` in a fresh directory**, and each names the
-absence it skipped on rather than passing quietly: `telegram` (no bot variables),
-`envelope-integrity` (no task folder), `vault` (no vault file), `environment` (no
-`.approval/env`), `read-proof` (no `daemon` block), `live-draw` (no
-`supervised-live` class), `checkpoint` (no `audit.checkpoint_keys`),
-`harness-hook-outcomes`, `harness-hook-wiring`, `harness-version-unverified` and
-`gate-organs` (no harness settings file), `verified-snapshot` (no daemon has
-run), and `log-drift`, `log-advance-cadence`, `dark-sessions`,
-`main-behind-origin` and `sealed-keys` (not a git checkout). `sealed-keys` is
-the one that asks git what it TRACKS: `.approval/payloads/` is tracked on
-purpose, so `.approval/` is a directory people `git add` from, and a
-sealed-delivery private key swept in by one of those adds opens that action's
-token for everyone holding the log. `gate-organs` is informational
-wherever it lands: it lists the harness files whose current bytes carry no
-`approval policy attest --organ` record, and it never moves the exit code, since
-the enforcement for one of those is the protected-path guard in CI. Doctor
-appends nothing, sends nothing and repairs nothing, and no credential value
-appears in its output.
+```
+✓ identity            APPROVAL_HUMAN=human:alice (config-declared: the trust boundary is this machine, not cryptography)
+✓ log                 /your/project/.approval/log/events.jsonl verifies: 1 record(s), head seq 1 0f3c4a19187a…
+✗ audit-sampling      disabled (secret-env-unnamed): APPROVAL.md sets audit.supervised_sample_rate to 0.1 but names no audit.sampling_secret_env. …
+    fix: approval policy attest --as human:<id> — after setting audit.supervised_sample_rate and audit.sampling_secret_env in the policy; then export the named variable where the daemon runs
+9 ok · 17 not applicable · 1 failed
+```
+
+That one failure is expected on the scaffolded policy: it samples supervised
+actions for audit, sampling needs an operator-held secret the policy only
+names, and a control that looks on while the party under oversight could steer
+it is worse than one that is visibly off. Name the secret when you want
+sampling, or delete the `audit` block if one person's gate has no use for it.
+
+**17 of the 27 report `not applicable` in a fresh directory**, and each names
+the absence it skipped on: `telegram` (no bot variables), `envelope-integrity`
+(no task folder), `vault` (no vault file), `environment` (no `.approval/env`),
+`read-proof` (no `daemon` block), `live-draw` (no `supervised-live` class),
+`checkpoint` (no `audit.checkpoint_keys`), `harness-hook-outcomes`,
+`harness-hook-wiring`, `harness-version-unverified` and `gate-organs` (no
+harness settings file), `verified-snapshot` (no daemon has run), and
+`log-drift`, `log-advance-cadence`, `dark-sessions`, `main-behind-origin` and
+`sealed-keys` (not a git checkout). `sealed-keys` asks git what it tracks:
+`.approval/payloads/` is tracked on purpose, and a sealed-delivery private key
+swept in by a `git add` of that directory would open that action's token for
+everyone holding the log. `gate-organs` is informational wherever it lands: it
+lists the harness files whose current bytes carry no `approval policy attest
+--organ` record, and never moves the exit code.
 
 Checks come in three tiers.
 
@@ -771,68 +742,34 @@ Checks come in three tiers.
 A denylist forces the full tier regardless of file extension: `APPROVAL.md`,
 `CLAUDE.md`, `.claude/**`, `SPEC.md`, `schema/**`, `**/fixtures/**`,
 `backlog/**`, `scripts/**`, `.github/**`, the packaging files, and `cli.js`.
-
-`backlog/**` sits on both that denylist and the records list, which is what
-makes the records tier all-or-nothing: a task file mixed with any other path
-takes the full tier. Task files are markdown by extension and behavior by
-effect, since their acceptance criteria are instructions to future agents. That
-earns them every check which can observe a task file, and the records tier is
-exactly those; it does not earn them a matrix of ~1800 tests on two Node
-majors, none of which reads one. `MILESTONES.md` rides along because the
-milestones guard checks the two against each other.
-
-Classification is computed from the changed paths by
-`scripts/classify-tier.mjs`, never asserted by the author of the change. Every
-merge to `main` runs the full suite unconditionally, and anything ambiguous, an
-empty path set included, resolves to full.
+`backlog/**` sits on both that denylist and the records list, so a task file
+mixed with any other path takes the full tier. Classification is computed from
+the changed paths by `scripts/classify-tier.mjs`, never asserted by the author
+of the change, and every merge to `main` runs the full suite.
 
 ### Before the push: `npm run ci:local`
 
-The merge queue is serial, so every red run there costs a slot, a re-merge and
-another wait. `npm run ci:local` (APRV-275) is where that red gets found
-instead. It asks the same classifier the workflow's `classify` job asks, by
-spawning the same command with the same arguments, and then runs the jobs
-`.github/workflows/ci.yml` declares for the tier that comes back: the docs
-guard for light, the record-reading tests for records, the three shards plus
-lint for full, and the protected-path grant cross-check on every tier whenever
-a merge base is computable. `--base <ref>` picks the base (default
-`origin/main`, three-dot, as CI classifies), `--working-tree` and explicit paths
-are the other two path sources, `--dry-run` prints the plan and runs nothing,
-`--json` prints it as data, and `--parallel` runs the tier's jobs concurrently
-the way the matrix does.
+The merge queue is serial, so every red run there costs a slot and another
+wait. `npm run ci:local` asks the same classifier the workflow asks and runs
+the jobs `.github/workflows/ci.yml` declares for that tier: the docs guard for
+light, the record-reading tests for records, the three shards plus lint for
+full, and the protected-path grant cross-check on every tier when a merge base
+is computable. `--base <ref>` picks the base, `--working-tree` and explicit
+paths are the other path sources, `--dry-run` prints the plan, `--json` prints
+it as data, and `--parallel` runs the tier's jobs concurrently. What it cannot
+reproduce it says: the Node 20 legs need Node 20, and CI's runner is
+`ubuntu-latest`. A green run locally is a prediction; the workflow is the
+verdict.
 
-`npm run check:changed` predates it and answers a different question: it
-classifies the working tree and runs the tier in its own shape, which for full
-is `npm test`, `npm run lint` and `npm run typecheck`. Use it while working, and
-`ci:local` before pushing, when the question is what the workflow will say.
-
-What it cannot reproduce it says, rather than passing over. The Node 20 floor
-legs need Node 20, and this host runs whatever it runs. CI's runner is
-`ubuntu-latest`, so on any other platform the report names the suites whose
-meaning differs here, the temp root's shape and the symlink cases among them. A
-cross-check with no reachable merge base, or with the records branches
-unfetched, is reported unresolved and kept out of the verdict. A red step exits
-non-zero and names the files that failed. Nothing in CI consults any of this: a
-green run locally is a prediction, and the workflow remains the verdict.
-
-A full-tier CI job compiles once. It builds, then runs `node
-scripts/run-tests.mjs` over what it built, because `npm test` and `npm run
-typecheck` would each recompile the same tree and neither pass can fail where
-the build passed. `npm test` keeps its build-then-run shape for anyone running
-it by hand. `scripts/run-tests.mjs --shard <k>/<n>` takes shard `k` of the
-sorted file list, where the file at position `i` belongs to shard `(i mod n) +
-1`, so the shards of a matrix are a partition of the suite: every file in
-exactly one shard, and the matrix covers all of them. An out-of-range index, an
-empty shard, and `--shard` combined with `--only` are refused rather than run.
-The Node 20 floor moved to the merge queue and to pushes to `main` because the
-queue candidate is what stands between a change and the branch, and a pull
-request now gets its verdict from the shards alone. The floor leg is sharded
-three ways too, so it proves the same whole suite in roughly a third of the
-wall clock it took as one run.
+`npm run check:changed` answers a different question: it classifies the
+working tree and runs the tier in its own shape, which for full is `npm test`,
+`npm run lint` and `npm run typecheck`. Use it while working, and `ci:local`
+before pushing. `scripts/run-tests.mjs --shard <k>/<n>` takes shard `k` of the
+sorted file list, so the shards of a matrix partition the suite.
 
 ## Exit codes
 
-An agent branches on the exit code before it ever reads stdout, so these numbers
+An agent branches on the exit code before it reads stdout, so these numbers
 are frozen. Adding one is a spec change; changing a meaning is breaking.
 
 | Code | Meaning |
@@ -845,61 +782,49 @@ are frozen. Adding one is a spec change; changing a meaning is breaking.
 | 5 | no valid execution token (approval run only) |
 | 6 | timeout (approval wait only) |
 
-Code 1 and code 4 are kept apart deliberately. "I could not read the file" and
-"the file has been tampered with" are different facts about the world, and
-conflating them either cries wolf over a permission bit or lets real tampering
-read as a filesystem hiccup. Code 3, a torn tail, is the signature of a crashed
-write rather than of tampering, and nothing is ever repaired automatically:
-truncating a torn line is a human decision. A gate refusal is exit 1 and never 2,
-since the command was well-formed and the answer is no, so branch on
-`error.code` under `--json` rather than retrying with different flags.
+Code 1 and code 4 are kept apart deliberately: "I could not read the file" and
+"the file has been tampered with" are different facts, and conflating them
+either cries wolf over a permission bit or lets tampering read as a filesystem
+hiccup. Code 3, a torn tail, is the signature of a crashed write, and nothing
+is repaired automatically: truncating a torn line is a human decision. A gate
+refusal is exit 1 and never 2, since the command was well-formed and the answer
+is no; branch on `error.code` under `--json`.
 
 ## Where to look next
 
 [SPEC.md](SPEC.md) is the source of truth for every design decision, and this
 README defers to it wherever the two could be read differently.
-[CLAUDE.md](CLAUDE.md) describes how this repository builds itself, including
-where it starts running behind its own gate.
+[CLAUDE.md](CLAUDE.md) describes how this repository builds itself behind its
+own gate; the 0.1.0 release was published, tagged and pushed through three
+grants from a phone.
 
-Every command carries its own instructions, so this README shows no verb
-inventory. `approval --help` lists them grouped by what they are for. `approval
-<command> --help` gives one command's flags, refusal codes, and JSON shape, and
-`--help --long` appends that verb's reasoning from
-[docs/cli-reference.md](docs/cli-reference.md). `approval instructions` is the
-agent-facing guide, and `--schemas` prints the verb registry as JSON.
+Every command carries its own instructions. `approval --help` lists them
+grouped by purpose, `approval <command> --help` gives one command's flags,
+refusal codes and JSON shape, and `--help --long` appends that verb's
+reasoning from [docs/cli-reference.md](docs/cli-reference.md). `approval
+instructions` is the agent-facing guide, and `--schemas` prints the verb
+registry as JSON.
 
 Every external adapter, harness, updater or gateway this project has weighed
-for integration has an entry in
-[docs/integrations-considered.md](docs/integrations-considered.md): what it
-exposes, how it fits, the verdict, and the next step, so the question is
-answered once.
-
-One of those entries has a runbook of its own.
+has an entry in
+[docs/integrations-considered.md](docs/integrations-considered.md).
 [examples/grok-bot-connector/runbook.md](examples/grok-bot-connector/runbook.md)
-puts a Grok Bot agent on the far end of `approval mcp serve --http --guest`,
-behind a tunnel that is itself gated, and rehearses both halves of the story: the
-agent asking for a branch push and an email and a human deciding them on a phone,
-then the agent skipping the gate entirely. What holds when it does is the point.
-Credentials answer only to single-use tokens, so the send it was never granted
-stays impossible, and `approval coverage` reports every observed effect with its
-evidence seq or `none`.
+puts a Grok Bot agent on the far end of `approval mcp serve --http --guest`
+and rehearses both halves of the story: the agent asking for a branch push and
+an email and a human deciding on a phone, then the agent skipping the gate and
+finding the credential inert.
 
-Designs that are proposed and not yet built live under `docs/proposals/`.
-[docs/proposals/hardened-authorization.md](docs/proposals/hardened-authorization.md)
-is the longest of them: what a grant in this log can and cannot prove to a
-service that does not trust the operator, and what an optional stronger tier
-would have to be. Identity in v0.1 is config-declared, so the honest ceiling
-today is "a party with write access to this log recorded a decision", and the
-proposal works through device-bound keys, WebAuthn on a separately controlled
-surface, per-decision signatures over the existing checkpoint machinery, and
-third-party witnesses, with the phasing, the receipt format, and the negative
-tests each would need. Nothing in it is implemented, and nothing in it amends
-SPEC.md. Two shorter ones,
+Designs proposed and not yet built live under `docs/proposals/`.
 [docs/proposals/solo-dev-quickstart.md](docs/proposals/solo-dev-quickstart.md)
-and [docs/proposals/no-daemon-mode.md](docs/proposals/no-daemon-mode.md),
-design the path for one person gating their own app: a three-question setup,
-one `guard` verb, and a runtime that lives inside the waiting command instead
-of a daemon.
+and [docs/proposals/no-daemon-mode.md](docs/proposals/no-daemon-mode.md) are
+the next step for the path at the top of this page: a three-question
+`approval quickstart`, one `approval guard -- <command>` verb that replaces
+the register, request, wait, run quartet, and a runtime that lives inside the
+waiting command instead of a daemon.
+[docs/proposals/hardened-authorization.md](docs/proposals/hardened-authorization.md)
+works through what a grant in this log can and cannot prove to a service that
+does not trust the operator, and what a stronger identity tier would have to
+be.
 
 ## License and governance
 
