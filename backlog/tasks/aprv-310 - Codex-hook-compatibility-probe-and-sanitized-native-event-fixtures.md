@@ -1,11 +1,11 @@
 ---
 id: APRV-310
 title: Codex hook compatibility probe and sanitized native event fixtures
-status: In Progress
+status: Done
 assignee:
   - '@codex-sol'
 created_date: '2026-09-08 07:23'
-updated_date: '2026-09-08 19:21'
+updated_date: '2026-09-08 21:12'
 labels: []
 dependencies: []
 references:
@@ -63,3 +63,9 @@ Native v7 focused patch-workdir probe completed CLI exit0 (execution29909/comple
 
 Final reviewed native fixtures match scratch captures byte-for-byte (v5 15 rows, v6 18, v7 1). Probe/adapter focused checks26/26 exit0. Full resumed npm test3928 passed,1 skipped,0 failed (3929 total), exit0; lint/typecheck/conformance exit0,293 vectors and142 controls. Native compatibility verifier failures remain documented findings, not hidden test passes. Source/scripts/tests/fixtures and probe documentation are ready for per-task commit; feature delivery remains draft.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Captured sanitized native Codex0.152.1 shell/direct-patch allow and denial, crash, timeout, malformed-output, directory and outcome contracts with scratch effects. Explicit denials blocked; native failures failed open; Bash effective cwd and trustworthy outcomes remain unavailable. Probe and fixture regressions pass in the full3951pass/1skip suite. Published feature PR344; final delivery tracked in APRV314 and everyday activation in APRV315.
+<!-- SECTION:FINAL_SUMMARY:END -->
