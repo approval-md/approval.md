@@ -457,6 +457,15 @@ interface HookInput {
    */
   toolResponse: Record<string, unknown> | null;
   /**
+   * `is_interrupt`, the post-execution events' own word for "a person stopped
+   * this" (APRV-303).
+   *
+   * `PostToolUseFailure` carries it beside `error`; `PostToolUse` carries the
+   * same fact as `tool_response.interrupted`. Read only to make an outcome
+   * UNREADABLE, never to establish one, so nothing about it can lower scrutiny.
+   */
+  interrupted: boolean;
+  /**
    * `version`, when the harness states its own (APRV-227).
    *
    * Claude Code's event may carry it; Cursor's does not, and neither did any
@@ -526,6 +535,7 @@ function parseHookInput(raw: string): ParsedInput {
       toolUseId: readString(fields, "tool_use_id"),
       hookEventName: readString(fields, "hook_event_name"),
       harnessVersion: readString(fields, "version"),
+      interrupted: fields["is_interrupt"] === true,
       toolResponse:
         typeof responseValue === "object" && responseValue !== null && !Array.isArray(responseValue)
           ? (responseValue as Record<string, unknown>)
@@ -1270,9 +1280,29 @@ function tierOf(target: string, cwd: string): FileTier {
   return { rule: PROTECTED_NAME_ELSEWHERE_RULE, worktree: null, root: realRoot };
 }
 
+/**
+ * The class an ordinary file edit is (APRV-303).
+ *
+ * The same string `core/command-class.ts` gives a shell redirect into the
+ * workspace, and spelled here because the file tools reach the same class by a
+ * different road. Until APRV-303 the file path produced no class at all for a
+ * non-protected target, which is why the loop floor could not see an Edit.
+ */
+const WORKSPACE_WRITE_CLASS = "files.write.workspace";
+
 /** What a gated file tool call asks for: one class, its bytes, its headline. */
 interface FileGate {
   cls: string;
+  /**
+   * Is this file one the policy protects? (APRV-303.)
+   *
+   * `false` is an ordinary workspace edit, which is answered by an outright
+   * allow unless a §10.2 floor is standing over the session or the actor. The
+   * class, the payload and the headline are built either way, so that the
+   * floored call asks the same question about the same bytes that a protected
+   * edit does.
+   */
+  protectedPath: boolean;
   rule: string;
   /** The target, absolute and resolved from the hook's own directory. */
   file: string;
@@ -1286,13 +1316,30 @@ interface FileGate {
 }
 
 /**
- * What a non-Bash tool call asks for, or `null` when it is pass-through.
+ * What a non-Bash tool call asks for, or `null` when it names no file at all.
  *
  * Only one thing about a file edit is a gate question at v0.1: whether the file
  * is one only a human may write. Everything else the harness edits is
  * `files.write.workspace`, which this repository's policy makes autonomous, and
  * routing every keystroke of ordinary editing through a gate check would spend
  * latency to reach a foregone conclusion.
+ *
+ * ## The ordinary edit still gets a class (APRV-303)
+ *
+ * It used to get none: an unprotected target returned `null` here, and
+ * `describeToolCall` answered `allow` from a branch that sits ABOVE the loop
+ * floor, above `recordUnattended`, and above everything that appends. So a
+ * session three failed writes deep had its Bash calls routed to a human and its
+ * Edit calls waved through, which is the disagreement APRV-303 was filed on:
+ * eight edits to the same file, under a standing floor, none of them routed and
+ * none of them counted.
+ *
+ * The foregone conclusion is still foregone, and is still answered without
+ * asking anybody: `describeToolCall` marks the call {@link FileGate.protectedPath}
+ * `false`, and `runHarnessHook` allows it outright the moment it establishes
+ * that no floor is standing. What it can no longer do is skip that
+ * establishment. The floor predicate is now one predicate over one class for
+ * every tool kind, which is what amended SPEC.md §10.2 asks for.
  *
  * ## The payload is the change (APRV-124)
  *
@@ -1335,7 +1382,6 @@ function fileToolGate(
   // surface stays `policy.edit`. Editing through the Edit tool must not be a
   // cheaper way to touch the gate than editing through a shell redirect.
   const surface = protectedPathClass(declared, protectedPaths);
-  if (surface === null) return null;
 
   const file = absolute(declared, cwd);
   const tier = tierOf(file, cwd);
@@ -1362,7 +1408,8 @@ function fileToolGate(
   }
 
   return {
-    cls: surface,
+    cls: surface ?? WORKSPACE_WRITE_CLASS,
+    protectedPath: surface !== null,
     rule,
     file,
     worktree: tier.worktree,
@@ -2388,10 +2435,24 @@ const POST_TOOL_EVENTS: readonly string[] = ["PostToolUse", "PostToolUseFailure"
  * invariant 7).
  *
  * A post-execution hook cannot deny anything — the tool has already run — so
- * none of these is a verdict, and every one of them exits 0 with an EMPTY
- * STDOUT: a decision object on that stream would be a second answer about a
- * command the harness already ran. The line goes to stderr, where the harness
- * shows it to an operator and to nobody else.
+ * none of these is a verdict, and every one of them prints an EMPTY STDOUT: a
+ * decision object on that stream would be a second answer about a command the
+ * harness already ran. The line goes to stderr instead.
+ *
+ * ## The exit code decides whether anybody reads that line (APRV-303)
+ *
+ * Claude Code's hooks reference states it plainly: stderr from a hook that
+ * exits 0 "goes to the debug log only, never the transcript, and Claude never
+ * sees it", and a post-execution hook that exits 2 has its stderr shown, since
+ * there is nothing left to block. So a refusal reported at exit 0 is a refusal
+ * nobody receives, which is how 22052 unreported starts accumulated on this
+ * project's own log without a single visible complaint.
+ *
+ * Therefore: {@link POST_TOOL_REPORTED} exits 0, because a counterpart that
+ * landed is not news; every other code exits {@link POST_TOOL_SURFACE_EXIT},
+ * because every other code means the outcome of a tool call was not recorded
+ * and somebody has to know. Neither exit is a verdict, and neither blocks
+ * anything.
  */
 export const POST_TOOL_CODES = [
   /** One or more counterparts were appended. */
@@ -2417,7 +2478,28 @@ export const POST_TOOL_CODES = [
 
 export type PostToolCode = (typeof POST_TOOL_CODES)[number];
 
-/** One machine-readable line on stderr, and exit 0. Never a verdict. */
+/** The one code that means the counterpart landed, and the one that exits 0. */
+const POST_TOOL_REPORTED = "post-tool-reported";
+
+/**
+ * The exit code that makes a post-execution hook's stderr visible (APRV-303).
+ *
+ * It is the number Claude Code's hook protocol reserves for "show this line",
+ * and on this one path it means exactly that. It is NOT `EXIT_USAGE`, whose
+ * meaning in `cli/exit-codes.ts` is a malformed invocation: the harness hooks
+ * speak the harness's protocol on both streams already (stdout carries a
+ * decision object no other verb prints), and the exit code is the third field
+ * of that same protocol. Nothing branches on it inside this runtime.
+ */
+const POST_TOOL_SURFACE_EXIT = 2;
+
+/**
+ * One machine-readable line on stderr. Never a verdict, and never blocking.
+ *
+ * Exit 0 for the report that landed, {@link POST_TOOL_SURFACE_EXIT} for every
+ * other code, so that a report which did NOT land is seen rather than written
+ * to a debug log nobody opens (see {@link POST_TOOL_CODES}).
+ */
 function report(
   streams: Streams,
   code: string,
@@ -2427,7 +2509,7 @@ function report(
   streams.err(
     `${JSON.stringify({ approval: { hook: "post-tool-use", code, detail, ...extra } })}\n`,
   );
-  return EXIT_OK;
+  return code === POST_TOOL_REPORTED ? EXIT_OK : POST_TOOL_SURFACE_EXIT;
 }
 
 type OutcomeReading =
@@ -2438,38 +2520,95 @@ type OutcomeReading =
  * Read a tool call's outcome off the reporting event, by a CLOSED set of
  * readings.
  *
- * The pinned contract, from the Claude Code hooks reference: `tool_response` is
- * an object carrying `type`, one of `text`, `error` or `base64`, and it exposes
- * NO exit code for any tool. A failing tool call arrives as the separate
- * `PostToolUseFailure` event instead. So there are exactly three readings, and
- * everything else is unreadable.
+ * ## THE EVENT NAME IS THE OUTCOME (APRV-303)
+ *
+ * The reading this replaces was written against a payload Claude Code does not
+ * send. It asked for `tool_response.type` and accepted `text`, `base64` or
+ * `error`, which is the shape of an API content block. What the event actually
+ * carries under `tool_response` is the TOOL'S OWN structured output, verbatim,
+ * and the hooks reference says so in as many words. From the shipped
+ * declarations in `@anthropic-ai/claude-code/sdk-tools.d.ts`:
+ *
+ * - `BashOutput` has `stdout`, `stderr`, `interrupted`, `isImage` and no `type`;
+ * - `FileEditOutput` (Edit, MultiEdit) has `filePath`, `oldString`,
+ *   `newString`, `structuredPatch` and no `type`;
+ * - `FileWriteOutput` (Write) does have `type`, whose values are `create` and
+ *   `update`;
+ * - `NotebookEditOutput` has no `type` and an optional `error` string.
+ *
+ * So the old reading matched NOTHING a Claude Code session emits, and every
+ * successful tool call was reported unreadable and appended nothing. Measured
+ * on this project's own log on 2026-09-07: 22062 harness starts, 10 reports,
+ * and of the reports the `agent:claude-code` actor filed, nine were failures
+ * and none was a completion. The §10.2 streak became a ratchet that only ever
+ * counts up, so every long session escalated itself to manual and stayed there.
+ *
+ * The contract that IS true is the one the reference states about the events
+ * themselves. `PostToolUse` "runs immediately after a tool completes
+ * successfully". `PostToolUseFailure` runs "when a tool that started executing
+ * fails". Claude Code fires exactly one of the two, neither of them when a
+ * permission decision stopped the call before it ran. The event name is
+ * therefore the whole reading, and it is the reading with the best provenance
+ * available here: it is the harness saying which of its own two code paths ran,
+ * rather than this process inferring an outcome out of a body of text.
+ *
+ * ## The refinements, and their direction
+ *
+ * Two readings of `tool_response` sit on top, and BOTH of them only ever move
+ * the answer away from "completed" (§11.1 invariant 4: a field the reporting
+ * side authors may raise scrutiny and never lower it):
+ *
+ * - `interrupted: true` (`BashOutput`) is UNREADABLE. A command a person
+ *   interrupted neither completed nor failed on its own terms; counting it a
+ *   failure trips an escalation on somebody's ctrl-C, and counting it a
+ *   completion clears a streak on a command that never finished.
+ * - `type: "error"`, or a non-empty `error` string (`NotebookEditOutput`, and
+ *   the MCP error result the reference names) is a FAILURE, whatever the event
+ *   name claimed.
  *
  * Unreadable means append nothing, and that is the safe answer in both
  * directions at once. A failure nobody observed would trip an escalation on
  * noise, and a control that trips on noise is one operators learn to silence
  * (§8 makes this argument about timestamp anomalies). A completion nobody
- * observed would clear a streak on nothing, which §11.1 invariant 4 forbids
- * outright. Appending nothing leaves the path exactly as vacuous as it was
- * before this verb existed, for that tool, and manufactures neither.
+ * observed would clear a streak on nothing. Appending nothing leaves the path
+ * exactly as vacuous as it was before this verb existed, for that tool, and
+ * manufactures neither. Since APRV-303 the unreadable arm also SAYS SO on a
+ * stream somebody reads (see {@link report}).
  *
- * NOTHING OF THE TOOL'S OUTPUT IS READ. Only the shape: the event name, and the
- * value of one enumerated field.
+ * NOTHING OF THE TOOL'S OUTPUT IS READ. Only the shape: the event name, and
+ * whether two enumerated fields are present and what kind of value they hold.
+ * No text from any of them reaches the log or this function's return.
  */
 function readReportedOutcome(input: HookInput): OutcomeReading {
-  if (input.hookEventName === "PostToolUseFailure") return { ok: true, outcome: "failed" };
-  const response = input.toolResponse;
-  if (response === null) {
-    return { ok: false, detail: "the event carries no tool_response object" };
+  const event = input.hookEventName;
+  if (event !== "PostToolUse" && event !== "PostToolUseFailure") {
+    return {
+      ok: false,
+      detail: `hook_event_name is ${
+        event === null ? "absent" : JSON.stringify(event)
+      }, which is neither of the two events this adapter reports an outcome for (PostToolUse, PostToolUseFailure)`,
+    };
   }
-  const type = response["type"];
-  if (type === "text" || type === "base64") return { ok: true, outcome: "completed" };
-  if (type === "error") return { ok: true, outcome: "failed" };
-  return {
-    ok: false,
-    detail: `tool_response.type is ${
-      typeof type === "string" ? JSON.stringify(type) : "absent or not a string"
-    }, which is not one of the pinned readings (text, base64, error)`,
-  };
+  const response = input.toolResponse;
+  // The one thing that unreads an event of either name. `PostToolUseFailure`
+  // carries `is_interrupt` for the same fact and no `tool_response` at all, so
+  // both spellings are checked and neither is trusted to say anything else.
+  if (response?.["interrupted"] === true || input.interrupted === true) {
+    return {
+      ok: false,
+      detail:
+        "the tool call was interrupted, so it neither completed nor failed on its own terms; an interruption is somebody stopping the session rather than a loop to escalate or a recovery to credit",
+    };
+  }
+  if (event === "PostToolUseFailure") return { ok: true, outcome: "failed" };
+  const errorText = response?.["error"];
+  if (
+    response?.["type"] === "error" ||
+    (typeof errorText === "string" && errorText.length > 0)
+  ) {
+    return { ok: true, outcome: "failed" };
+  }
+  return { ok: true, outcome: "completed" };
 }
 
 /**
@@ -2543,7 +2682,7 @@ function runPostToolUse(
   }
   return report(
     streams,
-    "post-tool-reported",
+    POST_TOOL_REPORTED,
     `recorded ${reading.outcome} for ${String(finished.records.length)} delegated execution(s) of ${finished.task}`,
     { task: finished.task, outcome: reading.outcome, appended: finished.records.length },
   );
@@ -2576,6 +2715,17 @@ type ToolDescription =
        * that RUN, and an edit runs nothing.
        */
       segments?: readonly ClassifiedSegment[];
+      /**
+       * Set for a call the policy does not gate on its own merits, carrying the
+       * reason it would have been allowed outright (APRV-303).
+       *
+       * `runHarnessHook` prints exactly that allow the moment it establishes
+       * that no §10.2 floor stands over this session or actor, and otherwise
+       * routes the call like any other member of its class. It is a description
+       * of the POLICY's answer and never of the floor's, which is why it is
+       * decided here and applied there.
+       */
+      passthrough?: string;
     }
   /** A tool call this hook does not gate at all. */
   | { kind: "allow"; reason: string }
@@ -2626,7 +2776,17 @@ function describeToolCall(
 
   const gated = fileToolGate(input.toolName, input.toolInput, protectedPaths, cwd);
   if (gated === null) {
-    return { kind: "allow", reason: `${input.toolName} is not a gated edit` };
+    return { kind: "allow", reason: `${input.toolName} names no file, so there is nothing to gate` };
+  }
+  if (!gated.protectedPath) {
+    return {
+      kind: "gated",
+      classes: [gated.cls],
+      payload: gated.payload,
+      headline: gated.summary,
+      notes: [],
+      passthrough: `${input.toolName} is not a gated edit`,
+    };
   }
   return {
     kind: "gated",
@@ -2816,6 +2976,15 @@ function runBypass(
     );
   }
   if (described.kind === "allow") return allow(streams, described.reason, adapter.kind);
+  if (described.passthrough !== undefined) {
+    // APRV-303. An ordinary workspace edit is allowed by the policy on its own
+    // merits, so there is nothing here for the window to suspend and nothing
+    // for a `gate.bypassed` record to say. The only thing that would have made
+    // this call a question is a §10.2 floor, and a window bypasses the floor
+    // outright. Answered here rather than below so the bypass log stays a
+    // record of calls the window actually let through.
+    return allow(streams, described.passthrough, adapter.kind);
+  }
 
   const classes = described.classes;
   if (classes.length === 0) {
@@ -2982,7 +3151,21 @@ function runHarnessHook(
   // run a command, and treating an unknown name as a no-op would be an ungated
   // one.
   if (input.hookEventName !== null && POST_TOOL_EVENTS.includes(input.hookEventName)) {
-    return runPostToolUse(parsed.flags, streams, cwd, input, actor, adapter);
+    // APRV-303. `commandHarnessHook`'s catch turns a throw into a DENY, which is
+    // the right answer for a call that has not run yet and exactly the wrong one
+    // here: it would print a verdict object about a tool call the harness has
+    // already finished, and the reason the counterpart did not land would be
+    // dressed as a permission decision. A throw on this path is `post-tool-io`,
+    // on stderr, at the exit code that makes the line visible.
+    try {
+      return runPostToolUse(parsed.flags, streams, cwd, input, actor, adapter);
+    } catch (cause) {
+      return report(
+        streams,
+        "post-tool-io",
+        `the counterpart failed: ${cause instanceof Error ? cause.message : String(cause)}; nothing was appended, so the start this event would have closed is still open`,
+      );
+    }
   }
 
   if (input.toolName !== adapter.shellTool && !adapter.fileTools.includes(input.toolName)) {
@@ -3219,6 +3402,21 @@ function runHarnessHook(
    * refinement's own words, and the loop floor's when one applied.
    */
   const note = notes.length === 0 ? "" : ` (${notes.join("; ")})`;
+
+  // APRV-303, and the last thing that can answer without touching the log: an
+  // ordinary workspace edit, which the policy allows on its own merits and which
+  // is a question only while a floor stands.
+  //
+  // The order is the whole fix. Until APRV-303 this allow was printed from
+  // `describeToolCall`'s own branch, several hundred lines above the floor
+  // lookup, so a session whose Bash calls were all being routed to a human went
+  // on editing files unrouted and uncounted. Now the same allow is printed, in
+  // the same words, from BELOW the floor: the fast path is as fast as it was,
+  // and the floored path routes an Edit exactly as it routes an `echo >`,
+  // because both are `files.write.workspace` and one predicate decides.
+  if (described.passthrough !== undefined && floor === null) {
+    return allow(streams, `${described.passthrough}${note}`, adapter.kind);
+  }
 
   /** No class here needs a human, so nothing downstream will ask for one. */
   const unattended = floor === null && autonomies.every((autonomy) => autonomy !== "manual");

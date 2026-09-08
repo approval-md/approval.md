@@ -119,20 +119,55 @@ and `approval doctor`'s `harness-hook-outcomes` check fails to say so:
 
 One binary, two events, dispatched on `hook_event_name`. The post-execution run
 answers no permission question — it cannot, the tool has already run — so it
-prints an empty stdout, one machine-readable JSON line on stderr, and exits 0.
+prints an empty stdout and one machine-readable JSON line on stderr.
 `--timeout` and `--interval` are meaningless on it; it never waits for anybody.
+
+**Its exit code says whether anybody should read that line (APRV-303).** Claude
+Code discards a hook's stderr when the hook exits 0, and shows a post-execution
+hook's stderr when it exits 2. So the counterpart exits 0 for `post-tool-reported`,
+the one code that means the counterpart landed, and exits 2 for every other code,
+every one of which means a tool call's outcome went unrecorded. Neither exit is a
+verdict and neither blocks anything; 2 here is the harness protocol's "show this",
+not the CLI's usage error.
 
 What it carries, and what it does with it. The event names `session_id` and
 `tool_use_id`, which are the two segments the pre-execution run put in the task
 id, so the task and the action keys are read back out of the VERIFIED log rather
-than out of the report. `tool_response` is an object whose `type` is `text`,
-`base64` or `error`, and the tool's exit code is not exposed to a hook at all: a
-failing Bash call arrives as `PostToolUseFailure` instead. So the reading is
-closed at three cases — `text`/`base64` is a completion, `error` is a failure,
-`PostToolUseFailure` is a failure — and ANYTHING ELSE APPENDS NOTHING. A failure
-nobody observed would trip an escalation on noise; a completion nobody observed
-would clear one on nothing. None of the text inside `tool_response` reaches the
-log, ever (SPEC.md §11.1 invariant 3 has no exception for diagnostics).
+than out of the report.
+
+**THE EVENT NAME IS THE OUTCOME.** `PostToolUse` runs immediately after a tool
+completes successfully; `PostToolUseFailure` runs when a tool that started
+executing fails, and carries `error` plus an optional `is_interrupt` with no
+`tool_response` at all. Claude Code fires exactly one of the two, and neither
+when a permission decision stopped the call before it ran (that is
+`PermissionDenied`). So `PostToolUse` is a completion and `PostToolUseFailure` is
+a failure, read off the harness's own choice of code path.
+
+`tool_response` is the TOOL'S OWN structured output object, verbatim, and it is
+read only to move an answer AWAY from "completed" (SPEC.md §11.1 invariant 4):
+
+| what is read | reading |
+|---|---|
+| `interrupted: true`, or `is_interrupt: true` | UNREADABLE, append nothing. A call somebody stopped neither completed nor failed on its own terms. |
+| `type: "error"`, or a non-empty `error` string | a failure, whatever the event name said. |
+| anything else, on `PostToolUse` | a completion. |
+
+APRV-303 replaced an earlier reading that asked `tool_response.type` to be
+`text`, `base64` or `error`. That is the shape of an API content block and no
+gated tool sends it: `BashOutput` carries `stdout`/`stderr`/`interrupted` and no
+`type`, `FileEditOutput` carries `filePath`/`oldString`/`newString` and no
+`type`, and `FileWriteOutput`'s `type` is `create` or `update`. Every successful
+tool call was therefore reported unreadable and appended nothing, while every
+failure landed, so the §10.2 streak only ever counted up. On this project's own
+log that came to 22062 starts, 10 reports, and not one completion from the
+Claude Code adapter.
+
+An unreadable outcome APPENDS NOTHING and says why on stderr at exit 2. A
+failure nobody observed would trip an escalation on noise; a completion nobody
+observed would clear one on nothing. None of the text inside `tool_response`
+reaches the log, ever (SPEC.md §11.1 invariant 3 has no exception for
+diagnostics): the fields above are inspected for shape and for kind, never
+carried.
 
 A few things about those numbers and paths:
 
@@ -935,6 +970,16 @@ Three edges are worth knowing:
 - **The write boundary agrees.** `startHarnessExecution` re-checks the floor when
   it records an unattended execution, and carves reads out with the same
   predicate, so what the floor counts and what it routes cannot drift apart.
+- **Every tool kind agrees (APRV-303).** An edit the policy does not protect is
+  `files.write.workspace`, the same class a shell redirect into the workspace
+  gets, and it reaches the floor by the same predicate. With no floor standing it
+  is allowed outright with nothing appended, exactly as before, so ordinary
+  editing costs a policy read and no round trip. With a floor standing it is
+  routed like any other write, and its completion clears the floor like any
+  other write's. Until APRV-303 the file path answered `allow` from above the
+  floor lookup: a session whose Bash calls were all going to a phone went on
+  editing files unrouted and uncounted, which is the disagreement APRV-303 was
+  filed on.
 
 `approval status` says all of this on the escalation row it already prints, in
 the `clears:` line.
@@ -964,8 +1009,11 @@ harness boundary, and none of them is reachable from inside this runtime:
    it runs under.
 2. **Any non-zero exit that is not 2.** Exit 2 is a block with stderr as the
    reason; every other non-zero code is a non-blocking error and the tool runs.
-   The verb exits 2 only for a misconfigured hook and otherwise exits 0 with a
-   verdict, which is what keeps a deny a deny.
+   On the PRE-execution event the verb exits 2 only for a misconfigured hook and
+   otherwise exits 0 with a verdict, which is what keeps a deny a deny. On the
+   post-execution events exit 2 blocks nothing, because the tool has already
+   run; there it means "show this line", and the counterpart uses it for every
+   report that did not land (APRV-303).
 3. **The binary cannot be launched at all** — an uninstalled CLI, a wrong path
    in `command`. Same reading, same outcome, and `approval doctor` will not know
    to look for it.
