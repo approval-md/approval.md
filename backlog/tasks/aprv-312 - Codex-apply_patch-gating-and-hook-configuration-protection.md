@@ -1,11 +1,11 @@
 ---
 id: APRV-312
 title: Codex apply_patch gating and hook configuration protection
-status: In Progress
+status: Done
 assignee:
   - '@codex-sol'
 created_date: '2026-09-08 07:25'
-updated_date: '2026-09-08 08:58'
+updated_date: '2026-09-08 21:12'
 labels: []
 dependencies:
   - APRV-311
@@ -40,3 +40,9 @@ Implemented strict Codex apply_patch parser and full raw tool/command/cwd bindin
 
 Final code df570ea passed full npm test3920pass/1skip, conformance293/293, lint/typecheck and all CI-parity steps exit0. Final CDPATH restriction accepts only absolute, exact dot/dotdot or slash-qualified relative paths. Astra findings are resolved and direct adapter regressions pass. Implementation acceptance is verified; feature delivery remains draft pending310/311 native evidence and313 SPEC.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implemented full-patch binding and Add/Update/Delete/Move source/destination protection, malformed/traversal/symlink/worktree checks, and Codex gate-organ paths. Patch and existing harness regressions pass in full3951pass/1skip suite. Experimental direct-patch coverage and native limitations documented; no live activation. Published PR344, delivery tracked in APRV314.
+<!-- SECTION:FINAL_SUMMARY:END -->
