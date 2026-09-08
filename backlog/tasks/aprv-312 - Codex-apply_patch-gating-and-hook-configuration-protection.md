@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-08 07:25'
-updated_date: '2026-09-08 08:38'
+updated_date: '2026-09-08 08:58'
 labels: []
 dependencies:
   - APRV-311
@@ -22,9 +22,9 @@ User-authorized Codex patch integration. SPEC 6.3,7,9,10,11.1 bind. Isolated cod
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 All Add/Update/Delete/Move targets are classified and the full patch plus directory binds approval and rendering.
-- [ ] #2 Malformed/ambiguous/traversal/symlink/mixed-protection and changed-payload cases cannot get weaker authority.
-- [ ] #3 Codex config.toml, hooks.json and hooks directory classify policy.core with shell/copy/patch tests.
+- [x] #1 All Add/Update/Delete/Move targets are classified and the full patch plus directory binds approval and rendering.
+- [x] #2 Malformed/ambiguous/traversal/symlink/mixed-protection and changed-payload cases cannot get weaker authority.
+- [x] #3 Codex config.toml, hooks.json and hooks directory classify policy.core with shell/copy/patch tests.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -37,4 +37,6 @@ User-authorized Codex patch integration. SPEC 6.3,7,9,10,11.1 bind. Isolated cod
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented strict Codex apply_patch parser and full raw tool/command/cwd binding; classified every source and move destination using lexical and resolved paths. Protected Codex gate organs and log paths across shell cwd/control flow; closed cd syntax and bounded 64-directory union refuse ambiguity. Patch guard provides naming-only evidence, never shell-time or fabricated hunk coverage. Astra review identified and resolved path ancestor, bare directory, traversal, redirect-only, conditional cd, log cwd, symlink logical cwd and CDPATH cases. Sol parser/classifier/guard 444/444 exit0; prior shared hook regressions565/565 exit0; final Codex12/12 before last narrow CDPATH tightening passed. Typecheck/lint/diff exit0 after that tightening. Central full/CI validation and native evidence still pending; acceptance left unchecked.
+
+Final code df570ea passed full npm test3920pass/1skip, conformance293/293, lint/typecheck and all CI-parity steps exit0. Final CDPATH restriction accepts only absolute, exact dot/dotdot or slash-qualified relative paths. Astra findings are resolved and direct adapter regressions pass. Implementation acceptance is verified; feature delivery remains draft pending310/311 native evidence and313 SPEC.
 <!-- SECTION:NOTES:END -->
