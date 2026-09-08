@@ -4,7 +4,11 @@ All notable changes to `approval-md`, the reference runtime for the approval.md
 convention. Versions follow the package; the SPEC keeps its own amendment
 markers.
 
-## 0.1.0 (unreleased)
+## 0.1.0 — 2026-09-08
+
+Published to npm as `approval-md@0.1.0` and tagged `v0.1.0`, through the gate:
+each of the publish, the tag and the tag push was a `release.publish` request
+granted from a phone and executed on a sealed token (APRV-199, APRV-306).
 
 The first release. Every milestone of SPEC.md section 14 (M0 to M8) is in it.
 
