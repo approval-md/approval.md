@@ -10,6 +10,11 @@ Codex defines the event envelope, matcher, command-handler, trust, timeout, and
 tool-coverage contracts in its [official hooks
 documentation](https://learn.chatgpt.com/docs/hooks).
 
+> **Status for Codex CLI 0.152.1:** native hook loading and the deny, timeout,
+> crash, and malformed-output paths remain unverified. `PostToolUse` is
+> diagnostic only for now and does not close execution outcomes. Everyday
+> activation remains pending the reviewed trust and phone checks below.
+
 The adapter uses the same policy, verified log, budget, and approval core as
 the other harness hooks. Codex's own sandbox and approval mode remain an
 independent control. Installing this hook does not widen that sandbox or grant
@@ -26,6 +31,19 @@ The hook process defaults to a nine-minute gate wait. The native command-hook
 entry has a ten-minute (`600` second) outer timeout. Keep the outer timeout
 longer than the gate wait so the adapter can return a machine-readable denial
 instead of being killed while a human is deciding.
+
+## Supported input
+
+The adapter accepts exact `Bash` and `apply_patch` events with a string command,
+stable session and tool-use identifiers, and an event cwd that agrees with the
+hook process's actual cwd. Patch input must use strict `*** Begin Patch` and
+`*** End Patch` framing, and every changed path must be relative and confined
+to that cwd.
+
+For compound shell commands, cwd tracking accepts absolute paths, `.`, `..`,
+and paths beginning `./` or `../`. It follows at most 64 conservative cwd
+candidates. An unsupported or ambiguous `cd` denies the command. Prefer an
+explicit form such as `cd ./dir`.
 
 ## Install by human review
 

@@ -2529,6 +2529,16 @@ The checks, at length:
   where there is nothing to commit a key to. Neither fix deletes nor commits:
   `git rm --cached` for a key already in the index is named in the prose and
   left to you, along with revoking every action whose token is still unspent.
+- **codex-hook-wiring** — whether this checkout's `.codex/hooks.json` carries
+  the reviewed approval.md profile for both `PreToolUse` and `PostToolUse`: the
+  exact `Bash|apply_patch` matcher, a direct synchronous `approval hook codex`
+  command, and a `600` second outer timeout. A PASS establishes only those JSON
+  bytes on disk. Codex trust, loading, and observed execution remain separate
+  facts checked through `/hooks` and the bounded smoke test. TOML-only hook
+  configuration, or JSON combined with `.codex/config.toml`, SKIPS because
+  doctor does not interpret or merge the TOML hook tables. Malformed JSON
+  FAILS; a different valid Codex hook profile SKIPS as undetermined rather than
+  being called broken.
 
 **`--json`** (one object on stdout):
 

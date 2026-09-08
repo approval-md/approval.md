@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-08 07:25'
-updated_date: '2026-09-08 08:23'
+updated_date: '2026-09-08 08:39'
 labels: []
 dependencies:
   - APRV-312
@@ -53,4 +53,6 @@ Coverage is bounded to the native paths that deliver these hooks. Operator docum
 Other proposed narrow edits: add Codex hook/config gate organs to section5.2; add hook codex CLI row; extend MCP withheld count to four and list Codex; list Codex in M8. Exact seven before/after edits prepared at /private/tmp/aprv-313-spec-edits.json. Existing approval run binds argv/cwd, while file-hunk evidence uses file/before/after. Do not fake Claude provenance or deploy the new daemon/schema merely to self-authorize. Parent is retaining this boundary while independent implementation proceeds.
 
 Operator slice reviewed: separate Codex wiring row; strict quoted absolute direct command profile, malformed async and echo/compound negative controls; TOML presence remains undetermined, no trust/execution inference. Inert example and human install/rollback runbook plus local POST witness prepared; README/count pins updated. Sol tsc/lint/focused doctor6 and docs guard22 exit0; parent full cli-doctor outside socket restriction passed70/70 exit0 (46.4s), resolving earlier inconclusive manually cancelled restricted runs. Loopback witness readiness/POST204/one marker/server exit0 verified. SPEC remains unchanged and proposed exact amendment is recorded above; native trust/outcome and morning activation remain pending.
+
+Integration review added the missing codex-hook-wiring CLI reference roster row and prominent native-unverified/PostToolUse diagnostic status. Runbook now states exact input/cwd/patch restrictions and conservative cd syntax. No SPEC or live configuration edit. Final full-suite verification follows.
 <!-- SECTION:NOTES:END -->
