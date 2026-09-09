@@ -970,16 +970,16 @@ Three edges are worth knowing:
 - **The write boundary agrees.** `startHarnessExecution` re-checks the floor when
   it records an unattended execution, and carves reads out with the same
   predicate, so what the floor counts and what it routes cannot drift apart.
-- **Every tool kind agrees (APRV-303).** An edit the policy does not protect is
-  `files.write.workspace`, the same class a shell redirect into the workspace
-  gets, and it reaches the floor by the same predicate. With no floor standing it
-  is allowed outright with nothing appended, exactly as before, so ordinary
-  editing costs a policy read and no round trip. With a floor standing it is
-  routed like any other write, and its completion clears the floor like any
-  other write's. Until APRV-303 the file path answered `allow` from above the
-  floor lookup: a session whose Bash calls were all going to a phone went on
-  editing files unrouted and uncounted, which is the disagreement APRV-303 was
-  filed on.
+- **Every tool kind agrees (APRV-303, APRV-304).** An edit the policy does not
+  protect is `files.write.workspace`, the same class a shell redirect into the
+  workspace gets. The hook resolves that class through the policy and records
+  `execution.started` before an autonomous or supervised allow. A manual rule
+  waits for a decision, a `human-only` rule denies, and budgets apply at the
+  recorded start. The post hook closes that start as completed or failed, so an
+  ordinary file-tool result contributes to loop safety exactly as a shell write
+  does. An open gate window records `gate.bypassed` instead of an execution; its
+  post event remains a visible `not-delegated` diagnostic because there is no
+  authorized start to close.
 
 `approval status` says all of this on the escalation row it already prints, in
 the `clears:` line.

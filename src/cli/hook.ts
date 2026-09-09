@@ -1338,15 +1338,7 @@ const WORKSPACE_WRITE_CLASS = "files.write.workspace";
 /** What a gated file tool call asks for: one class, its bytes, its headline. */
 interface FileGate {
   cls: string;
-  /**
-   * Is this file one the policy protects? (APRV-303.)
-   *
-   * `false` is an ordinary workspace edit, which is answered by an outright
-   * allow unless a §10.2 floor is standing over the session or the actor. The
-   * class, the payload and the headline are built either way, so that the
-   * floored call asks the same question about the same bytes that a protected
-   * edit does.
-   */
+  /** Is this file one the policy protects? (APRV-303.) */
   protectedPath: boolean;
   rule: string;
   /** The target, absolute and resolved from the hook's own directory. */
@@ -1363,13 +1355,12 @@ interface FileGate {
 /**
  * What a non-Bash tool call asks for, or `null` when it names no file at all.
  *
- * Only one thing about a file edit is a gate question at v0.1: whether the file
- * is one only a human may write. Everything else the harness edits is
- * `files.write.workspace`, which this repository's policy makes autonomous, and
- * routing every keystroke of ordinary editing through a gate check would spend
- * latency to reach a foregone conclusion.
+ * Every file edit is a gate question. Protected targets take their derived
+ * protected class; every other target is `files.write.workspace`. The policy
+ * decides the autonomy of either class, so changing the ordinary-file rule to
+ * manual, supervised or human-only changes the hook verdict too (APRV-304).
  *
- * ## The ordinary edit still gets a class (APRV-303)
+ * ## The ordinary edit gets a class and follows it (APRV-303, APRV-304)
  *
  * It used to get none: an unprotected target returned `null` here, and
  * `describeToolCall` answered `allow` from a branch that sits ABOVE the loop
@@ -1379,12 +1370,10 @@ interface FileGate {
  * eight edits to the same file, under a standing floor, none of them routed and
  * none of them counted.
  *
- * The foregone conclusion is still foregone, and is still answered without
- * asking anybody: `describeToolCall` marks the call {@link FileGate.protectedPath}
- * `false`, and `runHarnessHook` allows it outright the moment it establishes
- * that no floor is standing. What it can no longer do is skip that
- * establishment. The floor predicate is now one predicate over one class for
- * every tool kind, which is what amended SPEC.md §10.2 asks for.
+ * APRV-303 made the floor predicate one predicate over one class for every tool
+ * kind. APRV-304 carries the same class through the rest of the shared path:
+ * policy resolution, human-only refusal, budgets, registration and execution
+ * accounting. An open window records the bypass before allowing the edit.
  *
  * ## The payload is the change (APRV-124)
  *
@@ -2766,17 +2755,6 @@ type ToolDescription =
        * that RUN, and an edit runs nothing.
        */
       segments?: readonly ClassifiedSegment[];
-      /**
-       * Set for a call the policy does not gate on its own merits, carrying the
-       * reason it would have been allowed outright (APRV-303).
-       *
-       * `runHarnessHook` prints exactly that allow the moment it establishes
-       * that no §10.2 floor stands over this session or actor, and otherwise
-       * routes the call like any other member of its class. It is a description
-       * of the POLICY's answer and never of the floor's, which is why it is
-       * decided here and applied there.
-       */
-      passthrough?: string;
     }
   /** A tool call this hook does not gate at all. */
   | { kind: "allow"; reason: string }
@@ -2925,16 +2903,6 @@ function describeToolCall(
   if (gated === null) {
     return { kind: "allow", reason: `${input.toolName} names no file, so there is nothing to gate` };
   }
-  if (!gated.protectedPath) {
-    return {
-      kind: "gated",
-      classes: [gated.cls],
-      payload: gated.payload,
-      headline: gated.summary,
-      notes: [],
-      passthrough: `${input.toolName} is not a gated edit`,
-    };
-  }
   return {
     kind: "gated",
     classes: [gated.cls],
@@ -2942,7 +2910,7 @@ function describeToolCall(
     headline: gated.summary,
     // The tier rides in the verdict's note as well as in the payload, so an
     // `allow` says which checkout it authorized (APRV-124).
-    notes: [fileTierNote(gated)],
+    notes: gated.protectedPath ? [fileTierNote(gated)] : [],
   };
 }
 
@@ -3127,16 +3095,6 @@ function runBypass(
   if (described.kind === "allow") {
     return allow(streams, described.reason, adapter.kind, codexCommand);
   }
-  if (described.passthrough !== undefined) {
-    // APRV-303. An ordinary workspace edit is allowed by the policy on its own
-    // merits, so there is nothing here for the window to suspend and nothing
-    // for a `gate.bypassed` record to say. The only thing that would have made
-    // this call a question is a §10.2 floor, and a window bypasses the floor
-    // outright. Answered here rather than below so the bypass log stays a
-    // record of calls the window actually let through.
-    return allow(streams, described.passthrough, adapter.kind, codexCommand);
-  }
-
   const classes = described.classes;
   if (classes.length === 0) {
     // The gate's own CLI, including `approval gate close`. Allowed with no
@@ -3586,21 +3544,6 @@ function runHarnessHook(
    * refinement's own words, and the loop floor's when one applied.
    */
   const note = notes.length === 0 ? "" : ` (${notes.join("; ")})`;
-
-  // APRV-303, and the last thing that can answer without touching the log: an
-  // ordinary workspace edit, which the policy allows on its own merits and which
-  // is a question only while a floor stands.
-  //
-  // The order is the whole fix. Until APRV-303 this allow was printed from
-  // `describeToolCall`'s own branch, several hundred lines above the floor
-  // lookup, so a session whose Bash calls were all being routed to a human went
-  // on editing files unrouted and uncounted. Now the same allow is printed, in
-  // the same words, from BELOW the floor: the fast path is as fast as it was,
-  // and the floored path routes an Edit exactly as it routes an `echo >`,
-  // because both are `files.write.workspace` and one predicate decides.
-  if (described.passthrough !== undefined && floor === null) {
-    return allow(streams, `${described.passthrough}${note}`, adapter.kind, codexCommand);
-  }
 
   /** No class here needs a human, so nothing downstream will ask for one. */
   const unattended = floor === null && autonomies.every((autonomy) => autonomy !== "manual");
