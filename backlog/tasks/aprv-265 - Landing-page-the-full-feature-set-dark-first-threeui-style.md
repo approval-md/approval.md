@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex-sol'
 created_date: '2026-09-05 10:23'
-updated_date: '2026-09-08 23:33'
+updated_date: '2026-09-09 00:56'
 labels: []
 dependencies:
   - APRV-320
@@ -142,4 +142,6 @@ Verification: parent browser review at desktop 1280 found no horizontal overflow
 Release boundary correction: the feature index describes the current source checkout, while npm remains at 0.1.0 and no package publish is authorized in this wave. The ZZZ adapter, Codex MCP configuration, and experimental Codex hook cards now carry source-checkout tags rather than shipped tags; the install banner and both llms surfaces state the distinction.
 
 Codex delivery fallback: APRV-265 no longer depends on APRV-319. The page links the already shipped approval mcp serve documentation and says Codex may use those agent-facing gate tools. It also says this MCP route does not intercept ordinary tools and repository configuration still awaits human installation and attestation. The pending .codex README link, safe-launcher command, and committed-configuration claim were removed. APRV-319 remains independent and incomplete.
+
+Carter requested the exact bold lead: A harness-agnostic, open-source framework for approving agent actions with a human in the loop, immediately after the existing human approval for agent actions heading. Added the visible lead and synchronized metadata plus llms.txt/llms-full.txt; parent verified actual desktop rendering in the preview. The existing heading remains unchanged.
 <!-- SECTION:NOTES:END -->

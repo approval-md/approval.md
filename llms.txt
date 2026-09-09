@@ -1,6 +1,6 @@
 # approval.md
 
-> Human approval for agent actions: a file-based convention and reference runtime that gates agent actions with real-world side effects (send, spend, delete, post) behind an attested markdown policy, an append-only hash-chained log, and single-use execution tokens.
+> Human approval for agent actions. A harness-agnostic, open-source framework for approving agent actions with a human in the loop.
 
 approval.md is a CLI, an MCP server and a set of harness hooks, with Apache 2.0 code and a CC0 specification and schemas. Version 0.1.0 is published on npm and runs on Node 20 or newer; the feature index describes the current source checkout, including newer source-only entries. Policy lives in `APPROVAL.md` at the root of a repository, a human attests its bytes, and every gate decision and execution is appended to a hash-chained JSONL log that `approval log verify` answers for. Credentials sit in an encrypted vault and are reachable only inside a token window opened by a recorded human decision.
 
