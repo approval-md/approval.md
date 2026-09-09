@@ -68,7 +68,8 @@
  * exactly which bytes moved (SPEC §10.1, amended APRV-125).
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { isAdvanceBookkeeping } from "../core/advance-cycle.js";
@@ -122,6 +123,7 @@ export const LOG_ADVANCE_REFUSAL_CODES = [
   "log-advance-git-failed",
   "log-advance-push-rejected",
   "log-advance-pr-failed",
+  "log-advance-co-author-invalid",
 ] as const;
 
 export type LogAdvanceRefusalCode = (typeof LOG_ADVANCE_REFUSAL_CODES)[number];
@@ -150,6 +152,8 @@ export interface LogAdvanceOptions {
    * waiting for a hand click is the thing this option exists to remove.
    */
   autoMerge?: boolean;
+  /** Optional display credit. It grants no authority and is never inferred. */
+  coAuthor?: string;
   /** Report what would happen and stage, commit, and push nothing. */
   dryRun?: boolean;
   /** The date the default branch name is built from. Injected by the CLI edge. */
@@ -280,6 +284,14 @@ function isAdvancePath(path: string): boolean {
 
 /** `approval log advance`, as a function. The CLI wrapper formats its answer. */
 export function logAdvance(options: LogAdvanceOptions): LogAdvanceResult {
+  const coAuthor = validateCoAuthor(options.coAuthor);
+  if (!coAuthor.ok) {
+    return {
+      ok: false,
+      code: "log-advance-co-author-invalid",
+      message: coAuthor.message,
+    };
+  }
   const remote = options.remote ?? "origin";
   const dryRun = options.dryRun === true;
 
@@ -421,6 +433,7 @@ function snapshotUnderLock(root: string, logPath: string): SnapshotResult {
 
 function advanceOnSnapshot(ctx: UnderLock, snapshot: LogSnapshot): LogAdvanceResult {
   const { root, logPath, branch, remote, dryRun, options } = ctx;
+  const coAuthor = options.coAuthor ?? null;
   const progress = options.progress ?? silentProgress;
 
   // 4. The base: the remote's tip, fetched by this verb rather than by the
@@ -558,7 +571,7 @@ function advanceOnSnapshot(ctx: UnderLock, snapshot: LogSnapshot): LogAdvanceRes
       ? { from: committedSeq + 1, to: drift.workingHead?.seq ?? committedSeq }
       : null;
 
-  const message = range === null ? "" : advanceMessage(range, branch);
+  const message = range === null ? "" : messageWithCoAuthor(advanceMessage(range, branch), coAuthor);
   const carried = ADVANCE_PATHS.filter((path) => existsSync(join(root, path)));
 
   const report = (over: Partial<LogAdvanceReport>): LogAdvanceReport => ({
@@ -683,7 +696,7 @@ function advanceOnSnapshot(ctx: UnderLock, snapshot: LogSnapshot): LogAdvanceRes
   }
 
   progress.phase(`opening or updating the pull request for ${target}`);
-  const pr = ghPullRequest(root, target, range);
+  const pr = ghPullRequest(root, target, range, coAuthor);
   if (!pr.ok) {
     progress.done();
     return {
@@ -866,6 +879,69 @@ export function advanceMessage(range: { from: number; to: number }, branch: stri
   return `Log advance: ${span} (${branch})`;
 }
 
+const CO_AUTHOR_MAX_BYTES = 254;
+const CO_AUTHOR_EMAIL = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/u;
+
+/**
+ * Validate a display-only Git trailer identity before any mutating step.
+ *
+ * The accepted form is deliberately one line and one header value. It is never
+ * derived from a log actor and never interpreted as gate or GitHub authority.
+ */
+export function validateCoAuthor(
+  input: string | undefined,
+): { ok: true; value: string | null } | { ok: false; message: string } {
+  if (input === undefined) return { ok: true, value: null };
+  if (input.length === 0 || Buffer.byteLength(input, "utf8") > CO_AUTHOR_MAX_BYTES) {
+    return {
+      ok: false,
+      message: `--co-author expects one Name <email> identity of at most ${String(CO_AUTHOR_MAX_BYTES)} bytes`,
+    };
+  }
+  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(input) || input.trim() !== input) {
+    return {
+      ok: false,
+      message: "--co-author must be one line with no control or separator characters or surrounding whitespace",
+    };
+  }
+  const matched = /^([^<>:]+) <([^<>]+)>$/u.exec(input);
+  const name = matched?.[1] ?? "";
+  const email = matched?.[2] ?? "";
+  if (name.length === 0 || name.trim() !== name || !CO_AUTHOR_EMAIL.test(email)) {
+    return {
+      ok: false,
+      message: "--co-author expects exactly Name <email>; it is display credit, not an actor or approval identity",
+    };
+  }
+  return { ok: true, value: input };
+}
+
+function coAuthorTrailer(coAuthor: string): string {
+  return `Co-authored-by: ${coAuthor}`;
+}
+
+function messageWithCoAuthor(message: string, coAuthor: string | null): string {
+  return coAuthor === null ? message : `${message}\n\n${coAuthorTrailer(coAuthor)}`;
+}
+
+function bodyWithCoAuthor(body: string, coAuthor: string): string {
+  const trailer = coAuthorTrailer(coAuthor);
+  const normalized = body.replace(/\r\n/gu, "\n").trimEnd();
+  if (normalized === trailer || normalized.endsWith(`\n\n${trailer}`)) return body;
+  return `${body}${body.endsWith("\n") ? "\n" : "\n\n"}${trailer}`;
+}
+
+function ghWithBodyFile(root: string, args: readonly string[], body: string): ReturnType<typeof gh> {
+  const scratch = mkdtempSync(join(tmpdir(), "approval-pr-body-"));
+  const bodyPath = join(scratch, "body.md");
+  try {
+    writeFileSync(bodyPath, body, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    return gh([...args, "--body-file", bodyPath], root);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 /** The first `http…` line of a `gh` run's output, which is how `gh` names a PR. */
 function urlOf(text: string): string | null {
   return (
@@ -894,11 +970,12 @@ function ghPullRequest(
   root: string,
   recordsBranch: string,
   range: { from: number; to: number },
+  coAuthor: string | null,
 ):
   | { ok: true; url: string | null; created: boolean }
-  | { ok: false; step: "list" | "create"; message: string } {
+  | { ok: false; step: "list" | "create" | "edit"; message: string } {
   const listed = gh(
-    ["pr", "list", "--head", recordsBranch, "--state", "open", "--json", "url"],
+    ["pr", "list", "--head", recordsBranch, "--state", "open", "--json", "url,body"],
     root,
   );
   if (!listed.ok) {
@@ -906,7 +983,23 @@ function ghPullRequest(
   }
   const open = parsePrList(listed.stdout);
   if (open.length > 0) {
-    return { ok: true, url: open[0] ?? null, created: false };
+    const current = open[0];
+    if (current === undefined) throw new Error("unreachable");
+    if (coAuthor !== null) {
+      if (current.body === null) {
+        return {
+          ok: false,
+          step: "list",
+          message: "the open pull request body was unavailable, so its existing text was not replaced",
+        };
+      }
+      const body = bodyWithCoAuthor(current.body, coAuthor);
+      if (body !== current.body) {
+        const edited = ghWithBodyFile(root, ["pr", "edit", recordsBranch], body);
+        if (!edited.ok) return { ok: false, step: "edit", message: failureText(edited) };
+      }
+    }
+    return { ok: true, url: current.url, created: false };
   }
 
   const title = `Log advance: ${
@@ -915,7 +1008,14 @@ function ghPullRequest(
   const body =
     "This branch carries the append-only log advance, its queue projection, and the payload files the records reference — one commit per advance, and nothing else. " +
     "Merge with a MERGE COMMIT. Nothing else may ride this branch: a log commit alongside other work is what the one-commit rule forbids.";
-  const created = gh(["pr", "create", "--title", title, "--body", body, "--head", recordsBranch], root);
+  const created =
+    coAuthor === null
+      ? gh(["pr", "create", "--title", title, "--body", body, "--head", recordsBranch], root)
+      : ghWithBodyFile(
+          root,
+          ["pr", "create", "--title", title, "--head", recordsBranch],
+          bodyWithCoAuthor(body, coAuthor),
+        );
   if (!created.ok) {
     return { ok: false, step: "create", message: failureText(created) };
   }
@@ -1023,7 +1123,7 @@ function branchDiffPaths(root: string, from: string, to: string): string[] | nul
  * `gh pr create` that finds an existing PR fails loudly with the reason. The
  * opposite default would silently skip opening the day's pull request.
  */
-function parsePrList(text: string): string[] {
+function parsePrList(text: string): Array<{ url: string; body: string | null }> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text.trim().length === 0 ? "[]" : text) as unknown;
@@ -1031,11 +1131,14 @@ function parsePrList(text: string): string[] {
     return [];
   }
   if (!Array.isArray(parsed)) return [];
-  const urls: string[] = [];
+  const pullRequests: Array<{ url: string; body: string | null }> = [];
   for (const entry of parsed) {
     if (typeof entry !== "object" || entry === null) continue;
     const url = (entry as Record<string, unknown>)["url"];
-    if (typeof url === "string" && url.length > 0) urls.push(url);
+    const body = (entry as Record<string, unknown>)["body"];
+    if (typeof url === "string" && url.length > 0) {
+      pullRequests.push({ url, body: typeof body === "string" ? body : null });
+    }
   }
-  return urls;
+  return pullRequests;
 }

@@ -485,6 +485,20 @@ range they cover, and pushed to a short-lived records branch that exists for
 exactly that commit. Main is protected here, so the commit reaches it through a
 pull request; `--pr` opens that pull request through the ordinary `gh` path.
 
+`--co-author "Name <email>"` adds one validated `Co-authored-by` trailer to the
+generated records commit and to the pull request body. When the day's pull
+request already exists, the verb preserves its body and adds the trailer once.
+This is display credit only. It does not set an event actor, name an approver,
+grant authority, or derive an identity from the log. Omitting the flag preserves
+the existing commit message, pull request body, and merge command byte for byte.
+
+The merge queue ignored the custom auto-merge commit body observed on PR 378.
+For a queued merge commit to retain this credit, the repository must use GitHub's
+PR-body merge-message setting (`merge_commit_message=PR_BODY`); the package does
+not change repository settings. The PR body is therefore the durable source the
+queue can copy, rather than a claim that `gh pr merge --body` controls the final
+queued merge.
+
 **You do not fetch or reset first (APRV-203).** The verb owns its own git
 preconditions: it fetches the base branch (the one you are standing on, or
 `--base <name>`), builds the commit on `origin/<base>` in a scratch index rather

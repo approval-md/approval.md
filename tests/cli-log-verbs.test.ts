@@ -23,6 +23,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -42,7 +43,7 @@ import { appendAttestation } from "../src/core/attest.js";
 import { compareChains } from "../src/core/log-reconcile.js";
 import { storePayload } from "../src/core/payload-store.js";
 import { verify } from "../src/core/verify.js";
-import { logAdvance } from "../src/cli/log-advance.js";
+import { advanceMessage, logAdvance } from "../src/cli/log-advance.js";
 import { LOG_SYNC_STEPS, logSync, type LogSyncStep } from "../src/cli/log-sync.js";
 import { POLICY } from "./scenario.js";
 
@@ -138,6 +139,67 @@ interface Repo {
   dir: string;
   remote: string;
   logPath: string;
+}
+
+interface GhHarness {
+  dir: string;
+  callsPath: string;
+  bodyPath: string;
+}
+
+/** A local gh that records argv and copies body-file bytes before they disappear. */
+function ghHarness(existingBody?: string): GhHarness {
+  counter += 1;
+  const dir = join(scratch, `gh-attribution-${String(counter)}`);
+  const callsPath = join(dir, "calls.jsonl");
+  const bodyPath = join(dir, "body.md");
+  mkdirSync(dir, { recursive: true });
+  if (existingBody !== undefined) writeFileSync(bodyPath, existingBody, "utf8");
+  const script = [
+    "#!/usr/bin/env node",
+    'const fs = require("node:fs");',
+    `const calls = ${JSON.stringify(callsPath)};`,
+    `const body = ${JSON.stringify(bodyPath)};`,
+    "const argv = process.argv.slice(2);",
+    'fs.appendFileSync(calls, `${JSON.stringify(argv)}\\n`);',
+    'const value = (flag) => { const at = argv.indexOf(flag); return at < 0 ? null : argv[at + 1]; };',
+    'if (argv[0] === "pr" && argv[1] === "list") {',
+    '  process.stdout.write(fs.existsSync(body) ? JSON.stringify([{url:"https://example.invalid/pr/327",body:fs.readFileSync(body,"utf8")}]) : "[]");',
+    "  process.exit(0);",
+    "}",
+    'if (argv[0] === "pr" && (argv[1] === "create" || argv[1] === "edit")) {',
+    '  const bodyFile = value("--body-file");',
+    '  const inline = value("--body");',
+    '  fs.writeFileSync(body, bodyFile === null ? String(inline ?? "") : fs.readFileSync(bodyFile));',
+    '  if (argv[1] === "create") process.stdout.write("https://example.invalid/pr/327\\n");',
+    "  process.exit(0);",
+    "}",
+    'if (argv[0] === "pr" && argv[1] === "merge") process.exit(0);',
+    "process.exit(2);",
+    "",
+  ].join("\n");
+  const executable = join(dir, "gh");
+  writeFileSync(executable, script, "utf8");
+  chmodSync(executable, 0o755);
+  return { dir, callsPath, bodyPath };
+}
+
+function withGh<T>(harness: GhHarness, fn: () => T): T {
+  const previous = process.env["PATH"] ?? "";
+  process.env["PATH"] = `${harness.dir}:${previous}`;
+  try {
+    return fn();
+  } finally {
+    process.env["PATH"] = previous;
+  }
+}
+
+function ghCalls(harness: GhHarness): string[][] {
+  return readFileSync(harness.callsPath, "utf8")
+    .trim()
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as string[]);
 }
 
 function newRepo(records = 2): Repo {
@@ -776,6 +838,8 @@ test("advance: carries exactly the three paths, names the seq range, pushes a re
     git(["log", "-1", "--pretty=%s", commit], repo.dir).stdout.trim(),
     result.report.message,
   );
+  assert.equal(git(["log", "-1", "--pretty=%B", commit], repo.dir).stdout.trimEnd(), result.report.message);
+  assert.doesNotMatch(result.report.message, /Co-authored-by:/u);
 
   // It checked nothing out, it moved no branch, and it appended nothing.
   assert.equal(git(["rev-parse", "--abbrev-ref", "HEAD"], repo.dir).stdout.trim(), branchBefore);
@@ -790,6 +854,129 @@ test("advance: carries exactly the three paths, names the seq range, pushes a re
 
   // README.md was never staged, so it is still a working-tree change.
   assert.match(git(["status", "--porcelain", "--", "README.md"], repo.dir).stdout, /README\.md/u);
+});
+
+test("advance: explicit co-author reaches the real commit and new PR body without entering gh argv", () => {
+  const repo = newRepo();
+  appendRecord(repo.dir, "attributed-new-pr");
+  const harness = ghHarness();
+  const identity = "Codex <noreply@openai.com>";
+
+  const run = withGh(harness, () =>
+    runCli(
+      [
+        "log",
+        "advance",
+        "--branch",
+        "records-log-attributed",
+        "--pr",
+        "--co-author",
+        identity,
+        "--json",
+      ],
+      repo.dir,
+    ),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  const report = JSON.parse(run.stdout) as {
+    ok: true;
+    commit: string;
+    range: { from: number; to: number };
+  };
+  assert.equal(report.ok, true);
+  const message = git(["log", "-1", "--pretty=%B", report.commit], repo.dir).stdout.trimEnd();
+  assert.equal(message, `${advanceMessage(report.range, "main")}\n\nCo-authored-by: ${identity}`);
+  assert.equal(readFileSync(harness.bodyPath, "utf8").endsWith(`\n\nCo-authored-by: ${identity}`), true);
+
+  const calls = ghCalls(harness);
+  assert.deepEqual(calls[0], [
+    "pr",
+    "list",
+    "--head",
+    "records-log-attributed",
+    "--state",
+    "open",
+    "--json",
+    "url,body",
+  ]);
+  assert.equal(calls[1]?.[0], "pr");
+  assert.equal(calls[1]?.[1], "create");
+  assert.equal(calls[1]?.includes("--body-file"), true);
+  assert.equal(calls[1]?.includes(identity), false, "co-author became a gh argument");
+  assert.deepEqual(calls[2], ["pr", "merge", "records-log-attributed", "--merge", "--auto"]);
+});
+
+test("advance: an existing PR body is preserved and receives one co-author trailer", () => {
+  const repo = newRepo();
+  appendRecord(repo.dir, "attributed-existing-pr");
+  const identity = "Codex <noreply@openai.com>";
+  const original = `Operator context that must survive.\n\nExample only:\n\`\`\`text\nCo-authored-by: ${identity}\n\`\`\`\n\nMore operator context.\nCo-authored-by: ${identity}`;
+  const harness = ghHarness(original);
+
+  const first = withGh(harness, () =>
+    logAdvance({ cwd: repo.dir, branch: "records-log-existing", pr: true, coAuthor: identity }),
+  );
+  assert.equal(first.ok, true, first.ok ? "" : first.message);
+  assert.equal(
+    readFileSync(harness.bodyPath, "utf8"),
+    `${original}\n\nCo-authored-by: ${identity}`,
+  );
+  let calls = ghCalls(harness);
+  assert.equal(calls.filter((argv) => argv[1] === "edit").length, 1);
+  assert.equal(calls.find((argv) => argv[1] === "edit")?.includes(identity), false);
+
+  appendRecord(repo.dir, "attributed-existing-pr-again");
+  const second = withGh(harness, () =>
+    logAdvance({ cwd: repo.dir, branch: "records-log-existing", pr: true, coAuthor: identity }),
+  );
+  assert.equal(second.ok, true, second.ok ? "" : second.message);
+  assert.equal(
+    readFileSync(harness.bodyPath, "utf8").match(/Co-authored-by:/gu)?.length,
+    3,
+    "the existing trailer was duplicated",
+  );
+  assert.equal(readFileSync(harness.bodyPath, "utf8").startsWith(original), true);
+  calls = ghCalls(harness);
+  assert.equal(calls.filter((argv) => argv[1] === "edit").length, 1, "the unchanged body was edited again");
+});
+
+test("advance: invalid co-author values refuse before any git or log mutation", () => {
+  const repo = newRepo();
+  appendRecord(repo.dir, "invalid-attribution");
+  const before = {
+    log: bytes(repo.logPath),
+    status: git(["status", "--porcelain=v1"], repo.dir).stdout,
+    objects: git(["count-objects", "-v"], repo.dir).stdout,
+    remoteRefs: git(["for-each-ref", "--format=%(refname) %(objectname)"], repo.remote).stdout,
+  };
+  const invalid = [
+    "",
+    " Codex <noreply@openai.com>",
+    "Co-authored-by: Mallory <mallory@example.invalid>",
+    "Mallory <mallory@example.invalid>\nSigned-off-by: Root <root@example.invalid>",
+    "Mallory <not-an-email>",
+    "--help",
+    "Invisible\u200b <mallory@example.invalid>",
+    "Line\u2028Break <mallory@example.invalid>",
+    `${"Long".repeat(64)} <mallory@example.invalid>`,
+  ];
+  for (const coAuthor of invalid) {
+    const result = logAdvance({ cwd: repo.dir, coAuthor });
+    assert.equal(result.ok, false);
+    if (result.ok) throw new Error("unreachable");
+    assert.equal(result.code, "log-advance-co-author-invalid");
+  }
+
+  const cli = runCli(["log", "advance", "--co-author", invalid[3]!, "--json"], repo.dir);
+  assert.equal(cli.code, 2, cli.stderr);
+  assert.match(cli.stderr, /co-author/u);
+  assert.deepEqual(bytes(repo.logPath), before.log);
+  assert.equal(git(["status", "--porcelain=v1"], repo.dir).stdout, before.status);
+  assert.equal(git(["count-objects", "-v"], repo.dir).stdout, before.objects);
+  assert.equal(
+    git(["for-each-ref", "--format=%(refname) %(objectname)"], repo.remote).stdout,
+    before.remoteRefs,
+  );
 });
 
 test("advance: the default records branch carries the date", () => {
