@@ -87,6 +87,11 @@ import {
   readAgentmailConfig,
   type AgentmailConfig,
 } from "../adapters/agentmail.js";
+import {
+  probeZzz,
+  ZZZ_CREDENTIAL_SPECS,
+  ZZZ_TOKEN_NAME,
+} from "../adapters/zzz.js";
 import type { CredentialProvider } from "../adapters/contract.js";
 import { vaultCredentialProvider } from "../adapters/vault-provider.js";
 import { isSmtpSecurity, probeSmtp, type SmtpSecurity } from "../adapters/smtp.js";
@@ -95,6 +100,7 @@ import {
   SETUP_ADAPTER_AGENTMAIL_HELP,
   SETUP_ADAPTER_EMAIL_HELP,
   SETUP_ADAPTER_HELP,
+  SETUP_ADAPTER_ZZZ_HELP,
 } from "./help.js";
 import { refusal as renderRefusal, style } from "./style.js";
 import type { Streams } from "./main.js";
@@ -508,6 +514,27 @@ async function verifyAgentmail(
   );
 }
 
+async function verifyZzz(
+  values: Record<string, string>,
+  context: VerifyContext,
+): Promise<VerifyOutcome> {
+  if (!confirmUntil(context.streams, context.prompter, "ask zzz.bot to authenticate the stored token with one read-only room-list request? Nothing is posted", true)) {
+    return { ok: true, declined: true, detail: "\nstored and unverified: no request was made.\n" };
+  }
+  const current = values[ZZZ_TOKEN_NAME] === undefined
+    ? context.credentials.get(ZZZ_TOKEN_NAME)
+    : { ok: true as const, value: values[ZZZ_TOKEN_NAME] };
+  if (!current.ok) return { ok: false, detail: `${renderRefusal(style(), current.code, current.message)}\n` };
+  const result = await probeZzz(current.value, context.apiBase === undefined ? {} : { origins: { production: context.apiBase } });
+  if (result.ok) {
+    return {
+      ok: true,
+      detail: "\nverified: zzz.bot accepted the token on one read-only room-list request. No message was posted. This does not prove write scope, room membership, or private-room workflow evidence; those are checked by zzz.bot when the approved message is sent.\n",
+    };
+  }
+  return { ok: false, detail: `${renderRefusal(style(), result.code, result.message)}\nThe value remains stored; replace it or retry the probe after connectivity is restored.\n` };
+}
+
 /** Every adapter this verb can configure. Keyed by the `adapter <name>` name. */
 export const ADAPTER_SETUPS: Record<string, AdapterSetupEntry> = {
   email: {
@@ -541,6 +568,21 @@ export const ADAPTER_SETUPS: Record<string, AdapterSetupEntry> = {
       `The key stored here is the one that CAN send. Give the agent a different key,`,
       `without ${AGENTMAIL_SEND_PERMISSIONS.join(" or ")}, in AGENTMAIL_API_KEY: that key composes`,
       `drafts, and \`approval payload agentmail-draft\` snapshots one for a human to read.`,
+    ],
+  },
+  zzz: {
+    specs: ZZZ_CREDENTIAL_SPECS,
+    summary: "the invited zzz.bot agent token `approval adapter zzz` reads inside the verified-token window",
+    help: SETUP_ADAPTER_ZZZ_HELP,
+    hint: (context) => manifestHint(ZZZ_CREDENTIAL_SPECS, context),
+    verify: verifyZzz,
+    nextSteps: [
+      `Check the credential name (never its value) with:`,
+      ``,
+      `  approval vault list --as human:<id>`,
+      ``,
+      `Keep this write-capable token out of the agent environment. For a private room,`,
+      `zzz.bot also requires active membership and accepted approval.md workflow evidence.`,
     ],
   },
 };

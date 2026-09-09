@@ -588,6 +588,10 @@ test("the help texts state the rules a reader must not have to infer", async () 
         "AgentMail has no From",
       ],
     ],
+    [
+      ["adapter", "zzz", "--help"],
+      ["create_thread or create_reply", "communicate.zzz.external", "zzz.agent_token", "Idempotency-Key"],
+    ],
   ] as const) {
     const run = await runCli([...argv], unit.dir, GREEN);
     assert.equal(run.code, 0, run.stderr);
@@ -600,6 +604,7 @@ test("the help texts state the rules a reader must not have to infer", async () 
 test("the root help lists the adapter verb", async () => {
   assert.match(ROOT_HELP, /approval adapter email <action-key> --token <t> --payload <file\|->/u);
   assert.match(ROOT_HELP, /approval adapter agentmail <action-key> --token <t> --payload <file\|->/u);
+  assert.match(ROOT_HELP, /approval adapter zzz <action-key> --token <t> --payload <file\|->/u);
   assert.match(ROOT_HELP, /\n {2}adapter {3}execute an approved action through a side-effect adapter/u);
 });
 

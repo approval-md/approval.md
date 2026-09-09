@@ -497,6 +497,7 @@ const AGENT_FACING: readonly string[] = [
   "channel telegram health",
   "adapter email",
   "adapter agentmail",
+  "adapter zzz",
   "hook claude-code",
   "hook cursor",
   "hook codex",

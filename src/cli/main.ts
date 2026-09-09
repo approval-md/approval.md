@@ -78,7 +78,7 @@ import {
   type Style,
 } from "./style.js";
 import { usageErrorText } from "./usage.js";
-import { wordmark } from "./wordmark.js";
+import { VERSION, wordmark } from "./wordmark.js";
 
 /** Output sinks, injectable so the command layer stays testable in-process. */
 export interface Streams {
@@ -903,6 +903,10 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
     // terminal still gets the wordmark and the five verbs they need.
     streams.out(`${splash(theme)}\n`);
     return usageError(streams, false, "no command given", ROOT_HELP);
+  }
+  if (command === "--version" || command === "-v" || command === "version") {
+    streams.out(`${VERSION}\n`);
+    return EXIT_OK;
   }
   if (command === "--help" || command === "-h" || command === "help") {
     // `approval help <verb>` is the third spelling of `approval <verb> --help`,

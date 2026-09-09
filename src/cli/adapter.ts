@@ -54,6 +54,7 @@ import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { agentmailAdapter } from "../adapters/agentmail.js";
 import { emailAdapter } from "../adapters/email.js";
+import { zzzAdapter } from "../adapters/zzz.js";
 import { vaultCredentialProvider } from "../adapters/vault-provider.js";
 import {
   executeThroughAdapter,
@@ -68,7 +69,7 @@ import { passphraseEnvFor, vaultPathFor } from "../core/vault.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_INTEGRITY, EXIT_IO, EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { executeRefusalExitCode } from "./execute.js";
-import { ADAPTER_AGENTMAIL_HELP, ADAPTER_EMAIL_HELP, ADAPTER_HELP } from "./help.js";
+import { ADAPTER_AGENTMAIL_HELP, ADAPTER_EMAIL_HELP, ADAPTER_HELP, ADAPTER_ZZZ_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH, resolvePath } from "./paths.js";
 import { refusal as renderRefusal, style } from "./style.js";
@@ -108,6 +109,10 @@ export const ADAPTER_CLIS: Record<string, AdapterCliEntry> = {
   agentmail: {
     help: ADAPTER_AGENTMAIL_HELP,
     build: (options) => agentmailAdapter(options),
+  },
+  zzz: {
+    help: ADAPTER_ZZZ_HELP,
+    build: (options) => zzzAdapter(options),
   },
 };
 

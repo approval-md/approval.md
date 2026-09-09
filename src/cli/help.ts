@@ -63,6 +63,8 @@ Usage:
                       [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
   approval adapter agentmail <action-key> --token <t> --payload <file|->
                       [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
+  approval adapter zzz <action-key> --token <t> --payload <file|->
+                      [--as <id>] [--vault <path>] [--timeout <ms>] [--json]
   approval execution resolve <action-key> --outcome completed|failed
                       --note "<text>" [--as human:<id>] [--json]
   approval execution reconcile <action-key>
@@ -1937,15 +1939,15 @@ ${why("vault-remove")}`;
 export const ADAPTER_HELP = `approval adapter — execute an approved action through a side-effect adapter
 
 Usage:
-  approval adapter email|agentmail <action-key> --token <t> --payload <file|->
+  approval adapter email|agentmail|zzz <action-key> --token <t> --payload <file|->
                       [--as human:<id>|agent:<id>] [--vault <path>]
                       [--policy|--dir|--log <path>] [--timeout <ms>] [--json]
 
 Adapters:
-  email   send one RFC 5322 message over SMTP, for actions declared under
-          communicate.email.external (SPEC.md §6.1's canonical example)
+  email   send SMTP for communicate.email.external (SPEC.md §6.1)
   agentmail  send the same class over the AgentMail API: a direct message, or
           a draft the agent composed, re-read and refused if it drifted
+  zzz     create a thread or reply for communicate.zzz.external
 
 An adapter is the HARD BOUNDARY of SPEC.md §10.4: it holds the credentials and
 refuses to act without a valid, unexpired, single-use execution token bound to
@@ -2008,6 +2010,28 @@ WITH draft_send and message_send; the agent's own key must not have them.
 ${EXIT_CODES_POINTER} (5 when no valid token was presented; 1 for every refusal)
 ${JSON_ERRORS}
 ${why("adapter-agentmail")}`;
+
+export const ADAPTER_ZZZ_HELP = `approval adapter zzz — send one approved zzz.bot message
+
+Usage:
+  approval adapter zzz <action-key> --token <t> --payload <file|->
+      [--as <id>] [--vault|--policy|--dir|--log <p>] [--timeout <ms>] [--json]
+
+The tagged payload chooses create_thread or create_reply and production or
+preview. Both destinations are fixed in the adapter; the payload cannot supply
+an arbitrary URL. The runtime binds the complete payload, including metadata,
+tags and references, and derives ZZZ's retry-safe Idempotency-Key from the
+action key and payload hash. Actions use communicate.zzz.external. The VAULT
+holds zzz.agent_token.
+
+A public-room write needs an invited token with write scope. A private-room
+write also needs current room membership and accepted, unexpired approval.md
+workflow evidence. zzz.bot intentionally hides missing private access as 404.
+
+JSON shapes and failure codes: docs/cli-reference.md#adapter-zzz
+${EXIT_CODES_POINTER} (5 when no valid token was presented; 1 for every refusal)
+${JSON_ERRORS}
+${why("adapter-zzz")}`;
 
 export const ENV_HELP =`approval env — resolve .approval/env into an export block for your shell
 
@@ -2153,10 +2177,11 @@ Usage:
                                 [--policy <path>]
 
 Known adapters:
-  email     the SMTP settings \`approval adapter email\` reads: smtp.host,
-            smtp.port, smtp.security, smtp.user, smtp.password
+  email     smtp.host, smtp.port, smtp.security, smtp.user, smtp.password
   agentmail the two values \`approval adapter agentmail\` reads:
             agentmail.inbox_id and agentmail.api_key
+  zzz       the invited write credential \`approval adapter zzz\` reads:
+            zzz.agent_token
 
 Asks for each credential the named adapter DECLARES, validates every answer with
 the adapter's own rules, stores them in .approval/vault.enc, and offers to prove
@@ -2218,6 +2243,24 @@ says so rather than claiming the key can send. A FAILED PROBE KEEPS THE VALUES:
 ${EXIT_CODES_POINTER} (1 means AgentMail refused, or the vault would not open)
 ${JSON_ERRORS}
 ${why("setup-adapter-agentmail")}`;
+
+export const SETUP_ADAPTER_ZZZ_HELP = `approval setup adapter zzz — the zzz.bot credential (HUMAN-ONLY)
+
+Usage:
+  approval setup adapter zzz [--as human:<id>] [--log <path>]
+      [--dir <path>] [--policy <path>]
+
+The vault name is zzz.agent_token: an invited principal token with write scope.
+Keep it out of the agent environment, so publication remains behind the adapter.
+
+THE PROBE POSTS NOTHING. It performs one authenticated GET /api/v1/rooms. A
+success proves only that zzz.bot accepted the active credential. It does not
+prove write scope, room membership, or private-room workflow evidence; zzz.bot
+checks those when the approved message is sent.
+
+${EXIT_CODES_POINTER} (1 means zzz.bot refused, or the vault would not open)
+${JSON_ERRORS}
+${why("setup-adapter-zzz")}`;
 
 export const SETUP_CHANNEL_HELP = `approval setup channel — configure one channel's transport credential (HUMAN-ONLY)
 

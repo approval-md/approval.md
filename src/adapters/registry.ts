@@ -27,6 +27,7 @@
 
 import { agentmailAdapter } from "./agentmail.js";
 import { emailAdapter } from "./email.js";
+import { zzzAdapter } from "./zzz.js";
 import type { Adapter } from "./contract.js";
 
 /**
@@ -41,7 +42,7 @@ import type { Adapter } from "./contract.js";
  * own business and not a reason to open a socket at lookup time.
  */
 export function builtInAdapters(): readonly Adapter[] {
-  return [emailAdapter(), agentmailAdapter()];
+  return [emailAdapter(), agentmailAdapter(), zzzAdapter()];
 }
 
 /**
