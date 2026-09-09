@@ -3,11 +3,11 @@ id: APRV-249
 title: >-
   Design optional hardened human authorization and externally verifiable
   approval receipts
-status: In Progress
+status: Done
 assignee:
   - '@opus-249'
 created_date: '2026-09-04 20:43'
-updated_date: '2026-09-09 19:44'
+updated_date: '2026-09-09 20:09'
 labels: []
 dependencies: []
 references:
@@ -187,4 +187,12 @@ LEFT IN PROGRESS deliberately, per the task's own instruction that it authorizes
 The user explicitly picked up all outstanding tasks in this overnight wave, satisfying the task instruction to leave design work pending until pickup. This remains design-only; no receipt runtime is authorized by this record. Astra reviewed and applied the repaired proposal through primary gate outcome30154. Applied bytes match reviewed SHA256 71bb4cc48cfa3b8bc7e053672e226afa2fd336f6dfb2709fc1149622205dcfcc. AC3 now specifies complete domain-separated receipt signing and distinctly weaker canonical-record log witnesses; AC6 lists 29 concrete negative cases. Sol verification: build0, docs guard16/16 exit0, lint0, typecheck0, diff0, semantic consistency8 checks0, exact-byte comparison0. Full npm suite remains pending its sequential validation slot; task stays In Progress until required checks and GitHub delivery complete.
 
 Fresh resumed full validation: env -u APPROVAL_HUMAN npm test completed with actual exit0, 4018 tests, 4017 passed, 0 failed, 1 skipped. Complete evidence at /private/tmp/aprv-249-full-npm-test.log. Prior interrupted exit130 run is superseded by this complete run. Existing build, 16 documentation guard tests, lint, typecheck, exact reviewed-byte comparison, semantic checks and diff checks passed. Parent reviewed the proposal; protected edit outcome30154 is published by merged records PR365. Keep In Progress until GitHub delivery is confirmed.
+
+GitHub delivery confirmed: PR368 https://github.com/approval-md/approval.md/pull/368 merged at2026-09-09T20:08:13Z as7050881a9ab76fc100ac3e2406e6a5b6eb244c85 after all required PR and merge-group Node22/Node20 checks passed. Reviewed feature commit028fdc8dcc6ec43b1233b899c877d9a8ba0a1905; push outcome30195, PR-open30198, merge30204. This completes the design task only; no receipt runtime or stronger ZZZ operator assurance is deployed.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged PR368 corrects the design distinction between retrospective log witnesses and receipts with complete signed bodies, covering issuer trust, replay, proof of possession and negative cases. Full local suite4017passed1skipped exit0; GitHub PR and merge-group checks passed on Node22 and Node20. No receipt runtime or stronger ZZZ identity claim was introduced.
+<!-- SECTION:FINAL_SUMMARY:END -->
