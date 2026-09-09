@@ -1,0 +1,1 @@
+{"argv":["/opt/homebrew/bin/gh","pr","create","--repo","approval-md/approval.md","--base","main","--head","codex/operative-quickstart","--title","feat: add human quickstart with exact policy attestation (APRV-309)","--body-file","/private/tmp/aprv-309-pr.md"],"body_sha256":"3ffbe81629ff0b8d7e00eff46cf4daeb5ab29a2092c5bbe485f5e98f6c0a9982","cwd":"/Users/carter/dev/approval-md"}
