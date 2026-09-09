@@ -95,6 +95,7 @@ import {
   assertLocal as assertAgentmailLocal,
   startMockAgentmail,
 } from "./agentmail-mock.js";
+import { startMockZzz } from "./zzz-mock.js";
 
 /** dist/tests/cli-setup.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -1660,12 +1661,12 @@ test("setup adapter email refuses --json, answers --help, and names the adapters
   const missing = spawnCli(["setup", "adapter"], home.dir);
   assert.equal(missing.code, EXIT_USAGE);
   assert.match(missing.stderr, /missing <name>/u);
-  assert.match(missing.stderr, /known adapters: agentmail, email/u);
+  assert.match(missing.stderr, /known adapters: agentmail, email, zzz/u);
 
   const unknown = spawnCli(["setup", "adapter", "gcal"], home.dir);
   assert.equal(unknown.code, EXIT_USAGE);
   assert.match(unknown.stderr, /unknown adapter "gcal"/u);
-  assert.match(unknown.stderr, /known adapters: agentmail, email/u);
+  assert.match(unknown.stderr, /known adapters: agentmail, email, zzz/u);
   // A typo is answered with the list, not with a lecture about terminals.
   assert.doesNotMatch(unknown.stderr, /stdin is not a terminal/u);
 });
@@ -2751,4 +2752,46 @@ test("the non-interactive hint is generated from the AgentMail manifest", () => 
   }
   // The secret's line still reads its value from the keystore, never an argv.
   assert.match(result.stderr, /find-generic-password|secret-tool lookup/u);
+});
+
+// ===========================================================================
+// setup adapter zzz (APRV-320)
+// ===========================================================================
+
+const ZZZ_TOKEN = `z_${"q".repeat(48)}`;
+const zzzMock = await startMockZzz(ZZZ_TOKEN);
+
+after(async () => {
+  await zzzMock.close();
+  assert.equal(
+    transcript.join("\n").includes(ZZZ_TOKEN),
+    false,
+    "the ZZZ token was printed by `approval setup adapter zzz`",
+  );
+});
+
+test("setup adapter zzz stores the token and proves only read authentication", async () => {
+  const home = makeHome();
+  const prompter = scriptedPrompter([ZZZ_TOKEN, "y"]);
+  const before = zzzMock.requests.length;
+  const result = await run(
+    ["adapter", "zzz", "--as", HUMAN],
+    home,
+    {
+      prompter,
+      keystore: fakeKeystore("keychain"),
+      env: WITH_PASSPHRASE,
+      apiBase: zzzMock.url,
+    },
+  );
+
+  assert.equal(result.code, EXIT_OK, result.err);
+  assert.deepEqual(vaultNames(home), ["zzz.agent_token"]);
+  assert.equal(vaultValue(home, "zzz.agent_token"), ZZZ_TOKEN);
+  assert.match(result.out, /accepted the token on one read-only room-list request/u);
+  assert.match(result.out, /does not prove write scope, room membership, or private-room workflow evidence/u);
+  assert.equal(zzzMock.requests.length, before + 1);
+  assert.equal(zzzMock.requests[before]?.method, "GET");
+  assert.equal(zzzMock.requests[before]?.path, "/api/v1/rooms");
+  assert.equal(result.out.includes(ZZZ_TOKEN), false);
 });

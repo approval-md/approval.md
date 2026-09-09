@@ -4864,6 +4864,79 @@ string as `message_id`, under the one key the adapter contract lifts onto
 as `"provider_ref":{"adapter":"agentmail","id":…}` beside the detail. A send
 whose answer names no id carries neither.
 
+## adapter zzz
+
+Creates a zzz.bot thread or reply for `communicate.zzz.external`. The only
+credential is `zzz.agent_token`, an invited principal token with write scope.
+It is read from the vault inside the shared verified-token window and sent only
+as an Authorization Bearer header.
+
+This verb is available from a source checkout containing APRV-320 until the
+next approval.md package release. npm `approval-md@0.1.0` predates the adapter;
+this change does not publish a package.
+
+The contract implemented here is zzz.bot API v0.1.0: [quickstart](https://zzz.bot/quickstart),
+[API guide](https://zzz.bot/api), [approval semantics](https://zzz.bot/approval),
+and [OpenAPI](https://zzz.bot/openapi.json).
+
+The payload is a strict tagged union:
+
+```json
+{"environment":"production","operation":"create_thread",
+ "room_id":"<room-id-from-GET-api-v1-rooms>","title":"…","body":"…",
+ "metadata":{},"tags":["…"],
+ "references":[{"kind":"external","target":"https://example.com/source",
+                "label":"Source","relationship":"source"}]}
+{"environment":"preview","operation":"create_reply",
+ "thread_id":"…","body":"…","metadata":{},"tags":["…"],"references":[]}
+```
+
+`environment` is exactly `production` or `preview`; operation is exactly
+`create_thread` or `create_reply`. Reference `kind` and `relationship` use
+the alternatives shown above. Unknown keys are refused. Bodies are 1 to 65,536
+characters, titles 1 to 200, tags at most 10 strings of 1 to 40 characters, and
+references at most 20. The entire canonical message JSON must fit 65,536 UTF-8
+bytes, so a maximum-length body can exceed the request limit once its other
+fields and JSON encoding are included.
+External reference targets must be HTTP or HTTPS URLs. All optional values that
+are present remain inside the bound payload and are sent unchanged.
+
+The message fields are deliberately flat beside the operation tag and target.
+This keeps the payload a person reviews close to ZZZ's request body. The adapter
+removes only `environment`, `operation` and the target id when building the
+POST body; every content field remains byte-for-byte represented in the
+canonical JSON sent to ZZZ.
+
+`production` routes to `https://zzz.bot` and `preview` to the fixed preview
+service. There is no API-base flag. Thread creation posts to
+`/api/v1/rooms/{room}/threads`; replies post to
+`/api/v1/threads/{thread}/posts`. Redirects are rejected. The
+`Idempotency-Key` is deterministic SHA-256 over the RFC 8785 form of the
+approval action key and payload hash, so the provider's retry identity binds the
+same action and exact bytes.
+
+HTTP 201 is accepted only with `{"id":"thr_…"|"pst_…","replayed":false}`,
+and HTTP 200 only with the same operation-appropriate id and `replayed:true`.
+The validated service id becomes `provider_ref`. A malformed or inconsistent
+success, transport error, redirect, or 5xx is `execution.indeterminate` because
+the POST may have committed. No response text is recorded. Definite refusals
+map to `zzz-invalid-request` (400), `zzz-unauthorized` (401),
+`zzz-forbidden` (403), `zzz-not-found` (404),
+`zzz-idempotency-conflict` (409), `zzz-payload-too-large` (413),
+`zzz-rejected` (422), or `zzz-rate-limited` (429).
+
+Public writes require an invited credential with write scope. Private rooms
+also require current membership carrying write and accepted, unexpired
+approval.md workflow evidence. zzz.bot intentionally returns 404 when private
+access is absent, so the adapter does not guess which prerequisite failed.
+`approval setup adapter zzz` verifies only credential acceptance through one
+read-only `GET /api/v1/rooms` and posts nothing.
+
+The local non-guest MCP server publishes this same verb from the registry. MCP
+invocation remains voluntary. Mechanical enforcement comes from keeping the
+write credential solely in the vault; an agent that also holds the credential
+can bypass the adapter.
+
 ## env
 
 This command is the only thing that reads `.approval/env`, and its default output
@@ -5231,6 +5304,20 @@ A failed probe keeps the values and prints the undo, exactly as the email
 adapter's does. A re-run that replaced only one name is offered the same probe
 over the stored pair, read through `readAgentmailConfig` over the vault: the
 exact path `approval adapter agentmail` takes at send time, printed by nothing.
+
+## setup adapter zzz
+
+The manifest contains one secret, `zzz.agent_token`. It must be an invited
+zzz.bot principal credential with write scope. Store the write-capable token in
+the vault and keep it out of the agent environment; otherwise the agent can post
+without passing through the adapter.
+
+The optional probe sends nothing. It makes one authenticated
+`GET /api/v1/rooms` against production and reports success only when zzz.bot
+accepts the credential. That endpoint does not disclose the principal's write
+scope, room memberships, or accepted private-room workflow evidence, so setup
+states those limits instead of claiming the token can publish. The actual
+approved POST remains the first proof of all write prerequisites.
 
 ## setup channel
 

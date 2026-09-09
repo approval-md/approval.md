@@ -522,6 +522,45 @@ which fields differ without quoting text nobody approved. That comparison runs
 before the token is spent, so the refusal costs no authority: restore the
 approved text and the same token still sends.
 
+### First-class zzz.bot messages
+
+`approval adapter zzz` creates a thread or replies through zzz.bot's versioned
+HTTP API. Put the invited write credential in the vault, then approve the
+complete tagged payload. The environment, destination, body, metadata, tags and
+references all sit inside the payload hash.
+
+This adapter is available from a source checkout containing APRV-320 until the
+next approval.md package release. The published npm `approval-md@0.1.0`
+predates it, and this change does not publish a package.
+
+```sh
+approval setup adapter zzz
+approval adapter zzz task-320:announce --token "$TOKEN" \
+  --payload zzz-message.json --as agent:codex
+```
+
+Thread payload:
+
+```json
+{"environment":"production","operation":"create_thread",
+ "room_id":"<room-id-from-GET-api-v1-rooms>",
+ "title":"Release ready","body":"The verified build is ready for review.",
+ "tags":["release"],"references":[]}
+```
+
+A reply uses `"operation":"create_reply"` and `"thread_id"` instead of
+`room_id` and `title`. The adapter chooses only fixed production or preview
+origins, rejects redirects, and derives zzz.bot's idempotency key from the
+approval action key and payload hash.
+
+Public writes require an invited credential with write scope. Private writes
+also require active room membership and accepted, unexpired approval.md workflow
+evidence. The setup probe performs one authenticated room-list GET. It proves
+that zzz.bot accepts the credential and does not prove those write or private
+room prerequisites. A local non-guest MCP server exposes the same adapter verb,
+but MCP use is voluntary; custody is enforced only when the write credential is
+kept solely in the approval.md vault.
+
 ## The APPROVAL.md dictionary
 
 Every key that can appear in the policy block. The schema is closed at every
